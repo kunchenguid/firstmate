@@ -818,29 +818,11 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_omp_session_marker() {
-  local path=$1
-  [ ! -L "$path" ] || return 1
-  if [ -e "$path" ]; then
-    [ -f "$path" ] || return 1
-    rm -f -- "$path" || return 1
-  fi
+  fm_omp_session_marker_clear "$1"
 }
 
 clear_omp_session_marker_with_lifecycle_lock() {
-  local state=$1 id=$2 path=$3 status release_status
-  fm_omp_session_evidence_lock_acquire "$state" "$id" || return 1
-  if clear_omp_session_marker "$path"; then
-    status=0
-  else
-    status=$?
-  fi
-  if fm_omp_session_evidence_lock_release "$state" "$id"; then
-    release_status=0
-  else
-    release_status=$?
-  fi
-  [ "$status" -eq 0 ] || return "$status"
-  return "$release_status"
+  fm_omp_session_marker_clear_locked "$1" "$2" "$3"
 }
 
 clear_relaunch_harness_wiring() {
@@ -2820,7 +2802,7 @@ EOF
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 import { randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
-import { closeSync, constants, existsSync, fstatSync, futimesSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, futimesSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 const SESSION_RUN = "$STATE_REAL/$ID.omp-session-run";
 const SESSION_STOP = "$STATE_REAL/$ID.omp-session-stop";
 const SESSION_EVIDENCE_DIR = "$STATE_REAL/$ID.omp-session-evidence";
@@ -2829,12 +2811,16 @@ const SESSION_EVIDENCE_ACTIVE = "$STATE_REAL/$ID.omp-session-evidence.active";
 const SESSION_EVIDENCE_TEMPS = "$STATE_REAL/$ID.omp-session-evidence.temps";
 const BUSY_GEN_PATH = "$STATE_REAL/$ID.busy-gen";
 const GENERATION_LOCK = "$STATE_REAL/$ID.busy-state.lock";
+const SAFE_FS = "$FM_ROOT/bin/fm-omp-fs.py";
 const TURNEND = "$TURNEND";
 const RUN_TOKEN_PREFIX = "$BUSY_GEN" + ".";
 let runToken = "";
 let idlePublishedToken = "";
 let runSequence = 0;
 let tempSequence = 0;
+const safeFs = (args: string[], input?: string) => execFileSync(
+  "python3", [SAFE_FS, ...args], input === undefined ? { encoding: "utf8" } : { encoding: "utf8", input },
+).toString();
 const INCARNATION_MARKER = "firstmate-omp-incarnation-v1";
 const PROCESS_INCARNATIONS = globalThis as unknown as Record<string, string>;
 const INCARNATION_KEY = "$STATE_REAL::$ID::$BUSY_GEN";
@@ -2845,7 +2831,11 @@ const INCARNATION_ID = "incarnation-" + INCARNATION_UUID + ".generation-" + "$BU
 const INCARNATION_RECORD = INCARNATION_MARKER + " $BUSY_GEN " + process.pid + " " + INCARNATION_UUID;
 const TEMP_OWNERSHIP_MARKER = "firstmate-omp-evidence-temp-v1";
 const TEMP_OWNERSHIP_HEADER = "firstmate-omp-session-evidence-temps-v1\\n$ID\\n$STATE_REAL";
+const TEMP_PROOF_MARKER = "firstmate-omp-evidence-proof-v1";
 const ownedTemps = new Set<string>();
+const ownedTempIdentities = new Map<string, { parent: string; entry: string }>();
+const ownedTempProofs = new Map<string, { path: string; entry: string }>();
+const acceptedIncarnations: Array<{ generation: string; processId: string; uuid: string }> = [];
 let recoveryBlocked = false;
 let ambiguousRecovery = false;
 const runRecords: Array<{
@@ -2889,9 +2879,33 @@ const generationLockTestPause = () => {
   writeFileSync(gate + ".ready", "ready\n", { encoding: "utf8" });
   while (existsSync(gate + ".hold")) sleepMillis(10);
 };
+const generationLockReleaseTestPause = () => {
+  const gate = process.env.FM_OMP_TEST_GENERATION_LOCK_RELEASE_GATE;
+  if (!gate) return;
+  writeFileSync(gate + ".ready", "ready\n", { encoding: "utf8" });
+  while (existsSync(gate + ".hold")) sleepMillis(10);
+};
 let generationLockHeld = false;
+let generationLockIdentity: { dev: string; ino: string } | null = null;
+let generationLockOwnerIdentity: { dev: string; ino: string } | null = null;
 const GENERATION_LOCK_OWNER = GENERATION_LOCK + "/owner";
 const GENERATION_LOCK_TOKEN = process.pid + "." + randomUUID();
+const directoryIdentity = (path: string) => {
+  const noFollow = constants.O_NOFOLLOW;
+  const directoryFlag = constants.O_DIRECTORY;
+  if (typeof noFollow !== "number" || typeof directoryFlag !== "number") {
+    throw new Error("OMP directory identity cannot enforce no-follow");
+  }
+  let fd = -1;
+  try {
+    fd = openSync(path, constants.O_RDONLY | directoryFlag | noFollow);
+    const stat = fstatSync(fd);
+    if (!stat.isDirectory()) throw new Error("OMP path is not a directory");
+    return { dev: String(stat.dev), ino: String(stat.ino) };
+  } finally {
+    if (fd >= 0) closeSync(fd);
+  }
+};
 const lockOwnerRead = () => {
   let fd = -1;
   try {
@@ -2905,7 +2919,7 @@ const lockOwnerRead = () => {
         !/^[A-Za-z0-9._-]+$/.test(fields[1]) || Number(fields[0]) <= 0) {
       return null;
     }
-    return { processId: fields[0], token: fields[1] };
+    return { processId: fields[0], token: fields[1], dev: String(stat.dev), ino: String(stat.ino) };
   } catch (error) {
     if ((error as any)?.code === "ENOENT") return null;
     throw error;
@@ -2941,8 +2955,24 @@ const acquireGenerationLock = () => {
       mkdirSync(GENERATION_LOCK, { mode: 0o700 });
       try {
         lockOwnerWrite();
+        const acquiredLock = directoryIdentity(GENERATION_LOCK);
+        const acquiredOwner = lockOwnerRead();
+        const currentLock = directoryIdentity(GENERATION_LOCK);
+        if (!acquiredOwner || acquiredLock.dev !== currentLock.dev || acquiredLock.ino !== currentLock.ino) {
+          throw new Error("OMP lifecycle lock changed during acquisition");
+        }
+        generationLockIdentity = acquiredLock;
+        generationLockOwnerIdentity = { dev: acquiredOwner.dev, ino: acquiredOwner.ino };
       } catch (error) {
-        try { rmdirSync(GENERATION_LOCK); } catch {}
+        try {
+          const stateIdentity = directoryIdentity("$STATE_REAL");
+          const lockIdentity = directoryIdentity(GENERATION_LOCK);
+          safeFs([
+            "remove-directory", "$STATE_REAL", "$ID.busy-state.lock",
+            stateIdentity.dev + ":" + stateIdentity.ino,
+            lockIdentity.dev + ":" + lockIdentity.ino,
+          ]);
+        } catch {}
         throw error;
       }
       generationLockHeld = true;
@@ -2968,8 +2998,14 @@ const acquireGenerationLock = () => {
       if (Date.now() - stat.mtimeMs >= 5000 && !lockOwnerAlive()) {
         const owner = lockOwnerRead();
         if (!owner) throw new Error("OMP lifecycle lock owner is unavailable");
-        unlinkSync(GENERATION_LOCK_OWNER);
-        rmdirSync(GENERATION_LOCK);
+        const lockIdentity = directoryIdentity(GENERATION_LOCK);
+        const stateIdentity = directoryIdentity("$STATE_REAL");
+        safeFs([
+          "remove-lock", "$STATE_REAL", "$ID.busy-state.lock",
+          stateIdentity.dev + ":" + stateIdentity.ino,
+          lockIdentity.dev + ":" + lockIdentity.ino,
+          owner.dev + ":" + owner.ino, owner.processId, owner.token,
+        ]);
         tries = 0;
         continue;
       }
@@ -2980,18 +3016,25 @@ const acquireGenerationLock = () => {
 const releaseGenerationLock = () => {
   if (!generationLockHeld) return;
   try {
-    const stat = lstatSync(GENERATION_LOCK);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      throw new Error("OMP lifecycle lock was replaced");
-    }
     const owner = lockOwnerRead();
-    if (!owner || owner.token !== GENERATION_LOCK_TOKEN) {
-      throw new Error("OMP lifecycle lock ownership changed");
-    }
-    unlinkSync(GENERATION_LOCK_OWNER);
-    rmdirSync(GENERATION_LOCK);
+    if (!generationLockIdentity || !generationLockOwnerIdentity || !owner ||
+        owner.token !== GENERATION_LOCK_TOKEN || owner.dev !== generationLockOwnerIdentity.dev ||
+        owner.ino !== generationLockOwnerIdentity.ino) return;
+    generationLockReleaseTestPause();
+    try {
+      const stateIdentity = directoryIdentity("$STATE_REAL");
+      safeFs([
+        "remove-lock", "$STATE_REAL", "$ID.busy-state.lock",
+        stateIdentity.dev + ":" + stateIdentity.ino,
+        generationLockIdentity.dev + ":" + generationLockIdentity.ino,
+        generationLockOwnerIdentity.dev + ":" + generationLockOwnerIdentity.ino,
+        owner.processId, owner.token,
+      ]);
+    } catch {}
   } finally {
     generationLockHeld = false;
+    generationLockIdentity = null;
+    generationLockOwnerIdentity = null;
   }
 };
 const withGenerationLock = <T>(fn: () => T): T => {
@@ -3013,10 +3056,31 @@ const beforeRenameTestPause = (path: string) => {
 };
 const cleanupOwnedTemp = (path: string) => {
   if (!ownedTemps.delete(path)) return;
+  const identity = ownedTempIdentities.get(path);
+  ownedTempIdentities.delete(path);
+  const proof = ownedTempProofs.get(path);
+  ownedTempProofs.delete(path);
   try {
-    unlinkSync(path);
+    if (identity) {
+      removeEvidenceFile(path, identity.entry);
+    } else {
+      unlinkSync(path);
+    }
   } catch (error) {
-    if ((error as any)?.code !== "ENOENT") throw error;
+    if ((error as any)?.code === "ENOENT") return;
+    try {
+      lstatSync(path);
+      throw error;
+    } catch (missing) {
+      if ((missing as any)?.code !== "ENOENT") throw error;
+    }
+  }
+  if (proof) {
+    try {
+      removeEvidenceFile(proof.path, proof.entry);
+    } catch (error) {
+      if (existsSync(proof.path)) throw error;
+    }
   }
 };
 const atomicWrite = (path: string, value: string) => {
@@ -3025,26 +3089,58 @@ const atomicWrite = (path: string, value: string) => {
   let temp = "";
   const evidenceTemp = path.startsWith(SESSION_EVIDENCE_DIR + "/");
   let fd = -1;
+  let evidenceCreated = false;
+  let evidenceIdentity: { parent: string; entry: string } | undefined;
+  let proofPath = "";
+  let proofIdentity: { parent: string; entry: string } | undefined;
   try {
     requireCurrentGeneration();
-    while (fd < 0) {
+    while (fd < 0 && !evidenceCreated) {
       temp = path + "." + INCARNATION_ID + ".seq-" + String(++tempSequence) + ".tmp";
-      try {
-        fd = openSync(temp, "wx", 0o600);
-      } catch (error) {
-        if ((error as any)?.code !== "EEXIST") throw error;
+      if (evidenceTemp) {
+        try {
+          evidenceIdentity = createEvidenceTemp(temp);
+          ownedTempIdentities.set(temp, evidenceIdentity);
+          evidenceCreated = true;
+        } catch (error) {
+          if ((error as any)?.status !== 17) throw error;
+        }
+      } else {
+        try {
+          fd = openSync(temp, "wx", 0o600);
+        } catch (error) {
+          if ((error as any)?.code !== "EEXIST") throw error;
+        }
       }
     }
     ownedTemps.add(temp);
-    if (evidenceTemp) registerEvidenceTemp(temp, fstatSync(fd));
-    writeFileSync(fd, value, { encoding: "utf8" });
-    closeSync(fd);
-    fd = -1;
+    if (evidenceTemp && evidenceIdentity) {
+      const proofUuid = randomUUID();
+      const targetName = temp.slice((SESSION_EVIDENCE_DIR + "/").length);
+      proofPath = temp + ".owner";
+      proofIdentity = createEvidenceTemp(proofPath);
+      ownedTempProofs.set(temp, { path: proofPath, entry: proofIdentity.entry });
+      const [dev, ino] = evidenceIdentity.entry.split(":");
+      const [proofDev, proofIno] = proofIdentity.entry.split(":");
+      registerEvidenceTemp(temp, { dev, ino }, proofUuid, { dev: proofDev, ino: proofIno });
+      writeEvidenceFile(proofPath,
+        TEMP_PROOF_MARKER + " " + proofUuid + " " + targetName + " $BUSY_GEN " +
+        process.pid + " " + INCARNATION_UUID + "\n", proofIdentity.entry);
+      appendEvidenceFile(temp, value, evidenceIdentity.entry);
+    } else {
+      writeFileSync(fd, value, { encoding: "utf8" });
+      closeSync(fd);
+      fd = -1;
+    }
     requireCurrentGeneration();
     beforeRenameTestPause(path);
     requireCurrentGeneration();
-    renameSync(temp, path);
+    if (evidenceTemp && evidenceIdentity) renameEvidenceFile(temp, path, evidenceIdentity.entry);
+    else renameSync(temp, path);
+    if (proofIdentity) removeEvidenceFile(proofPath, proofIdentity.entry);
     ownedTemps.delete(temp);
+    ownedTempIdentities.delete(temp);
+    ownedTempProofs.delete(temp);
   } catch (error) {
     if (fd >= 0) {
       try { closeSync(fd); } catch {}
@@ -3055,7 +3151,8 @@ const atomicWrite = (path: string, value: string) => {
     if (ownsLock) releaseGenerationLock();
   }
 };
-const ensureEvidenceDirectory = () => {
+let evidenceDirectoryIdentity = "";
+const ensureEvidenceDirectory = (expectedIdentity = "") => {
   requireCurrentGeneration();
   let stat;
   try {
@@ -3067,10 +3164,68 @@ const ensureEvidenceDirectory = () => {
     stat = lstatSync(SESSION_EVIDENCE_DIR);
   }
   if (!stat.isDirectory()) throw new Error("OMP evidence path is not a directory");
+  const identity = String(stat.dev) + ":" + String(stat.ino);
+  if (expectedIdentity && evidenceDirectoryIdentity && expectedIdentity !== evidenceDirectoryIdentity) {
+    throw new Error("OMP evidence directory identity changed");
+  }
+  const requiredIdentity = evidenceDirectoryIdentity || expectedIdentity;
+  if (requiredIdentity && requiredIdentity !== identity) throw new Error("OMP evidence directory was replaced");
+  safeFs(["list-directory", SESSION_EVIDENCE_DIR, identity]);
+  evidenceDirectoryIdentity = identity;
   requireCurrentGeneration();
+  return identity;
 };
 const evidencePath = (token: string) => SESSION_EVIDENCE_DIR + "/" + token;
+const evidenceEntryName = (path: string) => {
+  if (!path.startsWith(SESSION_EVIDENCE_DIR + "/")) throw new Error("OMP evidence path escaped its directory");
+  const name = path.slice((SESSION_EVIDENCE_DIR + "/").length);
+  if (!name || name.includes("/")) throw new Error("OMP evidence entry name is invalid");
+  return name;
+};
+const evidenceEntryIdentity = (path: string) => {
+  const name = evidenceEntryName(path);
+  const parent = ensureEvidenceDirectory();
+  const identity = safeFs(["identity-file", SESSION_EVIDENCE_DIR, name, parent]).trim().split(":");
+  if (identity.length !== 2 || !/^\d+$/.test(identity[0]) || !/^\d+$/.test(identity[1])) {
+    throw new Error("OMP evidence entry identity is malformed");
+  }
+  return { dev: identity[0], ino: identity[1] };
+};
+const createEvidenceTemp = (path: string) => {
+  const name = evidenceEntryName(path);
+  const parent = ensureEvidenceDirectory();
+  return {
+    parent,
+    entry: safeFs(["create-file", SESSION_EVIDENCE_DIR, name, parent]).trim(),
+  };
+};
+const writeEvidenceFile = (path: string, value: string, entry: string) => {
+  const name = evidenceEntryName(path);
+  const parent = ensureEvidenceDirectory();
+  safeFs(["write-file", SESSION_EVIDENCE_DIR, name, parent, entry], value);
+};
+const appendEvidenceFile = (path: string, value: string, entry: string) => {
+  const name = evidenceEntryName(path);
+  const parent = ensureEvidenceDirectory();
+  safeFs(["append-file", SESSION_EVIDENCE_DIR, name, parent, entry], value);
+};
+const renameEvidenceFile = (source: string, target: string, entry: string) => {
+  const sourceName = evidenceEntryName(source);
+  const targetName = evidenceEntryName(target);
+  const parent = ensureEvidenceDirectory();
+  safeFs(["rename-file", SESSION_EVIDENCE_DIR, sourceName, parent, entry, targetName]);
+};
+const removeEvidenceFile = (path: string, entry: string) => {
+  const name = evidenceEntryName(path);
+  const parent = ensureEvidenceDirectory();
+  safeFs(["remove-file", SESSION_EVIDENCE_DIR, name, parent, entry]);
+};
 function readRegularFile(path: string) {
+  if (path.startsWith(SESSION_EVIDENCE_DIR + "/")) {
+    const name = evidenceEntryName(path);
+    const parent = ensureEvidenceDirectory();
+    return safeFs(["read-file", SESSION_EVIDENCE_DIR, name, parent]);
+  }
   const noFollow = constants.O_NOFOLLOW;
   if (typeof noFollow !== "number") throw new Error("OMP state reads cannot enforce no-follow");
   let fd = -1;
@@ -3084,6 +3239,7 @@ function readRegularFile(path: string) {
   }
 }
 const regularFileIdentity = (path: string) => {
+  if (path.startsWith(SESSION_EVIDENCE_DIR + "/")) return evidenceEntryIdentity(path);
   const noFollow = constants.O_NOFOLLOW;
   if (typeof noFollow !== "number") throw new Error("OMP state identity cannot enforce no-follow");
   let fd = -1;
@@ -3104,6 +3260,18 @@ const readOptional = (path: string) => {
     throw error;
   }
 };
+const parseEvidenceProof = (content: string) => {
+  const lines = content.split(/\r?\n/);
+  if (lines[lines.length - 1] === "") lines.pop();
+  if (lines.length !== 1) return null;
+  const fields = lines[0].trim().split(/\s+/);
+  if (fields.length !== 6 || fields[0] !== TEMP_PROOF_MARKER ||
+      !/^[0-9a-f-]{36}$/.test(fields[1]) ||
+      !/^.+\.incarnation-[0-9a-f-]{36}\.generation-[A-Za-z0-9._-]+\.pid-[0-9]+\.seq-[0-9]+\.tmp$/.test(fields[2]) ||
+      !/^[A-Za-z0-9._-]+$/.test(fields[3]) || !/^[0-9]+$/.test(fields[4]) ||
+      !/^[0-9a-f-]{36}$/.test(fields[5])) return null;
+  return { proofUuid: fields[1], name: fields[2], generation: fields[3], processId: fields[4], uuid: fields[5] };
+};
 const parseTempOwnershipRegistry = (content: string) => {
   const lines = content.split(/\r?\n/);
   if (lines[lines.length - 1] === "") lines.pop();
@@ -3111,16 +3279,17 @@ const parseTempOwnershipRegistry = (content: string) => {
   if (lines.length < header.length || lines.slice(0, header.length).join("\\n") !== TEMP_OWNERSHIP_HEADER) {
     return null;
   }
-  const records: Array<{ name: string; generation: string; processId: string; uuid: string; dev: string; ino: string }> = [];
+  const records: Array<{ name: string; generation: string; processId: string; uuid: string; dev: string; ino: string; proofUuid: string; proofDev: string; proofIno: string }> = [];
   for (const line of lines.slice(header.length)) {
     const fields = line.split(/\s+/);
-    if (fields.length !== 7 || fields[0] !== TEMP_OWNERSHIP_MARKER ||
+    if (fields.length !== 10 || fields[0] !== TEMP_OWNERSHIP_MARKER ||
         !/^.+\.incarnation-[0-9a-f-]{36}\.generation-[A-Za-z0-9._-]+\.pid-[0-9]+\.seq-[0-9]+\.tmp$/.test(fields[1]) ||
         !/^[A-Za-z0-9._-]+$/.test(fields[2]) || !/^[0-9]+$/.test(fields[3]) ||
         !/^[0-9a-f-]{36}$/.test(fields[4]) || !/^[0-9]+$/.test(fields[5]) ||
-        !/^[0-9]+$/.test(fields[6]) || Number(fields[3]) <= 0 || Number(fields[5]) < 0 ||
-        Number(fields[6]) <= 0) return null;
-    records.push({ name: fields[1], generation: fields[2], processId: fields[3], uuid: fields[4], dev: fields[5], ino: fields[6] });
+        !/^[0-9]+$/.test(fields[6]) || !/^[0-9a-f-]{36}$/.test(fields[7]) ||
+        !/^[0-9]+$/.test(fields[8]) || !/^[0-9]+$/.test(fields[9]) ||
+        Number(fields[3]) <= 0 || Number(fields[5]) < 0 || Number(fields[6]) <= 0 || Number(fields[9]) <= 0) return null;
+    records.push({ name: fields[1], generation: fields[2], processId: fields[3], uuid: fields[4], dev: fields[5], ino: fields[6], proofUuid: fields[7], proofDev: fields[8], proofIno: fields[9] });
   }
   return records;
 };
@@ -3136,10 +3305,11 @@ const readTempOwnershipRegistry = () => {
   if (!records) throw new Error("OMP evidence temporary ownership registry is malformed");
   return records;
 };
-const registerEvidenceTemp = (path: string, stat: any) => {
+const registerEvidenceTemp = (path: string, stat: any, proofUuid: string, proofStat: any) => {
   const name = path.slice(path.lastIndexOf("/") + 1);
   const record = TEMP_OWNERSHIP_MARKER + " " + name + " $BUSY_GEN " + process.pid + " " +
-    INCARNATION_UUID + " " + String(stat.dev) + " " + String(stat.ino);
+    INCARNATION_UUID + " " + String(stat.dev) + " " + String(stat.ino) + " " + proofUuid + " " +
+    String(proofStat.dev) + " " + String(proofStat.ino);
   let content = "";
   try {
     content = readRegularFile(SESSION_EVIDENCE_TEMPS);
@@ -3152,7 +3322,8 @@ const registerEvidenceTemp = (path: string, stat: any) => {
   if (!records) throw new Error("OMP evidence temporary ownership registry is malformed");
   if (records.some((candidate) => candidate.name === name && candidate.generation === "$BUSY_GEN" &&
       candidate.processId === String(process.pid) && candidate.uuid === INCARNATION_UUID &&
-      candidate.dev === String(stat.dev) && candidate.ino === String(stat.ino))) return;
+      candidate.dev === String(stat.dev) && candidate.ino === String(stat.ino) && candidate.proofUuid === proofUuid &&
+      candidate.proofDev === String(proofStat.dev) && candidate.proofIno === String(proofStat.ino))) return;
   const normalized = content.endsWith("\\n") ? content : content + "\\n";
   atomicWrite(SESSION_EVIDENCE_TEMPS, normalized + record + "\\n");
 };
@@ -3160,10 +3331,47 @@ const evidenceTempOwnershipMatches = (path: string) => {
   const name = path.slice(path.lastIndexOf("/") + 1);
   const current = /^(.*)\.incarnation-([0-9a-f-]{36})\.generation-([A-Za-z0-9._-]+)\.pid-([0-9]+)\.seq-([0-9]+)\.tmp$/.exec(name);
   if (!current) return false;
-  const stat = regularFileIdentity(path);
+  let stat: { dev: string; ino: string } | null = null;
+  let proofStat: { dev: string; ino: string } | null = null;
+  let proof: ReturnType<typeof parseEvidenceProof> = null;
+  try {
+    stat = regularFileIdentity(path);
+    proofStat = regularFileIdentity(path + ".owner");
+    proof = parseEvidenceProof(readRegularFile(path + ".owner"));
+  } catch {
+    return false;
+  }
+  if (!stat || !proofStat || !proof) return false;
   return readTempOwnershipRegistry().some((record) => record.name === name &&
     record.generation === current[3] && record.processId === current[4] &&
-    record.uuid === current[2] && record.dev === stat.dev && record.ino === stat.ino);
+    record.uuid === current[2] && record.dev === stat.dev && record.ino === stat.ino &&
+    record.proofUuid === proof.proofUuid &&
+    record.proofDev === proofStat.dev && record.proofIno === proofStat.ino &&
+    proof.name === name && proof.generation === current[3] &&
+    proof.processId === current[4] && proof.uuid === current[2]);
+};
+const evidenceTempProofMatches = (path: string) => {
+  const name = path.slice(path.lastIndexOf("/") + 1).replace(/\.tmp\.owner$/, ".tmp");
+  const current = /^(.*)\.incarnation-([0-9a-f-]{36})\.generation-([A-Za-z0-9._-]+)\.pid-([0-9]+)\.seq-([0-9]+)\.tmp$/.exec(name);
+  if (!current) return false;
+  let tempStat: { dev: string; ino: string } | null = null;
+  let proofStat: { dev: string; ino: string } | null = null;
+  let proof: ReturnType<typeof parseEvidenceProof> = null;
+  try {
+    tempStat = regularFileIdentity(evidencePath(name));
+    proofStat = regularFileIdentity(path);
+    proof = parseEvidenceProof(readRegularFile(path));
+  } catch {
+    return false;
+  }
+  if (!tempStat || !proofStat || !proof) return false;
+  return incarnationRegistered(current[3], current[4], current[2]) && activeIncarnationMatches(current[3], current[4], current[2]) &&
+    readTempOwnershipRegistry().some((record) => record.name === name && record.generation === current[3] &&
+      record.processId === current[4] && record.uuid === current[2] && record.proofDev === proofStat.dev &&
+      record.proofIno === proofStat.ino && record.proofUuid === proof.proofUuid &&
+      record.dev === tempStat.dev && record.ino === tempStat.ino &&
+      proof.name === name && proof.generation === current[3] &&
+      proof.processId === current[4] && proof.uuid === current[2]);
 };
 const parseIncarnationRegistry = (content: string) => {
   const lines = content.split(/\r?\n/);
@@ -3189,6 +3397,21 @@ const parseIncarnationRecord = (content: string) => {
       !/^[0-9a-f-]{36}$/.test(fields[3])) return null;
   return { generation: fields[1], processId: fields[2], uuid: fields[3] };
 };
+const incarnationHasOwnedTemp = (record: { generation: string; processId: string; uuid: string }) => {
+  try {
+    const stat = lstatSync(SESSION_EVIDENCE_DIR);
+    if (!stat.isDirectory()) return false;
+    const parent = String(stat.dev) + ":" + String(stat.ino);
+    const entries = safeFs(["list-directory", SESSION_EVIDENCE_DIR, parent]).split(/\r?\n/).filter(Boolean);
+    return entries.some((name) => {
+      const current = /^(.*)\.incarnation-([0-9a-f-]{36})\.generation-([A-Za-z0-9._-]+)\.pid-([0-9]+)\.seq-([0-9]+)\.tmp$/.exec(name);
+      return current && current[2] === record.uuid && current[3] === record.generation &&
+        current[4] === record.processId && evidenceTempOwnershipMatches(evidencePath(name));
+    });
+  } catch {
+    return false;
+  }
+};
 const ensureIncarnationRegistration = () => {
   requireCurrentGeneration();
   const content = readRegularFile(SESSION_EVIDENCE_OWNER);
@@ -3200,7 +3423,16 @@ const ensureIncarnationRegistration = () => {
     atomicWrite(SESSION_EVIDENCE_OWNER, normalized + INCARNATION_RECORD + "\n");
   }
   const active = readOptional(SESSION_EVIDENCE_ACTIVE).trim();
-  if (active && !parseIncarnationRecord(active)) throw new Error("OMP active evidence incarnation is malformed");
+  const activeRecord = active ? parseIncarnationRecord(active) : null;
+  if (active && !activeRecord) throw new Error("OMP active evidence incarnation is malformed");
+  acceptedIncarnations.splice(0, acceptedIncarnations.length, {
+    generation: "$BUSY_GEN", processId: String(process.pid), uuid: INCARNATION_UUID,
+  });
+  for (const record of records) {
+    if (record.uuid === INCARNATION_UUID && record.processId === String(process.pid) &&
+        record.generation === "$BUSY_GEN") continue;
+    if (incarnationHasOwnedTemp(record)) acceptedIncarnations.push(record);
+  }
   if (active !== INCARNATION_RECORD) atomicWrite(SESSION_EVIDENCE_ACTIVE, INCARNATION_RECORD + "\n");
 };
 const incarnationRegistered = (generation: string, processId: string, uuid: string) => {
@@ -3209,8 +3441,8 @@ const incarnationRegistered = (generation: string, processId: string, uuid: stri
     record.processId === processId && record.uuid === uuid) === true;
 };
 const activeIncarnationMatches = (generation: string, processId: string, uuid: string) => {
-  const record = parseIncarnationRecord(readOptional(SESSION_EVIDENCE_ACTIVE).trim());
-  return record?.generation === generation && record.processId === processId && record.uuid === uuid;
+  return acceptedIncarnations.some((record) => record.generation === generation &&
+    record.processId === processId && record.uuid === uuid);
 };
 const parseRunToken = (token: string) => {
   if (typeof token !== "string" || !token.startsWith(RUN_TOKEN_PREFIX)) return null;
@@ -3235,6 +3467,8 @@ const isAtomicTempName = (name: string, path: string) => {
     activeIncarnationMatches(current[3], processId, current[2]) &&
     evidenceTempOwnershipMatches(path);
 };
+const isAtomicTempProofName = (name: string, path: string) =>
+  name.endsWith(".tmp.owner") && evidenceTempProofMatches(path);
 const writeRunEvidence = (record: {
   token: string;
   startedAt: number;
@@ -3349,25 +3583,40 @@ const persistedRuns = () => {
     const materialize: any[] = [];
     let repairPendingStop = false;
     let pointerRepair = runLines.length === 0;
-    let entries: any[] = [];
+    let entries: string[] = [];
+    let directoryIdentityText = "";
     try {
       const directory = lstatSync(SESSION_EVIDENCE_DIR);
       durableState = true;
       if (!directory.isDirectory()) return blocked();
-      entries = readdirSync(SESSION_EVIDENCE_DIR, { withFileTypes: true });
+      directoryIdentityText = String(directory.dev) + ":" + String(directory.ino);
+      ensureEvidenceDirectory(directoryIdentityText);
+      entries = safeFs(["list-directory", SESSION_EVIDENCE_DIR, directoryIdentityText])
+        .split(/\r?\n/).filter(Boolean);
     } catch (error) {
       if ((error as any)?.code !== "ENOENT") return blocked();
     }
     for (const entry of entries) {
-      if (entry.name.endsWith(".tmp")) {
-        if (!entry.isFile() || !isAtomicTempName(entry.name, evidencePath(entry.name))) return blocked();
+      if (entry.endsWith(".tmp")) {
+        if (!isAtomicTempName(entry, evidencePath(entry))) return blocked();
         continue;
       }
-      if (!entry.isFile() || !parseRunToken(entry.name)) return blocked();
-      const record = parseRunEvidence(readRegularFile(evidencePath(entry.name)));
-      if (!record || record.token !== entry.name) return blocked();
+      if (entry.endsWith(".tmp.owner")) {
+        if (!isAtomicTempProofName(entry, evidencePath(entry))) return blocked();
+        continue;
+      }
+      if (!parseRunToken(entry)) return blocked();
+      try {
+        regularFileIdentity(evidencePath(entry));
+      } catch {
+        return blocked();
+      }
+      const record = parseRunEvidence(readRegularFile(evidencePath(entry)));
+      if (!record || record.token !== entry) return blocked();
       evidence.set(record.token, record);
     }
+    if (directoryIdentityText && safeFs(["list-directory", SESSION_EVIDENCE_DIR, directoryIdentityText])
+        .split(/\r?\n/).filter(Boolean).join("\n") !== entries.join("\n")) return blocked();
     let pendingEvidence = [...evidence.values()].filter((record) => record.stoppedAt === 0);
     if (stop !== "" && stop !== "pending") {
       const stopRecord = evidence.get(stop);

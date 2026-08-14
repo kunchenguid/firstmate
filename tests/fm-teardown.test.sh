@@ -1487,8 +1487,43 @@ test_teardown_preserves_replaced_omp_evidence_entry_during_clear() {
   pass "teardown revalidates each OMP evidence entry before removal"
 }
 
+test_omp_evidence_lock_release_preserves_replacement() {
+  local case_dir state id=task-x1 gate lock owner releaser i=0
+  case_dir=$(make_case omp-evidence-lock-release-race)
+  state="$case_dir/state"
+  gate="$case_dir/evidence-lock-release-race"
+  lock="$state/$id.busy-state.lock"
+  owner="$lock/owner"
+  : > "$gate.hold"
+  (
+    # shellcheck source=bin/fm-omp-state-lib.sh
+    . "$ROOT/bin/fm-omp-state-lib.sh"
+    fm_omp_session_evidence_lock_acquire "$state" "$id" || exit 1
+    FM_OMP_TEST_EVIDENCE_LOCK_RELEASE_GATE="$gate" \
+      fm_omp_session_evidence_lock_release "$state" "$id"
+  ) > "$gate.output" 2>&1 &
+  releaser=$!
+  while [ "$i" -lt 100 ] && [ ! -e "$gate.ready" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$gate.ready" ] || fail "evidence lock release did not reach its identity gate"
+  rm -f -- "$owner"
+  rmdir "$lock" || fail "could not replace the evidence lock during release"
+  mkdir "$lock"
+  printf '%s replacement-token\n' "$$" > "$owner"
+  rm -f "$gate.hold"
+  wait "$releaser" || true
+  [ -d "$lock" ] || fail "the prior evidence lock holder removed the replacement lock"
+  [ "$(cat "$owner")" = "$$ replacement-token" ] \
+    || fail "the prior evidence lock holder modified the replacement owner"
+  rm -f -- "$owner"
+  rmdir "$lock" || fail "evidence lock replacement cleanup failed"
+  pass "evidence lock release revalidates the exact replacement boundary"
+}
+
 test_teardown_validates_omp_evidence_generation_and_temps() {
-  local case_dir rc token temp legacy_temp temp_identity temp_dev temp_ino
+  local case_dir rc token temp legacy_temp temp_identity temp_dev temp_ino proof_uuid proof_identity proof_dev proof_ino
   case_dir=$(make_case omp-evidence-generation)
   write_meta "$case_dir" local-only ship
   printf 'harness=omp\n' >> "$case_dir/state/task-x1.meta"
@@ -1539,12 +1574,18 @@ test_teardown_validates_omp_evidence_generation_and_temps() {
   mkdir -p "$case_dir/state/task-x1.omp-session-evidence"
   token='g-current.123.1000.1'
   temp="$case_dir/state/task-x1.omp-session-evidence/$token.incarnation-550e8400-e29b-41d4-a716-446655440000.generation-g-current.pid-456.seq-1.tmp"
+  proof_uuid=550e8400-e29b-41d4-a716-446655440001
   printf 'partial evidence\n' > "$temp"
+  printf 'firstmate-omp-evidence-proof-v1 %s %s g-current 456 550e8400-e29b-41d4-a716-446655440000\n' \
+    "$proof_uuid" "${temp##*/}" > "$temp.owner"
   temp_identity=$(stat -f '%d:%i' "$temp" 2>/dev/null || stat -c '%d:%i' "$temp")
   temp_dev=${temp_identity%:*}
   temp_ino=${temp_identity#*:}
-  printf 'firstmate-omp-session-evidence-temps-v1\ntask-x1\n%s\nfirstmate-omp-evidence-temp-v1 %s g-current 456 550e8400-e29b-41d4-a716-446655440000 %s %s\n' \
-    "$case_dir/state" "${temp##*/}" "$temp_dev" "$temp_ino" \
+  proof_identity=$(stat -f '%d:%i' "$temp.owner" 2>/dev/null || stat -c '%d:%i' "$temp.owner")
+  proof_dev=${proof_identity%:*}
+  proof_ino=${proof_identity#*:}
+  printf 'firstmate-omp-session-evidence-temps-v1\ntask-x1\n%s\nfirstmate-omp-evidence-temp-v1 %s g-current 456 550e8400-e29b-41d4-a716-446655440000 %s %s %s %s %s\n' \
+    "$case_dir/state" "${temp##*/}" "$temp_dev" "$temp_ino" "$proof_uuid" "$proof_dev" "$proof_ino" \
     > "$case_dir/state/task-x1.omp-session-evidence.temps"
 
   set +e
@@ -2836,6 +2877,7 @@ test_teardown_preserves_foreign_omp_evidence_collision
 test_teardown_preserves_unrecognized_owned_omp_evidence
 test_teardown_preserves_foreign_omp_evidence_added_during_clear
 test_teardown_preserves_replaced_omp_evidence_entry_during_clear
+test_omp_evidence_lock_release_preserves_replacement
 test_teardown_validates_omp_evidence_generation_and_temps
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes

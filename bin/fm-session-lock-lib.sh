@@ -8,6 +8,8 @@
 # lock-owning primary session before it may arm or rewake.
 # This file is sourced by scripts and has no side effects on source.
 
+FM_HARNESS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Cursor process identity is NOT expressible as a command-name pattern and is
 # deliberately not added to the tables below: Cursor's installed names are
 # cursor-agent and the far-too-generic legacy alias `agent`, and it runs as a
@@ -60,26 +62,18 @@ fm_harness_unlink_regular_nofollow_at() {
   local directory=${1:-} name=${2:-} expected_directory=${3:-} expected_entry=${4:-}
   [ "$#" -ge 2 ] && [ -n "$directory" ] && [ -n "$name" ] || return 1
   case "$name" in */*|.|..) return 1 ;; esac
-  command -v perl >/dev/null 2>&1 || return 1
-  perl -MFcntl=:DEFAULT -e '
-    my ($directory, $name, $expected_directory, $expected_entry) = @ARGV;
-    sysopen(my $dirfh, $directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or exit 1;
-    my @dir = stat($dirfh);
-    exit 1 unless @dir && (($dir[2] & 0170000) == 0040000);
-    if ($expected_directory ne "") {
-      my ($dev, $ino) = split /:/, $expected_directory, 2;
-      exit 1 unless defined($ino) && "$dir[0]:$dir[1]" eq "$dev:$ino";
-    }
-    chdir $dirfh or exit 1;
-    my @entry = lstat($name);
-    exit 1 unless @entry && (($entry[2] & 0170000) == 0100000);
-    if ($expected_entry ne "") {
-      my ($dev, $ino) = split /:/, $expected_entry, 2;
-      exit 1 unless defined($ino) && "$entry[0]:$entry[1]" eq "$dev:$ino";
-    }
-    unlink($name) or exit 1;
-    exit 1 if lstat($name);
-  ' "$directory" "$name" "$expected_directory" "$expected_entry"
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 "$FM_HARNESS_LIB_DIR/fm-omp-fs.py" \
+    remove-file "$directory" "$name" "$expected_directory" "$expected_entry"
+}
+
+fm_harness_rmdir_nofollow_at() {
+  local directory=${1:-} name=${2:-} expected_directory=${3:-} expected_entry=${4:-}
+  [ "$#" -ge 2 ] && [ -n "$directory" ] && [ -n "$name" ] || return 1
+  case "$name" in */*|.|..) return 1 ;; esac
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 "$FM_HARNESS_LIB_DIR/fm-omp-fs.py" \
+    remove-directory "$directory" "$name" "$expected_directory" "$expected_entry"
 }
 
 # Print the exact harness name carried by executable path $1 - its own basename

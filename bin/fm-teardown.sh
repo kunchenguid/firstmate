@@ -2201,6 +2201,10 @@ cleanup_firstmate_home_children() {
         echo "error: refusing teardown with unverified OMP session evidence for child $child_id" >&2
         return 1
       }
+      fm_omp_session_marker_clear_locked "$sub_state" "$child_id" \
+        "$sub_state/$child_id.omp-session-run" || return 1
+      fm_omp_session_marker_clear_locked "$sub_state" "$child_id" \
+        "$sub_state/$child_id.omp-session-stop" || return 1
     fi
     child_backend=$(fm_backend_of_meta "$child_meta")
     if [ "$child_backend" = orca ]; then
@@ -2285,8 +2289,6 @@ cleanup_firstmate_home_children() {
     rm -f "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.omp-ext.ts" \
-      "$sub_state/$child_id.omp-session-run" \
-      "$sub_state/$child_id.omp-session-stop" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session"
@@ -2571,10 +2573,14 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
+if [ "$TASK_HARNESS" = omp ] && [ "$TASK_RAW_LAUNCH" != 1 ]; then
+  fm_omp_session_marker_clear_locked "$STATE" "$ID" \
+    "$STATE/$ID.omp-session-run" || exit 1
+  fm_omp_session_marker_clear_locked "$STATE" "$ID" \
+    "$STATE/$ID.omp-session-stop" || exit 1
+fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
-  "$STATE/$ID.omp-session-run" \
-  "$STATE/$ID.omp-session-stop" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \

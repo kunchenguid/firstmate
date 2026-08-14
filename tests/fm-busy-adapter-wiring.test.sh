@@ -162,6 +162,7 @@ drive_omp_ext() {
     FM_OMP_TEST_BEFORE_RENAME_GATE="${FM_OMP_TEST_BEFORE_RENAME_GATE:-}" \
     FM_OMP_TEST_BEFORE_RENAME_TARGET="${FM_OMP_TEST_BEFORE_RENAME_TARGET:-}" \
     FM_OMP_TEST_GENERATION_LOCK_ACQUIRED_GATE="${FM_OMP_TEST_GENERATION_LOCK_ACQUIRED_GATE:-}" \
+    FM_OMP_TEST_GENERATION_LOCK_RELEASE_GATE="${FM_OMP_TEST_GENERATION_LOCK_RELEASE_GATE:-}" \
     BUSY_EVENT_PATH="$ROOT/bin/fm-busy-event.sh" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -201,7 +202,7 @@ switch (process.env.MODE) {
     if (fields.length !== 1) throw new Error("the initial run marker was malformed");
     const token = fields[0];
     const evidencePath = evidenceDir + "/" + token;
-    const evidence = readFileSync(evidencePath, "utf8").trim().split(/\s+/);
+    const evidence = readFileSync(evidencePath, "utf8").trim().split(/\s+/).slice(-4);
     if (evidence.length !== 4) throw new Error("the initial run evidence was malformed");
     writeFileSync(evidencePath, `${token} ${evidence[1]} ${evidence[2]} ${evidence[2]}\n`);
     writeFileSync(stopPath, token + "\n");
@@ -252,21 +253,23 @@ switch (process.env.MODE) {
     if (fields.length !== 4) throw new Error("the incarnation registration was malformed");
     const temp = evidenceDir + "/" + token + ".incarnation-" + fields[3] +
       ".generation-" + fields[1] + ".pid-" + fields[2] + ".seq-1.tmp";
+    const proofUuid = "00000000-0000-4000-8000-000000000001";
     writeFileSync(temp, "partial evidence\n", { encoding: "utf8", flag: "wx" });
+    writeFileSync(temp + ".owner",
+      "firstmate-omp-evidence-proof-v1 " + proofUuid + " " + temp.slice(temp.lastIndexOf("/") + 1) + " " +
+      fields[1] + " " + fields[2] + " " + fields[3] + "\n",
+      { encoding: "utf8", flag: "wx" });
     const tempStat = lstatSync(temp);
+    const proofStat = lstatSync(temp + ".owner");
     const tempRegistry = base + ".omp-session-evidence.temps";
     writeFileSync(tempRegistry,
       "firstmate-omp-session-evidence-temps-v1\n" + process.env.TASK_ID + "\n" +
       stateDir + "\n" +
       "firstmate-omp-evidence-temp-v1 " + temp.slice(temp.lastIndexOf("/") + 1) + " " +
       fields[1] + " " + fields[2] + " " + fields[3] + " " +
-      String(tempStat.dev) + " " + String(tempStat.ino) + "\n");
+      String(tempStat.dev) + " " + String(tempStat.ino) + " " + proofUuid + " " +
+      String(proofStat.dev) + " " + String(proofStat.ino) + "\n");
     try { unlinkSync(turnEndPath); } catch {}
-    const reloadedHandlers = await loadHandlers("?owned-partial=" + String(Date.now()));
-    await fireWith(reloadedHandlers, "agent_end");
-    if (busyState().includes("state=busy")) throw new Error("an owned partial evidence temp kept OMP busy");
-    if (!markerPresent(turnEndPath)) throw new Error("owned partial evidence recovery omitted turn-end evidence");
-    if (!existsSync(temp)) throw new Error("owned partial evidence temp was removed before cleanup");
     break;
   }
   case "unowned-active-incarnation-temp": {
@@ -285,13 +288,14 @@ switch (process.env.MODE) {
       ".generation-" + fields[1] + ".pid-" + fields[2] + ".seq-99.tmp";
     writeFileSync(temp, "copied active incarnation\n", { encoding: "utf8", flag: "wx" });
     const tempStat = lstatSync(temp);
-    const historicalTemp = temp.replace(".seq-99.tmp", ".seq-98.tmp");
+    const proofUuid = "00000000-0000-4000-8000-000000000002";
     const tempRegistry = base + ".omp-session-evidence.temps";
     writeFileSync(tempRegistry,
       "firstmate-omp-session-evidence-temps-v1\n" + process.env.TASK_ID + "\n" +
       stateDir + "\n" +
-      "firstmate-omp-evidence-temp-v1 " + historicalTemp.slice(historicalTemp.lastIndexOf("/") + 1) + " " +
+      "firstmate-omp-evidence-temp-v1 " + temp.slice(temp.lastIndexOf("/") + 1) + " " +
       fields[1] + " " + fields[2] + " " + fields[3] + " " +
+      String(tempStat.dev) + " " + String(tempStat.ino) + " " + proofUuid + " " +
       String(tempStat.dev) + " " + String(tempStat.ino) + "\n");
     const turnEndPath = base + ".turn-ended";
     try { unlinkSync(turnEndPath); } catch {}
@@ -1200,6 +1204,8 @@ test_omp_extension_recovers_owned_partial_evidence_temp() {
   ext="$state/$id.omp-ext.ts"
   out=$(drive_omp_ext "$ext" owned-partial-evidence-temp "$state" "$id") \
     || fail "owned partial evidence recovery drive failed: $out"
+  out=$(drive_omp_ext "$ext" agent-end "$state" "$id") \
+    || fail "owned partial evidence fresh-process recovery drive failed: $out"
   out=$(classify omp "$id" "$state")
   [ "$out" = "idle omp-ext" ] || fail "owned partial evidence did not recover the run, got '$out'"
   evidence_dir="$state/$id.omp-session-evidence"
@@ -1635,6 +1641,40 @@ test_omp_generation_lock_release_cannot_remove_replacement() {
   pass "OMP lifecycle lock release is bound to its owning incarnation"
 }
 
+test_omp_generation_lock_release_race_cannot_remove_replacement() {
+  local rec id=busy-omp-lock-release-race out state ext gate lock owner holder_pid i=0
+  rec=$(make_spawn_case omp-lock-release-race omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp release-race spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  gate="$state/$id.generation-lock-release"
+  lock="$state/$id.busy-state.lock"
+  owner="$lock/owner"
+  : > "$gate.hold"
+  FM_OMP_TEST_GENERATION_LOCK_RELEASE_GATE="$gate" \
+    drive_omp_ext "$ext" agent-start > "$gate.output" 2>&1 &
+  holder_pid=$!
+  while [ "$i" -lt 100 ] && [ ! -e "$gate.ready" ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$gate.ready" ] || fail "OMP lifecycle release did not publish its ownership gate"
+  rm -f -- "$owner"
+  rmdir "$lock" || fail "could not replace the OMP lifecycle lock during release"
+  mkdir "$lock"
+  printf '%s replacement-token\n' "$$" > "$owner"
+  rm -f "$gate.hold"
+  wait "$holder_pid" || fail "OMP release-race writer failed: $(cat "$gate.output")"
+  [ -d "$lock" ] || fail "the prior OMP lifecycle writer removed a replacement lock during release"
+  [ "$(cat "$owner")" = "$$ replacement-token" ] \
+    || fail "the prior OMP lifecycle writer modified a replacement owner during release"
+  rm -f -- "$owner"
+  rmdir "$lock" || fail "OMP release-race replacement cleanup failed"
+  pass "OMP lifecycle lock release revalidates the exact replacement boundary"
+}
+
 # drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
 # OpenCode plugin in a plain Node host and feed it one event per argument, in
 # order, through the same hooks.event entry OpenCode calls.
@@ -1836,6 +1876,7 @@ test_omp_agent_end_continuation_stays_busy
 test_omp_extension_stale_incarnation_rejected
 test_omp_extension_generation_commit_is_atomic
 test_omp_generation_lock_release_cannot_remove_replacement
+test_omp_generation_lock_release_race_cannot_remove_replacement
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
