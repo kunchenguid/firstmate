@@ -6,7 +6,7 @@ The fork is healthy only when its named divergence set stays small, turns over, 
 
 ## Remote topology
 
-The operating repository uses two remotes because Git requires one remote's fetch and push URLs to name the same place.
+The guarded topology uses two remotes and requires each remote's fetch and push URLs to name the same place.
 
 - `origin` is the personal fork and local `main` tracks `origin/main`.
 - `upstream` is the official repository and is pull-only by policy.
@@ -63,7 +63,7 @@ bin/fm-brief.sh <task-id> firstmate --mode no-mistakes --start-ref upstream/main
 
 The exact `upstream/main` start ref also makes the generator place the fork worker contract in the brief that `fm-spawn.sh` delivers as its typed launch input.
 That delivered contract loads `fork-main-integration`, forbids rewriting a published topic or pull-request branch, forbids routine upstream or fork-main merges into the topic, and keeps topic validation on the ordinary official-upstream registration.
-A source-file grep is not proof of this contract: `tests/fm-fork-main.test.sh` generates the brief, sends it through the executable launch-input encoder, reads the delivered body back, and asserts each worker rule there.
+The focused regression for this delivered contract is [`tests/fm-fork-main.test.sh`](../tests/fm-fork-main.test.sh).
 
 A canonical new topic has one aggregate non-merge patch commit before its first fork integration.
 This constraint matters because `git cherry` compares patches one commit at a time.
@@ -145,7 +145,7 @@ Every divergence records:
 `private` means it is intentionally not proposed upstream, carries no pull-request record, and should remain small.
 `superseded` is immediate removal debt and must be empty after an upstream integration.
 
-An upstream-sync record keeps the pre-merge fork SHA, previous and incoming upstream SHA, date, and touched divergence IDs.
+An upstream-sync record keeps the pre-merge fork SHA, previous and incoming upstream SHA, date, touched divergence IDs, and an optional validation pull-request URL.
 Counts are derived from Git rather than copied into the manifest.
 The history stays bounded to the latest 20 integrations.
 
@@ -160,24 +160,28 @@ A follow-up is not acceptable because a stale manifest looks authoritative.
 
 ## Health report
 
-Run the local deterministic report with:
+Run the local network-free report with:
 
 ```sh
 bin/fm-fork-status.sh
 ```
 
 Add `--refresh` to fetch both remotes and compare recorded GitHub pull-request dispositions through `gh-axi`.
-The current `gh-axi` help documents `--jq` but does not promise raw scalar stdout, so refresh parses the observed `api_response.body` TOON envelope and requires `truncated: false` rather than comparing the complete serializer output with `open`.
+Refresh fails closed when live disposition evidence is incomplete or its response shape is unsupported.
 Add `--json` for schema `firstmate.fork-health.v1`.
-Candidate helpers use `--facts-only` internally when an already-authorized add or discard can legitimately make the historical count rise; that mode still prints the trend but makes its exit status represent Git/manifest consistency and superseded debt rather than holistic fork health.
-Do not use `--facts-only` to characterize the fork to the captain.
 
 The report uses `git cherry upstream/main origin/main` for one fact only: which commits have no equivalent upstream patch.
 The manifest supplies the meaning of what the fork intends to carry, so active patch counts come from each manifest unit's canonical topic rather than every raw `+` line.
 A non-upstream commit outside those canonical patches is a visible signal, not automatically a carried divergence or a failed report.
 A validation fix descending from a recognized topic or upstream integration is attributed as an `integration-path` artifact.
 A manifest-only review-disposition commit is attributed as a `manifest-governance` artifact.
-Run the report against the actual post-pipeline `HEAD`, because helper-prepared health cannot classify commits that validation added later.
+After no-mistakes, validate the actual post-pipeline candidate because helper-prepared health cannot classify commits that validation added later:
+
+```sh
+bin/fm-fork-status.sh --repo <isolated-worktree> --fork-ref HEAD --facts-only
+```
+
+This candidate-only mode still prints the trend but limits its exit-status verdict to Git and manifest consistency plus superseded debt; do not use it to characterize the running fork as healthy.
 
 The report names active units and canonical patches, all factual non-upstream commits, integration artifacts, informational signals, trend since the previous upstream merge, counts by class, the oldest pending unit, the latest merge's touched units, retirement conditions, every accepted-upstream retirement with its proof, superseded debt, and structural health errors.
 
@@ -208,7 +212,8 @@ Before the first origin-based fast-forward, each code root with an `upstream` re
 It advances each code root from validated fork `origin/main`, then advances subordinate homes to that root's exact commit without trusting their own origin, and finally reports whether official upstream still needs a separate integration.
 It never merges in the operating checkout.
 
-Locked startup performs the same read-only need check as part of its deferred network work and emits `UPSTREAM_SYNC:` only when a validated merge is needed or the check failed.
+Locked startup performs the same non-merging need probe as part of its deferred network work and emits `UPSTREAM_SYNC:` only when a validated merge is needed or the check failed.
+It probes at most once per successful 24-hour interval; a failed probe writes no success marker and therefore remains eligible on the next startup.
 That probe runs only once `bin/fm-fork-remotes.sh check` passes.
 A home that has an `upstream` remote but has not finished the explicit migration is reported as `UPSTREAM_SYNC: fork topology is not validated: <first missing requirement>` on every startup, with no probe and no daily marker written, so a half-configured home stays loud until it is corrected or reversed.
 A home with no `upstream` remote at all is classic single-origin and stays silent.

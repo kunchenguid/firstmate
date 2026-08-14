@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Self-update a running firstmate and its secondmates to validated fork origin.
+# Self-update a running firstmate and its secondmates from the configured origin.
 #
 # Mechanical half of the /updatefirstmate skill. Fast-forwards the running
 # firstmate repo's default branch from origin, then fast-forwards every

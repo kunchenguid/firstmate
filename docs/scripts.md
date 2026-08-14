@@ -17,7 +17,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-snapshot.sh`   | Print the read-only structured fleet snapshot JSON (schema `fm-fleet-snapshot.v1`)   |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
-| `fm-update.sh`           | Fast-forward-only self-update from validated origin plus a separate upstream-integration need report |
+| `fm-update.sh`           | Fast-forward-only self-update from origin with fork-topology validation and a separate upstream-integration need report |
 | `fm-fork-remotes.sh`     | Plan, apply, reverse, validate, or provisionally inherit fork-origin and official-upstream topology |
 | `fm-fork-integration.sh` | Provision and prove the isolated fork-target no-mistakes registration without reconfiguring the ordinary one |
 | `fm-fork-status.sh`      | Report Git-backed divergence health and manifest drift, or probe whether upstream needs integration |

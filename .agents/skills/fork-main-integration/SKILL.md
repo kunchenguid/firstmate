@@ -94,7 +94,7 @@ A replayed rerere result supplies only the previously accepted file resolution, 
 ## Health and relevance
 
 Use `bin/fm-fork-status.sh` for the local answer and add `--refresh` only when live remote and PR evidence is needed.
-Run health against the actual post-pipeline head, because helper-prepared health cannot classify commits that validation added later.
+After no-mistakes, use the post-pipeline candidate command in [`docs/fork-main.md`](../../../docs/fork-main.md); a bare invocation reads the fork remote rather than proving candidate `HEAD`.
 Its own errors, signals, and exit status are the machine verdict, and [`docs/fork-main.md`](../../../docs/fork-main.md) states how it classifies raw `git cherry` facts and what makes it unhealthy.
 
 Never describe the fork as healthy when that report is not.

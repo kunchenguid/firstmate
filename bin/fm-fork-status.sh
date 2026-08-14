@@ -17,11 +17,13 @@
 # is re-proved here before its patch leaves the factual non-upstream count.
 #
 # --refresh fetches origin and upstream and verifies recorded GitHub PR
-# dispositions with gh-axi. Without it, the report is deterministic over local
-# refs and recorded dispositions. gh-axi's current API serializer is parsed as
-# one complete, untruncated scalar envelope rather than compared as raw stdout.
+# dispositions with gh-axi. Without it, the report is network-free and uses
+# local refs plus recorded dispositions. gh-axi's current API serializer is
+# parsed as one complete, untruncated scalar envelope rather than compared as
+# raw stdout.
 # --check-upstream is the cheap self-update and startup probe: it reports whether upstream is already an ancestor of the fork
-# and never merges or writes a file. --facts-only keeps rising divergence count
+# and never merges or changes a working-tree file; --refresh still updates the
+# remote-tracking refs it reads. --facts-only keeps rising divergence count
 # visible but makes the exit status depend only on Git/manifest consistency and
 # superseded debt; candidate preparation uses it when adding or retiring an
 # already-authorized topic would otherwise make trend an inappropriate blocker.
