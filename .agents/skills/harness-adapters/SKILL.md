@@ -112,7 +112,7 @@ When changing any primary watcher adapter, update `docs/supervision-protocols/`,
 
 `bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, `--effort`, and `--autocompact` values chosen by firstmate at intake.
 Do not make the shell scripts parse or match natural-language dispatch rules.
-`--autocompact` is a claude-CLI-specific axis: `bin/fm-spawn.sh`'s own header owns its exact accepted values, default, and per-spawn override contract; it is threaded only into claude-harness spawns.
+`--autocompact` is threaded into claude-harness and codex-harness spawns: `bin/fm-spawn.sh`'s own header owns its exact accepted values, default, and per-spawn override contract per harness.
 
 Effort precedence is an explicit per-task captain instruction first, then any applicable standing dispatch profile or secondmate pin, then the generic fallback below.
 Never replace an effort value supplied by either higher-precedence source.
