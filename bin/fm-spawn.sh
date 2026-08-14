@@ -1907,7 +1907,13 @@ case "$BACKEND" in
           exit 1
         }
         spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
-          echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
+          # A contended lock clears on its own; an unusable lock namespace never
+          # does, so this refusal names which one it hit.
+          if HERDR_NAMESPACE_FAULT=$(fm_backend_herdr_presentation_lock_namespace_fault); then
+            echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume - $HERDR_NAMESPACE_FAULT" >&2
+          else
+            echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
+          fi
           exit 1
         }
         if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
