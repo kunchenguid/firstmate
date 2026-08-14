@@ -467,6 +467,9 @@ The tmux away-delivery failure was reproduced on 2026-08-14 against a real Claud
 Under `LC_ALL=C`, the stale pre-consolidation classifier returned `pending` for that pane while the current shared classifier returned `empty` for the same capture.
 The pane remained genuinely idle between turns, and the daemon's 15-second housekeeping cadence continued retrying, so the composer false-positive was sufficient to explain the undelivered windows without a busy-guard or cadence failure.
 
+No retained successful daemon injection evidence exists to compare against: the away-delivery mechanism was defective from its first deployment, so no prior proven injection was ever recorded.
+The stale-versus-current classifier verdict on the same capture and the production-shaped end-to-end regression below are therefore the diagnostic baseline.
+
 The portable end-to-end regression now renders that exact byte shape under `LC_ALL=C` and proves all three delivery properties: pending human text still defers, the first idle gap accepts the preserved digest, and a swallowed Enter retries submission without retyping.
 
 ```sh

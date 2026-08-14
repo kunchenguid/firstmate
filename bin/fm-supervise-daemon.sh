@@ -1155,21 +1155,21 @@ inject_evidence_record() {  # <blocker> <detail> <backend> <target>
   case "$backend" in
     tmux)
       if capture=$(tmux capture-pane -e -p -t "$target" -S -"$lines" 2>/dev/null); then
-        capture=$(printf '%s' "$capture" | tail -n "$lines" | dd bs="$bytes" count=1 2>/dev/null)
+        capture=$(printf '%s' "$capture" | tail -n "$lines" | head -c "$bytes")
         style=ansi
       fi
       ;;
     herdr)
       if type fm_backend_herdr_capture_ansi >/dev/null 2>&1 \
          && capture=$(fm_backend_herdr_capture_ansi "$target" "$lines" 2>/dev/null); then
-        capture=$(printf '%s' "$capture" | tail -n "$lines" | dd bs="$bytes" count=1 2>/dev/null)
+        capture=$(printf '%s' "$capture" | tail -n "$lines" | head -c "$bytes")
         style=ansi
       fi
       ;;
   esac
   if [ "$style" = unavailable ]; then
     if capture=$(fm_backend_capture "$backend" "$target" "$lines" 2>/dev/null); then
-      capture=$(printf '%s' "$capture" | tail -n "$lines" | dd bs="$bytes" count=1 2>/dev/null)
+      capture=$(printf '%s' "$capture" | tail -n "$lines" | head -c "$bytes")
       style=plain
     else
       capture=
