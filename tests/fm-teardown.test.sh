@@ -58,6 +58,8 @@ fm_git_identity fmtest fmtest@example.invalid
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
+mkdir -p "$TMP_ROOT/data"
+export FM_DATA_OVERRIDE="$TMP_ROOT/data"
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
@@ -76,7 +78,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/data" "$case_dir/config" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -544,6 +546,7 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
@@ -555,7 +558,7 @@ make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
   for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    mkdir mktemp mv perl ps python3 readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
@@ -1218,6 +1221,10 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
   [ -e "$lock" ] || fail "persistent-index-lock: lock file was removed"
   [ -f "$case_dir/state/task-x1.meta" ] \
     || fail "persistent-index-lock: teardown completed despite persistent lock"
+  assert_present "$case_dir/state/task-x1.task-metrics-row" \
+    "persistent-index-lock: failed cleanup lost the retryable metrics receipt"
+  assert_absent "$case_dir/data/task-metrics.jsonl" \
+    "persistent-index-lock: failed cleanup committed a completion metrics row"
   pass "persistent index.lock exhausts retries and refuses without force-removing the lock"
 }
 
@@ -2591,6 +2598,37 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_successful_teardown_emits_one_metrics_row() {
+  local case_dir metrics
+  case_dir=$(make_case task-metrics-emission)
+  write_meta "$case_dir" local-only ship
+  printf 'done: local work complete\n' > "$case_dir/state/task-x1.status"
+  wt_commit "$case_dir"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "task-metrics-emission: teardown should succeed"
+  metrics="$case_dir/data/task-metrics.jsonl"
+  assert_present "$metrics" "task-metrics-emission: teardown emitted no metrics file"
+  assert_absent "$case_dir/state/task-x1.task-metrics-row" \
+    "task-metrics-emission: successful teardown retained the recovery receipt"
+  python3 - "$metrics" <<'PY'
+import json
+import sys
+
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+assert len(rows) == 1, rows
+row = rows[0]
+assert row["task"] == "task-x1", row
+assert row["mode"] == "local-only", row
+assert row["pipeline_runs"] == 0, row
+assert row["fix_rounds"] == 0, row
+assert row["outcome"] == "completed", row
+assert row["merged"] is None, row
+assert row["tokens_consumed"] is None, row
+PY
+  pass "successful teardown emits one honest metrics row before retiring task records"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -2649,3 +2687,4 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_successful_teardown_emits_one_metrics_row

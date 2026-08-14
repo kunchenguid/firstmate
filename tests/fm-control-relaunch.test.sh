@@ -278,6 +278,7 @@ test_relaunch_preserves_durable_task_metadata() {
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
   {
+    printf '%s\n' 'dispatched_at=2026-08-13T20:00:00Z'
     printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
     printf '%s\n' 'pr_head=feature/relaunch'
     printf '%s\n' 'x_request=request-19'
@@ -294,6 +295,8 @@ test_relaunch_preserves_durable_task_metadata() {
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
+  [ "$(meta_field "$dir" rl19 dispatched_at)" = "2026-08-13T20:00:00Z" ] \
+    || fail "the original dispatch timestamp must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 

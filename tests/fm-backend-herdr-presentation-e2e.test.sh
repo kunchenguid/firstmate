@@ -428,6 +428,7 @@ normalize_meta() {  # <meta>
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \
     -e 's|^spawn_gen=.*$|spawn_gen=<spawn-incarnation>|' \
+    -e 's|^dispatched_at=.*$|dispatched_at=<dispatch-time>|' \
     "$1"
 }
 
@@ -507,7 +508,7 @@ FIRSTMATE_WSID=$(grep '^herdr_workspace_id=' "$ANCHOR_META" | cut -d= -f2-)
 
 # The same task id and project run once opted out and once projected, so
 # Treehouse commands and metadata can be compared after normalizing endpoint
-# IDs and the deliberately fresh per-spawn incarnation.
+# IDs, the deliberately fresh per-spawn incarnation, and its dispatch time.
 : > "$TREEHOUSE_CALL_LOG"
 OFF_HERDR_START=$(log_line_count)
 OFF_MOVE_START=$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')
@@ -886,8 +887,10 @@ teardown_task order-a "$HOME_DIR" > "$TMP_ROOT/order-a-teardown.out" 2> "$TMP_RO
 ORDER_A_TEARDOWN_PID=$!
 teardown_task order-b "$HOME_DIR" > "$TMP_ROOT/order-b-teardown.out" 2> "$TMP_ROOT/order-b-teardown.err" &
 ORDER_B_TEARDOWN_PID=$!
-wait "$ORDER_A_TEARDOWN_PID" || fail "projected ordering fixture A teardown failed"
-wait "$ORDER_B_TEARDOWN_PID" || fail "projected ordering fixture B teardown failed"
+wait "$ORDER_A_TEARDOWN_PID" \
+  || fail "projected ordering fixture A teardown failed: $(cat "$TMP_ROOT/order-a-teardown.err")"
+wait "$ORDER_B_TEARDOWN_PID" \
+  || fail "projected ordering fixture B teardown failed: $(cat "$TMP_ROOT/order-b-teardown.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "concurrent projected teardowns"
 teardown_task order-fail "$HOME_DIR" > "$TMP_ROOT/order-fail-teardown.out" 2> "$TMP_ROOT/order-fail-teardown.err" \
   || fail "projected ordering failure fixture teardown failed"
