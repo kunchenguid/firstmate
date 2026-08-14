@@ -161,7 +161,9 @@ write_epoch arming
 # X mode cadence: source the generated config so an X instance polls at its
 # 30s cadence (fm-bootstrap.sh x_mode_setup contract).
 # shellcheck source=/dev/null
-[ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+if fm_state_mode_secure "$STATE" && [ -f "$CONFIG/x-mode.env" ]; then
+  . "$CONFIG/x-mode.env"
+fi
 
 # --- foreground the real arm wrapper ------------------------------------------
 # NO shell &: this hook process tree is the harness-owned lifecycle. The arm

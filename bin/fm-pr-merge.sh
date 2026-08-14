@@ -49,6 +49,40 @@ caller_has_merge_method() {
   return 1
 }
 
+data_only_merge_method() {
+  local method=squash seen=0 arg candidate
+  while [ "$#" -gt 0 ]; do
+    arg=$1
+    shift
+    case "$arg" in
+      --squash) candidate=squash ;;
+      --merge) candidate=merge ;;
+      --rebase) candidate=rebase ;;
+      --method)
+        [ "$#" -gt 0 ] || { echo "error: data-only merge requires a supported merge method" >&2; return 1; }
+        candidate=$1
+        shift
+        ;;
+      --method=*) candidate=${arg#--method=} ;;
+      *)
+        echo "error: data-only merge cannot translate extra argument to the GitHub API: $arg" >&2
+        return 1
+        ;;
+    esac
+    case "$candidate" in
+      merge|squash|rebase) ;;
+      *) echo "error: data-only merge requires a supported merge method" >&2; return 1 ;;
+    esac
+    if [ "$seen" -eq 1 ] && [ "$method" != "$candidate" ]; then
+      echo "error: data-only merge received conflicting merge methods" >&2
+      return 1
+    fi
+    method=$candidate
+    seen=1
+  done
+  printf '%s\n' "$method"
+}
+
 reject_repo_overrides() {
   local arg
   for arg in "$@"; do
@@ -70,9 +104,9 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   exit 1
 fi
 
-merge_head_args=()
 fm_state_mode_detect "$STATE"
 if [ "$FM_STATE_MODE" = data-only ]; then
+  merge_method=$(data_only_merge_method "$@") || exit 1
   unsafe=$(fm_state_data_only_artifacts "$STATE")
   [ -z "$unsafe" ] || {
     echo "error: data-only merge refuses pre-existing executable/check artifacts without executing them: $unsafe" >&2
@@ -105,7 +139,6 @@ if [ "$FM_STATE_MODE" = data-only ]; then
     echo "error: data-only merge refused because current GitHub PR identity, head, mergeability, or checks were not fully revalidated" >&2
     exit 1
   }
-  merge_head_args=(--match-head-commit "$recorded_head")
 else
   "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
   grep -qxF "pr=$URL" "$META" || {
@@ -119,5 +152,23 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
-  "${merge_args[@]+"${merge_args[@]}"}" "${merge_head_args[@]+"${merge_head_args[@]}"}" "$@"
+if [ "$FM_STATE_MODE" = data-only ]; then
+  merge_result=$(gh-axi api PUT \
+    "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/merge" \
+    --field "sha=$recorded_head" \
+    --field "merge_method=$merge_method" \
+    --jq '.merged') || {
+    echo "error: data-only GitHub API merge failed" >&2
+    exit 1
+  }
+  case "$merge_result" in
+    true|$'api_response:\n  body: "true"\n  truncated: false') ;;
+    *)
+      echo "error: data-only GitHub API merge did not confirm a merged PR" >&2
+      exit 1
+      ;;
+  esac
+else
+  gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    "${merge_args[@]+"${merge_args[@]}"}" "$@"
+fi

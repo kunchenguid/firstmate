@@ -187,7 +187,9 @@ if [ "$watcher_healthy" = false ]; then
     queue_arg=0
     "$queue_pending" && queue_arg=1
     x_mode=0
-    [ -f "$CONFIG/x-mode.env" ] && x_mode=1
+    if fm_state_mode_secure "$STATE" && [ -f "$CONFIG/x-mode.env" ]; then
+      x_mode=1
+    fi
     fix=$("$SCRIPT_DIR/fm-supervision-instructions.sh" \
       --read-only "$READ_ONLY" \
       --afk "$afk" \

@@ -904,17 +904,17 @@ x_mode_setup() {
   shim="$STATE/x-watch.check.sh"
   cadence="$CONFIG/x-mode.env"
 
-  token=
-  [ -f "$env_file" ] && token=$(fmx_env_get FMX_PAIRING_TOKEN "$env_file")
-
   fm_state_mode_detect "$STATE"
   if [ "$FM_STATE_MODE" = data-only ]; then
     unsafe=$(fm_state_data_only_artifacts "$STATE")
-    if [ -n "$token" ] || [ -n "$unsafe" ] || [ -e "$cadence" ] || [ -L "$cadence" ]; then
+    if [ -n "$unsafe" ] || [ -e "$cadence" ] || [ -L "$cadence" ]; then
       echo "BOOTSTRAP_INFO: X mode is unavailable in data-only supervision; no relay shim or cadence artifact was created; use ordinary chat"
     fi
     return 0
   fi
+
+  token=
+  [ -f "$env_file" ] && token=$(fmx_env_get FMX_PAIRING_TOKEN "$env_file")
 
   x_mode_remove_artifacts() {
     local failed=0

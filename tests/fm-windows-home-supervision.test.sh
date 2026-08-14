@@ -41,6 +41,11 @@ set -u
 printf '%s\n' "$*" >> "${FM_TEST_GH_LOG:?}"
 emit() { printf 'api_response:\n  body: "%s"\n  truncated: false\n' "$1"; }
 if [ "${1:-}" = api ]; then
+  if [ "${2:-}" = PUT ]; then
+    [ "${3:-}" = /repos/o/r/pulls/7/merge ] || exit 1
+    emit true
+    exit 0
+  fi
   endpoint=${2:-}
   [ "${FM_TEST_GH_CASE:-good}" = command-failure ] && exit 1
   case "$endpoint" in
@@ -224,8 +229,8 @@ test_inspection_and_revalidation() {
   grep -qxF checks=green "$dir/inspect.out" || fail "green checks were not reported"
   FM_TEST_GH_CASE=good run_data_only "$dir" "$ROOT/bin/fm-pr-merge.sh" task-a "$URL" \
     > /dev/null 2> "$dir/merge.err" || fail "authorized pre-merge revalidation failed"
-  grep -q "^pr merge 7 --repo o/r --squash --match-head-commit $GOOD_HEAD$" "$dir/gh.log" \
-    || fail "successful revalidation did not bind merge to the validated head"
+  grep -q "^api PUT /repos/o/r/pulls/7/merge --field sha=$GOOD_HEAD --field merge_method=squash --jq .merged$" "$dir/gh.log" \
+    || fail "successful revalidation did not bind API merge to the validated head"
   for scenario in changed-head no-checks red incomplete skipped ambiguous unstable pagination-mismatch pagination-late-red command-failure; do
     dir=$(make_case "revalidate-$scenario")
     make_ambiguous_stat "$dir/fakebin"
