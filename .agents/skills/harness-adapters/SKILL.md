@@ -389,7 +389,7 @@ Cursor Agent launches with a positional prompt as `cursor-agent --trust --force 
 
 | Fact | Value |
 |---|---|
-| Busy state | Unknown until a semantic source is live-verified. A spinner, `Working`, and `ctrl+c to stop` are rendered presentation and are not state sources. |
+| Busy state | `beforeSubmitPrompt` and `stop` are a live-verified semantic turn lifecycle, but firstmate has not wired them yet. Until it does, classification stays `unknown cursor-agent-unverified`; a spinner, `Working`, and `ctrl+c to stop` remain rendered presentation, not state sources. |
 | Exit command | One `Ctrl+D` from the empty composer exits after a short delay. |
 | Interrupt | Single Escape, live-verified by cancelling an active `sleep 30` tool call. |
 | Resume | `cursor-agent --continue` resumes the most recent session for the workspace. The CLI also exposes `--resume [chatId]`, `cursor-agent resume`, and `cursor-agent ls`. |
@@ -409,11 +409,11 @@ The metered Other-Models pool permits `kimi-k3-{low,high,max}`, `kimi-k2.7-code`
 Older `claude-4.5-sonnet`, `claude-4-sonnet`, `gpt-5.1*`, `gpt-5-mini`, and `gpt-5.4-mini/nano` remain eligible only when there is a concrete reason to test capacity the standalone plans do not serve.
 Always confirm current availability with `cursor-agent models`, because the account-backed catalog can change.
 
-Cursor project hooks and Pedro's existing global hooks do not compose on 2026.08.11-e8db854.
-A controlled run with project `sessionStart` and `beforeShellExecution` probes fired the project hooks but no observable global-hook control, while the same global hook and control environment fired when invoked directly.
-The project `.cursor/hooks.json` therefore shadows `~/.cursor/hooks.json` instead of extending it.
-Firstmate must not install a project deny or turn-end hook that silently disables Pedro's personal global setup, and it must never modify his global Cursor files.
-`bin/fm-busy-lib.sh` consequently keeps the Cursor semantic-source gate closed and unattended dispatch gated even though the launch adapter itself is verified.
+Cursor project hooks and Pedro's existing global hooks compose on 2026.08.11-e8db854.
+A controlled listener made the existing global hook observable without editing it: global `SessionStart`/`SessionEnd` events and a project hook fired in the same run, and a real interactive submission emitted `Start` (`beforeSubmitPrompt`) followed by `Stop`.
+Firstmate therefore has a reachable semantic turn lifecycle, but its transport is deferred to the captain-held `cursor-busy-hook-transport` decision; never modify Pedro's global Cursor files without his explicit approval.
+Until that wiring lands, `bin/fm-busy-lib.sh` returns `unknown cursor-agent-unverified`.
+Ordinary Cursor dispatch is not mechanically refused: each turn-end wake remains unabsorbed and a working pane can produce false stale/wedge escalation under issue #2374, so use attended dispatch only.
 
 Cursor's MCP and skill portability are separate follow-up work.
 The current global Cursor MCP configuration is Pedro's personal file and is never a firstmate write target.

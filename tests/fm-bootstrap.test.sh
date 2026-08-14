@@ -1061,6 +1061,7 @@ unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{
 kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3"}}]}^empty^
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
 cursor model-variant effort is accepted^{"rules":[{"when":"cursor model bench","use":{"harness":"cursor-agent","model":"cursor-grok-4.6-high","effort":"high"}}]}^empty^
+cursor-agent max effort is flagged^{"rules":[{"when":"cursor max work","use":{"harness":"cursor-agent","model":"cursor-grok-4.6-high","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: cursor-agent:max
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
 array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^empty^
 one-element array use is accepted^{"rules":[{"when":"focused feature","use":[{"harness":"claude"}]}]}^empty^

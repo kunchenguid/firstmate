@@ -514,8 +514,8 @@ test_cursor_agent_threads_model_variant_and_records_effort() {
   expect_code 0 "$status" "cursor-agent spawn with a model-variant effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor-agent cursor-grok-4.6-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "cursor-agent --trust --force --model 'cursor-grok-4.6-high'" \
-    "cursor-agent launch did not thread the selected model variant"
+  assert_contains "$launch" "cursor-agent --trust --force --model 'cursor-grok-4.6-high' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
+    "cursor-agent launch did not preserve the model variant and typed brief"
   assert_not_contains "$launch" "--effort" \
     "cursor-agent launch must not invent a separate effort flag"
   assert_not_contains "$launch" "--reasoning-effort" \

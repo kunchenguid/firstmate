@@ -99,15 +99,14 @@ fm_busy_kimi_verified() {
   [ -n "$FM_BUSY_KIMI_VERIFIED_VERSIONS" ]
 }
 
-# Cursor Agent verification gate. Empty means no installed version has exposed
-# a semantic turn-lifecycle source that firstmate can own without modifying the
-# captain's personal global Cursor config. On 2026.08.11-e8db854, a project
-# .cursor/hooks.json shadowed ~/.cursor/hooks.json instead of composing with it,
-# so a project-local writer would silently disable the captain's existing hooks.
-# The rendered spinner, Working label, and ctrl+c footer are presentation and are
-# deliberately never trusted. Open this gate only after a machine-readable source
-# brackets a live firstmate-launched turn and the interrupt path without that
-# config collision, then record the version and evidence before wiring cursor-hook.
+# Cursor Agent verification gate. A controlled run on 2026.08.11-e8db854 proved
+# that project .cursor/hooks.json and ~/.cursor/hooks.json compose, and that
+# beforeSubmitPrompt/stop brackets a real interactive turn. The semantic source
+# therefore exists, but firstmate wiring is deferred until the captain chooses its
+# transport (decision key cursor-busy-hook-transport). The rendered spinner,
+# Working label, and ctrl+c footer remain presentation and are never trusted.
+# Keep this gate empty until cursor-hook is wired, including the interrupt path,
+# then record the version and live state-transition evidence before opening it.
 FM_BUSY_CURSOR_AGENT_VERIFIED_VERSIONS=""
 
 fm_busy_cursor_agent_verified() {
