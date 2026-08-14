@@ -457,7 +457,7 @@ Registration writes one private record under `state/procevent/`, and a completed
 By default, results are published as ordinary `check` wakes carrying the source id and committed result sequence through the existing durable wake queue, so the runner adds no second notification control plane.
 The self-announcing adapter exception and its fail-safe ordering are defined below.
 The watcher delivers a queued result on its ordinary cycle by reporting it as an actionable `check` wake, so a default or fallback publication reaches firstmate through the same rewake path every other wake uses and never waits for a manual drain.
-A queued `check` delivery is reported at most once per captured source and sequence while any records for that key remain queued.
+Ordinary captured-result keys are unique by source and sequence, while a shadow key is eligible again after its durable record is acknowledged and reconcile re-announces it while the misplacement stands.
 A durable handled acknowledgement stops future source re-announcement, while a record already queued remains under the durable queue's authority until the ordinary drain's sequence-bound post-handling acknowledgement consumes it.
 
 Discovery is never a timer.
@@ -478,6 +478,9 @@ Announcement ordering is adapter-declared through `bin/fm-procevent-<adapter>.sh
 The remote-secondmate reply adapter declares itself self-announcing: a captured reply reaches its local status mirror and settles its correlated pending-reply expectation without any handler step, the mirrored status bytes are the single wake for one remote note through the same signal classification a local secondmate's append gets, a byte-identical replayed capture adds no bytes and stays quiet, and only a capture the adapter could not fully apply is published as a `check` wake, whose adapter handling remains idempotent.
 
 Ownership is machine-wide per canonical source, because separate homes can share one underlying source store.
+A claim arbitrates liveness, not placement, so the home that owns the artifact or subject arms its source, and transferring an existing one means retiring it in the old home before arming it in the new owner home.
+The Lavish adapter enforces that default at arm time by refusing an artifact outside the arming home's own tree unless `--cross-home` is passed, which prints the override it applied.
+A registration whose canonical source is live-owned by another home is announced by reconcile as a `procevent-shadow` check wake naming that owner, at most one unacknowledged record per source, and counted as `shadowed=`; `list` reports that source's owner as `foreign` rather than `live`, because another home's runner captures every result into its own inbox and wake queue and is never this home's listener.
 Claims live under `$XDG_STATE_HOME/firstmate/procevent-claims` (override with `FM_PROCEVENT_CLAIM_ROOT`).
 Each claim binds its home and runner PID to a process identity, unique claim generation, and exact registration-file generation.
 Registration, acquisition, replacement, retirement, and generation-bound release are serialized at one machine-wide boundary per source.

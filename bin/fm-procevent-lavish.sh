@@ -2,12 +2,20 @@
 # Lavish adapter for the generic process-to-event runner.
 #
 # Usage:
-#   fm-procevent-lavish.sh arm <artifact.html>
+#   fm-procevent-lavish.sh arm [--cross-home] <artifact.html>
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #
+# arm        Register this artifact's poll as a source of THIS home. The home
+#            whose tree contains the artifact is its default owner, so arming an
+#            artifact outside $FM_HOME refuses; --cross-home is the explicit,
+#            self-describing override for an artifact deliberately shared with
+#            another home, and it prints what it overrode. Transferring an
+#            existing review means retiring it in the old home first and then
+#            arming it in the new owner home; two homes registering one artifact
+#            leaves the loser inert behind the winner's machine-wide claim.
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
 # terminal   Exit 0 when the captured result means this Lavish source will never
@@ -47,7 +55,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -67,12 +75,36 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local artifact=${1-} id real
+  local artifact='' cross_home=0 arg id real home
+  for arg in "$@"; do
+    case "$arg" in
+      --cross-home) cross_home=1 ;;
+      -*) die "unknown arm option: $arg" ;;
+      *) [ -z "$artifact" ] || usage; artifact=$arg ;;
+    esac
+  done
   [ -n "$artifact" ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   id=$(cmd_source_id "$artifact") || exit 1
   real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
     || die "cannot resolve the artifact path: $artifact"
+  # Home affinity, checked before anything is registered. Lavish's take is
+  # destructive and its claim is machine-wide, so whichever home's runner wins
+  # consumes every batch into ITS own inbox and wake queue: arming an artifact
+  # from a home that does not own it strands the review where its owner cannot
+  # see it, and nothing downstream can recover that placement. The artifact's
+  # own home tree is the default owner, and a genuinely shared artifact stays
+  # possible through one explicit, self-describing flag rather than silence.
+  home=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$FM_HOME" 2>/dev/null) \
+    || home=$FM_HOME
+  case "$real" in
+    "$home"/*) ;;
+    *)
+      [ "$cross_home" -eq 1 ] \
+        || die "artifact lives outside this home; arm it from the home that owns it, or pass --cross-home to arm a deliberately shared artifact here: artifact=$real home=$home"
+      printf 'cross-home: %s (armed outside %s by explicit override)\n' "$real" "$home"
+      ;;
+  esac
   # The plain blocking form: no --timeout-ms, so completion is a server event.
   "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" -- lavish-axi poll "$real" || exit 1
   printf 'armed: %s\n' "$id"

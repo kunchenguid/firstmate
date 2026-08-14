@@ -535,7 +535,7 @@ else
 fi
 SH
 chmod +x "$LAVISH_BIN/lavish-axi"
-REVIEW_ART="$TMP_ROOT/review.html"
+REVIEW_ART="$HLT/review.html"
 printf '<h1>review</h1>\n' > "$REVIEW_ART"
 lavish_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REVIEW_ART")
 PE_TRACKED+=("$HLT|$lavish_id")
@@ -558,6 +558,42 @@ assert_grep 'ship it' "$LAVISH_RESULT" "automatic retirement retains the human's
 out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh" retire "$REVIEW_ART")
 assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
 pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
+
+# --- arming is home-affine by default, shared artifacts are explicit ---------
+# The other half of the command-board incident: nothing stopped a home from
+# arming an artifact it does not own. Lavish's take is destructive and its claim
+# is machine-wide, so that placement decides where every batch lands and cannot
+# be repaired afterwards.
+HAF="$TMP_ROOT/haf"; new_home "$HAF"
+OWN_ART="$HAF/own-board.html"
+printf '<h1>own board</h1>\n' > "$OWN_ART"
+own_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$OWN_ART")
+PE_TRACKED+=("$HAF|$own_id")
+out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HAF" "$ROOT/bin/fm-procevent-lavish.sh" arm "$OWN_ART")
+assert_contains "$out" "armed: $own_id" "the home that owns the artifact arms it with no override"
+assert_not_contains "$out" "cross-home" "a same-home arm reports no override"
+PATH="$LAVISH_BIN:$PATH" FM_HOME="$HAF" "$ROOT/bin/fm-procevent-lavish.sh" retire "$OWN_ART" >/dev/null
+
+FOREIGN_HOME="$TMP_ROOT/haf-other"; new_home "$FOREIGN_HOME"
+SHARED_ART="$FOREIGN_HOME/shared-board.html"
+printf '<h1>shared board</h1>\n' > "$SHARED_ART"
+shared_art_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$SHARED_ART")
+arm_status=0
+arm_out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HAF" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$SHARED_ART" 2>&1) || arm_status=$?
+[ "$arm_status" -ne 0 ] || fail "arming an artifact outside this home was accepted by default"
+assert_contains "$arm_out" "--cross-home" "the refusal names the explicit override"
+assert_contains "$arm_out" "arm it from the home that owns it" "the refusal names the placement rule"
+assert_absent "$HAF/state/procevent/$shared_art_id.source" "a refused arm registered nothing"
+
+PE_TRACKED+=("$HAF|$shared_art_id")
+arm_out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HAF" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm --cross-home "$SHARED_ART")
+assert_contains "$arm_out" "armed: $shared_art_id" "an explicit override arms a deliberately shared artifact"
+assert_contains "$arm_out" "cross-home:" "the override records what it overrode"
+assert_present "$HAF/state/procevent/$shared_art_id.source" "the overridden arm registered the source"
+PATH="$LAVISH_BIN:$PATH" FM_HOME="$HAF" "$ROOT/bin/fm-procevent-lavish.sh" retire "$SHARED_ART" >/dev/null
+pass "a Lavish artifact is armed from its owning home by default and shared only through an explicit override"
 
 # --- end-user-aligned regression: the exact drain-before-handling restart cut
 # Reproduces the confirmed defect through the public interface end to end: a
@@ -653,6 +689,57 @@ out=$(pe "$HB" start shared-src)
 assert_contains "$out" "already owned" "a second home cannot own a source another home already owns"
 [ -z "$(wake_payloads "$HB")" ] || fail "the losing home published an event"
 pass "one owner per canonical source across homes"
+
+# --- a shadowed registration is diagnosed, never read as this home's listener
+# The command-board incident: one artifact was armed in a home that did not own
+# it, that home's runner took every batch into its own inbox, and the owning
+# home's registration sat inert while every surface it could inspect looked
+# healthy. HA above owns the live runner for shared-src; HB is the shadowed home.
+out=$(pe "$HB" reconcile)
+assert_contains "$out" "shadowed=1" "reconcile counts a registration shadowed by another home's live owner"
+assert_contains "$(wake_payloads "$HB")" "procevent-shadow lavish shared-src owner=$HA" \
+  "the shadowed home is woken with the foreign owner named"
+[ "$(wake_payloads "$HB" | grep -c 'procevent-shadow')" = 1 ] \
+  || fail "one shadowed reconcile produced more than one diagnostic: $(wake_payloads "$HB")"
+
+# Bounded: the shadow persists across every watcher cycle, so repeat reconciles
+# must not grow the durable queue while the first record is still unhandled.
+out=$(pe "$HB" reconcile)
+assert_contains "$out" "shadowed=0" "a still-queued shadow diagnostic is not announced again"
+pe "$HB" reconcile >/dev/null
+[ "$(wake_payloads "$HB" | grep -c 'procevent-shadow')" = 1 ] \
+  || fail "repeat reconciles spammed the wake queue: $(wake_payloads "$HB")"
+
+# ...and it is re-announced once the queue that carried it has been drained and
+# acknowledged, because the misplacement itself is still unrepaired.
+: > "$HB/state/.wake-queue"
+out=$(pe "$HB" reconcile)
+assert_contains "$out" "shadowed=1" "an unrepaired shadow is announced again after acknowledgement"
+
+# The owner display must separate this home's listener from a foreign one; the
+# ambiguous `live` reading is exactly what made the incident invisible.
+assert_contains "$(pe "$HB" list)" "foreign" "list reports another home's live owner as foreign"
+assert_contains "$(pe "$HA" list)" "live" "list still reports this home's own runner as live"
+pass "a foreign live owner is announced once per queued generation and never displayed as this home's listener"
+
+# A healthy same-home source is untouched by the diagnostic: no shadow wake, and
+# the ordinary published result still reaches the queue exactly as before.
+HH="$TMP_ROOT/hh"; new_home "$HH"
+TRIG_HH="$TMP_ROOT/trigger-healthy-own"
+pe_register "$HH" lavish own-src -- "$BLOCKER" "$TRIG_HH" "own home payload" >/dev/null
+out=$(pe "$HH" reconcile)
+assert_contains "$out" "shadowed=0" "a source this home owns is never reported shadowed"
+sleep 0.5
+: > "$TRIG_HH"
+wait_for "$HH/state/.wake-queue" || fail "the healthy same-home source published no event"
+out=$(pe "$HH" reconcile)
+assert_contains "$out" "shadowed=0" "a live same-home runner is never reported shadowed"
+assert_not_contains "$(wake_payloads "$HH")" "procevent-shadow" \
+  "a healthy same-home source produced a shadow diagnostic"
+assert_contains "$(wake_payloads "$HH")" "procevent lavish own-src 1" \
+  "the healthy same-home result is still announced normally"
+pe "$HH" retire own-src >/dev/null
+pass "the shadow diagnostic fires only for a foreign owner and leaves the healthy path unchanged"
 
 # A source whose child never completes must not survive retirement. This is the
 # leak that reparented four orphaned runners: the fixture directory was removed

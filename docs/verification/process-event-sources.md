@@ -5,7 +5,8 @@ Audience: maintainer verification.
 This record holds reusable version-scoped evidence for the runner's active guarantees.
 `docs/configuration.md` owns the operating contract, each script's header and `--help` own its mechanics, and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
-Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
+The existing runner and Lavish protocol evidence was verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
+The home-affine arming and foreign-shadow guarantees were verified on 2026-08-12 in isolated fixture homes with an isolated claim root by `tests/fm-procevent.test.sh` (`all procevent tests passed`), `tests/fm-watch-triage.test.sh` (47/47), and `tests/fm-watch-arm.test.sh` (14/14).
 
 ## The published Lavish poll interface the adapter wraps
 
@@ -92,6 +93,8 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | trusted classification boundary | Lavish lifecycle classification reads the leading response envelope, so prompt payload text that resembles a missing-session error cannot override a valid session status |
 | result identity and ordering | each wake names the committed sequence to read, and pending sequences 1, 2, and 10 publish in numeric order |
 | one owner per canonical source | a second home's `start` for the same source id reports `already owned` and publishes nothing |
+| home-affine arming | Lavish `arm` refuses an artifact outside the arming home's own tree and registers nothing, while `--cross-home` arms the same artifact and reports the override it applied |
+| shadowed registration is diagnosed, not accepted | a registration whose canonical source is live-owned by another home is announced once as `procevent-shadow` naming that owner and counted as `shadowed=1`, is not announced again while that record stays queued, is announced again after the queue is acknowledged while the misplacement stands, and reads as `foreign` rather than `live` in `list`; the real watcher regression also proves the queued shadow diagnostic wakes proactively, names the owner in the drain, and re-wakes only after acknowledgement |
 | canonical physical identity | a final-component symlink and its target produce the same Lavish source id |
 | isolated public start boundary | direct `start` establishes a new runner-led process group before claiming the source, so retirement cannot signal an unrelated process inherited from the caller's group |
 | stale reclaim without displacement | concurrent contenders replacing one stale claim start exactly one runner, and cross-home replacement removes the old generation's staging file from its recorded state directory |
