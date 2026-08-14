@@ -8,7 +8,11 @@
 // ./fm-calm-visibility.ts owns which classes Calm hides.
 import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
-import { calmPresentationHides } from "./fm-calm-visibility.ts";
+import {
+  calmOperationalTurnIsActive,
+  calmPresentationHides,
+  calmReplyIsBareAcknowledgement,
+} from "./fm-calm-visibility.ts";
 
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
 
@@ -21,6 +25,7 @@ type AssistantMessagePresentationState = {
 type CalmAssistantLayoutPatch = {
   hidesThinking: () => boolean;
   hidesWorkingNote: () => boolean;
+  hidesOperationalReply: () => boolean;
 };
 
 // A mid-turn assistant message is one the model did not end its response with: Pi's
@@ -37,6 +42,19 @@ function isMidTurnAssistantMessage(message: AssistantMessage): boolean {
   );
 }
 
+// The reply that closes a turn started by a hidden operational input, and that says
+// nothing the captain needs. A mid-turn message is left to the working-note rule above,
+// so this only ever matches the message the model ended its response with.
+function isOperationalTurnAcknowledgement(message: AssistantMessage): boolean {
+  if (!calmOperationalTurnIsActive()) return false;
+  if (isMidTurnAssistantMessage(message)) return false;
+  const spoken = message.content
+    .filter((block) => block.type === "text")
+    .map((block) => (block as { text?: string }).text ?? "")
+    .join("\n");
+  return calmReplyIsBareAcknowledgement(spoken);
+}
+
 // Keep the introduction-version symbol stable so a compatible upgrade cannot
 // double-patch a live process.
 const CALM_ASSISTANT_LAYOUT_PATCH = Symbol.for(
@@ -49,14 +67,21 @@ export function installCalmAssistantLayout(): void {
   };
   const hidesThinking = (): boolean => calmPresentationHides("assistant-thinking");
   const hidesWorkingNote = (): boolean => calmPresentationHides("assistant-working-note");
+  const hidesOperationalReply = (): boolean =>
+    calmPresentationHides("operational-turn-reply");
   const installed = registry[CALM_ASSISTANT_LAYOUT_PATCH];
   if (installed) {
     installed.hidesThinking = hidesThinking;
     installed.hidesWorkingNote = hidesWorkingNote;
+    installed.hidesOperationalReply = hidesOperationalReply;
     return;
   }
 
-  const patch: CalmAssistantLayoutPatch = { hidesThinking, hidesWorkingNote };
+  const patch: CalmAssistantLayoutPatch = {
+    hidesThinking,
+    hidesWorkingNote,
+    hidesOperationalReply,
+  };
   const AssistantMessageComponent = PiCodingAgent.AssistantMessageComponent;
   if (typeof AssistantMessageComponent !== "function") {
     throw new Error("Firstmate Calm requires Pi AssistantMessageComponent");
@@ -76,14 +101,22 @@ export function installCalmAssistantLayout(): void {
       patch.hidesThinking();
     const hideWorkingNote =
       patch.hidesWorkingNote() && isMidTurnAssistantMessage(message);
+    // The captain asked not to see internal messages in chat. The operational input that
+    // started this turn is already rendered as nothing, so its bare acknowledgement is
+    // the other half of the same internal exchange and is dropped from the rendered rows
+    // too. Only a short acknowledgement qualifies - see calmReplyIsBareAcknowledgement -
+    // so a decision, blocker, finding, review-ready outcome or PR link produced by the
+    // same turn still reaches the captain.
+    const hideOperationalReply =
+      patch.hidesOperationalReply() && isOperationalTurnAcknowledgement(message);
     const presentationMessage =
-      hideThinking || hideWorkingNote
+      hideThinking || hideWorkingNote || hideOperationalReply
         ? {
             ...message,
             content: message.content.filter(
               (block) =>
                 !(hideThinking && block.type === "thinking") &&
-                !(hideWorkingNote && block.type === "text"),
+                !((hideWorkingNote || hideOperationalReply) && block.type === "text"),
             ),
           }
         : message;

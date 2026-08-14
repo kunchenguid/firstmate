@@ -5,7 +5,7 @@
 // message delivery.
 import type { UserMessageComponent as PiUserMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
-import { calmPresentationHides } from "./fm-calm-visibility.ts";
+import { calmPresentationHides, setCalmOperationalTurn } from "./fm-calm-visibility.ts";
 import { classifyFirstmateCurrentOperationalText } from "./fm-operational-input.ts";
 
 type UserMessageConstructorArgs = ConstructorParameters<typeof PiUserMessageComponent>;
@@ -127,9 +127,17 @@ export function installCalmOperationalUserLayout(): void {
 
     const text = this.getUserMessageText(message);
     if (!text || !patch.isOperationalInput(text)) {
+      // A genuine captain prompt: this turn and its reply belong on screen.
+      setCalmOperationalTurn(false);
       originalAddMessageToChat.call(this, message, options);
       return;
     }
+
+    // An internal operational input. Record that the turn it starts is internal so the
+    // assistant layout can recognise that turn's bare acknowledgement as the other half
+    // of the same hidden exchange. Delivery, model context and session storage are
+    // untouched either way; only rendering differs.
+    setCalmOperationalTurn(true);
 
     const component = new CalmOperationalUserMessageComponent(
       text,

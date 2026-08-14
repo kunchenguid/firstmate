@@ -1356,6 +1356,115 @@ JS
   pass "Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts"
 }
 
+# The captain asked not to see internal messages in chat while Firstmate keeps behaving
+# exactly as before. The operational input is already rendered as nothing; this pins the
+# other half - that turn's bare acknowledgement is dropped from the rendered rows only,
+# that a captain-relevant reply on the same turn still reaches the captain, and that the
+# message objects the model and session see are never touched.
+test_calm_hides_operational_turn_acknowledgement() {
+  command -v node >/dev/null 2>&1 || { skip "node not installed"; return 0; }
+  [ -f "$PI_PACKAGE_DIR/package.json" ] || { skip "@earendil-works/pi-coding-agent not installed"; return 0; }
+
+  local fixture output_file
+  fixture="$TMP_ROOT/calm-operational-reply"
+  mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  printf '{"type":"module"}\n' >"$fixture/package.json"
+  output_file="$fixture/node-output"
+
+  (cd "$fixture" && PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ AssistantMessageComponent }, { initTheme }, { setCapabilities }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+]);
+initTheme("dark");
+setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+
+const visibility = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href);
+const layout = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-assistant-layout.ts`).href);
+layout.installCalmAssistantLayout();
+
+const base = {
+  role: "assistant",
+  api: "calm-operational-reply-test",
+  provider: "calm-operational-reply-test",
+  model: "deterministic",
+  stopReason: "stop",
+  timestamp: 1,
+  usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+const messages = {
+  acknowledgement: { ...base, content: [{ type: "text", text: "Captain, shipshape." }] },
+  captainRelevant: {
+    ...base,
+    content: [{ type: "text", text: "Review-ready: https://github.com/example/repo/pull/7 checks green" }],
+  },
+  substantive: {
+    ...base,
+    content: [{ type: "text", text: "Captain, the promo ticker worker stopped and needs a decision on how to proceed." }],
+  },
+};
+const messagesBefore = JSON.stringify(messages);
+
+// The component lays out its rows when it receives the message, so each assertion builds
+// a fresh one under the presentation state being asserted rather than re-rendering a
+// component laid out under the previous state.
+const rendered = (name) => new AssistantMessageComponent(messages[name]).render(100);
+const renderedText = (name) => rendered(name).join("\n");
+
+// Calm off: nothing is ever hidden, whatever the turn was.
+visibility.setCalmPresentation(false);
+visibility.setCalmOperationalTurn(true);
+for (const name of Object.keys(messages)) {
+  if (rendered(name).length === 0) throw new Error(`Calm off hid ${name}`);
+}
+
+// Calm on, but the turn came from the captain: every reply stays on screen.
+visibility.setCalmPresentation(true);
+visibility.setCalmOperationalTurn(false);
+if (!renderedText("acknowledgement").includes("shipshape")) {
+  throw new Error("Calm hid an acknowledgement to a genuine captain prompt");
+}
+
+// Calm on and the turn was internal: only the bare acknowledgement leaves the chat.
+visibility.setCalmOperationalTurn(true);
+if (rendered("acknowledgement").length !== 0) {
+  throw new Error(`operational acknowledgement still rendered: ${JSON.stringify(rendered("acknowledgement"))}`);
+}
+if (!renderedText("captainRelevant").includes("pull/7")) {
+  throw new Error("a review-ready PR link was hidden from the captain");
+}
+if (!renderedText("substantive").includes("needs a decision")) {
+  throw new Error("a captain-relevant outcome was hidden from the captain");
+}
+
+// Presentation only: the objects the model and the session see are untouched.
+if (JSON.stringify(messages) !== messagesBefore) {
+  throw new Error("Calm mutated the assistant messages instead of only their rendering");
+}
+
+// And it is reversible, so nothing about this is sticky state.
+visibility.setCalmPresentation(false);
+if (rendered("acknowledgement").length === 0) {
+  throw new Error("turning Calm off did not restore the acknowledgement row");
+}
+console.log("OPERATIONAL_REPLY_OK");
+JS
+  local status=$?
+  if [ "$status" -ne 0 ] || ! grep -q OPERATIONAL_REPLY_OK "$output_file"; then
+    fail "Calm operational-reply presentation failed: $(cat "$output_file")"
+  fi
+  pass "Calm hides an internal turn's bare acknowledgement without touching the message or a captain-relevant reply"
+}
+
 test_calm_mid_turn_working_notes() {
   local fixture out output_file status version
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
@@ -3928,6 +4037,7 @@ test_builtin_gate_load_time
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle
 test_calm_mid_turn_working_notes
+test_calm_hides_operational_turn_acknowledgement
 test_operational_followup_turn_e2e
 test_hidden_block_geometry_e2e
 test_working_ship_geometry_and_lifecycle

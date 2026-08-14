@@ -24,6 +24,11 @@ export const CALM_TRANSCRIPT_CLASSES = [
   "project-trust-warning",
   "synthetic-user",
   "synthetic-assistant",
+  // The assistant's own reply to a turn whose input was a hidden operational message.
+  // Deliberately absent from the allowlist below: the captain asked not to see internal
+  // messages in chat, and an internal turn's bare acknowledgement is the other half of
+  // that same internal exchange.
+  "operational-turn-reply",
   "unknown",
 ] as const;
 
@@ -65,6 +70,39 @@ type FirstmateSyntheticPresentation = {
 
 let calm = false;
 let stockExportRendering = false;
+// Whether the most recent chat input was a hidden Firstmate operational message. The
+// operational-user layout sets it as it decides how to render that input, and the
+// assistant layout reads it to recognise that turn's reply. This is presentation state
+// only: it is derived from what was rendered, never consulted by delivery, and it
+// changes no message, no model context, no session entry, and no execution semantics.
+let operationalTurn = false;
+
+export function setCalmOperationalTurn(active: boolean): void {
+  operationalTurn = active;
+}
+
+export function calmOperationalTurnIsActive(): boolean {
+  return operationalTurn;
+}
+
+// The reply that says nothing the captain needs, matched against the exact wording
+// AGENTS.md prescribes for a routine no-action operational update rather than guessed at.
+//
+// An earlier revision hid any short single-line reply. A focused test caught that hiding
+// a genuine one-line escalation, which is the failure that matters here: showing the
+// captain one line of chatter is a nuisance, hiding one decision or blocker is a fault.
+// So this matches the contract phrase and nothing else, and everything unrecognised
+// stays on screen. The cost is that a reply which ignores that contract and improvises
+// its own no-action wording still shows, because presentation cannot tell such a reply
+// apart from a real outcome without reading intent that is not in the text.
+const CALM_NO_ACTION_REPLY = "captain, shipshape";
+
+export function calmReplyIsBareAcknowledgement(text: string): boolean {
+  const reply = text.trim();
+  if (!reply) return true;
+  const normalised = reply.replace(/\s+/g, " ").replace(/[.!\s]+$/, "").toLowerCase();
+  return normalised === CALM_NO_ACTION_REPLY;
+}
 
 export function calmTranscriptClassIsVisible(itemClass: CalmTranscriptClass): boolean {
   return CALM_VISIBLE_CLASSES.has(itemClass);

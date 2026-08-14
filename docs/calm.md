@@ -19,6 +19,10 @@ Hiding it removes the narration a model emits alongside its tool calls, while th
 Text that is still streaming is never hidden, because suppressing it would also stop a genuine reply from streaming, so a working note is briefly visible before its row collapses.
 The narration is hidden only from the live transcript presentation, and remains in the message, model context, session storage, and `/export` artifacts.
 The operational inputs remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
+The reply that closes such a turn is dropped from the rendered rows too, so an internal exchange does not leave half of itself in the captain's chat.
+That match is deliberately narrow: only the exact no-action acknowledgement `AGENTS.md` section 9 prescribes is treated as internal chatter, and every other reply stays visible so a decision, blocker, finding, review-ready outcome, or PR link can never be hidden by presentation.
+A reply that improvises its own no-action wording instead of using that phrase therefore still shows, because rendering cannot tell it apart from a real outcome.
+None of this changes delivery: the message, the model's context, the session entry, and the export all stay exactly as vanilla Firstmate produced them.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
 Outside Pi's same-name built-in override collision described below, Calm changes presentation only.
