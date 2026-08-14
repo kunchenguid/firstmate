@@ -911,15 +911,15 @@ SH
     chmod +x "$fakebin/$harness"
     launch=$(cat "$launchlog")
     out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
+    expected='WATCHER DOWN - SUPERVISION IS OFF'
     case "$harness" in
       codex)
-        expected='WATCHER DOWN - SUPERVISION IS OFF'
         assert_contains "$out" "$expected" \
           "Codex secondmate inherited Claude auto-arm despite its persistent watcher model"
         ;;
       claude)
-        [ -z "$out" ] \
-          || fail "Claude secondmate with a fresh beacon should use auto-arm supervision, got: $out"
+        assert_not_contains "$out" "$expected" \
+          "Claude secondmate with a fresh beacon did not use auto-arm supervision"
         ;;
     esac
   done

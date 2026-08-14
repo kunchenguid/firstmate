@@ -109,7 +109,15 @@ test_guard_warns_when_executing_checkout_lags_default() {
   git -C "$home" checkout -q --detach refs/heads/main
   out=$(run_guard "$home")
   [ -z "$out" ] || fail "guard must be silent when the executing checkout is current, got: $out"
-  pass "fm-guard: a real checkout behind local main alarms with both SHAs; a current checkout stays silent"
+
+  git -C "$home" commit -q --allow-empty -m "advance checkout"
+  out=$(run_guard "$home")
+  [ -z "$out" ] || fail "guard must be silent when the executing checkout is ahead, got: $out"
+
+  git -C "$repo" commit -q --allow-empty -m "diverge default"
+  out=$(run_guard "$home")
+  [ -z "$out" ] || fail "guard must be silent when the executing checkout has diverged, got: $out"
+  pass "fm-guard: a real checkout behind local main alarms with both SHAs; current, ahead, and diverged stay silent"
 }
 
 # --- GUARD 2b: fm-bootstrap problem line ------------------------------------
