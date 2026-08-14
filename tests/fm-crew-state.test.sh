@@ -72,6 +72,8 @@ case "${1:-}" in
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+      sync)
+        printf '%s\n' "${FM_FAKE_AXI_SYNC:-}" ;;
     esac
     ;;
   runs)
@@ -170,8 +172,9 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_AXI_SYNC=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_AXI_SYNC
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -288,6 +291,56 @@ run:
   pr: ""
   findings: none
 outcome: failed
+EOF
+}
+
+# --- `no-mistakes axi sync --check` fixtures (branch_sync TOON) -------------
+# Field shape verified against the real installed CLI (v1.48.0) on a genuinely
+# custody-returned branch: `branch_sync.state` and `branch_sync.safety` both
+# read "custody_returned" and `branch_sync.local.clean` reads true.
+
+sync_custody_returned() {
+  cat <<'EOF'
+branch_sync:
+  state: custody_returned
+  changed: false
+  local:
+    branch: fm/obsolete
+    head: abc1234
+    clean: true
+  pipeline:
+    run: "01RUN"
+    status: failed
+  safety: custody_returned
+  next_action:
+    code: run_pipeline
+EOF
+}
+
+# Same custody_returned state/safety, but a dirty worktree - must NOT qualify;
+# "clean" is part of the documented confirmation ("custody returned, clean").
+sync_custody_returned_dirty() {
+  cat <<'EOF'
+branch_sync:
+  state: custody_returned
+  local:
+    clean: false
+  safety: custody_returned
+EOF
+}
+
+# A branch still stranded by its terminal run, recovery not yet run: the
+# documented next_action.code is recover_custody and neither state nor safety
+# reads custody_returned - must NOT qualify.
+sync_recovery_pending() {
+  cat <<'EOF'
+branch_sync:
+  state: stranded
+  local:
+    clean: false
+  safety: recover_needed
+  next_action:
+    code: recover_custody
 EOF
 }
 
@@ -682,6 +735,116 @@ test_terminal_failed() {
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
   pass "terminal failed run is authoritative"
+}
+
+# (d') a TERMINAL failed run-step from an OBSOLETE run must not outrank a
+# LATER declared paused/blocked status event once the branch's custody is
+# structurally confirmed returned. Direct regression coverage for the
+# 2026-08-13 fm-key-position incident: a push-denied run failed, delivery
+# legitimately rerouted via a fork PR, custody was recovered through the
+# supported `axi sync --recover` path, and the crew declared paused: for the
+# upstream CI-approval wait - fm-crew-state.sh kept reporting failed and the
+# watcher kept short-cadence stale-escalating a healthy, deliberately parked
+# worker.
+test_obsolete_failed_run_paused_custody_returned_overrides() {
+  reset_fakes
+  local d; d=$(new_case obsolete-failed-paused)
+  make_repo_on_branch "$d/wt" fm/feat-obsolete
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-obsolete.meta" "window=fm:fm-feat-obsolete" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: PR open, CI withheld pending upstream approval - external wait\n' > "$d/state/feat-obsolete.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-obsolete)"
+  FM_FAKE_AXI_SYNC="$(sync_custody_returned)"
+  local out; out=$(run_crew_state "$d" feat-obsolete)
+  assert_contains "$out" "state: paused" "obsolete failed run + custody returned + later paused -> paused"
+  assert_contains "$out" "source: status-log" "override reports status-log as the source"
+  assert_contains "$out" "external wait" "the pause reason is carried in the detail"
+  assert_contains "$out" "obsolete run superseded" "detail names the obsolete run as superseded"
+  pass "obsolete failed run with returned custody defers to a later declared pause"
+}
+
+test_obsolete_failed_run_blocked_custody_returned_overrides() {
+  reset_fakes
+  local d; d=$(new_case obsolete-failed-blocked)
+  make_repo_on_branch "$d/wt" fm/feat-obsolete-b
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-obsolete-b.meta" "window=fm:fm-feat-obsolete-b" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'blocked: need a credential to continue\n' > "$d/state/feat-obsolete-b.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-obsolete-b)"
+  FM_FAKE_AXI_SYNC="$(sync_custody_returned)"
+  local out; out=$(run_crew_state "$d" feat-obsolete-b)
+  assert_contains "$out" "state: blocked" "obsolete failed run + custody returned + later blocked -> blocked"
+  assert_contains "$out" "source: status-log" "override reports status-log as the source"
+  pass "blocked generalizes the same obsolete-run precedence rule"
+}
+
+# The CURRENT-run case must never weaken: a run genuinely failed and its
+# branch is still stranded (recovery not yet run) keeps reporting failed
+# regardless of a later paused: append - a worker must not be able to hide a
+# genuinely failed current run by appending paused:.
+test_current_failed_run_stays_failed_when_custody_not_returned() {
+  reset_fakes
+  local d; d=$(new_case current-failed-stranded)
+  make_repo_on_branch "$d/wt" fm/feat-current
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-current.meta" "window=fm:fm-feat-current" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: pretending this is fine\n' > "$d/state/feat-current.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-current)"
+  FM_FAKE_AXI_SYNC="$(sync_recovery_pending)"
+  local out; out=$(run_crew_state "$d" feat-current)
+  assert_contains "$out" "state: failed" "custody still stranded -> failed stays authoritative"
+  assert_contains "$out" "source: run-step" "unresolved custody keeps the run-step source"
+  pass "a genuinely current failed run cannot be hidden behind paused: when custody is not returned"
+}
+
+# custody_returned but a dirty worktree must not qualify either - the
+# documented confirmation is "custody returned, clean".
+test_current_failed_run_stays_failed_when_worktree_dirty() {
+  reset_fakes
+  local d; d=$(new_case current-failed-dirty)
+  make_repo_on_branch "$d/wt" fm/feat-dirty
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dirty.meta" "window=fm:fm-feat-dirty" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: waiting on something\n' > "$d/state/feat-dirty.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-dirty)"
+  FM_FAKE_AXI_SYNC="$(sync_custody_returned_dirty)"
+  local out; out=$(run_crew_state "$d" feat-dirty)
+  assert_contains "$out" "state: failed" "custody_returned without a clean worktree -> failed stays authoritative"
+  pass "custody_returned alone is not enough without a clean worktree"
+}
+
+# An empty/errored sync check fails closed to the run-step verdict.
+test_current_failed_run_stays_failed_when_sync_check_unavailable() {
+  reset_fakes
+  local d; d=$(new_case failed-sync-unavailable)
+  make_repo_on_branch "$d/wt" fm/feat-nosync
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-nosync.meta" "window=fm:fm-feat-nosync" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: waiting on something\n' > "$d/state/feat-nosync.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-nosync)"
+  FM_FAKE_AXI_SYNC=""
+  local out; out=$(run_crew_state "$d" feat-nosync)
+  assert_contains "$out" "state: failed" "no sync-check answer fails closed to failed"
+  pass "an unavailable custody check fails closed instead of trusting the log"
+}
+
+# An ACTIVE run must never be affected by this rule, even with a trailing
+# paused: log and a custody_returned sync answer: custody recovery is
+# meaningless for a still-running run, and an ACTIVE or CURRENT run-step must
+# always keep outranking status prose.
+test_active_run_not_affected_by_custody_override() {
+  reset_fakes
+  local d; d=$(new_case active-run-trailing-pause)
+  make_repo_on_branch "$d/wt" fm/feat-active
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-active.meta" "window=fm:fm-feat-active" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: stale leftover line\n' > "$d/state/feat-active.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-active)"
+  FM_FAKE_AXI_SYNC="$(sync_custody_returned)"
+  local out; out=$(run_crew_state "$d" feat-active)
+  assert_contains "$out" "state: working" "an active run always keeps outranking status prose"
+  assert_contains "$out" "source: run-step" "active run keeps the run-step source"
+  pass "the custody override never applies to a currently-active run"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -1329,6 +1492,12 @@ test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
 test_terminal_failed
+test_obsolete_failed_run_paused_custody_returned_overrides
+test_obsolete_failed_run_blocked_custody_returned_overrides
+test_current_failed_run_stays_failed_when_custody_not_returned
+test_current_failed_run_stays_failed_when_worktree_dirty
+test_current_failed_run_stays_failed_when_sync_check_unavailable
+test_active_run_not_affected_by_custody_override
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status

@@ -35,6 +35,15 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
+#      EXCEPT: a terminal failed run-step is itself superseded when the log's
+#      last line is a LATER declared paused/blocked and `no-mistakes axi sync
+#      --check` structurally confirms the branch's custody was returned (see
+#      nm_custody_returned) - an obsolete run whose delivery legitimately
+#      rerouted (e.g. a denied push) must not keep short-cadence stale-
+#      escalating a crew now in a legitimate declared wait. This is narrower
+#      than it looks: it never applies to working/parked/done, so an ACTIVE or
+#      CURRENT run always keeps outranking status prose, and any unconfirmed
+#      or errored custody check fails closed to the run-step's failed verdict.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -304,6 +313,33 @@ nm_ci_checks_state() {
     *) printf 'unknown' ;;
   esac
 }
+
+# 2026-08-13 fm-key-position incident: a terminal FAILED run-step from an
+# OBSOLETE run (delivery legitimately rerouted, e.g. a push denied upstream)
+# must not keep outranking a LATER declared paused/blocked status event once
+# the crew has followed the supported `no-mistakes axi sync --recover` path.
+# `axi status` never surfaces that recovery on the run itself (verified
+# empirically: a run whose custody was returned still reports plain
+# outcome=failed), so this reads the ONE place the CLI does surface it -
+# `axi sync --check`'s `branch_sync` block - and requires BOTH its `state`
+# and `safety` fields to read the exact `custody_returned` value plus a
+# clean local worktree, matching AGENTS.md's Validate section language
+# ("structured status confirms that branch ownership is already returned").
+# Deliberately conservative: a branch that simply never needed recovery
+# (failed before any push) is NOT "custody_returned" and does not qualify -
+# only a run genuinely stranded and then explicitly released does. Any
+# other value, or an empty/errored call, fails closed and leaves the
+# terminal run-step verdict authoritative, so a current, uncleaned failure
+# can never be hidden behind a `paused:`/`blocked:` append.
+nm_custody_returned() {  # <sync-check-toon>
+  local state safety clean
+  [ -n "$1" ] || return 1
+  state=$(strip_quotes "$(fm_nm_field "$1" state)")
+  safety=$(strip_quotes "$(fm_nm_field "$1" safety)")
+  clean=$(strip_quotes "$(fm_nm_field "$1" clean)")
+  [ "$state" = custody_returned ] && [ "$safety" = custody_returned ] && [ "$clean" = true ]
+}
+
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
@@ -511,6 +547,21 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ "$CI_LOG_STATE" != not-ready ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
+  fi
+
+  # A TERMINAL failed run-step from an OBSOLETE run must not outrank a LATER
+  # declared paused/blocked status event once the branch's custody is
+  # structurally confirmed returned (nm_custody_returned, above): the crew
+  # followed the supported recovery path and moved on, so the retired run's
+  # own verdict no longer reflects the branch's current state. This never
+  # touches working/parked/done: an ACTIVE or CURRENT run always keeps
+  # outranking status prose, and an unconfirmed or errored custody check
+  # fails closed to the run-step verdict below.
+  if [ "$RUN_STATE" = failed ] \
+    && { status_is_paused "$LOG_LINE" || [ "$LOG_VERB" = blocked ]; } \
+    && nm_custody_returned "$(nm_run axi sync --check)"; then
+    emit "$(map_log_state "$LOG_LINE")" status-log \
+      "$(status_line_note "$LOG_LINE")${SEP}obsolete run superseded (custody returned)"
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
