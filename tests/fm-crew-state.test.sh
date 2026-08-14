@@ -349,14 +349,21 @@ EOF
 }
 
 # A run that failed BEFORE any push (a test/lint failure), so nothing was ever
-# stranded and nothing was ever recovered: the branch is clean and in sync, but
-# its custody was never returned because it was never taken away. The guard is
-# value-exact on the literal custody_returned pair, so whichever word the CLI
-# uses for this ordinary state, a clean worktree alone must not qualify.
+# stranded and nothing was ever recovered: the branch and head are already the
+# worker's, so no custody was ever returned because none was ever taken away.
+# `state: user_owned` is the CLI's documented word for that (the installed
+# no-mistakes skill contract, SKILL.md:243 at v1.48.0: "the run went terminal
+# before changing the submitted head and cancellation released the branch...
+# no sync action is needed"). Only that `state` value is quoted from the
+# contract - the `safety`, `clean` and `next_action` lines here model a
+# plausible shape that was NOT observed against a live run, and nothing in the
+# test depends on them: the guard is value-exact on the literal
+# custody_returned pair, so any `state` other than custody_returned already
+# fails closed whatever those fields turn out to be.
 branch_sync_never_stranded() {
   cat <<'EOF'
 branch_sync:
-  state: in_sync
+  state: user_owned
   changed: false
   local:
     clean: true
@@ -871,11 +878,15 @@ $(branch_sync_never_stranded)"
   pass "a clean, never-stranded branch is not custody_returned and cannot hide a failed run"
 }
 
-# The override needs `axi status` TOON to read branch_sync from. A COARSE
-# attribution (this branch resolved through the plain `no-mistakes runs` list
-# because the repo-wide status answer belonged to another crew) carries no such
-# block, so the documented narrowing applies: it keeps reporting failed even
-# though the same crew would qualify once attributed through the full path.
+# A COARSE attribution (this branch resolved through the plain `no-mistakes
+# runs` list because the repo-wide status answer belonged to another crew) does
+# still hold a real bare `axi status` capture, branch_sync block included - the
+# runs-list fallback only runs once that capture came back. What it does not
+# hold is an answer about THIS branch: under one shared no-mistakes repo
+# registration the capture describes another crew's active-or-most-recent run,
+# so the documented narrowing keeps that neighbour's custody state from leaking
+# here. Such a crew keeps reporting failed even though it would qualify once
+# `axi status` attributes its own branch through the full path.
 test_coarse_failed_run_keeps_failed_despite_later_pause() {
   reset_fakes
   local d short; d=$(new_case coarse-failed-paused)
