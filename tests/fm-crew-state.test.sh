@@ -612,6 +612,25 @@ test_checks_passed_without_green_evidence_is_not_done() {
   pass "a checks-passed claim with zero check evidence is not done"
 }
 
+# The cancelled half of the same rule. The ci-monitoring cancelled case above
+# reads working even on the old code (an unrecognized marker scored unknown, so
+# nothing overrode working), so only this terminal-outcome case actually pins
+# "a cancelled-only run cannot produce checks-passed" from behavior.
+test_checks_passed_cancelled_only_is_not_done() {
+  reset_fakes
+  local d; d=$(new_case checks-passed-cancelled)
+  make_repo_on_branch "$d/wt" fm/feat-cpassedcancel
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cpassedcancel.meta" "window=fm:fm-feat-cpassedcancel" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-cpassedcancel)"
+  FM_FAKE_CI_LOGS="[12:00:04] CI checks were cancelled without reporting a verdict"
+  local out; out=$(run_crew_state "$d" feat-cpassedcancel)
+  assert_not_contains "$out" "state: done" "checks-passed over cancelled checks must not be done"
+  assert_not_contains "$out" "checks green" "cancelled checks must not read as checks green"
+  assert_contains "$out" "without green check evidence" "the missing green evidence is named"
+  pass "a checks-passed claim over cancelled-only checks is not done"
+}
+
 test_checks_passed_with_success_evidence_is_done() {
   reset_fakes
   local d; d=$(new_case checks-passed-green)
@@ -1577,6 +1596,7 @@ test_ci_monitoring_cancelled_only_is_not_green
 test_prefixed_red_marker_after_green_is_not_green
 test_ci_failures_phrase_after_green_is_not_green
 test_checks_passed_without_green_evidence_is_not_done
+test_checks_passed_cancelled_only_is_not_done
 test_checks_passed_with_success_evidence_is_done
 test_completed_without_outcome_is_not_done
 test_ci_monitoring_green_then_rearm_stays_working
