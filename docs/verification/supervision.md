@@ -480,6 +480,8 @@ tests/fm-daemon.test.sh
 
 The daemon unit suite additionally proves that max-defer preserves the buffer and emits exact `busy`, `pending`, `unknown`, and submit verdicts with bounded readable and ANSI-preserving hex pane evidence.
 
+### Manual channel proof
+
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
 Automated suites never execute these real notification commands.
 
