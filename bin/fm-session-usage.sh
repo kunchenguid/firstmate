@@ -134,6 +134,11 @@ def usage_warnings(record):
                 for key, field in REQUIRED.items() if record["provider_usage"][key] is None]
     if record["model_rate_cost_estimate"] is None:
         warnings.append(dict(code="unknown_model_rate_cost", entry_class=record["entry_class"], line=record["line"]))
+    else:
+        warnings.extend(dict(code="unknown_model_rate_cost_field", entry_class=record["entry_class"],
+                             field=field, line=record["line"])
+                        for key, field in COSTS.items()
+                        if record["model_rate_cost_estimate"][key] is None)
     return warnings
 
 
@@ -142,7 +147,8 @@ def aggregate(records, section, key, zero_if_empty):
         return 0 if zero_if_empty else None
     if any(not record["has_usage"] for record in records):
         return None
-    values = [record[section][key] for record in records]
+    values = [record[section].get(key) if isinstance(record[section], dict) else None
+              for record in records]
     return sum(values) if all(value is not None for value in values) else None
 
 

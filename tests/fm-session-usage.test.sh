@@ -7,7 +7,7 @@ set -u
 
 PARSER="$ROOT/bin/fm-session-usage.sh"
 TMP_ROOT=$(fm_test_tmproot fm-session-usage)
-FULL="$TMP_ROOT/full.jsonl"; MISSING="$TMP_ROOT/missing.jsonl"; MALFORMED="$TMP_ROOT/malformed.jsonl"; UNSTABLE="$TMP_ROOT/unstable.jsonl"; OPTIONAL="$TMP_ROOT/optional.jsonl"; LATE="$TMP_ROOT/late.jsonl"
+FULL="$TMP_ROOT/full.jsonl"; MISSING="$TMP_ROOT/missing.jsonl"; MALFORMED="$TMP_ROOT/malformed.jsonl"; UNSTABLE="$TMP_ROOT/unstable.jsonl"; OPTIONAL="$TMP_ROOT/optional.jsonl"; LATE="$TMP_ROOT/late.jsonl"; COST_INVALID="$TMP_ROOT/cost-invalid.jsonl"; COST_PARTIAL="$TMP_ROOT/cost-partial.jsonl"
 cat >"$FULL" <<'EOF'
 {"type":"session","version":3,"id":"session-phase0","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/secret/project","parentSession":"/secret/parent.jsonl"}
 {"type":"message","id":"user-1","message":{"role":"user","content":"PROMPT_SECRET_DO_NOT_PRINT"}}
@@ -37,6 +37,15 @@ cat >"$LATE" <<'EOF'
 {"type":"message","id":"user-late","message":{"role":"user","content":"late"}}
 {"type":"session","version":3,"id":"late-header","cwd":"/tmp/phase0"}
 EOF
+cat >"$COST_INVALID" <<'EOF'
+{"type":"session","version":3,"id":"cost-invalid","cwd":"/tmp/phase0"}
+{"type":"message","message":{"role":"assistant","provider":"test-provider","model":"test-model","usage":{"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"totalTokens":10}}}
+{"type":"message","message":{"role":"assistant","provider":"test-provider","model":"test-model","usage":{"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"totalTokens":10,"cost":"not-an-object"}}}
+EOF
+cat >"$COST_PARTIAL" <<'EOF'
+{"type":"session","version":3,"id":"cost-partial","cwd":"/tmp/phase0"}
+{"type":"message","message":{"role":"assistant","provider":"test-provider","model":"test-model","usage":{"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"totalTokens":10,"cost":{"input":0.1,"output":"invalid","cacheRead":0.2,"total":0.3}}}}
+EOF
 
 check() { local input=$1 filter=$2 message=$3; shift 3; printf '%s\n' "$input" | jq -e "$@" "$filter" >/dev/null || fail "$message"; }
 report=$("$PARSER" --run-label phase0-measurement --role worker --task token-minimization --attempt 0 --settle-ms 0 "$FULL") || fail 'complete fixture must parse'
@@ -52,6 +61,12 @@ check "$late_report" '.artifact.final==false and .session.id == "932756903434134
 missing_report=$("$PARSER" --settle-ms 0 "$MISSING") || fail 'missing-usage fixture must parse'
 check "$missing_report" '.artifact.final and .calls.assistant==1 and .calls.measured==0 and .records[0].usage_state=="missing" and .records[0].provider_usage==null and .records[0].model_rate_cost_estimate==null and .totals.provider_usage.input==null and .totals.provider_usage.output==null and any(.warnings[];.code=="missing_usage")' 'missing usage remains unknown instead of zero'
 pass 'missing usage is warned and represented as unknown'
+cost_invalid_report=$("$PARSER" --settle-ms 0 "$COST_INVALID") || fail 'missing and non-object cost fixture must parse'
+check "$cost_invalid_report" '.artifact.final and (.records|length)==2 and .calls.measured==2 and all(.records[];.model_rate_cost_estimate==null) and .totals.model_rate_cost_estimate == {input:null,cache_read:null,cache_write:null,output:null,total:null} and ([.warnings[]|select(.code=="unknown_model_rate_cost")]|length)==2 and ([.warnings[]|select(.code=="unknown_model_rate_cost_field")]|length)==0' 'missing and non-object costs remain unknown with section warnings'
+pass 'missing and non-object model-rate costs are warned without aborting'
+cost_partial_report=$("$PARSER" --settle-ms 0 "$COST_PARTIAL") || fail 'partially invalid cost fixture must parse'
+check "$cost_partial_report" '.artifact.final and .totals.model_rate_cost_estimate.input==0.1 and .totals.model_rate_cost_estimate.cache_read==0.2 and .totals.model_rate_cost_estimate.output==null and .totals.model_rate_cost_estimate.cache_write==null and .totals.model_rate_cost_estimate.total==0.3 and ([.warnings[]|select(.code=="unknown_model_rate_cost_field" and .field=="output")]|length)==1 and ([.warnings[]|select(.code=="unknown_model_rate_cost_field" and .field=="cacheWrite")]|length)==1 and ([.warnings[]]|length)==2' 'partial model-rate costs preserve valid values and warn on invalid fields'
+pass 'partial model-rate costs warn on missing and invalid scalars'
 malformed_report=$("$PARSER" --settle-ms 0 "$MALFORMED") || fail 'malformed fixture must parse'
 check "$malformed_report" '.artifact.final==false and .entry_counts.parsed==2 and .entry_counts.malformed==2 and .totals.provider_usage.input==1 and any(.warnings[];.code=="malformed_json" and .line==3) and any(.warnings[];.code=="record_not_object" and .line==4)' 'malformed records remain measurable without becoming final'
 pass 'malformed records are warned and make the report non-final'
