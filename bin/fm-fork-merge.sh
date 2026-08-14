@@ -156,6 +156,7 @@ accepted_records() { # [retained-ids-file], one JSON retirement record per accep
       | git patch-id --stable | awk -v want="$patch_id" '$1 == want { print $2; exit }')
     [ -n "$upstream_patch" ] \
       || die "git cherry called $topic equivalent upstream but no commit in $UPSTREAM_REF carries patch identity $patch_id; refusing to retire $id unproved"
+    fm_fork_patch_reversible_from "$REPO" "$upstream_patch" "$UPSTREAM_REF" || continue
     jq -nc --arg id "$id" --arg topic "$topic" --arg summary "$summary" \
       --arg date "${FM_FORK_DATE_OVERRIDE:-$(date +%F)}" --arg fork_patch "$fork_patch" \
       --arg upstream_patch "$upstream_patch" --arg patch_id "$patch_id" \

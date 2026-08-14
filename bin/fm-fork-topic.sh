@@ -26,10 +26,11 @@
 # candidate commit, then validates that actual HEAD. The commit is reported by
 # health as a manifest-governance artifact, never as a carried divergence.
 #
-# discard derives every first-parent merge that integrated the named topic and
-# applies their mainline-parent-one inverses as one `git revert --no-commit`
-# sequence. It removes the manifest unit and commits the complete discard once,
-# so intermediate manifest states never enter history.
+# discard derives every delivered merge that integrated the named topic, whether
+# direct or in one regular pull-request candidate range, and applies their
+# mainline-parent-one inverses as one `git revert --no-commit` sequence. It
+# removes the manifest unit and commits the complete discard once, so intermediate
+# manifest states never enter history.
 #
 # A product conflict in integrate or discard exits 3, leaves Git's merge or
 # revert state intact, and writes a worktree-private receipt binding the branch,
@@ -285,7 +286,8 @@ cmd_disposition() {
 }
 
 find_discard_merges() {
-  local topic_ref=$1 merge parent_line second_parent
+  local topic_ref=$1 history merge parent_line second_parent
+  history=$(fm_fork_delivery_history "$REPO" HEAD) || die "cannot read fork delivery history"
   while IFS= read -r merge; do
     parent_line=$(git -C "$REPO" rev-list --parents -n1 "$merge")
     # Git emits a space-delimited list of hexadecimal object IDs.
@@ -297,7 +299,7 @@ find_discard_merges() {
         && ! git -C "$REPO" merge-base --is-ancestor "$second_parent" "$UPSTREAM_REF" 2>/dev/null; then
       printf '%s\n' "$merge"
     fi
-  done < <(git -C "$REPO" rev-list --first-parent --merges HEAD)
+  done <<< "$history"
 }
 
 write_discard_receipt() { # <original-base-head> <baseline> <conflicts-file>

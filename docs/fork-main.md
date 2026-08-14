@@ -109,7 +109,7 @@ The continuation refuses a changed branch, merge head, manifest, unaffected inde
 It writes the manifest entry into the completed merge commit and validates that candidate.
 The worker runs no-mistakes through the isolated fork registration, runs health against the actual post-pipeline head, waits for fork CI, and the captain merges the fork pull request with the regular merge method so the topic merge remains reachable.
 
-Discarding selects only the named topic's first-parent integration merges and reverts them newest to oldest with mainline parent one:
+Discarding selects only the named topic's integration merges on fork main's direct first-parent history or one regular pull-request candidate range beneath it, then reverts them newest to oldest with mainline parent one:
 
 ```sh
 bin/fm-fork-topic.sh discard --id <id> --repo <isolated-worktree>
@@ -221,7 +221,7 @@ Prepare a candidate in an isolated worktree of the private integration clone:
 bin/fm-fork-merge.sh prepare --repo <isolated-worktree>
 ```
 
-A clean result creates a two-parent upstream merge, moves each unit whose canonical patch Git proves equivalent to a reachable upstream commit into `retired_upstream` with that proof, records the sync input, runs `git range-diff --remerge-diff`, and validates health against candidate `HEAD`.
+A clean result creates a two-parent upstream merge, moves each unit whose canonical patch Git proves equivalent to a reachable upstream commit and whose equivalent patch reverses cleanly from the incoming upstream tip into `retired_upstream` with that proof, records the sync input, runs `git range-diff --remerge-diff`, and validates health against candidate `HEAD`.
 A unit that is equivalent upstream but no longer has exactly one aggregate patch commit stops the merge instead of retiring, because that single commit is the whole proof boundary.
 It does not push or invoke no-mistakes.
 The worker validates through the fork registration, runs health against the actual post-pipeline head, and opens a fork-main pull request.

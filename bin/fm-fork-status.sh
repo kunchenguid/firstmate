@@ -169,6 +169,7 @@ RETIRED="$TMP/retired"
 ACCEPTED="$TMP/accepted"
 PROVED="$TMP/proved"
 EXCLUDED="$TMP/excluded"
+DELIVERY_HISTORY="$TMP/delivery-history"
 : > "$ERRORS"
 : > "$SIGNALS"
 : > "$OWNED"
@@ -179,6 +180,8 @@ EXCLUDED="$TMP/excluded"
 : > "$PROVED"
 git -C "$REPO" cherry -v "$UPSTREAM_REF" "$ORIGIN_REF" > "$CHERRY" \
   || die "git cherry failed"
+fm_fork_delivery_history "$REPO" "$ORIGIN_REF" > "$DELIVERY_HISTORY" \
+  || die "cannot read fork delivery history"
 
 # `git revert -m 1 <topic-merge>` intentionally leaves both the topic patch and
 # its inverse revert in history. They remain `git cherry +` facts even though
@@ -194,7 +197,8 @@ while IFS= read -r line || [ -n "$line" ]; do
     | head -1)
   [ -n "$reverted_merge" ] || continue
   git -C "$REPO" merge-base --is-ancestor "$reverted_merge" "$ORIGIN_REF" 2>/dev/null || continue
-  git -C "$REPO" rev-list --first-parent "$ORIGIN_REF" | grep -Fxq "$revert_sha" || continue
+  grep -Fxq "$reverted_merge" "$DELIVERY_HISTORY" || continue
+  grep -Fxq "$revert_sha" "$DELIVERY_HISTORY" || continue
   revert_parent_line=$(git -C "$REPO" rev-list --parents -n1 "$revert_sha" 2>/dev/null || true)
   # Git emits a space-delimited list of hexadecimal object IDs.
   # shellcheck disable=SC2086
@@ -286,9 +290,17 @@ while IFS=$'\t' read -r id class topic; do
   git -C "$REPO" cherry "$UPSTREAM_REF" "$ref" > "$topic_cherry" \
     || { add_error "manifest unit $id could not be compared with $UPSTREAM_REF"; continue; }
   owned_count=$(awk '$1 == "+" { n++ } END { print n+0 }' "$topic_cherry")
+  equivalent_count=$(awk '$1 == "-" { n++ } END { print n+0 }' "$topic_cherry")
   unit_owned=
   if [ "$owned_count" -eq 0 ] && [ "$class" != superseded ]; then
-    add_signal "manifest unit $id has no canonical patch outside $UPSTREAM_REF; review whether upstream accepted it"
+    equivalent_patch=$(awk '$1 == "-" { print $2 }' "$topic_cherry")
+    if [ "$equivalent_count" -eq 1 ] \
+        && ! fm_fork_patch_reversible_from "$REPO" "$equivalent_patch" "$UPSTREAM_REF"; then
+      printf '%s\t%s\n' "$equivalent_patch" "$id" >> "$OWNED"
+      unit_owned=$equivalent_patch
+    else
+      add_signal "manifest unit $id has no canonical patch outside $UPSTREAM_REF; review whether upstream accepted it"
+    fi
   elif [ "$owned_count" -gt 1 ]; then
     add_error "manifest unit $id has $owned_count canonical non-equivalent commits; one aggregate patch is required"
   else
@@ -310,7 +322,7 @@ while IFS=$'\t' read -r id class topic; do
       printf '%s\n' "$merge" >> "$KNOWN_INTEGRATIONS"
       break
     fi
-  done < <(git -C "$REPO" rev-list --first-parent --merges "$ORIGIN_REF")
+  done < "$DELIVERY_HISTORY"
   [ "$integration_found" -eq 1 ] || add_error "manifest unit $id has no reachable branch-level integration merge for $topic"
 
   if [ -n "$unit_owned" ]; then

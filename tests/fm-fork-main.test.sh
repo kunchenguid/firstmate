@@ -142,6 +142,22 @@ new_candidate() { # <world> <name>; prints path
   printf '%s\n' "$candidate"
 }
 
+land_candidate_as_regular_pr() { # <world> <candidate> <name>
+  local w=$1 candidate=$2 name=$3 delivery branch
+  delivery="$w/fork-main"
+  branch="fm/pr-$name"
+  git -C "$candidate" push -q origin "HEAD:refs/heads/$branch"
+  if [ ! -d "$delivery/.git" ]; then
+    git clone -q "$w/fork.git" "$delivery"
+    configure_fork_clone "$delivery" "$w"
+  fi
+  git -C "$delivery" fetch -q origin
+  git -C "$delivery" switch -qC main origin/main
+  git -C "$delivery" merge -q --no-ff -m "Merge pull request for $name" "origin/$branch"
+  git -C "$delivery" push -q origin main
+  git -C "$delivery" fetch -q origin
+}
+
 bootstrap_network_only() { # <repo> <home>
   FM_ROOT_OVERRIDE="$1" FM_HOME="$2" FM_BOOTSTRAP_NETWORK=only \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
@@ -795,7 +811,7 @@ SH
 # Two canonical topics integrate as separate merge units, and discarding one
 # reverts only its merge while preserving its neighbor.
 test_topics_are_independently_revertible_units() {
-  local w candidate out beta_merge fake_sha rc
+  local w admin candidate delivery out beta_merge fake_sha health rc
   w=$(new_world topic-units)
   admin="$w/admin"
   git clone -q "$w/fork.git" "$admin"
@@ -816,7 +832,12 @@ test_topics_are_independently_revertible_units() {
     --pr-url https://github.com/example/firstmate/pull/10 --pr-disposition open 2>&1) \
     || fail "alpha integration failed: $out"
   assert_contains "$out" "branch-level merge" "alpha was not integrated as a merge unit"
-  git -C "$candidate" push -q origin HEAD:main
+  land_candidate_as_regular_pr "$w" "$candidate" integrate-alpha
+  delivery="$w/fork-main"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$STATUS" --repo "$delivery" 2>&1) \
+    || fail "regular PR delivery made alpha unhealthy: $out"
+  assert_contains "$out" "retained=1 patches=1" "nested alpha integration was not active and owned"
+  assert_contains "$out" "errors=0" "nested alpha integration created a health error"
 
   candidate=$(new_candidate "$w" integrate-beta)
   out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id beta \
@@ -824,7 +845,7 @@ test_topics_are_independently_revertible_units() {
     --retire-when 'Upstream ships equivalent beta behavior.' --path beta.txt \
     --pr-url https://github.com/example/firstmate/pull/11 --pr-disposition rejected 2>&1) \
     || fail "beta integration failed: $out"
-  git -C "$candidate" push -q origin HEAD:main
+  land_candidate_as_regular_pr "$w" "$candidate" integrate-beta
 
   candidate=$(new_candidate "$w" discard-alpha)
   out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" discard --repo "$candidate" --id alpha 2>&1) \
@@ -834,8 +855,20 @@ test_topics_are_independently_revertible_units() {
   assert_present "$candidate/beta.txt" "discard removed neighboring beta behavior"
   jq -e '[.divergences[].id] == ["beta"]' "$candidate/fork-divergences.json" >/dev/null \
     || fail "discard did not remove only alpha manifest unit"
+  land_candidate_as_regular_pr "$w" "$candidate" discard-alpha
+  delivery="$w/fork-main"
+  assert_absent "$delivery/alpha.txt" "delivered discard left alpha behavior"
+  assert_present "$delivery/beta.txt" "delivered discard removed neighboring beta behavior"
+  health=$(FM_ROOT_OVERRIDE="$ROOT" "$STATUS" --repo "$delivery" --json) \
+    || fail "regular PR delivery made the discard unhealthy: $health"
+  printf '%s' "$health" | jq -e '
+    .healthy == true and .retained.units == 1 and .retained.patches == 1
+    and .retained.retired_history_patches == 2 and (.errors | length) == 0
+  ' >/dev/null || fail "post-discard health did not prove only beta remains carried: $health"
 
-  beta_merge=$(git -C "$candidate" log --first-parent --merges --format=%H --grep='Merge divergence beta' -1)
+  candidate=$(new_candidate "$w" fake-revert)
+  beta_merge=$(git -C "$candidate" rev-list --all --merges --grep='^Merge divergence beta$' -1)
+  [ -n "$beta_merge" ] || fail "could not find the nested beta integration merge"
   printf 'not a revert\n' > "$candidate/fake.txt"
   git -C "$candidate" add fake.txt
   git -C "$candidate" commit -qm 'Fake revert marker' -m "This reverts commit $beta_merge, reversing"
@@ -846,7 +879,7 @@ test_topics_are_independently_revertible_units() {
   [ "$rc" -eq 0 ] || fail "message-only fake revert turned a discrepancy signal into a health failure: $out"
   assert_contains "$out" "non-upstream commit $fake_sha" "fake revert marker disappeared from the discrepancy signals"
   assert_contains "$out" "not-upstream=2" "fake revert marker reduced the factual non-upstream count"
-  pass "fork topics: each divergence is a branch-level unit that can be discarded alone"
+  pass "fork topics: regular PR delivery preserves active ownership and independent discard"
 }
 
 # Topic integration conflicts keep Git's merge state and bind continuation to
@@ -1386,6 +1419,50 @@ test_upstream_acceptance_retires_a_divergence_with_evidence() {
   pass "fork health: upstream acceptance retires a divergence only on re-provable Git evidence"
 }
 
+test_upstream_revert_before_sync_keeps_divergence_visible() {
+  local w admin candidate out accepted health
+  w=$(new_world upstream-reverted-before-sync)
+  admin="$w/admin"
+  git clone -q "$w/fork.git" "$admin"
+  configure_fork_clone "$admin" "$w"
+  git -C "$admin" switch -qC fm/divergence/banner upstream/main
+  printf 'FLEET\n' > "$admin/banner.txt"
+  git -C "$admin" add banner.txt
+  git -C "$admin" commit -qm 'Show the fleet banner'
+  git -C "$admin" push -q origin fm/divergence/banner
+
+  candidate=$(new_candidate "$w" reverted-banner-integrate)
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$TOPIC" integrate --repo "$candidate" --id banner \
+    --summary 'Shows the fleet banner on startup.' --class pending --topic fm/divergence/banner \
+    --retire-when 'Upstream prints the fleet banner itself.' --path banner.txt \
+    --pr-url https://github.com/example/firstmate/pull/45 --pr-disposition open 2>&1) \
+    || fail "banner integration failed: $out"
+  land_candidate_as_regular_pr "$w" "$candidate" reverted-banner-integrate
+
+  advance_upstream "$w" banner.txt FLEET 'official: show the fleet banner'
+  accepted=$(git -C "$w/seed" rev-parse HEAD)
+  git -C "$w/seed" revert --no-edit "$accepted" >/dev/null
+  git -C "$w/seed" push -q origin main
+
+  candidate=$(new_candidate "$w" reverted-banner-merge)
+  out=$(FM_ROOT_OVERRIDE="$ROOT" "$MERGE" prepare --repo "$candidate" 2>&1) \
+    || fail "upstream merge after the official revert failed: $out"
+  assert_present "$candidate/banner.txt" "upstream history removed the retained fork behavior"
+  jq -e '
+    [.divergences[].id] == ["banner"] and ((.retired_upstream // []) | length) == 0
+  ' "$candidate/fork-divergences.json" >/dev/null \
+    || fail "historical equivalence retired the active banner owner"
+  assert_contains "$out" "retained=1 patches=1" "health did not report the banner patch as carried"
+  assert_contains "$out" "accepted-upstream-patches=0" "health hid the banner behind historical acceptance"
+  health=$(FM_ROOT_OVERRIDE="$ROOT" "$STATUS" --repo "$candidate" --fork-ref HEAD --json) \
+    || fail "retained banner candidate was unhealthy: $health"
+  printf '%s' "$health" | jq -e '
+    .healthy == true and .retained.units == 1 and .retained.patches == 1
+    and .retained.accepted_upstream_patches == 0 and (.errors | length) == 0
+  ' >/dev/null || fail "fork health did not keep the reverted-upstream patch visible: $health"
+  pass "fork merge: an upstream accept-then-revert keeps the active owner visible"
+}
+
 # The private fork registration is added without changing the ordinary
 # upstream/fork registration. A mismatch stops before clone creation.
 test_no_mistakes_registration_isolation_is_proven() {
@@ -1503,6 +1580,7 @@ test_clean_upstream_merge_is_isolated_and_validated_as_candidate
 test_conflict_requires_rejustification_and_rerere_stays_reviewable
 test_conflicted_upstream_merge_aborts_into_independent_discard
 test_upstream_acceptance_retires_a_divergence_with_evidence
+test_upstream_revert_before_sync_keeps_divergence_visible
 test_no_mistakes_registration_isolation_is_proven
 
 echo "# all fork-main integration tests passed"

@@ -2,13 +2,15 @@
 # Shared fork-main primitives.
 # Usage: . bin/fm-fork-lib.sh
 #
-# Six facts are read by more than one fork script and must mean exactly the
+# Eight facts are read by more than one fork script and must mean exactly the
 # same thing in each, so they live here rather than being copied:
 #   - which branch a remote's default is (origin/upstream default resolution);
 #   - which ref is a divergence's canonical topic (published fork branch first,
 #     then a local branch);
 #   - whether a manifest path spec owns an actual changed path;
 #   - what one commit's patch identity is;
+#   - which first-parent commits arrived through direct or regular PR delivery;
+#   - whether a patch can be reversed from a current tree through a private index;
 #   - how a conflict receipt binds the unaffected index;
 #   - how to read gh-axi's current one-value TOON API envelope.
 #
@@ -63,6 +65,33 @@ fm_fork_commit_patch_id() { # <repo> <commit>; prints the stable patch id
   id=$(git -C "$repo" diff-tree -p "$commit" | git patch-id --stable | awk 'NR == 1 { print $1 }') || return 1
   [ -n "$id" ] || return 1
   printf '%s\n' "$id"
+}
+
+fm_fork_delivery_history() { # <repo> <tip>
+  local repo=$1 tip=$2 outer parent_line first_parent second_parent
+  git -C "$repo" rev-list --first-parent "$tip" || return 1
+  while IFS= read -r outer; do
+    parent_line=$(git -C "$repo" rev-list --parents -n1 "$outer") || return 1
+    first_parent=$(printf '%s\n' "$parent_line" | awk 'NF == 3 { print $2 }')
+    second_parent=$(printf '%s\n' "$parent_line" | awk 'NF == 3 { print $3 }')
+    [ -n "$first_parent" ] && [ -n "$second_parent" ] || continue
+    git -C "$repo" rev-list --first-parent "$first_parent..$second_parent" || return 1
+  done < <(git -C "$repo" rev-list --first-parent --merges "$tip")
+}
+
+fm_fork_patch_reversible_from() { # <repo> <patch-commit> <tree-ish>
+  local repo=$1 patch_commit=$2 treeish=$3 tmp index patch rc=1
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-fork-patch-reverse.XXXXXX") || return 1
+  index="$tmp/index"
+  patch="$tmp/patch"
+  if git -C "$repo" diff-tree --binary --full-index -p "$patch_commit" > "$patch" 2>/dev/null \
+      && GIT_INDEX_FILE="$index" git -C "$repo" read-tree "$treeish" >/dev/null 2>&1 \
+      && GIT_INDEX_FILE="$index" git -C "$repo" apply --cached --reverse --check "$patch" >/dev/null 2>&1; then
+    rc=0
+  fi
+  rm -f "$index" "$index.lock" "$patch"
+  rmdir "$tmp" 2>/dev/null || true
+  return "$rc"
 }
 
 fm_fork_path_covered() { # <manifest-spec> <actual-path>
