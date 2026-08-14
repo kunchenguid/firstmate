@@ -214,10 +214,12 @@ test_worker_briefs_preserve_live_instructions() {
       "$kind brief did not define when a durable instruction note is required"
     assert_grep 'the exact instruction, why it exists, and every result-dependent branch' "$brief" \
       "$kind brief did not preserve the instruction, rationale, and result branches"
+    assert_grep "exempt from rule 4's ordinary short, sparse, supervisor-actionable status-line restrictions" "$brief" \
+      "$kind brief left the durable note subject to ordinary status-line restrictions"
     assert_grep 'After compaction, reread that note before continuing.' "$brief" \
       "$kind brief did not require post-compaction recovery"
-    assert_grep 'cross-harness takeover record' "$brief" \
-      "$kind brief did not make the same note support a replacement worker"
+    assert_grep 'After cross-harness takeover, a replacement worker must reread the latest such note before continuing' "$brief" \
+      "$kind brief did not require a replacement worker to recover the latest durable instruction"
   done
   pass "fm-brief.sh: ship and scout briefs preserve live instructions durably"
 }

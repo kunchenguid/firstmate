@@ -303,9 +303,10 @@ fi
 IFS= read -r -d '' DURABLE_INSTRUCTION_RULE <<'EOF' || true
 8. Before you risk compaction, if you hold a live instruction that is not yet reflected in committed work, append one `working [INSTRUCTION-FOR-AFTER-COMPACT]: ...` line to the status file.
    Record the exact instruction, why it exists, and every result-dependent branch in that one durable note.
+   This durable note is exempt from rule 4's ordinary short, sparse, supervisor-actionable status-line restrictions.
    This includes an answered decision, a verification bar, a bounded investigation, or a rule about what not to do.
    After compaction, reread that note before continuing.
-   Treat it as the cross-harness takeover record: a replacement worker inherits the worktree and status log, but none of the conversation.
+   After cross-harness takeover, a replacement worker must reread the latest such note before continuing; the replacement inherits the worktree and status log, but none of the conversation.
 EOF
 DURABLE_INSTRUCTION_RULE=${DURABLE_INSTRUCTION_RULE%$'\n'}
 
