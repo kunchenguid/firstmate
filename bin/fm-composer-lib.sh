@@ -593,7 +593,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # injector defers on anything that is not `empty`, so escalations buffered for
 # 9.7 hours with the supervisor pane sitting idle the whole time.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
-  local row=$1 residue
+  local row=$1 residue LC_ALL=C
   [ -n "$row" ] || return 1
   case "$row" in
     *────────*) ;;
@@ -604,10 +604,9 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
     ─*─) ;;
     *) return 1 ;;
   esac
-  residue=${row//─/ }
-  residue=$(printf '%s' "$residue" | LC_ALL=C sed 's/[!-~]/ /g')
+  residue=${row//─/}
   case "$residue" in
-    *[![:space:]]*) return 1 ;;
+    *[![:print:]]*) return 1 ;;
   esac
   return 0
 }

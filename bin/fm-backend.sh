@@ -819,6 +819,26 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
   esac
 }
 
+fm_backend_composer_observation() {  # <backend> <target>
+  local backend=$1
+  shift
+  FM_BACKEND_COMPOSER_SCREEN=
+  FM_BACKEND_COMPOSER_VERDICT=unknown
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) _fm_tmux_composer_observe "$@" ;;
+    herdr) _fm_backend_herdr_composer_observe "$@" ;;
+    *) return 1 ;;
+  esac
+  printf 'composer verdict: %s\n' "$FM_BACKEND_COMPOSER_VERDICT"
+  printf 'captured screen:\n'
+  if [ -n "$FM_BACKEND_COMPOSER_SCREEN" ]; then
+    printf '%s\n' "$FM_BACKEND_COMPOSER_SCREEN"
+  else
+    printf '(capture failed)\n'
+  fi
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
 # recorded TARGET endpoint still exist on BACKEND? Never starts a server or
 # session: for herdr this deliberately queries the pane directly instead of

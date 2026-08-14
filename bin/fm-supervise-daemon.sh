@@ -915,6 +915,16 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
+  } 2>/dev/null > "$marker" || true
+  # Backend-independent active alert. Unlike the tmux flash below (skipped on
+  # every non-tmux backend), this can reach the captain even when every pane and
+  # its backend status-line is unreadable - the gap the 2026-07-10 overnight
+  # incident fell through. Configurable and best-effort; the marker above stays
+  # the durable record whether or not any channel fires.
+  if [ "$notify" -eq 1 ]; then
+    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+  fi
+  {
     # The defer reason alone cannot separate "the captain half-typed a line"
     # from "this pane's rendering is not in the shape catalogue". Record the
     # verdict and the screen it was read from, ONCE per max-defer window, so a
@@ -922,26 +932,16 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     # may no longer show the wedged rendering. The verdict's meaning is owned by
     # bin/fm-composer-lib.sh; this only reports it.
     printf '\n--- supervisor pane %s (%s) ---\n' "$target" "$backend"
-    printf 'composer verdict: %s\n' \
-      "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null || printf 'unreadable')"
-    printf 'captured screen:\n'
-    fm_backend_capture "$backend" "$target" "${FM_COMPOSER_CAPTURE_LINES:-20}" 2>/dev/null \
-      || printf '(capture failed)\n'
-  } 2>/dev/null > "$marker" || true
+    wedge_alarm_run_bounded composer-evidence \
+      fm_backend_composer_observation "$backend" "$target" 2>/dev/null \
+      || printf 'composer verdict: unreadable\ncaptured screen:\n(capture failed)\n'
+  } 2>/dev/null >> "$marker" || true
   # Best-effort status-line flash. tmux's display-message is a client-side OSD
   # with no herdr equivalent; the log line + durable marker above are already
   # the primary, backend-independent signal, so a non-tmux backend just skips
   # this cosmetic extra rather than attempting an unsupported call.
   if [ "$backend" = tmux ]; then
     tmux display-message -t "$target" "fm: away-mode escalations WEDGED ${age}s — see $marker" 2>/dev/null || true
-  fi
-  # Backend-independent active alert. Unlike the tmux flash above (skipped on
-  # every non-tmux backend), this can reach the captain even when every pane and
-  # its backend status-line is unreadable - the gap the 2026-07-10 overnight
-  # incident fell through. Configurable and best-effort; the marker above stays
-  # the durable record whether or not any channel fires.
-  if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
   fi
 }
 

@@ -1556,6 +1556,53 @@ test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
   pass "inject_wedge_alarm writes the marker AND emits the active alert even with no tmux status-line (herdr backend)"
 }
 
+test_inject_wedge_alarm_uses_single_composer_observation() {
+  local dir state log count marker
+  dir=$(make_wedge_case wedge-single-observation)
+  state="$dir/state"; log="$dir/alert.log"; count="$dir/observation-count"
+  marker="$state/.subsuper-inject-wedged"
+  escalate_add "$state" "needs-decision: pick A"
+  (
+    fm_backend_composer_state() { fail "wedge evidence called composer_state separately"; }
+    fm_backend_capture() { fail "wedge evidence captured a second screen"; }
+    fm_backend_composer_observation() {
+      printf 'x' >> "$count"
+      printf 'composer verdict: pending\ncaptured screen:\nsnapshot-one\n'
+    }
+    WEDGE_ALARM_LAST_EPOCH=0
+    FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=osascript \
+      FM_SUPERVISOR_BACKEND=herdr inject_wedge_alarm "$state" 30600
+  ) || fail "single-observation wedge alarm failed"
+  [ "$(cat "$count" 2>/dev/null)" = x ] || fail "wedge evidence did not use exactly one observation"
+  grep -F 'composer verdict: pending' "$marker" >/dev/null || fail "wedge marker lost the observed verdict"
+  grep -F 'snapshot-one' "$marker" >/dev/null || fail "wedge marker lost the screen paired with its verdict"
+  pass "inject_wedge_alarm records one paired composer observation"
+}
+
+test_inject_wedge_alarm_notifies_before_bounded_observation() {
+  local dir state log marker order_error daemon_log start elapsed
+  dir=$(make_wedge_case wedge-bounded-observation)
+  state="$dir/state"; log="$dir/alert.log"; marker="$state/.subsuper-inject-wedged"
+  order_error="$dir/order-error"; daemon_log="$dir/daemon.log"
+  escalate_add "$state" "needs-decision: pick A"
+  start=$SECONDS
+  (
+    fm_backend_composer_observation() {
+      [ -s "$log" ] || printf 'evidence started before alert\n' > "$order_error"
+      sleep 30
+    }
+    WEDGE_ALARM_LAST_EPOCH=0
+    LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=osascript \
+      FM_WEDGE_ALARM_TIMEOUT_SECS=1 FM_SUPERVISOR_BACKEND=herdr \
+      inject_wedge_alarm "$state" 30600
+  ) || fail "bounded-observation wedge alarm failed"
+  elapsed=$((SECONDS - start))
+  [ "$elapsed" -lt 5 ] || fail "hung composer observation blocked the wedge path for ${elapsed}s"
+  [ ! -e "$order_error" ] || fail "composer observation started before the active alert"
+  grep -F '(capture failed)' "$marker" >/dev/null || fail "timed-out observation did not leave a readable marker"
+  pass "inject_wedge_alarm alerts before bounded composer evidence"
+}
+
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   local dir state log daemon_log alerts errors
   dir=$(make_wedge_case wedge-unwritable-marker)
@@ -1924,6 +1971,8 @@ test_wedge_alarm_backgrounded_command_times_out_and_reaps_descendant
 test_wedge_alarm_hung_override_times_out_and_falls_through
 test_wedge_alarm_shutdown_stops_active_notifier_group
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
+test_inject_wedge_alarm_uses_single_composer_observation
+test_inject_wedge_alarm_notifies_before_bounded_observation
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
 test_fm_send_exits_nonzero_on_confirmed_swallow
 test_fm_send_exits_nonzero_on_initial_send_failure

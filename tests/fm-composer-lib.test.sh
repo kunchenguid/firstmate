@@ -238,7 +238,7 @@ test_titled_rule_requires_rule_glyphs_at_both_ends() {
   # The titled-rule tolerance is bounded exactly like a titled bottom BORDER:
   # rule glyphs at both ends and an ASCII-printable interior. Anything looser
   # would promote ordinary transcript prose into a composer boundary.
-  local base tail_only lead_only wide_title
+  local base tail_only lead_only wide_title tab_title
   # A titled rule pairs with the composer's closing rule, so the bare row
   # between them is classified and reads empty.
   base=$'chatter\n──────────── orchestrator ──\n❯\n────────────────────────'
@@ -252,6 +252,8 @@ test_titled_rule_requires_rule_glyphs_at_both_ends() {
   # A non-ASCII title is outside the proven tolerance and must not qualify.
   wide_title=$'chatter\n──────────── ✻ пример ──\n❯\n────────────────────────'
   assert_screen "non-ASCII rule title is not a rule" unknown "$CAPS_STYLED" "$wide_title" '' probe-absent
+  tab_title=$'chatter\n──────────── orchestrator\t ──\n❯\n────────────────────────'
+  assert_screen "TAB-bearing rule title is not a rule" unknown "$CAPS_STYLED" "$tab_title" '' probe-absent
   pass "fm_composer_classify_screen: a titled rule needs rule glyphs at both ends and an ASCII title"
 }
 

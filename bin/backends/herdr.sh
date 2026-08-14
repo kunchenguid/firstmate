@@ -2633,7 +2633,7 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
   fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
 }
 
-# fm_backend_herdr_composer_state: thin adapter - capture plus capabilities
+# _fm_backend_herdr_composer_observe: thin adapter - capture plus capabilities
 # in, shared verdict out. The ANSI capture is preferred (styled=1 lets the
 # shared classifier strip ghost/placeholder text); when it fails on an older
 # herdr, the plain capture degrades the descriptor to styled=0 rather than
@@ -2641,17 +2641,19 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # only when the classifier reports the verdict depends on it (a pi separator
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
-fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
+_fm_backend_herdr_composer_observe() {  # <target>
   local target=$1 cap caps verdict identity
-  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  FM_BACKEND_COMPOSER_SCREEN=
+  FM_BACKEND_COMPOSER_VERDICT=unknown
+  fm_backend_herdr_parse_target "$target" || return 0
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   elif cap=$(fm_backend_herdr_capture "$target" "$FM_COMPOSER_CAPTURE_LINES"); then
     caps=$(printf 'styled=0\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   else
-    printf 'unknown'
     return 0
   fi
+  FM_BACKEND_COMPOSER_SCREEN=$cap
   verdict=$(fm_composer_classify_screen "$caps" "$cap")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || [ -z "$identity" ]; then
@@ -2660,7 +2662,12 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
     verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
-  printf '%s' "$verdict"
+  FM_BACKEND_COMPOSER_VERDICT=$verdict
+}
+
+fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
+  _fm_backend_herdr_composer_observe "$1"
+  printf '%s' "$FM_BACKEND_COMPOSER_VERDICT"
 }
 
 # fm_backend_herdr_rendered_busy_state: busy|idle|unknown from the pane's

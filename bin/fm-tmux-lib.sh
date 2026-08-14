@@ -130,18 +130,21 @@ EOF
   esac
 }
 
-# fm_tmux_composer_state: the tmux composer verdict - a thin adapter over the
+# _fm_tmux_composer_observe: the tmux composer verdict - a thin adapter over the
 # shared screen classifier. The verdict contract (empty | pending |
 # pending-unproven | unknown, positive proof required for empty, unrecognized
 # future verdicts failing safe) is owned by bin/fm-composer-lib.sh. Identity
 # is fetched lazily, only when the classifier reports the verdict depends on
 # it (a pi separator pair under the cursor), so the common read never pays
 # for the process probe.
-fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
+_fm_tmux_composer_observe() {  # <target>
   local target=$1 cy pane verdict identity
-  cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
-  case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
-  pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
+  FM_BACKEND_COMPOSER_SCREEN=
+  FM_BACKEND_COMPOSER_VERDICT=unknown
+  cy=$(fm_tmux_composer_cursor_row "$target") || return 0
+  case "$cy" in ''|*[!0-9]*) return 0 ;; esac
+  pane=$(fm_tmux_composer_capture "$target") || return 0
+  FM_BACKEND_COMPOSER_SCREEN=$pane
   verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_tmux_composer_identity "$target") || [ -z "$identity" ]; then
@@ -162,7 +165,12 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
   fi
-  printf '%s' "$verdict"
+  FM_BACKEND_COMPOSER_VERDICT=$verdict
+}
+
+fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
+  _fm_tmux_composer_observe "$1"
+  printf '%s' "$FM_BACKEND_COMPOSER_VERDICT"
 }
 
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains
