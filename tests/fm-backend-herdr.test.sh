@@ -2856,9 +2856,12 @@ test_capture_calls_pane_read() {
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 250' "$ROOT" )
   [ "$out" = $'line one\nline two\nline three' ] || fail "capture did not pass through pane read output, got '$out'"
-  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''250' \
-    "capture did not call pane read with the right pane id and line bound"
-  pass "fm_backend_herdr_capture: calls 'pane read <pane> --source recent --lines N' with the session set"
+  # --format ansi is load-bearing, not cosmetic: on herdr 0.8.0 a text-format
+  # recent read of an idle alt-screen agent triggers the wheel-event history
+  # harvest and the pane visibly scrolls for seconds (herdrdev/herdr#2669).
+  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2'$'\x1f''--source'$'\x1f''recent'$'\x1f''--lines'$'\x1f''250'$'\x1f''--format'$'\x1f''ansi' \
+    "capture did not call pane read with the right pane id, line bound, and the harvest-skipping ansi format"
+  pass "fm_backend_herdr_capture: calls 'pane read <pane> --source recent --lines N --format ansi' with the session set"
 }
 
 test_capture_works_around_small_lines_bug() {
