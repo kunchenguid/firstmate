@@ -41,9 +41,9 @@
 # task events (status-changed, went-stale, exited) that map onto firstmate's
 # existing signal/stale/check/heartbeat wake vocabulary. The tmux adapter has
 # no native event push, so fm-watch.sh's poll loop over the pull primitives
-# below (capture, list-live, busy-state via regex) IS the default event-source
+# below (capture, list-live, busy-state via regex) is tmux's event-source
 # implementation that synthesizes those events; P1 only names that seam, it
-# does not change the loop's behavior. The pull primitives also stay available
+# does not change legacy tmux behavior. The pull primitives also stay available
 # on their own for on-demand reads (fm-peek.sh, fm-crew-state.sh).
 
 FM_BACKEND_SCRIPT=${BASH_SOURCE[0]:-$0}
