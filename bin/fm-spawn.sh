@@ -111,6 +111,11 @@
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
+#   Ordinary Pi-family workers also load the tracked fm-calm.ts by an explicit
+#   path outside the task repository and receive this spawn's resolved FM_HOME and
+#   config directory, so the extension reads the owning home's config/calm without
+#   project trust or project-local files. Secondmates keep their existing primary
+#   extension contract and receive no additional Calm launch flag here.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
 #   config/secondmate-harness may also carry an optional model and effort as extra
@@ -156,6 +161,7 @@
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
+#     __PICALM__   absolute path to the tracked .pi/extensions/fm-calm.ts used by ordinary Pi workers
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
@@ -1125,7 +1131,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PICALM__ -e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1236,6 +1242,13 @@ case "$HARNESS" in
     PI_TUI_MODE=
     if pi_supports_tui_mode "$PI_BIN"; then
       PI_TUI_MODE=' --tui-mode regular'
+    fi
+    if [ "$KIND" != secondmate ]; then
+      PI_CALM_EXTENSION="$FM_ROOT/.pi/extensions/fm-calm.ts"
+      [ -f "$PI_CALM_EXTENSION" ] || {
+        echo "error: Pi Calm extension not found at $PI_CALM_EXTENSION; refusing to launch an ordinary $HARNESS worker without the owning presentation implementation" >&2
+        exit 1
+      }
     fi
     LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
     LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
@@ -2708,6 +2721,7 @@ fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_picalm=$(shell_quote "${PI_CALM_EXTENSION:-$FM_ROOT/.pi/extensions/fm-calm.ts}")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
@@ -2719,6 +2733,7 @@ LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__PICALM__/$sq_picalm}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
@@ -2741,6 +2756,16 @@ esac
 # an unset value is the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+if [ "$KIND" != secondmate ]; then
+  case "$HARNESS" in
+    pi|pi-signed)
+      # The pane provider can outlive the firstmate process that requested this
+      # spawn, so bind Calm to this invocation's resolved home and config path
+      # instead of inheriting either value from that provider's environment.
+      LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") FM_CONFIG_OVERRIDE=$(shell_quote "$CONFIG") $LAUNCH"
+      ;;
+  esac
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

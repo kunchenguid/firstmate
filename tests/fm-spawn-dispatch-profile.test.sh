@@ -432,7 +432,8 @@ test_claude_threads_model_and_effort() {
   assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   assert_not_contains "$launch" "--tui-mode" "non-Pi launches must not receive Pi's TUI mode override"
-  pass "claude receives --model and --effort profile flags"
+  assert_not_contains "$launch" "fm-calm.ts" "non-Pi launches must not receive Pi's Calm extension"
+  pass "claude receives --model and --effort profile flags without Pi-only presentation wiring"
 }
 
 test_codex_threads_model_and_effort() {
@@ -632,6 +633,48 @@ test_pi_threads_model_and_max_effort() {
   pass "pi receives --model and --thinking max profile flags"
 }
 
+test_pi_workers_load_calm_from_the_owning_home() {
+  local harness rec absent_id on_id out status launch
+  for harness in pi pi-signed; do
+    absent_id="profile-${harness}-calm-absent-z8a"
+    on_id="profile-${harness}-calm-on-z8b"
+    rec=$(make_spawn_case "profile-${harness}-calm-home" "$harness" "$absent_id" "$on_id")
+    read_case_record "$rec"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$absent_id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "$harness spawn with an absent Calm preference should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "FM_HOME='$HOME_DIR' FM_CONFIG_OVERRIDE='$HOME_DIR/config'" \
+      "$harness launch did not bind Calm to the owning home and config directory"
+    assert_contains "$launch" "-e '$ROOT/.pi/extensions/fm-calm.ts' -e '$HOME_DIR/state/$absent_id.pi-ext.ts'" \
+      "$harness launch did not load the one owning Calm implementation before task supervision"
+    case "${launch#*fm-calm.ts}" in
+      *fm-calm.ts*) fail "$harness launch loaded Calm more than once" ;;
+    esac
+    assert_not_contains "$launch" "--approve" \
+      "$harness Calm integration must not require project trust"
+    assert_absent "$WT_DIR/.pi" \
+      "$harness Calm integration polluted the task repository"
+
+    printf '%s\n' on > "$HOME_DIR/config/calm"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$on_id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "$harness spawn with Calm on should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "FM_HOME='$HOME_DIR' FM_CONFIG_OVERRIDE='$HOME_DIR/config'" \
+      "$harness Calm-on launch stopped reading the owning home"
+    assert_contains "$launch" "-e '$ROOT/.pi/extensions/fm-calm.ts' -e '$HOME_DIR/state/$on_id.pi-ext.ts'" \
+      "$harness Calm-on launch forked or omitted the owning extension"
+    case "${launch#*fm-calm.ts}" in
+      *fm-calm.ts*) fail "$harness Calm-on launch loaded Calm more than once" ;;
+    esac
+  done
+  pass "ordinary Pi and Pi-signed workers load the owning home's Calm presentation without project trust or pollution"
+}
+
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   local rec id out status launch
   id=profile-pi-signed-z8b
@@ -737,6 +780,8 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
+  assert_not_contains "$launch" "-e '$ROOT/.pi/extensions/fm-calm.ts'" \
+    "ordinary-worker Calm wiring leaked into the secondmate primary launch contract"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
@@ -849,6 +894,7 @@ test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
+test_pi_workers_load_calm_from_the_owning_home
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity

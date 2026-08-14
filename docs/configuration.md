@@ -31,6 +31,7 @@ The values it writes are `on` and `off`, each followed by one newline; an absent
 `max` is the legacy value written by a removed third presentation level whose behavior is now ordinary Calm, and it is still read as `on`, so a home upgraded from it keeps Calm on rather than dropping to off.
 The `/calm` command replaces the file atomically before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence.
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
+Ordinary Pi and Pi-signed workers receive the spawning home's resolved preference paths at launch; [`calm.md`](calm.md#supervised-worker-sessions) owns the supported worker behavior and relaunch limitation.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
