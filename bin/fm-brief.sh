@@ -136,7 +136,7 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
-    --start-ref) want_value=start-ref ;;
+    --start-ref) want_value='start-ref' ;;
     --start-ref=*) START_REF=${a#--start-ref=}; START_REF_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then

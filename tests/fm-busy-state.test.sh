@@ -272,6 +272,31 @@ test_kimi_unverified_gate() {
   pass "standalone kimi classifies unknown until the live verification gate opens"
 }
 
+test_cursor_ignores_rendered_and_native_signals() {
+  local state out
+  state=$(new_state_dir cursor-gate)
+  # Cursor's verdict comes from its own transcript, never from rendered text.
+  # With no binding to fold, the honest answer is unknown - and a rendered
+  # busy-looking footer must not change that.
+  out=$(fm_busy_classify tmux w1 cursor t1 "$state" 'Working')
+  [ "$out" = "unknown cursor-transcript" ] \
+    || fail "cursor must not classify from its rendered footer, got '$out'"
+  out=$(fm_busy_classify tmux w1 cursor t1 "$state" 'ctrl+c to stop')
+  [ "$out" = "unknown cursor-transcript" ] \
+    || fail "cursor must not classify from the ctrl+c busy token either, got '$out'"
+  # Herdr's narrower native streaming state is not cursor's turn lifecycle.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf '%s' busy; }
+  out=$(fm_busy_classify herdr s:p cursor t1 "$state")
+  [ "$out" = "unknown cursor-transcript" ] \
+    || fail "cursor must not borrow herdr's native busy verdict, got '$out'"
+  unset -f fm_backend_busy_state
+  # The fold is a PULL source: nothing is armed, so no stored record is trusted.
+  [ -z "$(fm_busy_sources_for_harness cursor)" ] \
+    || fail "cursor must trust no stored record source; its fold has no writer"
+  pass "cursor classifies only from its transcript fold, never rendered text or native state"
+}
+
 # --- endpoint death and native fallbacks ----------------------------------------
 
 test_dead_endpoint_overrides() {
@@ -372,6 +397,7 @@ test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
+test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact

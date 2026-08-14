@@ -141,16 +141,8 @@ Tmux needs the exact `pi-launcher`, `pi-signed`, `pi`, and `Pi` process identiti
 Herdr uses native registered-agent state and needs no process-name branch.
 Zellij has no verified recovery-grade agent process probe, while Orca and cmux do not support secondmate spawns, so those three retain their existing generic ordinary-launch semantics without a new liveness matcher.
 
-The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:
-
-```sh
-tests/fm-composer-ghost.test.sh
-tests/fm-kimi-harness.test.sh
-tests/fm-tmux-submit-busy.test.sh
-```
-
-Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
-Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
+The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
+Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh` and `tests/fm-tmux-submit-busy.test.sh`.
 
 ### Cleanup endpoint identity
 
@@ -178,7 +170,40 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+
+## Composer classification matrix
+
+The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
+The live half of that guarantee was verified on 2026-08-10 from an already-trusted checkout at the branch's final validated head, against every installed harness then covered by the empty-composer matrix on tmux 3.6a, macOS arm64, on an isolated private socket, with no prompt submitted to any harness.
+An earlier untrusted-worktree run left Claude, Grok, and Muse unverified because the guard treats first-launch trust dialogs as an unreadable-composer state and never confirms them; this trusted-checkout rerun supersedes those missing results.
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - claude (2.1.227 (Claude Code)): real idle composer classifies empty
+ok - codex (codex-cli 0.146.0): real idle composer classifies empty
+ok - opencode (1.14.46): real idle composer classifies empty
+ok - pi (0.84.0): real idle composer classifies empty
+ok - grok (grok 1.0.0 (3cd0d0cbcebe)): real idle composer classifies empty
+# harness absent, not verified here: kimi
+ok - muse (Muse Code 0.1.0 (0.1.0-R708.1)): real idle composer classifies empty
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+ok - zellij (zellij 0.44.0): unrelated pane change never confirms delivery (verdict: unknown)
+ok - live composer-matrix guard verified 8 live surface(s)
+```
+
+All six installed harnesses' real idle composers reached a proven `empty` (Claude auto-updated to 2.1.227 between the audit and this rerun, so the shipped classifier is proven against the newer release as well), including Pi through the tmux foreground-process identity probe, Grok through the titled-bottom-border tolerance, and OpenCode through the left-bar shape; Codex and OpenCode first parked on vendor update-available modals that the strict classifier correctly refused until the guard's single non-submitting Escape dismissed them.
+The strict blank-row posture held live (a blank shell row deferred injection), and a zellij pane changing for reasons unrelated to submission never confirmed a delivery, replacing the retired content-diff heuristic's false positive.
+Kimi was not installed on the verification machine; its bordered shape is pinned by the portable byte-capture regressions in `tests/fm-composer-lib.test.sh`, which also carry the other five adapters' capability profiles for every harness under both a UTF-8 locale and `LC_ALL=C`.
+This guard is the refresh command after an upgrade to any matrix-covered harness; rerun it and update the versions above rather than trusting this table across releases.
+Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
+
+`zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
 ## Herdr
 
@@ -530,6 +555,27 @@ ok - real herdr: the watcher fast-path enqueues a stale wake naming the task win
 
 Polling remained active and is covered as the fallback for capability, connect, subscribe, and repeated reader failure.
 
+### Agent lifecycle control
+
+Herdr is one of the two backends whose recovery-grade agent-state classifier the control plane may trust ([agent-control.md](../agent-control.md)), so its lifecycle gating is measured against the real binary; reverified 2026-08-08 on Herdr 0.8.0, and first measured 2026-08-02 on Herdr 0.7.5 with identical results:
+
+```sh
+tests/fm-control-herdr-smoke.test.sh
+```
+
+Observed output:
+
+```text
+ok - real herdr: exit on a pane with no registered agent is idempotent success
+ok - real herdr: interrupt refuses when herdr's own agent registry reports no agent
+ok - real herdr: interrupt delivers the harness's key and proves the agent survived it
+ok - real herdr: no control verb removed the endpoint or the task's local copy
+ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
+```
+
+The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, so registering and not registering an agent on a plain shell pane exercises exactly the gate every lifecycle verb depends on, with no real agent launched.
+That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
+
 ### Away-mode transport
 
 The Pi/Herdr return and injection path was reverified on Herdr 0.7.3 and Pi 0.80.7:
@@ -556,6 +602,7 @@ All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; t
 | Literal send | `zellij action paste --pane-id <id> -- <text>` | Left text unsubmitted. |
 | Keys | `send-keys --pane-id <id> Enter`, `Esc`, and one argument `Ctrl c` | All three shared operations worked. |
 | Capture | `dump-screen --pane-id <id>` or `--full` | Worked with no attached client; no line-bound flag exists. |
+| Styled capture | `dump-screen --pane-id <id> --ansi` | Preserved ANSI styling ("Composer classification matrix" above); feeds the zellij composer classifier. |
 | Close | `close-tab-by-id <id>` | Removed the live task pane and tab together. |
 | Failure exit | actions against missing targets | Returned exit 0, requiring structural preflight and output-shape validation. |
 
@@ -653,6 +700,20 @@ tests/fm-backend-cmux-smoke.test.sh
 
 The real smoke proves socket access, fresh readiness, current-path probing, send and keys, bounded capture, title identity, and guarded exact cleanup.
 
+### Claude composer confirmation
+
+The borderless Claude composer confirmation was verified on 2026-08-09 with cmux 0.64.22 build 102 and Claude Code 2.1.226 on macOS aarch64.
+An isolated real Claude worker rendered a bare `❯` plus U+00A0 row between horizontal rules.
+The cmux classifier returned `empty`, and one `fm-send.sh --resolve-key <key> ALBATROSS` command appended the matching `resolved` event before the worker reported completion.
+The terminal capture contained exactly one submitted `❯ ALBATROSS` row.
+Refresh this harness-dependent proof with an isolated cmux Claude worker before accepting a Claude or cmux upgrade:
+
+```sh
+FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-live-e2e.test.sh
+```
+
+The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.
@@ -672,3 +733,164 @@ The host-tool sequence was:
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+
+## Cursor Agent CLI
+
+Cursor runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#cursor-primary-park-2026-08-13) owns the primary evidence.
+The evidence below was produced on 2026-08-11 against the installed signed CLI on macOS 26.5.2 arm64 with tmux 3.6a, running as `kunchenguid`, and extended on 2026-08-13 with the tmux composer verdict below.
+
+- Binary: `~/.local/bin/cursor-agent`, canonicalizing into `~/.local/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent`.
+- Version: `cursor-agent --version` reported `2026.08.11-e8db854`, and `cursor-agent status` reported a logged-in account.
+- Both installed names, `cursor-agent` and the legacy alias `agent`, resolve into that same versioned install tree.
+
+Resolution prints the STABLE launcher rather than the canonical target, because the canonical path carries a version the CLI replaces on its own auto-update.
+
+### Process identity
+
+`#{pane_current_command}` and `ps -o comm=` disagree for cursor, which is why identity reads both:
+
+| Source | Observed value |
+| --- | --- |
+| `#{pane_current_command}` | `node` |
+| `ps -o comm=` | `/Users/<user>/.local/bin/cursor-agent` |
+| child argv | `.../bin/cursor-agent --use-system-ca .../versions/2026.08.11-e8db854/index.js --trust --yolo` |
+
+`node` matches no harness name pattern, so a cursor pane is identified from Cursor's own name or install tree in the path or argv[0].
+An unrelated `node` or `agent` matches neither and classifies `other`, which the liveness callers fold into `ambiguous` rather than `dead`.
+A live cursor pane returned `alive`; a plain shell pane in the same run returned `dead`.
+
+### Environment markers and detection ordering
+
+Read from the live agent process and from a tool subprocess it spawned:
+
+| Marker | Where observed |
+| --- | --- |
+| `CURSOR_INVOKED_AS=cursor-agent` | the agent process itself, and its children |
+| `CURSOR_AGENT=1` | child/tool processes only |
+| `CURSOR_CONVERSATION_ID=<uuid>` | child/tool processes |
+| `AGENT_TRANSCRIPTS=<projects-root>/<slug>/agent-transcripts` | child/tool processes |
+
+Cursor does not clear an inherited `CLAUDECODE`, so ordering decides the verdict.
+With both markers set, `bin/fm-harness.sh` reports `cursor`; with `CLAUDECODE` alone it still reports `claude`.
+
+### Composer
+
+Cursor's composer is a BARE row whose prompt glyph is `→` (U+2192); there is no border.
+Its idle placeholder is `Plan, search, build anything` in a fresh session and `Add a follow-up` after a completed turn.
+
+The styled capture of an idle composer row was:
+
+```
+ESC[48;2;21;21;21m ESC[2m→ ESC[0;7mESC[48;2;21;21;21mPESC[0;2mESC[48;2;21;21;21mlan, search, build anythingESC[0m
+```
+
+The glyph and the placeholder tail are dim (SGR 2), but the cell under the terminal cursor is reverse video (SGR 0;7).
+Reverse video is neither dim nor a dark foreground, so ghost stripping leaves a lone `P` and an idle composer read `pending` before the fix.
+After teaching the shared classifier the glyph, both placeholders, and the plain-row remnant rule, the same captures read `empty` on the styled cursorless backends, while real typed text - including text typed to exactly match the placeholder - still read `pending`.
+An unstyled capture has no ghost-strip proof and correctly stays `unknown`.
+
+#### tmux composer verdict, corrected 2026-08-13
+
+The 2026-08-11 record that a Cursor pane's tmux composer verdict is `unknown` in every state described the cursor-ANCHORED read, which remains true: `#{cursor_y}` was 25 with `#{cursor_flag}` 0 on an idle pane, pointing below the footer, so tmux's cursor row is not a composer locator for Cursor.
+Read cursorlessly, the same live capture classifies correctly, so the composite verdict is no longer `unknown`:
+
+```text
+cursor_y=25  cursor_flag=0
+with-cursor : unknown      cursorless : empty     (idle composer)
+with-cursor : unknown      cursorless : pending   (real typed text, not submitted)
+with-cursor : unknown      cursorless : unknown   (agent exited to a shell)
+```
+
+`bin/fm-tmux-lib.sh` therefore reclassifies cursorlessly only when the pane's foreground process group is provably Cursor, so every other harness keeps the strict blank-cursor-row posture.
+That supplies the genuine composer-empty proof required for away-mode escalation delivery.
+A live injection through `bin/fm-supervise-daemon.sh`'s own `inject_msg` into a real Cursor pane returned 0 and the pane processed the typed `FIRSTMATE_OP: v1 away-supervisor:` escalation.
+
+`tests/fm-tmux-agent-liveness.test.sh` pins this with real processes and no Cursor installed: it asserts the cursor-anchored source is blind, that the composite still reads `empty` idle and `pending` with typed text, that an identical screen stays `unknown` when the pane is not Cursor, and that a stale Cursor screen over a dead shell never reads `empty`.
+
+### Busy state
+
+Cursor writes a per-conversation transcript at `<projects-root>/<workspace-slug>/agent-transcripts/<conversation-id>/<conversation-id>.jsonl`.
+Each turn is bracketed by a `role:user` open and a typed `{"type":"turn_ended","status":...}` close.
+Observed closes: `success` for a completed turn, and `aborted` with `"error":"User aborted/interrupted manually."` after a single Escape.
+
+The trailing close landed 0 seconds after the pane's busy footer cleared on a normal turn.
+The transcript does NOT accumulate one close per turn, so a count of closes is not a progress signal; only the trailing record is.
+After an interrupt the aborted close was observed within seconds in some runs and not within twenty seconds in others, so `bin/fm-control-lib.sh` deliberately claims no cancellation acknowledgement for cursor.
+
+Binding never reconstructs cursor's workspace-slug directory name, which collapses path separators.
+Cursor records the exact absolute workspace path in each project directory's `.workspace-trusted`, and the binding matches on that value.
+
+### Rendered busy token, delivery only
+
+Mid-turn the pane showed a braille spinner plus a verb, and `ctrl+c to stop` on the composer row; both the verb line and that token were absent the instant the turn ended.
+The same version rendered `Working` in one turn and `Running` in the next, so the TOKEN is matched and the verb is not.
+This row is a delivery guard for submit acknowledgement only; recorded worker state comes from the transcript fold.
+
+### Launch, lifecycle, and skills
+
+| Fact | Observed |
+| --- | --- |
+| Workspace trust | `--trust` suppressed the prompt; `--yolo` alone did NOT, and the prompt blocks a fresh worktree |
+| Autonomy | `--yolo` (alias of `--force`); the footer renders `Run Everything` |
+| Worktree | `-w/--worktree` allocates a SECOND worktree under `~/.cursor/worktrees` and is never passed |
+| Effort | no effort flag exists; requested effort stays in task metadata |
+| Interrupt | single Escape; the pane showed `Cancelled` and the composer returned to its placeholder, so no clear key is needed |
+| Exit | `/exit` |
+| Skill invocation | `/<skill>`; cursor discovers firstmate's user-level skills, and `/no-mistakes` autocompleted with firstmate's own description and invoked the skill |
+| Slash popup | real: the first Enter closes the popup and a SECOND Enter submits, the same hazard as grok, covered by the submit core's retried Enter |
+
+### End-to-end
+
+A throwaway scout was spawned through `bin/fm-spawn.sh --scout --backend tmux` on a real cursor worker and driven to completion:
+
+1. the launch delivered its brief positionally and the agent executed it;
+2. `state/<id>.cursor-session` was written with the task worktree;
+3. the transcript fold read `busy` mid-turn and `idle` after it;
+4. `bin/fm-send.sh` delivered a steer and exited 0;
+5. `bin/fm-control.sh <id> interrupt` cancelled a running turn;
+6. `bin/fm-control.sh <id> exit` stopped the agent;
+7. `bin/fm-teardown.sh` refused until the scout's report and decision gate were satisfied, then removed the session record.
+
+### Herdr backend
+
+The tmux run above is the reference; this section is the separate Herdr proof, produced on 2026-08-12 against Herdr 0.8.0 (client and server, protocol 19) and the same signed `cursor-agent` 2026.08.11-e8db854 on macOS 26.5.2 arm64.
+Every step ran inside an isolated `fm-lab-` session provisioned by `bin/fm-herdr-lab.sh`, launched from a neutral parent outside any Herdr pane, with the live default session's pane count checked before, during, and after; it stayed at 7 throughout.
+
+**Herdr's native agent state is unusable for Cursor.**
+A 60-sample probe of `agent get` across a full turn reported `agent_status=blocked` in every state - idle, mid-turn, and after.
+The submit path's idle baseline is therefore structurally unreachable for Cursor, and every send falls into the composer branch.
+
+| Pane state | Composer verdict | Rendered footer |
+| --- | --- | --- |
+| Idle | `empty` | no busy token |
+| Text typed, not submitted | `pending` | no busy token |
+| Mid-turn | `pending` (placeholder plus `ctrl+c to stop` on one row) | `ctrl+c to stop` |
+
+Herdr draws the composer's rules with the half-block glyphs U+2584 and U+2580 rather than the box-drawing family.
+Before those were taught to the shared edge detector, a bare composer's wrap region ran through its own closing rule and swallowed the model and path footer, so an idle pane read `pending`.
+Measured as an A/B on the same live pane, the pre-fix classifier returned `pending` and the current one returned `empty`.
+
+The idle fix alone did not confirm delivery, because the composer branch reads the mid-turn row instead.
+With the rendered-footer transition in place, `bin/fm-send.sh` exited 0 and the steer executed in the pane; the same send previously exited 1 with `delivery unconfirmed; verdict=pending` on a message that had actually landed.
+
+The rest of the lifecycle was driven end to end on that worker:
+
+1. `bin/fm-spawn.sh --scout --backend herdr` placed the worker and it executed its brief;
+2. the transcript fold read `busy` mid-turn and `idle` after, unchanged from tmux, so the recorded worker state is backend-agnostic;
+3. `bin/fm-control.sh <id> interrupt` reported `cancel=unconfirmed` by design and the pane showed `Cancelled`, with the footer and the fold both returning to idle;
+4. `bin/fm-control.sh <id> exit` stopped the agent through the slash popup and the pane returned to its shell;
+5. `bin/fm-teardown.sh` refused until the scout's report and decision gate were satisfied, then removed the session record and returned the worktree.
+
+Other harnesses on Herdr are unaffected by the edge-detector change.
+All seven live panes of the running default session - one Pi, four Claude, two plain shells - classified identically under the pre-fix and current classifiers.
+
+**Delivery confirmation is verified on tmux and Herdr only.**
+Zellij, cmux, and Orca share a submit core that never consults the busy footer, so a Cursor steer there lands but `fm-send` reports delivery unconfirmed and exits non-zero.
+Teaching that shared core the same transition is deliberately separate work, because it changes the submit path for every harness on those three backends and needs its own live validation on each.
+
+The portable regression is `tests/fm-cursor-harness.test.sh`, the composer captures are pinned in `tests/fm-composer-lib.test.sh`, and the Herdr submit and footer behavior is pinned in `tests/fm-backend-herdr.test.sh`.
+Refresh this harness-dependent proof before accepting a cursor upgrade:
+
+```sh
+FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+```

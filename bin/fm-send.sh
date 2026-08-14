@@ -93,6 +93,8 @@ fi
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
@@ -101,6 +103,8 @@ fi
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -118,13 +122,18 @@ fm_send_id_from_meta() {  # <meta-file>
 # it and submits both as one garbled message. Ctrl-U clears the composer
 # (verified), so the interrupt is not complete until it has been sent. A failed
 # clear is loud rather than silent, because the alternative is a corrupted steer.
+# WHICH adapters need that clear, and which key clears them, comes from the one
+# control-plane capability table (bin/fm-control-lib.sh) rather than a second
+# copy here - the same table bin/fm-control.sh's interrupt verb reads.
 fm_send_clear_after_interrupt() {  # <key>
-  local key=$1
+  local key=$1 family clear
   [ "$key" = Escape ] || return 0
-  case "$TARGET_HARNESS" in muse*) : ;; *) return 0 ;; esac
+  family=$(fm_control_harness_family "$TARGET_HARNESS") || return 0
+  clear=$(fm_control_interrupt_clear_key "$family") || return 0
+  [ -n "$clear" ] || return 0
   [ "$TARGET_BACKEND" != remote ] || return 0
-  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" C-u "$EXPECTED_LABEL"; then
-    echo "error: Escape reached $T, but the muse composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
+  if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$clear" "$EXPECTED_LABEL"; then
+    echo "error: Escape reached $T, but the $TARGET_HARNESS composer could not be cleared; it still holds the restored prompt. Clear it before sending the next message." >&2
     return 1
   fi
 }
@@ -371,13 +380,19 @@ fi
 # Close each answered decision in this home's ledger, only after delivery is
 # fully confirmed. An append failure exits nonzero with the manual close
 # command; the decision then stays open and re-surfaces, never silently lost.
+# The close is this home's own bookkeeping, written by the very turn that
+# answered the decision, so it goes through the guarded self-announced append
+# (bin/fm-wake-lib.sh) and does not wake this same session again; any
+# concurrent foreign status bytes leave the watcher's wake path untouched.
 fm_send_close_resolved_keys() {  # <answer-text>
-  local note=$1 k line
+  local note=$1 k line append_rc
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_KEYS; do
     line="resolved [key=$k]: answered: $note"
     fm_cap_line_var "$line"
-    if ! printf '%s\n' "$FM_LINE_CAP_LINE" >> "$RESOLVE_STATUS_FILE"; then
+    append_rc=0
+    fm_wake_status_append_self_announced "$STATE" "$RESOLVE_STATUS_FILE" "$FM_LINE_CAP_LINE" || append_rc=$?
+    if [ "$append_rc" -eq 2 ]; then
       echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
       return 1
     fi

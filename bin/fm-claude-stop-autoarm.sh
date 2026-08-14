@@ -78,10 +78,21 @@ esac
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-hook-host-lib.sh
+. "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
 # Consume the Stop payload once. The decisions below are state-based; the
-# payload is read so a slow writer can never wedge on a full pipe.
-cat >/dev/null 2>&1 || true
+# payload is read so a slow writer can never wedge on a full pipe, and its host
+# is inspected before anything else runs.
+PAYLOAD=$(cat 2>/dev/null || true)
+
+# Cursor loads the tracked Claude settings too. Cursor has no asyncRewake, so if
+# a future Cursor build starts firing the Claude-shaped Stop entry, this arm
+# would run SYNCHRONOUSLY inside Cursor's stop step and hold that turn open for
+# the declared multi-hour timeout - the exact wedge grok 1.0.0 produced
+# (docs/turnend-guard.md "Harness integrations"). Cursor's own park adapter owns
+# its turn boundary, so stand down on a Cursor-delivered payload.
+fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
@@ -230,7 +241,7 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
     [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
-    printf 'Run bin/fm-wake-drain.sh first and handle the wake. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
+    printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 2
