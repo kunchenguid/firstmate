@@ -211,9 +211,6 @@ block_stop() {
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
-      if [ "${REBLOCK_COUNT:-0}" -ge "$UNCLAIMED_BLOCK_BUDGET" ]; then
-        printf '●  This is the second unchanged block. Do not answer it with another acknowledgement; escalate the supervision choice to the captain now.\n'
-      fi
     fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
@@ -240,7 +237,7 @@ budget_account_current_epoch() {  # [observe|block]
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
-  signature="inflight=$FM_SUP_IN_FLIGHT:sources=$FM_SUP_SOURCES:x=$x_mode:afk=$afk:epoch=${current_epoch:-none}:outcome=${outcome:-none}"
+  signature="inflight=$FM_SUP_IN_FLIGHT:sources=$FM_SUP_SOURCES:identities=$FM_SUP_IDENTITY_FINGERPRINT:x=$x_mode:afk=$afk:epoch=${current_epoch:-none}:outcome=${outcome:-none}"
   initialized=0
   COUNT=0
   REBLOCK_COUNT=0
@@ -286,6 +283,7 @@ budget_account_current_epoch() {  # [observe|block]
       REBLOCK_COUNT=$((REBLOCK_COUNT + 1))
     else
       REBLOCK_COUNT=1
+      rm -f "$ESCALATION_MARKER" 2>/dev/null || true
     fi
     REBLOCK_SIGNATURE=$signature
   fi
@@ -395,7 +393,7 @@ terminal_fail_open() {
 
 terminal_unclaimed_escalation() {
   local pid role old_session old_reblocks old_signature
-  [ "$REBLOCK_COUNT" -gt "$UNCLAIMED_BLOCK_BUDGET" ] || return 1
+  [ "$REBLOCK_COUNT" -ge "$UNCLAIMED_BLOCK_BUDGET" ] || return 1
   [ ! -e "$STATE/.afk" ] || return 1
   failure_state_present && return 1
   [ ! -e "$ESCALATION_MARKER" ] || return 3
@@ -423,7 +421,7 @@ terminal_unclaimed_escalation() {
   esac
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   if [ "$role" != terminal-escalation ] || [ "$old_session" != "$SESSION_ID" ] \
-    || [ "$old_reblocks" -le "$UNCLAIMED_BLOCK_BUDGET" ] \
+    || [ "$old_reblocks" -lt "$UNCLAIMED_BLOCK_BUDGET" ] \
     || [ "$old_signature" != "$REBLOCK_SIGNATURE" ] || failure_state_present \
     || [ -e "$ESCALATION_MARKER" ]; then
     fm_lock_release "$BUDGET_LOCK"

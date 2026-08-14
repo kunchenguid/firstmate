@@ -313,6 +313,46 @@ Observed output:
 ok - Claude 2.1.232 (Claude Code) live E2E let the read-only competing session finish, then restored supervision from the lock-owning Stop hook without human intervention
 ```
 
+The two-session regression was also required to fail against its immediate unfixed parent, `fe30ee2e2ccf678bba877659e47bae71318a5fab`, on 2026-08-14.
+The portable control kept the current real-process regression and shared test helper while restoring the parent implementation.
+
+```sh
+test "$(git -C .review-unfixed-stop-guard rev-parse --show-toplevel)" = "$PWD/.review-unfixed-stop-guard" && rm -rf "$PWD/.review-unfixed-stop-guard"
+git clone -q . .review-unfixed-stop-guard
+git -C .review-unfixed-stop-guard checkout -q fe30ee2e2ccf678bba877659e47bae71318a5fab
+cp tests/fm-turnend-guard.test.sh tests/fm-claude-stop-autoarm-live-e2e.test.sh tests/lib.sh .review-unfixed-stop-guard/tests/
+(cd .review-unfixed-stop-guard && bash -o pipefail -c 'tests/fm-turnend-guard.test.sh 2>&1 | tail -8')
+```
+
+Observed output and exit status `1`:
+
+```text
+ok - tracked .claude/settings.json entries: 5 inert under grok, the documented subagent exception still armed, all live under Claude
+ok - .codex/hooks.json: Stop hook uses hook process root when payload cwd is outside
+ok - .codex/hooks.json: Stop hook ignores nested git root guard scripts
+ok - .opencode primary plugin: guard path is anchored to worktree, not directory
+ok - .pi primary extension: no-tool and multi-tool runs each inject exactly one guard follow-up
+ok - .pi primary extension: delivery failure resets the logical-run latch
+ok - fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)
+not ok - a read-only session must not be trapped by a guard whose matching auto-arm cannot own recovery: expected exit 0, got 2
+```
+
+The real-Claude control used the same parent fixture and the current env-gated live guard.
+The test-only gate bypass is confined to its disposable Claude processes so the live guard can execute from a no-mistakes validation worktree.
+
+```sh
+cp tests/fm-claude-stop-autoarm-live-e2e.test.sh .review-unfixed-stop-guard/tests/
+(cd .review-unfixed-stop-guard && bash -o pipefail -c "FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh 2>&1 | grep '^not ok -'")
+```
+
+Observed output and exit status `1`:
+
+```text
+not ok - read-only Claude session was trapped by the blind-turn guard: session=fa5c402a-511c-4cf2-b323-a9a5da85b70c
+```
+
+The corresponding green live result is recorded immediately above, and the green portable suite result is recorded in the focused 2026-08-14 run below.
+
 Current entry points:
 
 ```sh

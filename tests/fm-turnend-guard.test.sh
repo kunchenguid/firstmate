@@ -98,6 +98,34 @@ test_predicate_source_needs_supervision() {
   pass "fm_supervision_unhealthy: source-only home needs supervision"
 }
 
+test_predicate_identity_fingerprint_tracks_exact_owners() {
+  local state="$TMP_ROOT/pred-identities/state" task_a task_b source_a source_b
+  mkdir -p "$state/procevent"
+  : > "$state/task-a.meta"
+  : > "$state/procevent/source-a.source"
+  fm_supervision_status "$state" 300
+  task_a=${FM_SUP_IDENTITY_FINGERPRINT:-}
+  [ -n "$task_a" ] || fail "shared supervision status did not publish an identity fingerprint"
+
+  rm -f "$state/task-a.meta"
+  : > "$state/task-b.meta"
+  fm_supervision_status "$state" 300
+  task_b=${FM_SUP_IDENTITY_FINGERPRINT:-}
+  [ "$task_a" != "$task_b" ] || fail "same-count task replacement left the supervision identity fingerprint unchanged"
+
+  rm -f "$state/procevent/source-a.source"
+  : > "$state/procevent/source-b.source"
+  fm_supervision_status "$state" 300
+  source_a=${FM_SUP_IDENTITY_FINGERPRINT:-}
+  [ "$task_b" != "$source_a" ] || fail "same-count process-source replacement left the supervision identity fingerprint unchanged"
+
+  touch "$state/.last-watcher-beat"
+  fm_supervision_status "$state" 300
+  source_b=${FM_SUP_IDENTITY_FINGERPRINT:-}
+  [ "$source_a" = "$source_b" ] || fail "volatile beacon age changed the supervision identity fingerprint"
+  pass "fm_supervision_status: identity fingerprint tracks exact tasks and process sources only"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -1190,10 +1218,10 @@ test_hook_claude_mode_foreign_live_owner_does_not_starve_recovery() {
 
   expect_code 0 "$auto_status" "a read-only session's auto-arm must defer to the live lock owner"
   [ -z "$auto_out" ] || fail "foreign-owner auto-arm produced output: $auto_out"
-  assert_grep 'event=gate-live-session-owner' "$dir/state/.claude-autoarm-entry-trace" \
-    "auto-arm entry trace did not identify the foreign live-owner gate"
   expect_code 0 "$guard_status" "a read-only session must not be trapped by a guard whose matching auto-arm cannot own recovery"
   [ -z "$guard_out" ] || fail "foreign-owner guard produced output: $guard_out"
+  assert_grep 'event=gate-live-session-owner' "$dir/state/.claude-autoarm-entry-trace" \
+    "auto-arm entry trace did not identify the foreign live-owner gate"
   [ "$owner_after" = "$owner" ] || fail "foreign-owner reproduction displaced the session lock owner"
   assert_absent "$dir/state/.turnend-claude-blocks" "read-only guard consumed the lock owner's block budget"
   pass "fm-turnend-guard --claude: a foreign live session owner cannot trap the read-only session in an unrecoverable Stop loop"
@@ -1502,56 +1530,75 @@ test_hook_claude_mode_stale_rewake_epoch_blocks() {
 }
 
 test_hook_claude_mode_repeated_identical_block_escalates_once() {
-  local dir out out2 status status2 questions i
+  local dir first second later status questions
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget")
   : > "$dir/state/task1.meta"
   printf 'epoch=3 owner_pid=999 outcome=rewake updated_at=1\n' > "$dir/state/.claude-autoarm-epoch"
   touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
-  for i in 1 2; do
-    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
-    expect_code 2 "$status" "--claude block $i must exit 2 within the bounded retry budget"
-    assert_contains "$out" 'TURN WOULD END BLIND' "bounded retry $i lost the guard banner"
-  done
-  assert_contains "$out" 'Do not answer it with another acknowledgement' \
-    "the second unchanged block did not direct the terminal captain escalation"
+  first=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "the first no-claim observation must block"
+  assert_contains "$first" 'TURN WOULD END BLIND' "the first block lost the guard banner"
+
+  second=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 0 "$status" "the second unchanged stop must terminate with the captain escalation"
+  assert_contains "$second" 'FIRSTMATE NEEDS YOUR DECISION' "the second unchanged stop did not escalate the supervision choice"
+  assert_contains "$second" 'after two identical blocked turn ends' "terminal escalation did not name the bounded trigger"
+  questions=$(printf '%s' "$first$second" | tr -cd '?' | wc -c | tr -d ' ')
+  [ "$questions" -eq 1 ] || fail "the two-block exchange must contain exactly one captain-facing question, got $questions: $first$second"
   [ "$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")" = 1 ] \
     || fail "frozen epoch unexpectedly advanced the failure-epoch budget"
   [ "$(sed -n '4s/^reblocks=//p' "$dir/state/.turnend-claude-blocks")" = 2 ] \
     || fail "frozen epoch did not advance the separate identical-block count"
-  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
-  expect_code 0 "$status" "the third unchanged stop must terminate the repeated guard loop"
-  assert_contains "$out" 'FIRSTMATE NEEDS YOUR DECISION' "terminal retry did not escalate the supervision choice"
-  assert_contains "$out" 'after two identical blocked turn ends' "terminal escalation did not name the bounded trigger"
-  questions=$(printf '%s' "$out" | tr -cd '?' | wc -c | tr -d ' ')
-  [ "$questions" -eq 1 ] || fail "terminal escalation must contain exactly one captain-facing question, got $questions: $out"
   assert_present "$dir/state/.turnend-claude-escalated" "terminal escalation did not record its one-shot marker"
   assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "unverified escalation consumed the verified-failure alarm"
 
-  out2=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status2=$?
-  expect_code 0 "$status2" "an already escalated unchanged episode must stay terminal"
-  [ -z "$out2" ] || fail "terminal captain escalation repeated in one unchanged episode: $out2"
+  later=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 0 "$status" "an already escalated unchanged episode must stay terminal"
+  [ -z "$later" ] || fail "terminal captain escalation repeated in one unchanged episode: $later"
   rm -f "$dir/state/task1.meta"
-  out2=$(run_hook_claude "$dir" false); status2=$?
-  expect_code 0 "$status2" "an ended supervision need must stay silent"
+  : > "$dir/state/task2.meta"
+  later=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "changed evidence after escalation must start a fresh block sequence"
+  assert_absent "$dir/state/.turnend-claude-escalated" "changed evidence inherited the prior episode's escalation marker"
+  [ "$(sed -n '4s/^reblocks=//p' "$dir/state/.turnend-claude-blocks")" = 1 ] \
+    || fail "changed evidence after escalation did not reset the identical-block count"
+  rm -f "$dir/state/task2.meta"
+  later=$(run_hook_claude "$dir" false); status=$?
+  expect_code 0 "$status" "an ended supervision need must stay silent"
   assert_absent "$dir/state/.turnend-claude-escalated" "ended supervision need left the volatile escalation marker"
   assert_absent "$dir/state/.turnend-claude-blocks" "ended supervision need left the volatile block budget"
   pass "fm-turnend-guard --claude: two identical blocks terminate in one captain escalation instead of an unbounded loop"
 }
 
-test_hook_claude_mode_changed_block_evidence_resets_escalation_count() {
+test_hook_claude_mode_changed_task_identity_resets_escalation_count() {
   local dir out status
-  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget-change")
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget-task-change")
   : > "$dir/state/task1.meta"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
   expect_code 2 "$status" "first no-claim observation must block"
+  rm -f "$dir/state/task1.meta"
   : > "$dir/state/task2.meta"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
-  expect_code 2 "$status" "changed supervision evidence must start a fresh block sequence"
-  assert_not_contains "$out" 'Do not answer it with another acknowledgement' \
-    "changed evidence was misclassified as the second identical block"
+  expect_code 2 "$status" "same-count task replacement must start a fresh block sequence"
   [ "$(sed -n '4s/^reblocks=//p' "$dir/state/.turnend-claude-blocks")" = 1 ] \
-    || fail "changed evidence did not reset the identical-block count"
-  pass "fm-turnend-guard --claude: changed evidence resets the identical-block escalation count"
+    || fail "same-count task replacement did not reset the identical-block count"
+  pass "fm-turnend-guard --claude: changed task identity resets the identical-block escalation count"
+}
+
+test_hook_claude_mode_changed_source_identity_resets_escalation_count() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget-source-change")
+  mkdir -p "$dir/state/procevent"
+  : > "$dir/state/procevent/source1.source"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "first source-only no-claim observation must block"
+  rm -f "$dir/state/procevent/source1.source"
+  : > "$dir/state/procevent/source2.source"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "same-count process-source replacement must start a fresh block sequence"
+  [ "$(sed -n '4s/^reblocks=//p' "$dir/state/.turnend-claude-blocks")" = 1 ] \
+    || fail "same-count process-source replacement did not reset the identical-block count"
+  pass "fm-turnend-guard --claude: changed process-source identity resets the identical-block escalation count"
 }
 
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
@@ -1685,6 +1732,7 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
+test_predicate_identity_fingerprint_tracks_exact_owners
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
@@ -1737,7 +1785,8 @@ test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_repeated_identical_block_escalates_once
-test_hook_claude_mode_changed_block_evidence_resets_escalation_count
+test_hook_claude_mode_changed_task_identity_resets_escalation_count
+test_hook_claude_mode_changed_source_identity_resets_escalation_count
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
 test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open

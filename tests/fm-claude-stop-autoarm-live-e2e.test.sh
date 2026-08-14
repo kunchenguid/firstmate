@@ -96,7 +96,7 @@ chmod +x "$PROJECT/bin/owner-hold.sh" "$PROJECT/bin/fm-watch-arm.sh" "$PROJECT/b
 OWNER_PROMPT='Use Bash to run exactly `bin/owner-hold.sh` and wait for it. After it returns, reply exactly OWNER_RELEASED and end the turn. If Stop hook feedback then wakes you, use Bash to run exactly `bin/finish-live.sh`, reply exactly OWNER_RECOVERED, and end. Never run an arm command or any other tool.'
 (
   cd "$PROJECT" || exit 1
-  exec env FM_HOME="$HOME_DIR" CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
+  exec env FM_HOME="$HOME_DIR" FM_GATE_REFUSE_BYPASS=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
     claude -p "$OWNER_PROMPT" --dangerously-skip-permissions --effort low \
       --output-format stream-json --verbose --include-hook-events
 ) > "$OWNER_TRANSCRIPT" 2>&1 &
@@ -112,7 +112,7 @@ kill -0 "$LOCK_OWNER" 2>/dev/null || fail "recorded session-lock owner is not al
 COMPETING_PROMPT='Reply exactly COMPETING_READ_ONLY and end the turn without using tools.'
 (
   cd "$PROJECT" || exit 1
-  exec env FM_HOME="$HOME_DIR" CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
+  exec env FM_HOME="$HOME_DIR" FM_GATE_REFUSE_BYPASS=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
     claude -p "$COMPETING_PROMPT" --dangerously-skip-permissions --effort low \
       --output-format stream-json --verbose --include-hook-events
 ) > "$COMPETING_TRANSCRIPT" 2>&1 &

@@ -25,6 +25,7 @@ fm_sup_stat_mtime() {
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
 #   FM_SUP_SOURCES        count of registered process-to-event sources
+#   FM_SUP_IDENTITY_FINGERPRINT stable fingerprint of task and source identities
 #   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, or a
 #                         registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata)
@@ -34,7 +35,8 @@ fm_sup_stat_mtime() {
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age identity_records=
+  local LC_ALL=C
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
@@ -44,12 +46,17 @@ fm_supervision_status() {
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
+    identity_records="${identity_records}task:${#meta}:$meta;"
   done
   FM_SUP_SOURCES=0
   for source in "$state"/procevent/*.source; do
     [ -e "$source" ] || continue
     FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
+    identity_records="${identity_records}source:${#source}:$source;"
   done
+  FM_SUP_IDENTITY_FINGERPRINT=$(printf '%s' "$identity_records" \
+    | cksum 2>/dev/null | awk '{printf "%s-%s", $1, $2}')
+  [ -n "$FM_SUP_IDENTITY_FINGERPRINT" ] || FM_SUP_IDENTITY_FINGERPRINT=unavailable
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
     || [ -f "$state/x-watch.check.sh" ] \
     || [ "$FM_SUP_SOURCES" -gt 0 ]; then
