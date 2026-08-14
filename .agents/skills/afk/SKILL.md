@@ -101,6 +101,7 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   `pane_input_pending` is the tested fail-closed predicate for callers that need to know whether the composer is unsafe: it treats every result except exact `empty` as pending.
 
 A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
+Once the pane is genuinely idle with an affirmatively empty composer, delivery therefore occurs within one housekeeping interval (15 seconds by default) plus the bounded submit confirmation.
 In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
@@ -111,6 +112,8 @@ If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
 catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
+The log, marker, status flash, and active-alert summary name the exact blocking verdict (`busy`, `pending`, `pending-unproven`, `unknown`, a target failure, or the submit verdict).
+The marker also includes the same bounded pane snapshot in readable form and as ANSI-preserving hex, so a rendered-state misclassification is diagnosable without the original pane.
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 

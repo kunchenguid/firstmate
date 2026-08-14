@@ -461,6 +461,22 @@ tests/fm-turnend-guard.test.sh
 
 ## Wedge-alarm channels
 
+### Claude NBSP away-delivery regression
+
+The tmux away-delivery failure was reproduced on 2026-08-14 against a real Claude Code 2.1.226 pane whose idle composer was `❯` followed by U+00A0 NO-BREAK SPACE.
+Under `LC_ALL=C`, the stale pre-consolidation classifier returned `pending` for that pane while the current shared classifier returned `empty` for the same capture.
+The pane remained genuinely idle between turns, and the daemon's 15-second housekeeping cadence continued retrying, so the composer false-positive was sufficient to explain the undelivered windows without a busy-guard or cadence failure.
+
+The portable end-to-end regression now renders that exact byte shape under `LC_ALL=C` and proves all three delivery properties: pending human text still defers, the first idle gap accepts the preserved digest, and a swallowed Enter retries submission without retyping.
+
+```sh
+tests/fm-composer-lib.test.sh
+tests/fm-afk-inject-e2e.test.sh
+tests/fm-daemon.test.sh
+```
+
+The daemon unit suite additionally proves that max-defer preserves the buffer and emits exact `busy`, `pending`, `unknown`, and submit verdicts with bounded readable and ANSI-preserving hex pane evidence.
+
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
 Automated suites never execute these real notification commands.
 
