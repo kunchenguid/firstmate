@@ -574,8 +574,9 @@ ok - real herdr: no control verb removed the endpoint or the task's local copy
 ok - real herdr: an agent that does not stop fails closed instead of being reported as stopped
 ```
 
-Working occupancy on a plain shell pane still classifies as alive, so interrupt and fail-closed exit keep their live-agent guarantees.
-Idle occupancy on a proven idle shell classifies as already-stopped.
+The direct no-agent control and idle-occupancy control exercise the registry path and its strict idle-shell exception without launching a real agent.
+Working occupancy on that same plain shell remains alive, so interrupt and fail-closed exit keep their live-agent guarantees.
+The exact recovery-classification contract, including the unproven `idle` or `done` fail-closed case, is owned by `fm_backend_herdr_pane_agent_state`.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
 ### Away-mode transport
