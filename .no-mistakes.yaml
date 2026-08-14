@@ -36,7 +36,7 @@ document:
 commands:
   lint: 'bin/fm-lint.sh'
 
-# Keep test evidence out of this repo; it stays in a temp dir instead.
+# Store test evidence in this repo so it is committed alongside the change instead of kept in a temp dir.
 test:
   evidence:
-    store_in_repo: false
+    store_in_repo: true

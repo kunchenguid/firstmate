@@ -5,10 +5,10 @@
 # This is the one implementation of "advance a firstmate checkout to a base by a
 # clean fast-forward, never forcing, merging, or stashing" used by every sync
 # path:
-#   - /updatefirstmate (bin/fm-update.sh) pulls from origin: base_mode "origin".
+#   - /updatefirstmate (bin/fm-update.sh) pulls each code root from origin, then
+#     advances its subordinate homes to that code root's exact validated commit.
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
-#     on startup) follows the PRIMARY checkout's current default-branch commit:
-#     base_mode is that local commit, with NO fetch and no origin dependency.
+#     on startup) follows the PRIMARY checkout's current default-branch commit.
 #
 # A linked-worktree secondmate home already holds the primary's commit in the
 # shared object store, so its local-HEAD sync is a purely local fast-forward that
@@ -261,17 +261,15 @@ live_secondmate_meta_records() {
 # base_mode selects where the fast-forward base comes from:
 #   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
 #                  path); requires an origin remote and network reachability.
-#   <commit-ish> - advance to that LOCAL commit with NO fetch and no origin
-#                  dependency (the local-HEAD secondmate sync). The commit must
-#                  already exist in the target's object store, which it always does
-#                  for a worktree of this same repo; a standalone clone that lacks
-#                  it is skipped rather than fetched.
+#   <commit-ish> - advance to that LOCAL commit with no origin dependency. When
+#                  base_source is supplied, a standalone clone imports only that
+#                  exact commit from the code root; linked worktrees already share it.
 # Guards are identical in both modes: ff-only (never force/merge/stash); skip a
 # dirty, diverged, or wrong-branch target and leave its work untouched.
 FF_STATUS=""
 FF_INSTR=""
 ff_target() {
-  local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
+  local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no} base_source=${6:-}
   FF_STATUS="skipped"
   FF_INSTR=""
 
@@ -305,6 +303,17 @@ ff_target() {
     base="$base_mode"
   fi
 
+  if ! git -C "$dir" rev-parse --verify --quiet "$base^{commit}" >/dev/null \
+      && [ "$base_mode" != origin ] && [ -n "$base_source" ]; then
+    if ! git -C "$base_source" cat-file -e "$base^{commit}" 2>/dev/null; then
+      echo "$label: skipped: validated code-root commit $base is unavailable"
+      return 0
+    fi
+    if ! git -C "$dir" fetch --quiet --no-tags "$base_source" "$base" 2>/dev/null; then
+      echo "$label: skipped: could not import validated code-root commit $base"
+      return 0
+    fi
+  fi
   if ! git -C "$dir" rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
     echo "$label: skipped: $base does not exist"
     return 0
@@ -376,7 +385,7 @@ FF_SEEN_HOMES=""
 # firstmate repo itself (FM_ROOT) is never processed as its own secondmate, and
 # each resolved home is processed at most once.
 process_secondmate() {
-  local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
+  local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} base_source=${6:-} home_real fm_root_real
   [ -n "$id" ] || return 0
   [ -n "$home" ] || return 0
   fm_root_real=$(resolve_path "$FM_ROOT")
@@ -392,7 +401,7 @@ process_secondmate() {
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
-  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
+  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$base_source"
   if [ "$FF_STATUS" = "updated" ] && [ -n "$window" ]; then
     if [ "$nudge_requires_instr" = yes ] && [ -z "$FF_INSTR" ]; then
       return 0
@@ -411,10 +420,10 @@ process_secondmate() {
 # FF_NUDGE_WINDOWS / FF_SEEN_HOMES, which the caller resets before and reads after.
 # The registry argument is only for home= fallback on older or incomplete meta records.
 sweep_live_secondmate_metas() {
-  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta
+  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} base_source=${5:-} id home window meta
   [ -d "$state" ] || return 0
   while IFS='|' read -r id home window meta; do
     if grep -q '^remote_host=.' "$meta" 2>/dev/null; then continue; fi
-    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr"
+    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr" "$base_source"
   done < <(live_secondmate_meta_records "$state" "$registry")
 }

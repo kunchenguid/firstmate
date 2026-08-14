@@ -160,39 +160,92 @@ status_is_paused_or_captain_held() {  # <status-line>
 # rule 6), so closure never depends on a busy worker's discipline.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
-# format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
+# format): an OPTIONAL "[key=<slug>]" token names the decision. Its documented
+# position sits between the verb and the colon, and a complete token at the
+# head of the note is accepted as an EQUIVALENT position, because that
+# misplaced-colon shape is common real worker output whose stated key must
+# never silently collapse into the shared "default" bucket (issue #2109):
 #   needs-decision [key=api-shape]: <summary>
+#   needs-decision: [key=api-shape] <summary>
 #   resolved       [key=api-shape]: <how it was decided>
-# A line with no token uses the key "default", preserving the historical
-# one-open-decision-per-task behavior (a bare "resolved:" closes "default").
-# The three parsers are pure reads of a single line; the verb parser strips any
-# key token before the colon so the leading word is recovered cleanly.
+# Both positions state the same key and yield the same note (a consumed
+# note-head token is key metadata, stripped from the note); when both positions
+# carry a token, the documented before-colon one wins and the note-head token
+# stays note text. A token deeper inside the note is prose, never a stated key,
+# so a summary merely MENTIONING "[key=x]" cannot open or close that decision.
+# A line with no token in either position uses the key "default", preserving
+# the historical one-open-decision-per-task behavior (a bare "resolved:" closes
+# "default"). A stated key whose slug fails the charset below is rejected (the
+# folds skip the line), never rewritten to "default".
+# The parsers are pure reads of a single line. Status metadata may contain any
+# number of "[name=value]" tags before the colon, in any order, so verb parsing
+# ends at the first tag rather than special-casing "[key=...]".
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
-  v=${v%%\[key=*}
+  v=${v%%\[*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
 }
-status_line_note() {  # <status-line> -> text after the first colon, trimmed
-  case "$1" in
-    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
-    *) printf '%s' "$1" ;;
+# 0 when a complete "[key=...]" token sits in the documented position before
+# the line's first colon (or anywhere on a line that has no colon at all).
+_fm_key_before_colon() {  # <status-line>
+  case "${1%%:*}" in
+    *\[key=*\]*) return 0 ;;
+    *) return 1 ;;
   esac
 }
-_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
-  case "$prefix" in
-    *\[key=*\]*)
-      k=${prefix#*\[key=}
-      k=${k%%\]*}
-      case "$k" in
-        ''|*[!A-Za-z0-9._-]*) return 1 ;;
-        *) printf '%s' "$k" ;;
-      esac
-      ;;
-    *) printf 'default' ;;
+# Raw slug of a complete "[key=<slug>]" token at the head of the note (the
+# first thing after the line's first colon, ignoring whitespace). Fails when
+# the line has no colon or no complete token there; slug charset validity is
+# the caller's check via _fm_decision_slug_ok, exactly as for the before-colon
+# position.
+_fm_key_at_note_head() {  # <status-line> -> raw slug
+  local rest
+  case "$1" in
+    *:*) rest=${1#*:} ;;
+    *) return 1 ;;
   esac
+  rest=${rest#"${rest%%[![:space:]]*}"}
+  case "$rest" in
+    \[key=*\]*) rest=${rest#\[key=}; printf '%s' "${rest%%\]*}" ;;
+    *) return 1 ;;
+  esac
+}
+# 0 when a stated key slug is well-formed: nonempty, A-Za-z0-9._- only.
+_fm_decision_slug_ok() {  # <slug>
+  case "$1" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+status_line_note() {  # <status-line> -> text after the first colon, trimmed
+  local n k
+  case "$1" in
+    *:*) n=${1#*:}; n=${n#"${n%%[![:space:]]*}"} ;;
+    *) printf '%s' "$1"; return 0 ;;
+  esac
+  # A note-head token that states this line's key (no before-colon token, valid
+  # slug) is key metadata, not note text: strip it so both stated-key positions
+  # yield the same note.
+  if ! _fm_key_before_colon "$1" && k=$(_fm_key_at_note_head "$1") \
+    && _fm_decision_slug_ok "$k"; then
+    n=${n#"[key=$k]"}
+    n=${n#"${n%%[![:space:]]*}"}
+  fi
+  printf '%s' "$n"
+}
+_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
+  local k
+  if _fm_key_before_colon "$1"; then
+    k=${1%%:*}
+    k=${k#*\[key=}
+    k=${k%%\]*}
+  else
+    k=$(_fm_key_at_note_head "$1") || { printf 'default'; return 0; }
+  fi
+  _fm_decision_slug_ok "$k" || return 1
+  printf '%s' "$k"
 }
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
@@ -384,7 +437,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=2
+FM_OPEN_DECISIONS_FOLD_VERSION=4
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
@@ -396,15 +449,47 @@ _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
   fi
 }
 
-status_open_decisions_incremental() {  # <status-file>
-  local f=$1 cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
-  local version='' size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
+_fm_status_file_size() {  # <status-file>
+  local f=$1
+  if [ -n "${FM_STATUS_SIZE_READER:-}" ]; then
+    "$FM_STATUS_SIZE_READER" "$f"
+    return
+  fi
+  LC_ALL=C wc -c < "$f" 2>/dev/null
+}
+
+_fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
+  local f=$1 start=$2 length=$3
+  if [ -n "${FM_STATUS_SPAN_READER:-}" ]; then
+    "$FM_STATUS_SPAN_READER" "$f" "$start" "$length"
+    return
+  fi
+  perl -MFcntl=:DEFAULT -e '
+    my ($path, $start, $length) = @ARGV;
+    sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+    sysseek($file, $start, 0) == $start or exit 1;
+    while ($length > 0) {
+      my $want = $length > 65536 ? 65536 : $length;
+      my $read = sysread($file, my $chunk, $want);
+      defined($read) && $read > 0 or exit 1;
+      print $chunk or exit 1;
+      $length -= $read;
+    }
+  ' "$f" "$start" "$length"
+}
+
+status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
+  local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
+  local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
+  local target_cursor
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
   ident=''
   if [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ]; then
-    if cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null); then
+    cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null) || cursor_data=''
+  fi
+  if [ -n "${cursor_data:-}" ]; then
       first=${cursor_data%%$'\n'*}
       case "$first" in
         version=*)
@@ -440,7 +525,6 @@ status_open_decisions_incremental() {  # <status-file>
           esac
           ;;
       esac
-    fi
   fi
 
   # A stat/size-read failure is a genuine I/O error, not "the file is empty" -
@@ -448,12 +532,21 @@ status_open_decisions_incremental() {  # <status-file>
   # silent invalidation that would wipe it.
   cur_ident=$(_fm_open_decisions_file_ident "$f") || { printf '%s' "$trusted_open"; return 0; }
   [ -n "$cur_ident" ] || { printf '%s' "$trusted_open"; return 0; }
-  size=$(LC_ALL=C wc -c < "$f" 2>/dev/null) \
+  actual_size=$(_fm_status_file_size "$f") \
     || { printf '%s' "$trusted_open"; return 0; }
-  size=${size//[[:space:]]/}
-  case "$size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
+  actual_size=${actual_size//[[:space:]]/}
+  case "$actual_size" in ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
+  if [ -n "$captured_end" ]; then
+    case "$captured_end" in
+      ''|*[!0-9]*) printf '%s' "$trusted_open"; return 0 ;;
+    esac
+    [ "$captured_end" -le "$actual_size" ] || { printf '%s' "$trusted_open"; return 0; }
+    size=$captured_end
+  else
+    size=$actual_size
+  fi
 
-  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
+  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
     offset=0
     open=''
     trusted_open=''
@@ -462,7 +555,7 @@ status_open_decisions_incremental() {  # <status-file>
 
   if [ "$offset" -lt "$size" ]; then
     chunk_file="$cf.read.$$"
-    tail -c "+$((offset + 1))" "$f" > "$chunk_file" 2>/dev/null \
+    _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
       || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
     chunk_size=$(LC_ALL=C wc -c < "$chunk_file" 2>/dev/null) \
       || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
@@ -486,16 +579,14 @@ status_open_decisions_incremental() {  # <status-file>
     cursor_dirty=1
   fi
   if [ "$cursor_dirty" -eq 1 ]; then
+    target_cursor="$cf.tmp.$$"
     {
       printf 'version=%s\n' "$FM_OPEN_DECISIONS_FOLD_VERSION"
       printf 'offset=%s\n' "$offset"
       printf 'ident=%s\n' "$cur_ident"
-      # An `if` (not `[ -n "$open" ] && printf ...`) so the group's exit status
-      # is always 0 even when open is empty (fully resolved) - a bare `&&`
-      # there would make the whole group fail on that condition, silently
-      # skipping the mv below and leaving the cursor stuck on the OLD offset.
       if [ -n "$open" ]; then printf '%s' "$open"; fi
-    } > "$cf.tmp.$$" && mv -f "$cf.tmp.$$" "$cf"
+    } > "$target_cursor" || return 1
+    mv -f "$target_cursor" "$cf" || return 1
   fi
   printf '%s' "$open"
 }
@@ -520,6 +611,396 @@ $open
 EOF
   done
   return 0
+}
+
+status_presentation_snapshot() {  # <state>
+  local state=$1 f task size ident
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    size=$(_fm_status_file_size "$f") || return 1
+    size=${size//[[:space:]]/}
+    ident=$(_fm_open_decisions_file_ident "$f") || return 1
+    case "$size" in ''|*[!0-9]*) return 1 ;; esac
+    [ -n "$ident" ] || return 1
+    printf '%s\t%s\t%s\n' "$task" "$size" "$ident" || return 1
+  done
+}
+
+status_presentation_cursor_offset() {  # <status-file>
+  local f=$1 state task manifest data row_task offset ident extra cur_ident size legacy
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  state=${f%/*}
+  task=${f##*/}; task=${task%.status}
+  manifest="$state/.status-presentation-cursor"
+  if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+    [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
+    data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
+    offset=
+    while IFS=$(printf '\t') read -r row_task ident legacy extra; do
+      [ -n "$row_task" ] || continue
+      [ -z "$extra" ] || return 1
+      case "$legacy" in ''|*[!0-9]*) return 1 ;; esac
+      [ -n "$ident" ] || return 1
+      if [ "$row_task" = "$task" ]; then
+        [ -z "$offset" ] || return 1
+        offset=$legacy
+        cur_ident=$ident
+      fi
+    done <<EOF
+$data
+EOF
+    if [ -z "$offset" ]; then
+      printf '0'
+      return 0
+    fi
+    ident=$cur_ident
+  else
+    legacy=$(_fm_open_decisions_cursor_path "$f")
+    if [ -e "$legacy" ] || [ -L "$legacy" ]; then
+      status_open_decisions_cursor_offset "$f"
+      return
+    fi
+    offset=0
+    ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  fi
+  cur_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  size=$(_fm_status_file_size "$f") || return 1
+  size=${size//[[:space:]]/}
+  case "$size:$offset" in *[!0-9:]*) return 1 ;; esac
+  if [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then offset=0; fi
+  printf '%s' "$offset"
+}
+
+status_retire_presentation_task() {  # <state> <task-id>
+  local state=$1 task=$2 lock manifest tmp data row_task ident offset extra rc=0 found=0
+  lock="$state/.status-presentation-lock"
+  manifest="$state/.status-presentation-cursor"
+  tmp="$manifest.tmp.$$"
+
+  # A remote-home teardown can legitimately retire an endpoint ID that has no
+  # status log in that home. Do not contend with that home's unrelated status
+  # presenter in this no-op case. A concurrent presenter cannot add this task
+  # without its status file, so a valid manifest with no matching row is a
+  # durable proof that there is nothing to retire.
+  if [ ! -e "$state/$task.status" ] && [ ! -L "$state/$task.status" ] \
+    && [ ! -e "$state/.$task.open-decisions-cursor" ] \
+    && [ ! -L "$state/.$task.open-decisions-cursor" ]; then
+    if [ ! -e "$manifest" ] && [ ! -L "$manifest" ]; then
+      return 0
+    fi
+    if [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] \
+      && data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
+      while IFS=$(printf '\t') read -r row_task ident offset extra; do
+        [ -n "$row_task" ] || continue
+        if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
+        case "$offset" in ''|*[!0-9]*) rc=1; break ;; esac
+        [ "$row_task" != "$task" ] || found=1
+      done <<EOF
+$data
+EOF
+      [ "$rc" -ne 0 ] || [ "$found" -ne 0 ] || return 0
+      rc=0
+    fi
+  fi
+
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+    if [ ! -f "$manifest" ] || [ ! -r "$manifest" ] || [ -L "$manifest" ]; then
+      rc=1
+    elif ! data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
+      rc=1
+    elif ! : > "$tmp"; then
+      rc=1
+    else
+      while IFS=$(printf '\t') read -r row_task ident offset extra; do
+        [ -n "$row_task" ] || continue
+        if [ -n "$extra" ] || [ -z "$ident" ]; then rc=1; break; fi
+        case "$offset" in ''|*[!0-9]*) rc=1; break ;; esac
+        if [ "$row_task" != "$task" ]; then
+          printf '%s\t%s\t%s\n' "$row_task" "$ident" "$offset" >> "$tmp" \
+            || { rc=1; break; }
+        fi
+      done <<EOF
+$data
+EOF
+      if [ "$rc" -eq 0 ]; then mv -f "$tmp" "$manifest" || rc=1; fi
+      [ "$rc" -eq 0 ] || rm -f "$tmp"
+    fi
+  fi
+  if [ "$rc" -eq 0 ]; then
+    rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" || rc=1
+  fi
+  fm_lock_release "$lock" || rc=1
+  return "$rc"
+}
+
+status_acknowledge_presented_snapshot() {  # <state> <snapshot> [<fully-presented-task-ids>]
+  local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident f offset lines line safe
+  while IFS=$(printf '\t') read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    safe=false
+    case "
+$fully_presented
+" in *$'\n'"$task"$'\n'*) safe=true ;; esac
+    if [ "$safe" = false ]; then
+      f="$state/$task.status"
+      offset=$(status_presentation_cursor_offset "$f") || return 1
+      lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1
+      # Once any informational line in this span is presented fleet-wide, the
+      # contiguous cursor may advance through the captured endpoint. Routine
+      # lines remain unacknowledged only while they are the sole unread content,
+      # preserving delayed signal annotations without replaying a handled note
+      # that happened to follow a routine line.
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          *[![:space:]]*)
+            if status_line_is_unread_surface "$line"; then safe=true; break; fi
+            ;;
+        esac
+      done <<EOF
+$lines
+EOF
+      if [ "$safe" = false ]; then endpoint=$offset; fi
+    fi
+    printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" || return 1
+  done <<EOF
+$snapshot
+EOF
+}
+
+status_commit_presentation_snapshot() {  # <state> <snapshot>
+  local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp
+  tmp="$state/.status-presentation-cursor.tmp.$$"
+  : > "$tmp" || return 1
+  while IFS=$(printf '\t') read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    case "$endpoint" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
+    [ -n "$ident" ] || { rm -f "$tmp"; return 1; }
+    f="$state/$task.status"
+    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { rm -f "$tmp"; return 1; }
+    cur_ident=$(_fm_open_decisions_file_ident "$f") || { rm -f "$tmp"; return 1; }
+    size=$(_fm_status_file_size "$f") || { rm -f "$tmp"; return 1; }
+    size=${size//[[:space:]]/}
+    case "$size" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
+    [ "$cur_ident" = "$ident" ] && [ "$endpoint" -le "$size" ] \
+      || { rm -f "$tmp"; return 1; }
+    printf '%s\t%s\t%s\n' "$task" "$ident" "$endpoint" >> "$tmp" \
+      || { rm -f "$tmp"; return 1; }
+  done <<EOF
+$snapshot
+EOF
+  mv -f "$tmp" "$state/.status-presentation-cursor" || { rm -f "$tmp"; return 1; }
+}
+
+scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>
+  local state=$1 snapshot=$2 task endpoint ident f open line
+  while IFS=$(printf '\t') read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    f="$state/$task.status"
+    open=$(status_open_decisions_incremental "$f" "$endpoint") || return 1
+    [ -n "$open" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      printf '%s\t%s\n' "$task" "$line"
+    done <<EOF
+$open
+EOF
+  done <<EOF
+$snapshot
+EOF
+}
+
+# --- unread status lines since the presentation cursor ----------------------
+#
+# The drain annotation historically printed only the newest status line, so a
+# substantive `note:` answer immediately followed by a routine `note:` (or a
+# pending-reply resolution buried under a later unrelated append) never reached
+# the supervisor. Those verbs also never enter the OPEN DECISIONS fold, so they
+# had no other surfacing path.
+# These helpers are the ONE owner of "what is still unread since the last drain
+# presentation": one fleet manifest records each status identity and last-
+# presented byte offset, and one atomic replacement commits only the contiguous
+# status spans that were successfully presented. A quiet fleet scan leaves
+# routine working/done bytes unacknowledged so a subsequently published signal
+# can still annotate them. A missing manifest row or changed file identity is
+# offset 0 for the current file, while malformed or unreadable cursor state
+# aborts presentation without advancing any offset. A trusted cursor at EOF
+# prints nothing, so already-presented bytes are not replayed as new. Teardown
+# retires a task's manifest row with its status file, so reusing a task ID starts
+# the replacement log unread at byte 0. Informational `note:` lines and
+# reserved-key pending-reply resolutions are the fleet-wide unread surface;
+# they are not open decisions and are not persisted in the folded open-set.
+
+# Read the legacy per-task open-decisions cursor used to seed the presentation
+# offset before the fleet manifest exists. A fold-version mismatch, identity
+# mismatch, or offset past the current size falls back to 0. Never writes unless
+# a caller explicitly requests a migration snapshot.
+status_open_decisions_cursor_offset() {  # <status-file>
+  local f=$1 cf offset=0 ident='' version='' cursor_data first rest open=''
+  local offset_line ident_line cur_ident size
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  cf=$(_fm_open_decisions_cursor_path "$f")
+  if [ -e "$cf" ] || [ -L "$cf" ]; then
+    [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ] || return 1
+    if cursor_data=$(LC_ALL=C command cat "$cf" 2>/dev/null); then
+      first=${cursor_data%%$'\n'*}
+      case "$first" in
+        version=*)
+          version=${first#version=}
+          [ "$version" = "$FM_OPEN_DECISIONS_FOLD_VERSION" ] || version=''
+          rest=${cursor_data#*$'\n'}
+          offset_line=${rest%%$'\n'*}
+          case "$offset_line" in
+            offset=*) offset=${offset_line#offset=} ;;
+            *) offset=0; version='' ;;
+          esac
+          case "$offset" in
+            ''|*[!0-9]*) offset=0; version='' ;;
+            *)
+              case "$rest" in
+                *$'\n'*)
+                  rest=${rest#*$'\n'}
+                  ident_line=${rest%%$'\n'*}
+                  case "$ident_line" in
+                    ident=*)
+                      ident=${ident_line#ident=}
+                      case "$rest" in *$'\n'*) open=${rest#*$'\n'} ;; esac
+                      ;;
+                    *) offset=0; version='' ;;
+                  esac
+                  ;;
+                *) offset=0; version='' ;;
+              esac
+              ;;
+          esac
+          ;;
+      esac
+    else
+      return 1
+    fi
+  fi
+  cur_ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  [ -n "$cur_ident" ] || return 1
+  size=$(_fm_status_file_size "$f") || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
+    offset=0
+    open=''
+  fi
+  if [ -n "${FM_STATUS_CURSOR_SNAPSHOT_FILE:-}" ]; then
+    {
+      printf 'version=%s\n' "$FM_OPEN_DECISIONS_FOLD_VERSION"
+      printf 'offset=%s\n' "$offset"
+      printf 'ident=%s\n' "$cur_ident"
+      if [ -n "$open" ]; then printf '%s' "$open"; fi
+    } > "$FM_STATUS_CURSOR_SNAPSHOT_FILE" || return 1
+  fi
+  printf '%s' "$offset"
+}
+
+# Print every non-blank status line whose bytes begin at or after the persisted
+# presentation offset. Does not write the cursor. A missing manifest row or
+# changed status identity reads the current file from offset 0; malformed or
+# unreadable cursor state fails the scan. Symlinks and unreadable status files
+# print nothing.
+status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
+  local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line rc=0
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  cf=$(_fm_open_decisions_cursor_path "$f")
+  chunk_file="$cf.unread.$$"
+  offset=$(status_presentation_cursor_offset "$f") || return 1
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  actual_size=$(_fm_status_file_size "$f") || return 1
+  actual_size=${actual_size//[[:space:]]/}
+  case "$actual_size" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -n "$captured_end" ]; then
+    case "$captured_end" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$captured_end" -le "$actual_size" ] || return 1
+    size=$captured_end
+  else
+    size=$actual_size
+  fi
+  [ "$offset" -lt "$size" ] || return 0
+  _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
+    || { rm -f "$chunk_file"; return 1; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *[![:space:]]*) printf '%s\n' "$line" || { rc=1; break; } ;;
+    esac
+  done < "$chunk_file"
+  rm -f "$chunk_file"
+  return "$rc"
+}
+
+# 0 when a status line is an informational `note:` or a reserved-key
+# pending-reply resolution. Those lines never fold into OPEN DECISIONS, so the
+# drain's unread-status surface is their only guaranteed presentation.
+status_line_is_unread_surface() {  # <status-line>
+  local line=$1 verb key note resolve held prefix
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = note ] && return 0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  case "$verb" in
+    "$resolve"|"$held") ;;
+    *) return 1 ;;
+  esac
+  key=$(_fm_decision_key "$line") || return 1
+  note=$(status_line_note "$line")
+  for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}; do
+    case "$key" in
+      "$prefix"*)
+        _fm_decision_key_transition_allowed "$key" "$note"
+        return
+        ;;
+    esac
+  done
+  return 1
+}
+
+# Fleet-wide unread informational lines: one "<task>\t<status-line>" row per
+# still-unread `note:` or pending-reply resolution, in glob (task id) order.
+# Prints nothing when none are unread. Directory scan rejects status symlinks
+# the same way scan_open_decisions does.
+scan_unread_surface_lines() {  # <state>
+  local state=$1 f task lines line
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    lines=$(status_new_lines_since_cursor "$f") || return 1
+    [ -n "$lines" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      status_line_is_unread_surface "$line" || continue
+      printf '%s\t%s\n' "$task" "$line"
+    done <<EOF
+$lines
+EOF
+  done
+  return 0
+}
+
+scan_unread_surface_snapshot() {  # <state> <task-and-endpoint-snapshot>
+  local state=$1 snapshot=$2 task endpoint ident f lines line
+  while IFS=$(printf '\t') read -r task endpoint ident; do
+    [ -n "$task" ] || continue
+    f="$state/$task.status"
+    lines=$(status_new_lines_since_cursor "$f" "$endpoint") || return 1
+    [ -n "$lines" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      status_line_is_unread_surface "$line" || continue
+      printf '%s\t%s\n' "$task" "$line"
+    done <<EOF
+$lines
+EOF
+  done <<EOF
+$snapshot
+EOF
 }
 
 # Fold material routed-work phases in the same keyed event stream.
@@ -657,16 +1138,31 @@ crew_is_paused() {  # <id>
 # same space-separated file list as signal_reason_is_actionable. Files are mapped to
 # task ids by stripping the .status / .turn-ended suffix; a no-verb wake with nothing
 # provably working must surface, so an empty/unresolvable list returns 1.
+# A kind=secondmate task's .status signal is never absorbable here regardless of
+# busy evidence: that stream is the mate's routed-reply channel, so every append
+# is parent-directed content the supervisor must read (a routed reply, a newly
+# raised decision, a mirrored remote line), and a busy mate agent makes its note
+# more current, not less deliverable. Scoped to .status files - a mate's bare
+# turn-ended ping still uses the ordinary provably-working absorb.
 signal_crew_provably_working() {  # <file> ...
-  local f base task seen=""
+  local f base dir task seen=""
   for f in "$@"; do
     base=${f##*/}
+    dir=${f%/*}
+    [ "$dir" != "$f" ] || dir=.
     case "$base" in
       *.status)     task=${base%.status} ;;
       *.turn-ended) task=${base%.turn-ended} ;;
       *)            continue ;;
     esac
     [ -n "$task" ] || continue
+    case "$base" in
+      *.status)
+        if [ "$(grep '^kind=' "$dir/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2-)" = secondmate ]; then
+          return 1
+        fi
+        ;;
+    esac
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
     crew_is_provably_working "$task" || return 1

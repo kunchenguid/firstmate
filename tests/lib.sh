@@ -34,6 +34,13 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Host commit.gpgsign must never make a fixture depend on a personal signing key.
+# Use Git's process-local config environment rather than mutating user config.
+FM_TEST_GIT_CONFIG_INDEX=${GIT_CONFIG_COUNT:-0}
+eval "export GIT_CONFIG_KEY_$FM_TEST_GIT_CONFIG_INDEX=commit.gpgsign"
+eval "export GIT_CONFIG_VALUE_$FM_TEST_GIT_CONFIG_INDEX=false"
+export GIT_CONFIG_COUNT=$((FM_TEST_GIT_CONFIG_INDEX + 1))
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
@@ -189,24 +196,24 @@ SH
 
 # --- deterministic git identity and fixtures --------------------------------
 
-# fm_git_identity [name] [email]: export a fixed author/committer identity and
-# disable inherited signing so fixture commits never depend on host Git config.
+# fm_git_identity [name] [email]: export a fixed author/committer identity so
+# fixture commits never depend on host identity. The library-wide process-local
+# Git config above independently disables host commit signing for every fixture.
 fm_git_identity() {
   export GIT_AUTHOR_NAME=${1:-fmtest} GIT_AUTHOR_EMAIL=${2:-fmtest@example.invalid}
   export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
-  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false
 }
 
 # fm_git_init_commit <dir>: create a git repo at <dir> with a README and one
-# commit. Uses an inline identity and disables inherited signing so it works
-# whether or not fm_git_identity was called and regardless of global Git config.
+# commit. Uses an inline identity so it works whether or not fm_git_identity was
+# called.
 fm_git_init_commit() {
   local dir=$1
   mkdir -p "$dir"
   git -C "$dir" init -q
   printf '# %s\n' "$(basename "$dir")" > "$dir/README.md"
   git -C "$dir" add README.md
-  git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' -c commit.gpgsign=false commit -qm initial
+  git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }
 
 # fm_git_add_origin <repo> <bare>: clone <repo> bare into <bare> and register it
@@ -218,11 +225,12 @@ fm_git_add_origin() {
   git -C "$repo" remote add origin "file://$remote_abs"
 }
 
-# fm_git_worktree <repo> <worktree> <branch>: init <repo> with one commit, then
-# add a worktree on a fresh branch.
+# fm_git_worktree <repo> <worktree> <branch>: initialize <repo> with one commit
+# and a local bare origin, then add a worktree on a fresh branch.
 fm_git_worktree() {
   local repo=$1 worktree=$2 branch=$3
   fm_git_init_commit "$repo"
+  fm_git_add_origin "$repo" "$repo.origin.git"
   git -C "$repo" worktree add --quiet -b "$branch" "$worktree"
 }
 

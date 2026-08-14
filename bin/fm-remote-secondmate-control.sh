@@ -138,7 +138,10 @@ cmd_launch() {
 
   validate_id "$id"
   validate_home "$id"
-  case "$harness" in claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) die "unverified remote secondmate harness: $harness" ;; esac
+  case "$harness" in
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    *) die "unverified remote secondmate harness: $harness" ;;
+  esac
   case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
   # Herdr is required on this host, not merely preferred: its server belongs to
   # the GUI login session, so the endpoint survives every SSH disconnection that
@@ -246,7 +249,7 @@ cmd_update() {
   validate_id "$id"
   validate_home "$id"
   if ! update_out=$(FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
-    "$SCRIPT_DIR/fm-update.sh" 2>&1); then
+    FM_SKIP_FORK_UPSTREAM_CHECK=1 "$SCRIPT_DIR/fm-update.sh" 2>&1); then
     [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
     die "remote code root update failed"
   fi

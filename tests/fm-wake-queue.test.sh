@@ -318,21 +318,11 @@ SH
   pass "structural signal enrichment is separate, deduped, home-local, and tier-zero for other wakes"
 }
 
-test_enrichment_caps_and_status_file_failures() {
-  local dir state out fake_perl_log perl_bin i raw_count annotation_bytes annotation_count oversized_lines perl_reads
-  dir=$(make_case caps)
+test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
+  local dir state out i raw_count expected
+  dir=$(make_case complete-enrichment)
   state="$dir/state"
   out="$dir/drain.out"
-  fake_perl_log="$dir/perl.log"
-  perl_bin=$(command -v perl) || fail "perl is required for safe status reads"
-  cat > "$dir/fakebin/perl" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = -MFcntl=:DEFAULT ]; then
-  printf 'read\n' >> "$FM_WAKE_ENRICH_PERL_LOG"
-fi
-exec "$FM_WAKE_ENRICH_REAL_PERL" "$@"
-SH
-  chmod +x "$dir/fakebin/perl"
   awk 'BEGIN { printf "done: "; for (i = 0; i < 20000; i++) printf "x"; printf "\n" }' > "$state/huge.status"
   append_wake "$state" signal huge.status "signal: huge" || fail "huge status wake append failed"
   i=1
@@ -350,28 +340,28 @@ SH
   chmod 000 "$state/unreadable.status"
   append_wake "$state" signal unreadable.status "signal: unreadable" || fail "unreadable status wake append failed"
 
-  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WAKE_ENRICH_PERL_LOG="$fake_perl_log" \
-    FM_WAKE_ENRICH_REAL_PERL="$perl_bin" "$DRAIN" > "$out" \
-    || fail "capped enrichment drain failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "complete enrichment drain failed"
   raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
-  grep '^wake annotation:.*\[truncated\]$' "$out" >/dev/null || fail "per-item/input truncation marker was not emitted"
-  grep -E '^wake annotation: [1-9][0-9]* annotations omitted \(global enrichment byte cap\)$' "$out" >/dev/null \
-    || fail "global omitted-annotation marker was not emitted"
-  annotation_bytes=$(LC_ALL=C awk '/^wake annotation:/ { bytes += length($0) + 1 } END { print bytes + 0 }' "$out")
-  [ "$annotation_bytes" -le 8192 ] || fail "global annotation output exceeded 8192 bytes ($annotation_bytes)"
-  oversized_lines=$(LC_ALL=C awk '/^wake annotation: latest/ && length($0) + 1 > 2048 { count++ } END { print count + 0 }' "$out")
-  [ "$oversized_lines" -eq 0 ] || fail "a per-item annotation exceeded 2048 bytes"
-  annotation_count=$(grep -c '^wake annotation: latest' "$out" || true)
-  [ "$annotation_count" -lt 9 ] || fail "global cap did not omit any of the nine readable status annotations"
-  perl_reads=$(wc -l < "$fake_perl_log" | tr -d ' ')
-  [ "$perl_reads" -eq 8 ] || fail "enrichment read cap allowed $perl_reads safe reads instead of 8"
-  grep -E '^wake annotation: [1-9][0-9]* annotations omitted \(enrichment read cap\)$' "$out" >/dev/null \
-    || fail "enrichment read-cap omission marker was not emitted"
+
+  expected="wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: $(cat "$state/huge.status")"
+  grep -Fx "$expected" "$out" >/dev/null \
+    || fail "the oversized unread status line was truncated or omitted"
+  i=1
+  while [ "$i" -le 8 ]; do
+    expected="wake annotation: latest wake-EVENT observed at drain, not current state: many-$i.status: $(cat "$state/many-$i.status")"
+    grep -Fx "$expected" "$out" >/dev/null \
+      || fail "readable status many-$i was truncated or omitted"
+    i=$((i + 1))
+  done
+  if grep -E '^wake annotation:.*(truncated|omitted)' "$out" >/dev/null; then
+    fail "complete unread annotation output still reported dropped content"
+  fi
   if grep -E ': (empty|missing|malformed|unreadable)\.status:' "$out" >/dev/null; then
     fail "missing, unreadable, malformed, or empty status file produced an annotation"
   fi
-  pass "bounded reads and per-item/global caps fail open with explicit truncation and omission markers"
+  pass "every readable unread status line is annotated in full while invalid status files preserve their raw wakes"
 }
 
 wait_for_file_text() {  # <file> <fixed-text>
@@ -483,8 +473,11 @@ test_legacy_generationless_wake_is_adopted() {
   pass "wake drain: generation-less legacy wakes are adopted and acknowledged"
 }
 
-test_stale_recovery_generation_is_rejected() {
-  local dir state first_err replay_err sequence generation newer_marker newer_sequence newer_generation rc
+# Pin the recovery acknowledgement contract from docs/watcher-continuity.md at
+# the queue-library boundary.
+test_stale_recovery_generation_cannot_touch_a_newer_episode() {
+  local dir state first_err replay_err sequence generation handling_marker
+  local newer_marker newer_sequence newer_generation rc
   dir=$(make_case stale-recovery-generation)
   state="$dir/state"
 
@@ -498,35 +491,63 @@ test_stale_recovery_generation_is_rejected() {
   [ -n "$sequence" ] && [ -n "$generation" ] \
     || fail "first drain did not emit a generation-bound acknowledgement"
 
-  append_wake "$state" check second 'check: newer recovery generation' \
-    || fail "newer generation wake append failed"
-  newer_marker=$(cat "$state/.watcher-down")
-  [ "${newer_marker##*:}" != "$generation" ] \
-    || fail "new durable publication did not advance the recovery generation"
+  append_wake "$state" check second 'check: same episode' \
+    || fail "first same-episode wake append failed"
+  append_wake "$state" check third 'check: same episode again' \
+    || fail "second same-episode wake append failed"
+  handling_marker=$(cat "$state/.watcher-down")
+  [ "${handling_marker##*:}" = "$generation" ] \
+    || fail "repeated publications replaced the outstanding recovery generation"
 
-  set +e
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
-    --recovery-generation "$generation" > "$dir/stale-ack.out" 2> "$dir/stale-ack.err"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "stale acknowledgement consumed a newer recovery generation"
-  [ "$(cat "$state/.watcher-down")" = "$newer_marker" ] \
-    || fail "stale acknowledgement changed the newer recovery marker"
+    --recovery-generation "$generation" > "$dir/handled-ack.out" 2> "$dir/handled-ack.err" \
+    || fail "a publication during handling invalidated the printed acknowledgement"
+  ! grep "$(printf '\tcheck\tfirst\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the handled row was not consumed"
   grep "$(printf '\tcheck\tsecond\t')" "$state/.wake-queue" >/dev/null \
-    || fail "stale acknowledgement removed the newer durable wake"
+    || fail "a row above the acknowledged sequence was consumed"
+  grep "$(printf '\tcheck\tthird\t')" "$state/.wake-queue" >/dev/null \
+    || fail "the second row above the acknowledged sequence was consumed"
+  case "$(cat "$state/.watcher-down")" in
+    pending:*) ;;
+    *) fail "an episode with rows still queued was retired" ;;
+  esac
 
+  # Retire that episode, then let a genuinely newer one open.
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay.out" 2> "$dir/replay.err" \
-    || fail "newer generation could not be re-drained"
+    || fail "remaining wake could not be re-drained"
   replay_err="$dir/replay.err"
   grep "$(printf '\tcheck\tsecond\t')" "$dir/replay.out" >/dev/null \
-    || fail "newer generation wake did not re-surface"
+    || fail "remaining wake did not re-surface"
+  grep "$(printf '\tcheck\tthird\t')" "$dir/replay.out" >/dev/null \
+    || fail "second remaining wake did not re-surface"
   newer_sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$replay_err")
   newer_generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$replay_err")
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$newer_sequence" \
     --recovery-generation "$newer_generation" \
-    || fail "newer recovery generation could not be acknowledged"
-  [ ! -s "$state/.wake-queue" ] || fail "newer acknowledgement left durable wakes queued"
-  pass "wake drain: stale acknowledgement cannot consume a newer recovery generation"
+    || fail "the handled episode could not be acknowledged"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledgement left durable wakes queued"
+
+  append_wake "$state" check fourth 'check: newer recovery generation' \
+    || fail "newer generation wake append failed"
+  newer_marker=$(cat "$state/.watcher-down")
+  [ "${newer_marker##*:}" != "$generation" ] \
+    || fail "a retired episode did not open a new recovery generation"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+    --recovery-generation "$generation" > "$dir/stale-ack.out" 2> "$dir/stale-ack.err" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "a stale acknowledgement failed instead of degrading safely: $(cat "$dir/stale-ack.err")"
+  if ! grep -F 'WAKE_ACK_REQUIRED' "$dir/stale-ack.err" >/dev/null \
+    || ! grep -F 're-run' "$dir/stale-ack.err" >/dev/null; then
+    fail "a stale acknowledgement did not name its own remedy: $(cat "$dir/stale-ack.err")"
+  fi
+  [ "$(cat "$state/.watcher-down")" = "$newer_marker" ] \
+    || fail "a stale acknowledgement retired the newer recovery episode"
+  grep "$(printf '\tcheck\tfourth\t')" "$state/.wake-queue" >/dev/null \
+    || fail "a stale acknowledgement consumed the newer durable wake"
+  pass "wake drain: a stale acknowledgement cannot retire or consume a newer recovery episode"
 }
 
 test_recovery_ack_failure_is_reported() {
@@ -557,8 +578,10 @@ SH
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "recovery acknowledgement failure was reported as success"
-  grep -F 'recovery generation is stale or could not be acknowledged safely' "$dir/drain.err" >/dev/null \
+  grep -F 'recovery episode could not be retired safely' "$dir/drain.err" >/dev/null \
     || fail "recovery acknowledgement failure had no explicit diagnostic"
+  grep -F 'WAKE_ACK_REQUIRED' "$dir/drain.err" >/dev/null \
+    || fail "recovery acknowledgement failure did not name its own remedy"
   [ "$(cat "$state/.watcher-down")" = "pending:handling:$generation" ] \
     || fail "failed acknowledgement corrupted the pending recovery marker"
 
@@ -626,6 +649,152 @@ test_interruption_before_and_after_raw_commit() {
   pass "interruptions preserve durable rows until post-handling acknowledgement"
 }
 
+# The guarded self-announced status append (fm_wake_status_append_self_announced)
+# and the seen-signature gate it shares with the watcher's signal scan. Both
+# directions of the dedup contract are pinned through the real library
+# functions: a fully announced file plus the home's own bookkeeping close stays
+# announced (no wake), while ANY unannounced byte - a pending foreign line, a
+# missing marker, a later different note - reads as wake-worthy.
+test_self_announced_append_guards() {
+  local dir state status
+  dir=$(make_case self-announced-append)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  # FIRST status change: a fresh file with no marker is unannounced (wakes).
+  printf 'working: first line\n' > "$status"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a never-announced status file read as already announced"
+
+  # Prime the marker to current (the watcher just surfaced/absorbed everything).
+  prime_status_seen "$state" "$status" || fail "could not prime the seen marker"
+
+  # A self-announced bookkeeping close on a fully announced file is suppressed.
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: closed by this home' \
+    || fail "self-announced append on an announced file was not suppressed (rc=$?)"
+  grep -Fq 'resolved [key=k1]: answered: closed by this home' "$status" \
+    || fail "the suppressed close was not appended"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "the self-announced close left unannounced bytes behind"
+
+  # A later DIFFERENT note from any other writer still wakes.
+  printf 'needs-decision [key=k2]: a new decision\n' >> "$status"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a later different note on the same task read as already announced"
+
+  # With that foreign line pending, a bookkeeping close must NOT advance the
+  # marker over it: the close appends but the file stays wake-worthy.
+  local rc=0
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: second close' || rc=$?
+  [ "$rc" -eq 1 ] || fail "a close over pending foreign bytes did not fail toward waking (rc=$rc)"
+  grep -Fq 'resolved [key=k1]: answered: second close' "$status" \
+    || fail "the fail-toward-waking close was not appended"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a close over pending foreign bytes swallowed the pending wake"
+
+  # UTF-8 close on an announced file: byte accounting must hold for multibyte.
+  prime_status_seen "$state" "$status" || fail "could not re-prime the seen marker"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    "$(printf 'resolved [key=k2]: answered: caf\xc3\xa9 rentr\xc3\xa9e')" \
+    || fail "a multibyte self-announced close was not suppressed (rc=$?)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "multibyte byte accounting broke the self-announce guard"
+
+  pass "self-announced appends suppress only their own bytes and fail toward waking"
+}
+
+# A trap that fires inside a lock's critical section abandons the holding
+# frame, and the exit path then re-acquires the same lock (a TERM inside a
+# recovery-marker section is the reproduced case: the watcher's reap wedged
+# forever spinning against its own pid). The same-process re-acquire must
+# reclaim the abandoned hold, while a SUBSHELL still waits on its parent's
+# live hold exactly as before.
+test_self_held_lock_reclaims_instead_of_deadlocking() {
+  local dir state rc
+  dir=$(make_case self-held-lock)
+  state="$dir/state"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock="$2/.fixture.lock"
+    fm_lock_acquire_wait "$lock" || exit 10
+    fm_lock_try_acquire "$lock" || exit 11
+    fm_lock_release "$lock"
+    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 12
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "self-held lock was not reclaimed cleanly (rc=$rc)"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock="$2/.fixture2.lock"
+    fm_lock_acquire_wait "$lock" || exit 10
+    ( fm_lock_try_acquire "$lock" && exit 13; exit 0 ) || exit 13
+    fm_lock_release "$lock"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a subshell reclaimed its parent's live hold (rc=$rc)"
+  pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
+}
+
+# Drain-time historical annotation staleness: a turn-ended-only wake row must
+# not present an already-announced status line as a new update, while a status
+# file with unannounced bytes keeps its annotation and a direct status row is
+# always annotated. Driven through the real drain executable.
+test_historical_annotation_skips_announced_status() {
+  local dir state out err
+  dir=$(make_case historical-annotation)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+
+  printf 'working: long scout still going\n' > "$state/scout.status"
+  prime_status_seen "$state" "$state/scout.status" \
+    || fail "could not prime the scout seen marker"
+  : > "$state/scout.turn-ended"
+  append_wake "$state" signal scout.turn-ended "signal: $state/scout.turn-ended" \
+    || fail "turn-ended wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "drain failed"
+  if grep -F 'scout.status: working: long scout still going' "$out" >/dev/null; then
+    fail "a fully announced status line was replayed as a historical annotation"
+  fi
+  grep -F 'scout.turn-ended' "$out" >/dev/null \
+    || fail "suppressing the stale annotation dropped the turn-ended wake row itself"
+  ack_drain_err "$state" "$err" || fail "could not acknowledge the first drain"
+
+  # Unannounced status bytes: the historical annotation is genuinely new
+  # information and must stay.
+  printf 'working: fresh unannounced progress\n' >> "$state/scout.status"
+  : > "$state/scout.turn-ended"
+  append_wake "$state" signal scout.turn-ended "signal: $state/scout.turn-ended" \
+    || fail "second turn-ended wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "second drain failed"
+  grep -F 'historical / not necessarily the triggering event: scout.status: working: fresh unannounced progress' "$out" >/dev/null \
+    || fail "an unannounced status line lost its historical annotation"
+  ack_drain_err "$state" "$err" || fail "could not acknowledge the second drain"
+
+  # A direct status row is the announcement itself and is always annotated,
+  # even when the seen marker already covers the file.
+  printf 'done: scout finished\n' >> "$state/scout.status"
+  prime_status_seen "$state" "$state/scout.status" \
+    || fail "could not prime the marker for the direct-row leg"
+  append_wake "$state" signal scout.status "signal: $state/scout.status" \
+    || fail "direct status wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "third drain failed"
+  grep -F 'scout.status: done: scout finished' "$out" >/dev/null \
+    || fail "a direct status row lost its annotation"
+  pass "historical annotations replay nothing already announced and keep everything new"
+}
+
+test_self_held_lock_reclaims_instead_of_deadlocking
+test_self_announced_append_guards
+test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
@@ -635,10 +804,10 @@ test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
-test_enrichment_caps_and_status_file_failures
+test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_wake_publish_requires_atomic_recovery_evidence
 test_legacy_generationless_wake_is_adopted
-test_stale_recovery_generation_is_rejected
+test_stale_recovery_generation_cannot_touch_a_newer_episode
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit

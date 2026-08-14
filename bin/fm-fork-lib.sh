@@ -1,0 +1,138 @@
+# shellcheck shell=bash
+# Shared fork-main primitives.
+# Usage: . bin/fm-fork-lib.sh
+#
+# Eight facts are read by more than one fork script and must mean exactly the
+# same thing in each, so they live here rather than being copied:
+#   - which branch a remote's default is (origin/upstream default resolution);
+#   - which ref is a divergence's canonical topic (published fork branch first,
+#     then a local branch);
+#   - whether a manifest path spec owns an actual changed path;
+#   - what one commit's patch identity is;
+#   - which first-parent commits arrived through direct or regular PR delivery;
+#   - whether a patch can be reversed from a current tree through a private index;
+#   - how a conflict receipt binds the unaffected index;
+#   - how to read gh-axi's current one-value TOON API envelope.
+#
+# Path ownership in particular is a shared invariant between two competing
+# consumers: fm-fork-merge.sh derives the affected-unit list for a conflict
+# re-justification receipt from it, while fm-fork-status.sh decides "manifest
+# unit <id> does not cover changed path <path>" from it. Two copies could drift
+# apart and attribute a conflict to a unit the health report says does not own
+# that path, which would then demand re-justification decisions for the wrong
+# units.
+#
+# Patch identity is the same kind of shared invariant. fm-fork-merge.sh records
+# the evidence that upstream accepted a divergence, and fm-fork-status.sh
+# re-proves that recorded evidence. Both must compute the identity the same way
+# or the merge would write proof the health owner cannot verify.
+
+fm_fork_remote_branch() { # <repo> <remote>
+  local repo=$1 remote=$2 ref branch
+  ref=$(git -C "$repo" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
+  if [ -n "$ref" ]; then
+    printf '%s\n' "${ref#"$remote"/}"
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$repo" rev-parse --verify --quiet "refs/remotes/$remote/$branch^{commit}" >/dev/null; then
+      printf '%s\n' "$branch"
+      return 0
+    fi
+  done
+  return 1
+}
+
+fm_fork_topic_ref() { # <repo> <topic>
+  local repo=$1 topic=$2
+  if git -C "$repo" rev-parse --verify --quiet "refs/remotes/origin/$topic^{commit}" >/dev/null; then
+    printf 'refs/remotes/origin/%s\n' "$topic"
+    return 0
+  fi
+  if git -C "$repo" rev-parse --verify --quiet "refs/heads/$topic^{commit}" >/dev/null; then
+    printf 'refs/heads/%s\n' "$topic"
+    return 0
+  fi
+  return 1
+}
+
+fm_fork_commit_patch_id() { # <repo> <commit>; prints the stable patch id
+  # Git documents `git diff-tree` output as carrying the commit's object name,
+  # which is what lets `git patch-id` map a patch identity back to its commit.
+  # `--stable` is passed explicitly because Git's default is the unstable
+  # algorithm and patchid.stable can change it per repository.
+  local repo=$1 commit=$2 id
+  id=$(git -C "$repo" diff-tree -p "$commit" | git patch-id --stable | awk 'NR == 1 { print $1 }') || return 1
+  [ -n "$id" ] || return 1
+  printf '%s\n' "$id"
+}
+
+fm_fork_delivery_history() { # <repo> <tip>
+  local repo=$1 tip=$2 outer parent_line first_parent second_parent
+  git -C "$repo" rev-list --first-parent "$tip" || return 1
+  while IFS= read -r outer; do
+    parent_line=$(git -C "$repo" rev-list --parents -n1 "$outer") || return 1
+    first_parent=$(printf '%s\n' "$parent_line" | awk 'NF == 3 { print $2 }')
+    second_parent=$(printf '%s\n' "$parent_line" | awk 'NF == 3 { print $3 }')
+    [ -n "$first_parent" ] && [ -n "$second_parent" ] || continue
+    git -C "$repo" rev-list --first-parent "$first_parent..$second_parent" || return 1
+  done < <(git -C "$repo" rev-list --first-parent --merges "$tip")
+}
+
+fm_fork_patch_reversible_from() { # <repo> <patch-commit> <tree-ish>
+  local repo=$1 patch_commit=$2 treeish=$3 tmp index patch rc=1
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-fork-patch-reverse.XXXXXX") || return 1
+  index="$tmp/index"
+  patch="$tmp/patch"
+  if git -C "$repo" diff-tree --binary --full-index -p "$patch_commit" > "$patch" 2>/dev/null \
+      && GIT_INDEX_FILE="$index" git -C "$repo" read-tree "$treeish" >/dev/null 2>&1 \
+      && GIT_INDEX_FILE="$index" git -C "$repo" apply --cached --reverse --check "$patch" >/dev/null 2>&1; then
+    rc=0
+  fi
+  rm -f "$index" "$index.lock" "$patch"
+  rmdir "$tmp" 2>/dev/null || true
+  return "$rc"
+}
+
+fm_fork_path_covered() { # <manifest-spec> <actual-path>
+  local spec=$1 actual=$2 prefix
+  case "$spec" in
+    */'**') prefix=${spec%'**'}; case "$actual" in "$prefix"*) return 0 ;; esac ;;
+    */) case "$actual" in "$spec"*) return 0 ;; esac ;;
+    *) [ "$actual" = "$spec" ] && return 0 ;;
+  esac
+  return 1
+}
+
+fm_fork_index_without_paths_hash() { # <repo> <newline-delimited-path-file>
+  local repo=$1 paths_file=$2 path
+  local -a pathspecs
+  pathspecs=(--stage -z -- .)
+  while IFS= read -r path || [ -n "$path" ]; do
+    [ -n "$path" ] || continue
+    pathspecs+=(":(top,exclude,literal)$path")
+  done < "$paths_file"
+  git -C "$repo" ls-files "${pathspecs[@]}" | git hash-object --stdin
+}
+
+fm_fork_gh_axi_scalar() { # current gh-axi API TOON envelope on stdin
+  # gh-axi 0.1.29 documents --jq but does not promise raw stdout. Its current
+  # authenticated API surface wraps one selected scalar as:
+  #   api_response:
+  #     body: <value>
+  #     truncated: false
+  # Accept only that complete, untruncated one-body shape. A serializer change
+  # then stops refresh instead of turning envelope text into a PR disposition.
+  local line body='' body_count=0 root_count=0 truncated=''
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      api_response:) root_count=$((root_count + 1)) ;;
+      '  body: '*) body=${line#'  body: '}; body_count=$((body_count + 1)) ;;
+      '  truncated: '*) truncated=${line#'  truncated: '} ;;
+      '') ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$root_count" -eq 1 ] && [ "$body_count" -eq 1 ] && [ "$truncated" = false ] && [ -n "$body" ] || return 1
+  printf '%s\n' "$body"
+}
