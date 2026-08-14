@@ -2036,6 +2036,16 @@ EOF
     echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
     return 1
   fi
+  if ! printf '%s' "$list" | jq -e --arg tab "$tab_id" --arg workspace "$wsid" --arg label "$label" '
+    [.result.tabs[]? | select(.tab_id == $tab)]
+    | length == 1
+      and .[0].workspace_id == $workspace
+      and .[0].label == $label
+  ' >/dev/null 2>&1 \
+     || [ "$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id")" != "$pane_id" ]; then
+    echo "error: herdr tab create response does not bind replacement tab $tab_id and pane $pane_id to label '$label' in workspace $wsid (session $session)" >&2
+    return 1
+  fi
   post_create_dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" --arg replacement "$tab_id" \
     '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
   concurrent_dup_tabs=

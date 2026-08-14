@@ -250,6 +250,18 @@ case "${args[0]:-} ${args[1]:-}" in
         esac
         exit 0
         ;;
+      postcreate-response-mismatch)
+        reads_file="$dir/herdr-tab-list-reads"
+        reads=0
+        [ -f "$reads_file" ] && reads=$(cat "$reads_file")
+        reads=$((reads + 1))
+        printf '%s\n' "$reads" > "$reads_file"
+        case "$reads" in
+          1|2) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"}]}}' ;;
+          *) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"},{"tab_id":"w1:t4","workspace_id":"w1","label":"fm-hr1"}]}}' ;;
+        esac
+        exit 0
+        ;;
       tabs-unavailable) exit 1 ;;
       tabs-malformed)
         printf '%s\n' '{}'
@@ -282,6 +294,18 @@ case "${args[0]:-} ${args[1]:-}" in
     ;;
   'pane list')
     case "$case_name" in
+      postcreate-conflicting-pane)
+        reads_file="$dir/herdr-pane-list-reads"
+        reads=0
+        [ -f "$reads_file" ] && reads=$(cat "$reads_file")
+        reads=$((reads + 1))
+        printf '%s\n' "$reads" > "$reads_file"
+        if [ "$reads" -le 2 ]; then
+          printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}'
+        else
+          printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"},{"pane_id":"w1:p4","tab_id":"w1:t4"}]}}'
+        fi
+        ;;
       mismatched-pane) printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p9","tab_id":"w1:t2"}]}}' ;;
       conflicting-pane) printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}' ;;
       *) printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}' ;;
@@ -298,6 +322,11 @@ case "${args[0]:-} ${args[1]:-}" in
     if [ "$case_name" = postcreate-conflicting-pane ]; then
       printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
       printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}'
+      exit 0
+    fi
+    if [ "$case_name" = postcreate-response-mismatch ]; then
+      printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
+      printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p9"}}}'
       exit 0
     fi
     printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
@@ -1664,6 +1693,31 @@ test_spawn_relaunch_reclaims_a_postcreate_herdr_conflict() {
   pass "fm-spawn --relaunch: a post-create Herdr conflict reclaims the unlaunched replacement"
 }
 
+test_spawn_relaunch_refuses_an_unbound_herdr_create_response() {
+  local dir out rc before mutations
+  dir=$(new_case herdr-postcreate-response hr1)
+  add_herdr_missing_pane_task "$dir" hr1
+  make_herdr_missing_pane_stub "$dir" postcreate-response-mismatch
+  before="$dir/meta-before"
+  cp "$dir/home/state/hr1.meta" "$before"
+  out=$(FM_FAKE_HERDR_CASE=postcreate-response-mismatch run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "an unbound Herdr create response must refuse"
+  assert_contains "$out" "does not bind replacement tab" \
+    "the unbound create response should name its ownership proof failure"
+  cmp -s "$before" "$dir/home/state/hr1.meta" \
+    || fail "an unbound create response changed the task's serialized metadata"
+  mutations=$(cat "$dir/fake/herdr-mutations")
+  assert_contains "$mutations" 'tab create' \
+    "the unbound create response fixture did not cross the create boundary"
+  assert_not_contains "$mutations" 'pane close' \
+    "an unbound create response must not close an unverified pane"
+  assert_not_contains "$mutations" 'tab close' \
+    "an unbound create response must not close an unverified tab"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "an unbound create response must not deliver a second worker launch"
+  pass "fm-spawn --relaunch: an unbound Herdr create response refuses before cleanup"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refreshes_the_published_endpoint_before_confirmation
 test_relaunch_preserves_durable_task_metadata
@@ -1713,3 +1767,4 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything
 test_spawn_relaunch_reclaims_a_postcreate_herdr_conflict
+test_spawn_relaunch_refuses_an_unbound_herdr_create_response
