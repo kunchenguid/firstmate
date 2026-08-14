@@ -645,7 +645,10 @@ test_create_task_closes_and_replaces_no_agent_husk() {
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
   # 5: tab create -> the replacement tab (created BEFORE the husk is closed)
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk2","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/6.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/7.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/8.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk2","workspace_id":"w1"}]}}\n' > "$resp/10.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk2 /tmp/proj' "$ROOT" ) \
@@ -673,7 +676,13 @@ test_create_task_closes_all_duplicate_husks_after_replacement() {
   printf '{"result":{"pane":{"pane_id":"w1:p3"}}}\n' > "$resp/6.out"
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p3 not found"}}\n' > "$resp/7.out"
   printf '{"result":{"tab":{"tab_id":"w1:t4"},"root_pane":{"pane_id":"w1:p4"}}}\n' > "$resp/8.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-husk-many","workspace_id":"w1"}]}}\n' > "$resp/11.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/9.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/10.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/11.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/13.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p3"}}}\n' > "$resp/14.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p3 not found"}}\n' > "$resp/15.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-husk-many","workspace_id":"w1"}]}}\n' > "$resp/17.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk-many /tmp/proj' "$ROOT" ) \
@@ -704,8 +713,11 @@ test_create_task_refuses_when_preexisting_husk_tab_remains() {
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/5.out"
-  printf '1\n' > "$resp/6.exit"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-husk","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-stale-husk","workspace_id":"w1"}]}}\n' > "$resp/7.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/6.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/7.out"
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/8.out"
+  printf '1\n' > "$resp/9.exit"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-husk","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-stale-husk","workspace_id":"w1"}]}}\n' > "$resp/10.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-stale-husk /tmp/proj' "$ROOT" 2>&1 )
@@ -797,6 +809,7 @@ setup_stale_occupancy_responses() {  # <resp> <status> [agent-json-extra]
   local resp=$1 status=$2 extra=${3:-}
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
   printf '{"result":{"agent":{"agent":"fm-lab-agent","agent_status":"%s"%s}}}\n' "$status" "$extra" > "$resp/2.out"
+  printf '{"result":{"agent":{"agent":"fm-lab-agent","agent_status":"%s"%s}}}\n' "$status" "$extra" > "$resp/4.out"
 }
 
 test_pane_agent_state_idle_proven_shell_is_no_agent() {
@@ -883,20 +896,36 @@ test_pane_agent_state_rollback_flag_keeps_idle_live() {
   pass "fm_backend_herdr_pane_agent_state: FM_HERDR_STALE_SHELL_RELEASE=0 keeps idle occupancy live"
 }
 
-test_pane_agent_state_releases_only_returned_source() {
+test_pane_agent_state_stale_recheck_preserves_working_agent() {
+  local dir log resp fb out calls
+  dir="$TMP_ROOT/stale-working-recheck"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  setup_stale_occupancy_responses "$resp" idle ',"agent_session":{"source":"herdr:pi"}'
+  death_process_info_fixture w1:p2 67 > "$resp/3.out"
+  printf '{"result":{"agent":{"agent":"fm-lab-agent","agent_status":"working","agent_session":{"source":"herdr:pi"}}}}\n' > "$resp/4.out"
+  make_stale_occupancy_ps "$dir" 67
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(run_stale_occupancy_classifier)
+  [ "$out" = "live" ] || fail "a newly working agent must stay live after the stale-shell proof, got '$out'"
+  calls=$(cat "$log")
+  assert_not_contains "$calls" $'pane\x1frelease-agent' "the liveness classifier must not release a newly working agent"
+  pass "fm_backend_herdr_pane_agent_state: a working transition after the stale-shell proof stays live"
+}
+
+test_pane_agent_state_releases_current_stale_identity() {
   local dir log resp fb out calls
   dir="$TMP_ROOT/stale-release"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  setup_stale_occupancy_responses "$resp" idle ',"agent_session":{"source":"herdr:pi"}'
+  setup_stale_occupancy_responses "$resp" idle ',"agent_session":{"source":"herdr:pi"},"state_change_seq":42'
   death_process_info_fixture w1:p2 67 > "$resp/3.out"
   make_stale_occupancy_ps "$dir" 67
   fb=$(make_herdr_fakebin "$dir")
   out=$(run_stale_occupancy_classifier)
-  [ "$out" = "no-agent" ] || fail "idle occupancy with a returned source should still classify no-agent, got '$out'"
+  [ "$out" = "no-agent" ] || fail "a revalidated stale occupancy should classify no-agent, got '$out'"
   calls=$(cat "$log")
-  assert_contains "$calls" $'pane\x1frelease-agent' "matching source must call release-agent"
+  assert_contains "$calls" $'pane\x1frelease-agent' "a current stale identity must release its lifecycle authority"
   assert_contains "$calls" $'--source\x1fherdr:pi' "release-agent must use the source Herdr returned"
   assert_contains "$calls" $'--agent\x1ffm-lab-agent' "release-agent must use the agent Herdr returned"
-  pass "fm_backend_herdr_pane_agent_state: matching release-agent uses only the source Herdr returned"
+  assert_contains "$calls" $'--seq\x1f42' "release-agent must condition on the current lifecycle sequence"
+  pass "fm_backend_herdr_pane_agent_state: releases a revalidated stale identity at its exact lifecycle sequence"
 }
 
 test_create_task_replaces_idle_occupancy_on_proven_shell() {
@@ -907,8 +936,14 @@ test_create_task_replaces_idle_occupancy_on_proven_shell() {
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
   printf '{"result":{"agent":{"agent":"fm-lab-agent","agent_status":"idle"}}}\n' > "$resp/4.out"
   death_process_info_fixture w1:p2 67 > "$resp/5.out"
-  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/6.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-stale-idle","workspace_id":"w1"}]}}\n' > "$resp/8.out"
+  printf '{"result":{"agent":{"agent":"fm-lab-agent","agent_status":"idle"}}}\n' > "$resp/6.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/7.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/8.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/9.out"
+  printf '{"result":{"agent":{"agent":"fm-lab-agent","agent_status":"idle"}}}\n' > "$resp/10.out"
+  death_process_info_fixture w1:p2 67 > "$resp/11.out"
+  printf '{"result":{"agent":{"agent":"fm-lab-agent","agent_status":"idle"}}}\n' > "$resp/12.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-stale-idle","workspace_id":"w1"}]}}\n' > "$resp/14.out"
   make_stale_occupancy_ps "$dir" 67
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -924,6 +959,32 @@ EOF
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' "create_task did not create the replacement tab"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task did not close the stale-occupancy husk"
   pass "fm_backend_herdr_create_task: idle occupancy on a proven idle shell is a replaceable husk"
+}
+
+test_create_task_refuses_stale_husk_that_becomes_working_before_close() {
+  local dir log resp fb calls
+  dir="$TMP_ROOT/husk-stale-working-before-close"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-working","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
+  printf '{"result":{"agent":{"agent":"fm-lab-agent","agent_status":"idle"}}}\n' > "$resp/4.out"
+  death_process_info_fixture w1:p2 67 > "$resp/5.out"
+  printf '{"result":{"agent":{"agent":"fm-lab-agent","agent_status":"idle"}}}\n' > "$resp/6.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/7.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/8.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/9.out"
+  printf '{"result":{"agent":{"agent":"fm-lab-agent","agent_status":"working"}}}\n' > "$resp/10.out"
+  make_stale_occupancy_ps "$dir" 67
+  fb=$(make_herdr_fakebin "$dir")
+  if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-stale-working /tmp/proj' "$ROOT" >/dev/null 2>&1; then
+    fail "create_task must refuse a stale husk that becomes working before closure"
+  fi
+  calls=$(cat "$log")
+  assert_contains "$calls" $'\x1f''tab'$'\x1f''create' "create_task should create the replacement before the closure recheck"
+  assert_not_contains "$calls" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' "create_task must not close a duplicate that became working"
+  pass "fm_backend_herdr_create_task: a stale husk that becomes working before closure is preserved"
 }
 
 test_create_task_creates_and_parses_ids() {
@@ -4521,8 +4582,10 @@ test_pane_agent_state_working_proven_shell_stays_live
 test_pane_agent_state_blocked_proven_shell_stays_live
 test_pane_agent_state_idle_without_shell_proof_stays_live
 test_pane_agent_state_rollback_flag_keeps_idle_live
-test_pane_agent_state_releases_only_returned_source
+test_pane_agent_state_stale_recheck_preserves_working_agent
+test_pane_agent_state_releases_current_stale_identity
 test_create_task_replaces_idle_occupancy_on_proven_shell
+test_create_task_refuses_stale_husk_that_becomes_working_before_close
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
 test_presentation_defaults_on_at_or_above_the_floor
