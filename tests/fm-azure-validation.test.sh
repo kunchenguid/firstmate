@@ -135,7 +135,7 @@ assert "AUTHOR_RESERVED_VCPUS" not in host
 assert "def admission_decision" not in host
 assert "def shared_capacity_demand" not in host
 assert '"ttl_schedule_id": base + "/Microsoft.DevTestLab/schedules/shutdown-computevm-{}".format(vm)' in host
-assert 'fresh_start = state.get("run_id") is None' in host
+assert 'run_mode = replacement_run_mode(state)' in host
 assert 'create_run_command(env, state, "start", input_url=input_url, output_url=output_url)' in host
 assert '"running", "reattaching")' in host
 for value in ("MemoryMax","MemorySwapMax=0","TasksMax","CPUQuota=700%","PrivateTmp=yes","ProtectSystem=strict","CapabilityBoundingSet=","cryptsetup luksUUID","provider account-binding marker mismatch","credential disk content binding mismatch","FM_AZURE_VALIDATION_RUNTIME_PATH","axi status","/dev/disk/azure/scsi1/lun","/dev/disk/azure/data/by-lun/"):
@@ -362,6 +362,32 @@ source=inspect.getsource(m.foundation_gate)
 assert 'storage, env["operator_data_plane_ip"], "ipAddressOrRange"' in source
 PY
   pass "validation accepts Azure CLI's exact operator /32 ipAddressOrRange shape"
+}
+
+controller_recovery_contract() {
+  python3 - "$HOST" <<'PY' || fail "validation controller recovery contract failed"
+import importlib.util,os,pathlib,tempfile,sys
+spec=importlib.util.spec_from_file_location("validation",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+captured={}
+def write_private_json(_env,_prefix,value):
+ captured.update(value); fd,name=tempfile.mkstemp(); os.close(fd); path=pathlib.Path(name); path.write_text("{}\n"); return path
+m.write_private_json=write_private_json
+keys={"FM_AZURE_VALIDATION_WORKTREE_KEY_FILE":b"a"*64+b"\n","FM_AZURE_VALIDATION_CREDENTIAL_KEY_FILE":b"b"*64+b"\n"}
+m.ensure_secret_file=lambda name:(pathlib.Path("fixture"),keys[name])
+m.az_command=lambda *_args,**_kwargs:(None,0,"")
+m.read_resource=lambda _env,rid,_kind:(True,{"id":rid,"tags":{"validation-cell":"azv-aaaaaaaaaaaa","fence":"sha256:"+"f"*64}})
+m.save_state=lambda *_args:None
+m.expected_tags=lambda *_args:{"validation-cell":"azv-aaaaaaaaaaaa","fence":"sha256:"+"f"*64}
+state={"cell":"azv-aaaaaaaaaaaa","attempt":1,"input_digest":"sha256:"+"i"*64,"request_digest":"sha256:"+"r"*64,"allocation":{"sku":"Standard_D8as_v6","sku_family":"standardDav6Family"},"request":{"fence":"sha256:"+"f"*64,"protocol":{"guest_digest":m.sha256_file(m.GUEST)},"limits":{"wall_seconds":60}},"resources":{"vm_id":"/vm","vm_instance_id":"vm-instance","worktree_disk_id":"/work","credential_disk_id":"/credential","identity_client_id":"client","run_commands":[]},"staging":{"container":"container"}}
+m.create_run_command({"storage":"storage","owner":"owner"},state,"start")
+protected={item["name"]:item["value"] for item in captured["properties"]["protectedParameters"]}
+assert protected["fm_azure_validation_worktree_key_file"]==("a"*64+"\n")
+assert protected["fm_azure_validation_credential_key_file"]==("b"*64+"\n")
+assert m.replacement_run_mode({"phase":"failed-retained","control_error":"No key available with this passphrase.\n"})=="reattach"
+assert m.replacement_run_mode({"phase":"failed-retained","control_error":"different failure\n"})=="start"
+assert m.replacement_run_mode({"phase":"running","run_id":"01AAAAAAAAAAAAAAAAAAAAAAAA"})=="reattach"
+PY
+  pass "controller preserves 65-byte key text and reattaches the initialized passphrase-failure disk"
 }
 
 retail_price_transport_contract() {
@@ -654,6 +680,7 @@ submit_contract
 security_negative_contract
 credential_disk_identity_contract
 storage_network_access_contract
+controller_recovery_contract
 retail_price_transport_contract
 admission_contract
 identity_and_recovery_contract

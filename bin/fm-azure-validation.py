@@ -1498,7 +1498,7 @@ def create_run_command(env, state, mode, input_url=None, output_url=None, respon
         protected.append({"name": "response", "value": response})
     for name in ("FM_AZURE_VALIDATION_WORKTREE_KEY_FILE", "FM_AZURE_VALIDATION_CREDENTIAL_KEY_FILE"):
         _, secret = ensure_secret_file(name)
-        protected.append({"name": name.lower(), "value": secret.decode("utf-8").rstrip("\n")})
+        protected.append({"name": name.lower(), "value": secret.decode("utf-8")})
     selected = {
         "sku": state["allocation"]["sku"],
         "family": state["allocation"]["sku_family"],
@@ -1885,6 +1885,17 @@ def replacement_allowed(state, vm_presence, worktree_identity, remote_head):
     return True, "replacement admitted"
 
 
+def replacement_run_mode(state):
+    if state.get("run_id") is not None:
+        return "reattach"
+    if (
+        state.get("phase") == "failed-retained"
+        and state.get("control_error") == "No key available with this passphrase.\n"
+    ):
+        return "reattach"
+    return "start"
+
+
 def replace(env, args):
     if not args.confirm_replace or args.confirm_subscription != env["subscription"]:
         raise ValidationError("replacement requires --confirm-replace and the exact subscription")
@@ -1905,7 +1916,7 @@ def replace(env, args):
         allowed, reason = replacement_allowed(state, "absent-proven", immutable_identity(worktree, "disk"), remote_head)
         if not allowed:
             raise ValidationError(reason)
-        fresh_start = state.get("run_id") is None
+        run_mode = replacement_run_mode(state)
         # Prove and remove the old attempt's exact disposable remnants before
         # their names leave authoritative state. Durable worktree, identity,
         # private container, and credential lease are retained.
@@ -1943,7 +1954,7 @@ def replace(env, args):
             env, state["staging"]["result_blob"], "cw", hours=MAX_CELL_LIFETIME_HOURS,
             container=state["staging"]["container"],
         )
-        if fresh_start:
+        if run_mode == "start":
             input_url = blob_sas(
                 env, state["staging"]["input_blob"], "r",
                 container=state["staging"]["container"],
@@ -1952,7 +1963,7 @@ def replace(env, args):
             note = "replacement VM freshly starting because no no-mistakes run id was recorded"
         else:
             create_run_command(env, state, "reattach", output_url=output_url)
-            note = "replacement VM reattaching only to the exact recorded no-mistakes run"
+            note = "replacement VM reattaching to the exact retained durable worktree"
         transition(env, state, "running", note)
     print("AZURE VALIDATION REPLACED cell={} attempt={}".format(state["cell"], state["attempt"]))
 
