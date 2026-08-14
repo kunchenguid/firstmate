@@ -256,6 +256,12 @@ with tarfile.open(sys.argv[1], "r:gz") as archive:
             target.chmod(0o755)
         elif member.isfile():
             target.chmod(0o755 if member.mode & 0o111 else 0o644)
+# The bundle is built from a file list and carries zero directory members,
+# so every intermediate directory is created at the extracting umask (077)
+# and no member-driven chmod ever reaches it. Normalize the real tree.
+for path in root.rglob("*"):
+    if path.is_dir():
+        path.chmod(0o755)
 MODES
   python3 - "$RUNTIME" <<'PY'
 import hashlib
