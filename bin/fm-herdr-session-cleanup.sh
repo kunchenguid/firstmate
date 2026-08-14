@@ -202,7 +202,7 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
 fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   local session=$1 workspace=$2 title=$3 home_real=$4 token journal id task_lock
   local version bound_workspace bound_tab bound_pane presentation_lock snapshot
-  local tab pane state close_status=0
+  local tab pane state close_status=0 namespace_fault
   token=$(fm_herdr_cleanup_title_token "$title") || return 0
   if ! fm_herdr_cleanup_unique_match "$title" "$session" "$home_real"; then
     return 0
@@ -221,7 +221,11 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   fi
   presentation_lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || {
     fm_lock_release "$task_lock" || true
-    fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is unavailable"
+    if namespace_fault=$(fm_backend_herdr_presentation_lock_namespace_fault); then
+      fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is unavailable - $namespace_fault"
+    else
+      fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is unavailable"
+    fi
     return 0
   }
   if ! fm_lock_try_acquire "$presentation_lock"; then
