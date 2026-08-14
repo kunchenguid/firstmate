@@ -101,13 +101,10 @@ fm_busy_kimi_verified() {
 
 # Cursor Agent verification gate. A controlled run on 2026.08.11-e8db854 proved
 # that project .cursor/hooks.json and ~/.cursor/hooks.json compose, and that
-# beforeSubmitPrompt/stop brackets a real interactive turn. The semantic source
-# therefore exists, but firstmate wiring is deferred until the captain chooses its
-# transport (decision key cursor-busy-hook-transport). The rendered spinner,
+# beforeSubmitPrompt/stop brackets a real interactive turn. fm-spawn wires that
+# lifecycle through a project-local cursor-hook source. The rendered spinner,
 # Working label, and ctrl+c footer remain presentation and are never trusted.
-# Keep this gate empty until cursor-hook is wired, including the interrupt path,
-# then record the version and live state-transition evidence before opening it.
-FM_BUSY_CURSOR_AGENT_VERIFIED_VERSIONS=""
+FM_BUSY_CURSOR_AGENT_VERIFIED_VERSIONS="2026.08.11-e8db854"
 
 fm_busy_cursor_agent_verified() {
   [ -n "$FM_BUSY_CURSOR_AGENT_VERIFIED_VERSIONS" ]

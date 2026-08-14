@@ -35,7 +35,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex
+  fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex cursor-agent
   printf '%s\n' "$fakebin"
 }
 
@@ -256,6 +256,45 @@ run_claude_hook() {  # <settings.json> <hook-event>
   sh -c "$cmd"
 }
 
+run_cursor_hook() {  # <hooks.json> <hook-event>
+  local cmd
+  cmd=$(jq -r ".hooks[\"$2\"][0].command" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  printf '{}\n' | sh -c "$cmd"
+}
+
+test_cursor_hooks_semantic_lifecycle() {
+  local rec id=busy-cursor-1 out state hooks status
+  rec=$(make_spawn_case cursor-lifecycle cursor-agent "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "cursor-agent spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$WT_DIR/.cursor/hooks.json"
+  assert_present "$hooks" "cursor-agent spawn did not write project-local hooks"
+  jq -e '.version == 1 and .hooks.beforeSubmitPrompt and .hooks.stop' "$hooks" >/dev/null \
+    || fail "cursor-agent hooks do not expose the verified lifecycle"
+
+  status=$(git -C "$WT_DIR" status --short --untracked-files=all)
+  [ -z "$status" ] || fail "project-local Cursor hooks surfaced in the worktree diff: $status"
+
+  rm -f "$state/$id.turn-ended"
+  run_cursor_hook "$hooks" stop || fail "stop hook command failed"
+  assert_present "$state/$id.turn-ended" "stop no longer touches the turn-end notification"
+  out=$(classify cursor-agent "$id" "$state")
+  [ "$out" = "idle cursor-hook" ] || fail "stop must classify 'idle cursor-hook', got '$out'"
+
+  run_cursor_hook "$hooks" beforeSubmitPrompt || fail "beforeSubmitPrompt hook command failed"
+  out=$(classify cursor-agent "$id" "$state")
+  [ "$out" = "busy cursor-hook" ] \
+    || fail "beforeSubmitPrompt must classify 'busy cursor-hook', got '$out'"
+
+  run_cursor_hook "$hooks" stop || fail "final stop hook command failed"
+  out=$(classify cursor-agent "$id" "$state")
+  [ "$out" = "idle cursor-hook" ] || fail "final stop must classify 'idle cursor-hook', got '$out'"
+  pass "cursor-agent project hooks stay out of diffs and drive semantic busy-to-idle classification"
+}
+
 test_claude_hooks_semantic_lifecycle() {
   local rec id=busy-cl-1 out state settings
   rec=$(make_spawn_case claude-lifecycle claude "$id")
@@ -349,6 +388,7 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_cursor_hooks_semantic_lifecycle
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

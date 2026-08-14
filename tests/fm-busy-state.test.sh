@@ -160,7 +160,7 @@ test_stale_gen_record_unknown() {
 test_missing_record_unknown_not_idle() {
   local state out h
   state=$(new_state_dir missing)
-  for h in claude opencode pi pi-signed; do
+  for h in claude opencode pi pi-signed cursor-agent; do
     out=$(fm_busy_classify tmux w1 "$h" t1 "$state")
     [ "$out" = "unknown missing" ] || fail "$h with no record must be 'unknown missing', got '$out'"
   done
@@ -222,7 +222,7 @@ test_converted_adapters_ignore_footer_text() {
    ■■■■⬝⬝⬝⬝  esc interrupt
 Working...
 Ctrl+c:cancel'
-  for h in claude opencode pi pi-signed; do
+  for h in claude opencode pi pi-signed cursor-agent; do
     out=$(fm_busy_classify tmux w1 "$h" t1 "$state" "$tail")
     [ "$out" = "unknown missing" ] || fail "$h must never classify from footer text, got '$out'"
   done
@@ -272,21 +272,27 @@ test_kimi_unverified_gate() {
   pass "standalone kimi classifies unknown until the live verification gate opens"
 }
 
-test_cursor_agent_unverified_gate() {
+test_cursor_agent_verified_gate() {
   local state gen out
   state=$(new_state_dir cursor-agent-gate)
   gen=$("$EV" arm "$state" t1)
   "$EV" apply "$state" t1 busy --gen "$gen" --source cursor-hook --event before-submit-prompt
   out=$(fm_busy_classify tmux w1 cursor-agent t1 "$state")
-  [ "$out" = "unknown cursor-agent-unverified" ] \
-    || fail "cursor-agent must classify unknown without a semantic source, got '$out'"
+  [ "$out" = "busy cursor-hook" ] \
+    || fail "cursor-agent must trust its verified semantic source, got '$out'"
+  "$EV" apply "$state" t1 idle --gen "$gen" --source cursor-hook --event stop
+  out=$(fm_busy_classify tmux w1 cursor-agent t1 "$state")
+  [ "$out" = "idle cursor-hook" ] \
+    || fail "cursor-agent stop must classify idle from its semantic source, got '$out'"
   out=$(fm_busy_classify tmux w1 cursor-agent t1 "$state" 'Working
 ctrl+c to stop')
-  [ "$out" = "unknown cursor-agent-unverified" ] \
-    || fail "cursor-agent must not classify from rendered TUI text, got '$out'"
-  [ -z "$(fm_busy_sources_for_harness cursor-agent)" ] \
-    || fail "cursor-agent must trust no semantic source until one is verified"
-  pass "cursor-agent classifies unknown until a semantic source passes its verification gate"
+  [ "$out" = "idle cursor-hook" ] \
+    || fail "cursor-agent must ignore rendered TUI text in favor of its semantic source, got '$out'"
+  case " $(fm_busy_sources_for_harness cursor-agent) " in
+    *' cursor-hook '*) : ;;
+    *) fail "cursor-agent must trust cursor-hook after live verification" ;;
+  esac
+  pass "cursor-agent classifies busy and idle from its verified semantic source"
 }
 
 # --- endpoint death and native fallbacks ----------------------------------------
@@ -389,7 +395,7 @@ test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
-test_cursor_agent_unverified_gate
+test_cursor_agent_verified_gate
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact

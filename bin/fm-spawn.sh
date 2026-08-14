@@ -152,6 +152,8 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# Cursor Agent uses project-local .cursor/hooks.json, excluded through the
+# worktree's git info/exclude so Firstmate machinery never enters project diffs.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -2009,7 +2011,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|cursor-agent*)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2134,6 +2136,22 @@ export default function (pi: any) {
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
+      ;;
+    cursor-agent*)
+      # Cursor composes project-local hooks with the operator's global hooks.
+      # beforeSubmitPrompt opens the semantic turn and stop closes it while
+      # preserving the watcher's turn-end notification. The whole project-local
+      # directory is excluded through git info/exclude so no Cursor hook artifact
+      # can surface in a project diff or pull request.
+      mkdir -p "$WT/.cursor"
+      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source cursor-hook"
+      j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event before-submit-prompt 2>/dev/null || true")
+      j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+      cat > "$WT/.cursor/hooks.json" <<EOF
+{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":"$j_submit"}],"stop":[{"command":"$j_stop"}]}}
+EOF
+      exclude_path '.cursor/'
       ;;
     codex*)
       # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the

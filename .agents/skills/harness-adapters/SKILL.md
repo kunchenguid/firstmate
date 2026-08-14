@@ -389,7 +389,7 @@ Cursor Agent launches with a positional prompt as `cursor-agent --trust --force 
 
 | Fact | Value |
 |---|---|
-| Busy state | `beforeSubmitPrompt` and `stop` are a live-verified semantic turn lifecycle, but firstmate has not wired them yet. Until it does, classification stays `unknown cursor-agent-unverified`; a spinner, `Working`, and `ctrl+c to stop` remain rendered presentation, not state sources. |
+| Busy state | Project-local `beforeSubmitPrompt` and `stop` hooks drive `busy cursor-hook` and `idle cursor-hook`; `stop` also writes the turn-end notification. A spinner, `Working`, and `ctrl+c to stop` remain rendered presentation, not state sources. |
 | Exit command | One `Ctrl+D` from the empty composer exits after a short delay. |
 | Interrupt | Single Escape, live-verified by cancelling an active `sleep 30` tool call. |
 | Resume | `cursor-agent --continue` resumes the most recent session for the workspace. The CLI also exposes `--resume [chatId]`, `cursor-agent resume`, and `cursor-agent ls`. |
@@ -411,9 +411,10 @@ Always confirm current availability with `cursor-agent models`, because the acco
 
 Cursor project hooks and Pedro's existing global hooks compose on 2026.08.11-e8db854.
 A controlled listener made the existing global hook observable without editing it: global `SessionStart`/`SessionEnd` events and a project hook fired in the same run, and a real interactive submission emitted `Start` (`beforeSubmitPrompt`) followed by `Stop`.
-Firstmate therefore has a reachable semantic turn lifecycle, but its transport is deferred to the captain-held `cursor-busy-hook-transport` decision; never modify Pedro's global Cursor files without his explicit approval.
-Until that wiring lands, `bin/fm-busy-lib.sh` returns `unknown cursor-agent-unverified`.
-Ordinary Cursor dispatch is not mechanically refused: each turn-end wake remains unabsorbed and a working pane can produce false stale/wedge escalation under issue #2374, so use attended dispatch only.
+`fm-spawn` installs that lifecycle in the disposable worktree's `.cursor/hooks.json` and excludes `.cursor/` through git info/exclude so it cannot surface in project diffs or pull requests.
+The hooks drive the classifier through the trusted `cursor-hook` source and let the watcher absorb ordinary turn-end wakes while a new turn is provably active.
+Ordinary Cursor crewmate and scout dispatch is unattended-capable; primary and secondmate support remain unavailable.
+Never modify Pedro's global Cursor files without his explicit approval.
 
 Cursor's MCP and skill portability are separate follow-up work.
 The current global Cursor MCP configuration is Pedro's personal file and is never a firstmate write target.
