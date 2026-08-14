@@ -1,19 +1,17 @@
 # shellcheck shell=bash
-# Shared quota-axi compatibility floor for the bootstrap diagnostic.
+# Shared quota-axi compatibility check for the bootstrap diagnostic.
 # Usage: . bin/fm-quota-axi-lib.sh
 #
-# FM_QUOTA_AXI_MIN follows the axi-family floor policy owned beside the floor
-# constants in bin/fm-bootstrap.sh.
-#
-# This file is the single owner of that version number. bin/fm-bootstrap.sh
-# turns a failing check into the operator-facing MISSING diagnostic, which is
-# what keeps an older build from reaching a dispatch intake at all.
+# bin/fm-reviewed-toolchain.sh owns the exact reviewed version.
+# bin/fm-bootstrap.sh turns a failing check into the operator-facing MISSING
+# diagnostic, which keeps a mismatched build from reaching dispatch intake.
 
-FM_QUOTA_AXI_MIN=0.1.25
+FM_QUOTA_AXI_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-reviewed-toolchain.sh disable=SC1091
+. "$FM_QUOTA_AXI_LIB_DIR/fm-reviewed-toolchain.sh"
 
 fm_quota_axi_compatible() {
-  local timeout=${1:-} output parts major minor patch extra
-  local min_major min_minor min_patch min_extra
+  local timeout=${1:-} output installed expected
   command -v quota-axi >/dev/null 2>&1 || return 1
   if [ -n "$timeout" ]; then
     case "$timeout" in
@@ -31,19 +29,9 @@ fm_quota_axi_compatible() {
   else
     output=$(quota-axi --version 2>/dev/null </dev/null) || return 1
   fi
-  parts=$(printf '%s\n' "$output" |
-    sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
-    head -1)
-  IFS=' ' read -r major minor patch extra <<< "$parts"
-  # An unparseable version is incompatible, never assumed current, so a
-  # development or vendored build cannot pass a floor it was never checked against.
-  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
-  # The floor is compared from FM_QUOTA_AXI_MIN so bumping it needs one edit.
-  IFS='.' read -r min_major min_minor min_patch min_extra <<< "$FM_QUOTA_AXI_MIN"
-  [ -n "$min_major" ] && [ -n "$min_minor" ] && [ -n "$min_patch" ] && [ -z "$min_extra" ] || return 1
-  [ "$major" -gt "$min_major" ] && return 0
-  [ "$major" -eq "$min_major" ] || return 1
-  [ "$minor" -gt "$min_minor" ] && return 0
-  [ "$minor" -eq "$min_minor" ] || return 1
-  [ "$patch" -ge "$min_patch" ]
+  installed=$(printf '%s\n' "$output" |
+    sed -nE 's/.*[vV]?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' |
+    head -n 1)
+  expected=$(fm_reviewed_tool_version quota-axi) || return 1
+  [ "$installed" = "$expected" ]
 }

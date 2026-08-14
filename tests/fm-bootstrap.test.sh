@@ -12,8 +12,8 @@
 # tasks-axi update advertises --archive-body, whether its mv help advertises
 # multi-ID moves, whether quota-axi is on PATH,
 # whether the local backend config opts out of tasks-axi backlog mutations,
-# which no-mistakes version is on PATH, which gh-axi version is on PATH, and
-# which lavish-axi version is on PATH.
+# which no-mistakes version is on PATH, and whether every reviewed npm tool
+# reports its exact selected version.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
@@ -44,12 +44,13 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
+  fm_fake_exit0 "$fakebin" tmux node
+  fm_fake_reviewed_browser_toolchain "$fakebin" "$dir"
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.50
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_GH_AXI_VERSION:-0.1.29}"
+  printf '%s\n' "${FM_FAKE_GH_AXI_VERSION:-0.1.30}"
   exit 0
 fi
 exit 0
@@ -85,7 +86,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
-  add_tasks_axi "$fakebin" "0.2.4"
+  add_tasks_axi "$fakebin" "0.2.5"
   add_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
 }
@@ -297,16 +298,16 @@ test_bootstrap_reporting() {
         ;;
     esac
   done <<'ROWS'
-treehouse --lease support is accepted silently^1^0.2.4^1^manual^empty^^
-treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.4^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-compatible tasks-axi is silent by default^1^0.2.4^1^-^empty^^
-missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without archive-body is required by default^1^0.2.4:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without multi-id mv is required by default^1^0.2.4:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-missing quota-axi is required by default^1^0.2.4^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
-manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-manual backlog backend suppresses tasks-axi availability^1^0.2.4^1^manual^empty^^
+treehouse --lease support is accepted silently^1^0.2.5^1^manual^empty^^
+treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.5^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
+compatible tasks-axi is silent by default^1^0.2.5^1^-^empty^^
+missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.5)^
+incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.5)^
+tasks-axi without archive-body is required by default^1^0.2.5:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.5)^
+tasks-axi without multi-id mv is required by default^1^0.2.5:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.5)^
+missing quota-axi is required by default^1^0.2.5^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi@0.1.25)^
+manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.5)^
+manual backlog backend suppresses tasks-axi availability^1^0.2.5^1^manual^empty^^
 ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
 }
@@ -341,9 +342,9 @@ ROWS
   pass "bootstrap enforces no-mistakes minimum version"
 }
 
-test_gh_axi_min_version() {
+test_gh_axi_reviewed_version() {
   local label version mode case_dir fakebin out missing n
-  missing='MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)'
+  missing='MISSING: gh-axi (install: npm install -g gh-axi@0.1.30)'
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
@@ -361,20 +362,20 @@ test_gh_axi_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum gh-axi version is accepted^0.1.29^empty
-newer gh-axi patch is accepted^0.1.30^empty
-newer gh-axi minor is accepted^0.2.0^empty
-newer gh-axi major is accepted^1.0.0^empty
-older gh-axi patch reports an upgrade^0.1.19^missing
-much older gh-axi minor reports an upgrade^0.0.9^missing
-unparseable gh-axi version reports an upgrade^gh-axi development build^missing
+reviewed gh-axi version is accepted^0.1.30^empty
+previous gh-axi patch reports a mismatch^0.1.29^missing
+newer gh-axi patch reports a mismatch^0.1.31^missing
+newer gh-axi minor reports a mismatch^0.2.0^missing
+newer gh-axi major reports a mismatch^1.0.0^missing
+older gh-axi patch reports a mismatch^0.1.19^missing
+unparseable gh-axi version reports a mismatch^gh-axi development build^missing
 ROWS
-  pass "bootstrap enforces gh-axi minimum version"
+  pass "bootstrap enforces the reviewed gh-axi version"
 }
 
-test_lavish_axi_min_version() {
+test_lavish_axi_reviewed_version() {
   local label version mode case_dir fakebin out missing n
-  missing='MISSING: lavish-axi (install: npm install -g lavish-axi && lavish-axi setup hooks)'
+  missing='MISSING: lavish-axi (install: npm install -g lavish-axi@0.1.50)'
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
@@ -392,20 +393,20 @@ test_lavish_axi_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum lavish-axi version is accepted^0.1.46^empty
-newer lavish-axi patch is accepted^0.1.47^empty
-newer lavish-axi minor is accepted^0.2.0^empty
-newer lavish-axi major is accepted^1.0.0^empty
-the patch just below the floor reports an upgrade^0.1.45^missing
-much older lavish-axi minor reports an upgrade^0.0.9^missing
-unparseable lavish-axi version reports an upgrade^lavish-axi development build^missing
+reviewed lavish-axi version is accepted^0.1.50^empty
+previous lavish-axi patch reports a mismatch^0.1.49^missing
+newer lavish-axi patch reports a mismatch^0.1.51^missing
+newer lavish-axi minor reports a mismatch^0.2.0^missing
+newer lavish-axi major reports a mismatch^1.0.0^missing
+older lavish-axi minor reports a mismatch^0.0.9^missing
+unparseable lavish-axi version reports a mismatch^lavish-axi development build^missing
 ROWS
-  pass "bootstrap enforces lavish-axi minimum version"
+  pass "bootstrap enforces the reviewed lavish-axi version"
 }
 
-test_tasks_axi_min_version() {
+test_tasks_axi_reviewed_version() {
   local label version mode case_dir fakebin out missing n archive_body multi_id
-  missing='MISSING: tasks-axi (install: npm install -g tasks-axi)'
+  missing='MISSING: tasks-axi (install: npm install -g tasks-axi@0.2.5)'
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
@@ -438,24 +439,24 @@ test_tasks_axi_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum tasks-axi version is accepted^0.2.4^empty
-newer tasks-axi patch is accepted^0.2.5^empty
-newer tasks-axi minor is accepted^0.3.0^empty
-newer tasks-axi major is accepted^1.0.0^empty
-older tasks-axi with features reports an upgrade^0.1.1^missing
-the patch just below the floor reports an upgrade^0.2.3^missing
-unparseable tasks-axi version reports an upgrade^tasks-axi development build^missing
-tasks-axi at floor without archive-body reports an upgrade^0.2.4:noarchive^missing
-tasks-axi at floor without multi-id reports an upgrade^0.2.4:nomulti^missing
+reviewed tasks-axi version is accepted^0.2.5^empty
+previous tasks-axi patch reports a mismatch^0.2.4^missing
+newer tasks-axi patch reports a mismatch^0.2.6^missing
+newer tasks-axi minor reports a mismatch^0.3.0^missing
+newer tasks-axi major reports a mismatch^1.0.0^missing
+older tasks-axi with features reports a mismatch^0.1.1^missing
+unparseable tasks-axi version reports a mismatch^tasks-axi development build^missing
+tasks-axi at reviewed version without archive-body reports a mismatch^0.2.5:noarchive^missing
+tasks-axi at reviewed version without multi-id reports a mismatch^0.2.5:nomulti^missing
 ROWS
-  pass "bootstrap enforces tasks-axi minimum version"
+  pass "bootstrap enforces the reviewed tasks-axi version"
 }
 
 # These rows exercise the real bootstrap check with a fake quota-axi answering
-# --version: below the floor produces MISSING, while at or above is silent.
-test_quota_axi_min_version() {
+# --version: only the reviewed version is accepted.
+test_quota_axi_reviewed_version() {
   local label version mode case_dir fakebin out missing n
-  missing='MISSING: quota-axi (install: npm install -g quota-axi)'
+  missing='MISSING: quota-axi (install: npm install -g quota-axi@0.1.25)'
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
@@ -473,15 +474,93 @@ test_quota_axi_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum quota-axi version is accepted^0.1.25^empty
-newer quota-axi patch is accepted^0.1.26^empty
-newer quota-axi minor is accepted^0.2.0^empty
-newer quota-axi major is accepted^1.0.0^empty
-the patch just below the floor reports an upgrade^0.1.24^missing
-much older quota-axi minor reports an upgrade^0.0.9^missing
-unparseable quota-axi version reports an upgrade^quota-axi development build^missing
+reviewed quota-axi version is accepted^0.1.25^empty
+newer quota-axi patch reports a mismatch^0.1.26^missing
+newer quota-axi minor reports a mismatch^0.2.0^missing
+newer quota-axi major reports a mismatch^1.0.0^missing
+previous quota-axi patch reports a mismatch^0.1.24^missing
+older quota-axi minor reports a mismatch^0.0.9^missing
+unparseable quota-axi version reports a mismatch^quota-axi development build^missing
 ROWS
-  pass "bootstrap enforces quota-axi minimum version"
+  pass "bootstrap enforces the reviewed quota-axi version"
+}
+
+test_reviewed_browser_versions_and_global_path() {
+  local case_dir fakebin out package_json entrypoint expected
+
+  case_dir="$TMP_ROOT/reviewed-browser"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "reviewed browser toolchain should be silent, got: $out"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_CHROME_DEVTOOLS_AXI_VERSION=0.1.30 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  expected='MISSING: chrome-devtools-axi (install: npm install -g chrome-devtools-axi@0.1.29)'
+  [ "$out" = "$expected" ] || fail "newer browser AXI mismatch did not request the reviewed pin: $out"
+
+  package_json="$case_dir/npm-prefix/lib/node_modules/chrome-devtools-mcp/package.json"
+  printf '%s\n' '{' '  "name": "chrome-devtools-mcp",' '  "version": "1.7.1"' '}' > "$package_json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  expected='MISSING: chrome-devtools-mcp (install: npm install -g chrome-devtools-mcp@1.7.0)'
+  [ "$out" = "$expected" ] || fail "browser component mismatch did not request the reviewed pin: $out"
+
+  printf '%s\n' '{' '  "name": "not-chrome-devtools-mcp",' '  "version": "1.7.0"' '}' > "$package_json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$expected" ] || fail "wrong browser package identity was accepted: $out"
+
+  printf '%s\n' '{' '  "name": "chrome-devtools-mcp",' '  "version": "1.7.0"' '}' > "$package_json"
+  entrypoint="$case_dir/npm-prefix/lib/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+  rm -f "$entrypoint"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "$expected" ] || fail "missing direct browser entrypoint was accepted: $out"
+
+  mkdir -p "${entrypoint%/*}"
+  printf '%s\n' '#!/usr/bin/env node' > "$entrypoint"
+  chmod +x "$entrypoint"
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-reviewed-toolchain.sh" global-entrypoint chrome-devtools-mcp)
+  [ "$out" = "$entrypoint" ] || fail "global MCP path did not follow the fake npm prefix: $out"
+
+  pass "bootstrap requires exact browser pins and resolves the MCP entrypoint from npm's global prefix"
+}
+
+test_reviewed_install_consent_commands() {
+  local case_dir fakebin log out expected
+  case_dir="$TMP_ROOT/reviewed-install"
+  fakebin=$(fm_fakebin "$case_dir")
+  log="$case_dir/npm.log"
+  : > "$log"
+  cat > "$fakebin/npm" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_NPM_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/npm"
+
+  expected=$'install -g gh-axi@0.1.30\ninstall -g chrome-devtools-axi@0.1.29\ninstall -g lavish-axi@0.1.50\ninstall -g quota-axi@0.1.25\ninstall -g tasks-axi@0.2.5\ninstall -g chrome-devtools-mcp@1.7.0'
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_NPM_LOG="$log" \
+    "$ROOT/bin/fm-reviewed-toolchain.sh" install \
+    gh-axi chrome-devtools-axi lavish-axi quota-axi tasks-axi chrome-devtools-mcp)
+  [ "$(cat "$log")" = "$expected" ] || fail "CI install interface did not pass exact reviewed npm specs: $(cat "$log")"
+  assert_not_contains "$out" "setup hooks" "reviewed install path must not install vendor hooks"
+  assert_not_contains "$out" "@latest" "reviewed install path must not float to latest"
+
+  : > "$log"
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_NPM_LOG="$log" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" "$ROOT/bin/fm-bootstrap.sh" install \
+    gh-axi chrome-devtools-axi lavish-axi quota-axi tasks-axi chrome-devtools-mcp)
+  [ "$(cat "$log")" = "$expected" ] || fail "consent path did not pass exact reviewed npm specs: $(cat "$log")"
+  assert_not_contains "$out" "setup hooks" "bootstrap install path must not install vendor hooks"
+  assert_not_contains "$out" "@latest" "bootstrap install path must not float to latest"
+
+  pass "CI and consent-gated bootstrap installs use every exact reviewed npm spec without vendor hooks"
 }
 
 test_git_is_required_with_supported_install_instruction() {
@@ -1150,10 +1229,12 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
-test_gh_axi_min_version
-test_lavish_axi_min_version
-test_tasks_axi_min_version
-test_quota_axi_min_version
+test_gh_axi_reviewed_version
+test_lavish_axi_reviewed_version
+test_tasks_axi_reviewed_version
+test_quota_axi_reviewed_version
+test_reviewed_browser_versions_and_global_path
+test_reviewed_install_consent_commands
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux

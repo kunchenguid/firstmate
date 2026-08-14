@@ -187,6 +187,36 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# fm_fake_reviewed_browser_toolchain <fakebin> <fixture-dir>: provide the exact
+# chrome-devtools-axi version plus an npm-prefix-derived chrome-devtools-mcp
+# package and entrypoint accepted by the reviewed-toolchain public check.
+fm_fake_reviewed_browser_toolchain() {
+  local fakebin=$1 prefix="$2/npm-prefix" entrypoint
+  fm_fake_version_tool "$fakebin" chrome-devtools-axi FM_FAKE_CHROME_DEVTOOLS_AXI_VERSION 0.1.29
+  fm_fake_version_tool "$fakebin" chrome-devtools-mcp FM_FAKE_CHROME_DEVTOOLS_MCP_VERSION 1.7.0
+  entrypoint="$prefix/lib/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+  mkdir -p "${entrypoint%/*}"
+  cat > "${entrypoint%/build/src/bin/chrome-devtools-mcp.js}/package.json" <<'JSON'
+{
+  "name": "chrome-devtools-mcp",
+  "version": "1.7.0"
+}
+JSON
+  cat > "$entrypoint" <<'SH'
+#!/usr/bin/env node
+SH
+  chmod +x "$entrypoint"
+  cat > "$fakebin/npm" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = prefix ] && [ "\${2:-}" = -g ]; then
+  printf '%s\n' '$prefix'
+  exit 0
+fi
+exit 2
+SH
+  chmod +x "$fakebin/npm"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

@@ -52,11 +52,11 @@ jobs:
           set -eu
           bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Install tasks-axi
+      - name: Install reviewed tasks-axi
         run: |
           set -eu
-          npm install -g tasks-axi
-          tasks-axi --version
+          bin/fm-reviewed-toolchain.sh install tasks-axi
+          bin/fm-reviewed-toolchain.sh check tasks-axi
       - name: Run portable parallel shard 1
         run: |
           set -eu
@@ -84,11 +84,11 @@ jobs:
           set -eu
           bin/fm-install-shellcheck.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Install tasks-axi
+      - name: Install reviewed tasks-axi
         run: |
           set -eu
-          npm install -g tasks-axi
-          tasks-axi --version
+          bin/fm-reviewed-toolchain.sh install tasks-axi
+          bin/fm-reviewed-toolchain.sh check tasks-axi
       - name: Run portable parallel shard 2
         run: |
           set -eu
@@ -138,11 +138,11 @@ jobs:
             exit 1
           }
           tmux -V
-      - name: Install tasks-axi for backlog-handoff delegation
+      - name: Install reviewed tasks-axi for backlog-handoff delegation
         run: |
           set -eu
-          npm install -g tasks-axi
-          tasks-axi --version
+          bin/fm-reviewed-toolchain.sh install tasks-axi
+          bin/fm-reviewed-toolchain.sh check tasks-axi
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
           # job-total rather than a literal, so shrinking or growing the matrix
