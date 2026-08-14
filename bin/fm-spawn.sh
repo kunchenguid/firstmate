@@ -1758,9 +1758,9 @@ freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual remotes
   if remotes=$(git -C "$worktree" remote 2>/dev/null) && ! printf '%s\n' "$remotes" | grep -qx origin; then
     require_clean_spawn_worktree "$worktree" \
-      'before launching from it; the project has no remote' \
-      'the project has no remote, so refusing to launch a worker on top of uncommitted work' || return 1
-    echo "notice: pooled worktree '$worktree' base was not freshened because the project has no remote" >&2
+      'before launching from it; the project has no origin remote' \
+      'the project has no origin remote, so refusing to launch a worker on top of uncommitted work' || return 1
+    echo "notice: pooled worktree '$worktree' base was not freshened because the project has no origin remote" >&2
     return 0
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
