@@ -104,7 +104,7 @@ The GitHub authority must declare exactly one repository and exactly these opera
 
 - `contents:write`
 - `pull_requests:write`
-- `checks:read`
+- `checks:read`, or its fine-grained-UI successor pair `actions:read` plus `statuses:read`
 
 The authority kind must be a fine-grained token or GitHub App installation token.
 The guest gives the coordinator the exact token file and installs a repository-local Git credential helper that reads only that file.

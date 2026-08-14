@@ -420,9 +420,19 @@ def load_credential_lease(path, task, generation, repo_slug):
     if github.get("repository") != repo_slug:
         raise ValidationError("GitHub authority is not scoped to the exact repository")
     permissions = set(github.get("permissions") or [])
-    exact_permissions = {"contents:write", "pull_requests:write", "checks:read"}
-    if permissions != exact_permissions:
-        raise ValidationError("GitHub authority must declare only contents:write, pull_requests:write, checks:read")
+    # GitHub's fine-grained token UI no longer offers a Checks permission;
+    # actions:read plus statuses:read is its exact successor for reading CI
+    # results. Either the historical triple or the successor quad is an
+    # acceptable minimal declaration; nothing broader is.
+    exact_permission_sets = (
+        {"contents:write", "pull_requests:write", "checks:read"},
+        {"contents:write", "pull_requests:write", "actions:read", "statuses:read"},
+    )
+    if permissions not in exact_permission_sets:
+        raise ValidationError(
+            "GitHub authority must declare only contents:write, pull_requests:write, "
+            "and either checks:read or actions:read plus statuses:read"
+        )
     if github.get("kind") not in ("fine-grained-token", "github-app-installation"):
         raise ValidationError("GitHub authority must be a fine-grained token or installation lease")
     expires = parse_utc(value.get("expires_at"), "credential lease expiry")

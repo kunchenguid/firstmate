@@ -252,6 +252,22 @@ PY
     --repo "$repo" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "submit accepted broad GitHub authority"
   assert_contains "$out" "must declare only" "broad GitHub authority refusal was not explicit"
+  # The fine-grained UI's successor pair for checks:read is accepted as an
+  # equally minimal declaration; validate_credential_lease alone proves it
+  # (submit would next require the live disk).
+  make_lease "$tmp/lease.json" task-one generation-one "fixture/repository"
+  python3 - "$tmp/lease.json" "$ROOT/bin/fm-azure-validation.py" <<'PY'
+import importlib.util,json,sys
+p=sys.argv[1]; value=json.load(open(p))
+value["github_authority"]["permissions"]=["contents:write","pull_requests:write","actions:read","statuses:read"]
+open(p,"w").write(json.dumps(value)+"\n")
+spec=importlib.util.spec_from_file_location("v", sys.argv[2])
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+import os
+os.chmod(p, 0o600)
+m.validate_credential_lease(p, "task-one", "generation-one")
+print("successor authority pair accepted")
+PY
   # A modified file whose stale manifest digest remains otherwise structurally
   # valid is refused before any cell can execute the runtime.
   rm -rf "$tmp/runtime-tampered"
