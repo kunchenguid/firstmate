@@ -43,6 +43,10 @@ environment_mode_defaults() {
 import importlib.util,os,sys
 spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 assert m.environment()["cost_admission_mode"]=="strict"
+assert m.environment()["operator_data_plane_ip"]==""
+os.environ["FM_AZURE_OPERATOR_DATA_PLANE_IP"]="203.0.113.10/32"
+assert m.environment()["operator_data_plane_ip"]=="203.0.113.10/32"
+os.environ.pop("FM_AZURE_OPERATOR_DATA_PLANE_IP")
 os.environ["FM_AZURE_RUNNER_MAX_CONCURRENCY"]="16"; assert m.environment()["max_concurrency"]==16
 os.environ["FM_AZURE_RUNNER_COST_ADMISSION_MODE"]="commissioning-bounded"; os.environ["FM_AZURE_RUNNER_CELL_ORDINAL"]="16"
 commissioning=m.environment(); assert commissioning["cell_ordinal"]==16 and m.runner_sku_for_environment(commissioning)=="Standard_D4ds_v6"
@@ -59,6 +63,28 @@ else: raise AssertionError("environment accepted concurrency above 16")
 PY
   rm -rf "$home"
   pass "normal environment defaults to strict without commissioning evidence or confirmation variables"
+}
+
+storage_network_access_contract() {
+  python3 - "$HOST" <<'PY' || fail "runner storage network-access contract failed"
+import importlib.util,inspect,sys
+spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+main={"properties":{"publicNetworkAccess":"Disabled","networkAcls":{"ipRules":[]}}}
+control={"properties":{"publicNetworkAccess":"Disabled","networkAcls":{}}}
+assert m.storage_network_access_is_exact(main,"")
+assert m.storage_network_access_is_exact(control,"")
+operator_ip="203.0.113.10/32"
+for resource in (main,control):
+ resource["properties"]["publicNetworkAccess"]="Enabled"
+ resource["properties"]["networkAcls"]["ipRules"]=[{"value":operator_ip,"action":"Allow"}]
+ assert m.storage_network_access_is_exact(resource,operator_ip)
+ resource["properties"]["networkAcls"]["ipRules"].append({"value":"203.0.113.11/32","action":"Allow"})
+ assert not m.storage_network_access_is_exact(resource,operator_ip)
+source=inspect.getsource(m.foundation_gate)
+assert 'storage_network_access_is_exact(storage, env["operator_data_plane_ip"])' in source
+assert 'storage_network_access_is_exact(control, env["operator_data_plane_ip"])' in source
+PY
+  pass "runner gates main and control storage to disabled or one exact operator /32 rule"
 }
 
 static_private_controller_contract() {
@@ -658,6 +684,7 @@ PY
 
 static_private_controller_contract
 environment_mode_defaults
+storage_network_access_contract
 prepare_contract
 private_snapshot_prepare_contract
 executor_credential_adversary

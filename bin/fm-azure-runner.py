@@ -416,6 +416,7 @@ def environment():
         "subscription": subscription,
         "prefix": prefix,
         "storage": storage,
+        "operator_data_plane_ip": os.environ.get("FM_AZURE_OPERATOR_DATA_PLANE_IP", ""),
         "control_storage": "st{}ctl01".format(prefix),
         "controller_identity": "id-{}-validation-shards".format(prefix),
         "owner": owner,
@@ -1028,6 +1029,21 @@ def require_zero_effective_rbac(env, principal_id, label):
         raise RunnerError("{} must have zero direct, group, and inherited effective RBAC assignments".format(label))
 
 
+def storage_network_access_is_exact(resource, operator_data_plane_ip, ip_rule_key="value"):
+    properties = resource.get("properties", resource)
+    network_acls = properties.get("networkAcls") or properties.get("networkRuleSet") or {}
+    ip_rules = network_acls.get("ipRules") or []
+    if not operator_data_plane_ip:
+        return properties.get("publicNetworkAccess") == "Disabled" and not ip_rules
+    return (
+        properties.get("publicNetworkAccess") == "Enabled"
+        and len(ip_rules) == 1
+        and isinstance(ip_rules[0], dict)
+        and ip_rules[0].get(ip_rule_key) == operator_data_plane_ip
+        and ip_rules[0].get("action") == "Allow"
+    )
+
+
 def foundation_gate(env):
     storage_id = exact_id(env, "Microsoft.Storage", "storageAccounts", env["storage"])
     control_storage_id = exact_id(env, "Microsoft.Storage", "storageAccounts", env["control_storage"])
@@ -1057,7 +1073,7 @@ def foundation_gate(env):
         or (storage.get("sku") or {}).get("name") != "Standard_ZRS"
         or properties.get("accessTier") != "Hot"
         or properties.get("defaultToOAuthAuthentication") is not True
-        or properties.get("publicNetworkAccess") != "Disabled"
+        or not storage_network_access_is_exact(storage, env["operator_data_plane_ip"])
         or properties.get("allowSharedKeyAccess") is not False
         or properties.get("allowBlobPublicAccess") is not False
         or properties.get("supportsHttpsTrafficOnly") is not True
@@ -1076,7 +1092,7 @@ def foundation_gate(env):
         or control.get("location") != "eastus"
         or control.get("kind") != "StorageV2"
         or (control.get("sku") or {}).get("name") != "Standard_LRS"
-        or control_properties.get("publicNetworkAccess") != "Disabled"
+        or not storage_network_access_is_exact(control, env["operator_data_plane_ip"])
         or control_properties.get("allowSharedKeyAccess") is not False
         or control_properties.get("allowBlobPublicAccess") is not False
         or control_properties.get("defaultToOAuthAuthentication") is not True

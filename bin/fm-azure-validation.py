@@ -245,6 +245,7 @@ def environment(require_cloud=False):
         "subscription": subscription,
         "prefix": prefix,
         "storage": storage,
+        "operator_data_plane_ip": os.environ.get("FM_AZURE_OPERATOR_DATA_PLANE_IP", ""),
         "deployment_generation": require_id(
             "deployment generation", os.environ["FM_AZURE_DEPLOYMENT_GENERATION"]
         ),
@@ -834,7 +835,9 @@ def foundation_gate(env):
         storage.get("location") != "eastus"
         or storage.get("kind") != "StorageV2"
         or (storage.get("sku") or {}).get("name") != "Standard_ZRS"
-        or storage.get("publicNetworkAccess") != "Disabled"
+        or not runner.storage_network_access_is_exact(
+            storage, env["operator_data_plane_ip"], "ipAddressOrRange"
+        )
         or storage.get("allowSharedKeyAccess") is not False
         or storage.get("allowBlobPublicAccess") is not False
         or storage.get("defaultToOAuthAuthentication") is not True

@@ -311,6 +311,22 @@ PY
   pass "credential disk validation accepts Azure's uniqueId when disk GET omits ETag"
 }
 
+storage_network_access_contract() {
+  python3 - "$HOST" <<'PY' || fail "validation storage network-access contract failed"
+import importlib.util,inspect,sys
+spec=importlib.util.spec_from_file_location("validation",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+runner=m.runner_module(); operator_ip="203.0.113.10/32"
+disabled={"publicNetworkAccess":"Disabled","networkRuleSet":{"ipRules":[]}}
+enabled={"publicNetworkAccess":"Enabled","networkRuleSet":{"ipRules":[{"ipAddressOrRange":operator_ip,"action":"Allow"}]}}
+assert runner.storage_network_access_is_exact(disabled,"","ipAddressOrRange")
+assert runner.storage_network_access_is_exact(enabled,operator_ip,"ipAddressOrRange")
+assert not runner.storage_network_access_is_exact(enabled,"203.0.113.11/32","ipAddressOrRange")
+source=inspect.getsource(m.foundation_gate)
+assert 'storage, env["operator_data_plane_ip"], "ipAddressOrRange"' in source
+PY
+  pass "validation accepts Azure CLI's exact operator /32 ipAddressOrRange shape"
+}
+
 admission_contract() {
   local tmp fixture out
   fm_test_tmproot_into tmp fm-azure-validation-admission
@@ -581,6 +597,7 @@ static_contract
 submit_contract
 security_negative_contract
 credential_disk_identity_contract
+storage_network_access_contract
 admission_contract
 identity_and_recovery_contract
 trusted_manifest_verifier_contract
