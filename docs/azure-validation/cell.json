@@ -251,7 +251,7 @@
             },
             {
               "lun": 1,
-              "name": "credential-lease",
+              "name": "[last(split(parameters('credentialDiskId'), '/'))]",
               "createOption": "Attach",
               "deleteOption": "Detach",
               "managedDisk": {

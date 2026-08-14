@@ -104,6 +104,8 @@ assert vm["properties"]["storageProfile"]["osDisk"]["deleteOption"]=="Detach"
 data=vm["properties"]["storageProfile"]["dataDisks"]
 assert len(data)==2 and {item["lun"] for item in data}=={0,1}
 assert all(item["deleteOption"]=="Detach" for item in data)
+credential=next(item for item in data if item["lun"]==1)
+assert credential["name"]=="[last(split(parameters('credentialDiskId'), '/'))]"
 schedule=next(item for item in resources if item["type"]=="Microsoft.DevTestLab/schedules")
 assert schedule["properties"]["taskType"]=="ComputeVmShutdownTask"
 assert schedule["properties"]["status"]=="Enabled"
