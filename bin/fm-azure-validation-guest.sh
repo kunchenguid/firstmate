@@ -528,21 +528,29 @@ export PATH="$FM_AZURE_VALIDATION_RUNTIME_PATH:/usr/local/sbin:/usr/local/bin:/u
 export GH_TOKEN="$(cat "$GH_TOKEN_FILE")"
 cd "$REPO"
 set +e
-case "$MODE" in
-  start) "$NM_BIN" axi run --intent "$(cat "$INTENT_FILE")" >"$RUN_LOG" 2>&1 ;;
-  reattach) "$NM_BIN" axi run >"$RUN_LOG" 2>&1 ;;
-  respond)
-    "$NM_BIN" axi respond <"$RESPONSE_FILE" >>"$RUN_LOG" 2>&1
-    response_rc=$?
-    if [ "$response_rc" -eq 0 ]; then
-      "$NM_BIN" axi run >>"$RUN_LOG" 2>&1
-    else
-      false
-    fi
-    ;;
-  *) exit 125 ;;
-esac
+# A fresh cell clone carries the in-tree gate config but not the local gate
+# state (bare gate repo, hook, no-mistakes remote, database record), so every
+# axi command refuses with "repo not initialized". init sets up or refreshes
+# that state and is safe to repeat on a retained worktree.
+"$NM_BIN" init >"$RUN_LOG" 2>&1
 rc=$?
+if [ "$rc" -eq 0 ]; then
+  case "$MODE" in
+    start) "$NM_BIN" axi run --intent "$(cat "$INTENT_FILE")" >>"$RUN_LOG" 2>&1 ;;
+    reattach) "$NM_BIN" axi run >>"$RUN_LOG" 2>&1 ;;
+    respond)
+      "$NM_BIN" axi respond <"$RESPONSE_FILE" >>"$RUN_LOG" 2>&1
+      response_rc=$?
+      if [ "$response_rc" -eq 0 ]; then
+        "$NM_BIN" axi run >>"$RUN_LOG" 2>&1
+      else
+        false
+      fi
+      ;;
+    *) exit 125 ;;
+  esac
+  rc=$?
+fi
 set -e
 if [ "$rc" -ne 0 ]; then
   # A refused run's one-line error rarely names the failing layer; capture
