@@ -325,6 +325,8 @@ identity=m.immutable_identity(disk,"disk")
 assert identity["etag"]=="disk-unique-id" and identity["unique_id"]=="disk-unique-id"
 assert m.immutable_identity({"id":"/run"},"run-command")=={"id":"/run","etag":None}
 assert m.immutable_identity({"id":"/schedule"},"ttl-schedule")=={"id":"/schedule","etag":None}
+uami=m.immutable_identity({"id":"/identity","properties":{"clientId":"client","principalId":"principal"}},"identity")
+assert uami=={"id":"/identity","etag":None,"client_id":"client","principal_id":"principal"}
 disk["managedBy"]=vm_id
 m.verify_credential_disk(env,state,allow_expected_vm=True)
 try: m.verify_credential_disk(env,state)

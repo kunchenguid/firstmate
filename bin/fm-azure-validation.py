@@ -1281,7 +1281,7 @@ def immutable_identity(resource, kind):
     }
     if (
         not identity["id"]
-        or (kind not in ("run-command", "ttl-schedule") and not identity["etag"])
+        or (kind not in ("identity", "run-command", "ttl-schedule") and not identity["etag"])
         or any(not identity.get(key) for key in stable_keys.get(kind, ()))
     ):
         raise ValidationError("{} immutable identity is incomplete".format(kind))
