@@ -1,48 +1,32 @@
 ---
 name: no-mistakes-herdr-dashboard
 description: >-
-  Agent-only procedure for preparing the native no-mistakes attach dashboard
-  beside a Herdr crewmate immediately before that crewmate starts no-mistakes.
+  Agent-only procedure for opening one native no-mistakes attach surface beside
+  a Herdr crewmate after its headless pipeline driver records a run id and HEAD.
 user-invocable: false
 metadata:
   internal: true
 ---
 
-# No-mistakes Herdr dashboard
+# Native no-mistakes attach surface
 
-Load this immediately before the same implementation crewmate invokes the
-installed no-mistakes skill. The installed skill and live AXI help remain the
-authority for pipeline custody, gates, fixes, push, PR, and CI.
+Load this immediately after the headless pipeline driver starts one native run and records its exact run id and checked-out HEAD.
+The installed no-mistakes skill and live AXI help remain the authority for pipeline custody, gates, fixes, push, PR, and CI.
 
-Read `bin/fm-no-mistakes-attach.sh --help`; its header owns the exact invocation,
-wait boundary, and Herdr mutations. Have the implementation crewmate run the
-helper's prepare operation from its repository before invoking no-mistakes.
-The operation must run inside that crewmate's pane: injected Herdr identity is
-the placement authority for the sibling split, and the helper serializes that
-layout mutation with the canonical named-session presentation lock.
+Read `bin/fm-no-mistakes-attach.sh --help`; its header owns the exact invocation and Herdr mutations.
+From the implementation repository, give the helper that exact run id and HEAD.
+The operation must run inside the driver's pane so injected Herdr identity places the unfocused sibling split.
 
-- `prepared` means the sibling exists and is waiting; immediately invoke the
-  installed no-mistakes skill on that same crewmate.
-- `not-applicable` means the crewmate is not running under Herdr; continue with
-  the existing no-mistakes behavior unchanged.
-- Any error stops launch. Preserve the branch and report the exact failure to
-  Firstmate instead of starting AXI without the requested dashboard.
+- `attached` means the sibling runs the native attach surface for that exact run and HEAD.
+- `not-applicable` means the crewmate is not running under Herdr, so existing behavior continues unchanged.
+- Any error preserves the branch and stops attach placement without starting a second pipeline operation.
 
-The sibling polls only `no-mistakes axi status` in the same repository. Once it
-observes a nonterminal run for the crewmate's exact branch and current code
-identity, it executes native `no-mistakes attach --run <id>`. It never calls
-`axi run`, `axi respond`, or any branch-mutating command. The implementation
-crewmate remains the sole AXI driver, and the native pipeline agent remains
-headless rather than becoming a second Herdr crewmate.
+The helper verifies that the checkout still equals the supplied HEAD before placement.
+The visible sibling executes only native `no-mistakes attach --run <id>`.
+It neither starts nor polls, retries, aborts, or otherwise drives the pipeline run.
+The implementation crewmate remains the sole pipeline driver, and the pipeline agent stays headless.
+The visible surface is native attach only, never a Codex conversation, transcript, or reconstructed agent UI.
 
-The native dashboard is interactive. Focus the sibling pane and use its own
-keyboard navigation (`j`/`k`, `g`/`G`, `Ctrl-d`/`Ctrl-u`, arrows, Home, and End)
-instead of Herdr scrollback. Direct actions taken there by the captain are
-authoritative. Before the crewmate answers the same gate, it must reconcile the
-dashboard action from its one returned AXI call or one `axi status` read and
-must not submit a duplicate response.
-
-The sibling is an ordinary Herdr split. Firstmate keeps no dashboard journal,
-does not recreate or retire it, and does not make teardown depend on it. Close
-the pane manually after the run is terminal. If no nonterminal run appears
-within the helper's bounded wait, the pane exits with a visible error.
+The sibling is an ordinary Herdr split.
+Firstmate keeps no attach journal, does not recreate or retire the surface, and does not make teardown depend on it.
+Close the pane manually after the native attach command exits.

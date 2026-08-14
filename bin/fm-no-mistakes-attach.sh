@@ -1,55 +1,41 @@
 #!/usr/bin/env bash
-# Prepare one native no-mistakes attach dashboard beside the current Herdr
-# crewmate, or wait inside that sibling for the exact active run.
+# Open one native no-mistakes attach surface beside the current Herdr crewmate.
 #
 # Usage:
-#   fm-no-mistakes-attach.sh prepare
-#   fm-no-mistakes-attach.sh wait <repo-root> <branch> <expected-head> <no-mistakes-executable>
+#   fm-no-mistakes-attach.sh attach <run-id> <expected-head>
 #
-# `prepare` is the public operation. Run it from the implementation repository,
-# in the Herdr crewmate that will drive no-mistakes, immediately before invoking
-# the installed no-mistakes skill. Outside Herdr it prints `not-applicable` and
-# exits 0 without mutation.
+# `attach` is the public operation. Run it from the implementation repository,
+# after its headless pipeline driver has started one native run and captured that
+# exact run id and the checked-out HEAD it attributes. Outside Herdr it prints
+# `not-applicable` and exits 0 without mutation.
 #
-# Under Herdr, `prepare` verifies the caller's live pane, tab, workspace, named
-# session, and socket through the canonical Herdr launcher-identity primitive.
-# It holds the shared named-session presentation lock while splitting that exact
-# pane to the right at ratio 0.5 without changing focus, verifying that the
-# response-derived sibling shares the caller's current tab and workspace, and
-# starting the internal `wait` operation there. It prints `prepared: pane <id>`
-# only after `pane run` accepts the waiter command.
+# Under Herdr, `attach` verifies that the supplied HEAD still exactly matches the
+# implementation checkout. It verifies the caller's live pane, tab, workspace,
+# named session, and socket through the canonical Herdr launcher-identity
+# primitive. It holds the shared named-session presentation lock while splitting
+# that exact pane to the right at ratio 0.5 without changing focus, verifies that
+# the response-derived sibling shares the caller's current tab and workspace,
+# and starts the native attach command there. It prints `attached: pane <id>`
+# only after `pane run` accepts that command.
 #
-# `wait` is internal but documented for auditability. It polls only
-# `no-mistakes axi status` from <repo-root>. It ignores terminal or wrong-branch
-# runs and, on the first nonterminal exact-branch-and-code-identity run, executes
-# exactly:
+# The visible sibling executes exactly:
 #
 #   <no-mistakes-executable> attach --run <run-id>
 #
-# The default wait is 900 one-second polls. Tests may override it with the
-# positive integer FM_NM_ATTACH_MAX_POLLS and non-negative integer
-# FM_NM_ATTACH_POLL_SECONDS environment variables. Lock tests may override the
-# default 50 attempts and 0.1-second interval with positive integer
-# FM_NM_ATTACH_LOCK_ATTEMPTS and non-negative number
-# FM_NM_ATTACH_LOCK_SLEEP_SECONDS. Status tests may override the default three
-# consecutive failures with positive integer FM_NM_ATTACH_STATUS_ERROR_LIMIT.
-# A timeout or status failure exits visibly and never starts AXI. This helper
-# creates no journal, performs no recovery or
-# retirement, sends no dashboard input, and never calls axi run/respond, sync,
-# abort, rerun, push, PR, CI, or merge operations. A failed post-split launch
-# leaves the exact new pane visible for manual inspection instead of guessing
-# that it is safe to close.
+# The headless driver alone starts, polls, retries, aborts, and otherwise drives
+# the run. This helper creates no journal, performs no recovery or retirement,
+# and never calls AXI. A failed post-split launch leaves the exact new pane
+# visible for manual inspection instead of guessing that it is safe to close.
+# Lock tests may override the default 50 attempts and 0.1-second interval with
+# positive integer FM_NM_ATTACH_LOCK_ATTEMPTS and non-negative number
+# FM_NM_ATTACH_LOCK_SLEEP_SECONDS.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-SCRIPT_PATH="$SCRIPT_DIR/${BASH_SOURCE[0]##*/}"
-
 # shellcheck source=bin/backends/herdr.sh
 . "$SCRIPT_DIR/backends/herdr.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-nm-run-lib.sh
-. "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
 usage() {
   awk '
@@ -64,57 +50,26 @@ fm_nm_attach_error() {
   return 2
 }
 
-fm_nm_attach_terminal() { # <status-output>
-  local output=$1 status outcome
-  status=$(fm_nm_strip_quotes "$(fm_nm_field "$output" status)")
-  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$output" outcome)")
-  case "$status" in completed|failed|cancelled) return 0 ;; esac
-  case "$outcome" in checks-passed|passed|failed|cancelled) return 0 ;; esac
-  return 1
-}
-
-fm_nm_attach_status_usable() { # <status-output>
-  local output=$1 run branch head
-  case "$output" in *run:*) ;; *) return 1 ;; esac
-  run=$(fm_nm_strip_quotes "$(fm_nm_field "$output" id)")
-  branch=$(fm_nm_strip_quotes "$(fm_nm_field "$output" branch)")
-  head=$(fm_nm_strip_quotes "$(fm_nm_field "$output" head)")
-  case "$run" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  [ -n "$branch" ] || return 1
-  case "$head" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
-  return 0
-}
-
-fm_nm_attach_status_absent() { # <status-output-path>
-  local output_path=$1 canonical first bytes
-  canonical='No active run. Push through the gate to start a pipeline:'
-  bytes=$(wc -c < "$output_path") || return 1
-  IFS= read -r first < "$output_path" || return 1
-  if [ "$bytes" -eq "$((${#canonical} + 1))" ]; then
-    [ "$first" = "$canonical" ]
-  elif [ "$bytes" -eq "$((${#canonical} + 2))" ]; then
-    [ "$first" = "$canonical"$'\r' ]
-  else
-    return 1
-  fi
-}
-
-fm_nm_attach_status_diagnostic() { # <status-output>
-  local output=$1 diagnostic
-  diagnostic=$(printf '%s\n' "$output" | tr '\r' '\n' | sed -n '/[^[:space:]]/{s/^[[:space:]]*//;p;q;}')
-  [ -n "$diagnostic" ] || diagnostic='empty output'
-  printf '%.240s' "$diagnostic"
-}
-
 fm_nm_attach_shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
 }
 
-fm_nm_attach_prepare_locked() { # <session> <repo> <branch> <expected-head> <no-mistakes-executable>
-  local session=$1 repo=$2 branch=$3 expected_head=$4 nm_bin=$5 pane parent_tab parent_workspace
+fm_nm_attach_checkout_matches() { # <repo> <expected-head>
+  local repo=$1 expected_head=$2 current_head
+  current_head=$(git -C "$repo" rev-parse --verify HEAD 2>/dev/null) || return 1
+  [ "$current_head" = "$expected_head" ]
+}
+
+fm_nm_attach_locked() { # <session> <repo> <run-id> <expected-head> <no-mistakes-executable>
+  local session=$1 repo=$2 run_id=$3 expected_head=$4 nm_bin=$5 pane parent_tab parent_workspace
   local split_output child child_output child_tab child_workspace command
+
+  fm_nm_attach_checkout_matches "$repo" "$expected_head" || {
+    fm_nm_attach_error 'implementation commit changed before native attach'
+    return 2
+  }
 
   if ! fm_backend_herdr_launcher_identity "$session"; then
     fm_nm_attach_error 'cannot verify current Herdr identity'
@@ -147,16 +102,16 @@ fm_nm_attach_prepare_locked() { # <session> <repo> <branch> <expected-head> <no-
       return 2
     }
 
-  command="exec $(fm_nm_attach_shell_quote "$SCRIPT_PATH") wait $(fm_nm_attach_shell_quote "$repo") $(fm_nm_attach_shell_quote "$branch") $(fm_nm_attach_shell_quote "$expected_head") $(fm_nm_attach_shell_quote "$nm_bin")"
+  command="exec $(fm_nm_attach_shell_quote "$nm_bin") attach --run $(fm_nm_attach_shell_quote "$run_id")"
   fm_backend_herdr_cli "$session" pane run "$child" "$command" >/dev/null 2>&1 || {
-    fm_nm_attach_error "sibling pane $child exists but the dashboard waiter did not start"
+    fm_nm_attach_error "sibling pane $child exists but native attach did not start"
     return 2
   }
-  printf 'prepared: pane %s waiting for no-mistakes on branch %s\n' "$child" "$branch"
+  printf 'attached: pane %s run %s at head %s\n' "$child" "$run_id" "$expected_head"
 }
 
-fm_nm_attach_prepare() {
-  local session pane socket repo branch expected_head nm_bin lock_path attempts sleep_seconds attempt=0 rc
+fm_nm_attach() {
+  local run_id=$1 expected_head=$2 session pane socket repo nm_bin lock_path attempts sleep_seconds attempt=0 rc
 
   if [ "${HERDR_ENV:-}" != 1 ]; then
     printf 'not-applicable: runtime is not Herdr\n'
@@ -175,16 +130,20 @@ fm_nm_attach_prepare() {
   nm_bin=$(command -v no-mistakes 2>/dev/null) || nm_bin=
   case "$nm_bin" in /*) ;; *) fm_nm_attach_error 'no-mistakes executable is unavailable'; return 2 ;; esac
   [ -x "$nm_bin" ] || { fm_nm_attach_error "no-mistakes executable is not executable: $nm_bin"; return 2; }
+  case "$run_id" in ''|*[!A-Za-z0-9._-]*) fm_nm_attach_error 'attach run id is invalid'; return 2 ;; esac
+  case "$expected_head" in ''|*[!0-9a-fA-F]*) fm_nm_attach_error 'attach expected head must be a commit SHA'; return 2 ;; esac
 
   repo=$(git rev-parse --show-toplevel 2>/dev/null) || {
-    fm_nm_attach_error 'prepare must run inside the implementation repository'
+    fm_nm_attach_error 'attach must run inside the implementation repository'
     return 2
   }
   repo=$(cd "$repo" 2>/dev/null && pwd -P) || return 2
-  branch=$(git -C "$repo" branch --show-current 2>/dev/null) || branch=
-  [ -n "$branch" ] || { fm_nm_attach_error 'implementation repository is detached'; return 2; }
-  expected_head=$(git -C "$repo" rev-parse --verify HEAD 2>/dev/null) || {
-    fm_nm_attach_error 'cannot capture the implementation commit'
+  expected_head=$(git -C "$repo" rev-parse --verify "${expected_head}^{commit}" 2>/dev/null) || {
+    fm_nm_attach_error 'attach expected head is unavailable in the implementation repository'
+    return 2
+  }
+  fm_nm_attach_checkout_matches "$repo" "$expected_head" || {
+    fm_nm_attach_error 'implementation commit does not match attach expected head'
     return 2
   }
 
@@ -203,7 +162,7 @@ fm_nm_attach_prepare() {
   }
   while [ "$attempt" -lt "$attempts" ]; do
     if fm_lock_try_acquire "$lock_path"; then
-      fm_nm_attach_prepare_locked "$session" "$repo" "$branch" "$expected_head" "$nm_bin"
+      fm_nm_attach_locked "$session" "$repo" "$run_id" "$expected_head" "$nm_bin"
       rc=$?
       fm_lock_release "$lock_path"
       return "$rc"
@@ -215,98 +174,10 @@ fm_nm_attach_prepare() {
   return 2
 }
 
-fm_nm_attach_wait() { # <repo-root> <branch> <expected-head> <no-mistakes-executable>
-  local repo=$1 branch=$2 expected_head=$3 nm_bin=$4 max_polls poll_seconds status_error_limit
-  local poll=0 status_errors=0 output run run_branch run_head current_branch current_head actual_repo query_rc diagnostic status_output_path
-  max_polls=${FM_NM_ATTACH_MAX_POLLS:-900}
-  poll_seconds=${FM_NM_ATTACH_POLL_SECONDS:-1}
-  status_error_limit=${FM_NM_ATTACH_STATUS_ERROR_LIMIT:-3}
-  case "$max_polls" in ''|*[!0-9]*|0) fm_nm_attach_error 'FM_NM_ATTACH_MAX_POLLS must be a positive integer'; return 2 ;; esac
-  case "$poll_seconds" in ''|*[!0-9]*) fm_nm_attach_error 'FM_NM_ATTACH_POLL_SECONDS must be a non-negative integer'; return 2 ;; esac
-  case "$status_error_limit" in ''|*[!0-9]*|0) fm_nm_attach_error 'FM_NM_ATTACH_STATUS_ERROR_LIMIT must be a positive integer'; return 2 ;; esac
-  case "$repo" in /*) ;; *) fm_nm_attach_error 'wait repo root must be absolute'; return 2 ;; esac
-  case "$expected_head" in *[!0-9a-fA-F]*|'') fm_nm_attach_error 'wait expected head must be a commit SHA'; return 2 ;; esac
-  case "$nm_bin" in /*) ;; *) fm_nm_attach_error 'wait executable must be absolute'; return 2 ;; esac
-  [ -d "$repo" ] && [ -x "$nm_bin" ] || { fm_nm_attach_error 'wait repository or executable is unavailable'; return 2; }
-  cd "$repo" || return 2
-  actual_repo=$(git rev-parse --show-toplevel 2>/dev/null) || actual_repo=
-  actual_repo=$(cd "$actual_repo" 2>/dev/null && pwd -P) || actual_repo=
-  [ "$actual_repo" = "$repo" ] || {
-    fm_nm_attach_error 'wait repository identity changed'
-    return 2
-  }
-  expected_head=$(git -C "$repo" rev-parse --verify "${expected_head}^{commit}" 2>/dev/null) || {
-    fm_nm_attach_error 'wait expected head is unavailable in the implementation repository'
-    return 2
-  }
-  status_output_path=$(mktemp "${TMPDIR:-/tmp}/fm-no-mistakes-attach-status.XXXXXX") || {
-    fm_nm_attach_error 'cannot create a private status capture'
-    return 2
-  }
-
-  while [ "$poll" -lt "$max_polls" ]; do
-    current_branch=$(git branch --show-current 2>/dev/null) || current_branch=
-    [ "$current_branch" = "$branch" ] || {
-      rm -f "$status_output_path"
-      fm_nm_attach_error "branch changed while waiting (expected $branch, found ${current_branch:-detached})"
-      return 2
-    }
-    current_head=$(git rev-parse --verify HEAD 2>/dev/null) || current_head=
-    [ "$current_head" = "$expected_head" ] || {
-      rm -f "$status_output_path"
-      fm_nm_attach_error 'implementation commit changed while waiting'
-      return 2
-    }
-    if "$nm_bin" axi status > "$status_output_path" 2>&1; then
-      query_rc=0
-    else
-      query_rc=$?
-    fi
-    if [ "$query_rc" -eq 0 ] && fm_nm_attach_status_absent "$status_output_path"; then
-      status_errors=0
-    else
-      output=$(< "$status_output_path")
-      if [ "$query_rc" -eq 0 ] && fm_nm_attach_status_usable "$output"; then
-        status_errors=0
-        run=$(fm_nm_strip_quotes "$(fm_nm_field "$output" id)")
-        run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$output" branch)")
-        run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$output" head)")
-        if [ "$run_branch" = "$branch" ] && fm_nm_head_matches_worktree "$repo" "$run_head" \
-          && ! fm_nm_attach_terminal "$output"; then
-          rm -f "$status_output_path"
-          exec "$nm_bin" attach --run "$run"
-        fi
-      elif [ "$query_rc" -eq 0 ]; then
-        status_errors=$((status_errors + 1))
-        diagnostic=$(fm_nm_attach_status_diagnostic "$output")
-        case "$output" in *run:*) diagnostic='status output is missing required run id, branch, or head' ;; esac
-      else
-        status_errors=$((status_errors + 1))
-        diagnostic=$(fm_nm_attach_status_diagnostic "$output")
-        [ "$diagnostic" = 'empty output' ] && diagnostic="command exited $query_rc with empty output"
-      fi
-    fi
-    if [ "$status_errors" -ge "$status_error_limit" ]; then
-      rm -f "$status_output_path"
-      fm_nm_attach_error "axi status failed $status_errors consecutive times: $diagnostic"
-      return 2
-    fi
-    poll=$((poll + 1))
-    [ "$poll" -lt "$max_polls" ] && sleep "$poll_seconds"
-  done
-  rm -f "$status_output_path"
-  printf 'ERROR: no active no-mistakes run appeared for branch %s after %s polls\n' "$branch" "$max_polls" >&2
-  return 1
-}
-
 case "${1:-}" in
-  prepare)
-    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
-    fm_nm_attach_prepare
-    ;;
-  wait)
-    [ "$#" -eq 5 ] || { usage >&2; exit 2; }
-    fm_nm_attach_wait "$2" "$3" "$4" "$5"
+  attach)
+    [ "$#" -eq 3 ] || { usage >&2; exit 2; }
+    fm_nm_attach "$2" "$3"
     ;;
   -h|--help|help)
     usage

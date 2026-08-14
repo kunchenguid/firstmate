@@ -279,25 +279,20 @@ There is still one watcher process; the event reader is a bounded child of that 
 
 `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
 
-## No-mistakes attach dashboard
+## Native no-mistakes attach surface
 
-The agent-only `no-mistakes-herdr-dashboard` skill requires the implementation
-crewmate to prepare an unfocused sibling split immediately before it invokes the
-installed no-mistakes skill. `bin/fm-no-mistakes-attach.sh --help` owns the exact
-command and mutation mechanics. Sibling creation reuses the adapter's canonical
-live launcher identity and named-session presentation lock. The sibling waits
-for the same repository, branch, and code identity to expose a nonterminal AXI
-run, then executes native `no-mistakes attach --run <id>`.
+After the headless driver starts a native run, it passes that exact run id and checked-out HEAD to the agent-only `no-mistakes-herdr-dashboard` skill.
+`bin/fm-no-mistakes-attach.sh --help` owns the exact command and mutation mechanics.
+The helper verifies the current checkout equals that HEAD and reuses the adapter's canonical live launcher identity and named-session presentation lock.
+It opens one unfocused sibling that executes native `no-mistakes attach --run <id>` for that one run.
 
-The native TUI exposes phases, logs, findings, tests, gates, PR, and CI state;
-its own keyboard navigation remains interactive after the pane is focused. A
-direct captain action in that TUI is authoritative and the sole AXI-driving
-crewmate reconciles it before sending any response of its own. The pipeline
-agent remains headless. Firstmate creates no dashboard journal and performs no
-automatic recreation or retirement; other runtime backends are unchanged.
+The sibling is attach-only.
+It cannot start, poll, retry, abort, or otherwise drive the pipeline, so the headless implementation crewmate remains its only driver.
+The visible surface is the native pipeline attach UI only, never a Codex conversation, transcript, or reconstructed agent UI.
+Firstmate creates no attach journal and performs no automatic recreation or retirement.
+Other runtime backends are unchanged.
 
-`tests/fm-no-mistakes-attach.test.sh` covers sibling placement, exact run
-binding, non-Herdr behavior, and the no-second-driver boundary.
+`tests/fm-no-mistakes-attach.test.sh` covers exact run and HEAD rejection, native-only placement, non-Herdr behavior, and the no-second-driver boundary.
 
 ## Away-mode supervisor support
 

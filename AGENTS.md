@@ -326,7 +326,7 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 
 ### Validate
 
-Load `no-mistakes-herdr-dashboard` immediately before the same worker invokes the installed no-mistakes skill; on Herdr the worker must prepare the native attach sibling first, while other backends retain their existing behavior.
+Load `no-mistakes-herdr-dashboard` immediately after the same worker starts a native run and records its exact run id and checked-out HEAD; on Herdr the worker then opens the native attach sibling, while other backends retain their existing behavior.
 For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
