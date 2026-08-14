@@ -540,6 +540,19 @@ case "$MODE" in
 esac
 rc=$?
 set -e
+if [ "$rc" -ne 0 ]; then
+  # A refused run's one-line error rarely names the failing layer; capture
+  # the ground truth the operator otherwise needs a live VM probe to see.
+  {
+    printf '=== launch diagnostics (exit %s) ===\n' "$rc"
+    printf 'pwd: %s\n' "$(pwd)"
+    id
+    ls -ld "$REPO" "$REPO/.git"
+    git -C "$REPO" rev-parse --show-toplevel
+    git -C "$REPO" symbolic-ref --short HEAD
+    "$NM_BIN" --version
+  } >>"$RUN_LOG" 2>&1 || true
+fi
 printf '%s\n' "$rc" >"$RUN_LOG.exit"
 exit 0
 SH
