@@ -34,7 +34,7 @@ Local-only under `state/captain-router/` (gitignored with `state/`):
 | `anchors.current` | Current session open-ask anchors |
 | `current.session` | Session id last settled on this home |
 | `sessions/<id>.brief` | Per-session topic head + anchors |
-| `pending/<ts>-<digest>.route` | Staged reroute/new handoff for later delivery |
+| `pending/<ts>-<digest>-<unique>.route` | Staged reroute/new handoff for later delivery |
 | `pending/LATEST` | Basename of the newest pending route |
 | `verdicts.log` | Append-only verdict rows |
 | `explanations.log` | Append-only model rationale rows (audit only) |

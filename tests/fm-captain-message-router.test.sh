@@ -478,6 +478,76 @@ EOF
 	pass "router: the full prompt rides the temp file, argv only the short instruction"
 }
 
+test_submit_prompt_handoff_failures_fail_open() {
+	local kind root fakebin out status expected wrapper count_file
+	local real_mktemp real_chmod real_cat
+	real_mktemp=$(command -v mktemp)
+	real_chmod=$(command -v chmod)
+	real_cat=$(command -v cat)
+	for kind in create mode write; do
+		root="$TMP_ROOT/prompt-handoff-$kind"
+		make_primary "$root"
+		fakebin=$(cursor_fixture "$root" "prompt-handoff-$kind" 'verdict=same
+target=-
+explanation=unused')
+		case "$kind" in
+		create)
+			wrapper="$fakebin/mktemp"
+			cat >"$wrapper" <<EOF
+#!/usr/bin/env bash
+case "\${1-}" in
+*/prompt.XXXXXX) exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+EOF
+			expected="could not create private router prompt file"
+			;;
+		mode)
+			wrapper="$fakebin/chmod"
+			cat >"$wrapper" <<EOF
+#!/usr/bin/env bash
+case "\${2-}" in
+*/prompt.*) exit 1 ;;
+esac
+exec "$real_chmod" "\$@"
+EOF
+			expected="could not set private router prompt file mode"
+			;;
+		write)
+			wrapper="$fakebin/cat"
+			count_file="$root/cat-count"
+			cat >"$wrapper" <<EOF
+#!/usr/bin/env bash
+count=0
+if [ "\$#" -eq 0 ]; then
+	[ ! -s "$count_file" ] || IFS= read -r count <"$count_file"
+	count=\$((count + 1))
+	printf '%s\n' "\$count" >"$count_file"
+	if [ "\$count" -eq 2 ]; then
+		"$real_cat" >/dev/null
+		exit 1
+	fi
+fi
+exec "$real_cat" "\$@"
+EOF
+			expected="could not write private router prompt file"
+			;;
+		esac
+		chmod +x "$wrapper"
+		status=0
+		out=$(printf 'continue safely' |
+			run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
+		expect_code 0 "$status" "$kind prompt handoff failure exit"
+		assert_contains "$out" "verdict=same target=primary confidence=det" \
+			"$kind prompt handoff failure allows the captain message through"
+		assert_grep "$expected" "$(failures_log "$root")" \
+			"$kind prompt handoff failure is recorded"
+		assert_no_grep "router agent exited" "$(failures_log "$root")" \
+			"$kind prompt handoff failure records no duplicate agent exit"
+	done
+	pass "router: every private prompt handoff failure is recorded and fails open"
+}
+
 test_submit_dependency_free_timeout_terminates_hung_spawn() {
 	local root="$TMP_ROOT/submit-bash-timeout" out status=0 fakebin marker
 	make_primary "$root"
@@ -580,6 +650,59 @@ explanation=continue the existing shader review')
 		"the verdict log records only the surfaced deterministic fallback"
 	assert_absent "$pending/LATEST" "a failed reroute publication does not claim a latest route"
 	pass "router: failed reroute publication never surfaces an unstaged handoff"
+}
+
+test_repeated_route_staging_preserves_published_latest() {
+	local root="$TMP_ROOT/repeated-route-staging" out status=0 pending fakebin
+	local first_latest latest_after first_route route_count real_mv
+	make_primary "$root"
+	printf 'Should I continue the existing shader review?' |
+		run "$root" --on-settle --session-id sess-shader >/dev/null
+	fakebin=$(cursor_fixture "$root" repeated-route 'verdict=reroute
+target=sess-shader
+explanation=continue the existing shader review')
+	cat >"$fakebin/date" <<'SH'
+#!/usr/bin/env bash
+printf '2026-08-13T12:00:00Z\n'
+SH
+	chmod +x "$fakebin/date"
+	out=$(printf 'continue the shader review' |
+		run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
+	expect_code 0 "$status" "initial repeated-route staging exit"
+	assert_contains "$out" "verdict=reroute target=sess-shader confidence=model" \
+		"the initial route is published"
+	pending=$(pending_dir "$root")
+	first_latest=$(cat "$pending/LATEST")
+	first_route="$pending/$first_latest"
+	assert_present "$first_route" "the initial latest route exists"
+	real_mv=$(command -v mv)
+	cat >"$fakebin/mv" <<EOF
+#!/usr/bin/env bash
+destination=
+for argument in "\$@"; do
+	destination=\$argument
+done
+case "\$destination" in
+*/LATEST) exit 1 ;;
+esac
+exec "$real_mv" "\$@"
+EOF
+	chmod +x "$fakebin/mv"
+	status=0
+	out=$(printf 'continue the shader review' |
+		run_with_probe "$root" "$fakebin" --on-submit --session-id primary) || status=$?
+	expect_code 0 "$status" "repeated-route latest failure exit"
+	assert_contains "$out" "verdict=same target=primary confidence=det" \
+		"the failed replacement publication allows the captain message through"
+	latest_after=$(cat "$pending/LATEST")
+	[ "$latest_after" = "$first_latest" ] ||
+		fail "LATEST changed after failed repeated staging ($first_latest vs $latest_after)"
+	assert_present "$first_route" "failed repeated staging preserves the published route"
+	assert_grep "continue the shader review" "$first_route" \
+		"the preserved latest route retains its captain message"
+	route_count=$(find "$pending" -type f -name '*.route' | wc -l | tr -d ' ')
+	[ "$route_count" -eq 1 ] || fail "expected one published route after rollback, got $route_count"
+	pass "router: repeated staging cannot destroy the route named by LATEST"
 }
 
 test_pi_hook_uses_context_session_ids_without_outer_timeout() {
@@ -727,6 +850,7 @@ test_pi_hook_classifies_queued_input_and_rejects_mixed_runs() {
 		node --experimental-test-module-mocks --experimental-strip-types --no-warnings \
 		--input-type=module 2>&1 <<'JS'
 import { mock } from "node:test";
+import { readFileSync } from "node:fs";
 const calls = [];
 let lockOwned = true;
 mock.module("node:child_process", { namedExports: {
@@ -740,7 +864,11 @@ mock.module("node:child_process", { namedExports: {
         ? { status: 0, stdout: text, stderr: "" }
         : { status: 1, stdout: "", stderr: "" };
     }
-    calls.push({ mode: args[0], args, input: options?.input });
+    const historyIndex = args.indexOf("--chat-history-file");
+    const history = historyIndex >= 0
+      ? readFileSync(args[historyIndex + 1], "utf8")
+      : "";
+    calls.push({ mode: args[0], args, input: options?.input, history });
     return {
       status: 0,
       stdout: `verdict=same target=${args[2]} confidence=model\n`,
@@ -773,6 +901,14 @@ await handlers.get("input")(
   context("session-alpha"),
 );
 await end("queued response");
+await handlers.get("input")(
+  { type: "input", text: "late queued follow-up", source: "rpc", streamingBehavior: "followUp" },
+  context("session-alpha"),
+);
+await handlers.get("input")(
+  { type: "input", text: "late queued steer", source: "rpc", streamingBehavior: "steer" },
+  context("session-alpha"),
+);
 await handlers.get("agent_settled")({}, context("session-alpha"));
 
 await handlers.get("input")(
@@ -826,9 +962,13 @@ JS
 	local submits settles
 	submits=$(printf '%s\n' "$out" | grep -o '"mode":"--on-submit"' | wc -l | tr -d ' ')
 	settles=$(printf '%s\n' "$out" | grep -o '"mode":"--on-settle"' | wc -l | tr -d ' ')
-	[ "$submits" -eq 6 ] || fail "expected exactly 6 captain classifications, got $submits ($out)"
+	[ "$submits" -eq 8 ] || fail "expected exactly 8 captain classifications, got $submits ($out)"
 	[ "$settles" -eq 3 ] || fail "expected idle, queued, and extension captain settlement, got $settles ($out)"
 	assert_contains "$out" '"input":"queued captain"' "queued captain input is classified"
+	assert_contains "$out" '"input":"late queued follow-up","history":"assistant: queued response"' \
+		"a late follow-up is classified against the agent-end candidate history"
+	assert_contains "$out" '"input":"late queued steer","history":"assistant: queued response"' \
+		"a late steer is classified against the agent-end candidate history"
 	assert_contains "$out" '"input":"extension captain"' "extension-delivered captain input is classified"
 	assert_not_contains "$out" 'candidate before watcher' "late operational input invalidates an earlier candidate"
 	assert_not_contains "$out" 'operational response' "operational-only runs do not settle"
@@ -1258,10 +1398,12 @@ test_submit_new_and_same_targets_are_normalized
 test_model_override_keeps_cursor_cli_read_only
 test_builtin_default_uses_cursor_cli_read_only
 test_submit_prompt_rides_the_file_not_argv
+test_submit_prompt_handoff_failures_fail_open
 test_submit_dependency_free_timeout_terminates_hung_spawn
 test_submit_large_timeout_override_reaches_shared_owner
 test_new_route_publication_failure_falls_back_to_same
 test_reroute_publication_failure_falls_back_to_same
+test_repeated_route_staging_preserves_published_latest
 test_pi_hook_uses_context_session_ids_without_outer_timeout
 test_pi_hook_classifies_queued_input_and_rejects_mixed_runs
 test_pi_hook_rejects_typed_session_start_context

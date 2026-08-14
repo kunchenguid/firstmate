@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
 	appendFileSync,
 	existsSync,
+	mkdtempSync,
 	mkdirSync,
 	readFileSync,
 	rmSync,
@@ -150,14 +151,16 @@ function runRouterSubmit(
 	recentChatHistory: string,
 ): string {
 	if (!text.trim()) return "";
+	let historyDir = "";
 	let historyFile = "";
 	try {
 		if (recentChatHistory) {
-			historyFile = join(
-				tmpdir(),
-				`fm-captain-router-history-${process.pid}-${Date.now()}.txt`,
-			);
-			writeFileSync(historyFile, recentChatHistory, { mode: 0o600 });
+			historyDir = mkdtempSync(join(tmpdir(), "fm-captain-router-history-"));
+			historyFile = join(historyDir, "history.txt");
+			writeFileSync(historyFile, recentChatHistory, {
+				flag: "wx",
+				mode: 0o600,
+			});
 		}
 	} catch {
 		historyFile = "";
@@ -183,9 +186,9 @@ function runRouterSubmit(
 		);
 		return "";
 	} finally {
-		if (historyFile) {
+		if (historyDir) {
 			try {
-				rmSync(historyFile, { force: true });
+				rmSync(historyDir, { force: true, recursive: true });
 			} catch {
 				// Fail-open.
 			}
@@ -389,7 +392,11 @@ export default function (pi: ExtensionAPI) {
 		run: RunState,
 	): void {
 		run.hasCaptainInput = true;
-		const stdout = runRouterSubmit(prompt, sessionId, recentChatHistory);
+		const stdout = runRouterSubmit(
+			prompt,
+			sessionId,
+			run.candidateRecentChatHistory || recentChatHistory,
+		);
 		const parsed = parseVerdict(stdout);
 		if (!parsed) {
 			if (stdout)

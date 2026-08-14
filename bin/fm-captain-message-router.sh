@@ -59,7 +59,7 @@
 #   anchors.current       - one normalized open-ask anchor per line (settle)
 #   current.session       - session id for the live primary this home last settled
 #   sessions/<id>.brief   - per-session topic head + anchors
-#   pending/<ts>-<digest>.route - staged reroute/new handoff for later delivery
+#   pending/<ts>-<digest>-<unique>.route - staged reroute/new handoff for later delivery
 #   pending/LATEST        - basename of the most recent pending route file
 #   verdicts.log          - append-only verdict rows
 #   explanations.log      - append-only model rationale rows, keyed by the same
@@ -227,14 +227,12 @@ write_session_brief() { # <session-id> <topic> ; anchors on stdin (or empty)
 }
 
 stage_pending_route() { # <verdict> <target> <confidence> <explanation> ; message on stdin
-	local verdict=$1 target=$2 conf=$3 explanation=${4-} ts digest path rel msg tmp latest_tmp
+	local verdict=$1 target=$2 conf=$3 explanation=${4-} ts digest path rel msg tmp unique latest_tmp
 	msg=$(cat)
 	ts=$(iso_now | tr -d ':-')
 	digest=$(printf '%s' "$msg" | digest_message)
 	[ -n "$digest" ] || digest=nodigest
 	mkdir -p "$PENDING_DIR" 2>/dev/null || return 1
-	rel="${ts}-${digest}.route"
-	path="$PENDING_DIR/$rel"
 	tmp=$(mktemp "$PENDING_DIR/.route.XXXXXX" 2>/dev/null) || return 1
 	{
 		printf 'verdict=%s\n' "$verdict"
@@ -253,10 +251,15 @@ stage_pending_route() { # <verdict> <target> <confidence> <explanation> ; messag
 		rm -f "$tmp" 2>/dev/null || true
 		return 1
 	}
-	mv -f "$tmp" "$path" 2>/dev/null || {
+	unique=${tmp##*/}
+	unique=${unique#.route.}
+	rel="${ts}-${digest}-${unique}.route"
+	path="$PENDING_DIR/$rel"
+	ln "$tmp" "$path" 2>/dev/null || {
 		rm -f "$tmp" 2>/dev/null || true
 		return 1
 	}
+	rm -f "$tmp" 2>/dev/null || true
 	latest_tmp=$(mktemp "$PENDING_DIR/.latest.XXXXXX" 2>/dev/null) || {
 		rm -f "$path" 2>/dev/null || true
 		return 1
@@ -366,13 +369,18 @@ build_router_prompt() { # <current-id> <message-file> [history-file]
 # list and no kernel argument-size limit applies.
 spawn_router_agent() { # prompt on stdin
 	local prompt_file out status=0 cmd
-	prompt_file=$(mktemp "$ROUTER_DIR/prompt.XXXXXX" 2>/dev/null) || return 1
+	prompt_file=$(mktemp "$ROUTER_DIR/prompt.XXXXXX" 2>/dev/null) || {
+		record_failure "could not create private router prompt file"
+		return 1
+	}
 	chmod 600 "$prompt_file" 2>/dev/null || {
 		rm -f "$prompt_file"
+		record_failure "could not set private router prompt file mode"
 		return 1
 	}
 	cat >"$prompt_file" || {
 		rm -f "$prompt_file"
+		record_failure "could not write private router prompt file"
 		return 1
 	}
 	# Reuse upstream's verified resolver instead of carrying another Cursor

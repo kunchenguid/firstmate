@@ -8,7 +8,6 @@ on:
       - main
 
 permissions:
-  actions: read
   contents: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
@@ -29,14 +28,8 @@ jobs:
     steps:
       - name: Verify no-mistakes signature in PR body
         env:
-          EVENT_ACTION: ${{ github.event.action }}
-          EVENT_SENDER: ${{ github.event.sender.login }}
-          EVENT_RUN_ID: ${{ github.run_id }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_BODY: ${{ github.event.pull_request.body }}
-          PR_BODY_BEFORE: ${{ github.event.changes.body.from }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
@@ -44,50 +37,6 @@ jobs:
           if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
             exit 0
-          fi
-
-          # Kody can replace the complete PR body after the signed opening.
-          # Accept that generated body only when this workflow already verified
-          # the same PR, so an unsigned PR cannot acquire provenance from Kody.
-          kody_start='<!-- kody-pr-summary:start -->'
-          kody_end='<!-- kody-pr-summary:end -->'
-          if printf '%s' "${PR_BODY:-}" | grep -qF -- "$kody_start" &&
-             printf '%s' "${PR_BODY:-}" | grep -qF -- "$kody_end"; then
-            if [ "$EVENT_ACTION" = edited ] &&
-               [ "$EVENT_SENDER" = 'kody-ai[bot]' ] &&
-               printf '%s' "${PR_BODY_BEFORE:-}" | grep -qF -- "$marker"; then
-              echo "Kody replaced a verified no-mistakes body on PR #${PR_NUMBER}."
-              exit 0
-            fi
-
-            if [ "$EVENT_ACTION" != edited ] || [ "$EVENT_SENDER" = 'kody-ai[bot]' ]; then
-              encoded_head="$(printf '%s' "$PR_HEAD_REF" | jq -sRr @uri)"
-              runs_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/no-mistakes-required.yml/runs?branch=${encoded_head}&event=pull_request&per_page=100"
-              if ! runs_json="$(curl --fail --silent --show-error \
-                --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-                --header 'Accept: application/vnd.github+json' \
-                --header 'X-GitHub-Api-Version: 2022-11-28' \
-                "$runs_url")"; then
-                echo "::error::Could not verify prior no-mistakes provenance for PR #${PR_NUMBER}." >&2
-                exit 1
-              fi
-              if printf '%s' "$runs_json" | jq -e \
-                --argjson pr "$PR_NUMBER" --argjson current_run "$EVENT_RUN_ID" '
-                [
-                  .workflow_runs[]?
-                  | select(.id != $current_run)
-                  | select(any(.pull_requests[]?; .number == $pr))
-                ] as $pr_runs
-                | any($pr_runs[]; .conclusion == "success")
-                  and ([
-                    $pr_runs[]
-                    | select(.name | contains(" body compliance - edited - "))
-                  ][0].actor.login == "kody-ai[bot]")
-              ' >/dev/null; then
-                echo "Found prior no-mistakes verification for Kody-rewritten PR #${PR_NUMBER}."
-                exit 0
-              fi
-            fi
           fi
           {
             echo "::error::This PR was not raised through no-mistakes."
