@@ -369,8 +369,12 @@ test_builtin_gate_load_time() {
   mkdir -p \
     "$fixture/project/.pi/extensions/lib" \
     "$fixture/project/node_modules/@earendil-works" \
+    "$fixture/home-absent/config" \
     "$fixture/home-off/config" \
-    "$fixture/home-on/config"
+    "$fixture/home-unrecognized/config" \
+    "$fixture/home-unreadable/config/calm" \
+    "$fixture/home-on/config" \
+    "$fixture/home-max/config"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
@@ -381,13 +385,20 @@ test_builtin_gate_load_time() {
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+  printf '%s\n' off >"$fixture/home-off/config/calm"
+  printf '%s\n' loud >"$fixture/home-unrecognized/config/calm"
   printf '%s\n' on >"$fixture/home-on/config/calm"
+  printf '%s\n' max >"$fixture/home-max/config/calm"
 
   output_file="$fixture/node-output"
   (cd "$fixture/project" && \
     EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
+    HOME_ABSENT="$fixture/home-absent" \
     HOME_OFF="$fixture/home-off" \
+    HOME_UNRECOGNIZED="$fixture/home-unrecognized" \
+    HOME_UNREADABLE="$fixture/home-unreadable" \
     HOME_ON="$fixture/home-on" \
+    HOME_MAX="$fixture/home-max" \
     node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 
@@ -411,34 +422,44 @@ function fakePi() {
   return { pi, tools, handlers };
 }
 
-// Calm-off (config/calm absent for this home): load-time registration must be
-// entirely skipped, so a non-Calm user contests nothing.
-process.env.FM_HOME = process.env.HOME_OFF;
-const offRun = fakePi();
-const extensionOff = await import(`${pathToFileURL(process.env.EXT).href}?gate-off=${Date.now()}`);
-extensionOff.default(offRun.pi);
-if (offRun.tools.length !== 0) {
-  throw new Error(`Calm registered ${offRun.tools.length} built-ins while config/calm was absent: ${offRun.tools.map((t) => t.name).join(",")}`);
+// The ordinary-worker launch supplies FM_CONFIG_OVERRIDE explicitly. Every inactive
+// preference shape must leave Pi's stock built-ins untouched at extension load, while
+// "on" and the supported legacy "max" value claim the Calm renderers synchronously.
+const inactiveHomes = new Map([
+  ["absent", process.env.HOME_ABSENT],
+  ["off", process.env.HOME_OFF],
+  ["unrecognized", process.env.HOME_UNRECOGNIZED],
+  ["unreadable", process.env.HOME_UNREADABLE],
+]);
+for (const [label, home] of inactiveHomes) {
+  process.env.FM_HOME = "/wrong-owning-home";
+  process.env.FM_CONFIG_OVERRIDE = `${home}/config`;
+  const run = fakePi();
+  const extension = await import(`${pathToFileURL(process.env.EXT).href}?gate-${label}=${Date.now()}`);
+  extension.default(run.pi);
+  if (run.tools.length !== 0) {
+    throw new Error(`Calm registered ${run.tools.length} built-ins while config/calm was ${label}: ${run.tools.map((tool) => tool.name).join(",")}`);
+  }
 }
 
-// Calm-on (config/calm="on" for this home): registration must happen synchronously,
-// during this same factory call, exactly the timing /reload's pre-session_start
-// transcript render depends on - not deferred to session_start or later.
-process.env.FM_HOME = process.env.HOME_ON;
-const onRun = fakePi();
-const extensionOn = await import(`${pathToFileURL(process.env.EXT).href}?gate-on=${Date.now()}`);
-extensionOn.default(onRun.pi);
-const names = onRun.tools.map((t) => t.name).sort();
 const expected = ["bash", "edit", "find", "grep", "ls", "read", "write"];
-if (JSON.stringify(names) !== JSON.stringify(expected)) {
-  throw new Error(`Calm registered ${JSON.stringify(names)} synchronously at load with config/calm=on, expected ${JSON.stringify(expected)}`);
+for (const [label, home] of new Map([["on", process.env.HOME_ON], ["max", process.env.HOME_MAX]])) {
+  process.env.FM_HOME = "/wrong-owning-home";
+  process.env.FM_CONFIG_OVERRIDE = `${home}/config`;
+  const run = fakePi();
+  const extension = await import(`${pathToFileURL(process.env.EXT).href}?gate-${label}=${Date.now()}`);
+  extension.default(run.pi);
+  const names = run.tools.map((tool) => tool.name).sort();
+  if (JSON.stringify(names) !== JSON.stringify(expected)) {
+    throw new Error(`Calm registered ${JSON.stringify(names)} synchronously at load with config/calm=${label}, expected ${JSON.stringify(expected)}`);
+  }
 }
 JS
   status=$?
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm gate-at-load-time path failed: $out"
   [ -z "$out" ] || fail "Pi calm gate-at-load-time test printed output: $out"
-  pass "Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on"
+  pass "Calm uses the worker's owning config override at load: absent, off, unreadable, and unrecognized preferences keep stock built-ins, while on and legacy max register all 7 Calm wrappers synchronously"
 }
 
 test_calm_activation_collision_and_regression_bound() {
@@ -3079,7 +3100,7 @@ JS
 }
 
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -3098,7 +3119,6 @@ test_interactive_terminal_e2e() {
   hidden_snapshot="$TMP_ROOT/hidden.txt"
   active_before_snapshot="$TMP_ROOT/active-before.txt"
   active_hidden_snapshot="$TMP_ROOT/active-hidden.txt"
-  export_snapshot="$TMP_ROOT/export.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
   working_snapshot="$TMP_ROOT/working.txt"
   working_response_snapshot="$TMP_ROOT/working-response.txt"
@@ -3505,8 +3525,12 @@ JS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  wait_for_text "$export_snapshot" "Session exported to: $export_file" \
-    || fail "/export did not complete while calm mode was on"
+  active_wait=0
+  while [ ! -s "$export_file" ] && [ "$active_wait" -lt 120 ]; do
+    sleep 0.05
+    active_wait=$((active_wait + 1))
+  done
+  [ -s "$export_file" ] || fail "/export did not write its HTML artifact while calm mode was on"
   node - "$export_file" <<'JS' || fail "calm-mode HTML export lost tool data or persisted synthetic provenance"
 const html = require("node:fs").readFileSync(process.argv[2], "utf8");
 const match = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/);

@@ -36,14 +36,14 @@ These are supported-API boundaries rather than hidden-content failures.
 Firstmate loads this same tracked `fm-calm.ts` implementation explicitly for every ordinary Pi and Pi-signed ship or scout worker.
 The launch binds the worker to the spawning Firstmate home's resolved `FM_HOME` and config directory, so the extension reads that home's `config/calm` even though the worker runs in an isolated task repository.
 The launch contributes exactly one Calm extension path outside that repository, requires no project-local copy or project trust, and keeps the generated supervision extension separate so presentation and supervision retain their existing owners.
-An absent or off preference leaves stock Pi presentation unchanged, while on applies the same presentation-only behavior described above without changing tool execution, message ordering, session storage, or exports.
+The [home-local preference contract](configuration.md#pi-calm-preference-configcalm) is unchanged; the worker launch only selects the owning home's path, and an active preference applies the same presentation-only behavior described above without changing tool execution, message ordering, session storage, or exports.
 Non-Pi workers receive no Calm launch integration.
 Persistent second mates also receive no ordinary-worker integration because a Pi-family second mate already starts as a primary Firstmate session under its own tracked extension contract.
 
 A worker reads the preference when its Pi extension starts and again on Pi `session_start` events, but it does not poll the file while an existing session sits unchanged.
 Changing the preference in another Pi session therefore applies automatically to workers started later and to a running worker only after that worker naturally starts or reloads a Pi session.
 Firstmate does not inject live extension code or force a reload into a running worker.
-Use the supported worker relaunch path when the new presentation must apply immediately: it preserves the task's isolated local copy and durable progress while starting a replacement Pi session, and the prior Pi transcript remains stored normally.
+Use the [supported control-plane relaunch](agent-control.md#transactional-relaunch) when the new presentation must apply immediately: it preserves the task's isolated local copy and durable progress while starting a replacement Pi session, and the prior Pi transcript remains stored normally.
 
 ## Pi compatibility
 
@@ -66,6 +66,7 @@ If the other extension wins, a session-start console diagnostic names the tool a
 Regression entry points:
 
 ```sh
+tests/fm-spawn-dispatch-profile.test.sh
 tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
