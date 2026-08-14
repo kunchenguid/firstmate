@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -277,24 +279,29 @@ test_relaunch_preserves_durable_task_metadata() {
   local dir out rc
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
+  local meta="$dir/home/state/rl19.meta"
   {
-    printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
-    printf '%s\n' 'pr_head=feature/relaunch'
     printf '%s\n' 'x_request=request-19'
     printf '%s\n' 'decisions_reviewed=1'
-  } >> "$dir/home/state/rl19.meta"
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
+    printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
+  } >> "$meta"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
   expect_code 0 "$rc" "relaunch should preserve durable metadata"$'\n'"$out"
   [ "$(meta_field "$dir" rl19 pr)" = "https://github.com/example/repo/pull/19" ] \
     || fail "the task PR must survive relaunch"
-  [ "$(meta_field "$dir" rl19 pr_head)" = "feature/relaunch" ] \
+  [ "$(meta_field "$dir" rl19 pr_head)" = "0123456789abcdef0123456789abcdef01234567" ] \
     || fail "the task PR head must survive relaunch"
   [ "$(meta_field "$dir" rl19 x_request)" = "request-19" ] \
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
-  pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+  [ "$(tail -n 2 "$meta")" = $'pr=https://github.com/example/repo/pull/19\npr_head=0123456789abcdef0123456789abcdef01234567' ] \
+    || fail "PR metadata must remain the final lines after relaunch"
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "the relaunch-shaped metadata must pass PR identity parsing"
+  pass "fm-control relaunch: durable metadata survives replacement publication with PR lines last"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
