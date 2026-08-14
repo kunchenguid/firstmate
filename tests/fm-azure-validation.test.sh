@@ -298,6 +298,19 @@ PY
   pass "secret-bearing leases, broad GitHub authority, and credential-like runtime bundles fail before admission"
 }
 
+credential_disk_identity_contract() {
+  python3 - "$HOST" <<'PY' || fail "credential disk uniqueId fallback failed"
+import importlib.util,sys
+spec=importlib.util.spec_from_file_location("validation",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+disk_id="/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/disks/credential-task"
+env={"subscription":"sub","resource_group":"rg"}
+state={"request":{"credential_lease":{"lease_id":"lease-task","disk":{"id":disk_id,"etag":"disk-unique-id"}}}}
+m.read_resource=lambda *_:(True,{"id":disk_id,"properties":{"uniqueId":"disk-unique-id"},"tags":{"credential-lease":"lease-task"}})
+m.verify_credential_disk(env,state)
+PY
+  pass "credential disk validation accepts Azure's uniqueId when disk GET omits ETag"
+}
+
 admission_contract() {
   local tmp fixture out
   fm_test_tmproot_into tmp fm-azure-validation-admission
@@ -567,6 +580,7 @@ operator_documentation_contract() {
 static_contract
 submit_contract
 security_negative_contract
+credential_disk_identity_contract
 admission_contract
 identity_and_recovery_contract
 trusted_manifest_verifier_contract

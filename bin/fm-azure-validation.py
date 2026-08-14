@@ -1360,9 +1360,11 @@ def verify_credential_disk(env, state):
     exists, disk = read_resource(env, expected["id"], "disk")
     if not exists:
         raise ValidationError("exact credential lease disk is absent")
-    if disk.get("etag") != expected["etag"]:
+    properties = disk.get("properties") or {}
+    live_identity = disk.get("etag") or properties.get("etag") or properties.get("uniqueId")
+    if live_identity != expected["etag"]:
         raise ValidationError("credential lease disk ETag changed")
-    if disk.get("managedBy") or disk.get("properties", {}).get("managedBy"):
+    if disk.get("managedBy") or properties.get("managedBy"):
         raise ValidationError("credential lease disk is already attached to another cell")
     tags = disk.get("tags") or {}
     if tags.get("credential-lease") != state["request"]["credential_lease"]["lease_id"]:
