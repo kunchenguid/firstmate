@@ -168,12 +168,25 @@ esac
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
 ACTIVE_HOME=${FM_HOME:-$ROOT}
+ACTIVE_STATE=${FM_STATE_OVERRIDE:-$ACTIVE_HOME/state}
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 
-POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" 2>/dev/null) || exit 0
+STATE_MODE=unknown
+if [ -e "$ACTIVE_STATE" ] || [ -L "$ACTIVE_STATE" ]; then
+  if [ -d "$ACTIVE_STATE" ] && [ ! -L "$ACTIVE_STATE" ] && [ -f "$SCRIPT_DIR/fm-state-capability-lib.sh" ]; then
+    # shellcheck source=bin/fm-state-capability-lib.sh
+    . "$SCRIPT_DIR/fm-state-capability-lib.sh"
+    fm_state_mode_detect "$ACTIVE_STATE"
+    STATE_MODE=$FM_STATE_MODE
+  else
+    STATE_MODE=data-only
+  fi
+fi
+
+POLICY_OUTPUT=$(node "$POLICY" --command "$CMD" --root "$ROOT" --home "$ACTIVE_HOME" --state-mode "$STATE_MODE" 2>/dev/null) || exit 0
 [ -n "$POLICY_OUTPUT" ] || exit 0
 
 TAB=$(printf '\t')

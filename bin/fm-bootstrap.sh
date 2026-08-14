@@ -924,8 +924,9 @@ x_mode_setup() {
   }
 
   x_mode_supervision_repair() {
-    local out
-    out=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --repair-line 2>/dev/null) \
+    local out x_mode=0
+    [ -f "$cadence" ] && x_mode=1
+    out=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --x-mode "$x_mode" --repair-line 2>/dev/null) \
       || out='repair missing watcher supervision according to the session-start operating block.'
     printf '%s\n' "$out"
   }

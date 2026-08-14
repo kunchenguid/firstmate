@@ -738,13 +738,25 @@ EOF
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
-  local rec root home fakebin holder_pid out status
+  local rec root home fakebin holder_pid out status probe_log real_stat
   rec=$(new_world lock-refusal)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  probe_log="$TMP_ROOT/read-only-capability-probe.log"
+  real_stat=$(command -v stat)
+  cat > "$fakebin/stat" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in
+    */.fm-state-capability.*) printf '%s\n' "\$*" >> "$probe_log" ;;
+  esac
+done
+exec "$real_stat" "\$@"
+SH
+  chmod +x "$fakebin/stat"
 
   # A live secondmate meta with a window pointed at nothing real - if the
   # bootstrap sweep's secondmate_sync ran (a MUTATING step), it would try to
@@ -764,6 +776,8 @@ EOF
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
+
+  [ ! -s "$probe_log" ] || fail "lock-refusal digest probed shared state capability: $(cat "$probe_log")"
 
   expect_code 0 "$status" "fm-session-start.sh must exit 0 even on a lock refusal"
   assert_contains "$out" "READ-ONLY SESSION" "read-only banner missing on lock refusal"

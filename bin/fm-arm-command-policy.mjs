@@ -29,12 +29,12 @@ const REASONS = {
 };
 
 function parseArguments(argv) {
-  const result = { command: "", root: "", home: "" };
+  const result = { command: "", root: "", home: "", stateMode: "unknown" };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
-    if (name === "--command" || name === "--root" || name === "--home") {
+    if (name === "--command" || name === "--root" || name === "--home" || name === "--state-mode") {
       if (i + 1 >= argv.length) throw new Error(`${name} requires a value`);
-      result[name.slice(2)] = argv[i + 1];
+      result[name === "--state-mode" ? "stateMode" : name.slice(2)] = argv[i + 1];
       i += 1;
       continue;
     }
@@ -870,8 +870,8 @@ function setupKind(info, context) {
   const values = position.words.map((word) => word.value);
   if (values[0] === "cd" && values.length === 2) return "cd";
   if (values[0] === "export" && values.length === 2 && isAssignment(values[1])) return "export";
-  if ((values[0] === "source" || values[0] === ".") && values.length === 2 && xModePathAllowed(values[1], context.home)) return "source";
-  if (values[0] === "[" && values[1] === "-f" && values[3] === "]" && values.length === 4 && xModePathAllowed(values[2], context.home)) return "test-source";
+  if ((values[0] === "source" || values[0] === ".") && values.length === 2 && context.stateMode !== "data-only" && xModePathAllowed(values[1], context.home)) return "source";
+  if (values[0] === "[" && values[1] === "-f" && values[3] === "]" && values.length === 4 && context.stateMode !== "data-only" && xModePathAllowed(values[2], context.home)) return "test-source";
   return "";
 }
 
@@ -899,8 +899,8 @@ function blessedProgram(analysis, context) {
   return true;
 }
 
-function decision(command, root, home) {
-  const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
+function decision(command, root, home, stateMode = "unknown") {
+  const context = { root: path.normalize(root), home: path.normalize(home), stateMode, protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
   const analysis = analyzeProgram(command, context);
   if (analysis.broadKill) return deny("broad-watcher-kill");
   if (analysis.error && analysis.protectedFound) return deny("unclassifiable-protected-command");
@@ -946,7 +946,7 @@ if (invokedDirectly()) {
     if (!args.command) {
       process.stdout.write("allow\n");
     } else {
-      const result = decision(args.command, args.root, args.home);
+      const result = decision(args.command, args.root, args.home, args.stateMode);
       if (result.decision === "allow") {
         process.stdout.write("allow\n");
       } else {

@@ -728,7 +728,7 @@ stage supervision-instructions
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
 X_MODE_PRESENT=0
-if fm_state_mode_secure "$STATE" && [ -f "$CONFIG/x-mode.env" ]; then
+if [ "$READ_ONLY" -eq 0 ] && fm_state_mode_secure "$STATE" && [ -f "$CONFIG/x-mode.env" ]; then
   X_MODE_PRESENT=1
 fi
 
@@ -907,7 +907,7 @@ load /afk and ensure the daemon is running, because the daemon owns watcher
 supervision.
 
 EOF
-elif fm_state_mode_secure "$STATE" && [ -f "$CONFIG/x-mode.env" ]; then
+elif [ "$X_MODE_PRESENT" -eq 1 ]; then
   cat <<EOF
 Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
 X mode is active, so the emitted block's cadence instruction applies.

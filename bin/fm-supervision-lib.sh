@@ -44,7 +44,9 @@ fm_supervision_status() {
   FM_SUP_BEACON_DESC=never
   FM_SUP_QUEUE_PENDING=false
 
-  fm_state_mode_secure "$state" && x_mode_allowed=1
+  if [ "${FM_GUARD_READ_ONLY:-0}" != 1 ]; then
+    fm_state_mode_secure "$state" && x_mode_allowed=1
+  fi
 
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue

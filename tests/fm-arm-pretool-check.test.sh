@@ -239,6 +239,36 @@ test_direct_policy_contract() {
   assert_policy direct-heredoc-watcher $'deny\twatcher-redirection' "$heredoc_watcher"
 }
 
+test_data_only_x_mode_setup_is_not_blessed() {
+  local home fakebin real_stat out rc
+  home="$MATRIX_TMP/data-only-home"
+  fakebin="$MATRIX_TMP/data-only-fakebin"
+  mkdir -p "$home/state" "$home/config" "$fakebin"
+  real_stat=$(command -v stat)
+  cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    */.fm-state-capability.*) printf '755\n'; exit 0 ;;
+  esac
+done
+exec "$FM_TEST_REAL_STAT" "$@"
+SH
+  chmod +x "$fakebin/stat"
+
+  out=$(node "$POLICY" --root "$ROOT" --home "$home" --state-mode data-only \
+    --command "source 'config/x-mode.env'; exec bin/fm-watch-arm.sh") \
+    || fail "data-only policy invocation failed"
+  assert_contains "$out" $'deny\twatcher-bundled' "data-only policy must reject X-mode setup"
+
+  out=$(FM_TEST_REAL_STAT="$real_stat" FM_HOME="$home" PATH="$fakebin:$PATH" \
+    "$CHECK" --command "source 'config/x-mode.env'; exec bin/fm-watch-arm.sh" 2>&1)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "data-only pretool transport must deny X-mode setup, got exit $rc"
+  assert_contains "$out" "[watcher-bundled]" "data-only pretool deny did not preserve the policy reason"
+  pass "data-only capability gates X-mode sourcing before watcher execution"
+}
+
 # --- CLI parsing -------------------------------------------------------------
 
 test_command_equals_form() {
@@ -456,6 +486,7 @@ test_shellcheck_clean() {
 
 test_full_acceptance_matrix
 test_direct_policy_contract
+test_data_only_x_mode_setup_is_not_blessed
 test_command_equals_form
 test_background_flag_accepted_and_non_gating
 test_unknown_flag_errors
