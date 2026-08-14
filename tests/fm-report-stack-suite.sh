@@ -243,15 +243,22 @@ test_revision_fields_distinguish_pr_head_from_worktree_head() {
 test_legacy_cutover_preserves_fresh_reports_and_retires_expired_raw_paths() {
   local stack="$TMP_ROOT/legacy-cutover-stack" ready="$TMP_ROOT/legacy-cutover.ready"
   local proceed="$TMP_ROOT/legacy-cutover.proceed" output="$TMP_ROOT/legacy-cutover.out" pid status fresh_path
+  local fresh_completed fresh_completed_two
+  # Freshness must be relative to the wall clock: hardcoded dates age across
+  # the retention window and detonate exactly at a midnight-UTC boundary
+  # (this fixture's 2026-07-15 stamp turned 30 days old on 2026-08-14 and
+  # failed every shard fleet-wide).
+  fresh_completed=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+  fresh_completed_two=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z"))')
   mkdir -p "$stack/entries/legacy-fresh" "$stack/entries/legacy-fresh-two" \
     "$stack/entries/legacy-expired" "$stack/entries/.legacy-old.expired"
-  printf '{"schemaVersion":1,"reportId":"legacy-fresh","taskId":"legacy-fresh","title":"Fresh","summary":"Fresh","completedAt":"2026-07-15T00:00:00.000Z","kind":"ship","project":"example","harness":"codex"}\n' \
-    > "$stack/entries/legacy-fresh/manifest.json"
+  printf '{"schemaVersion":1,"reportId":"legacy-fresh","taskId":"legacy-fresh","title":"Fresh","summary":"Fresh","completedAt":"%s","kind":"ship","project":"example","harness":"codex"}\n' \
+    "$fresh_completed" > "$stack/entries/legacy-fresh/manifest.json"
   printf 'fresh bytes\n' > "$stack/entries/legacy-fresh/report.md"
   printf '<script src="../../.retention-policy.js"></script><a href="../../index.html">stack</a>\n' \
     > "$stack/entries/legacy-fresh/report.html"
-  printf '{"schemaVersion":1,"reportId":"legacy-fresh-two","taskId":"legacy-fresh-two","title":"Fresh two","summary":"Fresh two","completedAt":"2026-07-15T00:01:00.000Z","kind":"ship","project":"example","harness":"codex"}\n' \
-    > "$stack/entries/legacy-fresh-two/manifest.json"
+  printf '{"schemaVersion":1,"reportId":"legacy-fresh-two","taskId":"legacy-fresh-two","title":"Fresh two","summary":"Fresh two","completedAt":"%s","kind":"ship","project":"example","harness":"codex"}\n' \
+    "$fresh_completed_two" > "$stack/entries/legacy-fresh-two/manifest.json"
   printf 'second fresh bytes\n' > "$stack/entries/legacy-fresh-two/report.md"
   printf '{"schemaVersion":1,"reportId":"legacy-expired","taskId":"legacy-expired","title":"Expired","summary":"Expired","completedAt":"2000-01-01T00:00:00.000Z","kind":"ship","project":"example","harness":"codex"}\n' \
     > "$stack/entries/legacy-expired/manifest.json"
