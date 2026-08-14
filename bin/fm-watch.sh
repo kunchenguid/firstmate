@@ -404,6 +404,11 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
+  if [ "$class" = paused ]; then
+    date +%s > "$recheck_file"
+    printf 'paused'
+    return
+  fi
   if [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then

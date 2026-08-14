@@ -779,6 +779,7 @@ test_obsolete_failed_run_blocked_custody_returned_overrides() {
   local out; out=$(run_crew_state "$d" feat-obsolete-b)
   assert_contains "$out" "state: blocked" "obsolete failed run + custody returned + later blocked -> blocked"
   assert_contains "$out" "source: status-log" "override reports status-log as the source"
+  assert_contains "$out" "obsolete run superseded" "detail names the obsolete run as superseded"
   pass "blocked generalizes the same obsolete-run precedence rule"
 }
 
