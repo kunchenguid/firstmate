@@ -669,8 +669,11 @@ RESULT_ARCHIVE=$BOOTSTRAP/result.tar.gz
 rm -f "$RESULT_ARCHIVE"
 (
   cd "$STATE"
-  cp "$RUN_LOG" run.log
-  cp "$REPORT" report.md
+  # The report already lives at $STATE/report.md, so an unconditional cp is a
+  # same-file error that kills packaging after the run completed; guard both
+  # protocol members against identity copies.
+  [ "$RUN_LOG" -ef run.log ] || cp "$RUN_LOG" run.log
+  [ "$REPORT" -ef report.md ] || cp "$REPORT" report.md
   tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
     -czf "$RESULT_ARCHIVE" "$(basename "$RESULT")" run.log report.md
 )
