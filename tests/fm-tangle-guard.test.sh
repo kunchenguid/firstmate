@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for the worktree-tangle guards.
+# Behavior tests for the checkout-state guards.
 #
 # Firstmate is a treehouse-pooled git repo of itself: linked worktrees and
 # secondmate homes all sit at a detached HEAD on the default branch, while the
@@ -9,8 +9,9 @@
 #   GUARD 1 (prevention) - the brief asserts isolation before its branch step, and
 #            fm-spawn refuses to launch unless the resolved worktree is isolated.
 #   GUARD 2 (detection)  - fm-guard and fm-bootstrap alarm when the primary is on
-#            a feature branch, and stay silent on the default branch or detached.
-# These cases pin: the shared lib's branch classification, the fm-guard banner,
+#            a feature branch, and warn when the executing checkout's detached
+#            HEAD is behind the local default branch while staying silent when current.
+# These cases pin: the shared lib's checkout classification, the fm-guard banners,
 # the fm-bootstrap problem line, the brief assertion ordering, and the fm-spawn
 # abort - all hermetic over temp git repos and fakebins.
 set -u
@@ -64,7 +65,7 @@ ROWS
 
 run_guard() {
   # Scope the guard to a temp repo as the primary checkout; state lives under it.
-  FM_ROOT_OVERRIDE="$1" FM_HOME="$1" "$ROOT/bin/fm-guard.sh" 2>&1
+  LC_ALL=C FM_ROOT_OVERRIDE="$1" FM_HOME="$1" "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
 test_guard_banner() {
@@ -88,6 +89,27 @@ test_guard_banner() {
   assert_contains "$out" "read-only session must leave restore work" "read-only guard did not explain restore ownership"
   assert_not_contains "$out" "checkout main" "read-only guard printed a state-changing restore command"
   pass "fm-guard: bordered tangle banner fires only for a feature branch and suppresses repair commands in read-only mode"
+}
+
+test_guard_warns_when_executing_checkout_lags_default() {
+  local repo home checkout_sha default_sha out
+  repo=$(make_repo "$TMP_ROOT/lag-repo")
+  home="$TMP_ROOT/lag-home"
+  git -C "$repo" worktree add -q --detach "$home" main
+  checkout_sha=$(git -C "$home" rev-parse HEAD)
+  git -C "$repo" commit -q --allow-empty -m "advance default"
+  default_sha=$(git -C "$home" rev-parse refs/heads/main)
+
+  out=$(run_guard "$home")
+  assert_contains "$out" "STALE FIRSTMATE CHECKOUT" \
+    "guard did not alarm when the executing checkout HEAD was behind its local default branch"
+  assert_contains "$out" "$checkout_sha" "stale-checkout banner did not name the executing checkout SHA"
+  assert_contains "$out" "$default_sha" "stale-checkout banner did not name the local default-branch SHA"
+
+  git -C "$home" checkout -q --detach refs/heads/main
+  out=$(run_guard "$home")
+  [ -z "$out" ] || fail "guard must be silent when the executing checkout is current, got: $out"
+  pass "fm-guard: a real checkout behind local main alarms with both SHAs; a current checkout stays silent"
 }
 
 # --- GUARD 2b: fm-bootstrap problem line ------------------------------------
@@ -303,6 +325,7 @@ test_spawn_tmux_window_construction() {
 
 test_lib_classification
 test_guard_banner
+test_guard_warns_when_executing_checkout_lags_default
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Watcher liveness and worktree-tangle guard, called by supervision scripts, by
+# Checkout-version, watcher-liveness, and worktree-tangle guard, called by supervision scripts, by
 # fm-wake-drain.sh after it empties queued wakes, and by fm-session-start.sh in
 # read-only advisory mode whenever session-lock ownership was not verified.
-# First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
+# First, always warn if the executing checkout HEAD is behind its local default
+# branch, because every invoked script then predates already-landed code.
+# Independently warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
 # Then, if a task is in flight (a state/<id>.meta exists) or X-mode relay
@@ -117,7 +119,27 @@ fm_guard_clear_stale_banner() {
   rm -f "$STALE_BANNER_MARKER" 2>/dev/null || true
 }
 
-# Worktree-tangle alarm, checked FIRST and independent of in-flight tasks: the
+# The guard is the shared fleet-action choke point, so compare the checkout that
+# supplied this script with its local default branch here once instead of adding
+# a revision check to every lifecycle caller. This is read-only and deliberately
+# warns without advancing a running supervisor underneath its active session.
+checkout_lag=$(fm_checkout_lag "$FM_ROOT" || true)
+if [ -n "$checkout_lag" ]; then
+  read -r checkout_sha checkout_default checkout_default_sha <<< "$checkout_lag"
+  crule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  {
+    printf '●%s\n' "$crule"
+    printf '●  STALE FIRSTMATE CHECKOUT - RUNNING OLD TOOLING\n'
+    printf '●  Executing checkout HEAD: %s\n' "$checkout_sha"
+    printf '●  Local %s tip:           %s\n' "$checkout_default" "$checkout_default_sha"
+    printf '●  This command is running scripts from HEAD, not the newer local default branch.\n'
+    printf '●  Its output does not measure code that landed after the executing HEAD.\n'
+    printf '●  Do not fast-forward this checkout underneath the running session.\n'
+    printf '●%s\n' "$crule"
+  } >&2
+fi
+
+# Worktree-tangle alarm, independent of in-flight tasks: the
 # firstmate PRIMARY checkout (FM_ROOT) must stay on its default branch. If a
 # crewmate's branch/commits landed here instead of in its own isolated worktree,
 # the primary is stranded on a feature branch - surface it loudly on the very next

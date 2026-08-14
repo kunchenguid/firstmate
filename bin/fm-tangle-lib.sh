@@ -16,6 +16,8 @@
 # which is how every linked worktree and secondmate home legitimately sits on the
 # default branch. Detached HEAD on the default is fine; a feature branch in a
 # primary checkout is the alarm.
+# fm_checkout_lag detects a different unsafe checkout state: the scripts being
+# executed come from a HEAD that is strictly behind the local default-branch tip.
 
 # Resolve the default branch name of the git repo at <dir>: prefer origin/HEAD,
 # then fall back to a local main/master. Echoes the name, or returns 1.
@@ -50,4 +52,18 @@ fm_primary_tangle_branch() {
   [ "$cur" = "$default" ] && return 1
   printf '%s\n' "$cur"
   return 0
+}
+
+# If the checkout at <root> is strictly behind its local default branch, print
+# "<checkout-sha> <default-branch> <default-sha>" and return 0. Stay silent and
+# return 1 when it is current, ahead, diverged, or cannot be classified.
+fm_checkout_lag() {
+  local root=$1 default checkout_sha default_sha
+  git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  default=$(fm_default_branch "$root") || return 1
+  checkout_sha=$(git -C "$root" rev-parse --verify "HEAD^{commit}" 2>/dev/null) || return 1
+  default_sha=$(git -C "$root" rev-parse --verify "refs/heads/$default^{commit}" 2>/dev/null) || return 1
+  [ "$checkout_sha" != "$default_sha" ] || return 1
+  git -C "$root" merge-base --is-ancestor "$checkout_sha" "$default_sha" 2>/dev/null || return 1
+  printf '%s %s %s\n' "$checkout_sha" "$default" "$default_sha"
 }
