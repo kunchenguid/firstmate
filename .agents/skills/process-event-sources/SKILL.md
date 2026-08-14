@@ -38,6 +38,8 @@ That is the board's current reply transport, and it has no arming precondition: 
 Its `serve` command runs the board's own loopback reply service, which is how the board is served at all; [`docs/mission-control.md`](../../../docs/mission-control.md) owns how firstmate deploys and exposes it.
 `bin/fm-procevent-mission-control.sh arm <board.html>` is the superseded Lavish-bridged surface for a board served through Lavish, and it keeps that adapter's own precondition: open the Lavish session first, because the first poll with no session is terminal.
 
+A local append-only JSONL or line-oriented file (for example a private daemon's own event log) is armed through `bin/fm-procevent-jsonl-tail.sh arm <file>`; its header owns the cursor discipline and its plainly stated at-most-once delivery boundary.
+
 A configured remote secondmate reply source is armed and handled through `bin/fm-procevent-remote-reply.sh`.
 Its header owns exact commands, while the adapter owns cursor continuity, validated deduplicated status ingest, path-confined document fetch, acknowledgement, and re-arming after a good delta.
 A continuity break is escalated once and stays unarmed until an operator deliberately rebases it.
