@@ -64,8 +64,8 @@ The third is recorded below.
 Two harness-specific consequences are load-bearing rather than incidental.
 
 Codex's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
-Codex's run tier is therefore verified only for `codex exec`.
-The interactive TUI remains on the tracked nudge floor through `AGENTS.md` and the Ahoy fallback; Firstmate ships no global hook and does not depend on one.
+Codex's run tier is therefore verified only for `codex exec` startup and context-preserving resume.
+The interactive TUI is a known uncovered gap: Firstmate has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
 
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
@@ -79,8 +79,34 @@ Compacted from 7,697 tokens
 compact
 ```
 
-Pi disagrees with Claude and Codex on `resume`: a NEW Pi process continuing a session reports `startup`, and Pi's `resume` reason is reserved for an in-process session switch.
-That is correct for the run tier rather than a problem, because a new process holds no lock and must take the helm; the routing table in [`../sessionstart-nudge.md`](../sessionstart-nudge.md#source-routing) is written to whichever source each harness actually reports.
+Pi disagrees with Claude and Codex on `resume`: a new Pi process continuing a session reports `startup`, and Pi's `resume` reason is reserved for an in-process session switch.
+The current adapter classification and baseline mechanics are owned by [`../sessionstart-nudge.md`](../sessionstart-nudge.md#harness-transports) and the `bin/fm-session-start.sh` header.
+Their continuation classification is covered by portable tests, not claimed as live validation in this record.
+
+### Post-start instruction refresh
+
+The isolated real-Pi instruction-refresh regression ran on 2026-08-11 with Pi 0.84.0.
+It used a scratch `FM_HOME`, a private tmux socket, and a disposable Firstmate checkout.
+The historical `origin/main` implementation first reproduced the stale original marker after a real compaction.
+The current implementation then recorded `source=startup`, changed and committed the lab's `AGENTS.md`, compacted the same real Pi session, and answered with the replacement marker.
+The fixed run also proved that the true-start baseline remained different from the updated file after compaction.
+
+```sh
+FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 \
+FM_SESSIONSTART_INSTRUCTION_REFRESH_REF=origin/main \
+FM_SESSIONSTART_INSTRUCTION_REFRESH_EXPECT=stale \
+tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
+# ok - Pi 0.84.0 reproduces stale AGENTS.md after a real compact
+
+FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 \
+tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
+# ok - Pi 0.84.0 re-injects updated AGENTS.md after a real compact in an isolated session
+```
+
+This is live coverage only for Pi compaction.
+The portable session-start tests cover continuation classification, baseline immutability, and source-routing behavior.
+Pi compaction is the only supported stale-cache refresh pair.
+Codex exec exposes only startup and context-preserving resume through tracked registration; Codex interactive reset behavior remains uncovered rather than inferred from direct wrapper invocation.
 
 ### Detached session-open workers survive the hook
 
@@ -131,6 +157,7 @@ tests/fm-sessionstart-nudge.test.sh
 tests/fm-session-start.test.sh
 tests/fm-startup-network.test.sh
 FM_SESSIONSTART_HOOK_LIVE_E2E=1 tests/fm-sessionstart-hook-live-e2e.test.sh
+FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
 ```
@@ -206,13 +233,17 @@ ok - Grok adaptive Stop real-process matrix passed with exact target cleanup and
 ```
 
 The same run proved the Claude-compatible Stop entries stay inert under `GROK_AGENT`, the legacy resume carries `GROK_TURNEND_GUARD_ACTIVE=1`, and every replacement root is removed after exact target cleanup while its control window survives.
+That inertness result is scoped to the builds it exercised: it did not establish that `GROK_AGENT` reaches a Grok HOOK process, and on grok 1.0.0 it does not, so the marker set was widened to `GROK_HOOK_EVENT` as well (docs/turnend-guard.md "Harness integrations").
+`tests/fm-turnend-guard.test.sh` now pins every tracked `.claude/settings.json` hook entry against a real grok 1.0.0 hook environment so the inertness contract is covered deterministically rather than only by the opt-in live matrix.
 
 The secondmate-home scope and manual-repair wake path were measured with Claude Code 2.1.207 on 2026-07-12, when a native background completion re-invoked the idle model with no human input.
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
 Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
 Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
 `tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
-`tests/fm-watch-arm.test.sh` runs a real watcher and attached arm to verify that a delivered reason survives queue draining, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
+`tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
+The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
+It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
 
 The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
 
@@ -334,6 +365,8 @@ Deterministic entry points:
 tests/fm-pi-watch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-watcher-lock.test.sh
+tests/fm-watch-arm.test.sh
+tests/fm-wake-queue.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh

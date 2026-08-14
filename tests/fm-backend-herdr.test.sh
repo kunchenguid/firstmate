@@ -2987,7 +2987,7 @@ test_busy_state_unknown_on_no_agent() {
 test_composer_state_bare_prompt_is_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-bare"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ─────╯\n\n  Shift+Tab:mode\n' > "$resp/1.out"
+  printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ──────╯\n\n  Shift+Tab:mode\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
@@ -2995,21 +2995,21 @@ test_composer_state_bare_prompt_is_empty() {
   pass "fm_backend_herdr_composer_state: a bare '❯' composer row reads empty"
 }
 
-test_composer_state_ghost_placeholder_is_empty() {
+test_composer_state_styled_placeholder_draft_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-ghost"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '  ╭────────────────────────╮\n  │ ❯ Type a message...    │\n  ╰──────── Composer ─────╯\n' > "$resp/1.out"
+  printf '  ╭────────────────────────╮\n  │ ❯ Type a message...    │\n  ╰──────── Composer ──────╯\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
-  [ "$out" = empty ] || fail "the known ghost placeholder 'Type a message...' should read as empty, got '$out'"
-  pass "fm_backend_herdr_composer_state: the ghost placeholder text reads empty, not pending"
+  [ "$out" = pending ] || fail "bright placeholder-like text in a styled capture should remain pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: bright placeholder-like text stays pending rather than being mistaken for an idle ghost"
 }
 
 test_composer_state_real_text_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '  ╭────────────────────────╮\n  │ ❯ hello captain         │\n  ╰──────── Composer ─────╯\n\n  Enter:send\n' > "$resp/1.out"
+  printf '  ╭────────────────────────╮\n  │ ❯ hello captain        │\n  ╰──────── Composer ──────╯\n\n  Enter:send\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
@@ -3028,7 +3028,7 @@ test_composer_state_real_text_is_pending() {
 test_composer_state_popup_placeholder_fill_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-popup-placeholder"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '  ╭──────────────────────────────────────╮\n  │ ❯ /compact compaction instructions    │\n  ╰──────────────── Composer ─────────────╯\n\n  Enter:send\n' > "$resp/1.out"
+  printf '  ╭──────────────────────────────────────╮\n  │ ❯ /compact compaction instructions   │\n  ╰──────────────── Composer ────────────╯\n\n  Enter:send\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
@@ -3236,7 +3236,7 @@ test_composer_state_claude_dim_ghost_row_with_real_text_is_pending() {
 test_composer_state_grok_dark_truecolor_placeholder_is_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-grok-truecolor-ghost"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '  \x1b[38;2;86;82;110m\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[38;2;224;222;244m \xe2\x9d\xaf \x1b[38;2;50;47;70mType a message...\x1b[38;2;86;82;110m \xe2\x94\x82\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\x1b[39m\n' > "$resp/1.out"
+  printf '  \x1b[38;2;86;82;110m\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[38;2;224;222;244m \xe2\x9d\xaf \x1b[38;2;50;47;70mType a message...\x1b[38;2;86;82;110m \xe2\x94\x82\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\x1b[39m\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
@@ -3248,7 +3248,7 @@ test_composer_state_grok_dark_truecolor_placeholder_is_empty() {
 test_composer_state_grok_bright_truecolor_real_text_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-grok-truecolor-real"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '  \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[38;2;224;222;244m \xe2\x9d\xaf fix the login bug \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[39m\n' > "$resp/1.out"
+  printf '  \x1b[38;2;86;82;110m\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[38;2;224;222;244m \xe2\x9d\xaf fix the login bug \x1b[38;2;86;82;110m\xe2\x94\x82\x1b[39m\n  \x1b[38;2;86;82;110m\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\x1b[39m\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
@@ -3489,19 +3489,131 @@ test_send_text_submit_confirms_blocked_after_enter() {
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter() {
   local dir log resp fb out enter_count read_count
   dir="$TMP_ROOT/submit-preexisting-working-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: send-text
+  # 2: agent get - pre-Enter baseline is working, so the composer branch runs
+  # 3: pane read - the RENDERED footer baseline is still idle because the
+  #    pre-existing turn has not rendered its token yet
+  # 4: send-keys enter; 5: pane read - the composer still holds the message
+  # 6: pane read - the pre-existing turn's footer has become busy
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/3.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/4.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/6.out"
+  printf '  ready\n' > "$resp/3.out"
+  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
+  printf '  thinking... esc to interrupt\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "send_text_submit must not accept preexisting working as proof that this Enter landed, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "preexisting-working swallowed Enter should use the configured retry count, sent $enter_count Enter(s)"
+  read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
+  [ "$read_count" -eq 2 ] || fail "preexisting-working confirmation should read one footer baseline and one composer verdict without accepting the later busy footer, made $read_count read(s)"
+  pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
+}
+
+# --- the never-idle-native-state harness (real cursor on herdr) --------------
+# Measured live on cursor-agent 2026.08.11-e8db854 under herdr: `agent get`
+# reports a cursor pane `blocked` in EVERY state - idle, mid-turn, and after -
+# so the idle-baseline native path is structurally unreachable and every send
+# lands in the composer branch. Cursor's mid-turn composer row renders its own
+# `Add a follow-up` placeholder beside a right-aligned `ctrl+c to stop`, so the
+# content verdict is `pending` on a composer holding no user text, and every
+# steer reported delivery unconfirmed on a message that had actually landed.
+# The bytes below are the real captures from that pane.
+
+# The idle capture: no busy token anywhere, which is the pre-Enter baseline.
+herdr_cursor_idle_plain() {
+  printf '%b' ' ▄▄▄▄▄▄▄▄▄▄\n  → Add a follow-up\n ▀▀▀▀▀▀▀▀▀▀\n  Cursor Grok 4.5 High · 7%%           Run Everything\n  ~/.treehouse/curhd-ae68cd/1/curhd · 39418af\n'
+}
+
+# The mid-turn capture, plain: the spinner verb rotates, the `ctrl+c to stop`
+# token does not, which is why the token is what the matcher keys on.
+herdr_cursor_midturn_plain() {
+  printf '%b' ' ⠘⠆ Running  59 tokens\n ▄▄▄▄▄▄▄▄▄▄\n  → Add a follow-up                   ctrl+c to stop\n ▀▀▀▀▀▀▀▀▀▀\n  1 task\n  Cursor Grok 4.5 High · 7%%           Run Everything\n  ~/.treehouse/curhd-ae68cd/1/curhd · 39418af\n'
+}
+
+# The same mid-turn rows as herdr renders them with styling: the glyph and the
+# placeholder tail are dim, the cell under the parked terminal cursor is
+# reverse video, and the busy token trails on the SAME row.
+herdr_cursor_midturn_ansi() {
+  printf '%b' ' \033[0m\033[38;2;21;21;21m▄▄▄▄▄▄▄▄▄▄\033[0m\r\n \033[0m\033[48;2;21;21;21m \033[0m\033[2m\033[48;2;21;21;21m→ \033[0m\033[7m\033[48;2;21;21;21mA\033[0m\033[2m\033[48;2;21;21;21mdd a follow-up\033[0m\033[48;2;21;21;21m                   \033[0m\033[2m\033[48;2;21;21;21mctrl+c to stop\033[0m\033[48;2;21;21;21m \033[0m\r\n \033[0m\033[38;2;21;21;21m▀▀▀▀▀▀▀▀▀▀\033[0m\r\n  \033[0m\033[38;5;4m1 task\033[0m\r\n  \033[0m\033[2mCursor Grok 4.5 High\033[0m \033[0m\033[2m·\033[0m \033[0m\033[2m7%%\033[0m           \033[0m\033[38;5;5mRun Everything\033[0m\r\n  \033[0m\033[2m~/.treehouse/curhd-ae68cd/1/curhd · 39418af\033[0m\r\n'
+}
+
+# Non-vacuity anchor for the two submit tests below: the real mid-turn capture
+# genuinely reads `pending`, so the confirmation those tests assert can only be
+# coming from the rendered-footer transition and never from a softened composer
+# verdict. The composer verdict is deliberately NOT relaxed - a right-aligned
+# status token on the composer row is content the shared classifier must keep
+# treating as content for every other caller.
+test_composer_state_cursor_midturn_row_reads_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-cursor-midturn"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_cursor_midturn_ansi > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "cursor's mid-turn composer row carries a busy token and must stay 'pending' as composer CONTENT, got '$out'"
+  pass "fm_backend_herdr_composer_state: cursor's mid-turn placeholder-plus-busy-token row reads pending (why delivery needs a separate signal)"
+}
+
+test_rendered_busy_state_reads_the_cursor_busy_token() {
+  local dir log resp fb idle_out busy_out fail_out
+  dir="$TMP_ROOT/rendered-busy"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_cursor_idle_plain > "$resp/1.out"
+  herdr_cursor_midturn_plain > "$resp/2.out"
+  printf '1\n' > "$resp/3.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  idle_out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_rendered_busy_state default:w1:p2' "$ROOT" )
+  busy_out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_rendered_busy_state default:w1:p2' "$ROOT" )
+  fail_out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_rendered_busy_state default:w1:p2' "$ROOT" )
+  [ "$idle_out" = idle ] || fail "an idle cursor pane renders no busy token and must read idle, got '$idle_out'"
+  [ "$busy_out" = busy ] || fail "a mid-turn cursor pane renders 'ctrl+c to stop' and must read busy, got '$busy_out'"
+  [ "$fail_out" = unknown ] || fail "an unreadable pane must read unknown, never idle, got '$fail_out'"
+  pass "fm_backend_herdr_rendered_busy_state: busy/idle/unknown from the rendered footer, with an unreadable pane never reading idle"
+}
+
+test_send_text_submit_confirms_never_idle_native_state_via_footer_transition() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-cursor-footer-transition"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: send-text
+  # 2: agent get - cursor is `blocked` even while idle, so the native
+  #    idle-baseline path is unreachable and the composer branch runs
+  # 3: pane read - rendered footer baseline: no busy token, so the pane was NOT
+  #    mid-turn before our Enter
+  # 4: send-keys enter
+  # 5: pane read - composer content mid-turn: placeholder plus busy token
+  # 6: pane read - rendered footer now busy: an idle-to-busy transition ACROSS
+  #    our Enter, which is the submission proof
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/2.out"
+  herdr_cursor_idle_plain > "$resp/3.out"
+  herdr_cursor_midturn_ansi > "$resp/5.out"
+  herdr_cursor_midturn_plain > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle-to-busy rendered-footer transition must confirm the submit for a harness whose native state never goes idle, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a confirmed submit must not send a needless extra Enter, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a rendered-footer idle-to-busy transition confirms delivery when native agent-state never reports idle"
+}
+
+test_send_text_submit_never_idle_native_state_keeps_pending_without_a_transition() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-cursor-no-transition"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The pane was ALREADY mid-turn before our Enter, so its busy footer is not
+  # evidence about OUR message: the verdict must stay pending rather than
+  # borrowing someone else's turn as proof of our delivery.
+  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/2.out"
+  herdr_cursor_midturn_plain > "$resp/3.out"
+  herdr_cursor_midturn_ansi > "$resp/5.out"
+  herdr_cursor_midturn_ansi > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = pending ] || fail "send_text_submit must not accept preexisting working as proof that this Enter landed, got '$out'"
-  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 2 ] || fail "preexisting-working swallowed Enter should retry Enter up to the configured count, sent $enter_count Enter(s)"
-  read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
-  [ "$read_count" -eq 2 ] || fail "preexisting-working confirmation should fall back to composer reads, made $read_count read(s)"
-  pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
+  [ "$out" = pending ] || fail "a pane already busy before our Enter must not confirm from that same busy footer, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: an already-busy footer baseline is never accepted as proof that this Enter landed"
 }
 
 # Regression for the submit-confirmation side of the 2026-07-07 incident:
@@ -3620,8 +3732,9 @@ test_dispatch_composer_state_routes_by_backend() {
   # fm_backend_composer_state (the generic per-backend composer/pending-input
   # classifier the away-mode daemon dispatches through - bin/fm-supervise-daemon.sh's
   # pane_input_pending) must route to each backend's OWN named classifier with
-  # the target passed through unchanged, fall back to unknown for a backend with
-  # no named classifier (zellij), and unknown for an unrecognized backend name.
+  # the target passed through unchanged - every backend has one now, all thin
+  # wrappers over the shared fm_composer_classify_screen - and report unknown
+  # for an unrecognized backend name.
   # Sourced-guards are pre-set so fm_backend_source no-ops and these stubs are
   # never clobbered by the real per-backend files trying (and failing) a live call.
   (
@@ -3634,13 +3747,14 @@ test_dispatch_composer_state_routes_by_backend() {
     fm_tmux_composer_state() { [ "$1" = "sess:win" ] || fail "tmux composer_state got wrong target: $1"; printf 'pending'; }
     fm_backend_herdr_composer_state() { [ "$1" = "default:w1:p2" ] || fail "herdr composer_state got wrong target: $1"; printf 'empty'; }
     fm_backend_orca_composer_state() { [ "$1" = "term-1" ] || fail "orca composer_state got wrong target: $1"; printf 'empty'; }
+    fm_backend_zellij_composer_state() { [ "$1" = "sess:7" ] || fail "zellij composer_state got wrong target: $1"; printf 'empty'; }
     [ "$(fm_backend_composer_state tmux sess:win)" = pending ] || fail "composer_state did not dispatch to the tmux classifier"
     [ "$(fm_backend_composer_state herdr default:w1:p2)" = empty ] || fail "composer_state did not dispatch to the herdr classifier"
     [ "$(fm_backend_composer_state orca term-1)" = empty ] || fail "composer_state did not dispatch to the orca classifier"
-    [ "$(fm_backend_composer_state zellij sess:win)" = unknown ] || fail "composer_state should report unknown for zellij (no named classifier yet)"
+    [ "$(fm_backend_composer_state zellij sess:7)" = empty ] || fail "composer_state did not dispatch to the zellij classifier"
     [ "$(fm_backend_composer_state bogus x)" = unknown ] || fail "composer_state should report unknown for an unrecognized backend"
   ) || fail "composer_state dispatch subshell failed"
-  pass "fm_backend_composer_state dispatches tmux/herdr/orca to their named classifiers, unknown for zellij/unrecognized backends"
+  pass "fm_backend_composer_state dispatches every backend to its named thin classifier, unknown for unrecognized backends"
 }
 
 test_scripts_route_explicit_target_through_meta_backend() {
@@ -4315,7 +4429,7 @@ test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
-test_composer_state_ghost_placeholder_is_empty
+test_composer_state_styled_placeholder_draft_is_pending
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure
@@ -4346,6 +4460,10 @@ test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
+test_composer_state_cursor_midturn_row_reads_pending
+test_rendered_busy_state_reads_the_cursor_busy_token
+test_send_text_submit_confirms_never_idle_native_state_via_footer_transition
+test_send_text_submit_never_idle_native_state_keeps_pending_without_a_transition
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change

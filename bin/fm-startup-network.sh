@@ -50,7 +50,11 @@
 #          Print the digest's NETWORK CHECKS section and release the inline-print
 #          claim. Called by bin/fm-session-start.sh, not by hand.
 #        fm-startup-network.sh report
-#          Print the current state and report without changing anything.
+#          Print the current state and report without changing anything, then the
+#          last run's per-step elapsed times. This is the ONLY command that prints
+#          those timings: `harvest` composes the session-start digest, and adding
+#          diagnostic detail there would make every startup pay for a question
+#          only a slow run raises.
 #        fm-startup-network.sh wait [<seconds>]
 #          Block until the report is published, up to <seconds> (default 120).
 #          For operators and tests only; a session start never waits.
@@ -71,6 +75,16 @@
 #                             a durable acknowledgement that harvest printed the
 #                             current finished result; only this suppresses its
 #                             wake.
+#   .startup-network.timings  per-step elapsed times for the last run, in
+#                             bin/fm-timing-lib.sh's tab-separated format: the
+#                             stage total, one record per network phase (gh auth,
+#                             secondmate liveness, secondmate convergence, handoff
+#                             delivery, fleet sync), one per secondmate for the
+#                             remote-touching steps (id and host), and one per
+#                             project clone. Published for a timed-out or failed
+#                             run too, where a partial record is the answer.
+#                             Diagnostic only: nothing reads it to make a
+#                             decision, and losing it never downgrades a run.
 #   .startup-network.lock     serializes publication, harvest acknowledgement,
 #                             and the wake decision.
 #
@@ -89,10 +103,16 @@ STATUS_FILE="$STATE/.startup-network.status"
 REPORT_FILE="$STATE/.startup-network.report"
 CLAIM_FILE="$STATE/.startup-network.claim"
 DELIVERED_FILE="$STATE/.startup-network.delivered"
+TIMINGS_FILE="$STATE/.startup-network.timings"
 PUBLISH_LOCK="$STATE/.startup-network.lock"
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# fm-timing-lib.sh owns the per-step elapsed record this stage publishes beside
+# its report. Recording is opt-in per run: it stays inert until cmd_run points
+# FM_TIMING_LOG at a file, so nothing else that sources these scripts pays for it.
+# shellcheck source=bin/fm-timing-lib.sh
+. "$SCRIPT_DIR/fm-timing-lib.sh"
 # fm-wake-lib.sh owns both the portable lock helpers used below and the durable
 # wake queue this stage publishes into.
 # shellcheck source=bin/fm-wake-lib.sh
@@ -323,12 +343,20 @@ EOF
   fm_lock_release "$PUBLISH_LOCK"
 }
 
-publish() {  # <generation> <state> <phases> <locked> <started> <rc> <output-file>
-  local generation=$1 state=$2 phases=$3 locked=$4 started=$5 rc=$6 out=$7 report_published=1
+publish() {  # <generation> <state> <phases> <locked> <started> <rc> <output-file> <timing-file>
+  local generation=$1 state=$2 phases=$3 locked=$4 started=$5 rc=$6 out=$7 timings=${8:-} report_published=1
   fm_lock_acquire_wait "$PUBLISH_LOCK"
   if [ "$(status_get generation)" != "$generation" ]; then
     fm_lock_release "$PUBLISH_LOCK"
     return 0
+  fi
+  # Timings are published for EVERY outcome, including timeout and failure: a run
+  # that hit the bound is exactly the run whose per-step record is worth having,
+  # and whatever the killed sweeps managed to append is a real partial answer.
+  # A timing record is diagnostic only, so a failure to publish it is discarded
+  # rather than downgrading the run - the report itself is the contract.
+  if [ -n "$timings" ] && [ -f "$timings" ]; then
+    write_atomic "$TIMINGS_FILE" < "$timings" || true
   fi
   if ! write_atomic "$REPORT_FILE" < "$out"; then
     state=failed
@@ -353,7 +381,7 @@ EOF
 }
 
 cmd_run() {  # <locked> <lock-pid> <generation>
-  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0
+  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started
   mkdir -p "$STATE" 2>/dev/null || return 1
   started=$(now)
   budget=$(stage_budget)
@@ -400,6 +428,14 @@ EOF
   fi
 
   out=$(mktemp "${TMPDIR:-/tmp}/fm-startup-network.XXXXXX" 2>/dev/null) || return 1
+  # Recorded into a temp file rather than straight into state/ so a run that is
+  # killed mid-sweep cannot leave a half-written artifact where the previous
+  # run's complete one used to be; publish() promotes it atomically at the end.
+  # Sweeps run in child processes (bin/fm-bootstrap.sh, and bin/fm-fleet-sync.sh
+  # below it), so FM_TIMING_LOG is exported and appended to by all of them.
+  timings=$(mktemp "${TMPDIR:-/tmp}/fm-startup-network-timings.XXXXXX" 2>/dev/null) || timings=
+  [ -z "$timings" ] || fm_timing_start "$timings"
+  stage_started=$(fm_timing_now_ms)
   rc=0
   if [ "$sweep_locked" -eq 1 ]; then
     fm_lock_acquire_wait "$STATE/.lock.acquire"
@@ -419,24 +455,28 @@ EOF
       "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?
   fi
   [ "$lease_held" -eq 0 ] || fm_lock_release "$STATE/.lock.acquire"
+  # The bounded run as a whole, so the per-phase records can be read against the
+  # total even when the bound cut some of them off.
+  fm_timing_record stage network-checks "$stage_started" "$phases"
 
   if [ "$downgraded" -eq 1 ]; then
     printf 'NETWORK_CHECKS: the fleet lock was no longer held by the session that requested these, so dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh were skipped; they belong to whichever session holds the lock now\n' >> "$out"
   fi
   case "$rc" in
-    0) publish "$generation" 'done' "$phases" "$sweep_locked" "$started" "$rc" "$out" ;;
+    0) publish "$generation" 'done' "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings" ;;
     124)
       printf 'NETWORK_CHECKS: hit the %ss bound before finishing, so %s may be incomplete; rerun %s/bin/fm-startup-network.sh run --locked %s\n' \
         "$budget" "$(phase_label "$phases")" "$FM_ROOT" "$sweep_locked" >> "$out"
-      publish "$generation" timeout "$phases" "$sweep_locked" "$started" "$rc" "$out"
+      publish "$generation" timeout "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings"
       ;;
     *)
       printf 'NETWORK_CHECKS: the deferred check worker exited %s, so %s may be incomplete; rerun %s/bin/fm-startup-network.sh run --locked %s\n' \
         "$rc" "$(phase_label "$phases")" "$FM_ROOT" "$sweep_locked" >> "$out"
-      publish "$generation" failed "$phases" "$sweep_locked" "$started" "$rc" "$out"
+      publish "$generation" failed "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings"
       ;;
   esac
   rm -f "$out" 2>/dev/null || true
+  [ -z "$timings" ] || rm -f "$timings" 2>/dev/null || true
   return 0
 }
 
@@ -463,6 +503,15 @@ print_finished() {  # <state>
   else
     printf '(silent - no problems found)\n'
   fi
+}
+
+# Deliberately NOT part of print_state, and so deliberately not part of harvest:
+# harvest composes the digest's NETWORK CHECKS section, and this record is
+# diagnostic detail nobody needs on an ordinary session start. It is printed only
+# by the on-demand `report` command, so the timings cost a reader nothing until
+# a run is actually slow enough to ask about.
+print_timings() {
+  fm_timing_render "$TIMINGS_FILE"
 }
 
 print_pending() {
@@ -557,7 +606,7 @@ case "$MODE" in
   start) cmd_start "$LOCKED" "${HARVEST_PID:-0}" ;;
   run) cmd_run "$LOCKED" "$LOCK_PID" "$GENERATION" ;;
   harvest) cmd_harvest "${HARVEST_PID:-}" ;;
-  report) print_state ;;
+  report) print_state; print_timings ;;
   wait) cmd_wait "${1:-120}" || exit $? ;;
   -h|--help) usage ;;
   *)

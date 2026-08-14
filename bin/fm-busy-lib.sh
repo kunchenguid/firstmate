@@ -36,12 +36,12 @@
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
-#   fm-interrupt     a firstmate-controlled interruption of the worker
+#   fm-interrupt     the legacy Claude fm-send --key Escape idle event
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, muse-session-log, missing,
-#   malformed, gen-mismatch, source-mismatch, kimi-unverified,
-#   codex-unverified, capture-failed, no-target
+#   endpoint-gone, herdr-native, grok-regex, muse-session-log,
+#   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
+#   kimi-unverified, codex-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
@@ -50,13 +50,14 @@
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
-#      muse session-log pull source, then the Grok-only temporary regex fallback
-#      classifies a grok task from its rendered tail, then unknown missing
+#      muse session-log and cursor transcript pull sources, then the Grok-only
+#      temporary regex fallback classifies a grok task from its rendered tail,
+#      then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
 # The Grok arm is the ONLY rendered-text classification that survives the
 # redesign, because Grok's structured lifecycle was not credited-live-verified
 # in the approved audit; it is scoped to harness=grok and can never classify
-# another adapter. The delivery guards in bin/fm-tmux-lib.sh match rendered
+# another adapter. The delivery guards in bin/fm-composer-lib.sh match rendered
 # footers for submit acknowledgement and away-mode supervisor injection only;
 # neither is a recorded worker state source.
 #
@@ -67,6 +68,13 @@
 # MUSE_EXPERIMENTAL_PLUGINS). Nothing is armed for muse for the same reason
 # standalone Kimi is not: a seeded record with no writer could never be
 # cleared. See fm_busy_muse_run_state for the fold.
+#
+# The cursor pull source works the same way and for the same reason: it folds
+# cursor's own durable per-conversation transcript, which brackets each turn
+# with a role:user open and a typed turn_ended close that covers aborts. It has
+# no writer, no arm, and no gen, so nothing is seeded that could never be
+# cleared. See fm_busy_cursor_turn_state for the fold. Cursor's rendered
+# `ctrl+c to stop` footer is deliberately not a state source here.
 #
 # Codex negotiation (fm_busy_codex_appserver_observable,
 # fm_busy_codex_hooks_verified): the approved contract prefers Codex's
@@ -513,18 +521,10 @@ EOF
   printf '%s' "$selected"
 }
 
-# fm_busy_muse_run_state: fold one session log to busy|settled|none.
-#   busy     at least one run started with no matching terminal
-#   settled  every started run reached a terminal
-#   none     the log holds no run lifecycle records at all
-# The match is anchored on the exact structural prefix rather than a bare
-# "kind":"terminal" search, because muse also emits nested "record":{"kind":
-# "terminal"} cleanup-effect payloads that are NOT run terminals and would
-# otherwise close a run that is still in flight.
-fm_busy_muse_run_state() {  # <session-log>
+fm_busy_muse_run_events() {  # <session-log>
   [ -f "$1" ] || return 1
   LC_ALL=C awk '
-    BEGIN { pre = "\"payload\":{\"kind\":\"run\",\"run_id\":\"" }
+    BEGIN { OFS = "\t"; pre = "\"payload\":{\"kind\":\"run\",\"run_id\":\"" }
     {
       p = index($0, pre)
       if (p == 0) next
@@ -539,15 +539,287 @@ fm_busy_muse_run_state() {  # <session-log>
       q = index(rest, "\"")
       if (q == 0) next
       ev = substr(rest, 1, q - 1)
-      if (ev == "started") { open[rid] = 1; seen = 1 }
-      else if (ev == "terminal") { open[rid] = 0 }
-    }
-    END {
-      if (!seen) { print "none"; exit }
-      for (r in open) if (open[r] == 1) { print "busy"; exit }
-      print "settled"
+      terminal = ""
+      if (ev == "terminal") {
+        marker = "\"terminal\":\""
+        p = index(rest, marker)
+        if (p != 0) {
+          value = substr(rest, p + length(marker))
+          q = index(value, "\"")
+          if (q != 0) terminal = substr(value, 1, q - 1)
+        }
+      }
+      if (ev == "started" || ev == "terminal") print rid, ev, terminal
     }
   ' "$1"
+}
+
+# fm_busy_muse_run_state: fold one session log to busy|settled|none.
+#   busy     at least one run started with no matching terminal
+#   settled  every started run reached a terminal
+#   none     the log holds no run lifecycle records at all
+# The match is anchored on the exact structural prefix rather than a bare
+# "kind":"terminal" search, because muse also emits nested "record":{"kind":
+# "terminal"} cleanup-effect payloads that are NOT run terminals and would
+# otherwise close a run that is still in flight.
+fm_busy_muse_run_state() {  # <session-log>
+  [ -f "$1" ] || return 1
+  fm_busy_muse_run_events "$1" | LC_ALL=C awk -F '\t' '
+    $2 == "started" { open[$1] = 1; seen = 1 }
+    $2 == "terminal" { open[$1] = 0 }
+    END {
+      if (!seen) { print "none"; exit }
+      for (rid in open) if (open[rid] == 1) { print "busy"; exit }
+      print "settled"
+    }
+  '
+}
+
+fm_busy_muse_active_run_id() {  # <session-log>
+  [ -f "$1" ] || return 1
+  fm_busy_muse_run_events "$1" | LC_ALL=C awk -F '\t' '
+    $2 == "started" { open[$1] = 1 }
+    $2 == "terminal" { open[$1] = 0 }
+    END {
+      for (rid in open) {
+        if (open[rid] != 1) continue
+        active = rid
+        count++
+      }
+      if (count != 1) exit 1
+      print active
+    }
+  '
+}
+
+fm_busy_muse_run_terminal() {  # <session-log> <run-id>
+  [ -f "$1" ] && [ -n "${2:-}" ] || return 1
+  fm_busy_muse_run_events "$1" | LC_ALL=C awk -F '\t' -v wanted="$2" '
+    $1 == wanted && $2 == "terminal" && $3 != "" { terminal = $3 }
+    END {
+      if (terminal == "") exit 1
+      print terminal
+    }
+  '
+}
+
+# cursor conversation-transcript busy source
+#
+# cursor-agent persists an append-only JSONL transcript per conversation at
+# <projects-root>/<workspace-slug>/agent-transcripts/<conversation-id>/<id>.jsonl
+# and brackets every submitted turn. Verified live on cursor-agent
+# 2026.08.11-e8db854:
+#   {"role":"user", ...}                                    <- turn opens
+#   {"role":"assistant", ...}                               <- work
+#   {"type":"turn_ended","status":"success"}                <- turn closes
+# An Escape interrupt closes the turn with status "aborted", so like muse's
+# session log - and unlike Claude's Stop hook - this source covers the manual
+# interrupt path. Nothing is installed and no trust grant is needed: cursor
+# writes this transcript on its own.
+#
+# Resolution deliberately does NOT reconstruct cursor's workspace-slug directory
+# name. That slug is a lossy transformation of the workspace path (separators
+# collapse), so rebuilding it would be a guess that silently binds the wrong
+# pane. cursor writes the exact absolute path into each project directory's
+# .workspace-trusted, so the binding matches on that recorded value instead.
+#
+# fm_busy_cursor_binding_path: the per-task sidecar fm-spawn writes. It records
+# projects_root=<abs>, workspace_root=<abs>, and one prior_conversation=<id> for
+# each conversation that already existed for that workspace when this pane
+# launched, so a relaunched task cannot fold its predecessor's transcript.
+fm_busy_cursor_binding_path() {  # <state-dir> <id>
+  printf '%s/%s.cursor-session' "$1" "$2"
+}
+
+fm_busy_cursor_binding_field() {  # <state-dir> <id> <key>
+  local path value
+  path=$(fm_busy_cursor_binding_path "$1" "$2")
+  [ -f "$path" ] || return 1
+  value=$(LC_ALL=C awk -F= -v k="$3" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$path")
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+# fm_busy_cursor_project_dir: the project directory whose recorded
+# .workspace-trusted workspacePath is exactly <workspace-root>. Exact-match
+# only: a prefix or slug comparison would bind a nested worktree to its parent.
+fm_busy_cursor_project_dir() {  # <projects-root> <workspace-root>
+  local root=$1 want=$2 marker dir path
+  [ -d "$root" ] || return 1
+  for marker in "$root"/*/.workspace-trusted; do
+    [ -f "$marker" ] || continue
+    path=$(LC_ALL=C sed -n 's/.*"workspacePath"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' "$marker" | head -1)
+    [ -n "$path" ] || continue
+    [ "$path" = "$want" ] || continue
+    dir=${marker%/.workspace-trusted}
+    printf '%s' "$dir"
+    return 0
+  done
+  return 1
+}
+
+# fm_busy_cursor_transcript: the ONE transcript this pane owns, or failure.
+# A conversation recorded as prior_conversation is excluded, so a relaunch in a
+# reused worktree folds its own turn rather than the previous pane's. Requiring
+# a UNIQUE remaining conversation is what keeps the binding honest: zero means
+# no turn has been submitted yet and several means the pane cannot be told
+# apart, and neither proves anything about the current turn.
+fm_busy_cursor_transcript() {  # <state-dir> <id>
+  local root workspace project dir conv found='' count=0 prior
+  root=$(fm_busy_cursor_binding_field "$1" "$2" projects_root) || return 1
+  workspace=$(fm_busy_cursor_binding_field "$1" "$2" workspace_root) || return 1
+  project=$(fm_busy_cursor_project_dir "$root" "$workspace") || return 1
+  prior=$(LC_ALL=C awk -F= '$1 == "prior_conversation" { sub(/^[^=]*=/, ""); print }' \
+    "$(fm_busy_cursor_binding_path "$1" "$2")" 2>/dev/null)
+  for dir in "$project"/agent-transcripts/*/; do
+    [ -d "$dir" ] || continue
+    conv=$(basename -- "${dir%/}")
+    printf '%s\n' "$prior" | grep -Fqx "$conv" && continue
+    [ -f "$dir$conv.jsonl" ] || continue
+    found="$dir$conv.jsonl"
+    count=$((count + 1))
+  done
+  [ "$count" = 1 ] && [ -n "$found" ] || return 1
+  printf '%s' "$found"
+}
+
+# fm_busy_cursor_turn_state: fold the transcript into busy | settled | none.
+# Lifecycle records are matched on top-level fields of structurally valid JSON,
+# so a turn whose own text mentions turn_ended cannot close it.
+fm_busy_cursor_turn_state() {  # <transcript>
+  [ -f "$1" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    LC_ALL=C jq -Rr '
+      try (
+        fromjson
+        | if type == "object" and .type? == "turn_ended" then "close"
+          elif type == "object" and .role? == "user" then "open"
+          else "other"
+          end
+      ) catch "malformed"
+    ' "$1"
+  else
+    LC_ALL=C awk '
+      function ws(    c) {
+        while (p <= n) {
+          c = substr(line, p, 1)
+          if (c != " " && c != "\t" && c != "\r") break
+          p++
+        }
+      }
+      function hex(c) {
+        if (c >= "0" && c <= "9") return c + 0
+        c = tolower(c)
+        return index("abcdef", c) + 9
+      }
+      function string(    c, e, h, i, code, out) {
+        if (substr(line, p, 1) != "\"") return 0
+        p++; out = ""
+        while (p <= n) {
+          c = substr(line, p++, 1)
+          if (c == "\"") { value = out; kind = "string"; return 1 }
+          if (c ~ /[[:cntrl:]]/) return 0
+          if (c != "\\") { out = out c; continue }
+          if (p > n) return 0
+          e = substr(line, p++, 1)
+          if (e == "\"" || e == "\\" || e == "/") out = out e
+          else if (e ~ /^[bfnrt]$/) out = out "?"
+          else if (e == "u") {
+            h = substr(line, p, 4)
+            if (length(h) != 4 || h !~ /^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$/) return 0
+            code = 0
+            for (i = 1; i <= 4; i++) code = code * 16 + hex(substr(h, i, 1))
+            out = out (code < 128 ? sprintf("%c", code) : "?")
+            p += 4
+          } else return 0
+        }
+        return 0
+      }
+      function number(    c) {
+        if (substr(line, p, 1) == "-") p++
+        c = substr(line, p, 1)
+        if (c == "0") {
+          p++
+          if (substr(line, p, 1) ~ /^[0-9]$/) return 0
+        } else if (c ~ /^[1-9]$/) {
+          do { p++; c = substr(line, p, 1) } while (c ~ /^[0-9]$/)
+        } else return 0
+        if (substr(line, p, 1) == ".") {
+          p++
+          if (substr(line, p, 1) !~ /^[0-9]$/) return 0
+          while (substr(line, p, 1) ~ /^[0-9]$/) p++
+        }
+        c = substr(line, p, 1)
+        if (c == "e" || c == "E") {
+          p++; c = substr(line, p, 1)
+          if (c == "+" || c == "-") p++
+          if (substr(line, p, 1) !~ /^[0-9]$/) return 0
+          while (substr(line, p, 1) ~ /^[0-9]$/) p++
+        }
+        kind = "number"; value = ""
+        return 1
+      }
+      function array(depth,    c) {
+        p++; ws()
+        if (substr(line, p, 1) == "]") { p++; return 1 }
+        while (p <= n) {
+          if (!json(depth + 1)) return 0
+          ws(); c = substr(line, p, 1)
+          if (c == "]") { p++; return 1 }
+          if (c != ",") return 0
+          p++; ws()
+        }
+        return 0
+      }
+      function object(depth,    c, key, vkind, vvalue, is_close, is_open) {
+        p++; ws()
+        if (substr(line, p, 1) == "}") { p++; kind = "object"; return 1 }
+        while (p <= n) {
+          if (!string()) return 0
+          key = value; ws()
+          if (substr(line, p, 1) != ":") return 0
+          p++; ws()
+          if (!json(depth + 1)) return 0
+          vkind = kind; vvalue = value
+          if (depth == 0 && key == "type") is_close = (vkind == "string" && vvalue == "turn_ended")
+          if (depth == 0 && key == "role") is_open = (vkind == "string" && vvalue == "user")
+          ws(); c = substr(line, p, 1)
+          if (c == "}") {
+            p++; kind = "object"; value = ""
+            if (depth == 0) event = (is_close ? "close" : (is_open ? "open" : "other"))
+            return 1
+          }
+          if (c != ",") return 0
+          p++; ws()
+        }
+        return 0
+      }
+      function json(depth,    c, word) {
+        ws(); c = substr(line, p, 1)
+        if (c == "\"") return string()
+        if (c == "{") return object(depth)
+        if (c == "[") { kind = "array"; value = ""; return array(depth) }
+        if (c == "-" || c ~ /^[0-9]$/) return number()
+        word = substr(line, p)
+        if (substr(word, 1, 4) == "true" || substr(word, 1, 4) == "null") { p += 4; kind = "literal"; value = ""; return 1 }
+        if (substr(word, 1, 5) == "false") { p += 5; kind = "literal"; value = ""; return 1 }
+        return 0
+      }
+      {
+        line = $0; p = 1; n = length(line); event = "other"; kind = ""; value = ""
+        valid = json(0); ws()
+        print (valid && p > n ? event : "malformed")
+      }
+    ' "$1"
+  fi | LC_ALL=C awk '
+    $0 == "close" { open = 0; seen = 1; malformed = 0; next }
+    $0 == "open" { open = 1; seen = 1; next }
+    $0 == "malformed" { if (!open) malformed = 1; next }
+    END {
+      if (!seen || (!open && malformed)) { print "none"; exit }
+      print (open ? "busy" : "settled")
+    }
+  '
 }
 
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
@@ -556,7 +828,7 @@ fm_busy_muse_run_state() {  # <session-log>
 # historical operator escape hatch.
 fm_busy_grok_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
-    | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
+    | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
 # fm_busy_classify: semantic classification for a task whose endpoint the
@@ -580,6 +852,24 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         printf 'unknown codex-unverified'
         return 0
       fi
+      ;;
+    cursor*)
+      # Semantic, on demand: fold this task's bound conversation transcript. A
+      # turn open past its last close is positive proof of a turn in flight and
+      # a trailing turn_ended is a finished turn. Every other outcome - no
+      # sidecar, no resolvable transcript, an unreadable or record-free file -
+      # is unknown, never idle. The rendered `ctrl+c to stop` footer is
+      # deliberately NOT consulted here; see the source note above.
+      if ! log=$(fm_busy_cursor_transcript "$state" "$id"); then
+        printf 'unknown cursor-transcript'
+        return 0
+      fi
+      case "$(fm_busy_cursor_turn_state "$log" 2>/dev/null)" in
+        busy) printf 'busy cursor-transcript' ;;
+        settled) printf 'idle cursor-transcript' ;;
+        *) printf 'unknown cursor-transcript' ;;
+      esac
+      return 0
       ;;
   esac
   out=$(fm_busy_record_read "$state" "$id") && rc=0 || rc=$?

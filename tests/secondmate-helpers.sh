@@ -19,7 +19,9 @@ make_fake_tmux() {
   local dir=$1 fakebin capture
   fakebin=$(fm_fakebin "$dir")
   capture="$dir/pane.txt"
-  printf 'idle prompt\n' > "$capture"
+  # A real, positively identified empty agent composer. A blank capture is
+  # deliberately unknown under the fleet-wide strict blank-row posture.
+  printf '❯\n' > "$capture"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u

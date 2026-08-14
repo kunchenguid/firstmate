@@ -7,6 +7,7 @@
 #   fm-procevent-remote-reply.sh autohandle <source-id> <sequence> <result-file>
 #   fm-procevent-remote-reply.sh classify <result-file>
 #   fm-procevent-remote-reply.sh terminal <result-file>
+#   fm-procevent-remote-reply.sh self-announcing
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
 #   fm-procevent-remote-reply.sh retire <secondmate-id>
 #
@@ -21,8 +22,18 @@
 # canonical source id instead of the secondmate id and is called by the runner
 # right after capture, so applying a reply never depends on a handler
 # remembering to run it. Ingesting a delta carries no judgement, so it belongs
-# in code. The published wake still reaches firstmate, and running `handle`
-# again on that wake is idempotent.
+# in code.
+#
+# `self-announcing` declares this adapter's one-announcement contract to the
+# runner: every byte autohandle applies lands in the parent's state/<id>.status
+# stream, whose ordinary signal-scan announcement is durable, so a fully
+# autohandled capture needs - and gets - no `check` wake of its own. One remote
+# note therefore produces exactly one firstmate wake, through the same signal
+# classification a local secondmate's own status append gets, and a replayed
+# capture whose every line is already mirrored (the at-most-once append) adds
+# no bytes and stays completely quiet. Only a capture autohandle could NOT
+# fully apply is published as a `check` wake for the manual handler, and
+# running `handle` on that wake is idempotent.
 #
 # This channel is a status-stream MIRROR, not a correlated-reply channel. A local
 # secondmate appends its whole status stream straight into the parent's
@@ -72,7 +83,7 @@ DOCUMENT_LOCAL_FAILURE=2
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -537,6 +548,7 @@ case "${1:-}" in
   ingest) shift; [ "$#" -eq 2 ] || usage; cmd_ingest "$@" ;;
   classify) shift; [ "$#" -eq 1 ] || usage; classify_result "$1" ;;
   terminal) shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;
+  self-announcing) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   retire-quiesce-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_quiesce_locked "$@" ;;

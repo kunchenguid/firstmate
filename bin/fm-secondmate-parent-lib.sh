@@ -56,7 +56,7 @@ fm_secondmate_parent_record_parse() {
     local)
       [ "$parent_home_count" -eq 1 ] || return 1
       [ "$parent_host_count" -eq 0 ] || return 1
-      [ -n "$parent_home" ] || return 1
+      case "$parent_home" in /*) ;; *) return 1 ;; esac
       FM_SECONDMATE_PARENT_HOME=$parent_home
       ;;
     remote)

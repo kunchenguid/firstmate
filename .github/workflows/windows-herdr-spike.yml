@@ -1,0 +1,438 @@
+name: Windows Herdr automation spike
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: Measure Herdr automation primitives
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Herdr Windows preview and jq
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $ProgressPreference = 'SilentlyContinue'
+          $installLog = Join-Path $env:RUNNER_TEMP 'herdr-windows-install.log'
+          "Installing the Herdr Windows preview with the official installer." | Tee-Object -FilePath $installLog
+          try {
+            $ErrorActionPreference = 'Stop'
+            Invoke-RestMethod https://herdr.dev/install.ps1 | Invoke-Expression
+          } catch {
+            "HERDR_INSTALL_ERROR: $($_.Exception.Message)" | Tee-Object -FilePath $installLog -Append
+          } finally {
+            $ErrorActionPreference = 'Continue'
+          }
+
+          try {
+            choco install jq --no-progress --limit-output -y
+          } catch {
+            "JQ_INSTALL_ERROR: $($_.Exception.Message)" | Tee-Object -FilePath $installLog -Append
+          }
+
+          $herdr = Get-Command herdr.exe -ErrorAction SilentlyContinue
+          if (-not $herdr) {
+            $candidate = Get-ChildItem -Path (Join-Path $env:USERPROFILE '.herdr\packages\standalone\releases') -Filter herdr.exe -Recurse -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1
+            if ($candidate) {
+              $herdr = $candidate
+            }
+          }
+          $jq = Get-Command jq.exe -ErrorAction SilentlyContinue
+
+          if ($herdr) {
+            $herdrPath = if ($herdr.PSObject.Properties.Name -contains 'Source') { $herdr.Source } else { $herdr.FullName }
+            $herdrDir = Split-Path -Parent $herdrPath
+            $herdrDir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            "HERDR_WINDOWS_DIR=$herdrDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "HERDR_INSTALL=ready" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "HERDR_PATH=$herdrPath" | Tee-Object -FilePath $installLog -Append
+            & $herdrPath --version 2>&1 | Tee-Object -FilePath $installLog -Append
+          } else {
+            "HERDR_INSTALL=failed" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            'HERDR_PATH=missing' | Tee-Object -FilePath $installLog -Append
+          }
+
+          if ($jq) {
+            $jqDir = Split-Path -Parent $jq.Source
+            $jqDir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            "JQ_WINDOWS_DIR=$jqDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "JQ_INSTALL=ready" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "JQ_PATH=$($jq.Source)" | Tee-Object -FilePath $installLog -Append
+            & $jq.Source --version 2>&1 | Tee-Object -FilePath $installLog -Append
+          } else {
+            "JQ_INSTALL=failed" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            'JQ_PATH=missing' | Tee-Object -FilePath $installLog -Append
+          }
+
+      - name: Measure real Windows primitives and custody proofs
+        id: measure
+        run: |
+          set -uo pipefail
+
+          results="$RUNNER_TEMP/windows-herdr-measurement.md"
+          details="$RUNNER_TEMP/windows-herdr-details.log"
+          : >"$results"
+          : >"$details"
+          first_limit=""
+          core_status="FAIL"
+          session="fm-windows-spike-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          server_pid=""
+          workspace_id=""
+          tab_id=""
+          pane_id=""
+          worktree_stub="$RUNNER_TEMP/fm-herdr-worktree-stub-${GITHUB_RUN_ATTEMPT}"
+          primitive_marker="FM_WINDOWS_PRIMITIVE_${GITHUB_RUN_ID}"
+          ansi_marker="FM_WINDOWS_ANSI_${GITHUB_RUN_ID}"
+          e2e_marker="FM_WINDOWS_E2E_ACK_${GITHUB_RUN_ID}"
+
+          clean_detail() {
+            printf '%s' "$1" | tr '\r\n|' '   ' | sed 's/[[:space:]][[:space:]]*/ /g'
+          }
+
+          record() {
+            local subsystem=$1 status=$2 detail
+            detail=$(clean_detail "$3")
+            printf '| %s | **%s** | %s |\n' "$subsystem" "$status" "$detail" >>"$results"
+            printf 'MEASUREMENT: %s | %s | %s\n' "$subsystem" "$status" "$detail"
+          }
+
+          limit() {
+            [ -n "$first_limit" ] || first_limit=$(clean_detail "$1")
+          }
+
+          herdr_call() {
+            "$HERDR" "$@" --session "$session"
+          }
+
+          cleanup() {
+            if [ -n "$HERDR" ]; then
+              herdr_call session stop "$session" --json >>"$details" 2>&1 || true
+              herdr_call session delete "$session" --json >>"$details" 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          {
+            echo '## Windows Herdr automation measurement'
+            echo
+            printf '%s\n' "- Runner: \`${RUNNER_OS:-unknown}\` / \`${RUNNER_ARCH:-unknown}\`"
+            printf '%s\n' "- Session: \`$session\`"
+            echo '- Scope: a throwaway, named Herdr session on this GitHub-hosted runner.'
+            echo
+            echo '| Subsystem | Result | Measured detail |'
+            echo '| --- | --- | --- |'
+          } >"$results"
+
+          HERDR=$(command -v herdr 2>/dev/null || command -v herdr.exe 2>/dev/null || true)
+          JQ=$(command -v jq 2>/dev/null || command -v jq.exe 2>/dev/null || true)
+          if [ -n "$HERDR" ]; then
+            herdr_version=$("$HERDR" --version 2>&1 || true)
+            record 'Herdr install and Git Bash PATH' PASS "$(basename "$HERDR"): $herdr_version"
+          else
+            record 'Herdr install and Git Bash PATH' FAIL 'herdr.exe was not reachable from Git Bash after the official installer'
+            limit 'Herdr was not installed or was not on the Git Bash PATH.'
+          fi
+          if [ -n "$JQ" ]; then
+            record 'jq install and Git Bash PATH' PASS "$(basename "$JQ"): $($JQ --version 2>&1 || true)"
+          else
+            record 'jq install and Git Bash PATH' FAIL 'jq.exe was not reachable from Git Bash after Chocolatey install'
+            limit 'jq was not installed or was not on the Git Bash PATH.'
+          fi
+
+          if [ -z "$HERDR" ] || [ -z "$JQ" ]; then
+            record 'Server and named session' FAIL 'not attempted because the CLI prerequisite failed'
+            record 'Workspace, tab, and pane creation' FAIL 'not attempted because the CLI prerequisite failed'
+            record 'Text send, key send, and capture' FAIL 'not attempted because the CLI prerequisite failed'
+            record 'Agent list and get' FAIL 'not attempted because the CLI prerequisite failed'
+            record 'Pane process-info' FAIL 'not attempted because the CLI prerequisite failed'
+            record 'Event path fallback to polling' DEGRADED 'not attempted because the CLI prerequisite failed'
+            record 'Foreground process group proof' DEGRADED 'not attempted because the CLI prerequisite failed'
+            record 'Live cwd tracking' DEGRADED 'not attempted because the CLI prerequisite failed'
+            record 'ANSI capture fidelity' DEGRADED 'not attempted because the CLI prerequisite failed'
+            record 'End-to-end shell stand-in' FAIL 'not attempted because the CLI prerequisite failed'
+          else
+            mkdir -p "$RUNNER_TEMP/fm-windows-herdr-home/state"
+            "$HERDR" server --session "$session" >"$RUNNER_TEMP/herdr-${session}.log" 2>&1 &
+            server_pid=$!
+            ready=0
+            for _ in $(seq 1 100); do
+              status_json=$(herdr_call status --json 2>>"$details" || true)
+              if printf '%s' "$status_json" | "$JQ" -e '.server.running == true' >/dev/null 2>&1; then
+                ready=1
+                break
+              fi
+              sleep 0.2
+            done
+            sessions_json=$(herdr_call session list --json 2>>"$details" || true)
+            if [ "$ready" = 1 ] && printf '%s' "$sessions_json" | "$JQ" -e --arg session "$session" '.sessions[]? | select(.name == $session and .running == true)' >/dev/null 2>&1; then
+              record 'Server and named session' PASS "server PID $server_pid; named session $session is running"
+              core_status=PASS
+            else
+              record 'Server and named session' FAIL "server did not become ready: $(tail -n 1 "$RUNNER_TEMP/herdr-${session}.log" 2>/dev/null || true)"
+              limit 'The named Herdr server/session could not become ready headlessly.'
+            fi
+
+            if [ "$ready" = 1 ]; then
+              repo_cwd=$(cygpath -w "$GITHUB_WORKSPACE")
+              workspace_json=$(herdr_call workspace create --cwd "$repo_cwd" --label fm-windows-spike --no-focus 2>>"$details" || true)
+              workspace_id=$(printf '%s' "$workspace_json" | "$JQ" -r '.result.workspace.workspace_id // empty' 2>/dev/null || true)
+              root_pane=$(printf '%s' "$workspace_json" | "$JQ" -r '.result.root_pane.pane_id // empty' 2>/dev/null || true)
+              if [ -n "$workspace_id" ] && [ -n "$root_pane" ]; then
+                tab_json=$(herdr_call tab create --workspace "$workspace_id" --cwd "$repo_cwd" --label fm-windows-spike-task --env "FM_WINDOWS_PRIMITIVE_MARKER=$primitive_marker" --env "FM_WINDOWS_ANSI_MARKER=$ansi_marker" --env "FM_WINDOWS_E2E_MARKER=$e2e_marker" --no-focus 2>>"$details" || true)
+                tab_id=$(printf '%s' "$tab_json" | "$JQ" -r '.result.tab.tab_id // empty' 2>/dev/null || true)
+                pane_id=$(printf '%s' "$tab_json" | "$JQ" -r '.result.root_pane.pane_id // empty' 2>/dev/null || true)
+                if [ -n "$tab_id" ] && [ -n "$pane_id" ]; then
+                  split_json=$(herdr_call pane split "$pane_id" --direction right --cwd "$repo_cwd" --no-focus 2>>"$details" || true)
+                  split_pane=$(printf '%s' "$split_json" | "$JQ" -r '.result.pane.pane_id // empty' 2>/dev/null || true)
+                  if [ -n "$split_pane" ] && herdr_call pane close "$split_pane" >>"$details" 2>&1; then
+                    record 'Workspace, tab, and pane creation' PASS "workspace $workspace_id; tab $tab_id; root pane $pane_id; split pane created and closed"
+                  else
+                    record 'Workspace, tab, and pane creation' DEGRADED "workspace $workspace_id and tab $tab_id created, but pane split/close did not complete"
+                    limit 'A pane lifecycle primitive did not complete in the headless Windows session.'
+                  fi
+                else
+                  record 'Workspace, tab, and pane creation' FAIL 'workspace root pane was created, but tab create did not return a tab and root pane ID'
+                  limit 'The tab/pane creation API did not return usable identifiers.'
+                fi
+              else
+                record 'Workspace, tab, and pane creation' FAIL 'workspace create did not return a workspace and root pane ID'
+                limit 'The workspace creation API did not return usable identifiers.'
+              fi
+
+              if [ -n "$pane_id" ]; then
+                if herdr_call pane send-text "$pane_id" 'Write-Output $env:FM_WINDOWS_PRIMITIVE_MARKER' >>"$details" 2>&1 &&
+                  herdr_call pane send-keys "$pane_id" enter >>"$details" 2>&1 &&
+                  herdr_call pane wait-output "$pane_id" --match "$primitive_marker" --timeout 10000 >>"$details" 2>&1; then
+                  capture=$(herdr_call pane read "$pane_id" --source recent --lines 200 2>>"$details" || true)
+                  if printf '%s' "$capture" | grep -Fq "$primitive_marker"; then
+                    record 'Text send, key send, and capture' PASS 'pane send-text plus pane send-keys enter was observable through pane read'
+                  else
+                    record 'Text send, key send, and capture' FAIL 'send operations returned success, but pane read did not contain the marker'
+                    limit 'Sent text could not be verified through pane capture.'
+                  fi
+                else
+                  record 'Text send, key send, and capture' FAIL 'send-text, send-keys, or wait-output failed'
+                  limit 'Text delivery or capture could not complete headlessly.'
+                fi
+
+                agent_list=$(herdr_call agent list 2>>"$details" || true)
+                agent_reported=0
+                if herdr_call pane report-agent "$pane_id" --source fm-windows-spike --agent spike-shell --state idle >>"$details" 2>&1; then
+                  agent_reported=1
+                fi
+                agent_get=$(herdr_call agent get "$pane_id" 2>>"$details" || true)
+                if [ "$agent_reported" = 1 ] && printf '%s' "$agent_list" | "$JQ" -e . >/dev/null 2>&1 && printf '%s' "$agent_get" | "$JQ" -e . >/dev/null 2>&1; then
+                  record 'Agent list and get' PASS 'agent list and agent get returned JSON after a shell stand-in self-report'
+                elif printf '%s' "$agent_list" | "$JQ" -e . >/dev/null 2>&1; then
+                  record 'Agent list and get' DEGRADED 'agent list returned JSON, but report-agent or agent get was unavailable for the shell stand-in'
+                  limit 'The headless agent inspection path was only partially available.'
+                else
+                  record 'Agent list and get' FAIL 'agent list did not return JSON'
+                  limit 'The agent inspection API was unavailable.'
+                fi
+
+                process_info=$(herdr_call pane process-info --pane "$pane_id" 2>>"$details" || true)
+                if printf '%s' "$process_info" | "$JQ" -e . >/dev/null 2>&1; then
+                  record 'Pane process-info' PASS 'pane process-info returned JSON for the shell stand-in'
+                  pgid=$(printf '%s' "$process_info" | "$JQ" -r '.result.process_info.foreground_process_group_id // empty' 2>/dev/null || true)
+                  if [ -n "$pgid" ]; then
+                    record 'Foreground process group proof' PASS "foreground_process_group_id=$pgid"
+                  else
+                    record 'Foreground process group proof' DEGRADED 'process-info works, but Windows did not expose foreground_process_group_id; focus-safe idle-shell proof falls back'
+                  fi
+                else
+                  record 'Pane process-info' FAIL 'pane process-info did not return JSON'
+                  record 'Foreground process group proof' DEGRADED 'not available because pane process-info did not return JSON'
+                  limit 'Pane process inspection was unavailable.'
+                fi
+
+                event_state="$RUNNER_TEMP/fm-windows-herdr-home/state"
+                event_rc=0
+                if (
+                  export FM_ROOT_OVERRIDE="$GITHUB_WORKSPACE"
+                  export FM_HOME="$RUNNER_TEMP/fm-windows-herdr-home"
+                  export FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1
+                  . "$GITHUB_WORKSPACE/bin/fm-backend.sh"
+                  fm_backend_source herdr
+                  fm_backend_herdr_wait_transition "$session" 3 "$event_state" "$session:$pane_id"
+                ) >>"$details" 2>&1; then
+                  event_rc=0
+                else
+                  event_rc=$?
+                fi
+                case "$event_rc" in
+                  0|1)
+                    record 'Event path fallback to polling' PASS "adapter event wait returned $event_rc after a bounded wait; native event transport is usable"
+                    ;;
+                  2)
+                    record 'Event path fallback to polling' DEGRADED 'adapter returned 2 for an unusable AF_UNIX/mkfifo event path, the documented signal to use polling'
+                    ;;
+                  *)
+                    record 'Event path fallback to polling' FAIL "adapter event wait returned unexpected status $event_rc"
+                    limit 'The event path did not produce either a usable wait or the safe polling fallback signal.'
+                    ;;
+                esac
+
+                if git -C "$GITHUB_WORKSPACE" worktree add --detach "$worktree_stub" HEAD >>"$details" 2>&1; then
+                  stub_cwd=$(cygpath -w "$worktree_stub")
+                  if herdr_call pane run "$pane_id" "cd $stub_cwd" >>"$details" 2>&1; then
+                    sleep 1
+                    pane_get=$(herdr_call pane get "$pane_id" 2>>"$details" || true)
+                    observed_cwd=$(printf '%s' "$pane_get" | "$JQ" -r '.result.pane.foreground_cwd // empty' 2>/dev/null || true)
+                    expected_normalized=$(printf '%s' "$stub_cwd" | tr '\\' '/' | tr '[:upper:]' '[:lower:]')
+                    observed_normalized=$(printf '%s' "$observed_cwd" | tr '\\' '/' | tr '[:upper:]' '[:lower:]')
+                    if [ -n "$observed_cwd" ] && printf '%s' "$observed_normalized" | grep -Fq "$expected_normalized"; then
+                      record 'Live cwd tracking' PASS "pane get reported the changed worktree stub cwd: $observed_cwd"
+                    else
+                      record 'Live cwd tracking' DEGRADED "pane launch cwd worked, but changed foreground_cwd was unavailable or mismatched: ${observed_cwd:-empty}"
+                    fi
+                  else
+                    record 'Live cwd tracking' DEGRADED 'could not issue cd inside the pane; Windows live cwd remains unverified'
+                  fi
+                else
+                  record 'Live cwd tracking' DEGRADED 'plain git worktree stub could not be created, so live cwd change was not measured'
+                  limit 'The stubbed isolated-copy step could not be prepared.'
+                fi
+
+                ansi_command="[Console]::Write([char]27 + '[31m' + \$env:FM_WINDOWS_ANSI_MARKER + [char]27 + '[0m' + [Environment]::NewLine)"
+                if herdr_call pane run "$pane_id" "$ansi_command" >>"$details" 2>&1 &&
+                  herdr_call pane wait-output "$pane_id" --match "$ansi_marker" --timeout 10000 >>"$details" 2>&1; then
+                  ansi_capture=$(herdr_call pane read "$pane_id" --source recent --lines 200 --format ansi 2>>"$details" || true)
+                  if printf '%s' "$ansi_capture" | grep -Fq $'\033[31m'"$ansi_marker"; then
+                    record 'ANSI capture fidelity' PASS 'pane read --format ansi preserved the injected red SGR sequence'
+                  elif printf '%s' "$ansi_capture" | grep -Fq "$ansi_marker"; then
+                    record 'ANSI capture fidelity' DEGRADED 'pane text was captured, but pane read --format ansi did not preserve the injected SGR sequence'
+                  else
+                    record 'ANSI capture fidelity' FAIL 'the ANSI marker was not observable through pane read --format ansi'
+                    limit 'ANSI capture could not be observed.'
+                  fi
+                else
+                  record 'ANSI capture fidelity' FAIL 'could not inject or wait for the ANSI marker'
+                  limit 'ANSI capture could not be measured.'
+                fi
+
+                if herdr_call pane send-text "$pane_id" 'Write-Output $env:FM_WINDOWS_E2E_MARKER' >>"$details" 2>&1 &&
+                  herdr_call pane send-keys "$pane_id" enter >>"$details" 2>&1 &&
+                  herdr_call pane wait-output "$pane_id" --match "$e2e_marker" --timeout 10000 >>"$details" 2>&1; then
+                  e2e_capture=$(herdr_call pane read "$pane_id" --source recent --lines 200 2>>"$details" || true)
+                  if printf '%s' "$e2e_capture" | grep -Fq "$e2e_marker"; then
+                    record 'End-to-end shell stand-in' PASS 'stubbed worktree, pane shell stand-in, steer, capture, and named-session teardown completed'
+                  else
+                    record 'End-to-end shell stand-in' FAIL 'the e2e steer was not found in the final capture'
+                    limit 'The end-to-end steer could not be verified through capture.'
+                  fi
+                else
+                  record 'End-to-end shell stand-in' FAIL 'the shell stand-in could not receive or acknowledge the steer'
+                  limit 'The end-to-end steer did not complete headlessly.'
+                fi
+
+                if herdr_call tab close "$tab_id" >>"$details" 2>&1 && herdr_call workspace close "$workspace_id" >>"$details" 2>&1; then
+                  record 'Tab and workspace teardown' PASS 'tab close and workspace close both returned success'
+                else
+                  record 'Tab and workspace teardown' DEGRADED 'the E2E loop completed, but tab close or workspace close did not return success'
+                fi
+              else
+                record 'Text send, key send, and capture' FAIL 'not attempted because no pane was created'
+                record 'Agent list and get' FAIL 'not attempted because no pane was created'
+                record 'Pane process-info' FAIL 'not attempted because no pane was created'
+                record 'Event path fallback to polling' DEGRADED 'not attempted because no pane was created'
+                record 'Foreground process group proof' DEGRADED 'not attempted because no pane was created'
+                record 'Live cwd tracking' DEGRADED 'not attempted because no pane was created'
+                record 'ANSI capture fidelity' DEGRADED 'not attempted because no pane was created'
+                record 'End-to-end shell stand-in' FAIL 'not attempted because no pane was created'
+              fi
+            else
+              record 'Text send, key send, and capture' FAIL 'not attempted because the named session did not start'
+              record 'Agent list and get' FAIL 'not attempted because the named session did not start'
+              record 'Pane process-info' FAIL 'not attempted because the named session did not start'
+              record 'Event path fallback to polling' DEGRADED 'not attempted because the named session did not start'
+              record 'Foreground process group proof' DEGRADED 'not attempted because the named session did not start'
+              record 'Live cwd tracking' DEGRADED 'not attempted because the named session did not start'
+              record 'ANSI capture fidelity' DEGRADED 'not attempted because the named session did not start'
+              record 'End-to-end shell stand-in' FAIL 'not attempted because the named session did not start'
+            fi
+          fi
+
+          if command -v lsof >/dev/null 2>&1; then
+            record 'Custody: lsof' PASS "lsof is present: $(lsof -v 2>&1 | head -n 1)"
+          else
+            record 'Custody: lsof' DEGRADED 'lsof is absent; stale-lock holder and worktree-cwd reaping proofs cannot complete'
+          fi
+
+          sleep 30 &
+          msys_pid=$!
+          if kill -0 "$msys_pid" 2>/dev/null && [ -r "/proc/$msys_pid/stat" ] && [ -r "/proc/$msys_pid/cmdline" ]; then
+            record 'Custody: kill -0 and /proc identity' PASS "kill -0 and /proc identity files work for Git Bash PID $msys_pid"
+          else
+            record 'Custody: kill -0 and /proc identity' DEGRADED 'Git Bash process liveness or /proc identity was unavailable'
+          fi
+          kill "$msys_pid" 2>/dev/null || true
+          wait "$msys_pid" 2>/dev/null || true
+
+          lock_dir="$RUNNER_TEMP/fm-windows-lock-target"
+          plain_link="$RUNNER_TEMP/fm-windows-lock-plain"
+          strict_link="$RUNNER_TEMP/fm-windows-lock-strict"
+          mkdir -p "$lock_dir"
+          plain_result=FAIL
+          strict_result=FAIL
+          ln -s "$lock_dir" "$plain_link" 2>>"$details" || true
+          if [ "$(readlink "$plain_link" 2>/dev/null || true)" = "$lock_dir" ]; then
+            plain_result=PASS
+          fi
+          rm -rf "$plain_link"
+          MSYS=winsymlinks:nativestrict ln -s "$lock_dir" "$strict_link" 2>>"$details" || true
+          if [ "$(readlink "$strict_link" 2>/dev/null || true)" = "$lock_dir" ]; then
+            strict_result=PASS
+          fi
+          rm -rf "$strict_link"
+          case "$plain_result:$strict_result" in
+            PASS:PASS) record 'Custody: MSYS symlink lock' PASS 'ln -s plus readlink worked with the default MSYS mode and winsymlinks:nativestrict' ;;
+            FAIL:PASS) record 'Custody: MSYS symlink lock' DEGRADED 'default MSYS link did not verify; winsymlinks:nativestrict verified an atomic symlink lock' ;;
+            *:FAIL) record 'Custody: MSYS symlink lock' FAIL 'ln -s plus readlink did not verify even with MSYS=winsymlinks:nativestrict' ;;
+            *) record 'Custody: MSYS symlink lock' DEGRADED "default=$plain_result strict=$strict_result" ;;
+          esac
+
+          {
+            echo
+            echo '## Revised verdict'
+            if [ "$core_status" = PASS ]; then
+              echo 'The real `windows-latest` runner reached a named Herdr session and exercised the CLI automation core recorded above.'
+            else
+              echo 'The real `windows-latest` runner did not establish the CLI automation core; the table identifies the first observed boundary.'
+            fi
+            if [ -n "$first_limit" ]; then
+              echo "First observed headless boundary: $first_limit"
+            else
+              echo 'No hard boundary was observed in this bounded shell-stand-in cycle.'
+            fi
+            echo 'A passing automation core does not authorize an unattended fleet: any FAIL or DEGRADED custody row remains an operational boundary until it is closed.'
+            echo 'A headless CI runner proves the AUTOMATION primitives, not the interactive desktop experience.'
+          } >>"$results"
+
+          cat "$results" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo 'MEASUREMENT_COPY_BEGIN'
+          cat "$results"
+          echo 'MEASUREMENT_COPY_END'
+
+      - name: Upload measurement and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-herdr-spike-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/windows-herdr-measurement.md
+            ${{ runner.temp }}/windows-herdr-details.log
+            ${{ runner.temp }}/herdr-fm-windows-spike-*.log
+            ${{ runner.temp }}/herdr-windows-install.log
+          if-no-files-found: warn

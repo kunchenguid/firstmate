@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Atomically drain durable watcher wake records, optionally annotate validated
-# signal status keys after raw consumption commits, then assert liveness.
+# Present durable watcher wake records, optionally acknowledge handled records,
+# annotate validated signal status keys, then assert liveness.
+#
+# Keep sequence-bound row consumption independent from generation-bound episode
+# retirement; docs/watcher-continuity.md owns the recovery contract.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,6 +17,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRAIN_TMP=
 DRAIN_LOCK_HELD=false
 RAW_ROWS=
+RECOVERY_MARKER="$STATE/.watcher-down"
+RECOVERY_MARKER_TOKEN=
+RECOVERY_ACK_REQUIRED=false
+RECOVERY_ACK_MOVED=false
+ACK_THROUGH=
+ACK_GENERATION=
+ACK_FINGERPRINTS=
+ACK_NOTICE_FINGERPRINTS=
+
+case "${1:-}" in
+  '') ;;
+  --ack-through)
+    ACK_THROUGH=${2:-}
+    case "$ACK_THROUGH" in ''|*[!0-9]*) echo "wake drain: invalid acknowledgement sequence" >&2; exit 2 ;; esac
+    [ "${3:-}" = --recovery-generation ] \
+      || { echo "wake drain: acknowledgement requires its recovery generation" >&2; exit 2; }
+    ACK_GENERATION=${4:-}
+    case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
+    [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
+    ;;
+  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+esac
 
 # Defense in depth for the supervision chain: this script runs at the top of
 # every wake-handling and recovery turn, so assert supervision health here too. A
@@ -23,11 +48,33 @@ RAW_ROWS=
 # its supervision verdict. Under Claude's between-turns auto-arm model, a normal
 # fire leaves a recent beacon well inside grace and stays silent mid-turn. Under
 # persistent-watcher models, the guard also requires the live identity-matched
-# watcher. Call after the queue is emptied so guard never re-prints its own
-# queued-wakes notice for the records this run just drained, and never let a
-# guard hiccup change the drain's exit status.
+# watcher. Never let a guard hiccup change the drain's exit status.
 assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
+}
+
+# Mark presentation-stage inactive terminal outcomes only after the handling
+# turn has completed and before this acknowledgement consumes its queue rows.
+# The helper ignores non-presentation and legacy keys, so this is a narrow
+# receipt path rather than a second interpretation of general check wakes.
+inactive_outcome_fingerprints() { # <sequence> <key-prefix>
+  local cutoff=$1 prefix=$2 epoch seq kind key payload
+  while IFS=$(printf '\t') read -r epoch seq kind key payload; do
+    [ "$kind" = check ] || continue
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    [ "$seq" -le "$cutoff" ] || continue
+    case "$key" in
+      "$prefix"*) printf '%s\n' "${key#"$prefix"}" ;;
+    esac
+  done < "$FM_WAKE_QUEUE"
+}
+
+acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
+  local mode=$1 fingerprints=$2 fingerprint
+  while IFS= read -r fingerprint; do
+    [ -n "$fingerprint" ] || continue
+    "$SCRIPT_DIR/fm-inactive-reconcile.sh" "$mode" "$fingerprint" || return 1
+  done <<< "$fingerprints"
 }
 
 # Print the consolidated OPEN DECISIONS section: every still-open
@@ -89,9 +136,7 @@ EOF
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.
 cleanup() {
   local status=$?
-  if [ "$status" -ne 0 ] && [ "$DRAIN_LOCK_HELD" = true ] && [ -n "$DRAIN_TMP" ] && [ -e "$DRAIN_TMP" ]; then
-    fm_wake_restore_queue "$DRAIN_TMP" || true
-  fi
+  [ -z "$DRAIN_TMP" ] || rm -f -- "$DRAIN_TMP" 2>/dev/null || true
   if [ "$DRAIN_LOCK_HELD" = true ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   fi
@@ -105,38 +150,124 @@ trap 'exit 143' TERM
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=true
 
+if [ -n "$ACK_THROUGH" ]; then
+  ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:') || exit 1
+  ACK_NOTICE_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-reconcile:') || exit 1
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  DRAIN_LOCK_HELD=false
+  if ! acknowledge_inactive_outcomes acknowledge "$ACK_FINGERPRINTS" \
+    || ! acknowledge_inactive_outcomes acknowledge-notice "$ACK_NOTICE_FINGERPRINTS"; then
+    echo "wake drain: inactive outcome receipt could not be recorded safely" >&2
+    exit 1
+  fi
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  DRAIN_LOCK_HELD=true
+  DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || exit 1
+  chmod 0600 "$DRAIN_TMP" || exit 1
+  awk -F '\t' -v cutoff="$ACK_THROUGH" '
+    NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff { print }
+  ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
+  if [ ! -s "$DRAIN_TMP" ]; then
+    fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"
+    RECOVERY_ACK_STATUS=$?
+    case "$RECOVERY_ACK_STATUS" in
+      0) ;;
+      3) RECOVERY_ACK_MOVED=true ;;
+      *)
+        echo "wake drain: recovery episode could not be retired safely; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command" >&2
+        exit 1
+        ;;
+    esac
+  else
+    fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
+    RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+    if [ "${RECOVERY_MARKER_TOKEN##*:}" != "$ACK_GENERATION" ]; then
+      RECOVERY_ACK_MOVED=true
+    fi
+  fi
+  if ! _fm_atomic_replace "$DRAIN_TMP" "$FM_WAKE_QUEUE"; then
+    echo "wake drain: acknowledged wakes could not be consumed safely" >&2
+    exit 1
+  fi
+  DRAIN_TMP=
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  DRAIN_LOCK_HELD=false
+  if [ "$RECOVERY_ACK_MOVED" = true ]; then
+    printf 'wake drain: acknowledged wakes through %s, but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
+      "$ACK_THROUGH" >&2
+  fi
+  exit 0
+fi
+
 if [ ! -s "$FM_WAKE_QUEUE" ]; then
   : > "$FM_WAKE_QUEUE"
+  fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true
+  RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+  case "$RECOVERY_MARKER_TOKEN" in
+    pending:downtime:*)
+      fm_recovery_marker_begin_handling "$RECOVERY_MARKER" || {
+        echo "wake drain: decision recovery could not begin handling safely" >&2
+        exit 1
+      }
+      RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+      RECOVERY_ACK_REQUIRED=true
+      ;;
+    pending:handling:*) RECOVERY_ACK_REQUIRED=true ;;
+  esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   (print_open_decisions_section) || true
+  if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
+    printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
+  fi
   assert_watcher_liveness
   exit 0
 fi
 
-DRAIN_TMP="$STATE/.wake-queue.drain.$(fm_current_pid)"
-rm -f "$DRAIN_TMP"
-mv "$FM_WAKE_QUEUE" "$DRAIN_TMP" || exit 1
-: > "$FM_WAKE_QUEUE" || exit 1
+fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true
+RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+if [ -z "$RECOVERY_MARKER_TOKEN" ]; then
+  if [ -e "$RECOVERY_MARKER" ] || [ -L "$RECOVERY_MARKER" ]; then
+    echo "wake drain: durable wakes have invalid recovery state" >&2
+    exit 1
+  fi
+  fm_recovery_marker_publish "$RECOVERY_MARKER" downtime || {
+    echo "wake drain: legacy durable wakes could not be adopted safely" >&2
+    exit 1
+  }
+elif [ "${RECOVERY_MARKER_TOKEN%%:*}" = acked ]; then
+  fm_recovery_marker_publish "$RECOVERY_MARKER" downtime || {
+    echo "wake drain: durable wakes could not enter a fresh recovery generation" >&2
+    exit 1
+  }
+fi
+fm_recovery_marker_begin_handling "$RECOVERY_MARKER" || {
+  echo "wake drain: durable wakes could not begin handling safely" >&2
+  exit 1
+}
+RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
 
-RAW_ROWS=$(fm_wake_print_deduped "$DRAIN_TMP") || exit "$?"
+RAW_ROWS=$(fm_wake_print_deduped "$FM_WAKE_QUEUE") || exit "$?"
+ACK_THROUGH=$(awk -F '\t' '$2 ~ /^[0-9]+$/ && $2 > max { max=$2 } END { print max + 0 }' "$FM_WAKE_QUEUE") || exit 1
 case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   0) ;;
   ''|*[!0-9]*) ;;
   *) sleep "$FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT" ;;
 esac
 if [ -n "$RAW_ROWS" ]; then
-  # Print-before-delete is the deliberate at-least-once no-loss boundary: a
-  # crash in this micro-gap may replay a wake, and annotations stay outside it.
   printf '%s\n' "$RAW_ROWS" || exit "$?"
 fi
-rm -f "$DRAIN_TMP" || exit "$?"
-DRAIN_TMP=
+fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
+RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+case "$RECOVERY_MARKER_TOKEN" in
+  pending:*|acked:*) ;;
+  *) echo "wake drain: durable wakes have no recovery generation" >&2; exit 1 ;;
+esac
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
+printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
+  "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
-# Raw output and queue deletion are authoritative. Everything below is
-# best-effort and cannot restore, duplicate, hide, or fail the consumed rows.
 (fm_wake_print_annotations "$RAW_ROWS") || true
 (print_open_decisions_section) || true
 assert_watcher_liveness
