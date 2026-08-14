@@ -116,9 +116,14 @@ matching_run() { # <worktree>
   [ -n "$run_id" ] && [ "$run_branch" = "$branch" ] || return 1
   fm_nm_head_matches_worktree "$wt" "$run_head" || return 1
   MATCH_RUN_ID=$run_id
-  [ -n "$outcome" ] && return 0
-  case "$status" in completed|failed|cancelled) return 0 ;; esac
-  MATCH_RUN_ACTIVE=1
+  if [ -n "$outcome" ]; then
+    case "$outcome" in passed|checks-passed|failed|cancelled) return 0 ;; *) return 1 ;; esac
+  fi
+  case "$status" in
+    completed|failed|cancelled) return 0 ;;
+    ci|running|fixing|awaiting_approval|fix_review) MATCH_RUN_ACTIVE=1 ;;
+    *) return 1 ;;
+  esac
 }
 
 active_run() { # <worktree>

@@ -178,6 +178,19 @@ cat > "$NM_STATUS" <<EOF
 run:
   id: "run-live"
   branch: $branch
+  status: running
+  head: "$head"
+  outcome: unrecognized-outcome
+EOF
+run_observer reconcile task || fail 'unknown-outcome observer reconcile failed'
+[ "$(pane_count)" = 2 ] || fail 'unknown outcome closed the exact observer pane'
+[ -f "$sidecar" ] || fail 'unknown outcome retired the exact observer sidecar'
+pass 'unknown outcome preserves the exact observer pane and sidecar'
+
+cat > "$NM_STATUS" <<EOF
+run:
+  id: "run-live"
+  branch: $branch
   status: completed
   head: "$head"
   outcome: checks-passed
@@ -187,6 +200,18 @@ if "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane get "$observer_pane" >/dev/
 [ ! -e "$sidecar" ] || fail 'terminal run did not retire a confirmed observer sidecar'
 [ "$($HERDR_LAB_HELPER run "$HERDR_LAB_SESSION" pane get "$task_pane" | jq -r '.result.pane.pane_id')" = "$task_pane" ] || fail 'terminal cleanup resized or closed the task pane'
 pass 'terminal matching run closes only the exact observer pane and preserves the task pane'
+
+cat > "$NM_STATUS" <<EOF
+run:
+  id: "run-unknown-status"
+  branch: $branch
+  status: unrecognized-status
+  head: "$head"
+EOF
+run_observer reconcile task || fail 'unknown-status observer reconcile failed'
+[ "$(pane_count)" = 1 ] || fail 'unknown status created an observer pane'
+[ ! -e "$sidecar" ] || fail 'unknown status created an observer sidecar'
+pass 'unknown status does not create an observer pane or sidecar'
 
 cat > "$NM_STATUS" <<EOF
 run:
