@@ -385,8 +385,8 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "explicit harness launch did not thread model and effort"
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -c auto_compact_token_limit='272000' --dangerously-bypass-approvals-and-sandbox" \
+    "explicit harness launch did not thread model, effort, and the default autocompact config"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
 
@@ -458,20 +458,69 @@ test_claude_threads_explicit_autocompact_override() {
   pass "an explicit --autocompact overrides the standing 272k default"
 }
 
-test_non_claude_harness_ignores_autocompact() {
+test_non_autocompact_harness_ignores_autocompact() {
   local rec id out status launch
-  id=profile-codex-autocompact-z3b
-  rec=$(make_spawn_case profile-codex-autocompact codex "$id")
+  id=profile-grok-autocompact-z3b
+  rec=$(make_spawn_case profile-grok-autocompact grok "$id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --autocompact 500k)
   status=$?
-  expect_code 0 "$status" "codex spawn with --autocompact should still succeed"
+  expect_code 0 "$status" "grok spawn with --autocompact should still succeed"
   assert_meta_autocompact "$HOME_DIR/state/$id.meta" 500k
   launch=$(cat "$LAUNCH_LOG")
-  assert_not_contains "$launch" "--autocompact" "codex launch must not receive the claude-only --autocompact flag"
+  assert_not_contains "$launch" "--autocompact" "grok launch must not receive an unsupported --autocompact flag"
+  assert_not_contains "$launch" "auto_compact_token_limit" "grok launch must not receive codex's auto_compact_token_limit config"
+  assert_not_contains "$launch" "AUTOCOMPACTFLAG" "an unsubstituted autocompact placeholder leaked into the grok launch"
+  pass "--autocompact has zero effect on a harness with no verified autocompact equivalent"
+}
+
+test_codex_threads_default_autocompact() {
+  local rec id out status launch
+  id=profile-codex-autocompact-default-z3c
+  rec=$(make_spawn_case profile-codex-autocompact-default codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn without --autocompact should succeed"
+  assert_meta_autocompact "$HOME_DIR/state/$id.meta" 272k
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex -c auto_compact_token_limit='272000' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread the standing 272k autocompact default as a raw token count"
+  pass "codex receives the standing 272k autocompact default, converted to a raw token count"
+}
+
+test_codex_threads_explicit_autocompact_override() {
+  local rec id out status launch
+  id=profile-codex-autocompact-override-z3d
+  rec=$(make_spawn_case profile-codex-autocompact-override codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --autocompact 500k)
+  status=$?
+  expect_code 0 "$status" "codex spawn with an explicit --autocompact should succeed"
+  assert_meta_autocompact "$HOME_DIR/state/$id.meta" 500k
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-c auto_compact_token_limit='500000'" \
+    "explicit --autocompact did not override the standing 272k default on codex"
+  pass "an explicit --autocompact overrides the standing 272k default on codex, converted to a raw token count"
+}
+
+test_codex_omits_auto_autocompact() {
+  local rec id out status launch
+  id=profile-codex-autocompact-auto-z3e
+  rec=$(make_spawn_case profile-codex-autocompact-auto codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --autocompact auto)
+  status=$?
+  expect_code 0 "$status" "codex spawn with --autocompact auto should succeed"
+  assert_meta_autocompact "$HOME_DIR/state/$id.meta" auto
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "auto_compact_token_limit" "codex has no verified auto equivalent; auto must not reach the launch command"
   assert_not_contains "$launch" "AUTOCOMPACTFLAG" "an unsubstituted autocompact placeholder leaked into the codex launch"
-  pass "--autocompact has zero effect on a non-claude harness's rendered launch command"
+  pass "codex omits a bare auto autocompact value instead of guessing at an unverified equivalent"
 }
 
 test_autocompact_rejects_below_floor_value() {
@@ -514,10 +563,11 @@ test_codex_threads_model_and_effort() {
   status=$?
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_meta_autocompact "$HOME_DIR/state/$id.meta" 272k
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread model and reasoning effort config"
-  pass "codex receives --model and model_reasoning_effort profile flags"
+  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -c auto_compact_token_limit='272000' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread model, reasoning effort, and the default autocompact config"
+  pass "codex receives --model and model_reasoning_effort profile flags, plus the default autocompact config"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -531,8 +581,8 @@ test_codex_omits_invalid_max_effort() {
   expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
+  assert_contains "$launch" "codex --model 'gpt-5' -c auto_compact_token_limit='272000' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not preserve the model and default autocompact flags when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
@@ -908,7 +958,10 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_claude_threads_explicit_autocompact_override
-test_non_claude_harness_ignores_autocompact
+test_non_autocompact_harness_ignores_autocompact
+test_codex_threads_default_autocompact
+test_codex_threads_explicit_autocompact_override
+test_codex_omits_auto_autocompact
 test_autocompact_rejects_below_floor_value
 test_autocompact_rejects_non_numeric_value
 test_codex_threads_model_and_effort

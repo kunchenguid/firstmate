@@ -38,17 +38,25 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
-#   --autocompact <value> is a claude-CLI-specific profile axis: claude's own
-#   --autocompact flag accepts "auto" or a token-count window from 100k to 1M
-#   (verified via `claude --help`: "Auto-compact window size (auto, or 100k-1M
-#   tokens)"). A value outside that set is refused before any spawn attempt. It
-#   is threaded only into claude-harness crewmate spawns; every other harness
-#   omits it, exactly like an unsupported --effort value. When the resolved
-#   harness is claude and the caller passes no --autocompact at all, it defaults
-#   to 272k (the captain-approved standing default), but this is a per-spawn
-#   default, not a hard cap: pass --autocompact <bigger value> explicitly at
-#   intake for a task that needs a larger window, such as a long audit or
-#   investigation.
+#   --autocompact <value> is a shared context-budget profile axis, accepting
+#   "auto" or a token-count window from 100k to 1M (e.g. 272k, 500k, 1M). It is
+#   threaded only into harnesses verified to support an equivalent control;
+#   every other harness omits it, exactly like an unsupported --effort value.
+#   claude: its own --autocompact flag accepts "auto" or a 100k-1M token
+#   window verbatim (verified via `claude --help`: "Auto-compact window size
+#   (auto, or 100k-1M tokens)").
+#   codex: its `-c auto_compact_token_limit=<tokens>` config override accepts
+#   a raw token count (verified: codex --strict-config -c
+#   auto_compact_token_limit=<N> doctor passes config validation on codex-cli
+#   0.142.1). Codex has no verified "auto" equivalent, so a bare "auto" value
+#   is omitted from codex spawns rather than guessed at; a numeric window
+#   still converts to the raw token count and is passed through.
+#   A value outside the shared 100k-1M/"auto" set is refused before any spawn
+#   attempt. When the resolved harness is claude or codex and the caller
+#   passes no --autocompact at all, it defaults to 272k (the captain-approved
+#   standing default across every ship), but this is a per-spawn default, not
+#   a hard cap: pass --autocompact <bigger value> explicitly at intake for a
+#   task that needs a larger window, such as a long audit or investigation.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -223,6 +231,19 @@ esac
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
+# Shared --autocompact token-window parser: converts "272k"/"500k"/"1M" into a
+# raw token count, or prints nothing for an unrecognized shape. Used both by
+# the shared validation below and by autocompact_flag_for_harness's codex
+# branch, which needs the raw integer rather than the "NNNk" shorthand.
+autocompact_token_count() {
+  local value=$1
+  if [[ "$value" =~ ^([0-9]+)[kK]$ ]]; then
+    printf '%s' $(( BASH_REMATCH[1] * 1000 ))
+  elif [[ "$value" =~ ^1[mM]$ ]]; then
+    printf '%s' 1000000
+  fi
+}
+
 resolve_directory_input() {
   local name=$1 path=$2 resolved
   case "$path" in
@@ -366,19 +387,13 @@ case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
-# claude's own --autocompact accepts "auto" or a 100k-1M token window
-# (verified via `claude --help`: "Auto-compact window size (auto, or 100k-1M
-# tokens)"). Validate here, before any resolution or launch work, the same way
-# --effort's allowed set is validated above.
+# The shared --autocompact axis accepts "auto" or a 100k-1M token window (see
+# the header for per-harness support). Validate here, before any resolution
+# or launch work, the same way --effort's allowed set is validated above.
 case "$AUTOCOMPACT" in
   ''|auto) ;;
   *)
-    autocompact_tokens=
-    if [[ "$AUTOCOMPACT" =~ ^([0-9]+)[kK]$ ]]; then
-      autocompact_tokens=$(( BASH_REMATCH[1] * 1000 ))
-    elif [[ "$AUTOCOMPACT" =~ ^1[mM]$ ]]; then
-      autocompact_tokens=1000000
-    fi
+    autocompact_tokens=$(autocompact_token_count "$AUTOCOMPACT")
     if [ -z "$autocompact_tokens" ] || [ "$autocompact_tokens" -lt 100000 ] || [ "$autocompact_tokens" -gt 1000000 ]; then
       echo "error: --autocompact must be 'auto' or a token count from 100k to 1M (e.g. 272k, 500k, 1M), got '$AUTOCOMPACT'" >&2
       exit 1
@@ -1152,9 +1167,9 @@ launch_template() {
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG____AUTOCOMPACTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG____AUTOCOMPACTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG____AUTOCOMPACTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1296,11 +1311,12 @@ case "$HARNESS" in
     ;;
 esac
 
-# --autocompact is a claude-CLI-specific axis (see the header). When the caller
-# left it unset AND the resolved harness is claude, apply the captain-approved
-# standing default rather than leaving it unset; every other harness is left
-# alone, since --autocompact has not been verified against their CLIs.
-if [ "$AUTOCOMPACT_SET" -eq 0 ] && [ "$HARNESS" = claude ]; then
+# --autocompact is a shared axis, verified against claude and codex only (see
+# the header). When the caller left it unset AND the resolved harness is one
+# of those two, apply the captain-approved standing default rather than
+# leaving it unset; every other harness is left alone, since --autocompact
+# has not been verified against their CLIs.
+if [ "$AUTOCOMPACT_SET" -eq 0 ] && { [ "$HARNESS" = claude ] || [ "$HARNESS" = codex ]; }; then
   AUTOCOMPACT=272k
 fi
 
@@ -1472,12 +1488,22 @@ effort_flag_for_harness() {
 }
 
 autocompact_flag_for_harness() {
-  local harness=$1 autocompact=$2
+  local harness=$1 autocompact=$2 tokens
   [ -n "$autocompact" ] && [ "$autocompact" != default ] || return 0
   case "$harness" in
-    # --autocompact is verified against the claude CLI only (see the header);
-    # every other harness omits it rather than guessing at an equivalent flag.
+    # --autocompact is verified against claude and codex only (see the
+    # header); every other harness omits it rather than guessing at an
+    # equivalent flag.
     claude) printf -- '--autocompact %s ' "$(shell_quote "$autocompact")" ;;
+    codex)
+      # codex has no verified "auto" equivalent for auto_compact_token_limit,
+      # so a bare "auto" is omitted here rather than passed through unproven;
+      # a numeric window converts to the raw token count the config key wants.
+      if [ "$autocompact" != auto ]; then
+        tokens=$(autocompact_token_count "$autocompact")
+        [ -z "$tokens" ] || printf -- '-c auto_compact_token_limit=%s ' "$(shell_quote "$tokens")"
+      fi
+      ;;
   esac
 }
 
