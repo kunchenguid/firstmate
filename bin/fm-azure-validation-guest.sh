@@ -234,6 +234,24 @@ PY
   rm -rf "$RUNTIME"
   install -d -m 0755 -o root -g root "$RUNTIME"
   tar -xzf "$EXTRACT/runtime.tar.gz" -C "$RUNTIME" --no-same-owner --no-same-permissions
+  # --no-same-permissions applies this process's umask, and the Azure run
+  # command context runs with umask 077, so every runtime file lands
+  # root-only and fmvalidate cannot execute no-mistakes. Assign exactly
+  # 0755/0644 from the archive's own executable intent instead of raw
+  # archive modes, so neither setuid nor world-write can ride in.
+  python3 - "$EXTRACT/runtime.tar.gz" "$RUNTIME" <<'MODES'
+import pathlib
+import sys
+import tarfile
+root = pathlib.Path(sys.argv[2])
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    for member in archive.getmembers():
+        target = root / member.name
+        if member.isdir():
+            target.chmod(0o755)
+        elif member.isfile():
+            target.chmod(0o755 if member.mode & 0o111 else 0o644)
+MODES
   python3 - "$RUNTIME" <<'PY'
 import hashlib
 import json
