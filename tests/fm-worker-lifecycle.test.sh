@@ -599,6 +599,59 @@ module.cost_query_with_state = original_cost_query_with_state
 module.az = original_az
 module.retail_rate = original_retail_rate
 
+# Cost reads retry the exact Cost Management client-type 429 throttle with
+# bounded short spacing; every other failure keeps single-attempt semantics.
+class FakeCostTime:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+    def monotonic(self):
+        return self.now
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+original_cost_time = module.time
+throttle_stderr = '{"error":{"code":"429","message":"Too many requests. Please retry."}}'
+cost_success = {"properties": {"columns": [{"name": "PreTaxCost"}, {"name": "Currency"}], "rows": [[1.75, "USD"]]}}
+cost_attempts = []
+def az_throttle_then_ok(_controller, args, check=True):
+    cost_attempts.append(args)
+    if len(cost_attempts) < 3:
+        return (None, 1, throttle_stderr)
+    return (dict(cost_success), 0, "")
+fake_cost_time = FakeCostTime()
+module.time = fake_cost_time
+module.az = az_throttle_then_ok
+throttled_value, throttled_untrained = module.cost_query_with_state(controller, False)
+assert throttled_value == 1.75 and throttled_untrained is False, (throttled_value, throttled_untrained)
+assert len(cost_attempts) == 3, cost_attempts
+assert fake_cost_time.sleeps == [module.COST_THROTTLE_RETRY_SPACING_SECONDS] * 2, fake_cost_time.sleeps
+
+cost_attempts = []
+fake_cost_time = FakeCostTime()
+module.time = fake_cost_time
+module.az = lambda _c, args, check=True: cost_attempts.append(args) or (None, 1, throttle_stderr)
+exhausted_value, exhausted_untrained = module.cost_query_with_state(controller, False)
+assert exhausted_value is None and exhausted_untrained is False
+expected_sleeps = module.COST_THROTTLE_RETRY_DEADLINE_SECONDS // module.COST_THROTTLE_RETRY_SPACING_SECONDS
+assert len(cost_attempts) == expected_sleeps + 1, len(cost_attempts)
+assert all(s == module.COST_THROTTLE_RETRY_SPACING_SECONDS for s in fake_cost_time.sleeps)
+
+cost_attempts = []
+fake_cost_time = FakeCostTime()
+module.time = fake_cost_time
+module.az = lambda _c, args, check=True: cost_attempts.append(args) or (None, 1, "ERROR: management token unavailable")
+plain_value, plain_untrained = module.cost_query_with_state(controller, False)
+assert plain_value is None and plain_untrained is False and len(cost_attempts) == 1
+assert fake_cost_time.sleeps == []
+
+cost_attempts = []
+module.az = lambda _c, args, check=True: cost_attempts.append(args) or (None, 1, "(424) A valid forecast can not be created. There is no cost training data.")
+untrained_value, untrained_flag = module.cost_query_with_state(controller, True)
+assert untrained_value is None and untrained_flag is True and len(cost_attempts) == 1
+module.time = original_cost_time
+module.az = original_az
+
 # Public IP relations are rejected while a private NIC is accepted.
 nic = {
     "id": "/nic", "etag": "etag", "tags": tags,

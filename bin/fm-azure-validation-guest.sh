@@ -371,6 +371,12 @@ chown -R fmvalidate:fmvalidate "$CELL_ROOT" "$PROVIDER_HOME"
 chown fmvalidate:fmvalidate "$GITHUB_TOKEN_FILE"
 chmod 0700 "$CELL_ROOT" "$HOME_DIR" "$NM_HOME" "$CACHE" "$TMP" "$PROVIDER_HOME"
 chmod 0600 "$GITHUB_TOKEN_FILE"
+# The chown above hands the cloned repository to fmvalidate, so every later
+# root-run git command in this script trips the dubious-ownership guard
+# (CVE-2022-24765); git config's variant of that refusal is the bare
+# "fatal: not in a git directory". Authorize exactly this repository for the
+# rest of the process; fmvalidate children inherit it harmlessly (own repo).
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=$REPO
 
 RUNTIME=/opt/fm-azure-validation/runtime
 NM_BIN=$RUNTIME/$(jq -r '.runtime.no_mistakes_path' "$REQUEST")

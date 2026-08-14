@@ -145,6 +145,8 @@ for value in ('MODE=${mode:-}','VM_RESOURCE_ID=${vm_resource_id:-}','INPUT_URL=$
 for value in ('cryptsetup blkid lsblk','WORKTREE_FS_TYPE=$(blkid -p -s TYPE -o value /dev/mapper/fm-validation-work','2:) mkfs.ext4','0:ext4)','worktree mapping has a foreign filesystem','worktree filesystem identity is unreadable'):
     assert value in guest
 assert 'if [ "${WORKTREE_EXISTING:-0}" -eq 0 ]' not in guest
+assert "GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=$REPO" in guest
+assert guest.index("chown -R fmvalidate:fmvalidate") < guest.index("GIT_CONFIG_KEY_0=safe.directory")
 assert guest.index('new cell found a pre-existing LUKS worktree') < guest.index('WORKTREE_FS_TYPE=$(blkid') < guest.index('mount -o nodev,nosuid /dev/mapper/fm-validation-work')
 for value in ("fm.azure-validation-shard/v1","storage_token","vm_instance_id","boot_id","trusted_verify_manifests"):
     assert value in bridge

@@ -426,6 +426,19 @@ def cost_query(controller, forecast):
     return value
 
 
+COST_THROTTLE_RETRY_DEADLINE_SECONDS = 180
+COST_THROTTLE_RETRY_SPACING_SECONDS = 15
+
+
+def cost_throttle_signature(stderr):
+    # Cost Management throttles the az CLI's shared client-type request
+    # bucket with a retry-after of a few seconds even while the per-hour
+    # query budget is nearly untouched, so a bounded short-spaced retry
+    # is the correct remedy; a long quiet window is not.
+    text = str(stderr)
+    return '"code":"429"' in text or "Too Many Requests" in text
+
+
 def cost_query_with_state(controller, forecast):
     """Return (value, untrained). untrained is True only for the exact
     Cost Management refusal that the forecast model has insufficient
@@ -440,12 +453,23 @@ def cost_query_with_state(controller, forecast):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(cost_body(controller, forecast), handle, separators=(",", ":"))
-        result, rc, stderr = az(controller, [
-            "rest", "--method", "post", "--url", url, "--body", "@" + name,
-        ], check=False)
-        if rc != 0 or not isinstance(result, dict):
+        deadline = time.monotonic() + COST_THROTTLE_RETRY_DEADLINE_SECONDS
+        while True:
+            result, rc, stderr = az(controller, [
+                "rest", "--method", "post", "--url", url, "--body", "@" + name,
+            ], check=False)
+            if rc == 0 and isinstance(result, dict):
+                break
             untrained = bool(forecast) and "cost training data" in str(stderr).lower()
-            return None, untrained
+            if untrained:
+                return None, True
+            if (
+                cost_throttle_signature(stderr)
+                and time.monotonic() + COST_THROTTLE_RETRY_SPACING_SECONDS <= deadline
+            ):
+                time.sleep(COST_THROTTLE_RETRY_SPACING_SECONDS)
+                continue
+            return None, False
         properties = result.get("properties", result)
         columns = properties.get("columns") or []
         rows = properties.get("rows") or []

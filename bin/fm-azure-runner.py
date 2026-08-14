@@ -1485,6 +1485,7 @@ def save_cost_cache(env, cache_key, endpoint, body_digest, server_date, result):
 def retry_after_seconds(headers):
     for name in (
         "x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after",
+        "x-ms-ratelimit-microsoft.costmanagement-clienttype-retry-after",
         "x-ms-ratelimit-microsoft.consumption-retry-after",
         "Retry-After",
     ):

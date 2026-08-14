@@ -430,6 +430,14 @@ def urlopen(*_a,**_k):
 m.urllib.request.urlopen=urlopen; m.time.sleep=lambda seconds:sleeps.append(seconds)
 result=m.cost_http_query(env,"query","https://management.azure.com/x",{"type":"Usage"})
 assert result["properties"]["rows"]==[] and sleeps==[2]
+# The clienttype bucket communicates its retry-after through its own
+# extension header (observed live at DefaultQuota:0) and is honored too.
+ct_headers=email.message.Message(); ct_headers["x-ms-ratelimit-microsoft.costmanagement-clienttype-retry-after"]="6"
+ct_throttle=urllib.error.HTTPError("https://management.azure.com/y",429,"throttle",ct_headers,io.BytesIO())
+calls[:]=[ct_throttle,Response()]; sleeps[:]=[]
+result=m.cost_http_query(env,"query","https://management.azure.com/y",{"type":"Usage-ct"})
+assert result["properties"]["rows"]==[] and sleeps==[6]
+assert m.retry_after_seconds(ct_headers)==6
 # Only exact body/endpoint bindings can read the authoritative success cache.
 body=m.canonical_bytes({"type":"Usage"}); digest="sha256:"+m.sha256_bytes(body); key=m.sha256_bytes(("query\0https://management.azure.com/x\0"+digest).encode())
 assert m.load_cost_cache(env,key,"query",digest) is not None
