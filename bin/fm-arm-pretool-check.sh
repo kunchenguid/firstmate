@@ -129,8 +129,9 @@ fi
 # Strict-superset prefilter (transport only; owns zero classification semantics).
 # Every protected watcher execution and every broad watcher kill resolves to the
 # fm-watch byte sequence AFTER the classifier's byte normalization, so a command
-# that cannot contain fm-watch or x-mode.env even after that normalization can
-# never be a deniable candidate and is fast-allowed without the Node policy owner.
+# that cannot contain fm-watch, x-mode.env, or a source/dot operator even after
+# that normalization can never be a deniable candidate and is fast-allowed
+# without the Node policy owner.
 # We mirror the classifier's cheapest byte transforms here (drop line-
 # continuation and escape backslashes, quotes, and newlines) so obfuscated
 # protected paths such as fm-watc\<newline>h-arm.sh or fm-"watch"-arm.sh still
@@ -138,7 +139,7 @@ fi
 # existing fm-watch run.
 #
 # The fast path may allow ONLY when ALL hold: (a) the stripped/normalized text
-# lacks the fm-watch and x-mode.env substrings, AND (b) the raw command carries no
+# lacks the fm-watch and x-mode.env substrings or source/dot operators, AND (b) the raw command carries no
 # quoting-decoder marker - a $ immediately followed by a single quote (ANSI-C
 # $'...') or a double quote (bash locale $"..."), both of which the classifier
 # decodes and can therefore reconstruct fm-watch from bytes this cheap byte
@@ -155,15 +156,21 @@ PREFILTER=${PREFILTER//\"/}
 PREFILTER=${PREFILTER//\'/}
 PREFILTER=${PREFILTER//$'\n'/}
 PREFILTER=${PREFILTER//$'\r'/}
-case "$CMD" in
-  *"\$'"*|*'$"'*) ;;
-  *)
-    case "$PREFILTER" in
-      *fm-watch*|*x-mode.env*) ;;
-      *) exit 0 ;;
-    esac
-    ;;
-esac
+SOURCE_HINT=0
+if [[ "$CMD" =~ (source|[.])[[:space:]] ]]; then
+  SOURCE_HINT=1
+fi
+if [ "$SOURCE_HINT" -eq 0 ]; then
+  case "$CMD" in
+    *"\$'"*|*'$"'*) ;;
+    *)
+      case "$PREFILTER" in
+        *fm-watch*|*x-mode.env*|*source[[:space:]]*|*.[[:space:]]*) ;;
+        *) exit 0 ;;
+      esac
+      ;;
+  esac
+fi
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0

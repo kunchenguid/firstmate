@@ -239,6 +239,9 @@ test_direct_policy_contract() {
   assert_policy direct-data-only-x-source $'deny\tx-mode-unavailable' 'source config/x-mode.env' data-only
   assert_policy direct-unknown-x-bundle $'deny\twatcher-bundled' 'source config/x-mode.env; exec bin/fm-watch-arm.sh'
   assert_policy direct-secure-x-source allow 'source config/x-mode.env' secure
+  assert_policy direct-unknown-x-variable $'deny\tx-mode-unavailable' 'X_MODE_FILE=config/x-mode.env; source "$X_MODE_FILE"'
+  assert_policy direct-data-only-x-glob $'deny\tx-mode-unavailable' 'source config/x-mode.env*' data-only
+  assert_policy direct-secure-x-variable allow 'source "$X_MODE_FILE"' secure
   heredoc_data=$'cat <<\'EOF\'\nbin/fm-watch-arm.sh &\nEOF'
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"
@@ -277,6 +280,11 @@ SH
   rc=$?
   [ "$rc" -eq 2 ] || fail "data-only pretool must deny a source-only X-mode command, got exit $rc"
   assert_contains "$out" "[x-mode-unavailable]" "data-only pretool source-only deny did not carry the X-mode reason"
+  out=$(FM_TEST_REAL_STAT="$real_stat" FM_HOME="$home" X_MODE_FILE=config/x-mode.env PATH="$fakebin:$PATH" \
+    "$CHECK" --command 'source "$X_MODE_FILE"' 2>&1)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "data-only pretool must deny an unresolved source operand, got exit $rc"
+  assert_contains "$out" "[x-mode-unavailable]" "data-only unresolved source deny did not carry the X-mode reason"
   pass "data-only capability gates X-mode sourcing before watcher execution"
 }
 
@@ -289,6 +297,15 @@ test_unknown_x_mode_source_is_not_fast_allowed() {
   rc=$?
   [ "$rc" -eq 2 ] || fail "unknown state must deny a source-only X-mode command, got exit $rc"
   assert_contains "$out" "[x-mode-unavailable]" "unknown-state source deny did not carry the X-mode reason"
+  out=$(FM_HOME="$home" X_MODE_FILE=config/x-mode.env \
+    "$CHECK" --command 'source "$X_MODE_FILE"' 2>&1)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "unknown state must deny an unresolved source operand, got exit $rc"
+  assert_contains "$out" "[x-mode-unavailable]" "unresolved source deny did not carry the X-mode reason"
+  out=$(FM_HOME="$home" "$CHECK" --command 'source config/x-mode.env*' 2>&1)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "unknown state must deny a globbed X-mode source, got exit $rc"
+  assert_contains "$out" "[x-mode-unavailable]" "globbed source deny did not carry the X-mode reason"
   pass "unknown state gates X-mode sourcing before the pretool fast path"
 }
 

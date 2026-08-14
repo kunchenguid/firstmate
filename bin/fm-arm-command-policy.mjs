@@ -55,7 +55,7 @@ function rawMentionsBroadKill(command) {
 
 function rawMentionsXModeSource(command) {
   const normalized = normalizeLineContinuations(command).replace(/["']/g, "");
-  return /(?:^|[\s;|&()])(?:source|\.)\s+[^;|&\n]*config\/x-mode\.env(?:[\s;|&()]|$)/.test(normalized);
+  return /(?:^|[\s;|&()])(?:source|\.)\s+/.test(normalized) && normalized.includes("config/x-mode.env");
 }
 
 function normalizeLineContinuations(source) {
@@ -744,7 +744,7 @@ function analyzeProgram(command, context, depth = 0) {
   const nodeInfos = [];
   let nestedProtected = false;
   let broadKill = false;
-  let xModeCandidate = false;
+  let xModeCandidate = rawMentionsXModeSource(command);
   let pgrepWatcher = false;
   let unsupported = false;
   let activeContext = {
@@ -879,7 +879,10 @@ function xModePathCandidate(value, home) {
 
 function xModeSourceCandidate(position, context) {
   const source = sourcedScript(position);
-  if (source && xModePathCandidate(source.value, context.home)) return true;
+  if (source) {
+    if (xModePathCandidate(source.value, context.home)) return true;
+    if (!source.literal || source.subs.length > 0 || /[*?\[\]]/.test(source.value)) return true;
+  }
   const values = position.words.map((word) => word.value);
   return values[0] === "[" && values[1] === "-f" && values[3] === "]" && values.length === 4 && xModePathCandidate(values[2], context.home);
 }
