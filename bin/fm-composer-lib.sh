@@ -584,6 +584,53 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
   return 1
 }
 
+# _fm_composer_rule_row: 0 when a row is a composer rule that may carry an
+# overlaid pane TITLE - dashes with text burned into them - proven by the row
+# collapsing to exactly the same width as the plain rule it pairs with.
+# <plain-rule-spaces> is that partner rule already mapped to spaces.
+#
+# This is NOT a relaxation of _fm_composer_pi_separator_row above, and the two
+# must not be merged. That predicate also feeds the pi identity conjunction,
+# where being wrong about what closes a separated composer would promote an
+# unidentified blank region into an injection target, so it stays strictly
+# dashes-only. This one serves a single narrow consumer,
+# _fm_composer_bare_rule_sandwich.
+#
+# No title POSITION is assumed, because that is the vendor's choice and it has
+# already moved once: the title may sit mid-rule or run flush to the row's end,
+# and both must read as a rule. What is assumed is structural and survives a
+# vendor restyle - an overlaid title overwrites dashes rather than displacing
+# them, so the titled rule keeps its partner's width.
+#
+# Width is proven the way _fm_composer_titled_bottom_ok proves it, by comparing
+# canonical space strings rather than counting characters. `${#row}` counts
+# characters under a UTF-8 locale and BYTES under LC_ALL=C, so a length test
+# here would silently disagree with itself between locales (issue #1988); a
+# character-for-character substitution compared as a string cannot.
+#
+# Title text is ASCII-printable only, the same limit _fm_composer_titled_bottom_ok
+# and fm_composer_geometry_spaces already impose fleet-wide. A title carrying a
+# non-ASCII glyph leaves residue, fails the proof, and the verdict stays
+# `unknown` - a refusal to read, which is the safe direction and the same answer
+# as before this exception existed.
+_fm_composer_rule_row() {  # <trimmed-row> <plain-rule-spaces>
+  local row=$1 expected=$2 spaces
+  [ -n "$row" ] || return 1
+  # Open with the same 8-column dash run the strict separator requires.
+  case "$row" in
+    ────────*) ;;
+    *) return 1 ;;
+  esac
+  spaces=${row//─/ }
+  spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
+  # Anything left is neither a dash nor title text - another container's edge
+  # glyph, for instance - and this is not a rule.
+  case "$spaces" in
+    *[![:space:]]*) return 1 ;;
+  esac
+  [ "$spaces" = "$expected" ]
+}
+
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
 _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
@@ -1023,6 +1070,33 @@ _fm_composer_leftbar_floor_row() {  # <trimmed-row>
   [ -z "${blocks//▀/}" ]
 }
 
+# _fm_composer_bare_rule_sandwich: 0 when a bare agent glyph sits in its own
+# composer box - a rule directly above it (plain or titled) and the window's
+# only unmatched separator directly below it, which is that box's closing rule.
+#
+# This is the exception the staleness invalidation below needs. That rule reads
+# an unmatched separator BELOW a matched candidate as proof the candidate is
+# scrollback, which is right in general and wrong for exactly this shape: when a
+# vendor overlays the pane title on the composer's TOP rule, the pair never
+# opens, and the composer's own BOTTOM rule becomes that unmatched separator.
+#
+# Adjacency on BOTH edges is what keeps the staleness rule intact everywhere
+# else: a glyph genuinely stranded in scrollback has transcript rows between it
+# and the separator below, not its own box edges.
+_fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
+  local plain=$1 row=$2 above below
+  [ "$row" -ge 1 ] || return 1
+  # The separator the invalidation is about to act on must be this box's own
+  # closing rule, immediately below the glyph row.
+  [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -eq "$((row + 1))" ] || return 1
+  below=$(_fm_composer_screen_row "$((row + 1))" "$plain")
+  fm_composer_normalize_trim_var below
+  _fm_composer_pi_separator_row "$below" || return 1
+  above=$(_fm_composer_screen_row "$((row - 1))" "$plain")
+  fm_composer_normalize_trim_var above
+  _fm_composer_rule_row "$above" "${below//─/ }"
+}
+
 _fm_composer_select_cursorless() {
   local plain=$1 generic=-1 next boundary raw trimmed
   FM_COMPOSER_SELECTED_KIND=
@@ -1062,8 +1136,14 @@ _fm_composer_select_cursorless() {
   fi
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
      && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
-    FM_COMPOSER_SELECTED_KIND=
-    return 1
+    # Spare only a bare glyph inside its own rule-bounded box; see
+    # _fm_composer_bare_rule_sandwich for why that shape is not scrollback.
+    if ! { [ "$FM_COMPOSER_SELECTED_KIND" = bare ] \
+           && [ "$generic" = "$FM_COMPOSER_SCAN_BARE_ROW" ] \
+           && _fm_composer_bare_rule_sandwich "$plain" "$FM_COMPOSER_SCAN_BARE_ROW"; }; then
+      FM_COMPOSER_SELECTED_KIND=
+      return 1
+    fi
   fi
   if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=

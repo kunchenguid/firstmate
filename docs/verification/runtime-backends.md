@@ -205,6 +205,57 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### Titled composer rule
+
+Claude draws its borderless composer between two horizontal `─` rules.
+When a terminal-title overlay is burned into the TOP rule, that rule is dashes plus text, so it fails the dashes-only separator predicate, the separated pair never opens, and the composer's own BOTTOM rule becomes an unmatched separator sitting below the `❯` row the scan already matched.
+The cursorless staleness rule read that unmatched separator as proof the match was scrollback and returned `unknown`, which defers away-mode escalation indefinitely and silently; this host paid one 8.5-hour undelivered-escalation outage for it.
+The current classifier spares exactly that shape and returns `empty`.
+
+**This guarantee is deliberately not scoped to a Claude version, and an earlier version-scoped record of it was wrong.**
+A 2026-08-11 measurement recorded the overlay as a property of `claude 2.1.226.634` focused panes specifically.
+By 2026-08-14 the installed build had moved twice, to `2.1.228.649` and then `2.1.231.653`, and stopped writing the title into the captured grid on any pane, focused or not.
+Nothing in firstmate or Herdr changed across that window: the Herdr binary and the same running server process spanned both observations.
+So the defect stopped being observable live without being fixed, and a version-scoped record of a live pass would have rotted into a false claim of coverage.
+The standing proof is therefore the portable regression `test_matrix_claude_titled_composer_rule` in `tests/fm-composer-lib.test.sh`, which builds the shape from its structure rather than from a captured pane and holds on every Claude release, asserts the titled rule diverges from the strict separator predicate so it cannot go vacuously green, and reproduces the exact failure when only the consumer narrowing is reverted.
+
+The live half was measured on 2026-08-14 on Linux x86_64 with `herdr 0.8.0`, `claude 2.1.231.653 (ASBX Claude Code, channel stable)`, and tmux 3.6a, against the running `default` Herdr session, reading real panes only and submitting nothing.
+Because the current Claude build renders no titled rule, the shape was proven against the live pane's own 20-row capture with only the top rule's dashes overwritten by that pane's actual terminal title, at the same column width, leaving every other byte of the real capture untouched:
+
+```text
+### current main reader
+  top=asis      cols=163  residue=[] verdict=empty  (LC_ALL=C: empty)
+  top=at-end    cols=163  residue=[Review interview demo and deck prep] verdict=unknown  (LC_ALL=C: unknown)
+  top=embedded  cols=163  residue=[ Review interview demo and deck prep ] verdict=unknown  (LC_ALL=C: unknown)
+
+### with the fix
+  top=asis      cols=163  residue=[] verdict=empty  (LC_ALL=C: empty)
+  top=at-end    cols=163  residue=[Review interview demo and deck prep] verdict=empty  (LC_ALL=C: empty)
+  top=embedded  cols=163  residue=[ Review interview demo and deck prep ] verdict=empty  (LC_ALL=C: empty)
+```
+
+`at-end` places the title flush at the row's end and `embedded` places it mid-rule; both are recognized, so the rule test does not depend on the row happening to close with a dash.
+The already-working clean-rule case (`asis`) is unchanged, and both locales agree, which is what the character-for-character space-string width comparison buys over a `${#row}` length test that counts characters under UTF-8 and bytes under `LC_ALL=C`.
+Only the cursorless capture profiles regressed - Herdr, Zellij, cmux, and Orca - because the narrowed rule lives in the cursorless selector; a tmux capture reaches its verdict through the cursor row and read `empty` throughout.
+
+The strict dashes-only separator predicate that gates Pi identity is unchanged, so recognizing a titled rule did not relax that gate, and the dead-shell and strict blank-row `unknown` rules are unchanged.
+
+`FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh` is the refresh command.
+Its Herdr section scans every live Claude pane rather than only the focused one, asserts any titled rule it finds, and reports explicitly when no pane renders one so absence is never read as a live pass.
+It also reads every idle Claude pane through the shared classifier, deriving the expected verdict from that pane's own composer row rather than from Herdr's agent state, because an idle agent whose operator has typed and not submitted a message is legitimately `pending` and a guard demanding `empty` there would fail on any working fleet.
+
+The same 2026-08-14 run confirmed both directions of that reading against real panes on `claude 2.1.231.653`, which supersedes the older per-harness Claude result above for the Herdr capture path:
+
+```text
+ok - claude (claude 2.1.231.653 (ASBX Claude Code, channel stable)): real idle composer classifies empty
+ok - herdr (herdr 0.8.0) + claude (claude 2.1.231.653 (ASBX Claude Code, channel stable)): idle pane w1:p9 (focused=true) composer row is blank and classifies empty
+ok - herdr (herdr 0.8.0) + claude (claude 2.1.231.653 (ASBX Claude Code, channel stable)): idle pane w12:p2 (focused=false) composer row is blank and classifies empty
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+```
+
+An earlier reading of the same fleet, before that pane's draft was submitted, returned `pending` for a pane carrying `❯ 1/ Why does every agent get it's own space? ...`, which is the drafted direction of the same rule.
+Codex is unverified in this run for the pre-existing reason recorded above: launched from a worktree it opens a first-launch directory-trust dialog, which the guard correctly treats as an unreadable composer and never confirms.
+
 ## Herdr
 
 The compatibility floor is protocol 14.
