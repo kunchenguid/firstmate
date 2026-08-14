@@ -13,7 +13,7 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are two documented exceptions. The absorb classification
+# There are three documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -23,7 +23,9 @@
 # open-decisions fold" below) also writes: it persists a per-status-file byte
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time.
+# log every time. crew_worktree_written_since reads the task's meta file and walks
+# a bounded slice of its worktree instead of a status file, so callers run it only
+# at the moment they would otherwise escalate.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -1131,6 +1133,51 @@ crew_is_provably_working() {  # <id>
 # escalating a possible wedge.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
+}
+
+# Directories excluded from the worktree write probe below, and the depth it walks.
+# The excluded set is everything a supervisor read or a package manager can write
+# without the crew doing any work - .git first, so firstmate's own read-only git
+# commands against the worktree can never make the probe self-fulfilling - plus the
+# large generated trees that would make the walk expensive. Both are overridable so
+# a home with an unusual layout can widen or narrow the probe.
+FM_WORKTREE_WRITE_PRUNE=${FM_WORKTREE_WRITE_PRUNE:-'.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'}
+FM_WORKTREE_WRITE_MAXDEPTH=${FM_WORKTREE_WRITE_MAXDEPTH:-6}
+
+# 0 when some regular file under <id>'s recorded worktree is newer than
+# <anchor-file>: positive evidence the crew is still producing work even though its
+# rendered pane has gone quiet. This is the third liveness input the wedge detector
+# has, after pane quietness and the run step, and it exists because neither of
+# those can see a crew that is writing source, then tests, then documentation
+# behind a static pane - the 2026-08-14 case of eight consecutive possible-wedge
+# escalations against a crew that was demonstrably working the whole time.
+#
+# 1 for every other outcome, including an id with no recorded worktree, a worktree
+# that is gone, a missing anchor, and a walk that fails or finds nothing. Absence of
+# evidence therefore always leaves the caller's existing escalation schedule
+# untouched, so a crew that writes nothing still escalates exactly as before.
+#
+# The anchor is the caller's own idle-window timer file, whose mtime already marks
+# when the quiet window opened, so `-newer` needs no clock arithmetic, no temp
+# file, and no portable mtime-setting. Not a pure status-file read (see the header):
+# one pruned, depth-bounded walk per call, which callers must reach only when they
+# are otherwise about to escalate, never on every poll.
+crew_worktree_written_since() {  # <id> <state> <anchor-file>
+  local id=$1 state=$2 anchor=$3 wt name hit
+  local -a names=() prune=()
+  [ -n "$id" ] || return 1
+  [ -f "$anchor" ] || return 1
+  wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  read -r -a names <<< "$FM_WORKTREE_WRITE_PRUNE"
+  for name in ${names[@]+"${names[@]}"}; do
+    [ "${#prune[@]}" -eq 0 ] || prune+=( -o )
+    prune+=( -name "$name" )
+  done
+  [ "${#prune[@]}" -gt 0 ] || return 1
+  hit=$(find "$wt" -xdev -maxdepth "$FM_WORKTREE_WRITE_MAXDEPTH" \
+    \( "${prune[@]}" \) -prune -o -type f -newer "$anchor" -print -quit 2>/dev/null || true)
+  [ -n "$hit" ]
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
