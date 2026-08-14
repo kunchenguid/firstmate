@@ -96,10 +96,13 @@ nic=next(item for item in resources if item["type"]=="Microsoft.Network/networkI
 work=next(item for item in resources if item["type"]=="Microsoft.Compute/disks")
 identity=next(item for item in resources if item["type"]=="Microsoft.ManagedIdentity/userAssignedIdentities")
 assert "publicipaddress" not in json.dumps(nic).lower()
-assert "customdata" not in text and "authorized_keys" not in text
+assert "customdata" not in text
 assert vm["identity"]["type"]=="UserAssigned"
 assert vm["properties"]["securityProfile"]["securityType"]=="TrustedLaunch"
 assert vm["properties"]["securityProfile"]["encryptionAtHost"] is True
+linux=vm["properties"]["osProfile"]["linuxConfiguration"]
+assert linux["disablePasswordAuthentication"] is True
+assert linux["ssh"]["publicKeys"]==[{"path":"/home/fmbootstrap/.ssh/authorized_keys","keyData":"ssh-ed25519 97Fzq4lT5FLUK4YzmrtyXx21gjpFVkVY/H3ioL7hpqk= firstmate-validation-blackhole"}]
 assert vm["properties"]["storageProfile"]["osDisk"]["deleteOption"]=="Detach"
 data=vm["properties"]["storageProfile"]["dataDisks"]
 assert len(data)==2 and {item["lun"] for item in data}=={0,1}

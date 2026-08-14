@@ -220,7 +220,13 @@
           "adminUsername": "fmbootstrap",
           "linuxConfiguration": {
             "disablePasswordAuthentication": true,
-            "provisionVMAgent": true
+            "provisionVMAgent": true,
+            "ssh": {
+              "publicKeys": [{
+                "path": "/home/fmbootstrap/.ssh/authorized_keys",
+                "keyData": "ssh-ed25519 97Fzq4lT5FLUK4YzmrtyXx21gjpFVkVY/H3ioL7hpqk= firstmate-validation-blackhole"
+              }]
+            }
           }
         },
         "storageProfile": {
