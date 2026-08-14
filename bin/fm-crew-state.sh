@@ -35,15 +35,20 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating.
-#      EXCEPT: a terminal failed run-step is itself superseded when the log's
-#      last line is a LATER declared paused/blocked and `no-mistakes axi sync
+#      EXCEPT: a terminal failed run-step is itself superseded when the status
+#      log's LAST LINE declares paused/blocked and `no-mistakes axi sync
 #      --check` structurally confirms the branch's custody was returned (see
 #      nm_custody_returned) - an obsolete run whose delivery legitimately
 #      rerouted (e.g. a denied push) must not keep short-cadence stale-
-#      escalating a crew now in a legitimate declared wait. This is narrower
-#      than it looks: it never applies to working/parked/done, so an ACTIVE or
-#      CURRENT run always keeps outranking status prose, and any unconfirmed
-#      or errored custody check fails closed to the run-step's failed verdict.
+#      escalating a crew now in a legitimate declared wait. Both halves are
+#      coarse by design: the log read is LAST-LINE-WINS, not a timestamp
+#      comparison against the run's own completion (status lines carry no
+#      timestamp), and the custody check is BRANCH-SCOPED rather than bound to
+#      the attributed run's id - it relies on no-mistakes binding at most one
+#      active pipeline per branch. This is still narrower than it looks: it
+#      never applies to working/parked/done, so an ACTIVE or CURRENT run always
+#      keeps outranking status prose, and any unconfirmed or errored custody
+#      check fails closed to the run-step's failed verdict.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -316,8 +321,12 @@ nm_ci_checks_state() {
 
 # 2026-08-13 fm-key-position incident: a terminal FAILED run-step from an
 # OBSOLETE run (delivery legitimately rerouted, e.g. a push denied upstream)
-# must not keep outranking a LATER declared paused/blocked status event once
-# the crew has followed the supported `no-mistakes axi sync --recover` path.
+# must not keep outranking a paused/blocked status event declared as the log's
+# LAST LINE once the crew has followed the supported `no-mistakes axi sync
+# --recover` path. This check is BRANCH-SCOPED: it answers "is this branch's
+# custody returned?", not "was THIS attributed run's custody returned?" - it is
+# never compared against the run's id, and relies on no-mistakes binding at
+# most one active pipeline per branch.
 # `axi status` never surfaces that recovery on the run itself (verified
 # empirically: a run whose custody was returned still reports plain
 # outcome=failed), so this reads the ONE place the CLI does surface it -
@@ -549,14 +558,17 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  # A TERMINAL failed run-step from an OBSOLETE run must not outrank a LATER
-  # declared paused/blocked status event once the branch's custody is
-  # structurally confirmed returned (nm_custody_returned, above): the crew
-  # followed the supported recovery path and moved on, so the retired run's
-  # own verdict no longer reflects the branch's current state. This never
-  # touches working/parked/done: an ACTIVE or CURRENT run always keeps
-  # outranking status prose, and an unconfirmed or errored custody check
-  # fails closed to the run-step verdict below.
+  # A TERMINAL failed run-step from an OBSOLETE run must not outrank a
+  # paused/blocked status event standing as the log's LAST LINE once the
+  # branch's custody is structurally confirmed returned (nm_custody_returned,
+  # above): the crew followed the supported recovery path and moved on, so the
+  # retired run's own verdict no longer reflects the branch's current state.
+  # Last-line-wins, not a timestamp comparison against the run's completion
+  # (status lines carry no timestamp), and the custody answer is branch-scoped,
+  # not bound to the attributed run's id. This never touches
+  # working/parked/done: an ACTIVE or CURRENT run always keeps outranking
+  # status prose, and an unconfirmed or errored custody check fails closed to
+  # the run-step verdict below.
   if [ "$RUN_STATE" = failed ] \
     && { status_is_paused "$LOG_LINE" || [ "$LOG_VERB" = blocked ]; } \
     && nm_custody_returned "$(nm_run axi sync --check)"; then

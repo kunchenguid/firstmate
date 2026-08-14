@@ -55,7 +55,9 @@ make_repo_on_branch() {  # <dir> <branch>
 # `axi` surface - no runs-listing subcommand exists under it, verified against
 # the real CLI), and the actual top-level run-listing command, `no-mistakes
 # runs --limit N`, which is plain text - no run id, no quoting - serving
-# FM_FAKE_RUNS_LIST verbatim.
+# FM_FAKE_RUNS_LIST verbatim. `axi sync` answers only the read-only `--check`
+# form and refuses every other invocation (notably the mutating `--recover`),
+# so the helper's read-only contract is enforced rather than assumed.
 make_fakebin() {  # <dir> -> echoes fakebin path
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -73,6 +75,8 @@ case "${1:-}" in
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
       sync)
+        shift
+        [ "$#" = 1 ] && [ "${1:-}" = --check ] || exit 90
         printf '%s\n' "${FM_FAKE_AXI_SYNC:-}" ;;
     esac
     ;;
