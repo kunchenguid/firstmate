@@ -129,16 +129,16 @@ fi
 # Strict-superset prefilter (transport only; owns zero classification semantics).
 # Every protected watcher execution and every broad watcher kill resolves to the
 # fm-watch byte sequence AFTER the classifier's byte normalization, so a command
-# that cannot contain fm-watch even after that normalization can never be a
-# deniable watcher command and is fast-allowed without the Node policy owner.
+# that cannot contain fm-watch or x-mode.env even after that normalization can
+# never be a deniable candidate and is fast-allowed without the Node policy owner.
 # We mirror the classifier's cheapest byte transforms here (drop line-
 # continuation and escape backslashes, quotes, and newlines) so obfuscated
 # protected paths such as fm-watc\<newline>h-arm.sh or fm-"watch"-arm.sh still
 # delegate. Stripping only these non-alphanumeric bytes can never destroy an
 # existing fm-watch run.
 #
-# The fast path may allow ONLY when BOTH hold: (a) the stripped/normalized text
-# lacks the fm-watch watcher substring, AND (b) the raw command carries no
+# The fast path may allow ONLY when ALL hold: (a) the stripped/normalized text
+# lacks the fm-watch and x-mode.env substrings, AND (b) the raw command carries no
 # quoting-decoder marker - a $ immediately followed by a single quote (ANSI-C
 # $'...') or a double quote (bash locale $"..."), both of which the classifier
 # decodes and can therefore reconstruct fm-watch from bytes this cheap byte
@@ -159,7 +159,7 @@ case "$CMD" in
   *"\$'"*|*'$"'*) ;;
   *)
     case "$PREFILTER" in
-      *fm-watch*) ;;
+      *fm-watch*|*x-mode.env*) ;;
       *) exit 0 ;;
     esac
     ;;

@@ -143,6 +143,8 @@ matrix_case E17 allow 'for f in 1; do echo fm-watch; done'
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
+SECURE_STATE="$MATRIX_TMP/secure-state"
+mkdir -p "$SECURE_STATE"
 trap fm_test_cleanup EXIT
 
 run_matrix_entry() {
@@ -153,21 +155,21 @@ run_matrix_entry() {
   case "$entry" in
     codex)
       payload=$(jq -cn --arg command "$cmd" '{tool_name:"Bash",tool_input:{command:$command}}')
-      printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
+      printf '%s' "$payload" | FM_STATE_OVERRIDE="$SECURE_STATE" "$CHECK" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     claude)
       payload=$(jq -cn --arg command "$cmd" '{tool_name:"Bash",tool_input:{command:$command}}')
-      printf '%s' "$payload" | "$CHECK" --claude >"$out_file" 2>"$err_file"
+      printf '%s' "$payload" | FM_STATE_OVERRIDE="$SECURE_STATE" "$CHECK" --claude >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     grok)
       payload=$(jq -cn --arg command "$cmd" '{toolName:"run_terminal_command",toolInput:{command:$command}}')
-      printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
+      printf '%s' "$payload" | FM_STATE_OVERRIDE="$SECURE_STATE" "$CHECK" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     opencode|pi)
-      "$CHECK" --command "$cmd" >"$out_file" 2>"$err_file"
+      FM_STATE_OVERRIDE="$SECURE_STATE" "$CHECK" --command "$cmd" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     *)
@@ -204,8 +206,8 @@ test_full_acceptance_matrix() {
 }
 
 assert_policy() {
-  local id=$1 expected=$2 command=$3 output
-  output=$(node "$POLICY" --root "$ROOT" --home "$ROOT" --command "$command") \
+  local id=$1 expected=$2 command=$3 state_mode=${4:-unknown} output
+  output=$(node "$POLICY" --root "$ROOT" --home "$ROOT" --state-mode "$state_mode" --command "$command") \
     || fail "$id direct policy invocation failed"
   case "$output" in
     "$expected"|"$expected"$'\t'*) : ;;
@@ -233,6 +235,10 @@ test_direct_policy_contract() {
   assert_policy direct-watch-not-blessed $'deny\twatcher-direct' 'bin/fm-watch.sh'
   assert_policy direct-watch-expanded $'deny\twatcher-direct' '$FM_HOME/bin/fm-watch.sh'
   assert_policy direct-watch-safe-shape $'deny\twatcher-direct' 'cd /tmp; bin/fm-watch.sh'
+  assert_policy direct-unknown-x-source $'deny\tx-mode-unavailable' 'source config/x-mode.env'
+  assert_policy direct-data-only-x-source $'deny\tx-mode-unavailable' 'source config/x-mode.env' data-only
+  assert_policy direct-unknown-x-bundle $'deny\twatcher-bundled' 'source config/x-mode.env; exec bin/fm-watch-arm.sh'
+  assert_policy direct-secure-x-source allow 'source config/x-mode.env' secure
   heredoc_data=$'cat <<\'EOF\'\nbin/fm-watch-arm.sh &\nEOF'
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"
@@ -266,7 +272,24 @@ SH
   rc=$?
   [ "$rc" -eq 2 ] || fail "data-only pretool transport must deny X-mode setup, got exit $rc"
   assert_contains "$out" "[watcher-bundled]" "data-only pretool deny did not preserve the policy reason"
+  out=$(FM_TEST_REAL_STAT="$real_stat" FM_HOME="$home" PATH="$fakebin:$PATH" \
+    "$CHECK" --command "source 'config/x-mode.env'" 2>&1)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "data-only pretool must deny a source-only X-mode command, got exit $rc"
+  assert_contains "$out" "[x-mode-unavailable]" "data-only pretool source-only deny did not carry the X-mode reason"
   pass "data-only capability gates X-mode sourcing before watcher execution"
+}
+
+test_unknown_x_mode_source_is_not_fast_allowed() {
+  local home out rc
+  home="$MATRIX_TMP/unknown-home"
+  mkdir -p "$home/config"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/missing-state" \
+    "$CHECK" --command "source 'config/x-mode.env'" 2>&1)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "unknown state must deny a source-only X-mode command, got exit $rc"
+  assert_contains "$out" "[x-mode-unavailable]" "unknown-state source deny did not carry the X-mode reason"
+  pass "unknown state gates X-mode sourcing before the pretool fast path"
 }
 
 # --- CLI parsing -------------------------------------------------------------
@@ -487,6 +510,7 @@ test_shellcheck_clean() {
 test_full_acceptance_matrix
 test_direct_policy_contract
 test_data_only_x_mode_setup_is_not_blessed
+test_unknown_x_mode_source_is_not_fast_allowed
 test_command_equals_form
 test_background_flag_accepted_and_non_gating
 test_unknown_flag_errors
