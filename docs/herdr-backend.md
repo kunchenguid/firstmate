@@ -318,7 +318,8 @@ It cannot start, restart, cancel, answer, approve, fix, or otherwise drive the p
 The helper writes an atomic private sidecar binding task id, run id, session, task pane, observer pane, and worktree.
 A sidecar is reusable only while its complete live binding agrees.
 A missing, unreadable, stale, or conflicting sidecar refuses both duplicate creation and pane closure.
-When the run is terminal, the task pane has disappeared, or normal task cleanup begins, the helper closes only its exact verified observer pane after confirming it differs from the task pane and is not the captain's active pane.
+When the run is terminal or normal task cleanup begins, the helper closes only its exact verified observer pane after confirming it differs from the task pane and is not the captain's active pane.
+If task metadata is already absent, it additionally requires the recorded task pane to be positively gone; a missing or unreadable task pane with metadata still present preserves the sidecar.
 It retires the sidecar only after structured pane absence confirms that close.
 The observer never contributes endpoint authority, recovery, delivery, or presentation-journal behavior.
 It is disabled by default, local to one home, and unsupported on non-Herdr backends.
@@ -346,6 +347,7 @@ tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
+tests/fm-herdr-no-mistakes-observer.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
