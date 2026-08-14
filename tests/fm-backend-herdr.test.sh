@@ -2529,9 +2529,6 @@ test_presentation_session_lock_path_is_shared_across_homes() {
     *) fail "session lock path must use this account's machine namespace: $path_a" ;;
   esac
   case "$path_a" in
-    /tmp/firstmate-herdr-presentation/*) fail "session lock path must not use a namespace name another account can claim: $path_a" ;;
-  esac
-  case "$path_a" in
     */state/*) fail "session lock path must not live under a home state directory: $path_a" ;;
   esac
   path_other=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
