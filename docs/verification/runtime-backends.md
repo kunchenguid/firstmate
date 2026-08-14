@@ -243,6 +243,8 @@ The strict dashes-only separator predicate that gates Pi identity is unchanged, 
 `FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh` is the refresh command.
 Its Herdr section scans every live Claude pane rather than only the focused one, asserts any titled rule it finds, and reports explicitly when no pane renders one so absence is never read as a live pass.
 It also reads every idle Claude pane through the shared classifier, deriving the expected verdict from that pane's own composer row rather than from Herdr's agent state, because an idle agent whose operator has typed and not submitted a message is legitimately `pending` and a guard demanding `empty` there would fail on any working fleet.
+That derivation reads the plain capture while the classifier reads the styled one and strips Claude's dim rotating suggestion, so the exact `empty` is asserted only where the plain composer row is blank, and a row carrying text accepts either direction of the read; `unknown` and an unreadable verdict fail in both cases, which is the behaviour the guard exists to catch.
+A pane with no readable capture or no composer row at all - parked on a `/model` picker or a compaction prompt the classifier rightly refuses, or scrolled into its own scrollback - is skipped with a note and counts toward nothing, so an absent composer is reported as absent rather than converted into a false regression report.
 
 The same 2026-08-14 run confirmed both directions of that reading against real panes on `claude 2.1.231.653`, which supersedes the older per-harness Claude result above for the Herdr capture path:
 

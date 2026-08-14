@@ -21,8 +21,10 @@
 #     vendor draws that overlay changes between Claude releases, so the guard
 #     asserts it when present and says so explicitly when it is absent. It also
 #     reads every idle claude pane through the shared classifier, expecting the
-#     verdict that pane's own composer row calls for - `empty` when blank,
-#     `pending` when the operator left an unsubmitted draft in it.
+#     verdict that pane's own composer row calls for - `empty` when that row is
+#     blank, and either `empty` or a pending read when it carries text, which
+#     may be an unsubmitted draft or the vendor's own dim suggestion. A pane
+#     showing no composer row at all is skipped and said so, never asserted.
 #
 # Run explicitly with FM_COMPOSER_MATRIX_LIVE=1. No prompt is ever submitted
 # to any harness, so no model tokens are spent. An absent harness is reported
@@ -238,7 +240,11 @@ fi
 # which builds the shape itself and therefore holds on every Claude release.
 #
 # Read-only throughout: pane list and pane capture on the explicitly named
-# `default` session, no lifecycle call of any kind, and nothing submitted.
+# `default` session, and nothing submitted. This section makes no lifecycle call
+# itself, though pane capture reaches fm_backend_herdr_server_ensure, which
+# backgrounds a server start when the session's server is not running; that is
+# unreachable here in practice because capture only runs after `pane list`
+# already returned output, which only a live server produces.
 if command -v herdr >/dev/null 2>&1 && command -v claude >/dev/null 2>&1; then
   hd_version=$(herdr --version 2>/dev/null | head -1)
   [ -n "$hd_version" ] || hd_version='version-unknown'
@@ -307,40 +313,72 @@ EOF
       #
       # The expectation is read from the raw glyph row rather than through
       # fm_composer_extract_selected_content, which would route it back through
-      # the selector under test and make the assertion circular.
+      # the selector under test and make the assertion circular. That row comes
+      # from the PLAIN capture, while the classifier reads the STYLED one and
+      # strips claude's dim rotating suggestion, so the two see different bytes
+      # whenever the row carries text: `❯ Try "..."` is a draft to this loop and
+      # correctly nothing to the classifier. So the exact `empty` is asserted
+      # only where the plain row is blank and the derivation is unambiguous, and
+      # a row carrying text accepts either direction of the read. What is never
+      # accepted, in both cases, is `unknown` or an unreadable verdict on a
+      # composer this loop can see - the defect that deferred every away-mode
+      # escalation, and the whole reason this guard exists.
+      #
+      # A pane with no readable capture or no composer glyph row at all is
+      # SKIPPED, not asserted: herdr reports `idle` for a pane parked on a
+      # `/model` picker or a compaction prompt the classifier rightly refuses,
+      # and for a pane scrolled into its own scrollback. Skipped panes count
+      # toward nothing, so the "no idle claude pane to read" note below still
+      # fires rather than the guard passing vacuously.
       while IFS=$'\t' read -r hd_pane hd_focused; do
         [ -n "$hd_pane" ] || continue
         hd_cap=$(fm_backend_herdr_capture "default:$hd_pane" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null || true)
+        if [ -z "$hd_cap" ]; then
+          note "herdr ($hd_version): idle pane $hd_pane returned no capture; skipped, not asserted"
+          continue
+        fi
+        hd_glyph_row=-1
+        hd_row=0
         hd_draft=''
         while IFS= read -r hd_line; do
           hd_trim=$hd_line
           fm_composer_normalize_trim_var hd_trim
           if fm_composer_leading_agent_glyph_var hd_g "$hd_trim"; then
+            hd_glyph_row=$hd_row
             hd_draft=${hd_trim#*"$hd_g"}
             fm_composer_normalize_trim_var hd_draft
           fi
+          hd_row=$((hd_row + 1))
         done <<EOF2
 $hd_cap
 EOF2
+        if [ "$hd_glyph_row" -lt 0 ]; then
+          note "herdr ($hd_version): idle pane $hd_pane renders no composer row (modal or scrollback); skipped, not asserted"
+          continue
+        fi
         if [ -n "$hd_draft" ]; then
-          hd_want=pending
-          hd_why="carries an unsubmitted draft"
+          hd_accept='empty pending pending-unproven'
+          hd_why="composer row carries text that is either a draft or the vendor's dim suggestion"
         else
-          hd_want=empty
+          hd_accept='empty'
           hd_why="composer row is blank"
         fi
         hd_verdict=$(fm_backend_herdr_composer_state "default:$hd_pane" 2>/dev/null || true)
-        if [ "$hd_verdict" = "$hd_want" ]; then
+        hd_ok=0
+        case " $hd_accept " in
+          *" ${hd_verdict:-unreadable} "*) hd_ok=1 ;;
+        esac
+        if [ "$hd_ok" -eq 1 ]; then
           hd_checked=$((hd_checked + 1))
           CHECKED=$((CHECKED + 1))
-          pass "herdr ($hd_version) + claude ($cl_version): idle pane $hd_pane (focused=$hd_focused) $hd_why and classifies $hd_want"
+          pass "herdr ($hd_version) + claude ($cl_version): idle pane $hd_pane (focused=$hd_focused) $hd_why and classifies $hd_verdict"
         else
           FAILED=1
           printf '# herdr pane %s tail at failure:\n' "$hd_pane" >&2
           fm_backend_herdr_capture "default:$hd_pane" 6 2>/dev/null \
             | grep '[^[:space:]]' | tail -6 | sed 's/^/#   /' >&2
-          printf 'not ok - herdr (%s) + claude (%s): idle pane %s (focused=%s) %s but classified %s, expected %s\n' \
-            "$hd_version" "$cl_version" "$hd_pane" "$hd_focused" "$hd_why" "${hd_verdict:-unreadable}" "$hd_want" >&2
+          printf 'not ok - herdr (%s) + claude (%s): idle pane %s (focused=%s) %s but classified %s, expected one of: %s\n' \
+            "$hd_version" "$cl_version" "$hd_pane" "$hd_focused" "$hd_why" "${hd_verdict:-unreadable}" "$hd_accept" >&2
         fi
       done <<EOF
 $(printf '%s' "$hd_panes" | jq -r '

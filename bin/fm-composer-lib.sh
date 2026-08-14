@@ -596,11 +596,15 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
 # dashes-only. This one serves a single narrow consumer,
 # _fm_composer_bare_rule_sandwich.
 #
-# No title POSITION is assumed, because that is the vendor's choice and it has
-# already moved once: the title may sit mid-rule or run flush to the row's end,
-# and both must read as a rule. What is assumed is structural and survives a
-# vendor restyle - an overlaid title overwrites dashes rather than displacing
-# them, so the titled rule keeps its partner's width.
+# The row must still OPEN with the same 8-column dash run the strict separator
+# requires, so a title flush at the row's START is not recognized: that row
+# reads `unknown`, the safe direction and the same answer as before this
+# predicate existed. Past that opening run the title's position is not assumed,
+# because that is the vendor's choice and it has already moved once: the title
+# may sit mid-rule or run flush to the row's END, and both must read as a rule.
+# What is assumed is structural and survives a vendor restyle - an overlaid
+# title overwrites dashes rather than displacing them, so the titled rule keeps
+# its partner's width.
 #
 # Width is proven the way _fm_composer_titled_bottom_ok proves it, by comparing
 # canonical space strings rather than counting characters. `${#row}` counts
