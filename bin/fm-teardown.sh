@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Tear down a finished task: return the treehouse worktree, release the Orca
-# worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# Tear down a finished task: return the Treehouse worktree, remove a
+# project-command worktree through native Git, release the Orca worktree, or
+# retire a secondmate home; kill the recorded runtime endpoint,
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
@@ -37,6 +38,13 @@
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
+# A successful custom acquisition records worktree_provider=project-command.
+# After the same dirty, landed-work, lock, process-reap, branch-retirement, and
+# endpoint-identity checks as a Treehouse task, teardown verifies the recorded
+# path is still registered to the recorded primary project and removes it only
+# through `git -C <project> worktree remove --force <path>`.
+# An absent field keeps the existing Treehouse return path; an unknown value or
+# a project-command marker on Orca/secondmate metadata is refused before cleanup.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -435,6 +443,22 @@ BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
+WORKTREE_PROVIDER=$(fm_meta_get "$META" worktree_provider)
+KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
+[ -n "$KIND" ] || KIND=ship
+case "$WORKTREE_PROVIDER" in
+  '') ;;
+  project-command)
+    if [ "$BACKEND" = orca ] || [ "$KIND" = secondmate ]; then
+      echo "error: worktree_provider=project-command is invalid for backend=$BACKEND kind=$KIND; refusing cleanup" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "error: unsupported worktree provider '$WORKTREE_PROVIDER' in $META; refusing cleanup without a known removal contract" >&2
+    exit 1
+    ;;
+esac
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
@@ -452,8 +476,6 @@ fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
 
-KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
-[ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
@@ -1054,6 +1076,24 @@ cleanup_stale_lock_for_safety_check() {
 
   echo "teardown: worktree safety check blocked by git lock $lock that is not provably stale (may belong to a live process); leaving it in place" >&2
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
+}
+
+# Remove a worktree acquired by a trusted project command without guessing a
+# filesystem target. The full landed/dirty/process safety sequence runs before
+# this function; this final boundary additionally proves Git still registers the
+# exact recorded worktree under the exact recorded primary project.
+teardown_project_worktree_remove() {  # <worktree> <project>
+  local dir=$1 project=$2 out
+  if ! worktree_registered_for_project "$project" "$dir"; then
+    echo "error: project-command worktree '$dir' is not registered to recorded project '$project'; refusing native Git removal" >&2
+    return 1
+  fi
+  if out=$(git -C "$project" worktree remove --force "$dir" 2>&1); then
+    [ -n "$out" ] && printf '%s\n' "$out"
+    return 0
+  fi
+  [ -n "$out" ] && printf '%s\n' "$out" >&2
+  return 1
 }
 
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
@@ -2444,10 +2484,17 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
+  if [ "$WORKTREE_PROVIDER" = project-command ]; then
+    teardown_project_worktree_remove "$WT" "$PROJ" || {
+      echo "error: native Git removal failed for project-command worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+  else
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+  fi
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"

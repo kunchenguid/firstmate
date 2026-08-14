@@ -121,6 +121,28 @@ test_stale_pool_base_refreshes_before_branching() {
   pass "a stale pooled worktree refreshes to current origin/main before a crew branch is created"
 }
 
+test_attached_task_branch_refreshes_without_losing_identity() {
+  local rec id out status current branch_before branch_after
+  id='pool-attached-branch-r2'
+  rec=$(make_case attached-branch "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" switch --quiet -c "$id"
+  branch_before=$(git -C "$POOL_DIR" symbolic-ref --quiet --short HEAD) \
+    || fail "fixture did not attach its task branch"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should refresh an attached task branch"$'\n'"$out"
+  current=$(git -C "$POOL_DIR" rev-parse origin/main)
+  branch_after=$(git -C "$POOL_DIR" symbolic-ref --quiet --short HEAD) \
+    || fail "spawn detached the attached task branch"
+  [ "$branch_after" = "$branch_before" ] \
+    || fail "spawn changed attached branch '$branch_before' to '$branch_after'"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+    || fail "spawn preserved the branch name but did not reset its content to current origin/main"
+  pass "base refresh resets content to the remote default tip while leaving the task branch attached"
+}
+
 test_non_main_default_branch_refreshes_before_branching() {
   local rec id out status current branch_head
   id='pool-current-trunk-r2'
@@ -228,6 +250,7 @@ test_unresolved_remote_default_refuses_pool() {
 }
 
 test_stale_pool_base_refreshes_before_branching
+test_attached_task_branch_refreshes_without_losing_identity
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work

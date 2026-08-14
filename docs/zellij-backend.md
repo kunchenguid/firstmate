@@ -1,7 +1,8 @@
 # Zellij runtime backend
 
 Zellij is an experimental explicit-only session backend.
-It provides the terminal session while Treehouse continues to provide task worktrees.
+It provides the terminal session while Treehouse provides task worktrees by default.
+A trusted project-local acquisition command may prepare the worktree instead; [`configuration.md`](configuration.md#project-worktree-acquisition) owns that shared override.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared selection and metadata semantics.
 
 ## Setup
@@ -66,8 +67,8 @@ A pane can still disappear between verification and the operation; downstream su
 
 Every pane operation passes an explicit `--pane-id` because a new session can focus its release-notes plugin pane, whose numeric plugin id is in a separate namespace from terminal pane ids.
 
-`pane_cwd` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
-Worktree discovery therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
+`pane_cwd` follows a top-level shell `cd` but not a foreground acquisition subshell such as the one opened by `treehouse get`.
+Worktree discovery therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines for either acquisition provider.
 This active probe is scoped to spawn-time worktree discovery and is not advertised as a general live-cwd API.
 
 `new-tab` has no no-focus flag and temporarily focuses the created tab in attached clients.

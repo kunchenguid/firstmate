@@ -12,6 +12,11 @@
 # transient-then-settled pane_current_path sequence with a fake tmux and
 # asserts the recorded worktree resolves to the real, settled worktree, never
 # the stale first read.
+#
+# The same executable interface also covers the optional per-project acquisition
+# command: safe <slug> substitution, a creator-plus-cd command that actually
+# enters the prepared worktree, two-read settling after command completion, and
+# an immediate preserving refusal when a retry finds the target already present.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -141,7 +146,219 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+make_project_command_fakebin() {  # <dir>
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*)
+    n=0
+    [ ! -f "$FM_FAKE_PANE_COUNTFILE" ] || n=$(cat "$FM_FAKE_PANE_COUNTFILE")
+    printf '%s\n' "$((n + 1))" > "$FM_FAKE_PANE_COUNTFILE"
+    cat "$FM_FAKE_PANE_PATH_FILE"
+    exit 0
+    ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  new-window) printf '@project-command-wid\n'; exit 0 ;;
+  list-windows|has-session|new-session|kill-window|set-window-option) exit 0 ;;
+  send-keys)
+    printf 'tmux %s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) shift ;;
+        *) break ;;
+      esac
+    done
+    payload=${1:-}
+    case "$payload" in
+      *__fm_worktree_acquire*)
+        (
+          cd "$FM_FAKE_PROJECT" || exit 1
+          eval "$payload"
+          pwd -P > "$FM_FAKE_PANE_PATH_FILE"
+        )
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected treehouse %s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+exit 99
+SH
+  chmod +x "$fakebin/tmux" "$fakebin/treehouse"
+  printf '%s\n' "$fakebin"
+}
+
+make_project_command_case() {  # <name> <id>
+  local name=$1 id=$2 case_dir home project prepared fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  prepared="$case_dir/prepared"
+  fakebin=$(make_project_command_fakebin "$case_dir/fake")
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" \
+    "$home/config/worktree-acquire" "$prepared"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+  fm_git_init_commit "$project"
+  fm_git_add_origin "$project" "$case_dir/origin.git"
+  cat > "$project/prepare-worktree.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+slug=${1:?slug required}
+printf '%s\n' "$slug" >> "$FM_FAKE_PREPARE_LOG"
+target="../prepared/$slug"
+if [ -e "$target" ]; then
+  echo "error: $target already exists" >&2
+  exit 42
+fi
+git worktree add --quiet -b "$slug" "$target" HEAD
+SH
+  chmod +x "$project/prepare-worktree.sh"
+  printf '%s\n' './prepare-worktree.sh <slug> && cd ../prepared/<slug>' \
+    > "$home/config/worktree-acquire/project"
+  printf '%s\n' "$project" > "$case_dir/pane-path"
+  : > "$case_dir/tmux.log"
+  : > "$case_dir/treehouse.log"
+  : > "$case_dir/prepare.log"
+  printf '%s\n' "$case_dir|$home|$project|$prepared|$fakebin"
+}
+
+read_project_command_record() {
+  IFS='|' read -r CUSTOM_CASE CUSTOM_HOME CUSTOM_PROJECT CUSTOM_PREPARED CUSTOM_FAKEBIN <<EOF
+$1
+EOF
+}
+
+run_project_command_spawn() {  # <id>
+  local id=$1
+  FM_ROOT_OVERRIDE='' FM_HOME="$CUSTOM_HOME" \
+    FM_STATE_OVERRIDE="$CUSTOM_HOME/state" FM_DATA_OVERRIDE="$CUSTOM_HOME/data" \
+    FM_PROJECTS_OVERRIDE="$CUSTOM_HOME/projects" FM_CONFIG_OVERRIDE="$CUSTOM_HOME/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_PROJECT="$CUSTOM_PROJECT" \
+    FM_FAKE_PANE_PATH_FILE="$CUSTOM_CASE/pane-path" \
+    FM_FAKE_PANE_COUNTFILE="$CUSTOM_CASE/pane-count" \
+    FM_FAKE_TMUX_LOG="$CUSTOM_CASE/tmux.log" \
+    FM_FAKE_TREEHOUSE_LOG="$CUSTOM_CASE/treehouse.log" \
+    FM_FAKE_PREPARE_LOG="$CUSTOM_CASE/prepare.log" \
+    PATH="$CUSTOM_FAKEBIN:$PATH" \
+    "$SPAWN" "$id" "$CUSTOM_PROJECT" --mode no-mistakes --yolo off 2>&1
+}
+
+test_project_command_creates_and_enters_attached_worktree() {
+  local rec id out status wt branch reads
+  id='prepared-worktree-z3'
+  rec=$(make_project_command_case project-command-success "$id")
+  read_project_command_record "$rec"
+
+  out=$(run_project_command_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "configured project acquisition should spawn successfully"$'\n'"$out"
+  wt="$CUSTOM_PREPARED/$id"
+  assert_grep "worktree=$wt" "$CUSTOM_HOME/state/$id.meta" \
+    "spawn did not record the project-prepared worktree"
+  assert_grep 'worktree_provider=project-command' "$CUSTOM_HOME/state/$id.meta" \
+    "spawn did not record the custom cleanup provider"
+  [ "$(cat "$CUSTOM_CASE/prepare.log")" = "$id" ] \
+    || fail "the safely substituted slug did not reach the project command exactly"
+  assert_no_grep '<slug>' "$CUSTOM_CASE/tmux.log" \
+    "the literal task placeholder reached the shell without substitution"
+  assert_grep "./prepare-worktree.sh '$id' && cd ../prepared/'$id'" \
+    "$CUSTOM_CASE/tmux.log" \
+    "the validated task slug was not shell-quoted at every placeholder"
+  [ ! -s "$CUSTOM_CASE/treehouse.log" ] \
+    || fail "configured project acquisition unexpectedly invoked Treehouse"
+  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD) \
+    || fail "project-prepared worktree was detached"
+  [ "$branch" = "$id" ] \
+    || fail "base refresh changed attached task branch '$id' to '$branch'"
+  reads=$(cat "$CUSTOM_CASE/pane-count")
+  [ "$reads" -ge 2 ] \
+    || fail "configured acquisition was accepted without two working-directory reads"
+  pass "a project command safely substitutes the task slug, enters its prepared worktree, and preserves the attached branch"
+}
+
+test_existing_project_target_refuses_quickly_and_preserves_work() {
+  local rec id out status start end elapsed target
+  id='prepared-existing-z4'
+  rec=$(make_project_command_case project-command-existing "$id")
+  read_project_command_record "$rec"
+  target="$CUSTOM_PREPARED/$id"
+  git -C "$CUSTOM_PROJECT" worktree add --quiet -b "$id" "$target" HEAD
+  printf 'unlanded work must survive\n' > "$target/preserve-me.txt"
+
+  start=$(date +%s)
+  out=$(run_project_command_spawn "$id")
+  status=$?
+  end=$(date +%s)
+  elapsed=$((end - start))
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite the configured target already existing"
+  assert_contains "$out" "exited with status 42" \
+    "spawn did not surface the project command's actionable exit status"
+  assert_contains "$out" "target is preserved" \
+    "spawn did not state that the existing target was preserved"
+  [ "$elapsed" -le 5 ] \
+    || fail "an already-existing target waited ${elapsed}s instead of refusing promptly"
+  assert_grep 'unlanded work must survive' "$target/preserve-me.txt" \
+    "failed acquisition deleted or changed the existing target"
+  assert_absent "$CUSTOM_HOME/state/$id.meta" \
+    "failed acquisition published task metadata"
+  [ ! -s "$CUSTOM_CASE/treehouse.log" ] \
+    || fail "failed configured acquisition fell back to Treehouse"
+  pass "an existing project target refuses promptly and preserves its unlanded work"
+}
+
+test_project_command_config_requires_one_placeholder_line() {
+  local rec id out status config
+
+  id='prepared-invalid-placeholder-z5'
+  rec=$(make_project_command_case project-command-invalid-placeholder "$id")
+  read_project_command_record "$rec"
+  config="$CUSTOM_HOME/config/worktree-acquire/project"
+  printf '%s\n' './prepare-worktree.sh task-without-placeholder' > "$config"
+  out=$(run_project_command_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a project command without <slug>"
+  assert_contains "$out" 'must contain the literal <slug> placeholder' \
+    "missing-placeholder config did not produce its schema error"
+  assert_absent "$CUSTOM_HOME/state/$id.meta" \
+    "missing-placeholder config published task metadata"
+  [ ! -s "$CUSTOM_CASE/tmux.log" ] \
+    || fail "missing-placeholder config reached the task shell"
+
+  id='prepared-invalid-lines-z6'
+  rec=$(make_project_command_case project-command-invalid-lines "$id")
+  read_project_command_record "$rec"
+  config="$CUSTOM_HOME/config/worktree-acquire/project"
+  printf '%s\n' './prepare-worktree.sh <slug>' 'cd ../prepared/<slug>' > "$config"
+  out=$(run_project_command_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a multi-line project acquisition config"
+  assert_contains "$out" 'must contain exactly one non-empty command line' \
+    "multi-line config did not produce its schema error"
+  assert_absent "$CUSTOM_HOME/state/$id.meta" \
+    "multi-line config published task metadata"
+  [ ! -s "$CUSTOM_CASE/tmux.log" ] \
+    || fail "multi-line config reached the task shell"
+  pass "project acquisition config requires exactly one command line containing <slug>"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_project_command_creates_and_enters_attached_worktree
+test_existing_project_target_refuses_quickly_and_preserves_work
+test_project_command_config_requires_one_placeholder_line
 
 echo "# all fm-spawn-worktree-settle tests passed"

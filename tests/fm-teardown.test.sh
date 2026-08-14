@@ -579,6 +579,38 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
 }
 
+test_project_command_worktree_uses_guarded_native_git_cleanup() {
+  local case_dir rc
+  case_dir=$(make_case project-command-cleanup)
+  write_meta "$case_dir" local-only ship
+  printf 'worktree_provider=project-command\n' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected treehouse return\n' >> "$FM_FAKE_TREEHOUSE_LOG"
+exit 99
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  : > "$case_dir/treehouse.log"
+
+  set +e
+  FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "project-command cleanup should succeed through native Git"
+  assert_absent "$case_dir/wt" \
+    "project-command teardown left the registered worktree directory behind"
+  git -C "$case_dir/project" worktree list --porcelain \
+    | grep -F "worktree $case_dir/wt" >/dev/null \
+    && fail "project-command teardown left the worktree registered"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "project-command teardown incorrectly called Treehouse"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "project-command teardown left task metadata after successful cleanup"
+  pass "project-command worktrees keep the standard safety checks and use guarded native Git cleanup"
+}
+
 test_teardown_prompts_tasks_axi_done_when_compatible() {
   local case_dir out
   case_dir=$(make_case tasks-axi-reminder)
@@ -2592,6 +2624,7 @@ EOF
 }
 
 test_local_only_fork_remote_allows
+test_project_command_worktree_uses_guarded_native_git_cleanup
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
