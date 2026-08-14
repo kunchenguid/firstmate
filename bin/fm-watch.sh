@@ -1070,13 +1070,47 @@ EOF
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
+              rm -f "$STATE/.terminal-mtime-$key" "$STATE/.terminal-resurfaced-$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
-              fm_wake_append stale "$w" "stale: $w" || exit 1
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
-              wake "stale: $w"
+              # Anchor re-surface on status file mtime (not pane hash) so
+              # cosmetic pane changes (spinners, tips, context counters)
+              # cannot produce repeated wakes for an unchanged terminal
+              # state - the same approach handle_paused_stale uses. A new
+              # terminal state (changed mtime or first sighting) surfaces
+              # immediately; an unchanged one re-surfaces only on the long
+              # PAUSE_RESURFACE_SECS cadence as a safety net.
+              task=$(window_to_task "$w" "$STATE")
+              statusf="$STATE/$task.status"
+              cur_mtime=$(stat_mtime "$statusf")
+              case "$cur_mtime" in ''|*[!0-9]*) cur_mtime=$(date +%s) ;; esac
+              tmf="$STATE/.terminal-mtime-$key"
+              trf="$STATE/.terminal-resurfaced-$key"
+              prev_mtime=$(cat "$tmf" 2>/dev/null || true)
+              if [ "$cur_mtime" != "$prev_mtime" ]; then
+                # Status file changed or first sighting - genuinely new
+                # terminal state; surface immediately.
+                fm_wake_append stale "$w" "stale: $w" || exit 1
+                printf '%s' "$h" > "$sf"
+                rm -f "$ssf"
+                printf '%s' "$cur_mtime" > "$tmf"
+                date +%s > "$trf"
+                mark_surfaced "$statusf"
+                wake "stale: $w"
+              else
+                # Same terminal state, churning pane hash. Advance the
+                # stale suppressor and re-surface on the long cadence only.
+                printf '%s' "$h" > "$sf"
+                trf_age=$(age_of "$trf")
+                if [ "$trf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
+                  fm_wake_append stale "$w" "stale: $w" || exit 1
+                  date +%s > "$trf"
+                  mark_surfaced "$statusf"
+                  wake "stale: $w"
+                else
+                  triage_log "absorbed stale (unchanged terminal status, resurfaced ${trf_age}s ago): $w"
+                fi
+              fi
             fi
           elif [ -e "$ssf" ]; then
             # This exact hash was already overridden as provably-working (a
@@ -1084,10 +1118,24 @@ EOF
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
             wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
+          else
+            # Same hash, no wedge timer. The terminal state was already
+            # surfaced on first sight; re-check the bounded cadence so a
+            # settled pane cannot rot invisibly (the churning-hash path
+            # above does the same check, but only fires while the hash
+            # keeps changing; this covers the post-settlement steady state).
+            trf="$STATE/.terminal-resurfaced-$key"
+            if [ -e "$trf" ]; then
+              trf_age=$(age_of "$trf")
+              if [ "$trf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
+                statusf="$STATE/$task.status"
+                fm_wake_append stale "$w" "stale: $w" || exit 1
+                date +%s > "$trf"
+                mark_surfaced "$statusf"
+                wake "stale: $w"
+              fi
+            fi
           fi
-          # else: already surfaced as genuinely terminal on a prior poll of
-          # this same hash - nothing left to do (matches the original,
-          # unmodified terminal-status behavior).
         else
           # Non-terminal stale: a crew gone quiet without a captain-relevant status.
           # Decided once per distinct stale hash (the costly state reads run only
