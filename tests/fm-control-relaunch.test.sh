@@ -60,9 +60,10 @@ case "${1:-}" in
   send-keys)
     shift
     literal=0
+    target=
     while [ $# -gt 0 ]; do
       case "$1" in
-        -t) shift 2 ;;
+        -t) target=$2; shift 2 ;;
         -l) literal=1; shift ;;
         *) break ;;
       esac
@@ -77,6 +78,13 @@ case "${1:-}" in
           ;;
         *'encode launch-brief'*)
           cat "$D/becomes" > "$D/command"
+          if [ -n "${FM_FAKE_RELAUNCH_META_PATH:-}" ]; then
+            awk -F= -v target="${FM_FAKE_RELAUNCH_META_TARGET:-}" '
+              $1 == "window" { print "window=" target; next }
+              { print }
+            ' "$FM_FAKE_RELAUNCH_META_PATH" > "$FM_FAKE_RELAUNCH_META_PATH.next"
+            mv "$FM_FAKE_RELAUNCH_META_PATH.next" "$FM_FAKE_RELAUNCH_META_PATH"
+          fi
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
       esac
@@ -96,10 +104,27 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
+    target=
+    previous=
+    for a in "$@"; do
+      if [ "$previous" = -t ]; then
+        target=$a
+      fi
+      previous=$a
+    done
     for a in "$@"; do
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
-        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_command*)
+          if [ -n "${FM_FAKE_EXPECTED_TARGET:-}" ] \
+             && [ "$target" != "$FM_FAKE_EXPECTED_TARGET" ]; then
+            printf 'zsh\n'
+          else
+            cat "$D/command"
+            printf '\n'
+          fi
+          exit 0
+          ;;
         *pane_current_path*)
           if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
             : > "$FM_FAKE_CWD_RACE_READY"
@@ -341,6 +366,9 @@ run_control() {  # <case-dir> <args...>
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
+    FM_FAKE_RELAUNCH_META_PATH="${FM_FAKE_RELAUNCH_META_PATH:-}" \
+    FM_FAKE_RELAUNCH_META_TARGET="${FM_FAKE_RELAUNCH_META_TARGET:-}" \
+    FM_FAKE_EXPECTED_TARGET="${FM_FAKE_EXPECTED_TARGET:-}" \
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
@@ -444,6 +472,23 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_relaunch_refreshes_the_published_endpoint_before_confirmation() {
+  local dir out rc target
+  dir=$(new_case published-target rl1a)
+  add_ship_task "$dir" rl1a claude
+  target='replacement:fm-rl1a'
+  out=$(FM_FAKE_RELAUNCH_META_PATH="$dir/home/state/rl1a.meta" \
+    FM_FAKE_RELAUNCH_META_TARGET="$target" \
+    FM_FAKE_EXPECTED_TARGET="$target" \
+    run_control "$dir" rl1a relaunch --note "continue safely"); rc=$?
+  expect_code 0 "$rc" "a relaunch should confirm its published replacement endpoint"$'\n'"$out"
+  [ "$(meta_field "$dir" rl1a window)" = "$target" ] \
+    || fail "the refreshed endpoint should be the one published by the replacement"
+  assert_contains "$out" "endpoint=$target" \
+    "the relaunch result should report the refreshed endpoint"
+  pass "fm-control relaunch: confirmation follows the endpoint published by the replacement"
 }
 
 test_relaunch_preserves_durable_task_metadata() {
@@ -1541,6 +1586,7 @@ test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_refreshes_the_published_endpoint_before_confirmation
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context

@@ -335,6 +335,17 @@ require_state_verified_backend() {  # <verb>
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
 }
 
+refresh_published_relaunch_endpoint() {
+  local published_backend published_worktree
+  fm_backend_validate_task_endpoint "$META" "$ID" || return 1
+  published_backend=$FM_BACKEND_VALIDATED_BACKEND
+  published_worktree=$(fm_meta_get "$META" worktree)
+  [ "$published_backend" = "$BACKEND" ] \
+    && [ "$published_worktree" = "$WT" ] \
+    && [ "$(fm_meta_get "$META" control_relaunch_tx)" = "$RELAUNCH_TX" ] || return 1
+  T=$FM_BACKEND_VALIDATED_TARGET
+}
+
 # send_interrupt_keys: deliver the harness's interrupt key the verified number
 # of times, then the composer-clear key when the adapter needs one. Refuses
 # before sending anything when the backend cannot deliver either key, because
@@ -830,6 +841,9 @@ do_relaunch() {
       || RELAUNCH_META_PUBLISHED=1
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
+
+  refresh_published_relaunch_endpoint \
+    || die "the replacement agent for $ID published an invalid endpoint record"
 
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
