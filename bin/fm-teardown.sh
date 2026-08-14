@@ -93,8 +93,8 @@
 # refusal above has already passed, and BEFORE any worktree return, branch
 # delete, or backend kill below - a still-active run or a leaked process may
 # own live work in that worktree):
-#   Fix 1 - conclude the task's own no-mistakes run. A ship task's worktree can
-#     be torn down while its no-mistakes pipeline run is still PARKED at a gate
+#   Fix 1 - conclude the task's own no-mistakes run. A no-mistakes ship task's
+#     worktree can be torn down while its no-mistakes pipeline run is still PARKED at a gate
 #     (awaiting_approval/fix_review/any awaiting_agent field), with no worker
 #     left to ever answer it - the run then sits there holding a fleet slot
 #     indefinitely (observed 2026-08-03: runs parked 7h39m and parked at a
@@ -1260,12 +1260,15 @@ task_status_is_run_not_found() {  # <status-error> <run-id>
 
 # Abort THIS task's own parked no-mistakes run before the worker that would
 # have answered its gate is removed, so no run is left orphaned holding a
-# fleet slot. Only KIND=ship drives a no-mistakes validation of its own
-# worktree (scouts and secondmates never do, mirroring bin/fm-crew-state.sh);
-# a run not attributed to this exact branch+head is left completely alone.
+# fleet slot. Only no-mistakes ship work drives a no-mistakes validation of its
+# own worktree (scouts and secondmates never do, mirroring
+# bin/fm-crew-state.sh); direct-PR and local-only contracts never invoke
+# no-mistakes, while legacy or unrecognized modes retain the safe default.
+# A run not attributed to this exact branch+head is left completely alone.
 conclude_task_no_mistakes_run() {  # <worktree>
   local wt=$1 out run_id
   [ "$KIND" = ship ] || return 0
+  case "$MODE" in direct-PR|local-only) return 0 ;; esac
   [ -d "$wt" ] || return 0
   command -v no-mistakes >/dev/null 2>&1 || return 0
   task_run_is_own_parked_run "$wt" || return 0

@@ -38,6 +38,10 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (z) direct-PR + clean landed work                           -> ALLOW without no-mistakes
+#   (aa) local-only + clean landed work                         -> ALLOW without no-mistakes
+#   (ab) unknown mode + task-owned parked run                   -> abort and confirm, then ALLOW
+#   (ac) ambiguous mode + task-owned parked run                 -> abort and confirm, then ALLOW
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -119,6 +123,7 @@ SH
   # path override FM_FAKE_AXI_STATUS/FM_FAKE_NM_ABORT_LOG before run_teardown.
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FM_FAKE_NM_CALL_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_NM_CALL_LOG"
 case "${1:-}" in
   axi)
     shift
@@ -209,6 +214,18 @@ write_meta() {
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode"
+}
+
+# Replace the default no-mistakes stub with a probe that records every attempt
+# to execute it. Args: case_dir call-log
+install_no_mistakes_call_probe() {
+  local case_dir=$1 call_log=$2
+  cat > "$case_dir/fakebin/no-mistakes" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\\$*" >> '$call_log'
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/no-mistakes"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -675,6 +692,42 @@ test_no_mistakes_origin_remote_allows() {
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
 }
 
+test_direct_pr_origin_remote_skips_no_mistakes() {
+  local case_dir rc call_log
+  case_dir=$(make_case direct-pr-origin)
+  write_meta "$case_dir" direct-PR ship
+  land_shippable_commit "$case_dir"
+  call_log="$case_dir/no-mistakes-calls.log"
+  install_no_mistakes_call_probe "$case_dir" "$call_log"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "direct-pr-origin: clean landed direct-PR teardown should succeed"
+  assert_absent "$call_log" \
+    "direct-pr-origin: teardown invoked no-mistakes despite the direct-PR delivery contract"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "direct-pr-origin: teardown printed a REFUSED line"
+  pass "clean landed direct-PR work tears down without invoking no-mistakes"
+}
+
+test_local_only_origin_remote_skips_no_mistakes() {
+  local case_dir rc call_log
+  case_dir=$(make_case local-only-origin)
+  write_meta "$case_dir" local-only ship
+  land_shippable_commit "$case_dir"
+  call_log="$case_dir/no-mistakes-calls.log"
+  install_no_mistakes_call_probe "$case_dir" "$call_log"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "local-only-origin: clean landed local-only teardown should succeed"
+  assert_absent "$call_log" \
+    "local-only-origin: teardown invoked no-mistakes despite the local-only delivery contract"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "local-only-origin: teardown printed a REFUSED line"
+  pass "clean landed local-only work tears down without invoking no-mistakes"
+}
+
 test_no_mistakes_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-unpushed)
@@ -691,6 +744,27 @@ test_no_mistakes_truly_unpushed_refuses() {
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+test_direct_pr_truly_unpushed_refuses() {
+  local case_dir rc call_log
+  case_dir=$(make_case direct-pr-unpushed)
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "unpushed direct-PR work"
+  call_log="$case_dir/no-mistakes-calls.log"
+  install_no_mistakes_call_probe "$case_dir" "$call_log"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "direct-pr-unpushed: teardown should refuse unlanded work"
+  assert_grep "REFUSED: worktree $case_dir/wt has work not on any remote and not landed" "$case_dir/stderr" \
+    "direct-pr-unpushed: teardown did not explain the unlanded-work refusal"
+  assert_present "$case_dir/wt" "direct-pr-unpushed: teardown removed unlanded worktree"
+  assert_present "$case_dir/state/task-x1.meta" "direct-pr-unpushed: teardown removed unlanded task metadata"
+  assert_absent "$call_log" \
+    "direct-pr-unpushed: teardown invoked no-mistakes before preserving unlanded work"
+  pass "unlanded direct-PR work still refuses and preserves its task records"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -2129,6 +2203,73 @@ test_parked_own_run_is_aborted_before_teardown() {
   pass "a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed"
 }
 
+test_missing_mode_preserves_no_mistakes_parked_run_handling() {
+  local case_dir rc head
+  case_dir=$(make_case missing-mode-parked-run)
+  write_meta "$case_dir" no-mistakes ship
+  grep -v '^mode=' "$case_dir/state/task-x1.meta" > "$case_dir/meta-without-mode"
+  mv "$case_dir/meta-without-mode" "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "missing-mode-parked-run: legacy task should retain parked-run handling"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "missing-mode-parked-run: legacy task skipped its no-mistakes parked run"
+  pass "legacy task metadata without a mode retains no-mistakes parked-run handling"
+}
+
+test_unknown_mode_preserves_no_mistakes_parked_run_handling() {
+  local case_dir rc head call_log abort_log
+  case_dir=$(make_case unknown-mode-parked-run)
+  write_meta "$case_dir" legacy-unknown-mode ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  call_log="$case_dir/no-mistakes-calls.log"
+  abort_log="$case_dir/nm-abort.log"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$abort_log" \
+  FM_FAKE_NM_CALL_LOG="$call_log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "unknown-mode-parked-run: unrecognized mode should retain fail-closed parked-run handling"
+  assert_grep "abort --run 01RUN" "$abort_log" \
+    "unknown-mode-parked-run: teardown did not target the verified parked run"
+  assert_grep "axi status --run 01RUN" "$call_log" \
+    "unknown-mode-parked-run: teardown did not confirm the targeted run stopped"
+  pass "unknown mode metadata aborts and confirms a task-owned parked run before teardown"
+}
+
+test_duplicate_mode_preserves_no_mistakes_parked_run_handling() {
+  local case_dir rc head call_log abort_log
+  case_dir=$(make_case duplicate-mode-parked-run)
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' 'mode=no-mistakes' >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  call_log="$case_dir/no-mistakes-calls.log"
+  abort_log="$case_dir/nm-abort.log"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$abort_log" \
+  FM_FAKE_NM_CALL_LOG="$call_log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "duplicate-mode-parked-run: ambiguous mode should retain fail-closed parked-run handling"
+  assert_grep "abort --run 01RUN" "$abort_log" \
+    "duplicate-mode-parked-run: teardown did not target the verified parked run"
+  assert_grep "axi status --run 01RUN" "$call_log" \
+    "duplicate-mode-parked-run: teardown did not confirm the targeted run stopped"
+  pass "ambiguous mode metadata aborts and confirms a task-owned parked run before teardown"
+}
+
 test_mismatched_run_after_abort_refuses_unconfirmed() {
   local case_dir rc head
   case_dir=$(make_case parked-run-replaced)
@@ -2656,7 +2797,10 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_direct_pr_origin_remote_skips_no_mistakes
+test_local_only_origin_remote_skips_no_mistakes
 test_no_mistakes_truly_unpushed_refuses
+test_direct_pr_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_teardown_retires_codex_effort_recovery_before_task_id_reuse
@@ -2693,6 +2837,9 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
 test_parked_own_run_is_aborted_before_teardown
+test_missing_mode_preserves_no_mistakes_parked_run_handling
+test_unknown_mode_preserves_no_mistakes_parked_run_handling
+test_duplicate_mode_preserves_no_mistakes_parked_run_handling
 test_parked_own_run_refuses_when_abort_is_unconfirmed
 test_mismatched_run_after_abort_refuses_unconfirmed
 test_empty_status_after_abort_refuses_unconfirmed
