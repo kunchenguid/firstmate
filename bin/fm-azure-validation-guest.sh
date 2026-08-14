@@ -10,7 +10,7 @@ set -euo pipefail
 set +x
 umask 077
 
-[ "$#" -ge 15 ] || { echo "validation guest: incomplete protected parameter set" >&2; exit 125; }
+[ "$#" -eq 12 ] || { echo "validation guest: regular parameter shape mismatch" >&2; exit 125; }
 MODE=$1
 INPUT_DIGEST=$2
 REQUEST_DIGEST=$3
@@ -23,38 +23,27 @@ CREDENTIAL_DISK_ID=$9
 STORAGE_ACCOUNT=${10}
 STORAGE_CONTAINER=${11}
 IDENTITY_CLIENT_ID=${12}
-shift 12
-INPUT_URL=
-OUTPUT_URL=
-RESPONSE=
+INPUT_URL=${input_url:-}
+OUTPUT_URL=${output_url:-}
+RESPONSE=${response:-}
+WORKTREE_KEY=${fm_azure_validation_worktree_key_file:-}
+CREDENTIAL_KEY=${fm_azure_validation_credential_key_file:-}
+unset input_url output_url response fm_azure_validation_worktree_key_file fm_azure_validation_credential_key_file
 case "$MODE" in
   start)
-    [ "$#" -eq 4 ] || { echo "validation guest: start parameter shape mismatch" >&2; exit 125; }
-    INPUT_URL=$1
-    OUTPUT_URL=$2
-    WORKTREE_KEY=$3
-    CREDENTIAL_KEY=$4
+    [ -n "$INPUT_URL" ] && [ -n "$OUTPUT_URL" ] || { echo "validation guest: start capability is absent" >&2; exit 125; }
     ;;
   reattach)
-    [ "$#" -eq 3 ] || { echo "validation guest: reattach parameter shape mismatch" >&2; exit 125; }
-    OUTPUT_URL=$1
-    WORKTREE_KEY=$2
-    CREDENTIAL_KEY=$3
+    [ -n "$OUTPUT_URL" ] || { echo "validation guest: reattach capability is absent" >&2; exit 125; }
     ;;
   respond)
-    [ "$#" -eq 4 ] || { echo "validation guest: respond parameter shape mismatch" >&2; exit 125; }
-    OUTPUT_URL=$1
-    RESPONSE=$2
-    WORKTREE_KEY=$3
-    CREDENTIAL_KEY=$4
+    [ -n "$RESPONSE" ] || { echo "validation guest: response is absent" >&2; exit 125; }
     ;;
   *)
     echo "validation guest: unsupported mode" >&2
     exit 125
     ;;
 esac
-set --
-
 case "$INPUT_DIGEST" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "validation guest: input digest is malformed" >&2; exit 125 ;; esac
 case "$REQUEST_DIGEST" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "validation guest: request digest is malformed" >&2; exit 125 ;; esac
 case "$CELL" in azv-[a-z0-9][a-z0-9]*) ;; *) echo "validation guest: cell identity is malformed" >&2; exit 125 ;; esac
