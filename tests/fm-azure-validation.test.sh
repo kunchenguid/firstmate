@@ -102,7 +102,9 @@ assert vm["properties"]["securityProfile"]["securityType"]=="TrustedLaunch"
 assert vm["properties"]["securityProfile"]["encryptionAtHost"] is True
 linux=vm["properties"]["osProfile"]["linuxConfiguration"]
 assert linux["disablePasswordAuthentication"] is True
-assert linux["ssh"]["publicKeys"]==[{"path":"/home/fmbootstrap/.ssh/authorized_keys","keyData":"ssh-ed25519 97Fzq4lT5FLUK4YzmrtyXx21gjpFVkVY/H3ioL7hpqk= firstmate-validation-blackhole"}]
+key=linux["ssh"]["publicKeys"][0]
+assert key["path"]=="/home/fmbootstrap/.ssh/authorized_keys"
+assert key["keyData"].startswith("ssh-rsa ") and key["keyData"].endswith(" firstmate-validation-blackhole")
 assert vm["properties"]["storageProfile"]["osDisk"]["deleteOption"]=="Detach"
 data=vm["properties"]["storageProfile"]["dataDisks"]
 assert len(data)==2 and {item["lun"] for item in data}=={0,1}

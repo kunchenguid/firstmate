@@ -224,7 +224,7 @@
             "ssh": {
               "publicKeys": [{
                 "path": "/home/fmbootstrap/.ssh/authorized_keys",
-                "keyData": "ssh-ed25519 97Fzq4lT5FLUK4YzmrtyXx21gjpFVkVY/H3ioL7hpqk= firstmate-validation-blackhole"
+                "keyData": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCaAn1stDlmF2Wo5Dn44vAV+AzWGUIBaXvoCEJdxmx6Xhq6ElG4OQj0VAJkBhIqtXGIdUgObA0/ix3U4WIgwX/JYWcgYhQ8yZsNnYIfn6cfTduCD+4kJdHnss8S2C268S/4GszEH90cpSUI5bMXXVB1Adsntnz4S3Q1Z2hsB33zKOaB/sDnKYCck8y17JWTLCmVlwRpjiCL2NnKNwNkYbVeNa2U98/OJbHA2UGttqpI/GKnb2wB/iZV9KQ/Cf1kHIvJO99IFT12AKL2YoApLVVWrd2cxOHt2uAvnI3Pc+Qh2p8AZz++00eso1cmXkD5VzTNTpOnYPmGJAEO4Lo2Mb+00Op+LHWoPXifHtBt2E3588JPxSx/cXUaLIpvHHs7RwWSG+88rXQY1s628ZrhJFn7U/1logJ6lJo5exJAqDDzwlagdIxzCeNiyoKp/GQpwtSPYK1EIQDHqoYcBR6BJsRAbeZPzQ3TS/6lwEFE9EWfzohhHkVthPqsblympNQmWr8= firstmate-validation-blackhole"
               }]
             }
           }
