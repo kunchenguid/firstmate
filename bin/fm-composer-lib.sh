@@ -61,12 +61,15 @@
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
-#   separated  - pi: content rows between two solid horizontal `─` rules, no
-#                glyph and no side border. Provable only with a live agent
-#                identity reporting an idle/done/blocked pi (herdr `agent
-#                get`; the tmux foreground-process probe), because a blank
-#                region between two transcript rules is otherwise exactly the
-#                strict rule's unidentifiable blank row.
+#   separated  - pi: content rows between two horizontal `─` rules, no glyph
+#                and no side border. Provable only with a live agent identity
+#                reporting an idle/done/blocked pi (herdr `agent get`; the tmux
+#                foreground-process probe), because a blank region between two
+#                transcript rules is otherwise exactly the strict rule's
+#                unidentifiable blank row. A rule may carry a TITLE embedded in
+#                it, the same tolerance a titled bottom BORDER already gets;
+#                claude draws the session's agent name that way, and the rules
+#                it draws around its own bare composer must still pair.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -571,17 +574,42 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # exact positive proof they require (`empty`), so unrecognized future verdicts
 # fail safe by default.
 
-# _fm_composer_pi_separator_row: a solid pi separator - nothing but `─`, at
-# least 8 columns wide. The width floor is a literal substring test so it is
-# byte-exact in every locale.
+# _fm_composer_pi_separator_row: a horizontal `─` rule at least 8 columns wide,
+# either solid or carrying an embedded TITLE. The width floor is a literal
+# substring test so it is byte-exact in every locale.
+#
+# The titled form is the same bounded tolerance _fm_composer_titled_bottom_ok
+# gives a titled bottom BORDER, and for the same reason: the title is embedded
+# IN the rule rather than replacing it, so the row still starts and ends with
+# the rule glyph and everything between is ASCII-printable. Requiring both ends
+# is what keeps an ordinary transcript line from being promoted to a rule.
+#
+# Claude draws the session's agent name into the top rule of its own bare
+# composer this way (verified live on claude 2.1.232 through herdr 0.8.0). While
+# only a solid rule counted, that one titled rule left the composer's untitled
+# BOTTOM rule unpaired; an unpaired rule below the candidate is read as proof
+# that the candidate is stale, so _fm_composer_select_cursorless abandoned
+# selection and every idle claude pane classified `unknown`. The away-mode
+# injector defers on anything that is not `empty`, so escalations buffered for
+# 9.7 hours with the supervisor pane sitting idle the whole time.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
-  local row=$1
+  local row=$1 residue
   [ -n "$row" ] || return 1
-  [ -z "${row//─/}" ] || return 1
   case "$row" in
-    *────────*) return 0 ;;
+    *────────*) ;;
+    *) return 1 ;;
   esac
-  return 1
+  [ -z "${row//─/}" ] && return 0
+  case "$row" in
+    ─*─) ;;
+    *) return 1 ;;
+  esac
+  residue=${row//─/ }
+  residue=$(printf '%s' "$residue" | LC_ALL=C sed 's/[!-~]/ /g')
+  case "$residue" in
+    *[![:space:]]*) return 1 ;;
+  esac
+  return 0
 }
 
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2

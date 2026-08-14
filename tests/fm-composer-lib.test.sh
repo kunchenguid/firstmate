@@ -188,6 +188,73 @@ test_matrix_claude_bare_nbsp_row() {
   pass "matrix: claude's ❯+NBSP row reads empty on every profile in both locales (#1988)"
 }
 
+test_matrix_claude_titled_rule_composer() {
+  # Real idle claude 2.1.232, captured live through herdr 0.8.0 (task
+  # afk-wedge). The composer is still the bare `❯`+U+00A0 row between two
+  # horizontal rules, but the TOP rule now carries the session's agent name as
+  # a reverse-video title, and a configured statusline sits below the bottom
+  # rule.
+  #
+  # While only a SOLID rule counted as a rule, that one title left the bottom
+  # rule unpaired, an unpaired rule below the candidate read as proof the
+  # candidate was stale, and every idle claude pane classified `unknown`. The
+  # away-mode injector defers on anything that is not `empty`, so escalations
+  # buffered for 9.7 hours against an idle supervisor pane.
+  local titled solid typed
+  titled=$'transcript line\n'\
+"${ESC}[0m${ESC}[38;2;136;136;136m────────────────────────${ESC}[0m${ESC}[38;2;0;0;0m${ESC}[48;2;136;136;136m orchestrator ${ESC}[0m${ESC}[38;2;136;136;136m──${ESC}[0m"$'\n'\
+"${ESC}[0m${ESC}[38;2;153;153;153m❯${NBSP}${ESC}[0m"$'\n'\
+"${ESC}[0m${ESC}[38;2;136;136;136m────────────────────────────────────────${ESC}[0m"$'\n'\
+"  ${ESC}[1m${ESC}[38;5;2mkalvira@host${ESC}[0m${ESC}[38;2;153;153;153m:${ESC}[0m${ESC}[1m${ESC}[38;5;4m/home/kalvira/firstmate${ESC}[0m${ESC}[38;2;153;153;153m (main) [ctx:15%]${ESC}[0m"$'\n'\
+"  ${ESC}[0m${ESC}[38;2;255;193;7m⏵⏵ auto mode on${ESC}[0m${ESC}[38;2;153;153;153m (shift+tab to cycle) · ← for agents${ESC}[0m"
+
+  # Non-vacuousness: the fixture must really carry an embedded title and a
+  # non-blank statusline below the closing rule, or it proves nothing.
+  case "$titled" in *' orchestrator '*) : ;; *) fail "fixture lost its embedded rule title" ;; esac
+  case "$titled" in *'kalvira@host'*) : ;; *) fail "fixture lost its statusline row" ;; esac
+
+  assert_screen "claude 2.1.232 titled rule on herdr" empty "$CAPS_STYLED" "$titled" '' probe-absent
+  assert_screen "claude 2.1.232 titled rule on tmux" empty "$CAPS_TMUX" "$titled" 2 probe-absent
+  assert_screen "claude 2.1.232 titled rule on zellij" empty "$CAPS_STYLED_NOID" "$titled"
+  assert_screen "claude 2.1.232 titled rule on cmux/orca" empty "$CAPS_PLAIN" "$titled"
+
+  # The title is the ONLY difference from the solid-rule rendering, so both
+  # must reach the same verdict; that divergence is what the fix restores.
+  solid=${titled/"${ESC}[0m${ESC}[38;2;0;0;0m${ESC}[48;2;136;136;136m orchestrator ${ESC}[0m${ESC}[38;2;136;136;136m──${ESC}[0m"/"──────────────${ESC}[0m"}
+  [ "$solid" != "$titled" ] || fail "solid-rule variant did not differ from the titled fixture"
+  assert_screen "claude 2.1.232 solid rule on herdr" empty "$CAPS_STYLED" "$solid" '' probe-absent
+
+  # A rule title must never swallow real typed text sitting in the composer.
+  typed=${titled/"❯${NBSP}"/"❯ answer the parked decision"}
+  [ "$typed" != "$titled" ] || fail "typed variant did not differ from the idle fixture"
+  assert_screen "claude 2.1.232 titled rule typed on herdr" pending "$CAPS_STYLED" "$typed" '' probe-absent
+  assert_screen "claude 2.1.232 titled rule typed on tmux" pending "$CAPS_TMUX" "$typed" 2 probe-absent
+  # Plain captures still cannot tell typed text from claude's rotating hint.
+  assert_screen "claude 2.1.232 titled rule typed on cmux/orca" unknown "$CAPS_PLAIN" "$typed"
+  pass "matrix: claude 2.1.232's titled composer rule still pairs and reads empty (afk-wedge)"
+}
+
+test_titled_rule_requires_rule_glyphs_at_both_ends() {
+  # The titled-rule tolerance is bounded exactly like a titled bottom BORDER:
+  # rule glyphs at both ends and an ASCII-printable interior. Anything looser
+  # would promote ordinary transcript prose into a composer boundary.
+  local base tail_only lead_only wide_title
+  # A titled rule pairs with the composer's closing rule, so the bare row
+  # between them is classified and reads empty.
+  base=$'chatter\n──────────── orchestrator ──\n❯\n────────────────────────'
+  assert_screen "titled rule pairs" empty "$CAPS_STYLED" "$base" '' probe-absent
+  # A row that only ENDS with the rule glyph is prose, not a rule, so the
+  # composer's own closing rule stays unpaired and the screen stays unreadable.
+  lead_only=$'chatter\nrunning the build ──────────\n❯\n────────────────────────'
+  assert_screen "prose ending in a rule is not a rule" unknown "$CAPS_STYLED" "$lead_only" '' probe-absent
+  tail_only=$'chatter\n──────────── still working\n❯\n────────────────────────'
+  assert_screen "prose after a rule is not a rule" unknown "$CAPS_STYLED" "$tail_only" '' probe-absent
+  # A non-ASCII title is outside the proven tolerance and must not qualify.
+  wide_title=$'chatter\n──────────── ✻ пример ──\n❯\n────────────────────────'
+  assert_screen "non-ASCII rule title is not a rule" unknown "$CAPS_STYLED" "$wide_title" '' probe-absent
+  pass "fm_composer_classify_screen: a titled rule needs rule glyphs at both ends and an ASCII title"
+}
+
 test_matrix_codex_dim_hint_row() {
   # Real idle codex: bold `›`, reset, then an SGR-2 dim hint. Styled captures
   # strip the ghost and prove empty; plain captures must defer as unknown -
@@ -608,6 +675,8 @@ test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
+test_matrix_claude_titled_rule_composer
+test_titled_rule_requires_rule_glyphs_at_both_ends
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
