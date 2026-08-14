@@ -203,8 +203,12 @@ def runtime_config(home: Path) -> dict[str, Any]:
         )
     provider_host = file_value.get("provider_host") or os.environ.get("FM_CROSSCHECK_PROVIDER_HOST")
     provider_port = file_value.get("provider_port") or os.environ.get("FM_CROSSCHECK_PROVIDER_PORT")
-    if not isinstance(provider_host, str) or not provider_host or ":" in provider_host:
+    if provider_host is not None and (
+        not isinstance(provider_host, str) or not provider_host or ":" in provider_host
+    ):
         raise AzureCrosscheckError("Azure Crosscheck provider_host must be one exact DNS name")
+    if provider_port is None:
+        provider_port = 443
     try:
         port = int(provider_port)
     except (TypeError, ValueError) as exc:
@@ -297,6 +301,29 @@ def verify_scope_and_foundation(config: dict[str, Any]) -> Any:
     return runner
 
 
+HARNESS_PROVIDER_HOSTS = {
+    "codex": "chatgpt.com",
+    "pi": "chatgpt.com",
+    "claude": "api.anthropic.com",
+}
+
+
+def effective_provider_host(azure: dict[str, Any], reviewer_harness: str) -> str:
+    """One exact model-egress host per review: explicit config wins, else the
+    reviewer harness names its provider. Cross-review selects reviewers from
+    both providers, so a single static host cannot serve every review."""
+    host = azure.get("provider_host")
+    if host:
+        return host
+    derived = HARNESS_PROVIDER_HOSTS.get(reviewer_harness)
+    if not derived:
+        raise AzureCrosscheckError(
+            "Azure Crosscheck cannot derive a provider host for reviewer "
+            f"harness {reviewer_harness!r}; set provider_host explicitly"
+        )
+    return derived
+
+
 def review_identity(
     *,
     home: Path,
@@ -321,7 +348,7 @@ def review_identity(
         "deployment_generation": azure["deployment_generation"],
         "model_image_id": azure["model_image_id"],
         "reviewer_sku": azure["reviewer_sku"],
-        "provider_host": azure["provider_host"],
+        "provider_host": effective_provider_host(azure, config["harness"]),
         "provider_port": str(azure["provider_port"]),
         "reviewer_harness": config["harness"],
         "reviewer_model": config["model"],
@@ -651,7 +678,7 @@ def provision_model_vm(
         "expiryUtc": {"value": expiry},
         "tags": {"value": tags},
         "modelImageId": {"value": config["model_image_id"]},
-        "providerHost": {"value": config["provider_host"]},
+        "providerHost": {"value": identity["provider_host"]},
         "providerPort": {"value": config["provider_port"]},
     }
     temporary = Path(tempfile.mkstemp(prefix=".fm-crosscheck-model-", suffix=".json")[1])
