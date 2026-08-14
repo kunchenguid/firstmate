@@ -55,9 +55,9 @@ make_repo_on_branch() {  # <dir> <branch>
 # `axi` surface - no runs-listing subcommand exists under it, verified against
 # the real CLI), and the actual top-level run-listing command, `no-mistakes
 # runs --limit N`, which is plain text - no run id, no quoting - serving
-# FM_FAKE_RUNS_LIST verbatim. `axi sync` answers only the read-only `--check`
-# form and refuses every other invocation (notably the mutating `--recover`),
-# so the helper's read-only contract is enforced rather than assumed.
+# FM_FAKE_RUNS_LIST verbatim. Nothing else is answered: any other subcommand
+# (notably the mutating `axi sync --recover`) produces no output, so a
+# regression that reached for one would fail rather than pass silently.
 make_fakebin() {  # <dir> -> echoes fakebin path
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -74,10 +74,6 @@ case "${1:-}" in
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
-      sync)
-        shift
-        [ "$#" = 1 ] && [ "${1:-}" = --check ] || exit 90
-        printf '%s\n' "${FM_FAKE_AXI_SYNC:-}" ;;
     esac
     ;;
   runs)
@@ -176,9 +172,8 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  FM_FAKE_AXI_SYNC=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_AXI_SYNC
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -298,19 +293,24 @@ outcome: failed
 EOF
 }
 
-# --- `no-mistakes axi sync --check` fixtures (branch_sync TOON) -------------
-# Field shape verified against the real installed CLI (v1.48.0) on a genuinely
-# custody-returned branch: `branch_sync.state` and `branch_sync.safety` both
-# read "custody_returned" and `branch_sync.local.clean` reads true.
+# --- branch_sync fixtures -----------------------------------------------
+# Bare `no-mistakes axi status` (the form this script calls, as opposed to
+# `axi status --run <id>`) carries a `branch_sync` block alongside the run, and
+# that block is where the custody guard reads from. Field shape verified
+# against the real installed CLI (v1.48.0) on a genuinely custody-returned
+# branch: `branch_sync.state` and `branch_sync.safety` both read
+# "custody_returned" and `branch_sync.local.clean` reads true.
+# The block deliberately repeats `branch` and `head` under `local:` - the guard
+# must read them block-scoped rather than letting them shadow the run's own.
 
-sync_custody_returned() {
-  cat <<'EOF'
+branch_sync_custody_returned() {  # <branch>
+  cat <<EOF
 branch_sync:
   state: custody_returned
   changed: false
   local:
-    branch: fm/obsolete
-    head: abc1234
+    branch: $1
+    head: "${FM_FAKE_RUN_HEAD:-abc1234}"
     clean: true
   pipeline:
     run: "01RUN"
@@ -323,7 +323,7 @@ EOF
 
 # Same custody_returned state/safety, but a dirty worktree - must NOT qualify;
 # "clean" is part of the documented confirmation ("custody returned, clean").
-sync_custody_returned_dirty() {
+branch_sync_custody_returned_dirty() {
   cat <<'EOF'
 branch_sync:
   state: custody_returned
@@ -336,7 +336,7 @@ EOF
 # A branch still stranded by its terminal run, recovery not yet run: the
 # documented next_action.code is recover_custody and neither state nor safety
 # reads custody_returned - must NOT qualify.
-sync_recovery_pending() {
+branch_sync_recovery_pending() {
   cat <<'EOF'
 branch_sync:
   state: stranded
@@ -345,6 +345,24 @@ branch_sync:
   safety: recover_needed
   next_action:
     code: recover_custody
+EOF
+}
+
+# A run that failed BEFORE any push (a test/lint failure), so nothing was ever
+# stranded and nothing was ever recovered: the branch is clean and in sync, but
+# its custody was never returned because it was never taken away. The guard is
+# value-exact on the literal custody_returned pair, so whichever word the CLI
+# uses for this ordinary state, a clean worktree alone must not qualify.
+branch_sync_never_stranded() {
+  cat <<'EOF'
+branch_sync:
+  state: in_sync
+  changed: false
+  local:
+    clean: true
+  safety: none
+  next_action:
+    code: run_pipeline
 EOF
 }
 
@@ -757,8 +775,8 @@ test_obsolete_failed_run_paused_custody_returned_overrides() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-obsolete.meta" "window=fm:fm-feat-obsolete" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'paused: PR open, CI withheld pending upstream approval - external wait\n' > "$d/state/feat-obsolete.status"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-obsolete)"
-  FM_FAKE_AXI_SYNC="$(sync_custody_returned)"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-obsolete)
+$(branch_sync_custody_returned fm/feat-obsolete)"
   local out; out=$(run_crew_state "$d" feat-obsolete)
   assert_contains "$out" "state: paused" "obsolete failed run + custody returned + later paused -> paused"
   assert_contains "$out" "source: status-log" "override reports status-log as the source"
@@ -774,8 +792,8 @@ test_obsolete_failed_run_blocked_custody_returned_overrides() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-obsolete-b.meta" "window=fm:fm-feat-obsolete-b" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'blocked: need a credential to continue\n' > "$d/state/feat-obsolete-b.status"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-obsolete-b)"
-  FM_FAKE_AXI_SYNC="$(sync_custody_returned)"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-obsolete-b)
+$(branch_sync_custody_returned fm/feat-obsolete-b)"
   local out; out=$(run_crew_state "$d" feat-obsolete-b)
   assert_contains "$out" "state: blocked" "obsolete failed run + custody returned + later blocked -> blocked"
   assert_contains "$out" "source: status-log" "override reports status-log as the source"
@@ -794,8 +812,8 @@ test_current_failed_run_stays_failed_when_custody_not_returned() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-current.meta" "window=fm:fm-feat-current" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'paused: pretending this is fine\n' > "$d/state/feat-current.status"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-current)"
-  FM_FAKE_AXI_SYNC="$(sync_recovery_pending)"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-current)
+$(branch_sync_recovery_pending)"
   local out; out=$(run_crew_state "$d" feat-current)
   assert_contains "$out" "state: failed" "custody still stranded -> failed stays authoritative"
   assert_contains "$out" "source: run-step" "unresolved custody keeps the run-step source"
@@ -811,30 +829,77 @@ test_current_failed_run_stays_failed_when_worktree_dirty() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-dirty.meta" "window=fm:fm-feat-dirty" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'paused: waiting on something\n' > "$d/state/feat-dirty.status"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-dirty)"
-  FM_FAKE_AXI_SYNC="$(sync_custody_returned_dirty)"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-dirty)
+$(branch_sync_custody_returned_dirty)"
   local out; out=$(run_crew_state "$d" feat-dirty)
   assert_contains "$out" "state: failed" "custody_returned without a clean worktree -> failed stays authoritative"
   pass "custody_returned alone is not enough without a clean worktree"
 }
 
-# An empty/errored sync check fails closed to the run-step verdict.
-test_current_failed_run_stays_failed_when_sync_check_unavailable() {
+# A status capture carrying no branch_sync block at all fails closed to the
+# run-step verdict rather than treating "nothing said" as custody returned.
+test_current_failed_run_stays_failed_without_branch_sync_block() {
   reset_fakes
-  local d; d=$(new_case failed-sync-unavailable)
+  local d; d=$(new_case failed-no-branch-sync)
   make_repo_on_branch "$d/wt" fm/feat-nosync
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-nosync.meta" "window=fm:fm-feat-nosync" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'paused: waiting on something\n' > "$d/state/feat-nosync.status"
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-nosync)"
-  FM_FAKE_AXI_SYNC=""
   local out; out=$(run_crew_state "$d" feat-nosync)
-  assert_contains "$out" "state: failed" "no sync-check answer fails closed to failed"
-  pass "an unavailable custody check fails closed instead of trusting the log"
+  assert_contains "$out" "state: failed" "no branch_sync block fails closed to failed"
+  assert_contains "$out" "source: run-step" "an unconfirmable custody check keeps the run-step source"
+  pass "an absent custody block fails closed instead of trusting the log"
+}
+
+# The most common shape of intent criterion (2): the run failed at a test or
+# lint step, BEFORE any push, so the branch was never stranded and never
+# recovered. It reads clean and in sync, but its custody was never returned,
+# and the guard's own documented exclusion says that must not qualify.
+test_current_failed_run_that_never_needed_recovery_stays_failed() {
+  reset_fakes
+  local d; d=$(new_case failed-never-stranded)
+  make_repo_on_branch "$d/wt" fm/feat-neverpushed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-neverpushed.meta" "window=fm:fm-feat-neverpushed" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: tests are red but I am calling it an external wait\n' > "$d/state/feat-neverpushed.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-neverpushed)
+$(branch_sync_never_stranded)"
+  local out; out=$(run_crew_state "$d" feat-neverpushed)
+  assert_contains "$out" "state: failed" "a clean branch that never needed recovery -> failed stays authoritative"
+  assert_contains "$out" "source: run-step" "a never-stranded branch keeps the run-step source"
+  pass "a clean, never-stranded branch is not custody_returned and cannot hide a failed run"
+}
+
+# The override needs `axi status` TOON to read branch_sync from. A COARSE
+# attribution (this branch resolved through the plain `no-mistakes runs` list
+# because the repo-wide status answer belonged to another crew) carries no such
+# block, so the documented narrowing applies: it keeps reporting failed even
+# though the same crew would qualify once attributed through the full path.
+test_coarse_failed_run_keeps_failed_despite_later_pause() {
+  reset_fakes
+  local d short; d=$(new_case coarse-failed-paused)
+  make_repo_on_branch "$d/wt" fm/feat-coarse
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-coarse.meta" "window=fm:fm-feat-coarse" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: PR open, awaiting upstream approval - external wait\n' > "$d/state/feat-coarse.status"
+  # The repo-wide answer is another crew's run, and it even carries a
+  # custody_returned block of its own - which must not leak across branches.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)
+$(branch_sync_custody_returned fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed    fm/feat-coarse ${short}  2026-08-13 22:05
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-coarse)
+  assert_contains "$out" "state: failed" "a coarse-sourced failed run keeps its verdict"
+  assert_contains "$out" "source: run-step" "the coarse narrowing keeps the run-step source"
+  pass "a coarse-sourced failed run is never superseded by a later declared pause"
 }
 
 # An ACTIVE run must never be affected by this rule, even with a trailing
-# paused: log and a custody_returned sync answer: custody recovery is
+# paused: log and a custody_returned branch_sync block: custody recovery is
 # meaningless for a still-running run, and an ACTIVE or CURRENT run-step must
 # always keep outranking status prose.
 test_active_run_not_affected_by_custody_override() {
@@ -844,8 +909,8 @@ test_active_run_not_affected_by_custody_override() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-active.meta" "window=fm:fm-feat-active" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'paused: stale leftover line\n' > "$d/state/feat-active.status"
-  FM_FAKE_AXI_STATUS="$(run_running fm/feat-active)"
-  FM_FAKE_AXI_SYNC="$(sync_custody_returned)"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-active)
+$(branch_sync_custody_returned fm/feat-active)"
   local out; out=$(run_crew_state "$d" feat-active)
   assert_contains "$out" "state: working" "an active run always keeps outranking status prose"
   assert_contains "$out" "source: run-step" "active run keeps the run-step source"
@@ -1501,7 +1566,9 @@ test_obsolete_failed_run_paused_custody_returned_overrides
 test_obsolete_failed_run_blocked_custody_returned_overrides
 test_current_failed_run_stays_failed_when_custody_not_returned
 test_current_failed_run_stays_failed_when_worktree_dirty
-test_current_failed_run_stays_failed_when_sync_check_unavailable
+test_current_failed_run_stays_failed_without_branch_sync_block
+test_current_failed_run_that_never_needed_recovery_stays_failed
+test_coarse_failed_run_keeps_failed_despite_later_pause
 test_active_run_not_affected_by_custody_override
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
