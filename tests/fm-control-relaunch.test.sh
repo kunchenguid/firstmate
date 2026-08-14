@@ -151,7 +151,11 @@ case "${args[0]:-} ${args[1]:-}" in
       [ -f "$reads_file" ] && reads=$(cat "$reads_file")
       reads=$((reads + 1))
       printf '%s\n' "$reads" > "$reads_file"
-      if [ "$case_name" = live-agent ] \
+      if [ "$case_name" = initial-unreadable ] && [ "$reads" = 1 ]; then
+        printf '%s\n' '{"error":{"code":"transport_unavailable"}}'
+      elif [ "$case_name" = recheck-unknown ] && [ "$reads" -gt 1 ]; then
+        printf '%s\n' '{"error":{"code":"transport_unavailable"}}'
+      elif [ "$case_name" = live-agent ] \
          || { [ "$case_name" = stale-readable ] && [ "$reads" -gt 1 ]; }; then
         printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}'
       else
@@ -318,6 +322,15 @@ add_herdr_missing_pane_journal_mismatch() {
     echo 'workspace_label=└ hr1 · p:0123456789ABCDEFGHIJKL'
     echo "task_label=fm-$id"
   } > "$journal"
+}
+
+add_herdr_missing_pane_journal_v1() {
+  local dir=$1 id=$2
+  {
+    echo 'version=1'
+    echo "task_id=$id"
+    echo 'projection_id=0123456789ABCDEFGHIJKL'
+  } > "$dir/home/state/$id.herdr-presentation"
 }
 
 run_control() {  # <case-dir> <args...>
@@ -1474,7 +1487,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 
 test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
   local case_name dir out rc before journal_before expected
-  for case_name in live-agent workspace-unreadable workspace-changed tabs-unavailable tabs-malformed changed-tab ambiguous-tab mismatched-pane stale-readable conflicting-pane non-isolated-worktree presentation-journal-mismatched; do
+  for case_name in live-agent initial-unreadable recheck-unknown workspace-unreadable workspace-changed tabs-unavailable tabs-malformed changed-tab ambiguous-tab mismatched-pane stale-readable conflicting-pane non-isolated-worktree presentation-journal-v1 presentation-journal-mismatched; do
     dir=$(new_case "herdr-$case_name" hr1)
     add_herdr_missing_pane_task "$dir" hr1
     make_herdr_missing_pane_stub "$dir" "$case_name"
@@ -1486,7 +1499,11 @@ test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
       mv "$dir/home/state/hr1.meta.next" "$dir/home/state/hr1.meta"
     fi
     journal_before=
-    if [ "$case_name" = presentation-journal-mismatched ]; then
+    if [ "$case_name" = presentation-journal-v1 ]; then
+      add_herdr_missing_pane_journal_v1 "$dir" hr1
+      journal_before="$dir/journal-before"
+      cp "$dir/home/state/hr1.herdr-presentation" "$journal_before"
+    elif [ "$case_name" = presentation-journal-mismatched ]; then
       add_herdr_missing_pane_journal_mismatch "$dir" hr1
       journal_before="$dir/journal-before"
       cp "$dir/home/state/hr1.herdr-presentation" "$journal_before"
@@ -1497,6 +1514,8 @@ test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
     expect_code 1 "$rc" "a missing Herdr pane with $case_name must refuse"
     case "$case_name" in
       live-agent) expected='positively agent-free endpoint' ;;
+      initial-unreadable) expected='positively agent-free endpoint' ;;
+      recheck-unknown) expected='requires the recorded pane to remain gone, got unknown' ;;
       workspace-unreadable) expected='cannot verify recorded workspace' ;;
       workspace-changed) expected='recorded workspace w1 is ambiguous or changed' ;;
       tabs-unavailable) expected='cannot inspect recorded workspace w1' ;;
@@ -1507,6 +1526,7 @@ test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
       stale-readable) expected='requires the recorded pane to remain gone, got no-agent' ;;
       conflicting-pane) expected="herdr tab 'fm-hr1' already exists" ;;
       non-isolated-worktree) expected='not an isolated worktree root' ;;
+      presentation-journal-v1) expected='presentation binding for hr1 is ambiguous or changed' ;;
       presentation-journal-mismatched) expected='presentation binding for hr1 is ambiguous or changed' ;;
     esac
     assert_contains "$out" "$expected" "the $case_name refusal should name its failed proof"

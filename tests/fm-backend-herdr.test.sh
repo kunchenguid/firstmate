@@ -4399,6 +4399,18 @@ test_missing_pane_relaunch_rollback_restores_presentation_binding() {
   pass "fm_backend_herdr_relaunch_missing_pane_rollback: abort restores the old presentation endpoint before reclaiming the replacement"
 }
 
+test_missing_pane_relaunch_rollback_reclaims_flat_endpoint() {
+  local out
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_reclaim_rollback() { printf "%s:%s" "$1" "$2"; }
+    fm_backend_herdr_relaunch_missing_pane_rollback hses "" hr1 w1:t2 w1:p2 w1:t3 w1:p3
+  ' "$ROOT") || fail "flat missing-pane rollback should reclaim its replacement"
+  [ "$out" = 'hses:w1:p3' ] \
+    || fail "flat missing-pane rollback did not reclaim the replacement endpoint: $out"
+  pass "fm_backend_herdr_relaunch_missing_pane_rollback: abort reclaims a flat replacement endpoint"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4445,6 +4457,7 @@ test_create_task_husk_replacement_creates_before_closing
 test_missing_pane_relaunch_delegates_exact_replacement
 test_missing_pane_relaunch_refusal_boundaries_are_non_mutating
 test_missing_pane_relaunch_rollback_restores_presentation_binding
+test_missing_pane_relaunch_rollback_reclaims_flat_endpoint
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
 test_presentation_defaults_on_at_or_above_the_floor
