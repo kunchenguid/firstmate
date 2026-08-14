@@ -321,6 +321,8 @@ state={"resources":{"vm_id":vm_id},"request":{"credential_lease":{"lease_id":"le
 disk={"id":disk_id,"properties":{"uniqueId":"disk-unique-id"},"tags":{"credential-lease":"lease-task"}}
 m.read_resource=lambda *_:(True,disk)
 m.verify_credential_disk(env,state)
+identity=m.immutable_identity(disk,"disk")
+assert identity["etag"]=="disk-unique-id" and identity["unique_id"]=="disk-unique-id"
 disk["managedBy"]=vm_id
 m.verify_credential_disk(env,state,allow_expected_vm=True)
 try: m.verify_credential_disk(env,state)

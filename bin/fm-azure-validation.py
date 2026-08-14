@@ -1267,6 +1267,7 @@ def immutable_identity(resource, kind):
         identity["resource_guid"] = properties.get("resourceGuid")
     elif kind == "disk":
         identity["unique_id"] = properties.get("uniqueId")
+        identity["etag"] = identity["etag"] or identity["unique_id"]
     elif kind == "identity":
         identity["client_id"] = properties.get("clientId")
         identity["principal_id"] = properties.get("principalId")
