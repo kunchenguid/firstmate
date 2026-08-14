@@ -57,6 +57,7 @@ import {
 import {
   calmPresentationHides,
   calmPresentationIsActive,
+  claimFirstmateCalmOwnership,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
@@ -120,6 +121,8 @@ function installCalmPresentationAdapter(name: string, install: () => void): void
 }
 
 export default function (pi: ExtensionAPI) {
+  if (!claimFirstmateCalmOwnership(pi)) return;
+
   installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout);
   installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout);
 

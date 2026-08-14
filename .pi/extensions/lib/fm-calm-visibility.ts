@@ -41,6 +41,7 @@ const CALM_VISIBLE_CLASSES = new Set<CalmTranscriptClass>([
 // presentation type. New operational input stays user-role and is never rerouted.
 export const FIRSTMATE_SYNTHETIC_PRESENTATION_TYPE = "firstmate-synthetic-input-presentation";
 export const FIRSTMATE_CALM_PRESENTATION_EVENT = "firstmate:calm-presentation";
+const FIRSTMATE_CALM_OWNERSHIP_EVENT = "firstmate:calm-ownership";
 
 export type CalmPresentationState = {
   active: boolean;
@@ -65,6 +66,36 @@ type FirstmateSyntheticPresentation = {
 
 let calm = false;
 let stockExportRendering = false;
+
+type FirstmateCalmOwnershipProbe = {
+  claim: () => void;
+};
+
+function isFirstmateCalmOwnershipProbe(
+  value: unknown,
+): value is FirstmateCalmOwnershipProbe {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "claim" in value &&
+    typeof value.claim === "function"
+  );
+}
+
+export function claimFirstmateCalmOwnership(pi: ExtensionAPI): boolean {
+  let claimed = false;
+  pi.events.emit(FIRSTMATE_CALM_OWNERSHIP_EVENT, {
+    claim: () => {
+      claimed = true;
+    },
+  } satisfies FirstmateCalmOwnershipProbe);
+  if (claimed) return false;
+
+  pi.events.on(FIRSTMATE_CALM_OWNERSHIP_EVENT, (value) => {
+    if (isFirstmateCalmOwnershipProbe(value)) value.claim();
+  });
+  return true;
+}
 
 export function calmTranscriptClassIsVisible(itemClass: CalmTranscriptClass): boolean {
   return CALM_VISIBLE_CLASSES.has(itemClass);

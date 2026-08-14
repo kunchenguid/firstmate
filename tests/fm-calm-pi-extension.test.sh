@@ -462,6 +462,127 @@ JS
   pass "Calm uses the worker's owning config override at load: absent, off, unreadable, and unrecognized preferences keep stock built-ins, while on and legacy max register all 7 Calm wrappers synchronously"
 }
 
+test_single_owner_across_pi_resource_loading() {
+  local fixture owner_dir project agent_dir output_file out status version
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm resource-loading ownership test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  record_pi_version_evidence "$version" "Pi calm resource-loading ownership"
+
+  fixture="$TMP_ROOT/single-owner"
+  owner_dir="$fixture/owner/.pi/extensions"
+  project="$fixture/project"
+  agent_dir="$fixture/pi-agent"
+  mkdir -p \
+    "$owner_dir/lib" \
+    "$project/.pi/extensions/lib" \
+    "$agent_dir" \
+    "$fixture/config"
+  for destination in "$owner_dir" "$project/.pi/extensions"; do
+    cp "$EXT" "$destination/fm-calm.ts"
+    cp "$ASSISTANT_LAYOUT" "$destination/lib/fm-calm-assistant-layout.ts"
+    cp "$OPERATIONAL_USER_LAYOUT" "$destination/lib/fm-calm-operational-user-layout.ts"
+    cp "$VISIBILITY" "$destination/lib/fm-calm-visibility.ts"
+    cp "$WORKING_SHIP" "$destination/lib/fm-calm-working-ship.ts"
+    cp "$PI_OPERATIONAL_INPUT" "$destination/lib/fm-operational-input.ts"
+  done
+  printf '%s\n' on >"$fixture/config/calm"
+  cat >"$project/.pi/extensions/project-probe.ts" <<'TS'
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+  pi.registerCommand("project-probe", {
+    description: "Prove unrelated trusted project extensions still load.",
+    handler: async () => {},
+  });
+}
+TS
+
+  output_file="$fixture/node-output"
+  (cd "$fixture" && \
+    OWNER_EXT="$owner_dir/fm-calm.ts" \
+    PROJECT="$project" \
+    AGENT_DIR="$agent_dir" \
+    FM_CONFIG_OVERRIDE="$fixture/config" \
+    PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+    node --input-type=module) >"$output_file" 2>&1 <<'JS'
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const pi = await import(pathToFileURL(resolve(process.env.PI_PACKAGE_DIR, "dist/index.js")).href);
+const ownerPath = realpathSync(process.env.OWNER_EXT);
+const settingsManager = pi.SettingsManager.create(
+  process.env.PROJECT,
+  process.env.AGENT_DIR,
+  { projectTrusted: false },
+);
+const loader = new pi.DefaultResourceLoader({
+  cwd: process.env.PROJECT,
+  agentDir: process.env.AGENT_DIR,
+  settingsManager,
+  additionalExtensionPaths: [process.env.OWNER_EXT],
+});
+
+await loader.reload({
+  resolveProjectTrust: async ({ extensionsResult }) => {
+    const owners = extensionsResult.extensions.filter((extension) => extension.commands.has("calm"));
+    if (owners.length !== 1 || realpathSync(owners[0].resolvedPath) !== ownerPath) {
+      throw new Error(`pre-trust Calm owner was ${owners.map((extension) => extension.resolvedPath).join(", ") || "absent"}`);
+    }
+    return true;
+  },
+});
+
+const result = loader.getExtensions();
+if (result.errors.length !== 0) {
+  throw new Error(`Pi reported extension collisions: ${result.errors.map((error) => `${error.path}: ${error.error}`).join("; ")}`);
+}
+
+const calmOwners = result.extensions.filter((extension) => extension.commands.has("calm"));
+if (calmOwners.length !== 1 || realpathSync(calmOwners[0].resolvedPath) !== ownerPath) {
+  throw new Error(`final Calm owners were ${calmOwners.map((extension) => extension.resolvedPath).join(", ") || "absent"}`);
+}
+
+const expectedTools = ["bash", "edit", "find", "grep", "ls", "read", "write"];
+const ownerTools = Array.from(calmOwners[0].tools.keys()).sort();
+if (JSON.stringify(ownerTools) !== JSON.stringify(expectedTools)) {
+  throw new Error(`owning Calm registered ${JSON.stringify(ownerTools)}, expected ${JSON.stringify(expectedTools)}`);
+}
+
+const projectCalmPath = realpathSync(resolve(process.env.PROJECT, ".pi/extensions/fm-calm.ts"));
+const projectCalm = result.extensions.find(
+  (extension) => realpathSync(extension.resolvedPath) === projectCalmPath,
+);
+if (!projectCalm) throw new Error("Pi did not exercise the trusted project Calm copy");
+const projectRegistrationCount =
+  projectCalm.tools.size +
+  projectCalm.commands.size +
+  projectCalm.shortcuts.size +
+  projectCalm.flags.size +
+  projectCalm.messageRenderers.size +
+  projectCalm.entryRenderers.size +
+  Array.from(projectCalm.handlers.values()).reduce((total, handlers) => total + handlers.length, 0);
+if (projectRegistrationCount !== 0) {
+  throw new Error(`non-owning project Calm made ${projectRegistrationCount} registrations`);
+}
+
+const projectProbe = result.extensions.find((extension) => extension.commands.has("project-probe"));
+if (!projectProbe) throw new Error("Pi dropped an unrelated trusted project extension");
+JS
+  status=$?
+  out=$(cat "$output_file")
+  [ "$status" -eq 0 ] || fail "Pi calm resource-loading ownership failed: $out"
+  [ -z "$out" ] || fail "Pi calm resource-loading ownership test printed output: $out"
+  pass "Pi keeps the explicit Calm implementation as the sole owner while loading unrelated trusted project extensions"
+}
+
 test_calm_activation_collision_and_regression_bound() {
   local fixture out output_file status
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
@@ -3949,6 +4070,7 @@ test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
 test_builtin_gate_load_time
+test_single_owner_across_pi_resource_loading
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle
 test_calm_mid_turn_working_notes
