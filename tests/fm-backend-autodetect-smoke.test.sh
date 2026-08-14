@@ -11,9 +11,9 @@
 # session, with a scratch FM_HOME and scratch local-only project. Concurrent
 # copies therefore never share the default session or a workspace namespace.
 #
-# The complementary "tmux nested inside herdr resolves to tmux, silently" case
-# is covered as a fast, deterministic fake-tmux fm-spawn.sh test in
-# tests/fm-backend.test.sh (test_spawn_autodetect_nesting_resolves_tmux_silently).
+# The complementary "tmux nested inside herdr resolves to tmux with the opt-out
+# notice" case is covered as a fast, deterministic fake-tmux fm-spawn.sh test in
+# tests/fm-backend.test.sh (test_spawn_autodetect_nesting_resolves_tmux_with_notice).
 # Reproducing a genuinely nested real-tmux-inside-real-herdr pane here would
 # need a live attached tmux client, which a background test script cannot
 # manufacture; the selection LOGIC for that case is already exercised for real
