@@ -120,10 +120,10 @@
 #                                   daemon defaults this to "discard" so no test
 #                                   can post a real notification (wedge_alarm_emit
 #                                   and the library-mode guard at the foot).
-#          FM_WEDGE_ALARM_TIMEOUT_SECS seconds allowed for each notifier before
-#                                   its watchdog terminates it and continues to the
-#                                   next channel (default 10; invalid/zero uses the
-#                                   default).
+#          FM_WEDGE_ALARM_TIMEOUT_SECS seconds allowed for each notifier or
+#                                   composer-evidence capture before its watchdog
+#                                   terminates it and continues (default 10;
+#                                   invalid/zero uses the default).
 #          FM_INJECT_CONFIRM_RETRIES Enter-retry attempts on a swallowed Enter
 #                                   (default 3); the digest is typed once, only
 #                                   Enter is retried. Composer-empty detection is

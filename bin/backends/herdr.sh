@@ -2633,8 +2633,9 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
   fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
 }
 
-# _fm_backend_herdr_composer_observe: thin adapter - capture plus capabilities
-# in, shared verdict out. The ANSI capture is preferred (styled=1 lets the
+# _fm_backend_herdr_composer_observe: capture one Herdr composer snapshot and
+# classify that same snapshot into FM_BACKEND_COMPOSER_SCREEN and
+# FM_BACKEND_COMPOSER_VERDICT. The ANSI capture is preferred (styled=1 lets the
 # shared classifier strip ghost/placeholder text); when it fails on an older
 # herdr, the plain capture degrades the descriptor to styled=0 rather than
 # letting ghost text be misread as typed input. Identity is fetched lazily,

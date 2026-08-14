@@ -189,17 +189,16 @@ test_matrix_claude_bare_nbsp_row() {
 }
 
 test_matrix_claude_titled_rule_composer() {
-  # Real idle claude 2.1.232, captured live through herdr 0.8.0 (task
-  # afk-wedge). The composer is still the bare `❯`+U+00A0 row between two
+  # Real idle Claude titled-rule rendering. The active version and backend
+  # evidence is recorded in docs/verification/runtime-backends.md. The
+  # composer is still the bare `❯`+U+00A0 row between two
   # horizontal rules, but the TOP rule now carries the session's agent name as
   # a reverse-video title, and a configured statusline sits below the bottom
   # rule.
   #
   # While only a SOLID rule counted as a rule, that one title left the bottom
   # rule unpaired, an unpaired rule below the candidate read as proof the
-  # candidate was stale, and every idle claude pane classified `unknown`. The
-  # away-mode injector defers on anything that is not `empty`, so escalations
-  # buffered for 9.7 hours against an idle supervisor pane.
+  # candidate was stale, and every idle Claude pane classified `unknown`.
   local titled solid typed
   titled=$'transcript line\n'\
 "${ESC}[0m${ESC}[38;2;136;136;136m────────────────────────${ESC}[0m${ESC}[38;2;0;0;0m${ESC}[48;2;136;136;136m orchestrator ${ESC}[0m${ESC}[38;2;136;136;136m──${ESC}[0m"$'\n'\

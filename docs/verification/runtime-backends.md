@@ -522,11 +522,29 @@ ok - forced teardown retains a nested secondmate home and its grandchild's Herdr
 
 Real captures verified these active distinctions:
 
-- Claude and Codex use bare `❯` and `›` agent composers.
+- Claude and Codex use bare `❯` and `›` agent composers, and Claude may embed its session title in the top horizontal rule around that bare row.
 - Pi uses content between complete separator rows and requires exact native Pi identity.
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
 - A bare shell prompt has no safe agent-composer container and is unknown.
+
+The Claude titled-rule variant was verified on 2026-08-14 with Claude Code 2.1.232 through Herdr 0.8.0.
+The same supervisor-pane read was used before and after the classifier correction, then repeated with unsent typed text in the composer:
+
+```sh
+. bin/fm-backend.sh
+fm_backend_composer_state herdr "$FM_SUPERVISOR_TARGET"
+```
+
+Observed verdicts:
+
+```text
+before titled-rule support: unknown
+after titled-rule support: empty
+after typing unsent text: pending
+```
+
+This focused Herdr check does not replace the complete tmux-backed matrix recorded in [Composer classification matrix](#composer-classification-matrix); that opt-in guard remains the fleet-wide refresh command.
 
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:

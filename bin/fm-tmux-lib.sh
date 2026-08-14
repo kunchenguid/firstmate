@@ -130,8 +130,10 @@ EOF
   esac
 }
 
-# _fm_tmux_composer_observe: the tmux composer verdict - a thin adapter over the
-# shared screen classifier. The verdict contract (empty | pending |
+# _fm_tmux_composer_observe: capture one tmux composer snapshot and classify
+# that same snapshot into FM_BACKEND_COMPOSER_SCREEN and
+# FM_BACKEND_COMPOSER_VERDICT. It is a thin adapter over the shared screen
+# classifier. The verdict contract (empty | pending |
 # pending-unproven | unknown, positive proof required for empty, unrecognized
 # future verdicts failing safe) is owned by bin/fm-composer-lib.sh. Identity
 # is fetched lazily, only when the classifier reports the verdict depends on

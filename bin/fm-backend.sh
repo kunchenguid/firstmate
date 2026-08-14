@@ -819,6 +819,10 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
   esac
 }
 
+# fm_backend_composer_observation: capture and classify one tmux or Herdr
+# composer snapshot, then print the verdict and that same snapshot as plain
+# text. Keeping the pair on one read makes a wedge marker diagnostic even when
+# the pane changes immediately afterward. Unsupported backends return nonzero.
 fm_backend_composer_observation() {  # <backend> <target>
   local backend=$1 plain_screen
   shift

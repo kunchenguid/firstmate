@@ -588,13 +588,10 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # promoted to a rule.
 #
 # Claude draws the session's agent name into the top rule of its own bare
-# composer this way (verified live on claude 2.1.232 through herdr 0.8.0). While
-# only a solid rule counted, that one titled rule left the composer's untitled
-# BOTTOM rule unpaired; an unpaired rule below the candidate is read as proof
-# that the candidate is stale, so _fm_composer_select_cursorless abandoned
-# selection and every idle claude pane classified `unknown`. The away-mode
-# injector defers on anything that is not `empty`, so escalations buffered for
-# 9.7 hours with the supervisor pane sitting idle the whole time.
+# composer this way. If only a solid rule counts, the untitled bottom rule is
+# left unpaired and cursorless selection rejects the real composer as stale.
+# The strict two-ended ASCII-printable form admits that title without admitting
+# one-ended transcript prose or non-ASCII content as a composer boundary.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
   local row=$1 residue LC_ALL=C
   [ -n "$row" ] || return 1
