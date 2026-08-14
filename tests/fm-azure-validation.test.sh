@@ -165,6 +165,8 @@ assert "retain-failure owns only failed outcomes" in host
 assert '"$NM_BIN" init >"$RUN_LOG" 2>&1' in guest
 assert guest.index('"$NM_BIN" init >"$RUN_LOG"') < guest.index('start) "$NM_BIN" axi run')
 assert 'runuser -u fmvalidate -- git -C "$REPO" config credential.helper "$GIT_HELPER"' in guest
+assert 'runuser -u fmvalidate -- git -C "$REPO" config user.name' in guest
+assert 'runuser -u fmvalidate -- git -C "$REPO" config user.email' in guest
 assert '"$LAUNCH" "$GIT_HELPER"' in guest
 assert 'install -d -m 0755 -o root -g root /opt/fm-azure-validation "$RUNTIME"' in guest
 assert guest.index("--no-same-permissions") < guest.index("0o755 if member.mode & 0o111")

@@ -470,6 +470,11 @@ chmod 0700 "$GIT_HELPER"
 # '.git/config': Permission denied). Write repo-local config as the owner.
 runuser -u fmvalidate -- git -C "$REPO" config credential.helper "$GIT_HELPER"
 runuser -u fmvalidate -- git -C "$REPO" config credential.useHttpPath true
+# The rebase and fix stages create commits inside the cell; without a
+# configured identity git refuses with "empty ident name". Match the
+# program's commit identity so pipeline commits attribute consistently.
+runuser -u fmvalidate -- git -C "$REPO" config user.name "ruby-dlee"
+runuser -u fmvalidate -- git -C "$REPO" config user.email "dongkeun@rubydata.ai"
 
 IDENTITY=$STATE/identity.json
 CURRENT_HEAD=$(git -C "$REPO" rev-parse HEAD)
