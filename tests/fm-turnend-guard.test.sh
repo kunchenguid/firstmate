@@ -116,6 +116,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -1164,6 +1165,40 @@ test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy() {
   pass "fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)"
 }
 
+test_hook_claude_mode_foreign_live_owner_does_not_starve_recovery() {
+  local dir claude owner auto_out auto_status guard_out guard_status owner_after
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-foreign-owner")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_integrated_failed_arm "$dir"
+  claude="$dir/claude"
+  ln -s /bin/bash "$claude"
+
+  "$claude" -c 'sleep 60; :' &
+  owner=$!
+  printf '%s\n' "$owner" > "$dir/state/.lock"
+  # shellcheck disable=SC2016 # the fake harness expands FM_HOME in its child shell.
+  auto_out=$(printf '%s\n' '{"session_id":"foreign","stop_hook_active":false}' \
+    | FM_HOME="$dir" "$claude" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); auto_status=$?
+  # shellcheck disable=SC2016 # the fake harness expands FM_HOME in its child shell.
+  guard_out=$(printf '%s\n' '{"session_id":"foreign","stop_hook_active":false}' \
+    | FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 FM_HOME="$dir" "$claude" -c \
+      '"$FM_HOME/bin/fm-turnend-guard.sh" --claude' 2>&1); guard_status=$?
+  owner_after=$(cat "$dir/state/.lock")
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+
+  expect_code 0 "$auto_status" "a read-only session's auto-arm must defer to the live lock owner"
+  [ -z "$auto_out" ] || fail "foreign-owner auto-arm produced output: $auto_out"
+  assert_grep 'event=gate-live-session-owner' "$dir/state/.claude-autoarm-entry-trace" \
+    "auto-arm entry trace did not identify the foreign live-owner gate"
+  expect_code 0 "$guard_status" "a read-only session must not be trapped by a guard whose matching auto-arm cannot own recovery"
+  [ -z "$guard_out" ] || fail "foreign-owner guard produced output: $guard_out"
+  [ "$owner_after" = "$owner" ] || fail "foreign-owner reproduction displaced the session lock owner"
+  assert_absent "$dir/state/.turnend-claude-blocks" "read-only guard consumed the lock owner's block budget"
+  pass "fm-turnend-guard --claude: a foreign live session owner cannot trap the read-only session in an unrecoverable Stop loop"
+}
+
 test_hook_claude_mode_reblocks_x_mode_without_tasks() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-x-mode")
@@ -1466,17 +1501,57 @@ test_hook_claude_mode_stale_rewake_epoch_blocks() {
   pass "fm-turnend-guard --claude: stale rewake epoch does not allow a blind stop"
 }
 
-test_hook_claude_mode_budget_without_verified_failure_keeps_blocking() {
-  local dir out status i
+test_hook_claude_mode_repeated_identical_block_escalates_once() {
+  local dir out out2 status status2 questions i
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget")
   : > "$dir/state/task1.meta"
-  for i in 1 2 3 4; do
+  printf 'epoch=3 owner_pid=999 outcome=rewake updated_at=1\n' > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  for i in 1 2; do
     out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
-    expect_code 2 "$status" "--claude block $i must exit 2 within the budget"
+    expect_code 2 "$status" "--claude block $i must exit 2 within the bounded retry budget"
+    assert_contains "$out" 'TURN WOULD END BLIND' "bounded retry $i lost the guard banner"
   done
-  assert_not_contains "$out" 'systemMessage' "budget exhaustion without verified auto-arm failure must not fail open"
-  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "unverified budget exhaustion recorded an attended alarm"
-  pass "fm-turnend-guard --claude: budget exhaustion alone cannot permit a blind stop"
+  assert_contains "$out" 'Do not answer it with another acknowledgement' \
+    "the second unchanged block did not direct the terminal captain escalation"
+  [ "$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")" = 1 ] \
+    || fail "frozen epoch unexpectedly advanced the failure-epoch budget"
+  [ "$(sed -n '4s/^reblocks=//p' "$dir/state/.turnend-claude-blocks")" = 2 ] \
+    || fail "frozen epoch did not advance the separate identical-block count"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 0 "$status" "the third unchanged stop must terminate the repeated guard loop"
+  assert_contains "$out" 'FIRSTMATE NEEDS YOUR DECISION' "terminal retry did not escalate the supervision choice"
+  assert_contains "$out" 'after two identical blocked turn ends' "terminal escalation did not name the bounded trigger"
+  questions=$(printf '%s' "$out" | tr -cd '?' | wc -c | tr -d ' ')
+  [ "$questions" -eq 1 ] || fail "terminal escalation must contain exactly one captain-facing question, got $questions: $out"
+  assert_present "$dir/state/.turnend-claude-escalated" "terminal escalation did not record its one-shot marker"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "unverified escalation consumed the verified-failure alarm"
+
+  out2=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status2=$?
+  expect_code 0 "$status2" "an already escalated unchanged episode must stay terminal"
+  [ -z "$out2" ] || fail "terminal captain escalation repeated in one unchanged episode: $out2"
+  rm -f "$dir/state/task1.meta"
+  out2=$(run_hook_claude "$dir" false); status2=$?
+  expect_code 0 "$status2" "an ended supervision need must stay silent"
+  assert_absent "$dir/state/.turnend-claude-escalated" "ended supervision need left the volatile escalation marker"
+  assert_absent "$dir/state/.turnend-claude-blocks" "ended supervision need left the volatile block budget"
+  pass "fm-turnend-guard --claude: two identical blocks terminate in one captain escalation instead of an unbounded loop"
+}
+
+test_hook_claude_mode_changed_block_evidence_resets_escalation_count() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget-change")
+  : > "$dir/state/task1.meta"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "first no-claim observation must block"
+  : > "$dir/state/task2.meta"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "changed supervision evidence must start a fresh block sequence"
+  assert_not_contains "$out" 'Do not answer it with another acknowledgement' \
+    "changed evidence was misclassified as the second identical block"
+  [ "$(sed -n '4s/^reblocks=//p' "$dir/state/.turnend-claude-blocks")" = 1 ] \
+    || fail "changed evidence did not reset the identical-block count"
+  pass "fm-turnend-guard --claude: changed evidence resets the identical-block escalation count"
 }
 
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
@@ -1538,6 +1613,7 @@ test_hook_claude_mode_allow_resets_budget() {
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
   expect_code 2 "$status" "first --claude block must exit 2"
   [ -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude block must record the consecutive-block budget"
+  : > "$dir/state/.turnend-claude-escalated"
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
   sleep 60 &
@@ -1555,6 +1631,7 @@ test_hook_claude_mode_allow_resets_budget() {
   rm -rf "$dir/state/.watch.lock"
   expect_code 0 "$status" "--claude must allow once the watcher is healthy again"
   [ ! -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude allow must reset the consecutive-block budget"
+  [ ! -f "$dir/state/.turnend-claude-escalated" ] || fail "positive watcher recovery must reset the one-shot escalation"
   [ ! -f "$dir/state/.claude-autoarm-failure-notified" ] || fail "positive watcher recovery must reset the failure notice"
   [ ! -f "$dir/state/.claude-autoarm-failure-alarmed" ] || fail "positive watcher recovery must reset the attended alarm"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
@@ -1648,6 +1725,7 @@ test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
+test_hook_claude_mode_foreign_live_owner_does_not_starve_recovery
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open
@@ -1658,7 +1736,8 @@ test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
-test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
+test_hook_claude_mode_repeated_identical_block_escalates_once
+test_hook_claude_mode_changed_block_evidence_resets_escalation_count
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
 test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open

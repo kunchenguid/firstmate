@@ -207,11 +207,11 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Claude's replacement Stop-owned path revalidated on 2026-07-24 and Cursor's stop-hook park validated on 2026-08-13.
+The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-14, with Claude's replacement Stop-owned path revalidated on 2026-08-14 and Cursor's stop-hook park validated on 2026-08-13.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
-| Claude | 2.1.219 | Cooperative blocking `Stop` guard plus `asyncRewake` auto-arm | A fresh unsupervised session ran session start first, reclaimed a stale dead-owner lock, completed two tokenless rewake cycles with no model arm command or guard continuation, and left a competing live owner unchanged. |
+| Claude | 2.1.232 | Cooperative blocking `Stop` guard plus `asyncRewake` auto-arm | Two real sessions shared an isolated home: the read-only session traced the foreign live-owner gate and finished without a guard loop, then the lock-owning session restored supervision and delivered an actionable rewake without human intervention. |
 | Codex | 0.142.1 | Blocking `Stop` hook | Hook process root stayed anchored to the trusted checkout and one continuation ran. |
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
@@ -296,7 +296,10 @@ Harness identity is read from the executable path and `argv[0]` as well as the c
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
 
-The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
+The Claude product live path ran with Claude Code 2.1.232 on 2026-08-14.
+Claude's current [hooks reference](https://code.claude.com/docs/en/hooks), read the same day, states that all matching hooks run in parallel, that Stop exit 2 prevents stopping and continues the conversation, and that `asyncRewake` wakes Claude on exit 2; it documents no sibling cancellation that would support the earlier short-circuit explanation.
+The live check deliberately separated the competing session from the lock owner, which is the condition that falsified that earlier hook-order explanation: the blocked Stop produced an auto-arm entry trace naming `gate-live-session-owner`, while a lock-owning Stop delivered `asyncRewake` normally.
+An absent entry trace on the blocked Stop would have falsified the identity-gate diagnosis; a claimed owner cycle without delivered `Stop hook feedback` would have supported the discarded-rewake candidate.
 
 ```sh
 claude --version
@@ -306,8 +309,8 @@ FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh
 Observed output:
 
 ```text
-2.1.219 (Claude Code)
-ok - Claude 2.1.219 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
+2.1.232 (Claude Code)
+ok - Claude 2.1.232 (Claude Code) live E2E let the read-only competing session finish, then restored supervision from the lock-owning Stop hook without human intervention
 ```
 
 Current entry points:
@@ -349,6 +352,30 @@ Observed output:
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 fm-doc-audience-check: ok surfaces=64 local_links=188
 FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=80078
+```
+
+The foreign-session Stop-loop correction, bounded entry trace, and one-shot repeated-block escalation were verified on 2026-08-14 with ShellCheck 0.11.0.
+The portable suite uses real operating-system processes without a vendor harness, while the credentialed live guard above supplies the separate Claude-dependent verdict.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-turnend-guard.test.sh tests/fm-supervision-instructions.test.sh | tail -8
+```
+
+Observed output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-doc-audience-check: ok surfaces=67 local_links=233
+FM_TEST_END 2026-08-14T02:34:08Z tests/fm-supervision-instructions.test.sh exit=0 duration_ms=711 gate_skip=false
+FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=141882
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=711 failed=0
+FM_TEST_SUMMARY_FAMILY family=unclassified count=1 duration_ms=63319 failed=0
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=1 duration_ms=76892 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-turnend-guard.test.sh duration_ms=76892
+FM_TEST_SLOWEST rank=2 script=tests/fm-claude-stop-autoarm.test.sh duration_ms=63319
+FM_TEST_SLOWEST rank=3 script=tests/fm-supervision-instructions.test.sh duration_ms=711
 ```
 
 The Pi extension-model pull-guard correction (`bin/fm-guard.sh` no longer reports a false watcher-down on a Pi primary during the extension's own watcher hand-off) was verified on 2026-08-13 with the installed ShellCheck 0.11.0 and isolated behavior suites.
@@ -426,7 +453,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
-| Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
+| Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | A read-only competing session defers without a guard loop, then the lock-owning session restores supervision and receives the actionable rewake. |
 | Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |

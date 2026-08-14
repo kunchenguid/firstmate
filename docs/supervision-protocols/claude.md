@@ -12,6 +12,8 @@ When this session owns supervision and away mode is not active:
 4. On the one `Stop hook feedback` automatic-mechanism failure notice (`firstmate watcher auto-arm FAILED ...`), drain, inspect the automatic mechanism failure, and do not turn the notice into a repeating manual-arm loop.
 5. If the Stop hook does not claim the home or reports an exhausted failure, inspect its registration and watcher startup path before ending blind.
    Keep the Stop-owned automatic mechanism as the only Claude arm owner.
+   If the same no-claim guard block appears a second time with no changed evidence, do not answer it with another acknowledgement.
+   Tell the captain that automatic supervision is not recovering and ask whether to keep the session attended for diagnosis or explicitly accept ending while work is unsupervised; the guard's next unchanged Stop ends the continuation loop with the same one-shot decision message.
 6. Treat `watcher: started ...` and `watcher: attached ...` inside automatic arm output as proof that one live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
 7. The durable wake queue preserves actionable events between a rewake and the next Stop-launched arm, while the bounded turn-end guard prevents a blind Stop when recovery did not start.

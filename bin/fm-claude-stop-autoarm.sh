@@ -64,6 +64,9 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 EPOCH="$STATE/.claude-autoarm-epoch"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+ENTRY_TRACE="$STATE/.claude-autoarm-entry-trace"
+ENTRY_TRACE_LOCK="$STATE/.claude-autoarm-entry-trace.lock"
+ENTRY_TRACE_MAX_LINES=256
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
 case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
@@ -81,6 +84,31 @@ esac
 # shellcheck source=bin/fm-hook-host-lib.sh
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
+# The bounded volatile entry trace distinguishes a hook that never ran from one
+# that took a pre-claim gate. Trace I/O is strictly best-effort and never waits,
+# prints, or changes the hook result. Concurrent appends may briefly exceed the
+# bound; the next successful trimming claim restores it.
+trace_entry_event() {  # <entry|gate-name>
+  local event=$1 count tmp
+  [ -d "$STATE" ] || return 0
+  if [ -e "$ENTRY_TRACE" ] && { [ ! -f "$ENTRY_TRACE" ] || [ -L "$ENTRY_TRACE" ]; }; then
+    return 0
+  fi
+  printf 'at=%s pid=%s event=%s\n' "$(date +%s)" "${BASHPID:-$$}" "$event" \
+    >> "$ENTRY_TRACE" 2>/dev/null || return 0
+  fm_lock_try_acquire "$ENTRY_TRACE_LOCK" || return 0
+  count=$(awk 'END { print NR }' "$ENTRY_TRACE" 2>/dev/null || true)
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  if [ "$count" -gt "$ENTRY_TRACE_MAX_LINES" ]; then
+    tmp="$ENTRY_TRACE.tmp.${BASHPID:-$$}"
+    tail -n "$ENTRY_TRACE_MAX_LINES" "$ENTRY_TRACE" > "$tmp" 2>/dev/null \
+      && mv -f "$tmp" "$ENTRY_TRACE" 2>/dev/null
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+  fm_lock_release "$ENTRY_TRACE_LOCK"
+  return 0
+}
+
 # Consume the Stop payload once. The decisions below are state-based; the
 # payload is read so a slow writer can never wedge on a full pipe, and its host
 # is inspected before anything else runs.
@@ -93,9 +121,13 @@ PAYLOAD=$(cat 2>/dev/null || true)
 # (docs/turnend-guard.md "Harness integrations"). Cursor's own park adapter owns
 # its turn boundary, so stand down on a Cursor-delivered payload.
 fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
+trace_entry_event entry
 
 # --- scope: genuine primary checkout only -----------------------------------
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+if ! fm_primary_scope_matches "$FM_ROOT" "$STATE"; then
+  trace_entry_event gate-scope
+  exit 0
+fi
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
 # A prior session may have died after leaving its numeric harness pid in .lock.
@@ -107,40 +139,61 @@ RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$LOCK_PID" in
-    ''|*[!0-9]*) exit 0 ;;
+    '') trace_entry_event gate-lock-missing; exit 0 ;;
+    *[!0-9]*) trace_entry_event gate-lock-malformed; exit 0 ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  if fm_harness_pid_alive "$LOCK_PID"; then
+    trace_entry_event gate-live-session-owner
+    exit 0
+  fi
   RECOVER_SESSION_LOCK=1
 fi
 
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
-[ -e "$STATE/.afk" ] && exit 0
+if [ -e "$STATE/.afk" ]; then
+  trace_entry_event gate-afk
+  exit 0
+fi
 
 # --- need: in-flight work or an X-mode relay poll ----------------------------
 need_supervision() {
   fm_supervision_needed "$STATE" "$GRACE"
 }
-need_supervision || exit 0
+if ! need_supervision; then
+  trace_entry_event gate-no-supervision
+  exit 0
+fi
 
 # --- stale session-lock recovery ---------------------------------------------
 # Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics
 # remain the single acquisition owner, then re-verify current-session identity
 # before touching any auto-arm state.
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
-  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
-  fm_session_lock_owned_by_self "$STATE" || exit 0
+  if ! "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1; then
+    trace_entry_event gate-lock-recovery-failed
+    exit 0
+  fi
+  if ! fm_session_lock_owned_by_self "$STATE"; then
+    trace_entry_event gate-identity-unresolved
+    exit 0
+  fi
 fi
 
 # --- single-flight owner claim ------------------------------------------------
 # Claude runs one background process per firing with no dedupe. Exactly one
 # owner foregrounds the arm and translates its close; every other firing exits
 # 0 so one watcher cycle maps to at most one exit-2 rewake.
-fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+if ! fm_lock_try_acquire "$OWNER_LOCK"; then
+  trace_entry_event gate-owner-lock-held
+  exit 0
+fi
 if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
+  trace_entry_event gate-owner-role-failed
   fm_lock_release "$OWNER_LOCK"
   exit 0
 fi
 trap 'fm_lock_release "$OWNER_LOCK"' EXIT
+trace_entry_event claimed
 
 write_epoch() {  # <outcome>
   local outcome=$1 seq tmp
