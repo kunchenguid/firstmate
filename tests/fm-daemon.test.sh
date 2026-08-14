@@ -1128,7 +1128,7 @@ test_submit_ack_reports_pending_on_persistent_swallow() {
 }
 
 test_max_defer_empty_swallow_types_once_and_alarms() {
-  local dir state fakebin sent
+  local dir state fakebin sent marker_mode
   dir=$(make_bordered_case maxdefer-stuck)
   state="$dir/state"; fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
@@ -1144,6 +1144,13 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
     || fail "max-defer typed the digest more than once"
   [ -s "$state/.subsuper-inject-wedged" ] \
     || fail "stuck max-defer inject did not raise a wedge alarm marker"
+  if [ "$(uname)" = Darwin ]; then
+    marker_mode=$(stat -f %Lp "$state/.subsuper-inject-wedged")
+  else
+    marker_mode=$(stat -c %a "$state/.subsuper-inject-wedged")
+  fi
+  [ "$marker_mode" = 600 ] \
+    || fail "wedge alarm marker mode was not 0600: $marker_mode"
   [ -s "$state/.subsuper-escalations" ] \
     || fail "buffer lost after a failed max-defer inject (must be preserved)"
   # The marker must carry enough to tell a half-typed line apart from a
