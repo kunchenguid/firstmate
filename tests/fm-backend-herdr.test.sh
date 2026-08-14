@@ -4376,6 +4376,29 @@ test_missing_pane_relaunch_refusal_boundaries_are_non_mutating() {
   pass "fm_backend_herdr_relaunch_missing_pane: live, unreadable, changed, ambiguous, and conflicting endpoints refuse without replacement publication"
 }
 
+test_missing_pane_relaunch_rollback_restores_presentation_binding() {
+  local dir state home out
+  dir="$TMP_ROOT/missing-pane-rollback"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$state" "$home"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" hr1) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label hr1 "$token")
+    fm_backend_herdr_projection_journal_bind \
+      "$1/hr1.herdr-presentation" hr1 "$2" hses w1 w1:t2 w1:p2 w0 firstmate "$label" fm-hr1 || exit 1
+    fm_backend_herdr_projection_journal_replace_endpoint \
+      "$1/hr1.herdr-presentation" hr1 w1:t2 w1:p2 w1:t3 w1:p3 || exit 1
+    fm_backend_herdr_projection_reclaim_rollback() { printf "%s:%s" "$1" "$2"; }
+    reclaimed=$(fm_backend_herdr_relaunch_missing_pane_rollback \
+      hses "$1/hr1.herdr-presentation" hr1 w1:t2 w1:p2 w1:t3 w1:p3) || exit 1
+    fm_backend_herdr_projection_journal_snapshot "$1/hr1.herdr-presentation" hr1 || exit 1
+    printf "%s|%s|%s\n" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" "$reclaimed"
+  ' "$ROOT" "$state" "$home") || fail "missing-pane rollback should restore its presentation binding"
+  [ "$out" = 'w1:t2|w1:p2|hses:w1:p3' ] \
+    || fail "missing-pane rollback did not restore the old binding before reclaiming the new pane: $out"
+  pass "fm_backend_herdr_relaunch_missing_pane_rollback: abort restores the old presentation endpoint before reclaiming the replacement"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4421,6 +4444,7 @@ test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_missing_pane_relaunch_delegates_exact_replacement
 test_missing_pane_relaunch_refusal_boundaries_are_non_mutating
+test_missing_pane_relaunch_rollback_restores_presentation_binding
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
 test_presentation_defaults_on_at_or_above_the_floor

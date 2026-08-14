@@ -2144,6 +2144,13 @@ EOF
   printf '%s' "$replacement"
 }
 
+fm_backend_herdr_relaunch_missing_pane_rollback() {
+  local session=$1 journal=$2 id=$3 old_tab=$4 old_pane=$5 new_tab=$6 new_pane=$7
+  fm_backend_herdr_projection_journal_replace_endpoint \
+    "$journal" "$id" "$new_tab" "$new_pane" "$old_tab" "$old_pane" || return 1
+  fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane"
+}
+
 # fm_backend_herdr_projection_create_task: create one disposable presentation
 # workspace and its normal fm-<id> task tab without looking up, adopting, or
 # reusing any existing workspace.

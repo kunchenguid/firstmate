@@ -136,6 +136,10 @@ if [ "${#args[@]}" -ge 2 ] && [ "${args[$penultimate]}" = --session ]; then
   unset "args[$last]" "args[$penultimate]"
 fi
 case "${args[0]:-} ${args[1]:-}" in
+  'session list')
+    printf '{"sessions":[{"name":"hses","running":true,"socket_path":"%s/herdr.sock"}]}\n' "$dir"
+    exit 0
+    ;;
   'pane get')
     if [ "${args[2]:-}" = w1:p3 ] && [ "$case_name" = conflicting-pane ]; then
       printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p3"}}}'
@@ -294,6 +298,26 @@ add_herdr_missing_pane_task() {  # <case-dir> <id>
     echo 'herdr_pane_id=w1:p2'
   } > "$home/state/$id.meta"
   TASK_TMPS+=("/tmp/fm-$id")
+}
+
+add_herdr_missing_pane_journal_mismatch() {
+  local dir=$1 id=$2 home journal
+  home=$(cd "$dir/home" && pwd -P)
+  journal="$dir/home/state/$id.herdr-presentation"
+  {
+    echo 'version=2'
+    echo "task_id=$id"
+    echo 'projection_id=0123456789ABCDEFGHIJKL'
+    echo "home=$home"
+    echo 'session=hses'
+    echo 'workspace_id=w1'
+    echo 'tab_id=w1:t9'
+    echo 'pane_id=w1:p2'
+    echo 'parent_workspace_id=w0'
+    echo 'parent_label=firstmate'
+    echo 'workspace_label=└ hr1 · p:0123456789ABCDEFGHIJKL'
+    echo "task_label=fm-$id"
+  } > "$journal"
 }
 
 run_control() {  # <case-dir> <args...>
@@ -1449,8 +1473,8 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 }
 
 test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
-  local case_name dir out rc before expected
-  for case_name in live-agent workspace-unreadable workspace-changed tabs-unavailable tabs-malformed changed-tab ambiguous-tab mismatched-pane stale-readable conflicting-pane non-isolated-worktree; do
+  local case_name dir out rc before journal_before expected
+  for case_name in live-agent workspace-unreadable workspace-changed tabs-unavailable tabs-malformed changed-tab ambiguous-tab mismatched-pane stale-readable conflicting-pane non-isolated-worktree presentation-journal-mismatched; do
     dir=$(new_case "herdr-$case_name" hr1)
     add_herdr_missing_pane_task "$dir" hr1
     make_herdr_missing_pane_stub "$dir" "$case_name"
@@ -1460,6 +1484,12 @@ test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
         { print }
       ' "$dir/home/state/hr1.meta" > "$dir/home/state/hr1.meta.next"
       mv "$dir/home/state/hr1.meta.next" "$dir/home/state/hr1.meta"
+    fi
+    journal_before=
+    if [ "$case_name" = presentation-journal-mismatched ]; then
+      add_herdr_missing_pane_journal_mismatch "$dir" hr1
+      journal_before="$dir/journal-before"
+      cp "$dir/home/state/hr1.herdr-presentation" "$journal_before"
     fi
     before="$dir/meta-before"
     cp "$dir/home/state/hr1.meta" "$before"
@@ -1477,10 +1507,13 @@ test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
       stale-readable) expected='requires the recorded pane to remain gone, got no-agent' ;;
       conflicting-pane) expected="herdr tab 'fm-hr1' already exists" ;;
       non-isolated-worktree) expected='not an isolated worktree root' ;;
+      presentation-journal-mismatched) expected='presentation binding for hr1 is ambiguous or changed' ;;
     esac
     assert_contains "$out" "$expected" "the $case_name refusal should name its failed proof"
     cmp -s "$before" "$dir/home/state/hr1.meta" \
       || fail "the $case_name refusal changed the task's serialized metadata"
+    [ -z "$journal_before" ] || cmp -s "$journal_before" "$dir/home/state/hr1.herdr-presentation" \
+      || fail "the $case_name refusal changed the presentation journal"
     [ ! -e "$dir/fake/herdr-mutations" ] \
       || fail "the $case_name refusal created or closed a Herdr endpoint"
   done
