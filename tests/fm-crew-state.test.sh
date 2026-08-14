@@ -543,6 +543,47 @@ test_ci_monitoring_cancelled_only_is_not_green() {
   pass "cancelled-only ci-monitor marker is not green"
 }
 
+# Real ci.log lines carry a timestamp/indent prefix, and a red marker can land
+# AFTER a green one. Both the marker selector and the conclusion classifier must
+# see the prefixed later line, or the earlier green wins.
+test_prefixed_red_marker_after_green_is_not_green() {
+  reset_fakes
+  local d; d=$(new_case ci-prefixed-red)
+  make_repo_on_branch "$d/wt" fm/feat-ciprefixed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ciprefixed.meta" "window=fm:fm-feat-ciprefixed" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ciprefixed)"
+  FM_FAKE_CI_LOGS="$(cat <<'EOF'
+[12:00:03] all CI checks passed - still monitoring until merged or closed
+[12:00:04] CI checks were cancelled without reporting a verdict
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-ciprefixed)
+  assert_contains "$out" "state: working" "a later prefixed cancelled marker overrides the earlier green"
+  assert_not_contains "$out" "state: done" "prefixed cancelled marker must not read as done"
+  pass "prefixed red marker after green is not green"
+}
+
+# "CI failures" is a red phrase the classifier recognizes; the marker selector
+# must recognize it too, or the last green line stays the selected marker.
+test_ci_failures_phrase_after_green_is_not_green() {
+  reset_fakes
+  local d; d=$(new_case ci-failures-phrase)
+  make_repo_on_branch "$d/wt" fm/feat-cifailures
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cifailures.meta" "window=fm:fm-feat-cifailures" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cifailures)"
+  FM_FAKE_CI_LOGS="$(cat <<'EOF'
+all CI checks passed - still monitoring until merged or closed
+CI failures: 2 jobs red
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-cifailures)
+  assert_contains "$out" "state: working" "a later CI failures line overrides the earlier green"
+  assert_not_contains "$out" "state: done" "CI failures must not read as done"
+  pass "CI failures marker after green is not green"
+}
+
 test_checks_passed_without_green_evidence_is_not_done() {
   reset_fakes
   local d; d=$(new_case checks-passed-empty)
@@ -810,11 +851,37 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
   running    fm/feat-coarseready ${short}  2026-07-02 22:05
 EOF
 )"
-  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
+  # The other branch's log is GREEN on purpose: any code that probed it would
+  # score green and emit done, so this assertion fails on a regression. A
+  # pending fake would pass either way and guard nothing.
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: working" "coarse ready status without evidence stays working"
-  assert_not_contains "$out" "state: done" "another branch's pending log must not corroborate a checks-green claim"
+  assert_contains "$out" "state: working" "coarse ready status without own evidence stays working"
+  assert_not_contains "$out" "state: done" "another branch's green log must not corroborate a checks-green claim"
   pass "coarse run does not treat another branch's ci log as this crew's green evidence"
+}
+
+# A coarse `completed` row carries no outcome and no check evidence, and the
+# ci-log scorer cannot run for it, so it must not reach done.
+test_coarse_completed_row_is_not_done() {
+  reset_fakes
+  local d short; d=$(new_case coarse-completed)
+  make_repo_on_branch "$d/wt" fm/feat-coarsedone
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-coarsedone.meta" "window=fm:fm-feat-coarsedone" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-07-02 22:10
+  completed  fm/feat-coarsedone ${short}  2026-07-02 22:05  https://github.com/o/r/pull/9
+EOF
+)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  local out; out=$(run_crew_state "$d" feat-coarsedone)
+  assert_contains "$out" "source: run-step" "coarse completed row is still attributed to this crew"
+  assert_not_contains "$out" "state: done" "coarse completed without check evidence must not be done"
+  assert_contains "$out" "run completed without check evidence" "coarse completed names the missing evidence"
+  pass "coarse completed row does not report done"
 }
 
 # A different-branch run with NO matching runs-list row must NOT be
@@ -1476,6 +1543,8 @@ test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_is_not_green
 test_ci_monitoring_cancelled_only_is_not_green
+test_prefixed_red_marker_after_green_is_not_green
+test_ci_failures_phrase_after_green_is_not_green
 test_checks_passed_without_green_evidence_is_not_done
 test_checks_passed_with_success_evidence_is_done
 test_ci_monitoring_green_then_rearm_stays_working
@@ -1491,6 +1560,7 @@ test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
+test_coarse_completed_row_is_not_done
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working

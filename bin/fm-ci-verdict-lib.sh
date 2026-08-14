@@ -31,29 +31,21 @@ fm_ci_verdict_is_success() {
 
 fm_ci_ready_verdict() {
   local raw conclusion saw_success=0
-  if [ "$#" -gt 0 ]; then
-    for raw in "$@"; do
-      conclusion=$(fm_ci_verdict_trim "$raw")
-      [ -n "$conclusion" ] || continue
-      if fm_ci_verdict_is_success "$conclusion"; then
-        saw_success=1
-        continue
-      fi
-      printf 'not-passed'
-      return 0
-    done
-  else
+  if [ "$#" -eq 0 ]; then
     while IFS= read -r raw || [ -n "$raw" ]; do
-      conclusion=$(fm_ci_verdict_trim "$raw")
-      [ -n "$conclusion" ] || continue
-      if fm_ci_verdict_is_success "$conclusion"; then
-        saw_success=1
-        continue
-      fi
-      printf 'not-passed'
-      return 0
+      set -- "$@" "$raw"
     done
   fi
+  for raw in "$@"; do
+    conclusion=$(fm_ci_verdict_trim "$raw")
+    [ -n "$conclusion" ] || continue
+    if fm_ci_verdict_is_success "$conclusion"; then
+      saw_success=1
+      continue
+    fi
+    printf 'not-passed'
+    return 0
+  done
   if [ "$saw_success" = 1 ]; then
     printf 'passed'
   else

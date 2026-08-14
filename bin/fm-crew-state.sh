@@ -345,10 +345,10 @@ nm_effective_ci_step_status() {
 nm_ci_marker_conclusion() {
   case "$1" in
     *"all CI checks passed"*) printf 'SUCCESS' ;;
-    *"CI check cancelled"*|"CI checks were cancelled"*|"cancelled without"*) printf 'CANCELLED' ;;
-    *"checks failed"*|"CI failures"*|"issues detected"*) printf 'FAILURE' ;;
-    *"CI checks running"*|"waiting for checks"*|"base branch advanced"*"re-arming CI monitor timeout"*) printf 'PENDING' ;;
-    *"no CI checks reported"*|"repository declares no CI"*) ;;
+    *"CI check cancelled"*|*"CI checks were cancelled"*|*"cancelled without"*) printf 'CANCELLED' ;;
+    *"checks failed"*|*"CI failures"*|*"issues detected"*) printf 'FAILURE' ;;
+    *"CI checks running"*|*"waiting for checks"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'PENDING' ;;
+    *"no CI checks reported"*|*"repository declares no CI"*) ;;
   esac
 }
 
@@ -359,7 +359,7 @@ nm_ci_checks_state() {
   log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
   [ -n "$log_tail" ] || { printf 'unknown'; return; }
   marker=$(printf '%s\n' "$log_tail" \
-    | grep -E 'CI checks passed|no CI checks reported|repository declares no CI|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout|CI check cancelled|CI checks were cancelled|cancelled without' \
+    | grep -E 'CI checks passed|no CI checks reported|repository declares no CI|checks failed|CI failures|issues detected|CI checks running|waiting for checks|base branch advanced.*re-arming CI monitor timeout|CI check cancelled|CI checks were cancelled|cancelled without' \
     | tail -1)
   [ -n "$marker" ] || { printf 'unknown'; return; }
   conclusion=$(nm_ci_marker_conclusion "$marker")
@@ -489,15 +489,20 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
+    # working, failed, or unknown. A crew genuinely parked at a gate still
     # gets full detail once `axi status` reports its own branch again (e.g.
     # once its own step is the most-recently-touched one), and its own
     # needs-decision/blocked status-log append (a captain-relevant VERB) is
     # surfaced through signal_reason_is_actionable regardless of this
     # coarse-vs-full distinction, so a real gate is never silently missed.
+    # A `completed` row carries no outcome and no check evidence, and the
+    # ci-log scorer cannot run here ($RUN_OUT holds another run's id), so it
+    # cannot distinguish a merged run from one that claimed checks-passed over
+    # cancelled or zero checks. Reporting unknown keeps the same invariant the
+    # scorer enforces on the full path: done requires scored green evidence.
     case "$COARSE_STATUS" in
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
+      completed) RUN_STATE=unknown; RUN_DETAIL="run completed without check evidence" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
