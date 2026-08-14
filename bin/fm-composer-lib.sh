@@ -145,6 +145,26 @@ for _fm_composer_space_octal in \
 done
 unset -v _fm_composer_space_octal _fm_composer_space_utf8
 
+# The UTF-8 lead-byte pairs of U+2500..U+25FF - box drawing, block elements, and
+# geometric shapes - built from octal escapes for the same reviewability reason
+# as the space list above. This is a superset of every glyph
+# fm_composer_row_has_edge treats as structural, and it is what
+# fm_composer_column_spaces refuses before it counts anything.
+FM_COMPOSER_STRUCTURAL_LEADS=()
+for _fm_composer_lead_octal in '\0342\0224' '\0342\0225' '\0342\0226' '\0342\0227'; do
+  printf -v _fm_composer_lead_utf8 '%b' "$_fm_composer_lead_octal"
+  FM_COMPOSER_STRUCTURAL_LEADS+=("$_fm_composer_lead_utf8")
+done
+unset -v _fm_composer_lead_octal _fm_composer_lead_utf8
+
+# One WELL-FORMED UTF-8 multibyte character as a byte-exact ERE: a 2-, 3-, or
+# 4-byte lead followed by exactly its continuation bytes. Built from octal
+# escapes rather than `\xHH`, which GNU sed accepts and BSD sed does not, and
+# always applied under LC_ALL=C so it matches bytes rather than the locale's
+# idea of a character.
+printf -v FM_COMPOSER_UTF8_CHAR_RE '%b' \
+  '[\0302-\0337][\0200-\0277]|[\0340-\0357][\0200-\0277]{2}|[\0360-\0364][\0200-\0277]{3}'
+
 # fm_composer_normalize_spaces_var: the ONE Unicode-whitespace mapping.
 # Replaces in place through the named variable so no caller needs a subshell.
 # Substitution, never deletion: deleting would silently join "foo<NBSP>bar"
@@ -606,17 +626,19 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
 # title overwrites dashes rather than displacing them, so the titled rule keeps
 # its partner's width.
 #
-# Width is proven the way _fm_composer_titled_bottom_ok proves it, by comparing
-# canonical space strings rather than counting characters. `${#row}` counts
-# characters under a UTF-8 locale and BYTES under LC_ALL=C, so a length test
-# here would silently disagree with itself between locales (issue #1988); a
-# character-for-character substitution compared as a string cannot.
+# Width is proven by fm_composer_column_spaces, the shared column-counting proof
+# _fm_composer_titled_bottom_ok and fm_composer_geometry_spaces also use, so all
+# three agree about what a column is and about what refuses. Space strings are
+# compared, never counted: `${#row}` counts characters under a UTF-8 locale and
+# BYTES under LC_ALL=C, so a length test here would silently disagree with itself
+# between locales (issue #1988).
 #
-# Title text is ASCII-printable only, the same limit _fm_composer_titled_bottom_ok
-# and fm_composer_geometry_spaces already impose fleet-wide. A title carrying a
-# non-ASCII glyph leaves residue, fails the proof, and the verdict stays
-# `unknown` - a refusal to read, which is the safe direction and the same answer
-# as before this exception existed.
+# Title text may be any script, and that boundary was widened deliberately: the
+# terminal title on the host that paid for this defect began with U+2733, so an
+# ASCII-only proof excluded the exact shape this predicate exists to read. What
+# still refuses is what cannot be counted honestly - a double-width glyph, a
+# structural box-drawing glyph, or a malformed byte - and each of those leaves the
+# verdict `unknown`, a refusal to read, which is the safe direction.
 _fm_composer_rule_row() {  # <trimmed-row> <plain-rule-spaces>
   local row=$1 expected=$2 spaces
   [ -n "$row" ] || return 1
@@ -625,13 +647,7 @@ _fm_composer_rule_row() {  # <trimmed-row> <plain-rule-spaces>
     ────────*) ;;
     *) return 1 ;;
   esac
-  spaces=${row//─/ }
-  spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
-  # Anything left is neither a dash nor title text - another container's edge
-  # glyph, for instance - and this is not a rule.
-  case "$spaces" in
-    *[![:space:]]*) return 1 ;;
-  esac
+  spaces=$(fm_composer_column_spaces "${row//─/ }") || return 1
   [ "$spaces" = "$expected" ]
 }
 
@@ -842,6 +858,8 @@ EOF
 # 0 when a mismatched bottom border reads as a legitimate TITLE: the trimmed
 # inner (corners already stripped) still starts and ends with the family's own
 # rule glyph, so the title is embedded IN the rule rather than replacing it.
+# The width proof and every refusal belong to fm_composer_column_spaces, shared
+# with _fm_composer_rule_row and fm_composer_geometry_spaces.
 _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
   local family=$1 inner=$2 expected=$3 dash spaces
   fm_composer_normalize_trim_var inner
@@ -856,11 +874,7 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
     "$dash"*"$dash") ;;
     *) return 1 ;;
   esac
-  spaces=${inner//"$dash"/ }
-  spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
-  case "$spaces" in
-    *[![:space:]]*) return 1 ;;
-  esac
+  spaces=$(fm_composer_column_spaces "${inner//"$dash"/ }") || return 1
   [ "$spaces" = "$expected" ]
 }
 
@@ -887,22 +901,72 @@ fm_composer_row_has_edge() {  # <trimmed-row>
   return 1
 }
 
+# fm_composer_column_spaces: the ONE fleet-wide column-counting proof - map text
+# to exactly one space per terminal column, or refuse when the column count
+# cannot be honestly established. Prints the mapping and returns 0 when every
+# byte was counted. A refusal returns 1, and prints what it did map with the
+# uncountable bytes still in place so a caller can name what it saw - except the
+# structural rejection in pass 1, which prints nothing because it never counted
+# anything.
+#
+# Three callers ask this same question - "how many columns is this text, refusing
+# anything I cannot count" - against a partner row's canonical space string:
+# _fm_composer_rule_row, _fm_composer_titled_bottom_ok, and
+# fm_composer_geometry_spaces. They share one boundary here rather than three
+# spellings that drift apart the next time what counts as residue changes.
+#
+# Equality against the partner's space string is what makes the mapping safe: a
+# miscounted column in EITHER direction fails that comparison and refuses, so
+# only the structural rejection has to be exactly right. Never a length test:
+# `${#text}` counts characters under UTF-8 and BYTES under LC_ALL=C (issue
+# #1988), so a count would silently disagree with itself between locales.
+#
+# The passes, in order:
+#   1. A box-drawing, block, or geometric glyph (U+2500..U+25FF) refuses
+#      outright, BEFORE any mapping. The caller has already substituted away its
+#      own rule glyph, so one still standing here is another container's edge and
+#      must never be credited as a column of title text.
+#   2. One well-formed UTF-8 multibyte character maps to one space, by bytes.
+#      Malformed bytes are deliberately left in place rather than deleted, so
+#      pass 4 refuses them explicitly instead of the arithmetic coming out right
+#      by luck.
+#   3. Every ASCII printable maps to a space, the pass this proof always had.
+#   4. Anything still standing refuses: a control byte, DEL, ESC, an invalid lead
+#      byte, an orphan continuation byte, or a truncated sequence.
+#
+# A DOUBLE-WIDTH character (CJK, emoji presentation) is counted as ONE column and
+# so under-counted, the partner comparison mismatches, and the caller refuses.
+# That is deliberate and is pinned as intended rather than left as an accident: a
+# terminal capture carries no width table, and refusing to read is the safe
+# direction everywhere in this owner.
+fm_composer_column_spaces() {  # <text> -> one space per counted column
+  local text=$1 lead
+  for lead in "${FM_COMPOSER_STRUCTURAL_LEADS[@]}"; do
+    case "$text" in
+      *"$lead"*) return 1 ;;
+    esac
+  done
+  text=$(printf '%s' "$text" \
+    | LC_ALL=C sed -E -e "s/$FM_COMPOSER_UTF8_CHAR_RE/ /g" -e 's/[!-~]/ /g')
+  printf '%s' "$text"
+  case "$text" in
+    *[![:space:]]*) return 1 ;;
+  esac
+  return 0
+}
+
 # fm_composer_geometry_spaces: prove a box content row blank to the same width
 # as its border. One leading prompt glyph is blanked (every prompt glyph
-# occupies one column), the content is normalized so a Unicode space cannot
-# defeat the blankness proof, then every remaining ASCII-printable is mapped to
-# a space; any other residue fails the proof.
+# occupies one column) and the content is normalized so a Unicode space cannot
+# defeat the blankness proof; the column count itself, and every refusal, belong
+# to fm_composer_column_spaces above.
 fm_composer_geometry_spaces() {  # <content-inner> -> spaces
   local content=$1 glyph
   fm_composer_normalize_spaces_var content
   if fm_composer_leading_prompt_glyph_var glyph "$content"; then
     content=${content/"$glyph"/ }
   fi
-  content=$(printf '%s' "$content" | LC_ALL=C sed 's/[!-~]/ /g')
-  case "$content" in
-    *[![:space:]]*) return 1 ;;
-  esac
-  printf '%s' "$content"
+  fm_composer_column_spaces "$content"
 }
 
 # _fm_composer_screen_row: print row <n> (zero-based) of <screen>.

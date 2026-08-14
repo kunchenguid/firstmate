@@ -366,6 +366,13 @@ test_matrix_grok_titled_bottom_border() {
   assert_screen "grok titled on zellij" empty "$CAPS_STYLED_NOID" "$titled"
   # The tolerance is additive: an untitled border still proves the same box.
   assert_screen "grok untitled border" empty "$CAPS_TMUX" "$plain_border" 1
+  # The titled-bottom proof shares fm_composer_column_spaces with the titled-rule
+  # predicate, so a non-ASCII glyph in this title is counted rather than refused
+  # at the same border width. Pinned here because that boundary moved with the
+  # shared proof, not only in the titled-rule case that asked for it.
+  local glyph_titled
+  glyph_titled=$'  ╭──────────────────────────────────────╮\n  │ ❯                                    │\n  ╰────────────────── ✳ Grok 4.5 (high) ─╯'
+  assert_screen "grok non-ASCII titled bottom border" empty "$CAPS_TMUX" "$glyph_titled" 1
   typed=$'  ╭──────────────────────────────────────╮\n  │ ❯ deploy the fix                     │\n  ╰──────────────────── Grok 4.5 (high) ─╯'
   assert_screen "grok typed on tmux" pending "$CAPS_TMUX" "$typed" 1
   pass "matrix: grok's titled bottom border is tolerated as a title, not read as ambiguity"
@@ -446,18 +453,52 @@ test_matrix_claude_titled_composer_rule() {
   out=$(fm_composer_classify_screen "$CAPS_PLAIN" $'transcript\n'"$wide"$'\n❯\n'"$rule")
   [ "$out" = unknown ] \
     || fail "a dashes-plus-text row wider than the closing rule must not prove a composer, got '$out'"
-  # Title text is ASCII-printable only, the fleet-wide limit. At the partner's
-  # exact width, a title carrying a non-ASCII glyph still fails the proof and the
-  # verdict stays unknown - a refusal to read, not a promotion. Pinned so the
-  # boundary is deliberate: the live terminal title observed on the host that
-  # paid for this defect began with U+2733.
+  # THE OUTAGE HOST'S OWN TITLE. The live terminal title on the host that paid
+  # for this defect began with U+2733, so a title of any script must READ at the
+  # partner's exact width - an ASCII-only proof would have excluded the one shape
+  # this exception exists for.
   local glyph_title
   glyph_title='──────────── ✳ Review demo ─────────────'         # 40, non-ASCII title
-  ! _fm_composer_rule_row "$glyph_title" "$spaces" \
-    || fail "a non-ASCII title glyph must not satisfy the ASCII-printable title proof"
-  out=$(fm_composer_classify_screen "$CAPS_PLAIN" $'transcript\n'"$glyph_title"$'\n❯\n'"$rule")
-  [ "$out" = unknown ] \
-    || fail "a non-ASCII titled rule must refuse to read rather than prove a composer, got '$out'"
+  _fm_composer_rule_row "$glyph_title" "$spaces" \
+    || fail "a non-ASCII title glyph at the partner's width must read as a rule"
+  assert_screen "claude glyph-titled-rule idle on herdr" empty "$CAPS_STYLED" \
+    $'transcript\n'"$glyph_title"$'\n❯'"$NBSP"$'\n'"$rule" '' probe-absent
+  assert_screen "claude glyph-titled-rule idle on cmux/orca" empty "$CAPS_PLAIN" \
+    $'transcript\n'"$glyph_title"$'\n❯'"$NBSP"$'\n'"$rule"
+
+  # WHAT THE WIDENED PROOF STILL REFUSES, each isolated by deriving it from the
+  # 40-column `mid` fixture so only one cause changes. Every one of these rows
+  # would read as a rule if the proof credited the offending bytes with one
+  # column, so each assertion pins its own rejection rather than a width accident.
+  local dwide struct ctrl badlead esc badbyte
+  esc=$(printf '\033')
+  printf -v badbyte '%b' '\0365'
+  # A DOUBLE-WIDTH title glyph: 40 columns on screen, 39 characters, so one
+  # space per character under-counts and the width proof mismatches. Refusing is
+  # the safe direction - a capture carries no width table.
+  dwide="${mid%──}審"
+  ! _fm_composer_rule_row "$dwide" "$spaces" \
+    || fail "a double-width title glyph cannot be counted honestly and must not read as a rule"
+  # Another container's edge glyph, at the partner's exact character count.
+  struct="${mid%─}│"
+  ! _fm_composer_rule_row "$struct" "$spaces" \
+    || fail "a structural box-drawing glyph in the title must refuse, never count as a column"
+  # Malformed bytes, again at the partner's exact character count: a control byte
+  # and an invalid UTF-8 lead byte.
+  ctrl="${mid%─}$esc"
+  ! _fm_composer_rule_row "$ctrl" "$spaces" \
+    || fail "a control byte in the title must refuse, never count as a column"
+  badlead="${mid%─}$badbyte"
+  ! _fm_composer_rule_row "$badlead" "$spaces" \
+    || fail "an invalid UTF-8 lead byte in the title must refuse, never count as a column"
+  assert_screen "claude double-width titled rule" unknown "$CAPS_PLAIN" \
+    $'transcript\n'"$dwide"$'\n❯\n'"$rule"
+  assert_screen "claude structural glyph in titled rule" unknown "$CAPS_PLAIN" \
+    $'transcript\n'"$struct"$'\n❯\n'"$rule"
+  assert_screen "claude control byte in titled rule" unknown "$CAPS_PLAIN" \
+    $'transcript\n'"$ctrl"$'\n❯\n'"$rule"
+  assert_screen "claude invalid UTF-8 lead byte in titled rule" unknown "$CAPS_PLAIN" \
+    $'transcript\n'"$badlead"$'\n❯\n'"$rule"
   # Adjacency on both edges: a glyph genuinely stranded in scrollback has
   # transcript rows between it and the separator below, not its own box edges.
   out=$(fm_composer_classify_screen "$CAPS_PLAIN" $'transcript\n'"$mid"$'\n❯\nolder output\n'"$rule")
@@ -498,6 +539,16 @@ test_matrix_kimi_bordered_shell_glyph_box() {
   assert_screen "kimi idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
   assert_screen "kimi idle on herdr" empty "$CAPS_STYLED" "$screen"
   assert_screen "kimi idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  # The box geometry proof shares fm_composer_column_spaces with the titled-rule
+  # predicate, so a single-width non-ASCII character in a content row is counted
+  # as the one column it occupies instead of failing the proof outright. This row
+  # read `pending-unproven` before that consolidation and reads `pending` now,
+  # because the geometry really is proven; `empty` remains the only verdict that
+  # authorizes an injection, so the widening does not widen what may be typed
+  # into.
+  local accented
+  accented=$'╭────────────────────────╮\n│ > café                 │\n╰────────────────────────╯'
+  assert_screen "kimi non-ASCII draft proves box geometry" pending "$CAPS_TMUX" "$accented" 1
   pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired)"
 }
 
