@@ -28,9 +28,8 @@
 #   fix_rounds: no-mistakes auto_fix rounds in review or test steps only.
 #   decisions_raised: status lines whose classified verb is needs-decision or
 #     blocked.
-#   ci_green_first_push: all GitHub workflow runs for the first durable pushed
-#     SHA completed successfully/skipped/neutral; false on any other completed
-#     conclusion, null when no complete observation exists.
+#   ci_green_first_push: null until durable records identify the first pushed
+#     SHA and support a complete workflow-run observation for that SHA.
 #   merged/outcome: the recorded PR's current forge state, or the last durable
 #     terminal status when there is no PR.
 #
@@ -161,7 +160,6 @@ task_metrics_pipeline_info() {
   [ -f "$db" ] && [ ! -L "$db" ] && [ -n "$project" ] && [ -n "$branch" ] || return 1
   fm_run_timed 10 python3 - "$db" "$project" "$branch" <<'PY'
 import os
-import re
 import sqlite3
 import sys
 
@@ -183,7 +181,7 @@ if not repo_ids:
 marks = ",".join("?" for _ in repo_ids)
 run_rows = list(
     con.execute(
-        f"SELECT id, last_pushed_sha FROM runs "
+        f"SELECT id FROM runs "
         f"WHERE repo_id IN ({marks}) AND branch = ? ORDER BY created_at, id",
         (*repo_ids, branch),
     )
@@ -200,21 +198,15 @@ if run_ids:
         "AND rd.trigger_type = 'auto_fix'",
         run_ids,
     ).fetchone()[0]
-first_sha = ""
-for _, candidate in run_rows:
-    if isinstance(candidate, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", candidate):
-        first_sha = candidate
-        break
 print(len(run_rows))
 print(fix_rounds)
-print(first_sha)
 PY
 }
 
 task_metrics_prepare() {
   local state_device worktree project mode pr_url branch prior_branch repo_slug=''
-  local pipeline_info='' pipeline_runs=null fix_rounds=null first_push_sha=''
-  local pr_provider='' pr_number='' pr_out='' ci_out='' pr_tmp='' ci_tmp=''
+  local pipeline_info='' pipeline_runs=null fix_rounds=null
+  local pr_provider='' pr_number='' pr_out='' pr_tmp=''
   local decisions=0 terminal_verb='' verb line receipt_tmp
 
   command -v python3 >/dev/null 2>&1 || { echo "error: task metrics requires python3" >&2; return 1; }
@@ -254,32 +246,24 @@ task_metrics_prepare() {
   if pipeline_info=$(task_metrics_pipeline_info "$mode" "$project" "$branch" 2>/dev/null); then
     pipeline_runs=$(printf '%s\n' "$pipeline_info" | sed -n '1p')
     fix_rounds=$(printf '%s\n' "$pipeline_info" | sed -n '2p')
-    first_push_sha=$(printf '%s\n' "$pipeline_info" | sed -n '3p')
     case "$pipeline_runs" in ''|*[!0-9]*) pipeline_runs=null ;; esac
     case "$fix_rounds" in ''|*[!0-9]*) fix_rounds=null ;; esac
   fi
 
   pr_tmp=$(mktemp "$STATE/.task-metrics-pr.XXXXXX") || return 1
-  ci_tmp=$(mktemp "$STATE/.task-metrics-ci.XXXXXX") || { rm -f "$pr_tmp"; return 1; }
   if [ "$pr_provider" = github ] && [ -n "$repo_slug" ] && command -v gh-axi >/dev/null 2>&1; then
     if fm_run_timed "$GH_TIMEOUT" gh-axi pr view "$pr_number" --repo "$repo_slug" > "$pr_tmp" 2>/dev/null; then
       pr_out=$pr_tmp
     fi
-    if [ -n "$first_push_sha" ] \
-      && fm_run_timed "$GH_TIMEOUT" gh-axi run list --repo "$repo_slug" \
-        --commit "$first_push_sha" --limit 100 > "$ci_tmp" 2>/dev/null; then
-      ci_out=$ci_tmp
-    fi
   fi
 
-  state_device=$(task_metrics_file_device "$STATE") || { rm -f "$pr_tmp" "$ci_tmp"; return 1; }
-  receipt_tmp=$(mktemp "$STATE/.task-metrics-row.XXXXXX") || { rm -f "$pr_tmp" "$ci_tmp"; return 1; }
+  state_device=$(task_metrics_file_device "$STATE") || { rm -f "$pr_tmp"; return 1; }
+  receipt_tmp=$(mktemp "$STATE/.task-metrics-row.XXXXXX") || { rm -f "$pr_tmp"; return 1; }
   if ! FM_METRICS_BRANCH="$branch" FM_METRICS_REPO="$repo_slug" \
       FM_METRICS_PIPELINE_RUNS="$pipeline_runs" FM_METRICS_FIX_ROUNDS="$fix_rounds" \
       FM_METRICS_DECISIONS="$decisions" FM_METRICS_TERMINAL_VERB="$terminal_verb" \
-      FM_METRICS_PR_OUT="$pr_out" FM_METRICS_CI_OUT="$ci_out" \
+      FM_METRICS_PR_OUT="$pr_out" \
       fm_run_timed 10 python3 - "$META" "$receipt_tmp" <<'PY'; then
-import csv
 import datetime
 import json
 import os
@@ -327,22 +311,6 @@ def parse_pr(path):
         return False, "pr_open"
     return False, None
 
-def parse_ci(path):
-    if not path:
-        return None
-    observations = []
-    with open(path, encoding="utf-8") as source:
-        for raw in source:
-            if not re.match(r"^  [0-9]", raw):
-                continue
-            row = next(csv.reader([raw.strip()]))
-            if len(row) >= 4:
-                observations.append((row[2], row[3]))
-    if not observations or any(status != "completed" for status, _ in observations):
-        return None
-    good = {"success", "skipped", "neutral"}
-    return all(conclusion in good for _, conclusion in observations)
-
 pr_url = nullable_text(meta.get("pr"))
 merged, outcome = parse_pr(os.environ.get("FM_METRICS_PR_OUT")) if pr_url else (None, None)
 terminal = os.environ.get("FM_METRICS_TERMINAL_VERB")
@@ -382,7 +350,7 @@ row = {
     "nudges_to_validate": None,
     "agent_deaths": None,
     "rebases_required": None,
-    "ci_green_first_push": parse_ci(os.environ.get("FM_METRICS_CI_OUT")),
+    "ci_green_first_push": None,
     "vacuous_tests_caught": None,
     "vacuous_tests_shipped": None,
     "tokens_consumed": None,
@@ -401,10 +369,10 @@ with open(output_path, "w", encoding="utf-8") as destination:
     json.dump(envelope, destination, ensure_ascii=False, separators=(",", ":"))
     destination.write("\n")
 PY
-    rm -f "$receipt_tmp" "$pr_tmp" "$ci_tmp"
+    rm -f "$receipt_tmp" "$pr_tmp"
     return 1
   fi
-  rm -f "$pr_tmp" "$ci_tmp"
+  rm -f "$pr_tmp"
   chmod 0600 "$receipt_tmp" || { rm -f "$receipt_tmp"; return 1; }
   task_metrics_private_file_valid "$receipt_tmp" 600 "$state_device" \
     || { rm -f "$receipt_tmp"; echo "error: task metrics receipt is unsafe" >&2; return 1; }

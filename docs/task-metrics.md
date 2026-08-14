@@ -21,7 +21,7 @@ The mechanically derived counters and outcomes are:
 - `pipeline_runs` counts no-mistakes runs whose durable repository path and branch match the task exactly.
 - `fix_rounds` counts durable no-mistakes `auto_fix` rounds for review and test steps only.
 - `decisions_raised` counts status events classified as `needs-decision` or `blocked` by `bin/fm-classify-lib.sh`.
-- `ci_green_first_push` inspects workflow runs for the first durable pushed SHA, returns true only when every observed run completed with `success`, `skipped`, or `neutral`, returns false for another completed conclusion, and remains null for missing or incomplete evidence.
+- `ci_green_first_push` remains null because current durable no-mistakes records retain only each run's latest pushed SHA, not the first pushed SHA or a complete workflow-run history for it.
 - `merged` and `outcome` use the recorded PR's current forge state, or the last durable `done` or `failed` status when no PR is recorded.
 
 Tasks outside no-mistakes mode have zero no-mistakes pipeline runs and fix rounds by definition.

@@ -111,12 +111,7 @@ pull_request:
 OUT
     ;;
   "run list")
-    cat <<'OUT'
-count: 2
-runs[2]{id,title,status,conclusion,workflow,branch,event,created}:
-  101,"portable tests",completed,success,CI,fm/metric-task,pull_request,1m ago
-  102,"lint",completed,success,CI,fm/metric-task,pull_request,1m ago
-OUT
+    exit 97
     ;;
   *) exit 1 ;;
 esac
@@ -148,7 +143,7 @@ assert row["blocked_min"] is None, row
 assert row["pipeline_runs"] == 2, row
 assert row["fix_rounds"] == 2, row
 assert row["decisions_raised"] == 3, row
-assert row["ci_green_first_push"] is True, row
+assert row["ci_green_first_push"] is None, row
 assert row["outcome"] == "merged", row
 assert row["pr"] == "https://github.com/example/widgets/pull/17", row
 assert row["merged"] is True, row
