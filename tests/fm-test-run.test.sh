@@ -1187,6 +1187,95 @@ PY
   pass "SIGTERM and SIGINT preserve partial evidence and remove isolated clones"
 }
 
+test_compare_commits_signal_records_inflight_confirmation() {
+  local tmp repo marker base head run_dir runner_pid python_pid rc clone_root i
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-confirmation-signal.XXXXXX")
+  repo="$tmp/repo"
+  marker="$tmp/base-confirmation-started"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-transition.test.sh" <<SH
+#!/usr/bin/env bash
+if [ -e "$marker" ]; then
+  trap '' TERM
+  sleep 30
+fi
+: >"$marker"
+echo "ok - initial base run"
+SH
+  chmod +x "$repo/tests/aa-transition.test.sh"
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm base
+  base=$(git -C "$repo" rev-parse HEAD)
+  cat >"$repo/tests/aa-transition.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - head regression"
+exit 1
+SH
+  chmod +x "$repo/tests/aa-transition.test.sh"
+  git -C "$repo" add tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm head
+  head=$(git -C "$repo" rev-parse HEAD)
+  run_dir="$tmp/result"
+  (cd "$repo" && exec bin/fm-test-run.sh --compare-commits "$base" "$head" \
+    --script-timeout 60 --output-dir "$run_dir" >"$tmp/out" 2>"$tmp/err") &
+  runner_pid=$!
+  clone_root=
+  i=0
+  while [ "$i" -lt 100 ]; do
+    i=$((i + 1))
+    if [ -f "$run_dir/partition.json" ]; then
+      clone_root=$(python3 - "$run_dir/base.json" "$run_dir/partition.json" <<'PY'
+import json, sys
+base = json.load(open(sys.argv[1], encoding="utf-8"))
+partition = json.load(open(sys.argv[2], encoding="utf-8"))
+rows = partition.get("regressed", [])
+if rows and rows[0].get("base_observations") == ["passed", "running"] and rows[0].get("head_observations") == ["failed"]:
+    print(__import__("pathlib").Path(base["checkout"]["path"]).parent)
+PY
+)
+        [ -n "$clone_root" ] && break
+    fi
+    sleep 0.05
+  done
+  [ -n "$clone_root" ] || {
+    kill -TERM "$runner_pid" 2>/dev/null || true
+    wait "$runner_pid" 2>/dev/null || true
+    rm -rf "$tmp"
+    fail "confirmation fixture never recorded its running observation"
+  }
+  python_pid=$(ps -axo pid=,ppid=,command= | awk -v result="$run_dir" \
+    'index($0, result) && $0 ~ /[Pp]ython/ { print $1; exit }')
+  [ -n "$python_pid" ] || python_pid=$runner_pid
+  kill -TERM "$python_pid"
+  set +e
+  wait "$runner_pid"
+  rc=$?
+  set -e
+  [ "$rc" -eq 143 ] || { rm -rf "$tmp"; fail "SIGTERM during confirmation must exit 143 (got $rc)"; }
+  python3 - "$run_dir/partition.json" <<'PY' || {
+import json, sys
+partition = json.load(open(sys.argv[1], encoding="utf-8"))
+assert partition["termination"] == {"complete": False, "exit_code": 143, "signal": "SIGTERM"}, partition
+rows = partition["regressed"]
+assert rows == [{
+    "base_observations": ["passed", "running"],
+    "base_outcome": "passed",
+    "head_observations": ["failed"],
+    "head_outcome": "failed",
+    "path": "tests/aa-transition.test.sh",
+}], partition
+PY
+    rm -rf "$tmp"
+    fail "SIGTERM artifacts did not preserve the in-flight confirmation"
+  }
+  [ ! -e "$clone_root" ] || { rm -rf "$tmp"; fail "SIGTERM leaked isolated clones at $clone_root"; }
+  rm -rf "$tmp"
+  pass "SIGTERM during confirmation preserves a running observation"
+}
+
 if [ -n "${FM_TEST_RUN_ONLY:-}" ]; then
   "$FM_TEST_RUN_ONLY"
   exit $?
@@ -1218,3 +1307,4 @@ test_compare_commits_refuses_an_independent_enumeration_mismatch
 test_compare_commits_headline_exposes_measured_coverage
 test_compare_commits_preflight_errors_exit_two_without_tracebacks
 test_compare_commits_signal_records_inflight_and_cleans_clones
+test_compare_commits_signal_records_inflight_confirmation

@@ -1509,14 +1509,17 @@ def run_inventory(doc, copy):
 def run_confirmation(doc, copy, path, attempt):
     global active_proc
     if path not in doc["expected_scripts"]:
+        confirmations[path][doc["label"]].append("absent")
         return "absent"
     script_path = copy / path
     if not script_path.is_file():
+        confirmations[path][doc["label"]].append("errored")
         return "errored"
     before_head, before_detached, before_clean = checkout_state(copy)
     if before_head != doc["commit"] or not before_detached or not before_clean:
         doc["checkout"]["invariant_ok"] = False
         write_inventory(doc)
+        confirmations[path][doc["label"]].append("errored")
         return "errored"
     log_path = output_dir / doc["label"] / "confirmations" / (
         f"{pathlib.Path(path).name}.attempt-{attempt}.log"
@@ -1532,6 +1535,8 @@ def run_confirmation(doc, copy, path, attempt):
     env["TMPDIR"] = str(script_tmp)
     env["TMP"] = str(script_tmp)
     outcome = "errored"
+    confirmations[path][doc["label"]].append("running")
+    write_current_partition()
     try:
         with log_path.open("wb") as log_stream:
             proc = subprocess.Popen(
@@ -1565,6 +1570,8 @@ def run_confirmation(doc, copy, path, attempt):
         doc["checkout"]["invariant_ok"] = False
         outcome = "errored"
         write_inventory(doc)
+    confirmations[path][doc["label"]][-1] = outcome
+    write_current_partition()
     print(
         "FM_TEST_COMPARE_CONFIRMATION "
         f"side={doc['label']} script={path} attempt={attempt} outcome={outcome}",
@@ -1633,7 +1640,11 @@ def make_partition(base, head):
         elif base_outcome != "absent" and head_outcome in {"failed", "timed_out", "errored"}:
             candidate_bucket = regressed
         if candidate_bucket is not None:
-            if confirmation is not None and (
+            if confirmation is not None and "running" in (
+                confirmation["base"] + confirmation["head"]
+            ):
+                candidate_bucket.append(entry)
+            elif confirmation is not None and (
                 len(set(confirmation["base"])) != 1
                 or len(set(confirmation["head"])) != 1
             ):
@@ -1690,9 +1701,9 @@ def confirm_regression_candidates(partition, base, head, copies):
             "base": [base_rows.get(path, "absent")],
             "head": [head_rows.get(path, "absent")],
         }
-        observation["base"].append(run_confirmation(base, copies["base"], path, 1))
-        observation["head"].append(run_confirmation(head, copies["head"], path, 1))
         confirmations[path] = observation
+        run_confirmation(base, copies["base"], path, 1)
+        run_confirmation(head, copies["head"], path, 1)
 
 
 def current_partition():
