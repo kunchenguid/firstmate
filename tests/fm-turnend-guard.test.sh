@@ -67,14 +67,21 @@ test_predicate_healthy_fresh_beacon() {
 }
 
 test_predicate_queue_pending_flag() {
-  local state="$TMP_ROOT/pred-queue/state"
+  local state="$TMP_ROOT/pred-queue/state" first_queue second_queue
   mkdir -p "$state"
   fm_supervision_status "$state" 300
   [ "$FM_SUP_QUEUE_PENDING" = false ] || fail "empty/absent wake queue must not read as pending"
   printf 'record\n' > "$state/.wake-queue"
-  fm_supervision_status "$state" 300
+  fm_supervision_needed "$state" 300 || fail "a pending wake did not register as supervision need"
   [ "$FM_SUP_QUEUE_PENDING" = true ] || fail "a non-empty wake queue must read as pending"
-  pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
+  [ "$FM_SUP_NEEDED" = true ] || fail "a pending wake must set FM_SUP_NEEDED"
+  first_queue=$FM_SUP_QUEUE_FINGERPRINT
+  printf 'different record\n' > "$state/.wake-queue"
+  fm_supervision_status "$state" 300
+  second_queue=$FM_SUP_QUEUE_FINGERPRINT
+  [ "$first_queue" != "$second_queue" ] || fail "changed wake records left the queue fingerprint unchanged"
+  fm_supervision_unhealthy "$state" 300 || fail "a pending wake with no beacon must be unhealthy"
+  pass "fm_supervision_status: a pending wake needs supervision"
 }
 
 test_predicate_x_mode_needs_supervision() {
@@ -277,6 +284,18 @@ test_hook_blocks_source_only_home() {
   expect_code 2 "$status" "non-Claude hook must block when a source-only home has no watcher"
   assert_contains "$out" "1 process-event source(s) registered" "block reason must identify the source-only supervision need"
   pass "fm-turnend-guard: non-Claude path blocks a source-only home"
+}
+
+test_hook_blocks_queue_only_home() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-queue-only")
+  FM_STATE_OVERRIDE="$dir/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append check pending-result "check: pending result"' _ "$dir" \
+    || fail "could not seed the durable wake"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "non-Claude hook must block when a queued wake has no watcher"
+  assert_contains "$out" "queued wake delivery pending" "block reason must identify the undelivered wake"
+  pass "fm-turnend-guard: non-Claude path blocks a queue-only home"
 }
 
 test_hook_blocks_when_dead_lock_has_fresh_beacon() {
@@ -1601,7 +1620,7 @@ test_hook_claude_mode_changed_source_identity_resets_escalation_count() {
   pass "fm-turnend-guard --claude: changed process-source identity resets the identical-block escalation count"
 }
 
-test_hook_claude_mode_source_retirement_during_wait_clears_episode() {
+test_hook_claude_mode_source_retirement_during_wait_keeps_wake_supervised() {
   local dir out status retire_pid
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget-source-retires")
   mkdir -p "$dir/state/procevent"
@@ -1609,15 +1628,22 @@ test_hook_claude_mode_source_retirement_during_wait_clears_episode() {
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
   expect_code 2 "$status" "first source-only no-claim observation must block"
 
-  (sleep 0.1; rm -f "$dir/state/procevent/source1.source") &
+  (
+    sleep 0.1
+    FM_STATE_OVERRIDE="$dir/state" bash -c \
+      '. "$1/bin/fm-wake-lib.sh"; fm_wake_append check procevent:source1:1 "check: procevent test source1 1"' _ "$dir"
+    rm -f "$dir/state/procevent/source1.source"
+  ) &
   retire_pid=$!
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=400 run_hook_claude "$dir" false); status=$?
   wait "$retire_pid"
-  expect_code 0 "$status" "a supervision need retired during claim wait must pass"
-  [ -z "$out" ] || fail "retired supervision need emitted a stale captain escalation: $out"
-  assert_absent "$dir/state/.turnend-claude-blocks" "retired supervision need left the prior block episode"
-  assert_absent "$dir/state/.turnend-claude-escalated" "retired supervision need left the prior escalation marker"
-  pass "fm-turnend-guard --claude: source retirement during claim wait clears the block episode"
+  assert_present "$dir/state/.wake-queue" "source retirement did not leave its durable wake"
+  expect_code 2 "$status" "a retired source with an undelivered wake must remain guarded"
+  assert_contains "$out" "queued wake delivery pending" "retired source block did not identify the undelivered wake"
+  [ "$(sed -n '4s/^reblocks=//p' "$dir/state/.turnend-claude-blocks")" = 1 ] \
+    || fail "source retirement with a durable wake inherited the prior evidence count"
+  assert_absent "$dir/state/.turnend-claude-escalated" "changed source evidence emitted a stale captain escalation"
+  pass "fm-turnend-guard --claude: terminal source wake remains supervised after retirement"
 }
 
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
@@ -1755,6 +1781,7 @@ test_predicate_identity_fingerprint_tracks_exact_owners
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
+test_hook_blocks_queue_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_non_claude_health_ignores_claude_budget_contention
@@ -1806,7 +1833,7 @@ test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_repeated_identical_block_escalates_once
 test_hook_claude_mode_changed_task_identity_resets_escalation_count
 test_hook_claude_mode_changed_source_identity_resets_escalation_count
-test_hook_claude_mode_source_retirement_during_wait_clears_episode
+test_hook_claude_mode_source_retirement_during_wait_keeps_wake_supervised
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
 test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open

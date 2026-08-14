@@ -28,6 +28,7 @@ It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
 Registered `state/procevent/*.source` records also require supervision even though they have no task metadata.
+Non-empty `state/.wake-queue` delivery remains a supervision need after its producing task or process source retires and until the queue is drained.
 The default cross-harness mode exits silently with no supervision need.
 Every mode treats `state/x-watch.check.sh` as supervision need, so Relay polling remains guarded without an in-flight task.
 Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`, the same PID-strict identity-matched lock and fresh-beacon check used by `bin/fm-watch-arm.sh`: a stale beacon blocks even when a watcher pid is live, and a fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
@@ -80,7 +81,7 @@ The auto-arm itself rechecks the healthy watcher predicate and retries a bounded
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.
 When none of those proofs appears and no automatic-failure state exists, the first no-claim observation blocks for that session and evidence signature.
 On the second genuinely identical observation, the guard emits exactly one captain-facing `systemMessage` question and ends the continuation loop itself.
-Every later unchanged Stop passes silently through `state/.turnend-claude-escalated`, while changed task or process-source identities reset the count and a supervision need that disappears during the claim wait clears the episode before passing.
+Every later unchanged Stop passes silently through `state/.turnend-claude-escalated`, while changed task or process-source identities or queued-delivery state reset the count, and only a supervision need that disappears during the claim wait without leaving a queued wake clears the episode before passing.
 A verified automatic failure retains the separate `FM_CLAUDE_TURNEND_BLOCK_BUDGET` progression (default 3, below Claude's 8-block override) and its stronger attended alarm.
 In Claude mode, positive watcher recovery clears the block budget, one-shot escalation, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.
 The one loud attended fail-open is available only when the auto-arm has recorded an exhausted failure, its one notice is already consumed, the block budget is exhausted, and a final check finds neither a healthy watcher nor an automatic continuation.
@@ -134,7 +135,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 ## Compatibility limits
 
 - Child crewmate and scout worktrees are outside scope.
-- A valid secondmate home is in scope; an idle secondmate endpoint with no Relay poll remains healthy because it has no supervision need.
+- A valid secondmate home is in scope; an idle secondmate endpoint with no task, process source, Relay poll, or queued delivery remains healthy because it has no supervision need.
 - The blocking and bounded-follow-up mechanisms are limited to the primary integrations listed above.
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
 - Cursor's `stop` step does not fire in headless `cursor-agent -p`, the same class of limit as OpenCode headless; firstmate primaries run interactive.

@@ -155,7 +155,7 @@ if [ -e "$STATE/.afk" ]; then
   exit 0
 fi
 
-# --- need: in-flight work or an X-mode relay poll ----------------------------
+# --- need: work, relay polling, process sources, or queued wake delivery -----
 need_supervision() {
   fm_supervision_needed "$STATE" "$GRACE"
 }

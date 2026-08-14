@@ -362,6 +362,19 @@ test_inert_when_fleet_idle() {
   pass "auto-arm: inert with nothing in flight and no X-mode need"
 }
 
+test_arms_for_queue_only_delivery_need() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/queue-only")
+  FM_STATE_OVERRIDE="$dir/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append check pending-result "check: pending result"' _ "$dir" \
+    || fail "could not seed the durable wake"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a queued wake must keep the auto-arm active after its source retires"
+  [ -e "$dir/state/arm-ran" ] || fail "hook took gate-no-supervision with a queued wake pending"
+  pass "auto-arm: queue-only delivery need arms the cycle"
+}
+
 # --- the armed cycle ----------------------------------------------------------
 
 test_actionable_close_rewakes_with_reason() {
@@ -620,6 +633,7 @@ test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
+test_arms_for_queue_only_delivery_need
 test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
