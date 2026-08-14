@@ -32,6 +32,7 @@ command -v python3 >/dev/null 2>&1 || { echo 'skip: python3 not found'; exit 0; 
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-focus-flash-e2e.XXXXXX")
 FAKEBIN="$TMP_ROOT/fakebin"
+RAW_MOVER_STATUS="$TMP_ROOT/raw-mover-status"
 mkdir -p "$FAKEBIN"
 
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-focus-flash-regression-r1)
@@ -74,6 +75,15 @@ done
 exec env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"
 SH
 chmod +x "$FAKEBIN/herdr"
+
+cat > "$FAKEBIN/herdr-workspace-mover" <<'SH'
+#!/usr/bin/env bash
+"$FM_REAL_HERDR_WORKSPACE_MOVER" "$@"
+status=$?
+printf '%s\n' "$status" >> "$FM_RAW_MOVER_STATUS"
+exit "$status"
+SH
+chmod +x "$FAKEBIN/herdr-workspace-mover"
 
 lab() { env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
 mkws() {  # <label> -> "<workspace_id> <tab_id> <pane_id>"
@@ -142,6 +152,7 @@ B_OPERATION_ACTIVE="$TMP_ROOT/operation.active"
 B_SAMPLER_READY="$TMP_ROOT/sampler.ready"
 SAMPLER_STOP="$TMP_ROOT/sampler.stop"
 : > "$CALL_LOG"
+: > "$RAW_MOVER_STATUS"
 : > "$B_FOCUS_SAMPLES"
 (
   : > "$B_SAMPLER_READY"
@@ -163,7 +174,10 @@ while [ ! -e "$B_SAMPLER_READY" ] && [ "$B_READY_ATTEMPT" -lt 100 ]; do
 done
 [ -e "$B_SAMPLER_READY" ] || fail 'the Part B focus sampler did not start'
 : > "$B_OPERATION_ACTIVE"
-B_OUT=$(PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" FM_FLASH_CALL_LOG="$CALL_LOG" bash -c '
+B_OUT=$(PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" FM_FLASH_CALL_LOG="$CALL_LOG" \
+  FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover" \
+  FM_REAL_HERDR_WORKSPACE_MOVER="$ROOT/bin/backends/herdr-workspace-move.py" \
+  FM_RAW_MOVER_STATUS="$RAW_MOVER_STATUS" bash -c '
   . "$1/bin/backends/herdr.sh"
   fm_backend_herdr_cli() {
     local session=$1
@@ -197,6 +211,7 @@ if grep -q '^pane process-info' "$CALL_LOG"; then
   pass 'mitigation: every in-operation sample preserved exact focus while the doomed workspace was removed'
 elif [ "$STEAL_LIVE" = 0 ] \
   && grep -q '^pane close' "$CALL_LOG" \
+  && [ "$(cat "$RAW_MOVER_STATUS")" = 2 ] \
   && printf '%s' "$B_OUT" | grep -q 'could not move the doomed workspace behind the focused one'; then
   # Herdr 0.8.0 no longer accepts the previous raw workspace.move transport.
   # Its plain explicit close is independently proven focus-preserving by Part A
