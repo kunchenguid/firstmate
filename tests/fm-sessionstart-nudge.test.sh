@@ -561,12 +561,18 @@ test_run_gate_and_scope_are_silent() {
 }
 
 test_run_reports_a_failed_session_start_as_digest_text() {
-  local root="$TMP_ROOT/run-unwritable" out status=0
+  local root="$TMP_ROOT/run-contended" fixture="$TMP_ROOT/run-contended-fixture"
+  local out status=0 holder
   make_run_primary "$root"
-  chmod 0500 "$root/state"
+  mkdir -p "$fixture"
+  cp /bin/bash "$fixture/codex"
+  "$fixture/codex" -c 'while :; do read -r -t 1 _ || :; done' &
+  holder=$!
+  printf '%s\n' "$holder" > "$root/state/.lock"
   out=$(run_hook "$root" --source startup </dev/null) || status=$?
-  chmod 0700 "$root/state"
-  expect_code 0 "$status" "run wrapper with an unwritable state directory"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 0 "$status" "run wrapper with a competing live session"
   assert_contains "$out" "READ-ONLY SESSION" "a failed lock did not reach the agent as digest text"
   pass "run wrapper: a session start that cannot take the lock still opens the session and says so"
 }
