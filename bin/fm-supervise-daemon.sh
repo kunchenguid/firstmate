@@ -909,13 +909,25 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     WEDGE_ALARM_LAST_EPOCH=$now
     log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
   fi
+  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
+  backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
   {
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
+    # The defer reason alone cannot separate "the captain half-typed a line"
+    # from "this pane's rendering is not in the shape catalogue". Record the
+    # verdict and the screen it was read from, ONCE per max-defer window, so a
+    # wedge is diagnosable from durable state instead of a live re-capture that
+    # may no longer show the wedged rendering. The verdict's meaning is owned by
+    # bin/fm-composer-lib.sh; this only reports it.
+    printf '\n--- supervisor pane %s (%s) ---\n' "$target" "$backend"
+    printf 'composer verdict: %s\n' \
+      "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null || printf 'unreadable')"
+    printf 'captured screen:\n'
+    fm_backend_capture "$backend" "$target" "${FM_COMPOSER_CAPTURE_LINES:-20}" 2>/dev/null \
+      || printf '(capture failed)\n'
   } 2>/dev/null > "$marker" || true
-  target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
-  backend="${FM_SUPERVISOR_BACKEND:-$FM_SUPERVISOR_BACKEND_DEFAULT}"
   # Best-effort status-line flash. tmux's display-message is a client-side OSD
   # with no herdr equivalent; the log line + durable marker above are already
   # the primary, backend-independent signal, so a non-tmux backend just skips

@@ -1146,7 +1146,16 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
     || fail "stuck max-defer inject did not raise a wedge alarm marker"
   [ -s "$state/.subsuper-escalations" ] \
     || fail "buffer lost after a failed max-defer inject (must be preserved)"
-  pass "max-defer on an empty stuck pane types once, alarms, and preserves the buffer"
+  # The marker must carry enough to tell a half-typed line apart from a
+  # rendering the shape catalogue does not know: the verdict AND the screen it
+  # was read from. Diagnosing the 9.7h afk-wedge episode needed exactly this.
+  grep -q '^composer verdict: ' "$state/.subsuper-inject-wedged" \
+    || fail "wedge marker did not record the composer verdict"
+  # A composer border row only ever comes from the CAPTURE, never from the
+  # buffered escalation text, so it proves the screen itself was recorded.
+  grep -q '^│ >' "$state/.subsuper-inject-wedged" \
+    || fail "wedge marker did not record the captured supervisor screen"
+  pass "max-defer on an empty stuck pane types once, alarms, preserves the buffer, and records the pane"
 }
 
 test_max_defer_flushes_empty_idle_pane() {
