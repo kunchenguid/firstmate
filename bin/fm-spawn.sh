@@ -1561,6 +1561,12 @@ if [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" = omp ] && ! command -v omp >/dev/nul
   echo "error: omp executable not found on PATH; install OMP or select a different verified harness" >&2
   exit 1
 fi
+if { [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" = omp ]; } || [ "${RAW_OWNER_REQUIRED:-0}" -eq 1 ]; then
+  if ! fm_omp_session_evidence_fs_runtime_available; then
+    echo "error: OMP launch requires a working python3 runtime for collision-safe lifecycle state; install Python 3 or select a different verified harness" >&2
+    exit 1
+  fi
+fi
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
 # --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
@@ -2802,7 +2808,7 @@ EOF
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
 import { randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
-import { closeSync, constants, existsSync, fstatSync, futimesSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, futimesSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 const SESSION_RUN = "$STATE_REAL/$ID.omp-session-run";
 const SESSION_STOP = "$STATE_REAL/$ID.omp-session-stop";
 const SESSION_EVIDENCE_DIR = "$STATE_REAL/$ID.omp-session-evidence";
@@ -2881,6 +2887,12 @@ const generationLockTestPause = () => {
 };
 const generationLockReleaseTestPause = () => {
   const gate = process.env.FM_OMP_TEST_GENERATION_LOCK_RELEASE_GATE;
+  if (!gate) return;
+  writeFileSync(gate + ".ready", "ready\n", { encoding: "utf8" });
+  while (existsSync(gate + ".hold")) sleepMillis(10);
+};
+const turnEndGenerationTestPause = () => {
+  const gate = process.env.FM_OMP_TEST_TURNEND_GENERATION_GATE;
   if (!gate) return;
   writeFileSync(gate + ".ready", "ready\n", { encoding: "utf8" });
   while (existsSync(gate + ".hold")) sleepMillis(10);
@@ -3062,9 +3074,11 @@ const cleanupOwnedTemp = (path: string) => {
   ownedTempProofs.delete(path);
   try {
     if (identity) {
-      removeEvidenceFile(path, identity.entry);
-    } else {
-      unlinkSync(path);
+      if (path.startsWith(SESSION_EVIDENCE_DIR + "/")) {
+        removeEvidenceFile(path, identity.entry);
+      } else {
+        removeStateFile(path, identity);
+      }
     }
   } catch (error) {
     if ((error as any)?.code === "ENOENT") return;
@@ -3088,26 +3102,29 @@ const atomicWrite = (path: string, value: string) => {
   if (ownsLock) acquireGenerationLock();
   let temp = "";
   const evidenceTemp = path.startsWith(SESSION_EVIDENCE_DIR + "/");
-  let fd = -1;
-  let evidenceCreated = false;
+  let tempCreated = false;
+  let tempIdentity: { parent: string; entry: string } | undefined;
   let evidenceIdentity: { parent: string; entry: string } | undefined;
   let proofPath = "";
   let proofIdentity: { parent: string; entry: string } | undefined;
   try {
     requireCurrentGeneration();
-    while (fd < 0 && !evidenceCreated) {
+    const expectedTarget = targetIdentityIfPresent(path);
+    while (!tempCreated) {
       temp = path + "." + INCARNATION_ID + ".seq-" + String(++tempSequence) + ".tmp";
       if (evidenceTemp) {
         try {
           evidenceIdentity = createEvidenceTemp(temp);
           ownedTempIdentities.set(temp, evidenceIdentity);
-          evidenceCreated = true;
+          tempCreated = true;
         } catch (error) {
           if ((error as any)?.status !== 17) throw error;
         }
       } else {
         try {
-          fd = openSync(temp, "wx", 0o600);
+          tempIdentity = createStateTemp(temp);
+          ownedTempIdentities.set(temp, tempIdentity);
+          tempCreated = true;
         } catch (error) {
           if ((error as any)?.code !== "EEXIST") throw error;
         }
@@ -3128,23 +3145,24 @@ const atomicWrite = (path: string, value: string) => {
         process.pid + " " + INCARNATION_UUID + "\n", proofIdentity.entry);
       appendEvidenceFile(temp, value, evidenceIdentity.entry);
     } else {
-      writeFileSync(fd, value, { encoding: "utf8" });
-      closeSync(fd);
-      fd = -1;
+      if (!tempIdentity) throw new Error("OMP state temporary identity is missing");
+      writeStateFile(temp, value, tempIdentity.entry);
     }
     requireCurrentGeneration();
     beforeRenameTestPause(path);
     requireCurrentGeneration();
-    if (evidenceTemp && evidenceIdentity) renameEvidenceFile(temp, path, evidenceIdentity.entry);
-    else renameSync(temp, path);
+    if (evidenceTemp && evidenceIdentity) {
+      replaceEvidenceFile(temp, path, evidenceIdentity.entry, expectedTarget?.entry || "");
+    } else if (tempIdentity) {
+      replaceStateFile(temp, path, tempIdentity.entry, expectedTarget?.entry || "");
+    } else {
+      throw new Error("OMP state temporary identity is missing");
+    }
     if (proofIdentity) removeEvidenceFile(proofPath, proofIdentity.entry);
     ownedTemps.delete(temp);
     ownedTempIdentities.delete(temp);
     ownedTempProofs.delete(temp);
   } catch (error) {
-    if (fd >= 0) {
-      try { closeSync(fd); } catch {}
-    }
     try { cleanupOwnedTemp(temp); } catch {}
     throw error;
   } finally {
@@ -3182,6 +3200,28 @@ const evidenceEntryName = (path: string) => {
   if (!name || name.includes("/")) throw new Error("OMP evidence entry name is invalid");
   return name;
 };
+const stateEntryName = (path: string) => {
+  if (!path.startsWith("$STATE_REAL/")) throw new Error("OMP state path escaped its directory");
+  const name = path.slice(("$STATE_REAL/").length);
+  if (!name || name.includes("/")) throw new Error("OMP state entry name is invalid");
+  return name;
+};
+const createStateTemp = (path: string) => {
+  const name = stateEntryName(path);
+  const parent = directoryIdentity("$STATE_REAL");
+  return {
+    parent: parent.dev + ":" + parent.ino,
+    entry: safeFs(["create-file", "$STATE_REAL", name, parent.dev + ":" + parent.ino]).trim(),
+  };
+};
+const writeStateFile = (path: string, value: string, entry: string) => {
+  const name = stateEntryName(path);
+  const parent = directoryIdentity("$STATE_REAL");
+  safeFs(["write-file", "$STATE_REAL", name, parent.dev + ":" + parent.ino, entry], value);
+};
+const removeStateFile = (path: string, identity: { parent: string; entry: string }) => {
+  safeFs(["remove-file", "$STATE_REAL", stateEntryName(path), identity.parent, identity.entry]);
+};
 const evidenceEntryIdentity = (path: string) => {
   const name = evidenceEntryName(path);
   const parent = ensureEvidenceDirectory();
@@ -3209,11 +3249,18 @@ const appendEvidenceFile = (path: string, value: string, entry: string) => {
   const parent = ensureEvidenceDirectory();
   safeFs(["append-file", SESSION_EVIDENCE_DIR, name, parent, entry], value);
 };
-const renameEvidenceFile = (source: string, target: string, entry: string) => {
+const replaceStateFile = (source: string, target: string, sourceEntry: string, targetEntry: string) => {
+  const sourceName = stateEntryName(source);
+  const targetName = stateEntryName(target);
+  const parent = directoryIdentity("$STATE_REAL");
+  safeFs(["replace-file", "$STATE_REAL", sourceName, parent.dev + ":" + parent.ino,
+    sourceEntry, targetName, targetEntry]);
+};
+const replaceEvidenceFile = (source: string, target: string, sourceEntry: string, targetEntry: string) => {
   const sourceName = evidenceEntryName(source);
   const targetName = evidenceEntryName(target);
   const parent = ensureEvidenceDirectory();
-  safeFs(["rename-file", SESSION_EVIDENCE_DIR, sourceName, parent, entry, targetName]);
+  safeFs(["replace-file", SESSION_EVIDENCE_DIR, sourceName, parent, sourceEntry, targetName, targetEntry]);
 };
 const removeEvidenceFile = (path: string, entry: string) => {
   const name = evidenceEntryName(path);
@@ -3252,13 +3299,24 @@ const regularFileIdentity = (path: string) => {
     if (fd >= 0) closeSync(fd);
   }
 };
+const targetIdentityIfPresent = (path: string) => {
+  try {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("OMP replacement target is not a regular file");
+    return { dev: String(stat.dev), ino: String(stat.ino), entry: String(stat.dev) + ":" + String(stat.ino) };
+  } catch (error) {
+    if ((error as any)?.code === "ENOENT") return null;
+    throw error;
+  }
+};
 const readOptional = (path: string) => {
   try {
-    return readRegularFile(path);
+    lstatSync(path);
   } catch (error) {
     if ((error as any)?.code === "ENOENT") return "";
     throw error;
   }
+  return readRegularFile(path);
 };
 const parseEvidenceProof = (content: string) => {
   const lines = content.split(/\r?\n/);
@@ -3294,13 +3352,13 @@ const parseTempOwnershipRegistry = (content: string) => {
   return records;
 };
 const readTempOwnershipRegistry = () => {
-  let content: string;
   try {
-    content = readRegularFile(SESSION_EVIDENCE_TEMPS);
+    lstatSync(SESSION_EVIDENCE_TEMPS);
   } catch (error) {
     if ((error as any)?.code === "ENOENT") return [];
     throw error;
   }
+  const content = readRegularFile(SESSION_EVIDENCE_TEMPS);
   const records = parseTempOwnershipRegistry(content);
   if (!records) throw new Error("OMP evidence temporary ownership registry is malformed");
   return records;
@@ -3327,28 +3385,42 @@ const registerEvidenceTemp = (path: string, stat: any, proofUuid: string, proofS
   const normalized = content.endsWith("\\n") ? content : content + "\\n";
   atomicWrite(SESSION_EVIDENCE_TEMPS, normalized + record + "\\n");
 };
-const evidenceTempOwnershipMatches = (path: string) => {
+const evidenceTempOwnershipRecord = (path: string) => {
   const name = path.slice(path.lastIndexOf("/") + 1);
   const current = /^(.*)\.incarnation-([0-9a-f-]{36})\.generation-([A-Za-z0-9._-]+)\.pid-([0-9]+)\.seq-([0-9]+)\.tmp$/.exec(name);
   if (!current) return false;
   let stat: { dev: string; ino: string } | null = null;
   let proofStat: { dev: string; ino: string } | null = null;
-  let proof: ReturnType<typeof parseEvidenceProof> = null;
   try {
     stat = regularFileIdentity(path);
     proofStat = regularFileIdentity(path + ".owner");
-    proof = parseEvidenceProof(readRegularFile(path + ".owner"));
   } catch {
     return false;
   }
-  if (!stat || !proofStat || !proof) return false;
-  return readTempOwnershipRegistry().some((record) => record.name === name &&
-    record.generation === current[3] && record.processId === current[4] &&
-    record.uuid === current[2] && record.dev === stat.dev && record.ino === stat.ino &&
-    record.proofUuid === proof.proofUuid &&
-    record.proofDev === proofStat.dev && record.proofIno === proofStat.ino &&
-    proof.name === name && proof.generation === current[3] &&
-    proof.processId === current[4] && proof.uuid === current[2]);
+  if (!stat || !proofStat) return false;
+  const record = readTempOwnershipRegistry().find((candidate) => candidate.name === name &&
+    candidate.generation === current[3] && candidate.processId === current[4] &&
+    candidate.uuid === current[2] && candidate.dev === stat.dev && candidate.ino === stat.ino &&
+    candidate.proofDev === proofStat.dev && candidate.proofIno === proofStat.ino);
+  return record || false;
+};
+const evidenceProofContentMatches = (content: string, record: {
+  name: string; generation: string; processId: string; uuid: string; proofUuid: string;
+}) => {
+  const normalized = content.endsWith("\\n") ? content.slice(0, -1) : content;
+  if (normalized.includes("\\n")) return false;
+  const expected = TEMP_PROOF_MARKER + " " + record.proofUuid + " " + record.name + " " +
+    record.generation + " " + record.processId + " " + record.uuid;
+  return expected.startsWith(normalized);
+};
+const evidenceTempOwnershipMatches = (path: string) => {
+  const record = evidenceTempOwnershipRecord(path);
+  if (!record) return false;
+  try {
+    return evidenceProofContentMatches(readRegularFile(path + ".owner"), record);
+  } catch {
+    return false;
+  }
 };
 const evidenceTempProofMatches = (path: string) => {
   const name = path.slice(path.lastIndexOf("/") + 1).replace(/\.tmp\.owner$/, ".tmp");
@@ -3356,22 +3428,25 @@ const evidenceTempProofMatches = (path: string) => {
   if (!current) return false;
   let tempStat: { dev: string; ino: string } | null = null;
   let proofStat: { dev: string; ino: string } | null = null;
-  let proof: ReturnType<typeof parseEvidenceProof> = null;
   try {
     tempStat = regularFileIdentity(evidencePath(name));
     proofStat = regularFileIdentity(path);
-    proof = parseEvidenceProof(readRegularFile(path));
   } catch {
     return false;
   }
-  if (!tempStat || !proofStat || !proof) return false;
-  return incarnationRegistered(current[3], current[4], current[2]) && activeIncarnationMatches(current[3], current[4], current[2]) &&
-    readTempOwnershipRegistry().some((record) => record.name === name && record.generation === current[3] &&
-      record.processId === current[4] && record.uuid === current[2] && record.proofDev === proofStat.dev &&
-      record.proofIno === proofStat.ino && record.proofUuid === proof.proofUuid &&
-      record.dev === tempStat.dev && record.ino === tempStat.ino &&
-      proof.name === name && proof.generation === current[3] &&
-      proof.processId === current[4] && proof.uuid === current[2]);
+  if (!tempStat || !proofStat) return false;
+  const record = readTempOwnershipRegistry().find((candidate) => candidate.name === name &&
+    candidate.generation === current[3] && candidate.processId === current[4] && candidate.uuid === current[2] &&
+    candidate.proofDev === proofStat.dev && candidate.proofIno === proofStat.ino &&
+    candidate.dev === tempStat.dev && candidate.ino === tempStat.ino);
+  if (!record) return false;
+  try {
+    return incarnationRegistered(current[3], current[4], current[2]) &&
+      activeIncarnationMatches(current[3], current[4], current[2]) &&
+      evidenceProofContentMatches(readRegularFile(path), record);
+  } catch {
+    return false;
+  }
 };
 const parseIncarnationRegistry = (content: string) => {
   const lines = content.split(/\r?\n/);
@@ -3513,20 +3588,26 @@ const busyEvent = (token: string, state: string, event: string) =>
     ], () => resolve());
   });
 const publishTurnEnd = () => {
-  if (!generationIsCurrent()) return false;
-  const noFollow = constants.O_NOFOLLOW;
-  if (typeof noFollow !== "number") return false;
-  let fd = -1;
   try {
-    fd = openSync(TURNEND, constants.O_WRONLY | constants.O_CREAT | noFollow, 0o600);
-    const stat = fstatSync(fd);
-    if (!stat.isFile()) return false;
-    futimesSync(fd, new Date(), new Date());
-    return true;
+    return withGenerationLock(() => {
+      requireCurrentGeneration();
+      turnEndGenerationTestPause();
+      const noFollow = constants.O_NOFOLLOW;
+      if (typeof noFollow !== "number") return false;
+      let fd = -1;
+      try {
+        fd = openSync(TURNEND, constants.O_WRONLY | constants.O_CREAT | noFollow, 0o600);
+        const stat = fstatSync(fd);
+        if (!stat.isFile()) return false;
+        futimesSync(fd, new Date(), new Date());
+        requireCurrentGeneration();
+        return true;
+      } finally {
+        if (fd >= 0) closeSync(fd);
+      }
+    });
   } catch {
     return false;
-  } finally {
-    if (fd >= 0) closeSync(fd);
   }
 };
 const touchTurnEnd = (token: string) =>

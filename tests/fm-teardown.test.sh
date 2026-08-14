@@ -1522,6 +1522,93 @@ test_omp_evidence_lock_release_preserves_replacement() {
   pass "evidence lock release revalidates the exact replacement boundary"
 }
 
+test_omp_evidence_lock_recovers_partial_release() {
+  local case_dir state id=task-x1 lock orphan output
+  case_dir=$(make_case omp-evidence-lock-partial-release)
+  state="$case_dir/state"
+  lock="$state/$id.busy-state.lock"
+  mkdir -p "$lock"
+  output=$(FM_BUSY_LOCK_STALE_SECS=0 bash -c '
+    . "$1"
+    fm_omp_session_evidence_lock_acquire "$2" "$3" || exit 1
+    fm_omp_session_evidence_lock_release "$2" "$3"
+  ' _ "$ROOT/bin/fm-omp-state-lib.sh" "$state" "$id" 2>&1) || \
+    fail "omp-evidence-lock-partial-release: empty lock recovery failed: $output"
+  [ ! -e "$lock" ] || fail "omp-evidence-lock-partial-release: empty lock was not retired"
+
+  mkdir -p "$lock"
+  orphan=".firstmate-remove-recovery"
+  printf '999999 orphan-token\n' > "$lock/$orphan"
+  output=$(FM_BUSY_LOCK_STALE_SECS=0 bash -c '
+    . "$1"
+    fm_omp_session_evidence_lock_acquire "$2" "$3" || exit 1
+    fm_omp_session_evidence_lock_release "$2" "$3"
+  ' _ "$ROOT/bin/fm-omp-state-lib.sh" "$state" "$id" 2>&1) || \
+    fail "omp-evidence-lock-partial-release: orphan temp recovery failed: $output"
+  [ ! -e "$lock" ] || fail "omp-evidence-lock-partial-release: orphan lock was not retired"
+  pass "OMP evidence lock release and stale recovery converge after partial completion"
+}
+
+test_omp_fs_removal_preserves_replacement() {
+  local case_dir parent entry original gate remover rc i=0 parent_identity entry_identity
+  case_dir=$(make_case omp-fs-removal-race)
+  parent="$case_dir/state/fs-removal"
+  mkdir -p "$parent"
+  entry="$parent/entry"
+  original="$parent/entry.original"
+  printf 'original\n' > "$entry"
+  parent_identity=$(stat -f '%d:%i' "$parent" 2>/dev/null || stat -c '%d:%i' "$parent")
+  entry_identity=$(stat -f '%d:%i' "$entry" 2>/dev/null || stat -c '%d:%i' "$entry")
+  gate="$case_dir/file-removal"
+  : > "$gate.hold"
+  (
+    . "$ROOT/bin/fm-session-lock-lib.sh"
+    FM_OMP_FS_REMOVE_GATE="$gate" \
+      fm_harness_unlink_regular_nofollow_at "$parent" entry "$parent_identity" "$entry_identity"
+  ) > "$gate.output" 2>&1 &
+  remover=$!
+  while [ "$i" -lt 100 ] && [ ! -e "$gate.ready" ]; do sleep 0.01; i=$((i + 1)); done
+  [ -e "$gate.ready" ] || fail "omp-fs-removal-race: file removal did not reach its identity gate"
+  mv "$entry" "$original"
+  printf 'foreign\n' > "$entry"
+  rm -f "$gate.hold"
+  set +e
+  wait "$remover"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "omp-fs-removal-race: file replacement must fail closed"
+  [ "$(cat "$entry")" = foreign ] || fail "omp-fs-removal-race: foreign file was removed or modified"
+  [ -f "$original" ] || fail "omp-fs-removal-race: replacement displaced file was removed"
+
+  local directory directory_original directory_gate directory_remover directory_rc directory_i=0 directory_identity
+  directory="$parent/directory"
+  directory_original="$parent/directory.original"
+  mkdir "$directory"
+  directory_identity=$(stat -f '%d:%i' "$directory" 2>/dev/null || stat -c '%d:%i' "$directory")
+  directory_gate="$case_dir/directory-removal"
+  : > "$directory_gate.hold"
+  (
+    . "$ROOT/bin/fm-session-lock-lib.sh"
+    FM_OMP_FS_REMOVE_GATE="$directory_gate" \
+      fm_harness_rmdir_nofollow_at "$parent" directory "$parent_identity" "$directory_identity"
+  ) > "$directory_gate.output" 2>&1 &
+  directory_remover=$!
+  while [ "$directory_i" -lt 100 ] && [ ! -e "$directory_gate.ready" ]; do sleep 0.01; directory_i=$((directory_i + 1)); done
+  [ -e "$directory_gate.ready" ] || fail "omp-fs-removal-race: directory removal did not reach its identity gate"
+  mv "$directory" "$directory_original"
+  mkdir "$directory"
+  printf 'foreign\n' > "$directory/foreign"
+  rm -f "$directory_gate.hold"
+  set +e
+  wait "$directory_remover"
+  directory_rc=$?
+  set -e
+  expect_code 1 "$directory_rc" "omp-fs-removal-race: directory replacement must fail closed"
+  [ -f "$directory/foreign" ] || fail "omp-fs-removal-race: foreign directory was removed or modified"
+  [ -d "$directory_original" ] || fail "omp-fs-removal-race: replacement displaced directory was removed"
+  pass "OMP filesystem removal preserves replacements across file and directory races"
+}
+
 test_teardown_validates_omp_evidence_generation_and_temps() {
   local case_dir rc token temp legacy_temp temp_identity temp_dev temp_ino proof_uuid proof_identity proof_dev proof_ino
   case_dir=$(make_case omp-evidence-generation)
@@ -1576,8 +1663,7 @@ test_teardown_validates_omp_evidence_generation_and_temps() {
   temp="$case_dir/state/task-x1.omp-session-evidence/$token.incarnation-550e8400-e29b-41d4-a716-446655440000.generation-g-current.pid-456.seq-1.tmp"
   proof_uuid=550e8400-e29b-41d4-a716-446655440001
   printf 'partial evidence\n' > "$temp"
-  printf 'firstmate-omp-evidence-proof-v1 %s %s g-current 456 550e8400-e29b-41d4-a716-446655440000\n' \
-    "$proof_uuid" "${temp##*/}" > "$temp.owner"
+  printf 'firstmate-omp-evidence-proof-v1 ' > "$temp.owner"
   temp_identity=$(stat -f '%d:%i' "$temp" 2>/dev/null || stat -c '%d:%i' "$temp")
   temp_dev=${temp_identity%:*}
   temp_ino=${temp_identity#*:}
@@ -2878,6 +2964,8 @@ test_teardown_preserves_unrecognized_owned_omp_evidence
 test_teardown_preserves_foreign_omp_evidence_added_during_clear
 test_teardown_preserves_replaced_omp_evidence_entry_during_clear
 test_omp_evidence_lock_release_preserves_replacement
+test_omp_evidence_lock_recovers_partial_release
+test_omp_fs_removal_preserves_replacement
 test_teardown_validates_omp_evidence_generation_and_temps
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes

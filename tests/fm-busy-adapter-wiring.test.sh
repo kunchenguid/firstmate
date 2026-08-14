@@ -163,6 +163,7 @@ drive_omp_ext() {
     FM_OMP_TEST_BEFORE_RENAME_TARGET="${FM_OMP_TEST_BEFORE_RENAME_TARGET:-}" \
     FM_OMP_TEST_GENERATION_LOCK_ACQUIRED_GATE="${FM_OMP_TEST_GENERATION_LOCK_ACQUIRED_GATE:-}" \
     FM_OMP_TEST_GENERATION_LOCK_RELEASE_GATE="${FM_OMP_TEST_GENERATION_LOCK_RELEASE_GATE:-}" \
+    FM_OMP_TEST_TURNEND_GENERATION_GATE="${FM_OMP_TEST_TURNEND_GENERATION_GATE:-}" \
     BUSY_EVENT_PATH="$ROOT/bin/fm-busy-event.sh" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -255,9 +256,7 @@ switch (process.env.MODE) {
       ".generation-" + fields[1] + ".pid-" + fields[2] + ".seq-1.tmp";
     const proofUuid = "00000000-0000-4000-8000-000000000001";
     writeFileSync(temp, "partial evidence\n", { encoding: "utf8", flag: "wx" });
-    writeFileSync(temp + ".owner",
-      "firstmate-omp-evidence-proof-v1 " + proofUuid + " " + temp.slice(temp.lastIndexOf("/") + 1) + " " +
-      fields[1] + " " + fields[2] + " " + fields[3] + "\n",
+    writeFileSync(temp + ".owner", "firstmate-omp-evidence-proof-v1 ",
       { encoding: "utf8", flag: "wx" });
     const tempStat = lstatSync(temp);
     const proofStat = lstatSync(temp + ".owner");
@@ -428,6 +427,77 @@ switch (process.env.MODE) {
       throw new Error("the replacement generation did not supersede the old one");
     }
     if (!busyState().includes("state=busy")) throw new Error("the replacement generation did not remain busy");
+    break;
+  }
+  case "target-replacement-collision": {
+    const base = process.env.STATE_DIR + "/" + process.env.TASK_ID;
+    const target = base + ".omp-session-run";
+    const collision = target + ".foreign-target";
+    const gate = process.env.ATOMIC_GATE;
+    if (!gate) throw new Error("the target replacement race gate was not configured");
+    await fire("agent_start");
+    await fire("agent_end");
+    try { unlinkSync(gate + ".ready"); } catch {}
+    writeFileSync(gate + ".hold", "hold\n", { encoding: "utf8" });
+    const racer = (await import("node:child_process")).spawn("sh", [
+      "-c",
+      'gate=$1; target=$2; collision=$3; while [ ! -e "$gate.ready" ]; do sleep 0.01; done; mv "$target" "$collision"; printf \'foreign\\n\' > "$target"; rm -f "$gate.hold"',
+      "omp-target-replacement-race", gate, target, collision,
+    ], { stdio: "ignore" });
+    const racerExit = new Promise((resolve, reject) => {
+      racer.once("error", reject);
+      racer.once("exit", resolve);
+    });
+    try { await fire("agent_start"); } catch {}
+    await racerExit;
+    if (readFileSync(target, "utf8") !== "foreign\n") {
+      throw new Error("a foreign target was replaced during atomic state commit");
+    }
+    if (!existsSync(collision)) throw new Error("the original target identity was not preserved");
+    break;
+  }
+  case "turn-end-generation-lock": {
+    const gate = process.env.FM_OMP_TEST_TURNEND_GENERATION_GATE;
+    if (!gate) throw new Error("the turn-end generation gate was not configured");
+    await fire("agent_start");
+    writeFileSync(gate + ".hold", "hold\n", { encoding: "utf8" });
+    const contenderScript = `
+import { pathToFileURL } from "node:url";
+import { existsSync, writeFileSync } from "node:fs";
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+while (!existsSync(process.env.GATE + ".ready")) await wait(5);
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href + "?turn-end-contender=" + Date.now());
+const loaded = {};
+mod.default({ on: (name, fn) => { loaded[name] = fn; } });
+await loaded.agent_start({}, {});
+writeFileSync(process.env.GATE + ".complete", "done\\n");
+`;
+    const contender = (await import("node:child_process")).spawn(
+      process.execPath, ["--input-type=module", "-e", contenderScript],
+      { env: { ...process.env, GATE: gate, FM_OMP_TEST_TURNEND_GENERATION_GATE: "" }, stdio: "ignore" },
+    );
+    const contenderExit = new Promise((resolve, reject) => {
+      contender.once("error", reject);
+      contender.once("exit", (code) => resolve(code));
+    });
+    const release = (await import("node:child_process")).spawn("sh", [
+      "-c",
+      'gate=$1; while [ ! -e "$gate.ready" ]; do sleep 0.01; done; sleep 0.2; if [ -e "$gate.complete" ]; then printf raced > "$gate.raced"; else printf blocked > "$gate.blocked"; fi; rm -f "$gate.hold"',
+      "turn-end-generation-release", gate,
+    ], { stdio: "ignore" });
+    const releaseExit = new Promise((resolve, reject) => {
+      release.once("error", reject);
+      release.once("exit", resolve);
+    });
+    try { await fire("agent_end"); } catch {}
+    await releaseExit;
+    const contenderCode = await contenderExit;
+    if (contenderCode !== 0 || !existsSync(gate + ".complete")) {
+      throw new Error("the competing OMP lifecycle writer did not complete after publication");
+    }
+    if (!existsSync(gate + ".blocked") || existsSync(gate + ".raced")) {
+      throw new Error("turn-end publication did not hold the generation lock");
+    }
     break;
   }
   case "persistent-durable-state-validation": {
@@ -1607,6 +1677,64 @@ test_omp_extension_generation_commit_is_atomic() {
   pass "OMP generation changes cannot interrupt a multi-file lifecycle commit"
 }
 
+test_omp_extension_rejects_replaced_atomic_target() {
+  local rec id=busy-omp-target-replacement out state state_real ext gate collision target
+  rec=$(make_spawn_case omp-target-replacement omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp target-replacement spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  state_real=$(cd "$state" && pwd -P)
+  ext="$state/$id.omp-ext.ts"
+  gate="$state/$id.target-replacement-race"
+  target="$state_real/$id.omp-session-run"
+  collision="$target.foreign-target"
+  out=$(ATOMIC_GATE="$gate" \
+    FM_OMP_TEST_BEFORE_RENAME_GATE="$gate" \
+    FM_OMP_TEST_BEFORE_RENAME_TARGET="$target" \
+    drive_omp_ext "$ext" target-replacement-collision "$state" "$id") \
+    || fail "target-replacement collision drive failed: $out"
+  [ "$(cat "$target")" = 'foreign' ] || fail "a foreign OMP state target was replaced"
+  [ -f "$collision" ] || fail "the original OMP state target was not preserved"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "a rejected OMP target replacement changed settled state, got '$out'"
+  pass "OMP state commits reject replacement targets without deleting foreign state"
+}
+
+test_omp_spawn_requires_collision_safe_python() {
+  local rec id=busy-omp-python-preflight out state status
+  rec=$(make_spawn_case omp-python-preflight omp "$id")
+  read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/python3" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$FAKEBIN_DIR/python3"
+  state="$HOME_DIR/state"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR"); status=$?
+  expect_code 1 "$status" "OMP spawn must fail closed without the filesystem runtime: $out"
+  assert_contains "$out" "working python3" "OMP spawn did not report the filesystem runtime preflight"
+  assert_absent "$state/$id.omp-ext.ts" "OMP spawn created an extension after runtime preflight failure"
+  pass "OMP preflight rejects a missing collision-safe filesystem runtime before launch"
+}
+
+test_omp_turn_end_publication_holds_generation_lock() {
+  local rec id=busy-omp-turn-end-lock out state ext gate
+  rec=$(make_spawn_case omp-turn-end-lock omp "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "omp turn-end-lock spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  gate="$state/$id.turn-end-generation-lock"
+  out=$(FM_OMP_TEST_TURNEND_GENERATION_GATE="$gate" \
+    drive_omp_ext "$ext" turn-end-generation-lock "$state" "$id") \
+    || fail "turn-end generation-lock drive failed: $out"
+  [ -e "$gate.blocked" ] || fail "turn-end publication did not expose a blocked contender"
+  [ ! -e "$gate.raced" ] || fail "turn-end publication allowed a competing generation writer"
+  pass "OMP turn-end publication holds the generation lock through its write"
+}
+
 test_omp_generation_lock_release_cannot_remove_replacement() {
   local rec id=busy-omp-lock-replacement out state ext gate lock owner holder_pid i=0
   rec=$(make_spawn_case omp-lock-replacement omp "$id")
@@ -1875,6 +2003,9 @@ test_omp_extension_rejects_foreign_and_out_of_order_persisted_timestamps
 test_omp_agent_end_continuation_stays_busy
 test_omp_extension_stale_incarnation_rejected
 test_omp_extension_generation_commit_is_atomic
+test_omp_extension_rejects_replaced_atomic_target
+test_omp_spawn_requires_collision_safe_python
+test_omp_turn_end_publication_holds_generation_lock
 test_omp_generation_lock_release_cannot_remove_replacement
 test_omp_generation_lock_release_race_cannot_remove_replacement
 test_kimi_and_grok_install_no_unverified_wiring
