@@ -37,7 +37,7 @@ Firstmate loads this same tracked `fm-calm.ts` implementation explicitly for eve
 The launch binds the worker to the spawning Firstmate home's resolved `FM_HOME` and config directory, so the extension reads that home's `config/calm` even though the worker runs in an isolated task repository.
 The launch contributes exactly one Calm extension path outside that repository, requires no project-local copy or project trust, and keeps the generated supervision extension separate so presentation and supervision retain their existing owners.
 Calm claims ownership before making any registration, so a trusted task repository that auto-discovers another checkout's `fm-calm.ts` leaves the explicitly loaded implementation as the sole Calm owner while unrelated project extensions continue loading normally.
-The [home-local preference contract](configuration.md#pi-calm-preference-configcalm) is unchanged; the worker launch only selects the owning home's path, and an active preference applies the same presentation-only behavior described above without changing tool execution, message ordering, session storage, or exports.
+The [home-local preference contract](configuration.md#pi-calm-preference-configcalm) is unchanged; the worker launch only selects the owning home's path, and an active preference applies the same presentation-only behavior described above without changing stored transcript or session data, exports, tool execution, message ordering, or supervision behavior.
 Non-Pi workers receive no Calm launch integration.
 Persistent second mates also receive no ordinary-worker integration because a Pi-family second mate already starts as a primary Firstmate session under its own tracked extension contract.
 

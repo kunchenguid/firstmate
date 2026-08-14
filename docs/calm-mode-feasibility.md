@@ -5,7 +5,8 @@ This document owns the version-scoped feasibility evidence, Pi transcript taxono
 
 ## Required extension surface
 
-A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Firstmate home across Pi session starts and resumes, keep working activity visible, emit no Calm status row, redraw already-rendered controllable rows, remove supported hidden rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
+A qualifying implementation must load Firstmate's tracked extension through Pi's supported extension surface, persist the toggle choice for the effective Firstmate home across Pi session starts and resumes, keep working activity visible, emit no Calm status row, redraw already-rendered controllable rows, remove supported hidden rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
+[`calm.md`](calm.md#supervised-worker-sessions) owns the ordinary-worker launch boundary, including its project-trust and relaunch limits.
 The governing presentation policy allows genuine original user prompts, genuine user-facing assistant text, and working activity.
 Working activity may be presented through Pi's stock row or through a supported Calm-owned widget, but Calm must leave the stock row untouched whenever Calm is off.
 Changing persisted context to remove hidden content, filtering provider context, patching installed harness code, or claiming coverage outside a supported renderer does not satisfy that boundary.
