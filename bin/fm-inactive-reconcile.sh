@@ -38,7 +38,7 @@
 # and its cursor records the last child visited within the aggregate budget.
 #
 # The scan reads only durable local state and fm-crew-state.sh; it never invokes
-# gh, gh-axi, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
+# gh, curl, fm-pr-check.sh, fm-pr-poll.sh, or a state *.check.sh.
 set -u
 export LC_ALL=C
 

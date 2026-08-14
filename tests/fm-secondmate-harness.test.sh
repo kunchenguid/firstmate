@@ -1039,15 +1039,6 @@ make_fake_toolchain() {
   mkdir -p "$fakebin"
   fm_fake_exit0 "$fakebin" node chrome-devtools-axi
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
-  cat > "$fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' '0.1.29'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/gh-axi"
   # tmux fake supports fm-send's composer-verified submit path and optional
   # FM_FAKE_TMUX_LOG / FM_FAKE_TMUX_FAIL_LITERAL for reread-nudge assertions.
   cat > "$fakebin/tmux" <<'SH'

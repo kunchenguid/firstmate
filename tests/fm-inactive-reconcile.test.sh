@@ -42,7 +42,7 @@ case "${1:-}" in
 esac
 SH
   local tool
-  for tool in gh gh-axi curl; do
+  for tool in gh curl; do
     cat > "$fake/$tool" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$(basename "$0")" >> "${FM_FORGE_LOG:?}"

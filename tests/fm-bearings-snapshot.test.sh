@@ -20,9 +20,9 @@ export FM_ROOT_OVERRIDE
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
-# A fakebin that stubs the local tools the canonical snapshot may reach for, plus a
-# gh/gh-axi that RECORDS every call to $NET_LOG so a test can prove the default path
-# makes no network call. gh returns one fixture open PR keyed to the ship task.
+# A fakebin that stubs the local tools the canonical snapshot may reach for, plus
+# gh recording every call to $NET_LOG so a test can prove the default path makes no
+# network call. gh returns one fixture open PR keyed to the ship task.
 make_fakebin() {  # <dir>
   local fb
   fb=$(fm_fakebin "$1")
@@ -59,18 +59,12 @@ cat <<'JSON'
 [{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"fm/ship-task","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]
 JSON
 SH
-  cat > "$fb/gh-axi" <<'SH'
-#!/usr/bin/env bash
-echo "gh-axi $*" >> "$NET_LOG"
-[ "${FAKE_GH_FAIL:-0}" = 1 ] && exit 1
-exit 0
-SH
   cat > "$fb/curl" <<'SH'
 #!/usr/bin/env bash
 echo "curl $*" >> "$NET_LOG"
 exit 1
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/curl"
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/curl"
   printf '%s\n' "$fb"
 }
 
@@ -892,7 +886,7 @@ test_default_is_bounded_and_local_only() {
   local canon; canon=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   [ "${#toon}" -lt "${#canon}" ] || fail "projection must be smaller than the canonical snapshot"
   # Local-only: no GitHub/network call on the default path.
-  [ ! -s "$home/net.log" ] || fail "default run must make no gh/gh-axi call, got: $(cat "$home/net.log")"
+  [ ! -s "$home/net.log" ] || fail "default run must make no gh call, got: $(cat "$home/net.log")"
   # Definitive not-requested PR state, never a silent omission.
   assert_contains "$toon" 'prs: "not_requested' "default must state PR checks were not requested"
   assert_contains "$toon" "live PR discovery + checks,\"--include-prs\"" "omitted must mark the dropped live-PR surface"
@@ -1177,7 +1171,7 @@ test_landed_includes_secondmate_home_merges() {
       and (.landed | any(.[]; .id == "done-a"))
   ' >/dev/null || fail "landed must merge secondmate-home Done with main-home Done: $json"
   # Still zero network on this default path.
-  [ ! -s "$home/net.log" ] || fail "landed roll-up must make no gh/gh-axi call, got: $(cat "$home/net.log")"
+  [ ! -s "$home/net.log" ] || fail "landed roll-up must make no gh call, got: $(cat "$home/net.log")"
   pass "landed includes secondmate-managed merges alongside main-home merges"
 }
 

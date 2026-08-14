@@ -290,22 +290,15 @@ make_teardown_case() {
     printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$t"
     chmod +x "$fakebin/$t"
   done
-  cat > "$fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-case "${1:-} ${2:-}" in
-  "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []"; exit 0 ;;
-  "pr view") echo "error: pull request not found" >&2; exit 1 ;;
-esac
-exit 0
-SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
+  "pr list") exit 0 ;;
   "pr view") echo "error: pull request not found" >&2; exit 1 ;;
 esac
 exit 0
 SH
-  chmod +x "$fakebin/gh-axi" "$fakebin/gh"
+  chmod +x "$fakebin/gh"
   git init -q --bare "$case_dir/origin.git"
   git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
   git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null

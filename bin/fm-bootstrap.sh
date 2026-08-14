@@ -52,10 +52,10 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
-#          The AXI-family floor policy is owned beside GH_AXI_MIN and
-#          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
-#          build below its floor reports MISSING like no-mistakes, so the operator
-#          is asked to upgrade rather than silently running an older tool.
+#          The AXI-family floor policy is owned beside LAVISH_AXI_MIN below;
+#          the per-tool owners point there. An installed build below its floor
+#          reports MISSING like no-mistakes, so the operator is asked to upgrade
+#          rather than silently running an older tool.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
 #          lavish-axi). A compatible tasks-axi default backend is silent.
@@ -756,7 +756,7 @@ install_cmd() {
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
-    gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
+    chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
   esac
@@ -784,7 +784,7 @@ missing_tool_diagnostic() {
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+COMMON_TOOLS="node git gh no-mistakes chrome-devtools-axi lavish-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -800,7 +800,6 @@ NO_MISTAKES_MIN=1.31.2
 # earliest release that happens to satisfy some depended-on behavior. The
 # tasks-axi feature probes are an independent defense-in-depth concern, not part
 # of its floor.
-GH_AXI_MIN=0.1.29
 LAVISH_AXI_MIN=0.1.46
 
 treehouse_supports_lease() {
@@ -1145,9 +1144,6 @@ detect_local_tools() {
   fi
   if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
     echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
-  fi
-  if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
-    echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
   fi
   if command -v lavish-axi >/dev/null 2>&1 && ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
     echo "MISSING: lavish-axi (install: $(install_cmd lavish-axi))"

@@ -5,15 +5,14 @@
 # BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
 # all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
 # 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)',
-# 'MISSING: gh-axi (install: ...)', 'MISSING: lavish-axi (install: ...)', and
-# 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
+# 'MISSING: lavish-axi (install: ...)', and 'BOOTSTRAP_INFO: ...' lines, so those
+# contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
 # tasks-axi update advertises --archive-body, whether its mv help advertises
 # multi-ID moves, whether quota-axi is on PATH,
 # whether the local backend config opts out of tasks-axi backlog mutations,
-# which no-mistakes version is on PATH, which gh-axi version is on PATH, and
-# which lavish-axi version is on PATH.
+# which no-mistakes version is on PATH and which lavish-axi version is on PATH.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
@@ -46,15 +45,6 @@ make_fake_toolchain() {
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
-  cat > "$fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_GH_AXI_VERSION:-0.1.29}"
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/gh-axi"
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
@@ -339,37 +329,6 @@ older no-mistakes patch reports an upgrade^no-mistakes version v1.31.1 (fake)^mi
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^missing
 ROWS
   pass "bootstrap enforces no-mistakes minimum version"
-}
-
-test_gh_axi_min_version() {
-  local label version mode case_dir fakebin out missing n
-  missing='MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)'
-  n=0
-  while IFS='^' read -r label version mode; do
-    [ -n "$label" ] || continue
-    n=$((n + 1))
-    case_dir="$TMP_ROOT/gh-axi-$n"
-    mkdir -p "$case_dir/home/config"
-    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-    fakebin=$(make_fake_toolchain "$case_dir")
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
-    case "$mode" in
-      empty)
-        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
-      missing)
-        [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
-    esac
-  done <<'ROWS'
-minimum gh-axi version is accepted^0.1.29^empty
-newer gh-axi patch is accepted^0.1.30^empty
-newer gh-axi minor is accepted^0.2.0^empty
-newer gh-axi major is accepted^1.0.0^empty
-older gh-axi patch reports an upgrade^0.1.19^missing
-much older gh-axi minor reports an upgrade^0.0.9^missing
-unparseable gh-axi version reports an upgrade^gh-axi development build^missing
-ROWS
-  pass "bootstrap enforces gh-axi minimum version"
 }
 
 test_lavish_axi_min_version() {
@@ -1150,7 +1109,6 @@ ROWS
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
-test_gh_axi_min_version
 test_lavish_axi_min_version
 test_tasks_axi_min_version
 test_quota_axi_min_version
