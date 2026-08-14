@@ -1905,6 +1905,7 @@ def replace(env, args):
         allowed, reason = replacement_allowed(state, "absent-proven", immutable_identity(worktree, "disk"), remote_head)
         if not allowed:
             raise ValidationError(reason)
+        fresh_start = state.get("run_id") is None
         # Prove and remove the old attempt's exact disposable remnants before
         # their names leave authoritative state. Durable worktree, identity,
         # private container, and credential lease are retained.
@@ -1942,8 +1943,17 @@ def replace(env, args):
             env, state["staging"]["result_blob"], "cw", hours=MAX_CELL_LIFETIME_HOURS,
             container=state["staging"]["container"],
         )
-        create_run_command(env, state, "reattach", output_url=output_url)
-        transition(env, state, "running", "replacement VM reattaching only to the exact recorded no-mistakes run")
+        if fresh_start:
+            input_url = blob_sas(
+                env, state["staging"]["input_blob"], "r",
+                container=state["staging"]["container"],
+            )
+            create_run_command(env, state, "start", input_url=input_url, output_url=output_url)
+            note = "replacement VM freshly starting because no no-mistakes run id was recorded"
+        else:
+            create_run_command(env, state, "reattach", output_url=output_url)
+            note = "replacement VM reattaching only to the exact recorded no-mistakes run"
+        transition(env, state, "running", note)
     print("AZURE VALIDATION REPLACED cell={} attempt={}".format(state["cell"], state["attempt"]))
 
 
