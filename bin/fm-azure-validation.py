@@ -2525,6 +2525,7 @@ def package_shard_response(env, state, request, record, destination):
 
 def drive(env, args):
     deadline = time.monotonic() + args.wait_seconds
+    control_probe_at = time.monotonic()
     cell = require_cell(args.cell)
     # The shard-driver lock serializes duplicate drivers without holding the
     # cell-state lock across hours of Azure execution. Observe/status/respond
@@ -2591,6 +2592,18 @@ def drive(env, args):
             if time.monotonic() >= deadline:
                 print("AZURE VALIDATION SHARDS WAITING cell={} pending=0".format(cell))
                 return
+            # A guest whose control command already ended can never publish
+            # another shard request, so waiting out the deadline only delays
+            # the observe that records the terminal outcome. Attempt 1 of
+            # generation 005 burned its whole 47-minute wall budget this way
+            # after the guest died in bootstrap. Probe at most every 30
+            # seconds; observe stays the sole owner of the state transition.
+            if time.monotonic() >= control_probe_at:
+                control_probe_at = time.monotonic() + 30
+                execution, _view = run_command_status(env, state)
+                if execution in ("Succeeded", "Failed", "Canceled", "TimedOut"):
+                    print("AZURE VALIDATION CONTROL TERMINAL cell={} control_state={} pending=0".format(cell, execution))
+                    return
             time.sleep(5)
 
 

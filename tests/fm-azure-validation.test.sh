@@ -597,6 +597,15 @@ ancestors=[]; current=run_call
 while current in parents: current=parents[current]; ancestors.append(current)
 with_sources=[ast.dump(node.items[0].context_expr) for node in ancestors if isinstance(node,ast.With)]
 assert len(with_sources)==1 and "shards" in with_sources[0]
+# A dead guest control command ends the wait immediately instead of burning
+# the whole wall budget on a shard request that can never appear; the probe
+# is throttled and observe stays the sole owner of the state transition.
+drive_src=inspect.getsource(m.drive)
+assert "run_command_status(env, state)" in drive_src
+assert "CONTROL TERMINAL" in drive_src
+assert drive_src.index("SHARDS WAITING") < drive_src.index("CONTROL TERMINAL")
+assert "control_probe_at = time.monotonic() + 30" in drive_src
+assert '("Succeeded", "Failed", "Canceled", "TimedOut")' in drive_src
 root=pathlib.Path(tempfile.mkdtemp()); home=root/"home"; state_dir=home/"state"/"azure-validation"; runner_dir=home/"state"/"azure-runner"
 env={"home":home,"state_dir":state_dir,"subscription":"sub"}; state={"schema":m.SCHEMA,"cell":"azv-aaaaaaaaaaaa","request":{"task":"task","fence":"sha256:"+"f"*64,"repository":{"head":"a"*40},"limits":{"reserved_vcpus":40}},"shard_runs":{}}
 m.ensure_dirs(env)
