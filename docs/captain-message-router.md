@@ -44,6 +44,8 @@ Local-only under `state/captain-router/` (gitignored with `state/`):
 
 The Pi hook also writes `state/.pi-captain-router-extension-loaded` with its content-derived version and process id.
 Session start accepts that marker only when its version matches the current extension and its process owns the session lock; otherwise it prints the trust-once and explicit `-e` restart paths.
+Pending-route publication creates a unique candidate before atomically replacing `LATEST`.
+If pointer publication fails, it removes only that candidate and preserves the previously published route and pointer before taking the fail-open path below.
 
 ### Session id assumption
 
@@ -103,6 +105,7 @@ The prompt carries four framed parts:
 The hook caps the excerpt at the newest 12 user/assistant turns and 6000 characters, and the owner re-bounds it (`FM_CAPTAIN_ROUTER_HISTORY_CHARS`, default 6000) and redacts before the model sees anything.
 Redaction drops any line carrying a Firstmate operational injection and masks secret-shaped tokens and `token`/`secret`/`password`/`api_key` values.
 With no history file the model still gets the briefs and the message.
+The hook writes the transcript handoff through a newly created private temp directory and mode-0600 file, then removes the directory after synchronous submit returns.
 
 The full prompt is handed to Cursor through a private (mode 0600) temp file under `state/captain-router/`; the spawn argv carries only a short instruction naming that file.
 No history, brief, or message text ever appears in the process list, and no kernel argument-size limit applies to large captain pastes.
@@ -126,7 +129,7 @@ It exists so the captain can audit why a verdict was chosen and dial the prompt 
 
 ### Fail-open fallback
 
-A spawn error, a timeout (`FM_CAPTAIN_ROUTER_TIMEOUT_SECS`, default 90s, hard-bounded through `bin/fm-timeout-lib.sh` so the whole Cursor process group dies at the bound even on hosts with no `timeout` binary), an unparseable reply, a `reroute` naming the current session or a session with no brief, or a pending-route publication failure all fall back to `same` against the current session with `confidence=det` and a `failures.log` row.
+A private prompt-file creation, permission, or write error, a spawn error, a timeout (`FM_CAPTAIN_ROUTER_TIMEOUT_SECS`, default 90s, hard-bounded through `bin/fm-timeout-lib.sh` so the whole Cursor process group dies at the bound even on hosts with no `timeout` binary), an unparseable reply, a `reroute` naming the current session or a session with no brief, or a pending-route publication failure all fall back to `same` against the current session with `confidence=det` and a `failures.log` row.
 The captain is never locked out by a broken or slow router.
 
 ### Configuration
@@ -135,7 +138,7 @@ The owner always uses upstream Firstmate's Cursor Agent CLI resolver and default
 Set `FM_CAPTAIN_ROUTER_MODEL` to another model id exposed by the current Cursor account.
 The Cursor model id carries the reasoning level because Cursor exposes no separate effort flag.
 Launch is non-interactive Cursor `--print --mode ask`, pinned to the Firstmate home as its workspace.
-Unit tests put a recording fake `cursor-agent` executable on `PATH`, so every test crosses the verified resolver, shared timeout owner, private prompt-file handoff, and read-only Cursor argv boundary.
+Shell submit-path fixtures put a recording fake `cursor-agent` executable on `PATH`, so those regressions cross the verified resolver, shared timeout owner, private prompt-file handoff, and read-only Cursor argv boundary.
 No real model calls in unit tests; `tests/fm-captain-router-live-e2e.test.sh` is the opt-in live proof.
 
 ## Hook behavior
@@ -144,6 +147,7 @@ No real model calls in unit tests; `tests/fm-captain-router-live-e2e.test.sh` is
 - Submit: synchronous so bash can stage pending routes before the primary turn proceeds.
 - Both paths run only while this Pi process owns the Firstmate session lock.
 - Every accepted Pi `input` is bound to its callback-context session and logical run before classification, including queued steering, follow-up, RPC, interactive, and extension-delivered input.
+- A queued follow-up or steer arriving after `agent_end` but before `agent_settled` is classified against that run's candidate transcript when present, rather than stale settled history.
 - `before_agent_start` is only a deduplicated fallback for an accepted prompt path that emitted no `input` event.
 - `agent_end` retains only a candidate response and bounded transcript; `agent_settled` publishes them only when that same session and run saw captain input and no Firstmate operational input.
 - A mixed captain and operational run publishes no anchors or recent history, including when operational input arrives after an earlier `agent_end`.
