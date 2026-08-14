@@ -63,7 +63,7 @@ printf '%s' "$CREDENTIAL_KEY" >"$CREDENTIAL_KEY_FILE"
 unset WORKTREE_KEY CREDENTIAL_KEY
 
 missing=()
-for tool in curl git python3 sha256sum tar systemd-run cryptsetup lsblk findmnt jq mount umount useradd runuser; do
+for tool in curl git python3 sha256sum tar systemd-run cryptsetup blkid lsblk findmnt jq mount umount useradd runuser; do
   command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
@@ -72,7 +72,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
   apt-get install -y --no-install-recommends \
     ca-certificates curl git python3 cryptsetup-bin util-linux jq systemd tar passwd
 fi
-for tool in curl git python3 sha256sum tar systemd-run cryptsetup lsblk findmnt jq mount umount useradd runuser; do
+for tool in curl git python3 sha256sum tar systemd-run cryptsetup blkid lsblk findmnt jq mount umount useradd runuser; do
   command -v "$tool" >/dev/null 2>&1 || { echo "validation guest: fixed bootstrap closure is incomplete" >&2; exit 125; }
 done
 
@@ -123,11 +123,9 @@ CREDENTIAL_DEVICE=$(resolve_data_disk 1)
 
 if cryptsetup isLuks "$WORK_DEVICE"; then
   [ "$MODE" != start ] || { echo "validation guest: new cell found a pre-existing LUKS worktree" >&2; exit 125; }
-  WORKTREE_EXISTING=1
 else
   [ "$MODE" = start ] || { echo "validation guest: replacement worktree is not LUKS2" >&2; exit 125; }
   cryptsetup luksFormat --type luks2 --batch-mode --key-file "$WORKTREE_KEY_FILE" "$WORK_DEVICE"
-  WORKTREE_EXISTING=0
 fi
 cryptsetup isLuks "$CREDENTIAL_DEVICE" || { echo "validation guest: credential lease disk is not LUKS2" >&2; exit 125; }
 cryptsetup open --key-file "$WORKTREE_KEY_FILE" "$WORK_DEVICE" fm-validation-work
@@ -137,9 +135,16 @@ shred -u "$WORKTREE_KEY_FILE" "$CREDENTIAL_KEY_FILE" 2>/dev/null || rm -f "$WORK
 WORK_MOUNT=/srv/fm-validation
 CREDENTIAL_MOUNT=/run/fm-validation-credentials
 install -d -m 0700 -o root -g root "$WORK_MOUNT" "$CREDENTIAL_MOUNT"
-if [ "${WORKTREE_EXISTING:-0}" -eq 0 ]; then
-  mkfs.ext4 -q -F -L fm-validation-work /dev/mapper/fm-validation-work
-fi
+set +e
+WORKTREE_FS_TYPE=$(blkid -p -s TYPE -o value /dev/mapper/fm-validation-work 2>/dev/null)
+WORKTREE_FS_RC=$?
+set -e
+case "$WORKTREE_FS_RC:$WORKTREE_FS_TYPE" in
+  2:) mkfs.ext4 -q -F -L fm-validation-work /dev/mapper/fm-validation-work ;;
+  0:ext4) ;;
+  0:*) echo "validation guest: worktree mapping has a foreign filesystem" >&2; exit 125 ;;
+  *) echo "validation guest: worktree filesystem identity is unreadable" >&2; exit 125 ;;
+esac
 mount -o nodev,nosuid /dev/mapper/fm-validation-work "$WORK_MOUNT"
 mount -o nodev,nosuid,noexec /dev/mapper/fm-validation-credentials "$CREDENTIAL_MOUNT"
 cleanup_mounts() {

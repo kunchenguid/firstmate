@@ -142,6 +142,10 @@ for value in ("MemoryMax","MemorySwapMax=0","TasksMax","CPUQuota=700%","PrivateT
     assert value in guest
 for value in ('MODE=${mode:-}','VM_RESOURCE_ID=${vm_resource_id:-}','INPUT_URL=${input_url:-}','WORKTREE_KEY=${fm_azure_validation_worktree_key_file:-}','unset input_url output_url response'):
     assert value in guest
+for value in ('cryptsetup blkid lsblk','WORKTREE_FS_TYPE=$(blkid -p -s TYPE -o value /dev/mapper/fm-validation-work','2:) mkfs.ext4','0:ext4)','worktree mapping has a foreign filesystem','worktree filesystem identity is unreadable'):
+    assert value in guest
+assert 'if [ "${WORKTREE_EXISTING:-0}" -eq 0 ]' not in guest
+assert guest.index('new cell found a pre-existing LUKS worktree') < guest.index('WORKTREE_FS_TYPE=$(blkid') < guest.index('mount -o nodev,nosuid /dev/mapper/fm-validation-work')
 for value in ("fm.azure-validation-shard/v1","storage_token","vm_instance_id","boot_id","trusted_verify_manifests"):
     assert value in bridge
 assert '"$FM_AZURE_VALIDATION_SHARD_BRIDGE" behavior' in nm
