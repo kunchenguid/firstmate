@@ -97,6 +97,13 @@ ff_target "$FM_ROOT" "firstmate" origin no no
 if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
   reread_firstmate="yes"
 fi
+case "$FF_STATUS" in
+  updated|current) ;;
+  *)
+    printf 'firstmate: refused subordinate propagation: code-root origin update status is %s, expected updated or current\n' "$FF_STATUS" >&2
+    exit 1
+    ;;
+esac
 root_commit=$(primary_head_commit "$FM_ROOT") || {
   printf 'firstmate: refused subordinate propagation: cannot read the validated default-branch commit\n' >&2
   exit 1

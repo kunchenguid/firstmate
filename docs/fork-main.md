@@ -76,6 +76,7 @@ Use `git range-diff` to review the relationship between the submitted series and
 A topic does not habitually merge fork main or official upstream.
 Git's own workflow guidance reserves a downstream merge for a concrete reason, such as an upstream API change reaching the topic or a topic that no longer merges cleanly.
 Fork main is the integration branch and receives upstream regularly.
+The captain's 2026-08-14 ruling requires DAILY official-upstream synchronization.
 
 ## Integrate and discard a topic
 
@@ -90,7 +91,7 @@ bin/fm-fork-topic.sh integrate \
   --topic fm/divergence/<id> \
   --retire-when '<falsifiable condition>' \
   --path <path-or-directory-prefix> \
-  [--pr-url <full-url> --pr-disposition <open|rejected|closed|merged>] \
+  [--pr-url <full-url> --pr-disposition <open|rejected>] \
   --repo <isolated-worktree>
 ```
 

@@ -235,6 +235,31 @@ test_registry_backstop_dedup_and_self_exclusion() {
   pass "T7 registry backstop resolves, dedups meta+registry, excludes the firstmate repo"
 }
 
+test_diverged_firstmate_stops_before_secondmate_propagation() {
+  local w out before_main before_sm
+  w=$(new_world t8)
+  add_sm "$w" sm1
+  printf 'local firstmate work\n' >> "$w/main/README.md"
+  git -C "$w/main" add README.md
+  git -C "$w/main" commit -qm local-firstmate-work
+  before_main=$(git -C "$w/main" rev-parse HEAD)
+  before_sm=$(git -C "$w/sm1" rev-parse HEAD)
+  bump_origin "$w" instr
+
+  if out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1); then
+    fail "diverged firstmate update succeeded"
+  fi
+
+  assert_contains "$out" "firstmate: skipped: diverged from origin/main" "diverged firstmate skipped"
+  assert_contains "$out" "firstmate: refused subordinate propagation:" "subordinate propagation refused"
+  assert_not_contains "$out" "secondmate sm1:" "secondmate was not processed"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before_main" ] \
+    || fail "diverged firstmate HEAD moved"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$before_sm" ] \
+    || fail "secondmate advanced from an unvalidated firstmate commit"
+  pass "T8 diverged firstmate stops before secondmate propagation"
+}
+
 # --- T9: firstmate repo on a feature branch is skipped ---------------------
 test_firstmate_wrong_branch_skipped() {
   local w out before
@@ -244,10 +269,12 @@ test_firstmate_wrong_branch_skipped() {
   git -C "$w/main" checkout -q -b feature/wip
   before=$(git -C "$w/main" rev-parse HEAD)
 
-  out=$(run_update "$w")
+  if out=$(run_update "$w"); then
+    fail "off-default firstmate update succeeded"
+  fi
 
   assert_contains "$out" "firstmate: skipped: on feature/wip, expected main" "off-default firstmate skipped"
-  assert_contains "$out" "reread-firstmate: no" "no reread when firstmate was skipped"
+  assert_not_contains "$out" "reread-firstmate:" "skipped firstmate stops the update"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "skipped firstmate HEAD moved"
   pass "T9 firstmate off its default branch is skipped, not forced"
@@ -260,10 +287,12 @@ test_firstmate_detached_head_skipped() {
   git -C "$w/main" checkout -q --detach HEAD
   before=$(git -C "$w/main" rev-parse HEAD)
 
-  out=$(run_update "$w")
+  if out=$(run_update "$w"); then
+    fail "detached firstmate update succeeded"
+  fi
 
   assert_contains "$out" "firstmate: skipped: detached HEAD, expected main" "detached firstmate skipped"
-  assert_contains "$out" "reread-firstmate: no" "no reread when detached firstmate was skipped"
+  assert_not_contains "$out" "reread-firstmate:" "detached firstmate stops the update"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "detached firstmate HEAD moved"
   pass "T10 firstmate detached HEAD is skipped"
@@ -297,6 +326,7 @@ test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
 test_idempotent_already_current
 test_registry_backstop_dedup_and_self_exclusion
+test_diverged_firstmate_stops_before_secondmate_propagation
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
