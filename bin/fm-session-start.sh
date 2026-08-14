@@ -756,6 +756,17 @@ if [ "$PRIMARY_HARNESS" = omp ] && [ "$READ_ONLY" -eq 0 ]; then
     || ! fm_pi_extension_loaded "$OMP_TURNEND_MARKER" "$OMP_TURNEND_VERSION" "$OMP_LOCK"; then
     printf 'OMP_WATCH_EXTENSION: not loaded - restart plain omp so %s and %s auto-load from .omp/extensions for turn-end guard and background wake coverage; use -e %s -e %s only when auto-loading is unavailable\n' "$OMP_TURNEND_EXT" "$OMP_EXT" "$OMP_TURNEND_EXT" "$OMP_EXT"
   fi
+  OMP_DELIVERY_FAILURE_MARKER="$STATE/.omp-watch-delivery-failed"
+  if [ -s "$OMP_DELIVERY_FAILURE_MARKER" ]; then
+    OMP_DELIVERY_FAILURE_HANDLING="$STATE/.omp-watch-delivery-failed.handling.$$"
+    if mv "$OMP_DELIVERY_FAILURE_MARKER" "$OMP_DELIVERY_FAILURE_HANDLING" 2>/dev/null; then
+      printf 'OMP_WATCH_DELIVERY: prior watcher follow-up delivery was rejected; the exact diagnostic follows.\n'
+      cat "$OMP_DELIVERY_FAILURE_HANDLING"
+      rm -f "$OMP_DELIVERY_FAILURE_HANDLING"
+    else
+      printf 'OMP_WATCH_DELIVERY: prior watcher follow-up delivery was rejected; inspect %s.\n' "$OMP_DELIVERY_FAILURE_MARKER"
+    fi
+  fi
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \
