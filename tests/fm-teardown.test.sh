@@ -1487,6 +1487,7 @@ test_teardown_preserves_replaced_omp_evidence_entry_during_clear() {
   pass "teardown revalidates each OMP evidence entry before removal"
 }
 
+# shellcheck disable=SC2031 # Background race fixture mutates shared path state.
 test_omp_evidence_lock_release_preserves_replacement() {
   local case_dir state id=task-x1 gate lock owner releaser i=0
   case_dir=$(make_case omp-evidence-lock-release-race)
@@ -1549,6 +1550,7 @@ test_omp_evidence_lock_recovers_partial_release() {
   pass "OMP evidence lock release and stale recovery converge after partial completion"
 }
 
+# shellcheck disable=SC2031 # Background race fixture mutates shared path state.
 test_omp_fs_removal_preserves_replacement() {
   local case_dir parent entry original gate remover rc i=0 parent_identity entry_identity
   case_dir=$(make_case omp-fs-removal-race)

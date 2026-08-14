@@ -596,7 +596,7 @@ fm_omp_session_evidence_clear_locked() {
     [ -d "$evidence_dir" ] && [ ! -L "$evidence_dir" ] || return 1
     evidence_identity=$(fm_omp_session_evidence_path_identity "$evidence_dir") || return 1
     (
-      CDPATH= cd -- "$evidence_dir" || exit 1
+      CDPATH='' cd -- "$evidence_dir" || exit 1
       current_identity=$(fm_omp_session_evidence_path_identity .) || exit 1
       [ "$current_identity" = "$evidence_identity" ] || exit 1
       current_generation=$(fm_omp_session_evidence_current_generation "$state" "$id") || exit 1

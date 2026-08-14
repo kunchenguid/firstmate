@@ -20,6 +20,7 @@ FM_HARNESS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Known harness command names; extend when a new adapter is verified. OMP's
 # exact Bun-script shape is verified alongside its primary and worker adapter.
+# shellcheck disable=SC2034 # Sourced callers use this public harness pattern.
 FM_HARNESS_RE='^(claude|codex|opencode|grok|kimi)(-|$)|^pi$|^pi-signed$|^omp$'
 
 # Exact executable names for the stricter path evidence below. Keep in sync
@@ -236,7 +237,7 @@ fm_harness_muse_executable_matches() {  # <executable>
 }
 
 fm_harness_process_identity() {  # <comm> <args> [executable] [script] -> harness|shell|other
-  local comm=$1 args=${2:-} executable=${3:-} script=${4:-} base argv0 name
+  local comm=$1 args=${2:-} executable=${3:-} script=${4:-} base name
   [ -n "$comm" ] || { printf 'unknown'; return 0; }
   if fm_harness_omp_process_matches "$comm" "$args" "$executable" "$script"; then
     printf 'omp'
@@ -531,12 +532,13 @@ fm_harness_process_matches() {  # <comm> <args> [executable] [script]
   local comm=${1:-} args=${2:-} executable=${3:-} script=${4:-} base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
-  [ "$base" = omp ] && ! fm_harness_omp_attribution_allowed && return 1
-  if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
-    case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+  base=${base#-}
+  if fm_harness_omp_process_matches "$comm" "$args" "$executable" "$script"; then
     return 0
   fi
-  if fm_harness_omp_process_matches "$comm" "$args" "$executable" "$script"; then
+  [ "$base" = omp ] && return 1
+  if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
+    case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
   argv0=${args%% *}

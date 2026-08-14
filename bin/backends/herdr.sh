@@ -2847,7 +2847,7 @@ fm_backend_herdr_omp_process_tree_state() {  # <session> <pane> -> omp|other|unk
 
 fm_backend_herdr_raw_omp_process_state() {  # <session> <pane> [raw-owner] -> harness|unknown
   local session=$1 pane=$2 raw_owner=${3:-${FM_RAW_LAUNCH_OWNER:-}}
-  local info shell_pid foreground_pids rows pid name args provider_executable script executable identity current_identity= shell_seen=0 omp_seen=0
+  local info shell_pid foreground_pids rows pid name args provider_executable script executable identity current_identity='' shell_seen=0 omp_seen=0
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || {
     printf 'unknown'
     return 0
@@ -2991,7 +2991,7 @@ fm_backend_herdr_omp_process_identity() {  # <session> <pane> [any] -> omp|other
 }
 
 fm_backend_herdr_process_identity() {  # <session> <pane> -> harness|shell|other|unknown
-  local session=$1 pane=$2 info rows pid name args provider_executable script executable identity current_identity= shell_seen=0 omp_seen=0 other_seen=0
+  local session=$1 pane=$2 info rows pid name args provider_executable script executable identity current_identity='' shell_seen=0 omp_seen=0 other_seen=0
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || {
     printf 'unknown'
     return 0
@@ -3091,7 +3091,7 @@ fm_backend_herdr_omp_input_safe() {  # <session> <pane> [recorded-harness] [raw-
   local inherited_unverified=${FM_HARNESS_UNVERIFIED:-}
   local FM_HARNESS_UNVERIFIED=$inherited_unverified
   [ -n "$inherited_unverified" ] && raw_launch=1
-  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED=raw-launch
+  [ "$raw_launch" = 1 ] && FM_HARNESS_UNVERIFIED='raw-launch'
   [ "$explicit_target" = 1 ] && [ -z "$recorded_harness" ] && [ -z "$raw_launch" ] && return 0
   [ "$recorded_harness" = raw-omp ] && return 1
   if [ "$recorded_harness" = omp ] && ! fm_harness_omp_attribution_allowed; then

@@ -1236,7 +1236,7 @@ case "$ARG3" in
     for word in $LAUNCH; do
       case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
     done
-    [ "$HARNESS" = omp ] && HARNESS=raw-omp
+    [ "$HARNESS" = omp ] && HARNESS='raw-omp'
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1269,7 +1269,7 @@ esac
 RAW_LAUNCH_WORDS=()
 
 raw_launch_tokenize() {
-  local input=$1 char quote= word= have=0 i=0 length=${#1}
+  local input=$1 char quote='' word='' have=0 i=0 length=${#1}
   RAW_LAUNCH_WORDS=()
   while [ "$i" -lt "$length" ]; do
     char=${input:$i:1}
@@ -1277,7 +1277,7 @@ raw_launch_tokenize() {
       if [ "$char" = "$quote" ]; then
         quote=
         have=1
-      elif [ "$quote" = '"' ] && [ "$char" = '\' ]; then
+      elif [ "$quote" = '"' ] && [ "$char" = "\\" ]; then
         i=$((i + 1))
         [ "$i" -lt "$length" ] || return 1
         word=$word${input:$i:1}
@@ -1289,7 +1289,7 @@ raw_launch_tokenize() {
     elif [ "$char" = "'" ] || [ "$char" = '"' ]; then
       quote=$char
       have=1
-    elif [ "$char" = '\' ]; then
+    elif [ "$char" = "\\" ]; then
       i=$((i + 1))
       [ "$i" -lt "$length" ] || return 1
       word=$word${input:$i:1}
@@ -4512,7 +4512,11 @@ fi
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
   claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
-    LAUNCH="env -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
+    if [ -n "${CURSOR_AGENT:-}" ] || [ -n "${CURSOR_INVOKED_AS:-}" ]; then
+      LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u OMPCODE $LAUNCH"
+    else
+      LAUNCH="env -u OMPCODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
+    fi
     ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
@@ -4556,18 +4560,15 @@ if [ "$RAW_LAUNCH" -eq 1 ]; then
     LAUNCH="unset FM_HARNESS_UNVERIFIED OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT FM_RAW_LAUNCH_OWNER; export FM_HARNESS_UNVERIFIED=raw-launch; $LAUNCH"
   fi
 else
-  if [ -n "${FM_HARNESS_UNVERIFIED:-}" ] || [ -n "${FM_RAW_LAUNCH_OWNER:-}" ]; then
-    LAUNCH="unset FM_HARNESS_UNVERIFIED FM_RAW_LAUNCH_OWNER; $LAUNCH"
-  fi
   case "$HARNESS" in
     omp)
-      LAUNCH="unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export OMPCODE=1; $LAUNCH"
+      LAUNCH="unset FM_HARNESS_UNVERIFIED FM_RAW_LAUNCH_OWNER CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; export OMPCODE=1; $LAUNCH"
       ;;
     pi|pi-signed)
-      LAUNCH="unset OMPCODE CLAUDECODE FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
+      LAUNCH="unset FM_HARNESS_UNVERIFIED FM_RAW_LAUNCH_OWNER OMPCODE CLAUDECODE FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
       ;;
     *)
-      LAUNCH="unset OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
+      LAUNCH="unset FM_HARNESS_UNVERIFIED FM_RAW_LAUNCH_OWNER OMPCODE CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS FM_PRIMARY_HARNESS GROK_AGENT GROK_HOOK_EVENT; $LAUNCH"
       ;;
   esac
 fi

@@ -3832,6 +3832,7 @@ make_owner_herdr_case() {
 
 test_fm_send_propagates_and_validates_raw_owner() {
   local dir="$TMP_ROOT/fm-send-raw-owner" home id=raw-owner-send fb log out rc
+  # shellcheck disable=SC2100 # Literal task ID, not arithmetic.
   id=raw-owner-send
   home="$dir/home"
   mkdir -p "$dir"
@@ -3867,6 +3868,7 @@ test_fm_send_propagates_and_validates_raw_owner() {
 
 test_fm_control_propagates_and_validates_raw_owner() {
   local dir="$TMP_ROOT/fm-control-raw-owner" home id=raw-owner-control fb log out rc
+  # shellcheck disable=SC2100 # Literal task ID, not arithmetic.
   id=raw-owner-control
   home="$dir/home"
   mkdir -p "$dir"
@@ -3902,6 +3904,7 @@ test_fm_control_propagates_and_validates_raw_owner() {
 
 test_fm_send_preserves_generic_raw_herdr_input() {
   local dir="$TMP_ROOT/fm-send-generic-raw" home id=generic-raw-send fb log out rc
+  # shellcheck disable=SC2100 # Literal task ID, not arithmetic.
   id=generic-raw-send
   home="$dir/home"
   mkdir -p "$home/state" "$dir/project" "$dir/worktree"

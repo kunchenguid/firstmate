@@ -282,7 +282,7 @@ fm_backend_tmux_foreground_omp_identity() {  # <target>
 }
 
 fm_backend_tmux_foreground_process_identity() {  # <target> -> harness|shell|other|unknown
-  local target=$1 name args executable script identity current_identity= shell_seen=0 omp_seen=0 other_seen=0
+  local target=$1 name args executable script identity current_identity='' shell_seen=0 omp_seen=0 other_seen=0
   while IFS=$'\t' read -r name args executable script; do
     [ -n "$name" ] || continue
     identity=$(fm_harness_process_identity "$name" "$args" "$executable" "$script")

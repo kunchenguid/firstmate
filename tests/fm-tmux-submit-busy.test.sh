@@ -98,6 +98,7 @@ test_busy_submit_passes_recorded_harness_to_busy_probe() {
   : > "$sent"
   touch "$dir/.swallow"
   (
+    # shellcheck disable=SC2329 # Called indirectly by the submit helper.
     fm_pane_is_busy() { [ "${2:-}" = omp ]; }
     PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
       FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
@@ -118,7 +119,9 @@ test_omp_submit_passes_recorded_harness_to_baseline_and_unknown_probes() {
   vfile="$dir/verdict"
   printf 'unreadable OMP turn\n' > "$composer"
   (
+    # shellcheck disable=SC2329 # Called indirectly by the submit helper.
     fm_tmux_composer_state() { printf 'unknown'; }
+    # shellcheck disable=SC2329 # Called indirectly by the submit helper.
     fm_pane_busy_state() {
       local count=0
       [ ! -f "$busy_args" ] || count=$(wc -l < "$busy_args")
@@ -129,6 +132,7 @@ test_omp_submit_passes_recorded_harness_to_baseline_and_unknown_probes() {
         printf 'unknown'
       fi
     }
+    # shellcheck disable=SC2329 # Called indirectly by the submit helper.
     fm_pane_is_busy() {
       printf '%s\n' "${2:-}" >> "$probe_args"
       [ "${2:-}" = omp ]

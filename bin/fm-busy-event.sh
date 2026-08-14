@@ -338,13 +338,13 @@ else
   REC_IDENTITY=
 fi
 if [ "$CMD" = retire ]; then
-  state_remove_file "$GEN_FILE" "$GEN_IDENTITY" && \
-    state_remove_file "$REC" "$REC_IDENTITY" || {
+  if ! state_remove_file "$GEN_FILE" "$GEN_IDENTITY" || \
+    ! state_remove_file "$REC" "$REC_IDENTITY"; then
     lock_release
     umask "$old_umask"
     echo "error: busy-state retirement failed for $ID" >&2
     exit 1
-  }
+  fi
   lock_release
   umask "$old_umask"
   exit 0
