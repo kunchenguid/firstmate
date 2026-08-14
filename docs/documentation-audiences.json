@@ -185,6 +185,18 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/visual-technical-communication/references/language-and-access.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/visual-technical-communication/references/visual-patterns.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/visual-technical-communication/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
