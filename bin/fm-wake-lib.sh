@@ -78,6 +78,19 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# fm_watcher_lock_unheld <state>
+# True when the watcher lock or its symlinked owner directory is absent, or when
+# the existing lock records no pid at all. Any non-empty pid remains held here;
+# its syntax, liveness, ownership metadata, and identity are health concerns.
+fm_watcher_lock_unheld() {
+  local state=$1 lockdir pid
+  lockdir="$state/.watch.lock"
+  [ ! -e "$lockdir" ] && return 0
+  [ ! -e "$lockdir/pid" ] && return 0
+  pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
+  [ -z "$pid" ]
+}
+
 FM_WATCHER_MATCHED_IDENTITY=
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
@@ -130,7 +143,12 @@ fm_watcher_healthy() {
 #   autoarm     Claude Stop-hook auto-arm: the watcher is armed at each turn end
 #               and exits on its wake, so it runs only BETWEEN turns. Mid-turn a
 #               fresh beacon with no live watcher process is the healthy state.
-#   persistent  every other harness (codex foreground checkpoint, opencode/pi/grok
+#   extension   Pi (and pi-signed): .pi/extensions/fm-primary-pi-watch.ts owns
+#               continuity. It tears the watcher down on every actionable wake and
+#               spawns the replacement itself, so a genuinely unheld singleton lock
+#               is healthy during that hand-off only with extension ownership and a
+#               fresh beacon. Any held but unhealthy lock remains down.
+#   persistent  every other harness (codex foreground checkpoint, opencode/grok
 #               background arm, tmux, unknown): the watcher runs as a tracked live
 #               process, so a live identity-matched pid is the real liveness signal.
 # FM_SUPERVISION_MODEL overrides detection (tests, and callers that already know
@@ -139,16 +157,75 @@ fm_watcher_healthy() {
 fm_supervision_model() {
   local harness
   case "${FM_SUPERVISION_MODEL:-}" in
-    autoarm|persistent) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
+    autoarm|extension|persistent) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     claude) printf 'autoarm\n' ;;
+    pi|pi-signed) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac
 }
 
-# fm_watcher_supervision_verdict <state> <watch-path> [grace] [home]
+# Pi primary supervision evidence. The Pi extensions record, in their state
+# markers, the exact build they loaded and the session process that loaded it, so
+# "a live Pi session owns supervision" is provable from durable state without a
+# watcher process and without reading any vendor-rendered surface.
+#
+# fm_pi_extension_version <file>
+# Print the marker version string the Pi extensions record for <file>. Must stay
+# byte-identical to the "sha256:<hex>" digest .pi/extensions/fm-primary-pi-watch.ts
+# and .pi/extensions/fm-primary-turnend-guard.ts compute for themselves; a host
+# with no SHA-256 tool falls back to a form no marker can match, which keeps every
+# consumer loud rather than silently satisfied.
+fm_pi_extension_version() {
+  local file=$1
+  [ -f "$file" ] || return 1
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print "sha256:" $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print "sha256:" $1}'
+  else
+    cksum "$file" | awk '{print "cksum:" $1 ":" $2}'
+  fi
+}
+
+# fm_pi_extension_loaded <marker> <expected-version> <session-lock>
+# True when <marker> records <expected-version> and names the session process in
+# <session-lock>, i.e. the session holding this home loaded exactly this build.
+fm_pi_extension_loaded() {
+  local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
+  [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
+  marker_version=$(sed -n '1p' "$marker")
+  marker_pid=$(sed -n '2p' "$marker")
+  lock_pid=$(sed -n '1p' "$lock")
+  [ -n "$marker_pid" ] || return 1
+  [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
+}
+
+# fm_pi_extension_owns_supervision <state> <root>
+# True when a LIVE Pi session owns supervision continuity for this home: both
+# primary extensions are loaded at their current on-disk builds by the process
+# recorded in this home's session lock, and that process is still alive.
+# Requiring the turn-end guard extension too is deliberate - it is the structural
+# backstop that catches a cycle the watch extension failed to restore, so a home
+# missing it has no benign hand-off to tolerate.
+fm_pi_extension_owns_supervision() {
+  local state=$1 root=$2 lock session_pid pair source marker version
+  lock="$state/.lock"
+  for pair in \
+    "fm-primary-pi-watch.ts:.pi-watch-extension-loaded" \
+    "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"; do
+    source=${pair%%:*}
+    marker=${pair#*:}
+    version=$(fm_pi_extension_version "$root/.pi/extensions/$source") || return 1
+    fm_pi_extension_loaded "$state/$marker" "$version" "$lock" || return 1
+  done
+  session_pid=$(sed -n '1p' "$lock" 2>/dev/null)
+  fm_pid_alive "$session_pid"
+}
+
+# fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
 # guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
 #   FM_WATCHER_VERDICT_OK      true when supervision is healthy for this model
@@ -160,6 +237,14 @@ fm_supervision_model() {
 #                                             absent (a genuine supervision lapse)
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
 # because the watcher only runs between turns; only a stale beacon is a lapse.
+# extension: a live identity-matched watcher is the ordinary healthy state, but a
+# genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
+# session provably owns continuity (fm_pi_extension_owns_supervision) - that is the
+# extension's own tear-down-and-respawn hand-off, which it retries and escalates
+# itself. A lock with any recorded pid remains down if the strict health check fails.
+# Without ownership proof an unheld lock is down exactly as before, so an unloaded,
+# version-drifted, or exited Pi session still alarms immediately, and a cycle the
+# extension never restores still alarms once the beacon passes grace.
 # persistent: require a live identity-matched watcher with a fresh beacon
 # (fm_watcher_healthy); a fresh leftover beacon with no live watcher is still down.
 # shellcheck disable=SC2034 # Read by callers after the function returns.
@@ -168,7 +253,8 @@ FM_WATCHER_VERDICT_OK=false
 FM_WATCHER_VERDICT_REASON=stale-beacon
 fm_watcher_supervision_verdict() {
   local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
-  local beat age fresh=false
+  local root=${5:-$FM_ROOT}
+  local beat age fresh=false model
   FM_WATCHER_VERDICT_OK=false
   FM_WATCHER_VERDICT_REASON=stale-beacon
   beat="$state/.last-watcher-beat"
@@ -177,7 +263,8 @@ fm_watcher_supervision_verdict() {
     ''|*[!0-9]*) ;;
     *) [ "$age" -lt "$grace" ] && fresh=true ;;
   esac
-  if [ "$(fm_supervision_model)" = autoarm ]; then
+  model=$(fm_supervision_model)
+  if [ "$model" = autoarm ]; then
     [ "$fresh" = true ] && FM_WATCHER_VERDICT_OK=true
     return 0
   fi
@@ -185,8 +272,14 @@ fm_watcher_supervision_verdict() {
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
-    # shellcheck disable=SC2034 # Read by callers after the function returns.
-    FM_WATCHER_VERDICT_REASON=no-watcher
+    if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
+      && fm_pi_extension_owns_supervision "$state" "$root"; then
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_OK=true
+    else
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_REASON=no-watcher
+    fi
   fi
   return 0
 }
