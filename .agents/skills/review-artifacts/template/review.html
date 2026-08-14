@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="Reference template for a Firstmate Review Deck decision artifact.">
+  <title>Firstmate Review Deck - Reference</title>
+  <link rel="stylesheet" href="../assets/review-deck.css">
+  <script defer src="../assets/review-deck.js"></script>
+  <style>
+    /* Demonstration subject system only. Replace this block with subject authority. */
+    .subject-demo {
+      --subject-bg: #f7f8fb;
+      --subject-panel: #ffffff;
+      --subject-text: #1f2740;
+      --subject-muted: #69728a;
+      --subject-accent: #3157d5;
+      display: grid;
+      grid-template-columns: minmax(9rem, 0.3fr) minmax(0, 1fr);
+      min-width: 32rem;
+      overflow: hidden;
+      border: 1px solid #d9deeb;
+      border-radius: 0.65rem;
+      background: var(--subject-bg);
+      color: var(--subject-text);
+      font-family: ui-sans-serif, system-ui, sans-serif;
+    }
+
+    .subject-demo nav {
+      padding: 1.25rem;
+      background: #222b48;
+      color: #ffffff;
+    }
+
+    .subject-demo nav strong {
+      display: block;
+      margin-bottom: 1.25rem;
+      font-size: 1.25rem;
+    }
+
+    .subject-demo nav span {
+      display: block;
+      margin-top: 0.65rem;
+      color: #bec8e8;
+      font-size: 0.75rem;
+    }
+
+    .subject-demo main {
+      min-width: 0;
+      padding: 1.5rem;
+    }
+
+    .subject-demo__header {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .subject-demo h3 {
+      margin: 0;
+      font-size: 1.75rem;
+    }
+
+    .subject-demo button {
+      min-height: 2.75rem;
+      padding: 0.6rem 0.9rem;
+      border: 0;
+      border-radius: 0.4rem;
+      background: var(--subject-accent);
+      color: #ffffff;
+      font-weight: 700;
+    }
+
+    .subject-demo__list {
+      margin-top: 1.25rem;
+      border: 1px solid #d9deeb;
+      background: var(--subject-panel);
+    }
+
+    .subject-demo__row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 1rem;
+      padding: 1rem;
+      border-bottom: 1px solid #d9deeb;
+    }
+
+    .subject-demo__row:last-child {
+      border-bottom: 0;
+    }
+
+    .subject-demo__row small {
+      display: block;
+      margin-top: 0.25rem;
+      color: var(--subject-muted);
+    }
+
+    @media (max-width: 42rem) {
+      .subject-demo {
+        grid-template-columns: minmax(0, 1fr);
+        min-width: 0;
+      }
+
+      .subject-demo nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        align-items: baseline;
+      }
+
+      .subject-demo nav strong,
+      .subject-demo nav span {
+        margin: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!--
+  THESIS: Turn evidence into exact decisions through a stable six-stage reading order; refuse dashboard-like review chrome.
+  OWN-WORLD: Cool paper, deep blue-green chrome, one cyan signal, numbered editorial sections, provenance rows, and explicit state labels.
+  STORY: The reviewer understands accepted constraints, sees behavior, weighs aligned options, answers exactly, verifies the record, and knows the implementation handoff.
+  FIRST VIEWPORT: A compact dark masthead names the decision and exposes the six-stage sequence before the evidence begins.
+  FORM: Firstmate Review Deck reference template, fixed by the Firstmate review-artifacts skill.
+  FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+  -->
+  <main class="fm-review" aria-labelledby="review-title">
+    <header class="fm-chrome">
+      <div class="fm-chrome__mark">Firstmate Review Deck</div>
+      <div class="fm-chrome__row">
+        <div>
+          <h1 id="review-title">Choose the task-routing model</h1>
+          <p class="fm-chrome__summary">A reference review with architecture evidence, aligned alternatives, a subject-native product mockup, and one exact implementation decision.</p>
+        </div>
+        <span class="fm-badge fm-badge--pending">Review open</span>
+      </div>
+      <ol class="fm-sequence" aria-label="Review sequence">
+        <li aria-current="step">1 Frame</li>
+        <li>2 Show</li>
+        <li>3 Compare</li>
+        <li>4 Decide</li>
+        <li>5 Record</li>
+        <li>6 Ship</li>
+      </ol>
+    </header>
+
+    <section class="fm-section" id="frame" aria-labelledby="frame-title">
+      <div class="fm-section__number" aria-hidden="true">01</div>
+      <div class="fm-section__body">
+        <h2 id="frame-title">Frame the accepted constraints</h2>
+        <p class="fm-lede">Name why the review exists, what is already accepted, which evidence is authoritative, and the exact choice still open.</p>
+        <dl class="fm-facts">
+          <dt>Decision</dt>
+          <dd>Choose whether routing stays implicit or becomes a visible rule set.</dd>
+          <dt>Accepted</dt>
+          <dd>Existing task creation, permissions, and project ownership remain unchanged.</dd>
+          <dt>Out of scope</dt>
+          <dd>No automatic reassignment and no new notification channel.</dd>
+          <dt>Visual authority</dt>
+          <dd>Subject project tokens and its task-list component govern the product mockup below.</dd>
+        </dl>
+        <div class="fm-evidence" aria-label="Evidence sources">
+          <div class="fm-evidence__item">
+            <span class="fm-evidence__source">DESIGN.md</span>
+            <span>Product typography, controls, and navigation tokens.</span>
+            <span class="fm-badge fm-badge--recorded">Current</span>
+          </div>
+          <div class="fm-evidence__item">
+            <span class="fm-evidence__source">routing.test.ts</span>
+            <span>Current fallback and ownership behavior.</span>
+            <span class="fm-badge fm-badge--recorded">Verified</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="fm-section" id="show" aria-labelledby="show-title">
+      <div class="fm-section__number" aria-hidden="true">02</div>
+      <div class="fm-section__body">
+        <h2 id="show-title">Show the system and proposed behavior</h2>
+        <p class="fm-lede">Use a diagram for the system relationship and keep product UI inside a visibly separate subject frame.</p>
+        <figure class="fm-subject-frame">
+          <figcaption class="fm-subject-frame__bar">
+            <span>Architecture evidence</span>
+            <span>Verified paths only</span>
+          </figcaption>
+          <div class="fm-subject-frame__content">
+            <svg class="fm-architecture fm-architecture--desktop" viewBox="0 0 800 310" role="img" aria-labelledby="architecture-title architecture-desc">
+              <title id="architecture-title">Task routing architecture</title>
+              <desc id="architecture-desc">Requests enter through intake, are evaluated against project and ownership evidence, then create one durable task handed to implementation.</desc>
+              <defs>
+                <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#006b73"></path>
+                </marker>
+              </defs>
+              <g fill="#f3f6f6" stroke="#72878f" stroke-width="2">
+                <rect x="25" y="105" width="165" height="90" rx="10"></rect>
+                <rect x="315" y="35" width="175" height="90" rx="10"></rect>
+                <rect x="315" y="185" width="175" height="90" rx="10"></rect>
+                <rect x="610" y="105" width="165" height="90" rx="10"></rect>
+              </g>
+              <g fill="none" stroke="#006b73" stroke-width="3" marker-end="url(#arrow)">
+                <path d="M190 135 C245 135 250 80 315 80"></path>
+                <path d="M190 165 C245 165 250 230 315 230"></path>
+                <path d="M490 80 C555 80 555 135 610 135"></path>
+                <path d="M490 230 C555 230 555 165 610 165"></path>
+              </g>
+              <g fill="#13252c" font-family="ui-sans-serif, system-ui, sans-serif" text-anchor="middle">
+                <text x="108" y="140" font-size="20" font-weight="700">Request intake</text>
+                <text x="108" y="168" font-size="15">Accepted scope</text>
+                <text x="402" y="70" font-size="20" font-weight="700">Project evidence</text>
+                <text x="402" y="98" font-size="15">Authority and mode</text>
+                <text x="402" y="220" font-size="20" font-weight="700">Routing rules</text>
+                <text x="402" y="248" font-size="15">Ownership and fit</text>
+                <text x="692" y="140" font-size="20" font-weight="700">Durable task</text>
+                <text x="692" y="168" font-size="15">One handoff</text>
+              </g>
+            </svg>
+            <svg class="fm-architecture fm-architecture--mobile" viewBox="0 0 360 450" role="img" aria-labelledby="architecture-mobile-title architecture-mobile-desc">
+              <title id="architecture-mobile-title">Task routing architecture</title>
+              <desc id="architecture-mobile-desc">Requests enter through intake, are evaluated against project and ownership evidence, then create one durable task handed to implementation.</desc>
+              <defs>
+                <marker id="mobile-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#006b73"></path>
+                </marker>
+              </defs>
+              <g fill="#f3f6f6" stroke="#72878f" stroke-width="2">
+                <rect x="90" y="10" width="180" height="78" rx="10"></rect>
+                <rect x="10" y="150" width="160" height="88" rx="10"></rect>
+                <rect x="190" y="150" width="160" height="88" rx="10"></rect>
+                <rect x="90" y="330" width="180" height="78" rx="10"></rect>
+              </g>
+              <g fill="none" stroke="#006b73" stroke-width="3" marker-end="url(#mobile-arrow)">
+                <path d="M180 88 L90 150"></path>
+                <path d="M180 88 L270 150"></path>
+                <path d="M90 238 L160 330"></path>
+                <path d="M270 238 L200 330"></path>
+              </g>
+              <g fill="#13252c" font-family="ui-sans-serif, system-ui, sans-serif" text-anchor="middle">
+                <text x="180" y="43" font-size="18" font-weight="700">Request intake</text>
+                <text x="180" y="67" font-size="14">Accepted scope</text>
+                <text x="90" y="185" font-size="17" font-weight="700">Project evidence</text>
+                <text x="90" y="210" font-size="13">Authority and mode</text>
+                <text x="270" y="185" font-size="17" font-weight="700">Routing rules</text>
+                <text x="270" y="210" font-size="13">Ownership and fit</text>
+                <text x="180" y="363" font-size="18" font-weight="700">Durable task</text>
+                <text x="180" y="387" font-size="14">One handoff</text>
+              </g>
+            </svg>
+          </div>
+        </figure>
+
+        <figure class="fm-subject-frame">
+          <figcaption class="fm-subject-frame__bar">
+            <span>Subject-native product mockup</span>
+            <span>Unbranded concept - replace with project authority</span>
+          </figcaption>
+          <div class="fm-subject-frame__content">
+            <div class="subject-demo">
+              <nav aria-label="Example product navigation">
+                <strong>Harbor Tasks</strong>
+                <span>Inbox</span>
+                <span>Projects</span>
+                <span>Routing</span>
+              </nav>
+              <main>
+                <div class="subject-demo__header">
+                  <h3>Routing rules</h3>
+                  <button type="button">Add rule</button>
+                </div>
+                <div class="subject-demo__list" aria-label="Example routing rules">
+                  <div class="subject-demo__row">
+                    <div><strong>Mobile release work</strong><small>Route to iOS ownership when the project matches.</small></div>
+                    <span>Active</span>
+                  </div>
+                  <div class="subject-demo__row">
+                    <div><strong>Local-only maintenance</strong><small>Keep in the primary project queue.</small></div>
+                    <span>Active</span>
+                  </div>
+                </div>
+              </main>
+            </div>
+          </div>
+        </figure>
+      </div>
+    </section>
+
+    <section class="fm-section" id="compare" aria-labelledby="compare-title">
+      <div class="fm-section__number" aria-hidden="true">03</div>
+      <div class="fm-section__body">
+        <h2 id="compare-title">Compare aligned options</h2>
+        <p class="fm-lede">Give every option the same anatomy and make the recommendation, cost, risk, and reversibility equally visible.</p>
+        <div class="fm-options">
+          <article class="fm-option">
+            <span class="fm-option__label">Option A</span>
+            <h3>Keep routing implicit</h3>
+            <p>Use current intake judgment with no operator-visible model.</p>
+            <ul class="fm-option__meta">
+              <li>Lowest implementation cost</li>
+              <li>Hardest decisions to audit</li>
+              <li>Immediately reversible</li>
+            </ul>
+          </article>
+          <article class="fm-option is-recommended">
+            <span class="fm-option__label">Option B - Recommended</span>
+            <h3>Visible ordered rules</h3>
+            <p>Expose the same routing logic as a small ordered rule set.</p>
+            <ul class="fm-option__meta">
+              <li>Moderate implementation cost</li>
+              <li>Clear precedence and ownership</li>
+              <li>Rules can be disabled safely</li>
+            </ul>
+          </article>
+          <article class="fm-option">
+            <span class="fm-option__label">Option C</span>
+            <h3>Automatic reassignment</h3>
+            <p>Continuously move tasks when ownership evidence changes.</p>
+            <ul class="fm-option__meta">
+              <li>Highest implementation cost</li>
+              <li>Introduces surprising movement</li>
+              <li>Difficult to reverse in flight</li>
+            </ul>
+          </article>
+        </div>
+        <div class="fm-recommendation">
+          <span class="fm-badge fm-badge--recommend">Recommendation</span>
+          <div><strong>Choose visible ordered rules.</strong> It makes current judgment inspectable without expanding scope into autonomous reassignment.</div>
+        </div>
+        <div class="fm-risk">
+          <span class="fm-badge fm-badge--risk">Primary risk</span>
+          <div><strong>Rule order can become hidden policy.</strong> Mitigate it with visible precedence, a default route, and a plain-language explanation for every match.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="fm-section" id="decide" aria-labelledby="decide-title">
+      <div class="fm-section__number" aria-hidden="true">04</div>
+      <div class="fm-section__body">
+        <h2 id="decide-title">Collect one exact decision</h2>
+        <p class="fm-lede">Selection stays local until the reviewer queues this question, and queued state remains visible until the answer is sent.</p>
+        <form class="fm-decision" data-fm-decision="routing-model">
+          <fieldset>
+            <legend>Which routing model should implementation use?</legend>
+            <label class="fm-choice">
+              <input type="radio" name="model" value="implicit" required>
+              <span><strong>Implicit judgment</strong><small>Preserve the current invisible model.</small></span>
+            </label>
+            <label class="fm-choice">
+              <input type="radio" name="model" value="ordered-rules" required>
+              <span><strong>Visible ordered rules</strong><small>Adopt the recommendation with explicit precedence.</small></span>
+            </label>
+            <label class="fm-choice">
+              <input type="radio" name="model" value="automatic-reassignment" required>
+              <span><strong>Automatic reassignment</strong><small>Expand the system to move work after intake.</small></span>
+            </label>
+            <label class="fm-field">
+              Decision note
+              <textarea name="note" rows="3" placeholder="Add a constraint or rationale that implementation must preserve."></textarea>
+            </label>
+          </fieldset>
+          <div class="fm-decision__actions">
+            <button class="fm-button" type="submit">Queue this answer</button>
+            <button class="fm-button fm-button--secondary" type="button" data-fm-copy-answer>Copy visible answer</button>
+          </div>
+          <output class="fm-decision__state" data-fm-decision-state tabindex="0" aria-live="polite">No answer selected or queued.</output>
+          <p class="fm-help">In Lavish, use Send to Agent after queueing. Direct-open mode prepares a visible answer for copy instead.</p>
+        </form>
+      </div>
+    </section>
+
+    <section class="fm-section" id="record" aria-labelledby="record-title">
+      <div class="fm-section__number" aria-hidden="true">05</div>
+      <div class="fm-section__body">
+        <h2 id="record-title">Record what the answer changes</h2>
+        <p class="fm-lede">The review is not complete until the returned answer is written to the originating durable decision record and unresolved questions remain explicit.</p>
+        <ol class="fm-timeline">
+          <li><time datetime="2026-08-18">Review open</time><span>Architecture and option evidence prepared.</span><span class="fm-badge fm-badge--recorded">Recorded</span></li>
+          <li><time>Awaiting answer</time><span>Routing model has not been selected.</span><span class="fm-badge fm-badge--pending">Pending</span></li>
+          <li><time>After feedback</time><span>Record the exact answer and route any authorized implementation.</span><span class="fm-badge fm-badge--blocked">Not started</span></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="fm-section" id="ship" aria-labelledby="ship-title">
+      <div class="fm-section__number" aria-hidden="true">06</div>
+      <div class="fm-section__body">
+        <h2 id="ship-title">Hand off implementation without implying it shipped</h2>
+        <p class="fm-lede">Close with the next owner, accepted behavior, dependencies, and a truthful completion state.</p>
+        <div class="fm-grid">
+          <div class="fm-surface">
+            <h3>Implementation packet</h3>
+            <ul>
+              <li>Build only the selected routing model.</li>
+              <li>Preserve current task creation and ownership boundaries.</li>
+              <li>Add behavioral coverage for precedence and fallback.</li>
+              <li>Use the subject project's product design authority.</li>
+            </ul>
+          </div>
+          <div class="fm-surface">
+            <h3>Completion definition</h3>
+            <p>The selected behavior is implemented, tested, documented, and delivered through the project's configured path.</p>
+            <span class="fm-badge fm-badge--pending">Awaiting decision</span>
+          </div>
+        </div>
+        <div class="fm-status-panel">
+          <span class="fm-badge fm-badge--pending">Current status</span>
+          <div><strong>Review ready, implementation not authorized.</strong> Replace this state only when the durable answer and delivery outcome exist.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
