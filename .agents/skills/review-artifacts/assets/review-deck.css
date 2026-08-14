@@ -276,6 +276,7 @@ a {
 .fm-evidence__source {
   font-family: var(--fm-mono);
   font-size: 0.82rem;
+  overflow-wrap: anywhere;
 }
 
 .fm-options {
@@ -561,6 +562,7 @@ a {
   color: var(--fm-ink-muted);
   font-family: var(--fm-mono);
   font-size: 0.82rem;
+  overflow-wrap: anywhere;
 }
 
 .fm-code {
