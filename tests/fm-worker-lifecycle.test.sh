@@ -578,6 +578,27 @@ assert module.retail_rate("Standard_D4as_v6") is None
 module.urllib.request.urlopen = lambda *_a, **_k: PriceResponse({"Items": [meter(productName="Virtual Machines Dasv6 Series Spot")]})
 assert module.retail_rate("Standard_D4as_v6") is None
 
+# Metrics read authoritative actual cost before the forecast. A fresh,
+# untrained forecast remains explicit without obscuring a readable actual.
+cost_calls = []
+original_cost_query = module.cost_query
+original_cost_query_with_state = module.cost_query_with_state
+original_az = module.az
+original_retail_rate = module.retail_rate
+module.cost_query = lambda _controller, forecast: cost_calls.append(("actual", forecast)) or 1.148
+module.cost_query_with_state = lambda _controller, forecast: cost_calls.append(("forecast", forecast)) or (None, True)
+module.az = lambda *_args, **_kwargs: ([], 0, "")
+module.retail_rate = lambda _sku: 0.25
+observed_metrics = module.metrics(controller, [], [], {})
+assert cost_calls == [("actual", False), ("forecast", True)], cost_calls
+assert observed_metrics["actual_usd"] == 1.148
+assert observed_metrics["forecast_usd"] is None
+assert observed_metrics["forecast_untrained"] is True
+module.cost_query = original_cost_query
+module.cost_query_with_state = original_cost_query_with_state
+module.az = original_az
+module.retail_rate = original_retail_rate
+
 # Public IP relations are rejected while a private NIC is accepted.
 nic = {
     "id": "/nic", "etag": "etag", "tags": tags,

@@ -630,6 +630,7 @@ def specialized_capacity_inventory(controller, vms, identities):
 
 
 def metrics(controller, vms, capacity_reservations, specialized_active_by_family):
+    actual_value = cost_query(controller, False)
     forecast_value, forecast_untrained = cost_query_with_state(controller, True)
     usage, rc, _ = az(controller, ["vm", "list-usage", "--location", "eastus"], check=False)
     regional_limit = None
@@ -657,7 +658,7 @@ def metrics(controller, vms, capacity_reservations, specialized_active_by_family
                     family_used[family] = used
                     family_free[family] = limit - used
     return {
-        "actual_usd": cost_query(controller, False),
+        "actual_usd": actual_value,
         "forecast_usd": forecast_value,
         "forecast_untrained": forecast_untrained,
         "regional_limit_vcpus": regional_limit,
