@@ -140,7 +140,16 @@ def repository_identity(repo):
     dirty = run(["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"]).stdout
     if dirty:
         raise BridgeError("cell worktree must be clean at the shard boundary")
-    branch = run(["git", "-C", str(repo), "symbolic-ref", "--short", "HEAD"]).stdout.strip()
+    probe = run(["git", "-C", str(repo), "symbolic-ref", "--short", "HEAD"], check=False)
+    if probe.returncode == 0:
+        branch = probe.stdout.strip()
+    else:
+        # The pipeline executes gate steps on a detached snapshot of the
+        # submitted branch, so HEAD carries no symbolic ref there; the branch
+        # identity then comes from the guest-declared environment.
+        branch = os.environ.get("FM_AZURE_VALIDATION_BRANCH", "").strip()
+        if not branch:
+            raise BridgeError("cell worktree is detached and no declared branch identity is present")
     head = run(["git", "-C", str(repo), "rev-parse", "HEAD"]).stdout.strip()
     tree = run(["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"]).stdout.strip()
     remote = run(["git", "-C", str(repo), "remote", "get-url", "origin"]).stdout.strip()

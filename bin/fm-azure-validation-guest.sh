@@ -467,6 +467,9 @@ runuser -u fmvalidate -- git -C "$REPO" config credential.useHttpPath true
 IDENTITY=$STATE/identity.json
 CURRENT_HEAD=$(git -C "$REPO" rev-parse HEAD)
 BRANCH=$(git -C "$REPO" symbolic-ref --short HEAD)
+# Gate steps run on detached snapshots where HEAD has no symbolic ref; the
+# shard bridge falls back to this declared branch identity.
+printf 'FM_AZURE_VALIDATION_BRANCH=%s\n' "$BRANCH" >>"$ENV_FILE"
 if [ "$MODE" = start ]; then
   jq -n \
     --arg cell "$CELL" --arg request "$REQUEST_DIGEST" --arg branch "$BRANCH" \
@@ -648,7 +651,7 @@ mv "$tmp" "$IDENTITY"
 # The durable no-mistakes database view, not free-form run output or intent,
 # owns terminal outcome classification.
 OUTCOME=failed
-if [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'needs[-_ ]decision|awaiting[_ -]user|ask-user' "$STATUS_LOG"; then
+if [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'needs[-_ ]decision|awaiting[_ -]user|awaiting[_ -]approval|ask-user' "$STATUS_LOG"; then
   OUTCOME=needs-decision
 elif [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*(passed|checks-passed)|checks[- ]passed|checks green' "$STATUS_LOG"; then
   OUTCOME=checks-passed
