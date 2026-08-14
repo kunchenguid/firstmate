@@ -24,6 +24,22 @@ set -u
 # Output: one line, one of: github gitlab local unknown
 # Exit: 0 always (the classification itself is the result; "unknown" is not
 #       a script failure)
+fm_forge_github_hosts() {
+  local host
+  printf '%s\n' "${FM_GITHUB_HOSTS:-github.com}" \
+    | tr ',' '\n' \
+    | while IFS= read -r host; do
+        host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        [ -n "$host" ] && printf '%s\n' "$host"
+      done
+}
+
+fm_forge_host_is_github() {
+  local host=${1:-}
+  [ -n "$host" ] || return 1
+  fm_forge_github_hosts | grep -F -x -q -- "$host"
+}
+
 fm_forge_gitlab_hosts() {
   local host
   printf '%s\n' "${FM_GITLAB_HOSTS:-gitlab.com}" \
@@ -78,10 +94,10 @@ fm_forge_detect_provider() {
   esac
   host=$(fm_forge_resolve_host "$remote_url" 2>/dev/null) || host=""
   case "$host" in
-    github.com) echo "github" ;;
-    gitlab.com) echo "gitlab" ;;
     *)
-      if fm_forge_host_is_gitlab "$host"; then
+      if fm_forge_host_is_github "$host"; then
+        echo "github"
+      elif fm_forge_host_is_gitlab "$host"; then
         echo "gitlab"
       else
         echo "unknown"
@@ -195,6 +211,7 @@ fm_forge_check_auth() {
 
   case "$provider" in
     github)
+      command -v gh >/dev/null 2>&1 || return 1
       if [ -n "$host" ]; then
         gh auth status --hostname "$host" >/dev/null 2>&1 || { echo "NEEDS_GH_AUTH"; return 1; }
       else
