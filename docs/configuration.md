@@ -424,6 +424,28 @@ The session-start digest separately prints an "Public commitments awaiting deliv
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
 See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind the restart end-to-end and the relay-disabled zero-overhead guarantee.
 
+## Slack captain channel (.env / config/slack-captain-channel)
+
+The Slack captain channel is an optional phone mirror for status, decisions, and coordination.
+It is off unless the firstmate home's gitignored `.env` contains a non-empty `FM_SLACK_BOT_TOKEN` and gitignored `config/slack-captain-channel` names exactly one valid private-channel id.
+Bootstrap never discovers channels: it reads only that configured id and arms polling when both values are present.
+
+The locked session-start bootstrap step writes `state/slack-watch.check.sh`, a byte-static identity shim for `bin/fm-slack-poll.sh`, and `config/slack-captain.env`, which exports `FM_SLACK_CHECK_INTERVAL=15` for watcher processes in that home.
+`bin/fm-watch.sh` sources `config/x-mode.env` and `config/slack-captain.env` at process start when either file exists.
+The watcher runs the Slack shim on the 15-second poll cycle via a dedicated fast path; every other `*.check.sh` sweep stays on the default 300-second `CHECK_INTERVAL`.
+
+`bin/fm-slack-poll.sh` calls `conversations.history` and, when needed, `conversations.replies` on the configured channel only.
+It never calls `conversations.list` or any other discovery API.
+A newly offered human captain message is acknowledged once in-thread with a fixed constant (`On it.`), stashed at `state/slack-inbox/<ts>.json`, and wakes firstmate once with `slack-captain-message <ts><TAB><text>`.
+Ack markers under `state/slack-acked/` and offer markers under `state/slack-offered/` keep repeats silent across later polls and watcher restarts.
+
+`bin/fm-slack-post.sh` posts and updates messages only on the configured channel id.
+`board` creates one living status message and later edits it in place via `chat.update`, recording `state/slack-board.meta`.
+Thread replies use `message <text> <thread_ts>`.
+
+Slack is transport, never ledger: answers copied from the channel land in the same backlog and decision records the terminal uses.
+Never post proprietary code, credentials, or company-confidential context in the channel.
+
 ## Process-to-event sources (state/procevent)
 
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
@@ -517,7 +539,9 @@ FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
-FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
+FM_SLACK_BOT_TOKEN=      # Slack bot token for the captain channel; .env opt-in with config/slack-captain-channel
+FM_SLACK_CAPTAIN_CHANNEL_ID=   # optional env override for config/slack-captain-channel
+FM_SLACK_API_URL=https://slack.com/api   # optional Slack API override, mainly for tests
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews X replies and dismissals to state/x-outbox/ without posting or requiring a token

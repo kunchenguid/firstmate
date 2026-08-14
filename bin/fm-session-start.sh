@@ -268,6 +268,7 @@ print_standing_check_inventory() {
     [ -f "$check" ] && [ ! -L "$check" ] || continue
     id=$(basename "$check" .check.sh)
     [ "$id" != x-watch ] || continue
+    [ "$id" != slack-watch ] || continue
     [ ! -f "$STATE/$id.meta" ] || continue
     fm_custom_check_registered "$STATE" "$id" || continue
     total=$((total + 1))

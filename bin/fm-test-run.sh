@@ -194,7 +194,7 @@ family_for_basename() {
       printf '%s\n' backend-dispatch
       ;;
     fm-check-register.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|fm-review-diff.test.sh|\
-    fm-teardown.test.sh|fm-x-mode.test.sh)
+    fm-teardown.test.sh|fm-x-mode.test.sh|fm-slack-captain-channel.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
@@ -289,6 +289,7 @@ tests/fm-test-run.test.sh
 tests/fm-tmux-submit-busy.test.sh
 tests/fm-transition-lib.test.sh
 tests/fm-x-mode.test.sh
+tests/fm-slack-captain-channel.test.sh
 EOF
 }
 
@@ -298,6 +299,7 @@ EOF
 list_portable_parallel_1() {
   cat <<'EOF'
 tests/fm-x-mode.test.sh
+tests/fm-slack-captain-channel.test.sh
 tests/fm-cd-pretool-check.test.sh
 tests/fm-decision-hold-lifecycle.test.sh
 tests/fm-test-run.test.sh

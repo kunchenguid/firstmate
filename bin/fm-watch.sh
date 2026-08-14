@@ -62,7 +62,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 mkdir -p "$STATE"
+# shellcheck disable=SC1091
+[ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+# shellcheck disable=SC1091
+[ -f "$CONFIG/slack-captain.env" ] && . "$CONFIG/slack-captain.env"
 
 # The native event fast-path and only its true dependencies have one narrow
 # production owner. The Herdr event-wait smoke test consumes this same owner
@@ -73,6 +78,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-slack-lib.sh
+. "$SCRIPT_DIR/fm-slack-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
@@ -112,6 +119,7 @@ POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
+SLACK_CHECK_INTERVAL=${FM_SLACK_CHECK_INTERVAL:-$POLL}  # slack-watch.check.sh only
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
@@ -806,6 +814,24 @@ while :; do
   # published while this watcher was between cycles.
   procevent_surface_queued
 
+  # Slack captain channel poll: fast path on the watcher cycle (default 15s).
+  # Other *.check.sh sweeps stay on CHECK_INTERVAL (default 300s).
+  slack_shim="$STATE/slack-watch.check.sh"
+  if [ -f "$slack_shim" ] \
+    && [ "$(age_of "$STATE/.last-slack-check")" -ge "$SLACK_CHECK_INTERVAL" ]; then
+    if fms_poll_shim_valid "$slack_shim" "$FM_HOME" "$FM_ROOT" \
+      && [ -f "$FM_ROOT/bin/fm-slack-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-slack-poll.sh" ]; then
+      FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-slack-poll.sh" || exit 1
+      out=$FM_CHECK_RESULT
+      touch "$STATE/.last-slack-check"
+      if [ -n "$out" ]; then
+        reason="check: $slack_shim: $out"
+        fm_wake_append check "$slack_shim" "$reason" || exit 1
+        wake "$reason"
+      fi
+    fi
+  fi
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -827,6 +853,8 @@ while :; do
           rejected_checks="$rejected_checks $c"
           continue
         fi
+      elif [ "$(basename "$c")" = slack-watch.check.sh ]; then
+        continue
       else
         id=$(basename "$c" .check.sh)
         if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then

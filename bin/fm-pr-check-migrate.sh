@@ -37,6 +37,8 @@ fi
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-slack-lib.sh
+. "$SCRIPT_DIR/fm-slack-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 
@@ -76,12 +78,20 @@ scan_marker_content_valid() {
   [ "$value" = "$SCAN_MARKER_VALUE" ]
 }
 
+relay_poll_shim_authenticated() {
+  local check=$1
+  case "$(basename "$check")" in
+    x-watch.check.sh) fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT" ;;
+    slack-watch.check.sh) fms_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT" ;;
+    *) return 1 ;;
+  esac
+}
+
 current_checks_authenticated() {
   local check id
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+    if relay_poll_shim_authenticated "$check"; then
       continue
     fi
     id=$(basename "$check" .check.sh)
@@ -247,11 +257,17 @@ migration_complete() {
   migration_marker_content_valid "$MARKER"
 }
 
+relay_shim_locked_scan_needed() {
+  local shim
+  for shim in "$STATE/x-watch.check.sh" "$STATE/slack-watch.check.sh"; do
+    [ -e "$shim" ] || [ -L "$shim" ] || continue
+    relay_poll_shim_authenticated "$shim" || return 0
+  done
+  return 1
+}
+
 x_shim_locked_scan_needed() {
-  local shim="$STATE/x-watch.check.sh"
-  [ -e "$shim" ] || [ -L "$shim" ] || return 1
-  fmx_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT" && return 1
-  return 0
+  relay_shim_locked_scan_needed
 }
 
 # Marker short-circuits apply only when generated artifact identities are current.
@@ -357,6 +373,25 @@ if ! refresh_v1_x_shim; then
   echo "PR_CHECK_MIGRATION: authenticated X poll shim could not be refreshed; migration did not complete safely" >&2
   exit 1
 fi
+refresh_slack_shim() {
+  local shim="$STATE/slack-watch.check.sh"
+  [ -e "$shim" ] || [ -L "$shim" ] || return 0
+  fms_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT" && return 0
+  fm_pr_regular_destination_on_device_or_absent "$shim" "$STATE_DEVICE" || return 1
+  MIGRATION_SLACK_SHIM_TMP=$(mktemp "$STATE/.fm-slack-watch.XXXXXX") || return 1
+  fms_poll_shim_content "$FM_HOME" "$FM_ROOT" > "$MIGRATION_SLACK_SHIM_TMP" || return 1
+  chmod 0700 "$MIGRATION_SLACK_SHIM_TMP" || return 1
+  fms_poll_shim_valid "$MIGRATION_SLACK_SHIM_TMP" "$FM_HOME" "$FM_ROOT" || return 1
+  mv -f -- "$MIGRATION_SLACK_SHIM_TMP" "$shim" || return 1
+  MIGRATION_SLACK_SHIM_TMP=
+  [ "$(fm_pr_file_device "$shim")" = "$STATE_DEVICE" ] || return 1
+  [ "$(fm_pr_file_mode "$shim")" = 700 ] || return 1
+  fms_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT"
+}
+if ! refresh_slack_shim; then
+  echo "PR_CHECK_MIGRATION: authenticated Slack poll shim could not be refreshed; migration did not complete safely" >&2
+  exit 1
+fi
 # A marker contradicted by a pending or failed obligation is not authoritative.
 # Remove only an ordinary marker under exclusion; unsafe marker paths remain a
 # hard refusal for the publication checks below.
@@ -374,8 +409,7 @@ migration_needed() {
   local check id
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+    if relay_poll_shim_authenticated "$check"; then
       continue
     fi
     id=$(basename "$check" .check.sh)
@@ -391,8 +425,7 @@ unsafe_checks_absent() {
   local check id
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+    if relay_poll_shim_authenticated "$check"; then
       continue
     fi
     id=$(basename "$check" .check.sh)
@@ -1023,8 +1056,7 @@ if migration_needed; then
 
   for check in "$STATE"/*.check.sh; do
     [ -e "$check" ] || [ -L "$check" ] || continue
-    if [ "$(basename "$check")" = x-watch.check.sh ] \
-      && fmx_poll_shim_valid "$check" "$FM_HOME" "$FM_ROOT"; then
+    if relay_poll_shim_authenticated "$check"; then
       continue
     fi
     id=$(basename "$check" .check.sh)

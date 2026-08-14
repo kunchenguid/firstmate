@@ -54,6 +54,7 @@ fm_supervision_status() {
   done
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
     || [ -f "$state/x-watch.check.sh" ] \
+    || [ -f "$state/slack-watch.check.sh" ] \
     || [ "$FM_SUP_SOURCES" -gt 0 ]; then
     FM_SUP_NEEDED=true
   fi
