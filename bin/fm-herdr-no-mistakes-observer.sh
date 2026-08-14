@@ -234,6 +234,9 @@ retire_exact() { # <sidecar> <task-id> [<metadata-present>]
     matching_run "$TASK_WORKTREE" && [ "$MATCH_RUN_ID" = "$OBS_RUN_ID" ] || {
       warn "$id sidecar run binding is stale or unreadable; preserving it"; return 0;
     }
+  elif [ "$(fm_backend_herdr_pane_presence_state "$session" "$task_pane")" != dead ]; then
+    warn "$id task metadata is absent while its task pane remains live or unreadable; preserving sidecar"
+    return 0
   fi
   [ "$pane" != "$task_pane" ] || { warn "$id sidecar names the task pane as observer; preserving it"; return 0; }
   observer_pane_matches "$session" "$pane" "${TASK_WORKSPACE:-$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')}" "${TASK_TAB:-$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null | jq -r '.result.pane.tab_id // empty')}" || {

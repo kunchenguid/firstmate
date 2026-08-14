@@ -127,6 +127,13 @@ run_observer reconcile task || fail 'repeat observer reconcile failed'
 [ "$(pane_count)" = 2 ] || fail 'repeat ensure created a duplicate observer'
 pass 'observer creation is idempotent for the complete live binding'
 
+rm -f "$STATE/task.meta"
+run_observer reconcile task || fail 'missing-metadata observer reconcile failed'
+[ "$(pane_count)" = 2 ] || fail 'missing metadata closed the exact observer pane'
+[ -f "$sidecar" ] || fail 'missing metadata retired the exact observer sidecar'
+write_meta task herdr
+pass 'missing metadata preserves the observer while its task pane remains live'
+
 # Normal cleanup takes the same task lock as reconciliation, so it cannot close
 # the observer while another lifecycle action owns the task.
 task_lock="$STATE/.spawn-task.lock"
