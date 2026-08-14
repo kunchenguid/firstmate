@@ -791,7 +791,8 @@ spawn_abort_cleanup() {
 }
 trap spawn_abort_cleanup EXIT
 
-# One bounded lock per live Herdr session/socket, shared across all homes.
+# One bounded lock per live Herdr session/socket, shared across all of this
+# account's homes; the namespace is per-uid, so another account never shares it.
 # <session> is required so secondmate and primary spawns serialize against the
 # same session without writing any other home's state directory.
 spawn_herdr_presentation_order_lock_acquire() {
