@@ -10,24 +10,26 @@ set -euo pipefail
 set +x
 umask 077
 
-[ "$#" -eq 12 ] || { echo "validation guest: regular parameter shape mismatch" >&2; exit 125; }
-MODE=$1
-INPUT_DIGEST=$2
-REQUEST_DIGEST=$3
-CELL=$4
-ATTEMPT=$5
-VM_RESOURCE_ID=$6
-VM_INSTANCE_ID=$7
-WORKTREE_DISK_ID=$8
-CREDENTIAL_DISK_ID=$9
-STORAGE_ACCOUNT=${10}
-STORAGE_CONTAINER=${11}
-IDENTITY_CLIENT_ID=${12}
+[ "$#" -eq 0 ] || { echo "validation guest: positional parameters are forbidden" >&2; exit 125; }
+MODE=${mode:-}
+INPUT_DIGEST=${input_digest:-}
+REQUEST_DIGEST=${request_digest:-}
+CELL=${cell:-}
+ATTEMPT=${attempt:-}
+VM_RESOURCE_ID=${vm_resource_id:-}
+VM_INSTANCE_ID=${vm_instance_id:-}
+WORKTREE_DISK_ID=${worktree_disk_id:-}
+CREDENTIAL_DISK_ID=${credential_disk_id:-}
+STORAGE_ACCOUNT=${storage_account:-}
+STORAGE_CONTAINER=${storage_container:-}
+IDENTITY_CLIENT_ID=${identity_client_id:-}
 INPUT_URL=${input_url:-}
 OUTPUT_URL=${output_url:-}
 RESPONSE=${response:-}
 WORKTREE_KEY=${fm_azure_validation_worktree_key_file:-}
 CREDENTIAL_KEY=${fm_azure_validation_credential_key_file:-}
+unset mode input_digest request_digest cell attempt vm_resource_id vm_instance_id
+unset worktree_disk_id credential_disk_id storage_account storage_container identity_client_id
 unset input_url output_url response fm_azure_validation_worktree_key_file fm_azure_validation_credential_key_file
 case "$MODE" in
   start)
