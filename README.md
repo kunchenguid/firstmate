@@ -226,3 +226,5 @@ Contributions are welcome - see [CONTRIBUTING.md](CONTRIBUTING.md) for the workf
 ## License
 
 MIT - see [LICENSE](LICENSE).
+
+<!-- Temporary no-mistakes 1.48.0 end-to-end validation canary; this PR will be closed without merge. -->
