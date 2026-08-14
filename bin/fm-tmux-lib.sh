@@ -146,6 +146,7 @@ _fm_tmux_composer_observe() {  # <target>
   cy=$(fm_tmux_composer_cursor_row "$target") || return 0
   case "$cy" in ''|*[!0-9]*) return 0 ;; esac
   pane=$(fm_tmux_composer_capture "$target") || return 0
+  # shellcheck disable=SC2034 # Consumed by fm_backend_composer_observation in bin/fm-backend.sh.
   FM_BACKEND_COMPOSER_SCREEN=$pane
   verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy")
   if [ "$verdict" = need-identity ]; then

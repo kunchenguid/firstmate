@@ -1578,8 +1578,11 @@ test_inject_wedge_alarm_uses_single_composer_observation() {
   marker="$state/.subsuper-inject-wedged"
   escalate_add "$state" "needs-decision: pick A"
   (
+    # shellcheck disable=SC2329 # Runtime override is an assertion tripwire for the isolated daemon.
     fm_backend_composer_state() { fail "wedge evidence called composer_state separately"; }
+    # shellcheck disable=SC2329 # Runtime override is an assertion tripwire for the isolated daemon.
     fm_backend_capture() { fail "wedge evidence captured a second screen"; }
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the isolated daemon.
     fm_backend_composer_observation() {
       printf 'x' >> "$count"
       printf 'composer verdict: pending\ncaptured screen:\nsnapshot-one\n'
@@ -1602,6 +1605,7 @@ test_inject_wedge_alarm_notifies_before_bounded_observation() {
   escalate_add "$state" "needs-decision: pick A"
   start=$SECONDS
   (
+    # shellcheck disable=SC2329 # Runtime override called indirectly by the isolated daemon.
     fm_backend_composer_observation() {
       [ -s "$log" ] || printf 'evidence started before alert\n' > "$order_error"
       sleep 30

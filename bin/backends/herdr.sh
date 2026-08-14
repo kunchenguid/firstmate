@@ -2654,6 +2654,7 @@ _fm_backend_herdr_composer_observe() {  # <target>
   else
     return 0
   fi
+  # shellcheck disable=SC2034 # Consumed by fm_backend_composer_observation in bin/fm-backend.sh.
   FM_BACKEND_COMPOSER_SCREEN=$cap
   verdict=$(fm_composer_classify_screen "$caps" "$cap")
   if [ "$verdict" = need-identity ]; then
