@@ -137,7 +137,7 @@ assert "def shared_capacity_demand" not in host
 assert '"ttl_schedule_id": base + "/Microsoft.DevTestLab/schedules/shutdown-computevm-{}".format(vm)' in host
 assert 'run_mode = replacement_run_mode(state)' in host
 assert 'create_run_command(env, state, "start", input_url=input_url, output_url=output_url)' in host
-assert '"running", "reattaching")' in host
+assert '"running", "reattaching", "collected")' in host
 for value in ("MemoryMax","MemorySwapMax=0","TasksMax","CPUQuota=700%","PrivateTmp=yes","ProtectSystem=strict","CapabilityBoundingSet=","cryptsetup luksUUID","provider account-binding marker mismatch","credential disk content binding mismatch","FM_AZURE_VALIDATION_RUNTIME_PATH","axi status","/dev/disk/azure/scsi1/lun","/dev/disk/azure/data/by-lun/"):
     assert value in guest
 for value in ('MODE=${mode:-}','VM_RESOURCE_ID=${vm_resource_id:-}','INPUT_URL=${input_url:-}','WORKTREE_KEY=${fm_azure_validation_worktree_key_file:-}','unset input_url output_url response'):
@@ -155,6 +155,8 @@ assert "launch diagnostics (exit" in guest
 assert "code: recover_custody" in guest
 assert '"$NM_BIN" axi sync --recover' in guest
 assert 'cp "$STATUS_LOG" "$EVIDENCE/attempt-$ATTEMPT/status.log"' in guest
+assert '"reattaching", "collected")' in host
+assert "retain-failure owns only failed outcomes" in host
 assert '"$NM_BIN" init >"$RUN_LOG" 2>&1' in guest
 assert guest.index('"$NM_BIN" init >"$RUN_LOG"') < guest.index('start) "$NM_BIN" axi run')
 assert 'runuser -u fmvalidate -- git -C "$REPO" config credential.helper "$GIT_HELPER"' in guest
