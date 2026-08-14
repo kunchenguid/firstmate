@@ -1,404 +1,222 @@
 #!/usr/bin/env bash
 # fm-session-usage.sh - read-only JSON report for an observed-stable Pi session.
 #
-# Usage:
-#   fm-session-usage.sh [--run-label <label>] [--role <role>]
-#     [--task <task>] [--attempt <number>] [--settle-ms <number>] <session.jsonl>
+# Usage: fm-session-usage.sh [--run-label <label>] [--role <role>]
+#   [--task <task>] [--attempt <number>] [--settle-ms <number>] <session.jsonl>
 #
-# The input must be a regular Pi JSONL session file. The report is final only
-# when the file has a session header, every non-blank line is valid JSON, and
-# the file identity and size stay unchanged while it is read and during the
-# settle check. A growing or replaced file is reported as non-final.
-#
-# Only top-level usage-bearing entries are measured. Compaction retained tails,
-# details, prompts, tool output, credentials, authenticated content, and source
-# paths are never emitted. Caller-supplied metadata is content-free only when it
-# uses the accepted tag syntax; primary versus worker identity is never guessed.
-# This phase does not create a correlation sidecar or add runtime instrumentation.
-# Provider usage and model-rate cost estimates are separate and neither is
+# Reads only a regular Pi JSONL artifact. final is true only for one header,
+# valid records, and an unchanged identity and size during read and settle.
+# Measures only top-level usage entries and emits no prompts, tool output,
+# credentials, authenticated content, or paths. Caller metadata is tag-only;
+# identity and correlation are never inferred or sidecar-backed.
+# Provider usage and model-rate estimates remain separate and neither means
 # subscription or quota consumption.
-set -euo pipefail
+set -eu
+command -v python3 >/dev/null 2>&1 || { printf 'fm-session-usage: python3 is required\n' >&2; exit 2; }
+exec python3 - "$@" <<'PY'
+import json, math, os, re, stat, sys, time
 
-usage() {
-  awk '
-    NR == 1 { next }
-    /^#/ { sub(/^# ?/, ""); print; next }
-    { exit }
-  ' "$0" >&2
-}
+TAG = re.compile(r"[A-Za-z0-9._:+,@-]{1,128}\Z")
+SESSION_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
+TOKENS = dict(input="input", cache_read="cacheRead", cache_write="cacheWrite",
+              output="output", reasoning="reasoning", provider_total="totalTokens")
+REQUIRED = {k: v for k, v in TOKENS.items() if k != "reasoning"}
+COSTS = dict(input="input", cache_read="cacheRead", cache_write="cacheWrite", output="output", total="total")
+HELP = """fm-session-usage.sh - read-only JSON report for an observed-stable Pi session.
 
-die() {
-  printf 'fm-session-usage: %s\n' "$*" >&2
-  exit 2
-}
+Usage: fm-session-usage.sh [--run-label <label>] [--role <role>]
+  [--task <task>] [--attempt <number>] [--settle-ms <number>] <session.jsonl>
+"""
 
-command -v jq >/dev/null 2>&1 || die 'jq is required'
 
-RUN_LABEL=
-ROLE=
-TASK=
-ATTEMPT=
-SETTLE_MS=10
-RUN_LABEL_SET=0
-ROLE_SET=0
-TASK_SET=0
-ATTEMPT_SET=0
+def fail(message):
+    print(f"fm-session-usage: {message}", file=sys.stderr)
+    raise SystemExit(2)
 
-validate_tag() {
-  local name=$1 value=$2
-  [ -n "$value" ] || die "$name must not be empty"
-  [ "${#value}" -le 128 ] || die "$name is too long"
-  case "$value" in
-    *[!A-Za-z0-9._:+,@-]*) die "$name must be a content-free tag" ;;
-  esac
-}
 
-validate_milliseconds() {
-  case "$1" in
-    ''|*[!0-9]*) die 'settle milliseconds must be a non-negative integer' ;;
-  esac
-  [ "$1" -le 60000 ] || die 'settle milliseconds must be at most 60000'
-}
+def parse(argv):
+    values = dict(run_label=None, role=None, task=None, attempt=None, settle_ms="10")
+    positional, options = [], {"--run-label", "--role", "--task", "--attempt", "--settle-ms"}
+    while argv:
+        arg = argv.pop(0)
+        if arg in ("-h", "--help"):
+            print(HELP, end="", file=sys.stderr); raise SystemExit(0)
+        if arg == "--":
+            positional.extend(argv); break
+        if arg in options:
+            if not argv: fail(f"{arg} requires a value")
+            values[arg[2:].replace("-", "_")] = argv.pop(0)
+        elif arg.startswith("-"):
+            fail("unknown option")
+        else:
+            positional.append(arg)
+    if len(positional) != 1 or positional[0].startswith("-"):
+        fail("one session JSONL path is required")
+    for key in ("run_label", "role", "task"):
+        if values[key] is not None and not TAG.fullmatch(values[key]):
+            fail(f"{key.replace('_', '-')} must be a content-free tag")
+    if values["attempt"] is not None and not re.fullmatch(r"[0-9]+", values["attempt"]):
+        fail("attempt must be a non-negative integer")
+    if not re.fullmatch(r"[0-9]+", values["settle_ms"]):
+        fail("settle milliseconds must be a non-negative integer")
+    values["settle_ms"] = int(values["settle_ms"])
+    if values["settle_ms"] > 60000:
+        fail("settle milliseconds must be between 0 and 60000")
+    return values, positional[0]
 
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --run-label)
-      [ "$#" -ge 2 ] || die '--run-label requires a value'
-      RUN_LABEL=$2
-      validate_tag run-label "$RUN_LABEL"
-      RUN_LABEL_SET=1
-      shift 2
-      ;;
-    --role)
-      [ "$#" -ge 2 ] || die '--role requires a value'
-      ROLE=$2
-      validate_tag role "$ROLE"
-      ROLE_SET=1
-      shift 2
-      ;;
-    --task)
-      [ "$#" -ge 2 ] || die '--task requires a value'
-      TASK=$2
-      validate_tag task "$TASK"
-      TASK_SET=1
-      shift 2
-      ;;
-    --attempt)
-      [ "$#" -ge 2 ] || die '--attempt requires a value'
-      case "$2" in
-        ''|*[!0-9]*) die 'attempt must be a non-negative integer' ;;
-      esac
-      ATTEMPT=$2
-      ATTEMPT_SET=1
-      shift 2
-      ;;
-    --settle-ms)
-      [ "$#" -ge 2 ] || die '--settle-ms requires a value'
-      SETTLE_MS=$2
-      validate_milliseconds "$SETTLE_MS"
-      shift 2
-      ;;
-    --help|-h)
-      usage
-      exit 0
-      ;;
-    --)
-      shift
-      break
-      ;;
-    -*)
-      die "unknown option: $1"
-      ;;
-    *)
-      break
-      ;;
-  esac
-done
 
-[ "$#" -eq 1 ] || die 'one session JSONL path is required'
-SESSION_FILE=$1
-case "$SESSION_FILE" in
-  -*) die 'session path must not start with a dash' ;;
-esac
-[ -f "$SESSION_FILE" ] || die 'session path is not a readable regular file'
-[ -r "$SESSION_FILE" ] || die 'session path is not a readable regular file'
+def signature(path):
+    try:
+        info = os.stat(path)
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns) \
+            if stat.S_ISREG(info.st_mode) else None
+    except OSError:
+        return None
 
-stat_signature() {
-  local path=$1 result
-  if result=$(stat -c '%d:%i:%s:%Y:%Z' "$path" 2>/dev/null); then
-    printf '%s\n' "$result"
-    return 0
-  fi
-  stat -f '%d:%i:%z:%m' "$path" 2>/dev/null
-}
 
-sleep_milliseconds() {
-  local milliseconds=$1 seconds fraction
-  [ "$milliseconds" -gt 0 ] || return 0
-  seconds=$((milliseconds / 1000))
-  fraction=$((milliseconds % 1000))
-  if [ "$seconds" -gt 0 ]; then
-    sleep "${seconds}.$(printf '%03d' "$fraction")"
-  else
-    sleep "0.$(printf '%03d' "$fraction")"
-  fi
-}
+def number(value):
+    try:
+        return None if isinstance(value, bool) or not isinstance(value, (int, float)) \
+            or not math.isfinite(value) or value < 0 else value
+    except (OverflowError, TypeError):
+        return None
 
-BEFORE_SIGNATURE=$(stat_signature "$SESSION_FILE") || die 'could not inspect session file'
-TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-session-usage.XXXXXX") || die 'could not create a private temporary directory'
-RECORDS_FILE=$TMP_DIR/records.jsonl
-WARNINGS_FILE=$TMP_DIR/warnings.jsonl
-: >"$RECORDS_FILE"
-: >"$WARNINGS_FILE"
-cleanup() {
-  rm -rf "$TMP_DIR"
-}
-trap cleanup EXIT
 
-append_warning() {
-  printf '%s\n' "$1" >>"$WARNINGS_FILE"
-}
+def text(value):
+    return value if isinstance(value, str) and value else None
 
-exec 3<"$SESSION_FILE" || die 'could not open session file'
-LINE_NUMBER=0
-MALFORMED_COUNT=0
-while IFS= read -r line <&3 || [ -n "$line" ]; do
-  LINE_NUMBER=$((LINE_NUMBER + 1))
-  [ -n "$line" ] || continue
 
-  if ! json=$(printf '%s\n' "$line" | jq -c . 2>/dev/null); then
-    append_warning "{\"code\":\"malformed_json\",\"line\":$LINE_NUMBER}"
-    MALFORMED_COUNT=$((MALFORMED_COUNT + 1))
-    continue
-  fi
-  if ! printf '%s\n' "$json" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    append_warning "{\"code\":\"record_not_object\",\"line\":$LINE_NUMBER}"
-    MALFORMED_COUNT=$((MALFORMED_COUNT + 1))
-    continue
-  fi
-  if ! printf '%s\n' "$json" | jq -c --argjson line "$LINE_NUMBER" '. + {"_fm_line": $line}' \
-    >>"$RECORDS_FILE" 2>/dev/null; then
-    append_warning "{\"code\":\"record_unreadable\",\"line\":$LINE_NUMBER}"
-    MALFORMED_COUNT=$((MALFORMED_COUNT + 1))
-  fi
-done
-exec 3<&-
+def provider_values(usage):
+    return {key: number(usage.get(source)) for key, source in TOKENS.items()} \
+        if isinstance(usage, dict) else None
 
-AFTER_READ_SIGNATURE=$(stat_signature "$SESSION_FILE" 2>/dev/null || true)
-sleep_milliseconds "$SETTLE_MS"
-AFTER_SETTLE_SIGNATURE=$(stat_signature "$SESSION_FILE" 2>/dev/null || true)
 
-STABILITY=stable
-STABLE_BOOL=true
-if [ -z "$AFTER_READ_SIGNATURE" ] || [ -z "$AFTER_SETTLE_SIGNATURE" ] || \
-  [ "$BEFORE_SIGNATURE" != "$AFTER_READ_SIGNATURE" ] || \
-  [ "$BEFORE_SIGNATURE" != "$AFTER_SETTLE_SIGNATURE" ]; then
-  STABILITY=unstable
-  STABLE_BOOL=false
-fi
+def cost_values(usage):
+    cost = usage.get("cost") if isinstance(usage, dict) else None
+    return {key: number(cost.get(source)) for key, source in COSTS.items()} \
+        if isinstance(cost, dict) else None
 
-jq -s \
-  --slurpfile input_warnings "$WARNINGS_FILE" \
-  --arg stability "$STABILITY" \
-  --argjson stable "$STABLE_BOOL" \
-  --argjson malformed "$MALFORMED_COUNT" \
-  --arg run_label "$RUN_LABEL" \
-  --arg role "$ROLE" \
-  --arg task "$TASK" \
-  --arg attempt "$ATTEMPT" \
-  --argjson run_label_set "$RUN_LABEL_SET" \
-  --argjson role_set "$ROLE_SET" \
-  --argjson task_set "$TASK_SET" \
-  --argjson attempt_set "$ATTEMPT_SET" \
-  '
-  def string_or_null($value):
-    if ($value | type) == "string" and ($value | length) > 0 then $value else null end;
 
-  def session_id_or_null($value):
-    if ($value | type) == "string" and ($value | test("^[A-Za-z0-9._:-]{1,128}$")) then $value else null end;
+def measurement(entry, entry_class, parent, provider=None, model=None):
+    usage = parent.get("usage")
+    state = "missing" if "usage" not in parent else "present" if isinstance(usage, dict) else "invalid"
+    return dict(entry_class=entry_class, line=entry["_line"], provider=text(provider), model=text(model),
+                usage_state=state, has_usage=state == "present", provider_usage=provider_values(usage),
+                model_rate_cost_estimate=cost_values(usage))
 
-  def nonnegative_number($value):
-    if ($value | type) == "number" and $value >= 0 then $value else null end;
 
-  def usage_object($value):
-    if ($value | type) == "object" then $value else null end;
+def measurements(entries):
+    result = []
+    for entry in entries:
+        message = entry.get("message")
+        if entry.get("type") == "message" and isinstance(message, dict):
+            role = message.get("role")
+            if role == "assistant":
+                result.append(measurement(entry, "assistant", message, message.get("provider"), message.get("model")))
+            elif role == "toolResult":
+                result.append(measurement(entry, "tool_result", message))
+        elif entry.get("type") in ("compaction", "branch_summary"):
+            result.append(measurement(entry, entry["type"], entry))
+    return result
 
-  def token_value($usage; $key):
-    nonnegative_number(($usage[$key] // null));
 
-  def cost_value($usage; $key):
-    nonnegative_number(($usage.cost[$key] // null));
+def usage_warnings(record):
+    if record["usage_state"] != "present":
+        return [dict(code=f"{record['usage_state']}_usage", entry_class=record["entry_class"], line=record["line"])]
+    warnings = [dict(code="unknown_usage_field", entry_class=record["entry_class"], field=field, line=record["line"])
+                for key, field in REQUIRED.items() if record["provider_usage"][key] is None]
+    if record["model_rate_cost_estimate"] is None:
+        warnings.append(dict(code="unknown_model_rate_cost", entry_class=record["entry_class"], line=record["line"]))
+    return warnings
 
-  def provider_usage($usage):
-    (usage_object($usage)) as $u |
-    if $u == null then null
-    else {
-      input: token_value($u; "input"),
-      cache_read: token_value($u; "cacheRead"),
-      cache_write: token_value($u; "cacheWrite"),
-      output: token_value($u; "output"),
-      reasoning: token_value($u; "reasoning"),
-      provider_total: token_value($u; "totalTokens")
-    }
-    end;
 
-  def model_rate_cost($usage):
-    (usage_object($usage)) as $u |
-    if $u == null or (($u.cost | type) != "object") then null
-    else {
-      input: cost_value($u; "input"),
-      cache_read: cost_value($u; "cacheRead"),
-      cache_write: cost_value($u; "cacheWrite"),
-      output: cost_value($u; "output"),
-      total: cost_value($u; "total")
-    }
-    end;
+def aggregate(records, section, key, zero_if_empty):
+    if not records:
+        return 0 if zero_if_empty else None
+    if any(not record["has_usage"] for record in records):
+        return None
+    values = [record[section][key] for record in records]
+    return sum(values) if all(value is not None for value in values) else None
 
-  def usage_state($parent):
-    if ($parent | type) != "object" or ($parent | has("usage") | not) then "missing"
-    elif (($parent.usage | type) != "object") then "invalid"
-    else "present"
-    end;
 
-  def measurement($entry; $entry_class; $parent; $provider; $model):
-    {
-      entry_class: $entry_class,
-      line: ($entry._fm_line // null),
-      provider: string_or_null($provider),
-      model: string_or_null($model),
-      usage_state: usage_state($parent),
-      has_usage: (usage_state($parent) == "present"),
-      provider_usage: provider_usage($parent.usage?),
-      model_rate_cost_estimate: model_rate_cost($parent.usage?)
-    };
+def report(values, path):
+    before = signature(path)
+    if before is None:
+        fail("session path is not a readable regular file")
+    entries, warnings, malformed = [], [], 0
 
-  def measurements($entries):
-    [
-      $entries[] as $entry |
-      if $entry.type == "message" and ($entry.message | type) == "object" and $entry.message.role == "assistant" then
-        measurement($entry; "assistant"; $entry.message; $entry.message.provider?; $entry.message.model?)
-      elif $entry.type == "message" and ($entry.message | type) == "object" and $entry.message.role == "toolResult" then
-        measurement($entry; "tool_result"; $entry.message; null; null)
-      elif $entry.type == "compaction" then
-        measurement($entry; "compaction"; $entry; null; null)
-      elif $entry.type == "branch_summary" then
-        measurement($entry; "branch_summary"; $entry; null; null)
-      else empty
-      end
-    ];
+    def reject_constant(value):
+        raise ValueError(value)
 
-  def usage_warnings($measurement):
-    if $measurement.usage_state == "missing" then
-      [{code: "missing_usage", entry_class: $measurement.entry_class, line: $measurement.line}]
-    elif $measurement.usage_state == "invalid" then
-      [{code: "invalid_usage", entry_class: $measurement.entry_class, line: $measurement.line}]
-    else
-      (
-        [
-          {key: "input", field: "input"},
-          {key: "cache_read", field: "cacheRead"},
-          {key: "cache_write", field: "cacheWrite"},
-          {key: "output", field: "output"},
-          {key: "provider_total", field: "totalTokens"}
-        ]
-        | map(select($measurement.provider_usage[.key] == null) |
-          {code: "unknown_usage_field", entry_class: $measurement.entry_class,
-           field: .field, line: $measurement.line})
-      ) +
-      if $measurement.model_rate_cost_estimate == null then
-        [{code: "unknown_model_rate_cost", entry_class: $measurement.entry_class, line: $measurement.line}]
-      else []
-      end
-    end;
+    try:
+        with open(path, encoding="utf-8", errors="replace") as source:
+            for line_no, line in enumerate(source, 1):
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line, parse_constant=reject_constant)
+                except (TypeError, ValueError):
+                    warnings.append(dict(code="malformed_json", line=line_no)); malformed += 1; continue
+                if not isinstance(entry, dict):
+                    warnings.append(dict(code="record_not_object", line=line_no)); malformed += 1; continue
+                entry["_line"] = line_no; entries.append(entry)
+    except OSError:
+        fail("could not read session file")
 
-  def aggregate($measurements; $section; $key; $zero_if_empty):
-    if ($measurements | length) == 0 then
-      if $zero_if_empty then 0 else null end
-    elif any($measurements[]; .has_usage == false) then null
-    else
-      ($measurements | map(.[$section][$key])) as $values |
-      if any($values[]; . == null) then null
-      else reduce $values[] as $value (0; . + $value)
-      end
-    end;
+    after_read = signature(path)
+    if values["settle_ms"]:
+        time.sleep(values["settle_ms"] / 1000)
+    stable = before == after_read == signature(path)
+    records = measurements(entries)
+    headers = [entry for entry in entries if entry.get("type") == "session"]
+    header = headers[0] if headers else {}
+    for record in records:
+        warnings.extend(usage_warnings(record))
+    if not headers:
+        warnings.append(dict(code="missing_session_header"))
+    elif len(headers) > 1:
+        warnings.append(dict(code="multiple_session_headers"))
+    warnings.extend(dict(code="embedded_history_ignored", entry_class="compaction", line=entry["_line"])
+                    for entry in entries if entry.get("type") == "compaction" and isinstance(entry.get("retainedTail"), list))
+    if not stable:
+        warnings.append(dict(code="unstable_file"))
 
-  def aggregate_section($measurements; $section; $zero_if_empty):
-    {
-      input: aggregate($measurements; $section; "input"; $zero_if_empty),
-      cache_read: aggregate($measurements; $section; "cache_read"; $zero_if_empty),
-      cache_write: aggregate($measurements; $section; "cache_write"; $zero_if_empty),
-      output: aggregate($measurements; $section; "output"; $zero_if_empty),
-      reasoning: aggregate($measurements; $section; "reasoning"; false),
-      provider_total: aggregate($measurements; $section; "provider_total"; false)
-    };
+    def type_count(kind):
+        return sum(entry.get("type") == kind for entry in entries)
 
-  . as $entries |
-  (measurements($entries)) as $measurements |
-  ($entries | map(select(.type == "session"))) as $headers |
-  ($headers[0] // {}) as $header |
-  (
-    $input_warnings +
-    ([$measurements[] | usage_warnings(.)[]]) +
-    (if ($headers | length) == 0 then [{code: "missing_session_header"}]
-     elif ($headers | length) > 1 then [{code: "multiple_session_headers"}]
-     else [] end) +
-    ([$entries[] | select(.type == "compaction" and (.retainedTail | type) == "array") |
-      {code: "embedded_history_ignored", entry_class: "compaction", line: ._fm_line}]) +
-    (if $stable then [] else [{code: "unstable_file"}] end)
-  ) as $warnings |
-  {
-    schema: 1,
-    artifact: {
-      format: "pi-session-jsonl",
-      stability: $stability,
-      final: ($stable and ($malformed == 0) and (($headers | length) == 1))
-    },
-    session: {
-      id: session_id_or_null($header.id?),
-      version: if ($header.version | type) == "number" then $header.version else null end
-    },
-    metadata: {
-      run_label: if $run_label_set == 1 then $run_label else null end,
-      role: if $role_set == 1 then $role else null end,
-      task: if $task_set == 1 then $task else null end,
-      attempt: if $attempt_set == 1 then ($attempt | tonumber) else null end
-    },
-    entry_counts: {
-      parsed: ($entries | length),
-      malformed: $malformed,
-      session: ($entries | map(select(.type == "session")) | length),
-      message: ($entries | map(select(.type == "message")) | length),
-      user_message: ($entries | map(select(.type == "message" and (.message.role? // null) == "user")) | length),
-      assistant_message: ($entries | map(select(.type == "message" and (.message.role? // null) == "assistant")) | length),
-      tool_result_message: ($entries | map(select(.type == "message" and (.message.role? // null) == "toolResult")) | length),
-      compaction: ($entries | map(select(.type == "compaction")) | length),
-      branch_summary: ($entries | map(select(.type == "branch_summary")) | length),
-      other: ($entries | map(select(.type != "session" and .type != "message" and .type != "compaction" and .type != "branch_summary")) | length)
-    },
-    calls: {
-      assistant: ($entries | map(select(.type == "message" and (.message.role? // null) == "assistant")) | length),
-      tool: ([$entries[] | select(.type == "message") | .message.content? // [] | .[]? | select(type == "object" and .type == "toolCall")] | length),
-      tool_result: ($entries | map(select(.type == "message" and (.message.role? // null) == "toolResult")) | length),
-      compaction: ($entries | map(select(.type == "compaction")) | length),
-      branch_summary: ($entries | map(select(.type == "branch_summary")) | length),
-      measured: ($measurements | map(select(.has_usage)) | length)
-    },
-    records: $measurements,
-    totals: {
-      provider_usage: aggregate_section($measurements; "provider_usage"; true),
-      model_rate_cost_estimate: {
-        input: aggregate($measurements; "model_rate_cost_estimate"; "input"; true),
-        cache_read: aggregate($measurements; "model_rate_cost_estimate"; "cache_read"; true),
-        cache_write: aggregate($measurements; "model_rate_cost_estimate"; "cache_write"; true),
-        output: aggregate($measurements; "model_rate_cost_estimate"; "output"; true),
-        total: aggregate($measurements; "model_rate_cost_estimate"; "total"; true)
-      }
-    },
-    warnings: $warnings,
-    limitations: [
-      "final means the regular file stayed unchanged during this read and settle check; Pi JSONL has no closed marker.",
-      "Provider usage is not subscription or quota consumption, and model-rate cost is an estimate rather than a billing record.",
-      "Worker identity and run correlation are caller-supplied only; this parser does not infer primary versus worker or create a sidecar."
-    ]
-  }
-' "$RECORDS_FILE"
+    def role_count(role):
+        return sum(entry.get("type") == "message" and isinstance(entry.get("message"), dict)
+                   and entry["message"].get("role") == role for entry in entries)
+
+    tool_calls = sum(isinstance(block, dict) and block.get("type") == "toolCall"
+                     for entry in entries if entry.get("type") == "message" and isinstance(entry.get("message"), dict)
+                     for block in (entry["message"].get("content") if isinstance(entry["message"].get("content"), list) else []))
+    known = {"session", "message", "compaction", "branch_summary"}
+    counts = dict(parsed=len(entries), malformed=malformed, session=type_count("session"), message=type_count("message"),
+                  user_message=role_count("user"), assistant_message=role_count("assistant"),
+                  tool_result_message=role_count("toolResult"), compaction=type_count("compaction"),
+                  branch_summary=type_count("branch_summary"), other=sum(entry.get("type") not in known for entry in entries))
+    calls = dict(assistant=role_count("assistant"), tool=tool_calls, tool_result=role_count("toolResult"),
+                 compaction=type_count("compaction"), branch_summary=type_count("branch_summary"),
+                 measured=sum(record["has_usage"] for record in records))
+    provider = {key: aggregate(records, "provider_usage", key, key not in ("reasoning", "provider_total")) for key in TOKENS}
+    model_cost = {key: aggregate(records, "model_rate_cost_estimate", key, True) for key in COSTS}
+    session_id = text(header.get("id"))
+    report_data = dict(schema=1,
+        artifact=dict(format="pi-session-jsonl", stability="stable" if stable else "unstable",
+                      final=stable and malformed == 0 and len(headers) == 1),
+        session=dict(id=session_id if session_id and SESSION_ID.fullmatch(session_id) else None,
+                     version=header.get("version") if isinstance(header.get("version"), (int, float)) and not isinstance(header.get("version"), bool) else None),
+        metadata=dict(run_label=values["run_label"], role=values["role"], task=values["task"],
+                      attempt=int(values["attempt"]) if values["attempt"] is not None else None),
+        entry_counts=counts, calls=calls, records=records,
+        totals=dict(provider_usage=provider, model_rate_cost_estimate=model_cost), warnings=warnings,
+        limitations=["final means the regular file stayed unchanged during this read and settle check; Pi JSONL has no closed marker.",
+                     "Provider usage is not subscription or quota consumption, and model-rate cost is an estimate rather than a billing record.",
+                     "Worker identity and run correlation are caller-supplied only; this parser does not infer primary versus worker or create a sidecar."])
+    json.dump(report_data, sys.stdout, indent=2); print()
+
+
+values, session_path = parse(sys.argv[1:])
+report(values, session_path)
+PY
