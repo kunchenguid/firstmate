@@ -387,7 +387,14 @@ for child in sorted(allowed_files):
     digest.update(size.to_bytes(8, "big"))
 actual = "sha256:" + digest.hexdigest()
 if actual != request["credential_lease"]["disk_content_binding"]:
-    raise SystemExit("validation guest: credential disk content binding mismatch")
+    # Print both integrity digests (never content): a provider session
+    # legitimately mutates its home, so the operator must roll the lease
+    # descriptor forward from the observed value.
+    raise SystemExit(
+        "validation guest: credential disk content binding mismatch (expected {} observed {})".format(
+            request["credential_lease"]["disk_content_binding"], actual
+        )
+    )
 PY
 PROVIDER_HOME=$CREDENTIAL_MOUNT/$PROVIDER_PATH
 GITHUB_TOKEN_FILE=$CREDENTIAL_MOUNT/$GITHUB_TOKEN_PATH
