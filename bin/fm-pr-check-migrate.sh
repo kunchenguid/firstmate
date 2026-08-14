@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Non-executing migration for watcher PR checks created by older Firstmate
 # versions. Legacy check files are never run, sourced, or parsed by Bash.
+# Secure-mode only: data-only supervision never creates migration or quarantine
+# artifacts and never invokes this script.
 # Pending validated merged-poll retirements finish first. Canonical polls are
 # then rebuilt from validated metadata, remaining provenance-bound polls and
 # registered custom checks remain armed, and every other task poll is

@@ -399,7 +399,7 @@ fm_pr_poll_data_parse() {
 # identity as the sidecar, then the two hashes and the two file identities.
 # The version tag moved to v2 with the provider tag, so a registration written
 # by the previous release is recognised as old and refused. The non-executing
-# migration in bin/fm-pr-check-migrate.sh then rebuilds that poll from the
+# secure-mode migration in bin/fm-pr-check-migrate.sh then rebuilds that poll from the
 # task's recorded pull request URL.
 fm_pr_poll_registration_parse() {
   local file=$1 version id provider url host path number data_hash template_hash data_identity check_identity

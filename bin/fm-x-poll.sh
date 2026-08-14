@@ -2,7 +2,9 @@
 # One short-poll of the relay connector for a pending X-mode mention.
 #
 # Inert by default: a HARD no-op (exit 0, no output) unless X mode is configured
-# via a non-empty FMX_PAIRING_TOKEN (from the home's .env or the environment).
+# via a non-empty FMX_PAIRING_TOKEN (from the home's .env or the environment) and
+# the state filesystem proves secure mode. Data-only supervision refuses this
+# executable polling path without creating or trusting its artifacts.
 # The watcher invokes this trusted repository script directly only after
 # state/x-watch.check.sh matches the expected byte-static identity shim.
 # Its contract is "output => wake firstmate, silence => keep sleeping", so the

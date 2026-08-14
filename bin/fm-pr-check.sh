@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# Record a PR-ready task: in secure mode, store one validated canonical pr=<url>
+# and the forge's exact pr_head=<sha> when available, then atomically arm a
+# static merge poll. In data-only mode, record only validated canonical metadata
+# and never create or arm executable poll artifacts.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,

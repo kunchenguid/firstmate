@@ -2,6 +2,7 @@
 
 Empirical record for the merge watch on GitLab, alongside the existing GitHub watch.
 Every command below was run on 2026-07-21 and its output is reproduced exactly.
+This evidence uses a secure state filesystem; data-only homes do not create or execute PR poll artifacts, and their record-only GitHub flow is owned by [configuration.md](configuration.md#state-filesystem-capability).
 
 ## Versions
 

@@ -67,8 +67,11 @@
 #          await the primary-authoritative inherited value instead of creating
 #          their own.
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
-#          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
-#          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          FMX_PAIRING_TOKEN and the state filesystem proves secure mode. In
+#          secure mode, bootstrap requires curl+jq, writes the relay poll shim
+#          and 30s cadence config, and prints an FMX line. Data-only mode reports
+#          the unavailable feature without creating, sourcing, or executing its
+#          artifacts.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -884,20 +887,23 @@ x_mode_remove_artifact() {
   ! x_mode_artifact_present "$artifact"
 }
 
-# X mode (opt-in): when this home's .env carries a non-empty FMX_PAIRING_TOKEN,
-# wire the relay poll into the existing authenticated watcher dispatch.
+# X mode (opt-in): when this home's .env carries a non-empty FMX_PAIRING_TOKEN
+# and the state filesystem proves secure mode, wire the relay poll into the
+# existing authenticated watcher dispatch.
 # Drops two idempotent, gitignored artifacts:
 #   state/x-watch.check.sh - byte-static identity shim; the watcher validates
 #                            its bytes and invokes bin/fm-x-poll.sh directly
 #   config/x-mode.env      - exports FM_CHECK_INTERVAL=30, sourced by the watcher
 #                            arm so only an X instance polls at the 30s cadence
-# On opt-out (no token, or empty) it removes any such artifacts so the instance
-# reverts to the default 300s no-poll behavior. Absent a token AND with no leftover
-# artifacts it is a complete no-op (nothing written, nothing printed), so a non-X
-# user sees zero change. Prints one confirmation line on opt-in, and one on opt-out
-# only when it actually removed artifacts. It never touches the watcher itself;
-# applying a cadence transition to a running watcher is the caller's job via
-# the emitted harness-aware supervision repair instruction.
+# On opt-out (no token, or empty) secure mode removes any such artifacts so the
+# instance reverts to the default 300s no-poll behavior. Data-only mode never
+# creates or executes these artifacts and leaves pre-existing ones unavailable.
+# Absent a token AND with no leftover artifacts, secure mode is a complete no-op
+# (nothing written, nothing printed), so a non-X user sees zero change. Prints
+# one confirmation line on opt-in, and one on opt-out only when it actually
+# removed artifacts. It never touches the watcher itself; applying a cadence
+# transition to a running watcher is the caller's job via the emitted
+# harness-aware supervision repair instruction.
 x_mode_setup() {
   local env_file token shim cadence shim_body cadence_body tool missing shim_home
   env_file="$FM_HOME/.env"

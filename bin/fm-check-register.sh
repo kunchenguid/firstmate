@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Bind an intentional custom watcher check to its current bytes.
+# Secure-mode only: data-only supervision refuses custom executable checks.
 # Usage: fm-check-register.sh <id>
 set -u
 

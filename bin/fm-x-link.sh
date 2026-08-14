@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Link a spawned task to the X-mode mention that triggered it, so firstmate can
 # post up to THREE completion follow-ups when the task lands (within a 7-day window).
+# Data-only supervision refuses this Relay task-link mutation because it cannot
+# activate or trust the X polling path.
 #
 # Usage: fm-x-link.sh <task-id> <request_id> [--carry-count <n> --carry-ts <epoch> [--carry-platform <x|discord>] [--carry-max <n>]]
 #

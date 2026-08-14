@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Merge a task's PR after recording pr= and any available pr_head= through
+# Merge a task's PR after mode-specific metadata recording and validation through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
+# Secure mode uses the authenticated static poll and gh-axi pr merge. Data-only
+# mode requires the recorded canonical GitHub head to be revalidated through
+# gh-axi api before its direct API merge path is allowed.
 # The full canonical GitHub PR URL is parsed by bin/fm-pr-lib.sh and the derived
 # owner/repository and PR number are passed to gh-axi as separate arguments.
 #

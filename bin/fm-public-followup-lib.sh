@@ -14,11 +14,13 @@
 # set -u / set -e safe.
 #
 # GATE ORDER - the acceptance criterion for relay-disabled homes:
-#   1. fm_pf_relay_active <home>     the authoritative myfirstmate activation
+#   1. fm_pf_relay_active <home>     the authoritative myfirstmate consent
 #                                    contract, a non-empty FMX_PAIRING_TOKEN in
-#                                    <home>/.env. There is no second flag. When
-#                                    <home>/.env is absent this is a single
-#                                    [ -f ] test and nothing else runs.
+#                                    <home>/.env. Bootstrap additionally requires
+#                                    secure state capability before creating Relay
+#                                    polling artifacts. When <home>/.env is absent
+#                                    this is a single [ -f ] test and nothing else
+#                                    runs.
 #   2. fm_pf_has_registrations       O(1) presence check on the registry created
 #      / fm_pf_has_events            only by the relay path (fm-public-followup.sh
 #                                    register). Relay-enabled homes with no
@@ -69,10 +71,10 @@ FM_PF_EVENT_BYTES_MAX=${FM_PF_EVENT_BYTES_MAX:-8192}
 # --- gate 1: the authoritative relay activation contract --------------------
 
 # fm_pf_relay_active <home>: 0 when this home has opted into the myfirstmate
-# relay, 1 otherwise. Identical contract to bootstrap's X-mode activation - a
-# non-empty FMX_PAIRING_TOKEN in <home>/.env - so no second activation flag
-# exists to drift. FMX_PAIRING_TOKEN in the environment wins, matching
-# fmx_load_config, so a direct client call and this gate agree.
+# relay, 1 otherwise. It owns the token-consent contract used by direct Relay
+# clients; bootstrap separately applies the secure state-capability gate before
+# creating polling artifacts. FMX_PAIRING_TOKEN in the environment wins,
+# matching fmx_load_config, so a direct client call and this gate agree.
 fm_pf_relay_active() {
   local home=$1 token
   if [ -n "${FMX_PAIRING_TOKEN+x}" ]; then
