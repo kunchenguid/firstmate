@@ -2028,21 +2028,33 @@ EOF
     done <<EOF
 $dup_tab_ids
 EOF
-    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
-      echo "error: could not verify herdr husk removal for tab '$label' in workspace $wsid (session $session)" >&2
+  fi
+  list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id" || {
+      echo "error: could not reclaim replacement herdr pane $pane_id after an unreadable duplicate check for label '$label' in workspace $wsid (session $session)" >&2
       return 1
     }
-    if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
-      echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
+    echo "error: could not verify herdr task tab uniqueness for label '$label' in workspace $wsid (session $session)" >&2
+    return 1
+  }
+  if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id" || {
+      echo "error: could not reclaim replacement herdr pane $pane_id after an unreadable duplicate check for label '$label' in workspace $wsid (session $session)" >&2
       return 1
-    fi
-    remaining_dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" --arg replacement "$tab_id" \
-      '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
-    remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
-    if [ -n "$remaining_dup_tabs" ]; then
-      echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
+    }
+    echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
+    return 1
+  fi
+  remaining_dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" --arg replacement "$tab_id" \
+    '.result.tabs[]? | select(.label == $want and .tab_id != $replacement) | .tab_id' 2>/dev/null)
+  remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
+  if [ -n "$remaining_dup_tabs" ]; then
+    fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id" || {
+      echo "error: could not reclaim replacement herdr pane $pane_id after concurrent tab(s) $remaining_dup_tabs appeared for label '$label' in workspace $wsid (session $session)" >&2
       return 1
-    fi
+    }
+    echo "error: herdr tab(s) $remaining_dup_tabs appeared during replacement for label '$label' in workspace $wsid (session $session)" >&2
+    return 1
   fi
   printf '%s %s' "$tab_id" "$pane_id"
 }

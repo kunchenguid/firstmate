@@ -766,11 +766,36 @@ test_create_task_husk_replacement_creates_before_closing() {
   pass "fm_backend_herdr_create_task: creates the replacement tab BEFORE closing the husk tab, never the reverse"
 }
 
+test_create_task_reclaims_replacement_when_a_live_duplicate_appears() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/create-postscan-live"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[]}}\n' > "$resp/1.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}\n' > "$resp/2.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-race1","workspace_id":"w1"},{"tab_id":"w1:t4","label":"fm-race1","workspace_id":"w1"}]}}\n' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_RECLAIMED_PANE="$dir/reclaimed" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_reclaim_rollback() { printf "%s" "$2" > "$FM_RECLAIMED_PANE"; }
+      fm_backend_herdr_create_task fmtest:w1 fm-race1 /tmp/proj
+    ' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a same-label tab that appears after create must refuse replacement publication"
+  [ "$(cat "$dir/reclaimed")" = w1:p3 ] \
+    || fail "the post-create conflict did not reclaim the unlaunched replacement pane"
+  assert_contains "$out" "appeared during replacement" \
+    "the post-create conflict did not report its concurrent endpoint"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' \
+    "the post-create conflict fixture did not cross the create boundary"
+  pass "fm_backend_herdr_create_task: a post-create same-label conflict reclaims the unlaunched replacement"
+}
+
 test_create_task_creates_and_parses_ids() {
   local dir log resp fb out
   dir="$TMP_ROOT/create-task"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"tabs":[]}}\n' > "$resp/1.out"
   printf '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}\n' > "$resp/2.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-newtask","workspace_id":"w1"}]}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-newtask /tmp/proj' "$ROOT" )
@@ -822,6 +847,7 @@ test_create_task_creates_with_no_focus_flag() {
   dir="$TMP_ROOT/create-task-no-focus"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"tabs":[]}}\n' > "$resp/1.out"
   printf '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}\n' > "$resp/2.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-newtask","workspace_id":"w1"}]}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-newtask /tmp/proj' "$ROOT" )
@@ -4454,6 +4480,7 @@ test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
+test_create_task_reclaims_replacement_when_a_live_duplicate_appears
 test_missing_pane_relaunch_delegates_exact_replacement
 test_missing_pane_relaunch_refusal_boundaries_are_non_mutating
 test_missing_pane_relaunch_rollback_restores_presentation_binding
