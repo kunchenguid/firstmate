@@ -44,12 +44,11 @@ case "$FM_TASKS_AXI_COMPATIBLE_MEMO" in
 esac
 
 fm_tasks_axi_version_parts() {
-  local output
+  local output version
   command -v tasks-axi >/dev/null 2>&1 || return 1
   output=$(tasks-axi --version 2>/dev/null) || return 1
-  printf '%s\n' "$output" |
-    sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
-    head -1
+  version=$(fm_reviewed_parse_version "$output") || return 1
+  printf '%s\n' "${version//./ }"
 }
 
 fm_tasks_axi_compatible() {

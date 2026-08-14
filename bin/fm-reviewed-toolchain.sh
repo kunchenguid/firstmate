@@ -58,6 +58,24 @@ fm_reviewed_package_json_field() {  # <package-json> <field>
   sed -nE "s/^[[:space:]]*\"${field}\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\\1/p" "$package_json" | head -n 1
 }
 
+# Parse a tool's raw `--version` output into its bare stable version. Only a
+# whole whitespace-delimited token that is exactly [vV]?X.Y.Z counts (wrapping
+# punctuation is stripped first), so a prefixed, suffixed, prerelease, or
+# build-metadata token like 10.1.30-rc.1 never truncates to a reviewed version,
+# and output carrying more than one version token is ambiguous and rejected.
+fm_reviewed_parse_version() {  # <raw --version output>
+  local versions
+  versions=$(printf '%s\n' "$1" |
+    tr -s '[:space:]' '\n' |
+    sed -E 's/^[]["(){}<>,;:=]+//; s/[]["(){}<>,;:=]+$//' |
+    sed -nE 's/^[vV]?([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')
+  [ -n "$versions" ] || return 1
+  case "$versions" in
+    *$'\n'*) return 1 ;;
+  esac
+  printf '%s\n' "$versions"
+}
+
 fm_reviewed_installed_version() {  # <tool>
   local tool=$1 output package_json name
   if [ "$tool" = chrome-devtools-mcp ]; then
@@ -69,9 +87,7 @@ fm_reviewed_installed_version() {  # <tool>
   fi
   command -v "$tool" >/dev/null 2>&1 || return 1
   output=$("$tool" --version 2>/dev/null </dev/null) || return 1
-  printf '%s\n' "$output" |
-    sed -nE 's/.*[vV]?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' |
-    head -n 1
+  fm_reviewed_parse_version "$output"
 }
 
 fm_reviewed_tool_compatible() {  # <tool>

@@ -363,6 +363,12 @@ test_gh_axi_reviewed_version() {
     esac
   done <<'ROWS'
 reviewed gh-axi version is accepted^0.1.30^empty
+v-prefixed reviewed gh-axi version is accepted^v0.1.30^empty
+labeled stable gh-axi output is accepted^gh-axi v0.1.30^empty
+contaminated newer gh-axi version reports a mismatch^10.1.30^missing
+prerelease gh-axi version reports a mismatch^0.1.30-rc.1^missing
+build-metadata gh-axi version reports a mismatch^0.1.30+build.7^missing
+multi-version gh-axi output reports a mismatch^gh-axi 0.1.30 (node 20.11.1)^missing
 previous gh-axi patch reports a mismatch^0.1.29^missing
 newer gh-axi patch reports a mismatch^0.1.31^missing
 newer gh-axi minor reports a mismatch^0.2.0^missing
@@ -394,6 +400,8 @@ test_lavish_axi_reviewed_version() {
     esac
   done <<'ROWS'
 reviewed lavish-axi version is accepted^0.1.50^empty
+contaminated newer lavish-axi version reports a mismatch^10.1.50^missing
+prerelease lavish-axi version reports a mismatch^0.1.50-rc.1^missing
 previous lavish-axi patch reports a mismatch^0.1.49^missing
 newer lavish-axi patch reports a mismatch^0.1.51^missing
 newer lavish-axi minor reports a mismatch^0.2.0^missing
@@ -440,6 +448,8 @@ test_tasks_axi_reviewed_version() {
     esac
   done <<'ROWS'
 reviewed tasks-axi version is accepted^0.2.5^empty
+contaminated newer tasks-axi version reports a mismatch^10.2.5^missing
+prerelease tasks-axi version reports a mismatch^0.2.5-rc.1^missing
 previous tasks-axi patch reports a mismatch^0.2.4^missing
 newer tasks-axi patch reports a mismatch^0.2.6^missing
 newer tasks-axi minor reports a mismatch^0.3.0^missing
@@ -475,6 +485,8 @@ test_quota_axi_reviewed_version() {
     esac
   done <<'ROWS'
 reviewed quota-axi version is accepted^0.1.25^empty
+contaminated newer quota-axi version reports a mismatch^10.1.25^missing
+prerelease quota-axi version reports a mismatch^0.1.25-rc.1^missing
 newer quota-axi patch reports a mismatch^0.1.26^missing
 newer quota-axi minor reports a mismatch^0.2.0^missing
 newer quota-axi major reports a mismatch^1.0.0^missing

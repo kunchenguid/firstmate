@@ -29,9 +29,7 @@ fm_quota_axi_compatible() {
   else
     output=$(quota-axi --version 2>/dev/null </dev/null) || return 1
   fi
-  installed=$(printf '%s\n' "$output" |
-    sed -nE 's/.*[vV]?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' |
-    head -n 1)
+  installed=$(fm_reviewed_parse_version "$output") || return 1
   expected=$(fm_reviewed_tool_version quota-axi) || return 1
   [ "$installed" = "$expected" ]
 }
