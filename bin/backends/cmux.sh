@@ -36,11 +36,12 @@
 #      (herdr-shape): `workspace list`'s `current_directory` field reflects a
 #      `cd` run directly in the surface's own top-level shell, but stays
 #      frozen at wherever that shell was when it launched a foreground
-#      subshell (exactly what `treehouse get` does) - verified live: a nested
-#      `bash -c 'cd /Users && exec bash'` left `current_directory` reporting
-#      the PARENT shell's last cwd, never following into the subshell. Fixed
-#      with zellij's own pwd-marker-probe workaround, reused verbatim in
-#      spirit (fm_backend_cmux_current_path below).
+#      subshell - verified live: a nested `bash -c 'cd /Users && exec bash'`
+#      left `current_directory` reporting the PARENT shell's last cwd, never
+#      following into the subshell. Firstmate therefore leases the worktree
+#      outside the surface, sends a top-level `cd`, and verifies that cd with
+#      zellij's own pwd-marker-probe workaround, reused verbatim in spirit
+#      (fm_backend_cmux_current_path below).
 #   3. `read-screen --lines N` has NO herdr-style small-N empty-result bug -
 #      verified N=1..10 all return correctly-clamped, non-empty content. The
 #      "fetch generous, trim locally" pattern is still used for consistency

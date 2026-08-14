@@ -99,7 +99,7 @@ Real test cleanup uses only an isolated non-`firstmate` session and the guard in
 - There is no verified agent-process liveness signal, so a dead Zellij secondmate is reported inconclusive rather than auto-respawned.
 - New-tab focus restoration has a narrow visible race.
 - CLI exit status is not meaningful; a target can still disappear after structural readiness checks.
-- Worktree cwd discovery requires the spawn-time marker probe.
+- Post-lease worktree-cd verification requires the spawn-time marker probe.
 - An ambiguous unscoped legacy title requires manual cleanup and respawn.
 
 ## Regression entry points
