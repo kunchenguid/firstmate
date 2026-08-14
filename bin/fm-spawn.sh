@@ -2772,8 +2772,12 @@ spawn_record_traceparent() {
   SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
-     || ! awk -F= '$1 != "traceparent"' "$meta" > "$SPAWN_META_TMP" \
-     || ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >> "$SPAWN_META_TMP" \
+     || ! awk -F= -v traceparent="$SPAWN_TRACEPARENT" '
+       $1 == "traceparent" { next }
+       $1 == "pr" && !inserted { print "traceparent=" traceparent; inserted=1 }
+       { print }
+       END { if (!inserted) print "traceparent=" traceparent }
+     ' "$meta" > "$SPAWN_META_TMP" \
      || ! mv -f "$SPAWN_META_TMP" "$meta"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true

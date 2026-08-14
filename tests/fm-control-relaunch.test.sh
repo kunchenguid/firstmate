@@ -276,7 +276,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
 }
 
 test_relaunch_preserves_durable_task_metadata() {
-  local dir out rc
+  local dir out rc traceparent
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
   local meta="$dir/home/state/rl19.meta"
@@ -286,6 +286,8 @@ test_relaunch_preserves_durable_task_metadata() {
     printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
     printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
   } >> "$meta"
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
   expect_code 0 "$rc" "relaunch should preserve durable metadata"$'\n'"$out"
@@ -297,6 +299,9 @@ test_relaunch_preserves_durable_task_metadata() {
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
+  traceparent=$(meta_field "$dir" rl19 traceparent)
+  fm_trace_context_valid "$traceparent" \
+    || fail "the trace-enabled relaunch must record a valid trace carrier"
   [ "$(tail -n 2 "$meta")" = $'pr=https://github.com/example/repo/pull/19\npr_head=0123456789abcdef0123456789abcdef01234567' ] \
     || fail "PR metadata must remain the final lines after relaunch"
   fm_pr_metadata_identity_parse "$meta" \
