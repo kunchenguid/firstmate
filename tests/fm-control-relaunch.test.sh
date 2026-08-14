@@ -187,6 +187,19 @@ meta_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.meta" | tail -1 | cut -d= -f2-
 }
 
+make_x_linked_metadata() {  # <metadata-path>
+  local meta=$1 state home
+  state=${meta%/*}
+  home=${state%/*}
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    bash -c '
+      . "$1/bin/fm-wake-lib.sh"
+      . "$1/bin/fm-x-lib.sh"
+      fmx_meta_link_set "$2" request-19 1700000000 1 x 280
+    ' \
+    _ "$ROOT" "$meta"
+}
+
 journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
 }
@@ -281,11 +294,12 @@ test_relaunch_preserves_durable_task_metadata() {
   add_ship_task "$dir" rl19 claude
   local meta="$dir/home/state/rl19.meta"
   {
-    printf '%s\n' 'x_request=request-19'
     printf '%s\n' 'decisions_reviewed=1'
     printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
     printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
   } >> "$meta"
+  make_x_linked_metadata "$meta" \
+    || fail "the relaunch fixture should build through the X metadata writer"
   printf '%s\n' "$$" > "$dir/home/state/.lock"
   printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
 

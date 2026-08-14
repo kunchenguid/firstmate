@@ -2635,7 +2635,9 @@ preserve_relaunch_meta() {
       split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
-    !($1 in owned)
+    $1 == "pr" || $1 == "pr_head" { pr_lines[++pr_count] = $0; next }
+    !($1 in owned) { print }
+    END { for (i = 1; i <= pr_count; i++) print pr_lines[i] }
   ' "$RELAUNCH_META"
 }
 {
@@ -2774,9 +2776,12 @@ spawn_record_traceparent() {
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
      || ! awk -F= -v traceparent="$SPAWN_TRACEPARENT" '
        $1 == "traceparent" { next }
-       $1 == "pr" && !inserted { print "traceparent=" traceparent; inserted=1 }
+       $1 == "pr" || $1 == "pr_head" { pr_lines[++pr_count] = $0; next }
        { print }
-       END { if (!inserted) print "traceparent=" traceparent }
+       END {
+         print "traceparent=" traceparent
+         for (i = 1; i <= pr_count; i++) print pr_lines[i]
+       }
      ' "$meta" > "$SPAWN_META_TMP" \
      || ! mv -f "$SPAWN_META_TMP" "$meta"; then
     status=1
