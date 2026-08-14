@@ -1281,7 +1281,7 @@ def immutable_identity(resource, kind):
     }
     if (
         not identity["id"]
-        or not identity["etag"]
+        or (kind not in ("run-command", "ttl-schedule") and not identity["etag"])
         or any(not identity.get(key) for key in stable_keys.get(kind, ()))
     ):
         raise ValidationError("{} immutable identity is incomplete".format(kind))
@@ -1963,16 +1963,13 @@ def delete_resource(env, state, resource_id, kind, recorded_key=None):
         return
     verify_cleanup_resource(state, resource, kind, recorded_key)
     identity = immutable_identity(resource, kind)
-    body = {"If-Match": identity["etag"]}
-    header = write_private_json(env, ".delete-header-", body)
-    try:
-        _, rc, stderr = az_command(env, [
-            "rest", "--method", "delete",
-            "--url", "https://management.azure.com{}?api-version={}".format(resource_id, RESOURCE_API[kind]),
-            "--headers", "If-Match={}".format(identity["etag"]),
-        ], check=False)
-    finally:
-        header.unlink(missing_ok=True)
+    arguments = [
+        "rest", "--method", "delete",
+        "--url", "https://management.azure.com{}?api-version={}".format(resource_id, RESOURCE_API[kind]),
+    ]
+    if identity["etag"]:
+        arguments += ["--headers", "If-Match={}".format(identity["etag"])]
+    _, rc, stderr = az_command(env, arguments, check=False)
     if rc != 0:
         raise ValidationError("exact {} deletion failed: {}".format(kind, stderr))
     for _ in range(60):
@@ -1995,11 +1992,13 @@ def delete_run_command(env, state, run_id, recorded):
         or not same_stable_identity(recorded, live, "run-command")
     ):
         raise ValidationError("run-command cleanup identity is foreign")
-    _, rc, stderr = az_command(env, [
+    arguments = [
         "rest", "--method", "delete",
         "--url", "https://management.azure.com{}?api-version={}".format(run_id, RESOURCE_API["run-command"]),
-        "--headers", "If-Match={}".format(live["etag"]),
-    ], check=False)
+    ]
+    if live["etag"]:
+        arguments += ["--headers", "If-Match={}".format(live["etag"])]
+    _, rc, stderr = az_command(env, arguments, check=False)
     if rc != 0:
         raise ValidationError("exact run-command delete failed: {}".format(stderr))
     for _ in range(60):
