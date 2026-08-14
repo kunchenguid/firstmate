@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# ABOUTME: Exercises the guarded task-to-GitHub pull request merge entrypoint.
+# ABOUTME: Pins metadata, argument, review-feedback, override, and failure behavior.
 # Tests for bin/fm-pr-merge.sh: the one path firstmate uses to merge a task's
 # PR, which must always record pr= and any available pr_head= into the task's
 # meta before merging so fm-teardown.sh's landed-check has a PR reference to
@@ -14,6 +16,10 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) unresolved inline and whole-PR conversation comments block with bodies
+#   (j) forge-confirmed resolved and outdated inline threads do not block
+#   (k) missing resolution evidence and API failures fail closed
+#   (l) an explicit human override is recorded before the merge proceeds
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -46,9 +52,10 @@ make_case() {
 # headRefOid for fm-pr-check.sh's pr_head lookup. Args: case_dir head_sha
 add_gh_mocks() {
   local case_dir=$1 head=$2
-  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+[ "${1:-}" != api ] || printf '%s\n' '[]'
 exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
@@ -75,6 +82,59 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
 case "${1:-} ${2:-}" in
   "pr merge") echo "error: pr merge failed" >&2 ; exit 1 ;;
 esac
+[ "${1:-}" != api ] || printf '%s\n' '[]'
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+add_gh_review_gate_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-} ${3:-}" in
+  "api POST graphql")
+    [ ! -e "$FM_TEST_CASE_DIR/fail-thread-api" ] || exit 1
+    [ ! -f "$FM_TEST_CASE_DIR/thread-states" ] || cat "$FM_TEST_CASE_DIR/thread-states"
+    exit 0
+    ;;
+esac
+if [ "${1:-}" = api ]; then
+  case "${2:-}" in
+    /repos/*/pulls/comments/*)
+      comment_id=${2##*/}
+      [ ! -f "$FM_TEST_CASE_DIR/inline-body-$comment_id" ] || cat "$FM_TEST_CASE_DIR/inline-body-$comment_id"
+      exit 0
+      ;;
+    /repos/*/issues/comments/*)
+      comment_id=${2##*/}
+      [ ! -f "$FM_TEST_CASE_DIR/conversation-body-$comment_id" ] || cat "$FM_TEST_CASE_DIR/conversation-body-$comment_id"
+      exit 0
+      ;;
+    /repos/*/pulls/*/comments*)
+      [ ! -e "$FM_TEST_CASE_DIR/fail-inline-api" ] || exit 1
+      [ ! -f "$FM_TEST_CASE_DIR/inline-comments" ] || cat "$FM_TEST_CASE_DIR/inline-comments"
+      [ -f "$FM_TEST_CASE_DIR/inline-comments" ] || printf '%s\n' '[]'
+      exit 0
+      ;;
+    /repos/*/issues/*/comments*)
+      [ ! -e "$FM_TEST_CASE_DIR/fail-conversation-api" ] || exit 1
+      [ ! -f "$FM_TEST_CASE_DIR/conversation-comments" ] || cat "$FM_TEST_CASE_DIR/conversation-comments"
+      [ -f "$FM_TEST_CASE_DIR/conversation-comments" ] || printf '%s\n' '[]'
+      exit 0
+      ;;
+  esac
+fi
+case "${1:-} ${2:-}" in
+  "pr merge")
+    exit 0
+    ;;
+esac
 exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
@@ -88,6 +148,7 @@ run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_TEST_CASE_DIR="$case_dir" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
@@ -117,6 +178,10 @@ test_records_pr_and_head_before_merging() {
     "records-before-merge: pr= was not recorded"
   assert_grep 'pr_head=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
     "records-before-merge: pr_head= was not recorded"
+  assert_grep 'api /repos/example/repo/pulls/9/comments?per_page=100&page=1' "$case_dir/gh-axi.log" \
+    "records-before-merge: inline review-comment surface was not fetched"
+  assert_grep 'api /repos/example/repo/issues/9/comments?per_page=100&page=1' "$case_dir/gh-axi.log" \
+    "records-before-merge: PR conversation-comment surface was not fetched"
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
   pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
@@ -139,6 +204,184 @@ test_merge_failure_propagates_after_recording() {
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
+}
+
+test_unresolved_inline_comment_blocks_merge() {
+  local case_dir rc
+  case_dir=$(make_case unresolved-inline-comment)
+  mkdir -p "$case_dir/wt"
+  add_gh_review_gate_mock "$case_dir"
+  printf '[1]{author,id,root_id}:\n  "reviewer-bot",501,501\n' \
+    > "$case_dir/inline-comments"
+  printf 'end_cursor: null\nhas_next: false\nthreads[1]{outdated,resolved,root_id}:\n  false,false,501\n' \
+    > "$case_dir/thread-states"
+  printf 'body_chunks[1]: "[P1] reviewer permission over-grant"\n' \
+    > "$case_dir/inline-body-501"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unresolved-inline-comment: fm-pr-merge should fail closed"
+  assert_grep 'unresolved inline review comments block merge' "$case_dir/stderr" \
+    "unresolved-inline-comment: refusal did not explain the review-comment gate"
+  assert_grep '[P1] reviewer permission over-grant' "$case_dir/stderr" \
+    "unresolved-inline-comment: refusal summarized away the comment body"
+  assert_grep 'reviewer-bot' "$case_dir/stderr" \
+    "unresolved-inline-comment: refusal omitted the bot author"
+  assert_grep 'https://github.com/example/repo/pull/31#discussion_r501' "$case_dir/stderr" \
+    "unresolved-inline-comment: refusal omitted the review comment URL"
+  assert_grep 'isResolved' "$case_dir/gh-axi.log" \
+    "unresolved-inline-comment: GraphQL did not request explicit resolved evidence"
+  assert_grep 'isOutdated' "$case_dir/gh-axi.log" \
+    "unresolved-inline-comment: GraphQL did not request separate outdated evidence"
+  assert_no_grep 'pr merge 31' "$case_dir/gh-axi.log" \
+    "unresolved-inline-comment: gh-axi pr merge was invoked"
+  pass "fm-pr-merge prints and blocks an unresolved inline review comment"
+}
+
+test_resolved_inline_comment_does_not_block() {
+  local case_dir
+  case_dir=$(make_case resolved-inline-comment)
+  mkdir -p "$case_dir/wt"
+  add_gh_review_gate_mock "$case_dir"
+  printf '[1]{author,id,root_id}:\n  reviewer,502,502\n' \
+    > "$case_dir/inline-comments"
+  printf 'end_cursor: null\nhas_next: false\nthreads[1]{outdated,resolved,root_id}:\n  false,true,502\n' \
+    > "$case_dir/thread-states"
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/32 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "resolved-inline-comment: fm-pr-merge failed"
+
+  assert_grep 'pr merge 32 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    "resolved-inline-comment: resolved thread blocked the merge"
+  pass "fm-pr-merge permits an inline comment whose GitHub thread is resolved"
+}
+
+test_outdated_inline_comment_does_not_block() {
+  local case_dir
+  case_dir=$(make_case outdated-inline-comment)
+  mkdir -p "$case_dir/wt"
+  add_gh_review_gate_mock "$case_dir"
+  printf '[1]{author,id,root_id}:\n  reviewer,503,503\n' \
+    > "$case_dir/inline-comments"
+  printf 'end_cursor: null\nhas_next: false\nthreads[1]{outdated,resolved,root_id}:\n  true,false,503\n' \
+    > "$case_dir/thread-states"
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/33 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "outdated-inline-comment: fm-pr-merge failed"
+
+  assert_grep 'pr merge 33 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    "outdated-inline-comment: API-confirmed outdated thread blocked the merge"
+  pass "fm-pr-merge permits an inline comment whose GitHub thread is outdated"
+}
+
+test_conversation_comment_blocks_without_resolution_evidence() {
+  local case_dir rc
+  case_dir=$(make_case conversation-comment)
+  mkdir -p "$case_dir/wt"
+  add_gh_review_gate_mock "$case_dir"
+  printf '[1]{author,id}:\n  "review-bot",601\n' \
+    > "$case_dir/conversation-comments"
+  printf 'body_chunks[1]: "Please inspect the authorization boundary"\n' \
+    > "$case_dir/conversation-body-601"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/34 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "conversation-comment: fm-pr-merge should fail closed"
+  assert_grep 'conversation comments have no resolution state' "$case_dir/stderr" \
+    "conversation-comment: refusal did not explain the forge limitation"
+  assert_grep 'Please inspect the authorization boundary' "$case_dir/stderr" \
+    "conversation-comment: comment body was summarized away"
+  assert_no_grep 'pr merge 34' "$case_dir/gh-axi.log" \
+    "conversation-comment: gh-axi pr merge was invoked"
+  pass "fm-pr-merge fails closed on PR conversation comments without resolution state"
+}
+
+test_missing_inline_resolution_state_fails_closed() {
+  local case_dir rc
+  case_dir=$(make_case missing-inline-state)
+  mkdir -p "$case_dir/wt"
+  add_gh_review_gate_mock "$case_dir"
+  printf '[1]{author,id,root_id}:\n  reviewer,504,504\n' \
+    > "$case_dir/inline-comments"
+  printf 'end_cursor: null\nhas_next: false\nthreads: []\n' > "$case_dir/thread-states"
+  printf 'body_chunks[1]: "State unavailable"\n' > "$case_dir/inline-body-504"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/35 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "missing-inline-state: fm-pr-merge should fail closed"
+  assert_grep 'resolution state unavailable' "$case_dir/stderr" \
+    "missing-inline-state: refusal did not explain missing forge evidence"
+  assert_no_grep 'pr merge 35' "$case_dir/gh-axi.log" \
+    "missing-inline-state: gh-axi pr merge was invoked"
+  pass "fm-pr-merge fails closed when GitHub omits an inline thread's state"
+}
+
+test_review_comment_override_is_logged_and_merges() {
+  local case_dir
+  case_dir=$(make_case review-comment-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_review_gate_mock "$case_dir"
+  printf '[1]{author,id,root_id}:\n  reviewer,505,505\n' \
+    > "$case_dir/inline-comments"
+  printf 'end_cursor: null\nhas_next: false\nthreads[1]{outdated,resolved,root_id}:\n  false,false,505\n' \
+    > "$case_dir/thread-states"
+  printf 'body_chunks[1]: "Human decision required"\n' > "$case_dir/inline-body-505"
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/36 \
+    --review-comments-override 'captain reviewed comment 505' \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "review-comment-override: fm-pr-merge failed"
+
+  assert_grep 'note: merge review-comments override: pr=https://github.com/example/repo/pull/36 reason=captain reviewed comment 505' \
+    "$case_dir/state/task-x1.status" \
+    "review-comment-override: the human decision was not recorded"
+  assert_grep 'pr merge 36 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    "review-comment-override: explicit override did not reach merge"
+  assert_no_grep 'review-comments-override' "$case_dir/gh-axi.log" \
+    "review-comment-override: private override argument leaked to gh-axi"
+  pass "fm-pr-merge records an explicit review-comment override before merging"
+}
+
+test_review_comment_api_failure_fails_closed() {
+  local case_dir rc
+  case_dir=$(make_case review-comment-api-failure)
+  mkdir -p "$case_dir/wt"
+  add_gh_review_gate_mock "$case_dir"
+  : > "$case_dir/fail-inline-api"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/37 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "review-comment-api-failure: fm-pr-merge should fail closed"
+  assert_grep 'could not read inline review comments' "$case_dir/stderr" \
+    "review-comment-api-failure: refusal did not name the failed surface"
+  assert_no_grep 'pr merge 37' "$case_dir/gh-axi.log" \
+    "review-comment-api-failure: gh-axi pr merge was invoked"
+  pass "fm-pr-merge fails closed when a review-comment API request fails"
 }
 
 test_extra_merge_args_forwarded() {
@@ -303,6 +546,13 @@ test_parses_pr_url_for_gh_axi() {
 
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
+test_unresolved_inline_comment_blocks_merge
+test_resolved_inline_comment_does_not_block
+test_outdated_inline_comment_does_not_block
+test_conversation_comment_blocks_without_resolution_evidence
+test_missing_inline_resolution_state_fails_closed
+test_review_comment_override_is_logged_and_merges
+test_review_comment_api_failure_fails_closed
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge
