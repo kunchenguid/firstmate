@@ -1991,7 +1991,7 @@ fm_backend_herdr_agent_alive() {  # <target>
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id post_create_dup_tabs concurrent_dup_tabs remaining_dup_tabs
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id created_tab created_pane post_create_dup_tabs concurrent_dup_tabs remaining_dup_tabs
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -2018,6 +2018,30 @@ EOF
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
+    return 1
+  fi
+  created_tab=$(fm_backend_herdr_cli "$session" tab get "$tab_id" 2>/dev/null) || {
+    echo "error: could not verify herdr tab create response for replacement tab $tab_id in workspace $wsid (session $session); retaining the unlaunched replacement" >&2
+    return 1
+  }
+  if ! printf '%s' "$created_tab" | jq -e --arg tab "$tab_id" --arg workspace "$wsid" --arg label "$label" '
+    .result.tab.tab_id == $tab
+      and .result.tab.workspace_id == $workspace
+      and .result.tab.label == $label
+  ' >/dev/null 2>&1; then
+    echo "error: herdr tab create response does not bind replacement tab $tab_id and pane $pane_id to label '$label' in workspace $wsid (session $session)" >&2
+    return 1
+  fi
+  created_pane=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || {
+    echo "error: could not verify herdr tab create response for replacement pane $pane_id in workspace $wsid (session $session); retaining the unlaunched replacement" >&2
+    return 1
+  }
+  if ! printf '%s' "$created_pane" | jq -e --arg pane "$pane_id" --arg tab "$tab_id" --arg workspace "$wsid" '
+    .result.pane.pane_id == $pane
+      and .result.pane.tab_id == $tab
+      and .result.pane.workspace_id == $workspace
+  ' >/dev/null 2>&1; then
+    echo "error: herdr tab create response does not bind replacement tab $tab_id and pane $pane_id to label '$label' in workspace $wsid (session $session)" >&2
     return 1
   fi
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {

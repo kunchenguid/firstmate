@@ -51,12 +51,52 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
   exit 0
 fi
+if [ "${1:-} ${2:-}" = 'tab get' ] && [ -f "$RESP/created-tab-id" ] \
+   && [ "${3:-}" = "$(cat "$RESP/created-tab-id")" ]; then
+  if [ -f "$RESP/created-tab-get.out" ]; then
+    cat "$RESP/created-tab-get.out"
+  else
+    jq -n --arg tab "$(cat "$RESP/created-tab-id")" \
+      --arg workspace "$(cat "$RESP/created-workspace-id")" \
+      --arg label "$(cat "$RESP/created-label")" \
+      '{result:{tab:{tab_id:$tab,workspace_id:$workspace,label:$label}}}'
+  fi
+  exit 0
+fi
+if [ "${1:-} ${2:-}" = 'pane get' ] && [ -f "$RESP/created-pane-id" ] \
+   && [ "${3:-}" = "$(cat "$RESP/created-pane-id")" ]; then
+  if [ -f "$RESP/created-pane-get.out" ]; then
+    cat "$RESP/created-pane-get.out"
+  else
+    jq -n --arg pane "$(cat "$RESP/created-pane-id")" \
+      --arg tab "$(cat "$RESP/created-tab-id")" \
+      --arg workspace "$(cat "$RESP/created-workspace-id")" \
+      '{result:{pane:{pane_id:$pane,tab_id:$tab,workspace_id:$workspace}}}'
+  fi
+  exit 0
+fi
 n=$next
 echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
-[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
+[ -f "$RESP/$n.out" ] && {
+  if [ "${1:-} ${2:-}" = 'tab create' ]; then
+    tab_create_output=$(cat "$RESP/$n.out")
+    printf '%s' "$tab_create_output" | jq -r '.result.tab.tab_id // empty' > "$RESP/created-tab-id"
+    printf '%s' "$tab_create_output" | jq -r '.result.root_pane.pane_id // empty' > "$RESP/created-pane-id"
+    for ((i = 1; i <= $#; i++)); do
+      if [ "${!i}" = --workspace ]; then
+        j=$((i + 1)); printf '%s' "${!j}" > "$RESP/created-workspace-id"
+      elif [ "${!i}" = --label ]; then
+        j=$((i + 1)); printf '%s' "${!j}" > "$RESP/created-label"
+      fi
+    done
+    printf '%s' "$tab_create_output"
+  else
+    cat "$RESP/$n.out"
+  fi
+}
 exit 0
 SH
   chmod +x "$fb/herdr"
@@ -130,6 +170,10 @@ case "$cmd $sub" in
   "tab list")
     jq_state --arg w "$ws" '{result:{tabs:[.tabs[]|select(.workspace_id==$w)]}}'
     ;;
+  "tab get")
+    tab=${3:-}
+    jq_state --arg t "$tab" '{result:{tab:(.tabs[]|select(.tab_id==$t)|{tab_id,label,workspace_id})}}'
+    ;;
   "tab create")
     n=$(jq_state -r '.next'); tabid="$ws:t$n"; paneid="$ws:p$n"
     jq_state --arg w "$ws" --arg wlabel "$label" --arg tabid "$tabid" --arg paneid "$paneid" \
@@ -139,6 +183,10 @@ case "$cmd $sub" in
     ;;
   "pane list")
     jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
+    ;;
+  "pane get")
+    pane=${3:-}
+    jq_state --arg p "$pane" '{result:{pane:(.tabs[]|select(.pane_id==$p)|{pane_id:.pane_id,tab_id:.tab_id,workspace_id:.workspace_id})}}'
     ;;
   "pane close")
     pane=${3:-}
@@ -806,8 +854,7 @@ test_create_task_refuses_an_unbound_create_response_without_cleanup() {
   dir="$TMP_ROOT/create-response-unbound"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '{"result":{"tabs":[]}}\n' > "$resp/1.out"
   printf '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/2.out"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-unbound1","workspace_id":"w1"}]}}\n' > "$resp/3.out"
-  printf '{"result":{"panes":[{"pane_id":"w1:p4","tab_id":"w1:t4"}]}}\n' > "$resp/4.out"
+  printf '{"result":{"tab":{"tab_id":"w1:t3","workspace_id":"w1","label":"foreign"}}}\n' > "$resp/created-tab-get.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_RECLAIMED_PANE="$dir/reclaimed" \
     bash -c '
