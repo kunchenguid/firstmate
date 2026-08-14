@@ -21,13 +21,11 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 make_fakebin() {  # <dir>
   local fb
   fb=$(fm_fakebin "$1")
-  cat > "$fb/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-[ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 30
-exit 0
-SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
+case "$*" in
+  *fm-slow*) [ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 30 ;;
+esac
 case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
   capture-pane)
@@ -65,7 +63,7 @@ SH
 echo "curl $*" >> "$NET_LOG"
 exit 1
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/curl"
+  chmod +x "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/curl"
   printf '%s\n' "$fb"
 }
 
@@ -122,7 +120,7 @@ EOF
     "project=firstmate" \
     "harness=claude" \
     "kind=ship" \
-    "mode=no-mistakes" \
+    "mode=direct-PR" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   record_claude_state "$home/state" ship-task busy
   printf 'working: building the thing\n' > "$home/state/ship-task.status"
@@ -152,7 +150,7 @@ EOF
     "project=firstmate" \
     "harness=claude" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
   record_claude_state "$home/state" external-wait idle
   printf 'paused: declared external-wait for upstream release\n' > "$home/state/external-wait.status"
   # The secondmate's OWN home backlog records a merge it managed. This lands in the
@@ -171,7 +169,7 @@ EOF
   mkdir -p "$mate/projects/mate"
   fm_write_meta "$mate/state/mate.meta" \
     "window=firstmate:fm-mate" "worktree=$mate/projects/mate" "project=firstmate" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=direct-PR"
   record_claude_state "$mate/state" mate idle
   printf 'needs-decision [key=race]: pick subscribe order\n' > "$mate/state/mate.status"
 }
@@ -343,7 +341,7 @@ test_active_child_overrides_old_parent_event() {
 EOF
   fm_write_meta "$mate/state/phase8.meta" \
     "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=codex" "kind=ship" "mode=direct-PR"
   printf 'working [key=phase8]: implementing Phase 8 parity\nneeds-decision [key=release]: choose release A or B\n' \
     > "$mate/state/phase8.status"
   fakebin=$(make_fakebin "$home")
@@ -383,7 +381,7 @@ test_structured_child_decision_reaches_captains_call() {
 EOF
   fm_write_meta "$mate/state/phase8.meta" \
     "window=firstmate:fm-phase8" "worktree=$mate/projects/phase8" "project=sample" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=direct-PR"
   record_claude_state "$mate/state" phase8 idle
   printf 'needs-decision [key=release]: choose release A or B\n' > "$mate/state/phase8.status"
   fakebin=$(make_fakebin "$home")
@@ -468,7 +466,7 @@ test_bad_secondmate_homes_never_revive_parent_work() {
   printf '## In flight\n- [ ] slow - Slow child (repo: sample) (kind: ship) (since 2026-07-13)\n\n## Queued\n\n## Done\n' > "$timedout/data/backlog.md"
   fm_write_meta "$timedout/state/slow.meta" \
     "window=firstmate:fm-slow" "worktree=$wt" "project=sample" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=codex" "kind=ship" "mode=direct-PR"
   append_secondmate_registry "$home" timedout "$timedout"
   write_parent_secondmate_event "$home" timedout "$timedout" "old timed work"
 
@@ -544,7 +542,7 @@ test_secondmate_and_child_bounds_are_disclosed() {
     printf -- '- [ ] %s - Active %s (repo: sample) (kind: ship) (since 2026-07-13)\n' "$child" "$child" >> "$mate/data/backlog.md"
     fm_write_meta "$mate/state/$child.meta" \
       "window=firstmate:fm-$child" "worktree=$mate/projects/$child" "project=sample" \
-      "harness=claude" "kind=ship" "mode=no-mistakes"
+      "harness=claude" "kind=ship" "mode=direct-PR"
     record_claude_state "$mate/state" "$child" busy
     printf 'working [key=%s]: active child %s\n' "$child" "$i" > "$mate/state/$child.status"
     i=$((i + 1))
@@ -654,7 +652,7 @@ EOF
 EOF
   fm_write_meta "$decision/state/$child.meta" \
     "window=firstmate:fm-$child" "worktree=$decision/projects/$child" "project=sample" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=direct-PR"
   record_claude_state "$decision/state" "$child" idle
   printf 'needs-decision [key=live-route]: choose the current route\n' > "$decision/state/$child.status"
   fakebin=$(make_fakebin "$home")
@@ -707,7 +705,7 @@ test_nonprogressing_child_states_are_explicit() {
 EOF
   fm_write_meta "$mate/state/parked.meta" \
     "window=firstmate:fm-parked" "worktree=$mate/projects/parked" "project=sample" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=direct-PR"
   record_claude_state "$mate/state" parked idle
   printf 'needs-decision [key=parked]: choose a route\n' > "$mate/state/parked.status"
   fakebin=$(make_fakebin "$home")
@@ -745,10 +743,10 @@ EOF
 EOF
   fm_write_meta "$mate/state/done.meta" \
     "window=firstmate:fm-done" "worktree=$mate/projects/done" "project=sample" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=direct-PR"
   fm_write_meta "$mate/state/failed.meta" \
     "window=firstmate:fm-failed" "worktree=$mate/projects/failed" "project=sample" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=direct-PR"
   record_claude_state "$mate/state" "done" idle
   record_claude_state "$mate/state" failed idle
   printf 'done: complete\n' > "$mate/state/done.status"
@@ -1484,7 +1482,7 @@ EOF
     "project=firstmate" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
   printf 'working: structured sibling still projects\n' > "$home/state/structured-ship.status"
   fakebin=$(make_fakebin "$home")
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
@@ -1528,7 +1526,7 @@ EOF
     "project=firstmate" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
   printf 'working: visible sibling\n' > "$home/state/visible-ship.status"
   fakebin=$(make_fakebin "$home")
   json_before=$(run "$home" "$fakebin" --json)
@@ -1545,7 +1543,7 @@ EOF
     "project=firstmate" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
   printf 'working: orphan now has meta\n' > "$home/state/orphan-ship.status"
   json_after=$(run "$home" "$fakebin" --json)
   printf '%s' "$json_after" | jq -e '
@@ -1586,7 +1584,7 @@ test_mixed_secondmate_roles_partial_state_and_captain_readiness() {
 EOF
   fm_write_meta "$hibit/state/hibit-worker.meta" \
     "window=firstmate:fm-hibit-worker" "worktree=$hibit/projects/worker" "project=hibit" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=direct-PR"
   record_claude_state "$hibit/state" hibit-worker busy
   printf 'working: finalizing progress\n' > "$hibit/state/hibit-worker.status"
 
@@ -1601,7 +1599,7 @@ EOF
 EOF
   fm_write_meta "$wheel/state/wheel-worker.meta" \
     "window=firstmate:fm-wheel-worker" "worktree=$wheel/projects/worker" "project=wheelhouse" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=direct-PR"
   record_claude_state "$wheel/state" wheel-worker busy
   printf 'working: active validation\n' > "$wheel/state/wheel-worker.status"
 
@@ -1617,7 +1615,7 @@ EOF
 EOF
   fm_write_meta "$sshhip/state/unreadable-child.meta" \
     "window=firstmate:dead-sshhip-child" "worktree=$sshhip/projects/child" "project=sshhip" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=codex" "kind=ship" "mode=direct-PR"
 
   cat > "$ha/data/backlog.md" <<'EOF'
 ## In flight
@@ -1631,7 +1629,7 @@ EOF
 EOF
   fm_write_meta "$ha/state/prep.meta" \
     "window=firstmate:fm-prep" "worktree=$ha/projects/prep" "project=home-assistant" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=direct-PR"
   record_claude_state "$ha/state" prep busy
   printf 'working: preparing canary\n' > "$ha/state/prep.status"
 
@@ -1750,7 +1748,7 @@ EOF
 
   fm_write_meta "$sshhip/state/unreadable-child.meta" \
     "window=firstmate:fm-unreadable-child" "worktree=$sshhip/projects/child" "project=sshhip" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=direct-PR"
   record_claude_state "$sshhip/state" unreadable-child busy
   printf 'working: app store submission restored\n' > "$sshhip/state/unreadable-child.status"
   json=$(run "$home" "$fakebin" --json)
@@ -1837,7 +1835,7 @@ test_main_captain_readiness_matches_secondmate_projection() {
 EOF
   fm_write_meta "$home/state/prep.meta" \
     "window=firstmate:fm-prep" "worktree=$home/projects/prep" "project=firstmate" \
-    "harness=codex" "kind=ship" "mode=no-mistakes"
+    "harness=codex" "kind=ship" "mode=direct-PR"
   printf 'working: preparing main canary\n' > "$home/state/prep.status"
   fm_write_meta "$home/state/observation.meta" \
     "window=firstmate:fm-observation" "worktree=$home/projects/observation" "project=firstmate" \

@@ -919,13 +919,6 @@ families_for_changed_path() {
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
-    bin/fm-nm-run-lib.sh)
-      # Shared no-mistakes run-attribution primitives, sourced by both
-      # bin/fm-crew-state.sh (pure-contract-unit) and bin/fm-teardown.sh's
-      # pre-teardown run abort (pr-forge).
-      printf '%s\n' pure-contract-unit
-      printf '%s\n' pr-forge
-      ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
@@ -956,7 +949,7 @@ families_for_changed_path() {
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
-    .github/workflows/ci.yml|.no-mistakes.yaml)
+    .github/workflows/ci.yml)
       printf '%s\n' pure-contract-unit
       printf '%s\n' real-herdr-gated
       ;;

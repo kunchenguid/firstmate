@@ -150,7 +150,7 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
     win="sess:fm-$task"
     pane="$dir/pane.txt"
     action_log="$dir/actions.log"
-    reason="stale: $win (idle 500s, possible wedge, escalation 3, demand-deep-inspection: same pane has wedge-escalated 3 times in a row - do not re-absorb on the run-step/pane state alone)"
+    reason="stale: $win (idle 500s, possible wedge, escalation 3, demand-deep-inspection: same pane has wedge-escalated 3 times in a row - do not re-absorb on the pane state alone)"
     fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
     case "$case_name" in
       working) status_line='working: building' ;;
@@ -801,7 +801,7 @@ test_afk_turn_exemption() {
   should_exit_afk "$state" "/afk back in an hour" \
     && fail "/afk with args should not exit afk"
   # a non-/afk skill invocation DOES exit (the captain is actively working)
-  should_exit_afk "$state" "/no-mistakes" \
+  should_exit_afk "$state" "/compact" \
     || fail "non-afk skill should exit afk"
   pass "/afk invocation is exempt from afk exit (no self-cancel)"
 }

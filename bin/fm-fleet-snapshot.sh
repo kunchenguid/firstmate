@@ -456,7 +456,7 @@ task_json_lines() {
     # reconciled against the crew LIFECYCLE, which only clears a stale decision the
     # crew has provably moved past. Two lifecycle signals clear it, neither of which
     # reads any report content:
-    #   - a live activity read (run-step or busy pane) that is working/done, so a
+    #   - a live activity read (busy pane) that is working/done, so a
     #     crew that resumed past a gate is not still reported as parked; and
     #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
     #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
@@ -468,7 +468,7 @@ task_json_lines() {
     # open decision surfacing.
     open_decisions_tsv=$(status_open_decisions "$status_log")
     if [ "$kind" != secondmate ] && \
-       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
+       { { [ "$current_source" = pane ] \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
          || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
       open_decisions_tsv=""

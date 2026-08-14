@@ -40,7 +40,7 @@ trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-proceven
 # tracked there, and the remote side runs the real scripts under test.
 (
   cd "$ROOT" || exit
-  tar --exclude=.git --exclude=.no-mistakes --exclude=data --exclude=state --exclude=config -cf - .
+  tar --exclude=.git --exclude=data --exclude=state --exclude=config -cf - .
 ) | (cd "$REMOTE_ROOT" && tar -xf -)
 
 # The remote host runs the Herdr fixture, whose every invocation is logged
@@ -295,7 +295,7 @@ try_flag() { # <expect-substring> <message> [extra args...]
 }
 try_flag 'applies only to --secondmate spawns' \
   "a ship spawn must refuse a caller-supplied carrier" \
-  --mode no-mistakes --yolo off --traceparent "$VALID"
+  --mode direct-PR --yolo off --traceparent "$VALID"
 try_flag 'not a valid W3C traceparent' \
   "a shell-metacharacter carrier must be refused before any pane export" \
   --secondmate --traceparent 'bogus; rm -rf /'

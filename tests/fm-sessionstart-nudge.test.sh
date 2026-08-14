@@ -26,8 +26,6 @@ fi
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-unset NO_MISTAKES_GATE
-
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
 RUN="$ROOT/bin/fm-sessionstart-run.sh"
@@ -48,7 +46,7 @@ make_primary() {
 
 run_nudge() {
   local root=$1
-  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
+  FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
 }
 
 expect_silent_zero() {
@@ -69,29 +67,6 @@ test_genuine_primary_nudges() {
   prefix_hex=$(printf '%s' "$out" | head -c 3 | od -An -tx1 | tr -d ' \n')
   [ "$prefix_hex" = e281a3 ] || fail "genuine primary nudge lost its U+2063 operational marker: $prefix_hex"
   pass "fm-sessionstart-nudge: a genuine primary gets one explicitly marked instruction line"
-}
-
-test_gate_env_is_silent() {
-  local root="$TMP_ROOT/gate-env"
-  make_primary "$root"
-  expect_silent_zero "gate env nudge" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
-  pass "fm-sessionstart-nudge: NO_MISTAKES_GATE is silent"
-}
-
-test_gate_common_dir_is_silent() {
-  local source="$TMP_ROOT/gate-source" bare="$TMP_ROOT/.no-mistakes/repos/gate.git"
-  local root="$TMP_ROOT/gate-worktree"
-  fm_git_init_commit "$source"
-  mkdir -p "$(dirname "$bare")"
-  git clone --quiet --bare "$source" "$bare"
-  git --git-dir="$bare" worktree add --quiet -b gate-test "$root" HEAD
-  mkdir -p "$root/bin" "$root/state"
-  : > "$root/AGENTS.md"
-  printf 'gate-test\n' > "$root/.fm-secondmate-home"
-  expect_silent_zero "gate common-dir nudge" env FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" "$NUDGE"
-  pass "fm-sessionstart-nudge: .no-mistakes gate common-dir is silent"
 }
 
 test_unmarked_linked_worktree_is_silent() {
@@ -135,7 +110,7 @@ test_opencode_plugin_delivers_exact_nudge_once() {
   local root="$TMP_ROOT/opencode-primary" out status=0
   make_primary "$root"
   cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
+    "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
   chmod +x "$root/bin/fm-sessionstart-nudge.sh"
   out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
     WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
@@ -190,7 +165,7 @@ make_run_primary() {
 run_hook() {  # <root> [args...]
   local root=$1
   shift
-  FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
+  FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
 }
 
 # Every run-tier assertion keys off the digest banner, which fm-session-start.sh
@@ -280,7 +255,7 @@ test_pi_large_sessionstart_digest_is_delivered_loudly() {
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
-    "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$ROOT/bin/fm-primary-scope-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
   cat > "$fixture/bin/fm-session-start.sh" <<'SH'
 #!/usr/bin/env bash
@@ -295,7 +270,7 @@ SH
   chmod +x "$fixture/bin/"*.sh
 
   out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
-    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_GATE_REFUSE_BYPASS=1 \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
     node --input-type=module 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 const handlers = new Map();
@@ -365,19 +340,14 @@ test_run_unknown_source_takes_the_helm() {
   pass "run wrapper: an unrecognized or absent source takes the helm rather than skipping it"
 }
 
-test_run_gate_and_scope_are_silent() {
-  local root="$TMP_ROOT/run-gate" base="$TMP_ROOT/run-linked-base" linked="$TMP_ROOT/run-linked"
-  make_run_primary "$root"
-  expect_silent_zero "gate env run" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
-    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" --source startup
-  assert_absent "$root/state/.lock" "a gate agent's session open still took the fleet lock"
-
+test_run_scope_is_silent() {
+  local base="$TMP_ROOT/run-linked-base" linked="$TMP_ROOT/run-linked"
   fm_git_worktree "$base" "$linked" fm/run-linked
   mkdir -p "$linked/bin" "$linked/state"
   : > "$linked/AGENTS.md"
   expect_silent_zero "linked worktree run" run_hook "$linked" --source startup
   assert_absent "$linked/state/.lock" "an unmarked task worktree still took the fleet lock"
-  pass "run wrapper: a gate agent and an unmarked task worktree never run a session start"
+  pass "run wrapper: an unmarked task worktree never runs a session start"
 }
 
 test_run_reports_a_failed_session_start_as_digest_text() {
@@ -392,8 +362,6 @@ test_run_reports_a_failed_session_start_as_digest_text() {
 }
 
 test_genuine_primary_nudges
-test_gate_env_is_silent
-test_gate_common_dir_is_silent
 test_unmarked_linked_worktree_is_silent
 test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
@@ -406,6 +374,6 @@ test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge
 test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
-test_run_gate_and_scope_are_silent
+test_run_scope_is_silent
 test_run_reports_a_failed_session_start_as_digest_text
 test_pi_large_sessionstart_digest_is_delivered_loudly

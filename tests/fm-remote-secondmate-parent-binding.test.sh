@@ -115,7 +115,7 @@ pass "remote provisioning publishes durable parent state before its completion m
 # --- the remote host's tracked code root, real git repos, one project --------
 (
   cd "$ROOT" || exit
-  tar --exclude=.git --exclude=.no-mistakes --exclude=data --exclude=state --exclude=config -cf - .
+  tar --exclude=.git --exclude=data --exclude=state --exclude=config -cf - .
 ) | (cd "$REMOTE_ROOT" && tar -xf -)
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
   "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"
@@ -228,7 +228,7 @@ write_child_meta() {
     "mode=local-only" "yolo=off"
 }
 mkdir -p "$TMP_ROOT/childfake"
-for t in tmux treehouse no-mistakes gh gh-axi tasks-axi; do
+for t in tmux treehouse gh gh-axi tasks-axi; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP_ROOT/childfake/$t"
   chmod +x "$TMP_ROOT/childfake/$t"
 done

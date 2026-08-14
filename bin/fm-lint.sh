@@ -3,8 +3,8 @@
 #
 # Runs every canonical shell root with ShellCheck's default severity, extended
 # analysis, ambient configuration disabled, and one exact ShellCheck version.
-# CI and no-mistakes both invoke this script with no arguments, so the file set,
-# rule set, version, bounded execution, and diagnostics ordering cannot drift.
+# CI invokes this script with no arguments, so the file set, rule set, version,
+# bounded execution, and diagnostics ordering cannot drift.
 # Tests stop source analysis at imported production modules because every
 # production shell is already a canonical, source-aware root of this same run.
 #

@@ -3,8 +3,8 @@
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
 # and keeps blocking; it queues and exits only for actionable wakes.
 # The no-verb signal and stale path is absorb-only-when-provably-working: a wake
-# is absorbed only when the crew shows POSITIVE evidence it is still working (an
-# actively-running no-mistakes step, or a backend busy signal), and surfaced
+# is absorbed only when the crew shows POSITIVE evidence it is still working (a
+# backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
 # working signal is never silently swallowed. A declared external-wait pause is
 # the separate idle absorb case and re-surfaces only on its long bounded cadence,
@@ -15,11 +15,11 @@
 #                          has a captain-relevant verb OR a no-verb signal's crew
 #                          is not provably working, unless afk is active
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
-#                          timer) regardless of what the status log says - an active
-#                          run-step or busy pane outranks even a captain-relevant log
-#                          line, since the crew's own log gets no new entry once
-#                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause is absorbed instead with its own long
+#                          timer) regardless of what the status log says - a busy
+#                          pane outranks even a captain-relevant log line, since the
+#                          crew's own log gets no new entry while it silently
+#                          resumes work. A declared external-wait pause is absorbed
+#                          instead with its own long
 #                          re-surface cadence, never as a wedge. Only when neither
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
@@ -125,10 +125,9 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # and ABSORBS the benign majority - it advances the suppression marker, logs to a
 # debug log, and keeps blocking WITHOUT enqueuing or exiting. The no-verb signal
 # / stale path is absorb-only-when-provably-working: such a wake is absorbed ONLY
-# while the crew shows positive evidence it is still working (an actively-running
-# no-mistakes step, or a busy pane, via crew_is_provably_working over
-# fm-crew-state.sh); a crew that stopped its turn with no running pipeline and no
-# busy pane is SURFACED, so a finish reported only through interactive pane menus
+# while the crew shows positive evidence it is still working (a busy pane, via
+# crew_is_provably_working over fm-crew-state.sh); a crew that stopped its turn
+# with no busy pane is SURFACED, so a finish reported only through interactive pane menus
 # (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
 # signal, a no-verb signal whose crew is not provably working, any check, a stale
 # pane whose crew is not provably working, a provably-working stale past the
@@ -290,7 +289,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the pane state alone)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
@@ -883,14 +882,14 @@ EOF
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file carries a captain-relevant verb;
     #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
-    #     NOT provably working - the crew stopped its turn with no actively-running
-    #     pipeline and no busy pane, so it may be done (even via an interactive menu
-    #     that wrote no done: status), waiting on a decision, or wedged. Absorbing
-    #     such a turn-end is exactly the swallowed-finish this change guards against.
+    #     NOT provably working - the crew stopped its turn with no busy pane, so it
+    #     may be done (even via an interactive menu that wrote no done: status),
+    #     waiting on a decision, or wedged. Absorbing such a turn-end is exactly
+    #     the swallowed-finish this change guards against.
     # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
     # whose crew IS provably working) in always-on mode -> advance the markers so it
     # will not re-fire, log, and keep blocking without enqueuing. The provably-working
-    # check is the only costly one (it may run a bounded no-mistakes call), so the ||
+    # check is the only costly one (it may run a bounded pane-busy check), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
@@ -973,18 +972,18 @@ EOF
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
           # proof the crew is actually done: a crew's own status log gets no
-          # new entry once firstmate hands it to a no-mistakes validation
-          # (AGENTS.md's sparse status-reporting contract), so the log can
-          # keep showing a "done:"/needs-decision/blocked leftover from
-          # BEFORE that validation started for the run's entire (possibly
-          # many-minutes) duration, while stale_is_terminal - which has no
-          # run-step awareness - keeps reporting it as still-current on every
-          # poll. Root cause of the 2026-07 herdr false-surface incidents: a
-          # validating crew was surfaced as stale every few minutes despite an
-          # actively-running pipeline, purely because of this stale leftover
-          # line. On a NEW hash, give an active run/busy pane (the same
-          # authoritative source fm-crew-state.sh itself already prioritizes
-          # over the log) a chance to override before trusting the log.
+          # new entry while it silently keeps working (AGENTS.md's sparse
+          # status-reporting contract), so the log can keep showing a
+          # "done:"/needs-decision/blocked leftover from BEFORE that work
+          # started for its entire (possibly many-minutes) duration, while
+          # stale_is_terminal - which has no busy-pane awareness - keeps
+          # reporting it as still-current on every poll. Root cause of the
+          # 2026-07 herdr false-surface incidents: a working crew was surfaced
+          # as stale every few minutes despite an actively-busy pane, purely
+          # because of this stale leftover line. On a NEW hash, give a busy
+          # pane (the same authoritative source fm-crew-state.sh itself
+          # already prioritizes over the log) a chance to override before
+          # trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"

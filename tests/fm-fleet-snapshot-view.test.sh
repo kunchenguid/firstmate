@@ -15,10 +15,6 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 make_fakebin() {  # <dir>
   local fb
   fb=$(fm_fakebin "$1")
-  cat > "$fb/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -52,7 +48,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux"
+  chmod +x "$fb/tmux"
   printf '%s\n' "$fb"
 }
 

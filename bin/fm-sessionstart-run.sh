@@ -42,8 +42,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 COMPLETION_FILE="$STATE/.session-start-complete"
 
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
@@ -63,10 +61,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# The same two eligibility owners the nudge wrapper uses, so a no-mistakes gate
-# agent and an unmarked task worktree can never run a session start for a home
-# they do not own.
-fm_is_gate_agent "$FM_ROOT" && exit 0
+# The same eligibility owner the nudge wrapper uses, so an unmarked task
+# worktree can never run a session start for a home it does not own.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 session_start_completed() {

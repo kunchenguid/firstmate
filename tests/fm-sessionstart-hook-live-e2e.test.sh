@@ -40,7 +40,6 @@ if [ "${FM_SESSIONSTART_HOOK_LIVE_E2E:-0}" != 1 ]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-unset NO_MISTAKES_GATE
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2

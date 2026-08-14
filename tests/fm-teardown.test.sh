@@ -24,20 +24,20 @@
 #   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
-#   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
-#   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
+#   (d) direct-PR + HEAD on origin remote-tracking branch      -> ALLOW  (no regression)
+#   (e) direct-PR + unpushed, no PR, content not in default    -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
-#   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
-#   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
-#   (i) no-mistakes + dirty worktree, even when work landed     -> REFUSE (dirty wins)
-#   (j) no-mistakes + gh lookup errors + content not in default -> REFUSE (fail-safe)
-#   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
-#   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
-#   (m) no-mistakes + local HEAD ancestor of merged PR head     -> ALLOW  (lagging local)
-#   (n) no-mistakes + replayed unpushed patch in merged PR head -> ALLOW  (replayed local)
+#   (g) direct-PR + squash-merged PR, exact PR head            -> ALLOW  (squash fix)
+#   (h) direct-PR + no PR but content already in default       -> ALLOW  (content fallback)
+#   (i) direct-PR + dirty worktree, even when work landed       -> REFUSE (dirty wins)
+#   (j) direct-PR + gh lookup errors + content not in default   -> REFUSE (fail-safe)
+#   (k) direct-PR + merged PR but HEAD moved afterward          -> REFUSE (stale PR)
+#   (l) direct-PR + stale origin/main but fetched content       -> ALLOW  (fresh fetch)
+#   (m) direct-PR + local HEAD ancestor of merged PR head       -> ALLOW  (lagging local)
+#   (n) direct-PR + replayed unpushed patch in merged PR head   -> ALLOW  (replayed local)
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
-#   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (q) direct-PR + NO pr= recorded, PR discovered by branch    -> ALLOW  (yolo/no-CI merge)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -109,50 +109,7 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  # Default hermetic no-mistakes stub: `axi status` answers FM_FAKE_AXI_STATUS
-  # verbatim (empty by default, i.e. no active run - the pre-teardown run-abort
-  # step is then a no-op), and `axi abort` appends one line to
-  # FM_FAKE_NM_ABORT_LOG when set. This keeps every case hermetic - without it,
-  # `command -v no-mistakes` would fall through to whatever real binary
-  # happens to be on the test runner's own PATH. Tests exercising the run-abort
-  # path override FM_FAKE_AXI_STATUS/FM_FAKE_NM_ABORT_LOG before run_teardown.
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-case "${1:-}" in
-  axi)
-    shift
-    case "${1:-}" in
-      status)
-        shift
-        run_id=""
-        if [ "${1:-}" = --run ]; then run_id=${2:-}; fi
-        if [ -n "${FM_FAKE_NM_ABORT_LOG:-}" ] \
-           && grep -Fxq "abort --run $run_id" "$FM_FAKE_NM_ABORT_LOG" 2>/dev/null \
-           && [ "${FM_FAKE_NM_ABORT_NOOP:-0}" != 1 ]; then
-          if [ "${FM_FAKE_NM_NOT_FOUND_AFTER_ABORT:-0}" = 1 ]; then
-            printf 'error: "run \\"%s\\" not found"\n' "$run_id" >&2
-            exit 1
-          elif [ "${FM_FAKE_NM_EMPTY_AFTER_ABORT:-0}" = 1 ]; then
-            exit 0
-          elif [ -n "${FM_FAKE_AXI_STATUS_AFTER_ABORT:-}" ]; then
-            printf '%s\n' "$FM_FAKE_AXI_STATUS_AFTER_ABORT"
-          else
-            printf 'run:\n  id: "%s"\n  outcome: cancelled\n' "$run_id"
-          fi
-        else
-          printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"
-        fi
-        ;;
-      abort)
-        shift
-        [ -z "${FM_FAKE_NM_ABORT_LOG:-}" ] || printf 'abort %s\n' "$*" >> "$FM_FAKE_NM_ABORT_LOG"
-        exit 0 ;;
-    esac
-    ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -582,7 +539,7 @@ test_local_only_fork_remote_allows() {
 test_teardown_prompts_tasks_axi_done_when_compatible() {
   local case_dir out
   case_dir=$(make_case tasks-axi-reminder)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   add_compatible_tasks_axi "$case_dir"
 
@@ -601,7 +558,7 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
   local case_dir out
   case_dir=$(make_case tasks-axi-manual-optout)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   add_compatible_tasks_axi "$case_dir"
@@ -653,10 +610,10 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
-test_no_mistakes_origin_remote_allows() {
+test_direct_pr_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit "$case_dir" "shippable work"
   # Push the task branch to origin and fetch so the worktree sees it.
   git -C "$case_dir/wt" push -q origin fm/task-x1
@@ -671,13 +628,13 @@ test_no_mistakes_origin_remote_allows() {
   ! grep -q REFUSED "$case_dir/stderr" || fail "nm-origin: teardown printed a REFUSED line"
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
     || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
-  pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+  pass "direct-PR worktree with HEAD on origin is torn down (no regression)"
 }
 
-test_no_mistakes_truly_unpushed_refuses() {
+test_direct_pr_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-unpushed)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   # Real content that is not pushed, has no PR (default gh-axi mock), and never
   # landed on origin/main: genuinely unlanded work that must still refuse.
   wt_commit_file "$case_dir" feature.txt hello "unpushed work"
@@ -689,13 +646,13 @@ test_no_mistakes_truly_unpushed_refuses() {
 
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
-  pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+  pass "direct-PR worktree with genuinely unlanded work is refused (safety preserved)"
 }
 
 test_squash_merged_branch_deleted_allows() {
   local case_dir rc pr_head
   case_dir=$(make_case squash-merged)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   # Real branch content that is NOT pushed and NOT on origin/main: a squash merge
   # rewrote it into a different commit on main and auto-deleted the head branch, so
   # HEAD is unreachable from every remote-tracking branch. The matching merged PR is
@@ -718,11 +675,11 @@ test_squash_merged_branch_deleted_allows() {
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
   local case_dir rc local_head pr_head
   case_dir=$(make_case squash-ancestor)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   append_pr_meta_url "$case_dir"
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "direct-PR follow-up")
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   set +e
@@ -738,18 +695,18 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   local case_dir rc local_head pr_head
   case_dir=$(make_case no-pr-branch-discovery)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   # Reproduces the real false-refusal report exactly, with NO pr=/pr_head=
   # recorded in meta at all (fm-pr-check.sh was never run, e.g. a yolo merge on
   # a repo with no PR CI so the "checks green" trigger that fires it never
-  # happened): a branch with a commit, a no-mistakes auto-fix commit pushed on
+  # happened): a branch with a commit, a follow-up fix commit pushed on
   # top that never made it back into the local worktree, a squash merge onto
   # main under a brand-new SHA, and the head branch deleted (simulated here by
   # never pushing fm/task-x1 at all, so no refs/remotes/origin/fm/task-x1
   # exists to make HEAD "reachable").
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes auto-fix")
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "direct-PR auto-fix")
   land_on_origin_main "$case_dir" feature.txt hello
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
   # No append_pr_meta_* call: state/task-x1.meta has no pr= or pr_head= line.
@@ -770,7 +727,7 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
   local case_dir rc parent_head pr_head
   case_dir=$(make_case squash-replayed-patch)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit_file "$case_dir" local-parent.txt parent "local parent"
   parent_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/fm/task-x1"
@@ -793,7 +750,7 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
 test_merged_pr_with_later_local_commit_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case stale-pr-head)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   append_pr_meta_for_current_head "$case_dir"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -813,7 +770,7 @@ test_merged_pr_with_later_local_commit_refuses() {
 test_pr_check_does_not_refresh_stale_pr_head() {
   local case_dir rc pr_head new_head count
   case_dir=$(make_case pr-check-stale)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
@@ -849,10 +806,10 @@ test_pr_check_does_not_refresh_stale_pr_head() {
 test_pr_check_records_remote_head_when_local_lags() {
   local case_dir local_head pr_head
   case_dir=$(make_case pr-check-local-lags)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "direct-PR follow-up")
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   FM_ROOT_OVERRIDE="$ROOT" \
@@ -870,7 +827,7 @@ test_pr_check_records_remote_head_when_local_lags() {
 test_content_in_default_fallback_allows() {
   local case_dir rc
   case_dir=$(make_case content-landed)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   # No pr= recorded and the default gh-axi mock reports no PR, so the merged-PR path
   # cannot fire and the content check must carry it. The branch adds feature.txt, and
   # the same net change has independently landed on origin/main via a squash commit.
@@ -890,7 +847,7 @@ test_content_in_default_fallback_allows() {
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
   case_dir=$(make_case content-stale-ref)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   git -C "$case_dir/project" config --unset-all remote.origin.fetch
   git -C "$case_dir/project" config --add remote.origin.fetch '+refs/heads/not-main:refs/remotes/origin/not-main'
@@ -909,7 +866,7 @@ test_content_fallback_refreshes_stale_origin_ref() {
 test_dirty_worktree_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case dirty-wt)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   # The committed work has fully landed (merged PR + content in default), but an
   # uncommitted edit remains. Dirtiness must refuse regardless: the reset would
@@ -934,7 +891,7 @@ test_dirty_worktree_refuses() {
 test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   # Real content not pushed, the PR lookup errors, and origin/main never gained the
   # content. The fail-safe must refuse rather than allow on a transient gh failure.
@@ -954,7 +911,7 @@ test_gh_error_and_content_absent_refuses() {
 test_stale_index_lock_cleared_and_teardown_succeeds() {
   local case_dir rc lock
   case_dir=$(make_case stale-index-lock)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -983,7 +940,7 @@ test_stale_index_lock_cleared_and_teardown_succeeds() {
 test_live_index_lock_is_never_removed_and_teardown_refuses() {
   local case_dir rc lock
   case_dir=$(make_case live-index-lock)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -1015,7 +972,7 @@ test_live_index_lock_is_never_removed_and_teardown_refuses() {
 test_lsof_error_never_clears_index_lock() {
   local case_dir rc lock
   case_dir=$(make_case lsof-error-index-lock)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -1046,7 +1003,7 @@ test_lsof_error_never_clears_index_lock() {
 test_stale_index_lock_cleanup_rechecks_dirty_worktree() {
   local case_dir rc lock
   case_dir=$(make_case stale-lock-dirty-recheck)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit_file "$case_dir" feature.txt landed "landed work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -1083,7 +1040,7 @@ test_non_linked_index_lock_path_is_checked_from_worktree() {
   git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
   git clone -q "$case_dir/origin.git" "$case_dir/wt"
   git -C "$case_dir/wt" checkout -q -b fm/task-x1
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit "$case_dir" "shippable normal clone work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/wt" fetch -q origin
@@ -1112,7 +1069,7 @@ test_non_linked_index_lock_path_is_checked_from_worktree() {
 test_index_lock_mtime_read_failure_refuses() {
   local case_dir rc lock
   case_dir=$(make_case mtime-error-index-lock)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -1146,7 +1103,7 @@ test_index_lock_mtime_read_failure_refuses() {
 test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds() {
   local case_dir rc lock attempt_file
   case_dir=$(make_case transient-index-lock-retry)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -1186,7 +1143,7 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds() {
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
   local case_dir rc lock
   case_dir=$(make_case persistent-index-lock)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -1224,7 +1181,7 @@ test_persistent_index_lock_exhausts_retries_and_refuses_loudly() {
 test_empty_retry_wait_uses_default_without_aborting() {
   local case_dir rc lock attempt_file
   case_dir=$(make_case empty-retry-wait)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -1260,7 +1217,7 @@ test_empty_retry_wait_uses_default_without_aborting() {
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
   local case_dir rc lock
   case_dir=$(make_case fractional-legacy-retry-wait)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   wt_commit "$case_dir" "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -1909,45 +1866,13 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
   pass "herdr projection teardown surfaces failed focus restoration without turning confirmed cleanup into a hard failure"
 }
 
-# --- Fix 1: conclude/abort the task's own parked no-mistakes run before the
-# worker is removed, and Fix 2: reap leaked descendant processes rooted under
-# the task's own worktree/tasktmp - both exercised through the real teardown
-# path (bin/fm-teardown.sh), never by matching its source text. ------------
+# --- Fix 2: reap leaked descendant processes rooted under the task's own
+# worktree/tasktmp - exercised through the real teardown path
+# (bin/fm-teardown.sh), never by matching its source text. ------------------
 
-# A parked-at-a-gate `axi status` TOON payload for <branch>/<head>, matching
-# the shape no-mistakes actually emits (see tests/fm-crew-state.test.sh's
-# run_parked fixture, the same shape bin/fm-crew-state.sh's own tests pin).
-parked_axi_status_toon() {  # <branch> <head> [run-id]
-  cat <<EOF
-run:
-  id: "${3:-01RUN}"
-  branch: $1
-  status: awaiting_approval
-  awaiting_agent: parked 2m10s
-  head: "$2"
-  pr: ""
-  findings: none
-gate: review
-EOF
-}
-
-running_axi_status_toon() {  # <branch> <head> [run-id]
-  cat <<EOF
-run:
-  id: "${3:-01RUN}"
-  branch: $1
-  status: running
-  head: "$2"
-  pr: ""
-steps[1]{step,status,findings,summary}:
-  test,running,0,"agent under way"
-EOF
-}
-
-# Land a shippable commit on the task branch and push it to origin, the same
-# "definitely landed, teardown must ALLOW" shape test_no_mistakes_origin_remote_allows
-# uses, so these new cases exercise the abort/reap steps on a real successful
-# teardown rather than a refusal path.
+# Land a shippable commit on the task branch and push it to origin, so these
+# cases exercise the reap step on a real successful teardown rather than a
+# refusal path.
 land_shippable_commit() {
   local case_dir=$1
   wt_commit "$case_dir" "shippable work"
@@ -1955,165 +1880,10 @@ land_shippable_commit() {
   git -C "$case_dir/project" fetch -q origin
 }
 
-test_parked_own_run_is_aborted_before_teardown() {
-  local case_dir rc head
-  case_dir=$(make_case parked-run-abort)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-
-  local rc=0
-  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
-  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 0 "$rc" "parked-run-abort: teardown should still succeed"
-  assert_present "$case_dir/nm-abort.log" \
-    "parked-run-abort: no-mistakes axi abort was never invoked for the task's own parked run"
-  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
-    "parked-run-abort: no-mistakes axi abort did not target the verified run id"
-  assert_grep "parked at a gate; aborting" "$case_dir/stderr" \
-    "parked-run-abort: teardown did not report aborting the parked run before removing the worker"
-  pass "a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed"
-}
-
-test_mismatched_run_after_abort_refuses_unconfirmed() {
-  local case_dir rc head
-  case_dir=$(make_case parked-run-replaced)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-
-  rc=0
-  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head" 01RUN)" \
-  FM_FAKE_AXI_STATUS_AFTER_ABORT="$(parked_axi_status_toon fm/task-x1 "$head" 02RUN)" \
-  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 1 "$rc" "parked-run-replaced: a different run does not confirm the targeted abort"
-  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
-    "parked-run-replaced: teardown did not abort only the verified run"
-  assert_present "$case_dir/wt" "parked-run-replaced: teardown removed the worktree without confirmation"
-  pass "a different run cannot confirm the targeted abort"
-}
-
-test_empty_status_after_abort_refuses_unconfirmed() {
-  local case_dir rc head
-  case_dir=$(make_case parked-run-empty-confirmation)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-
-  rc=0
-  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
-  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
-  FM_FAKE_NM_EMPTY_AFTER_ABORT=1 \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 1 "$rc" "parked-run-empty-confirmation: empty status should refuse"
-  assert_present "$case_dir/wt" "parked-run-empty-confirmation: teardown removed the worktree"
-  pass "empty post-abort status is not accepted as confirmation"
-}
-
-test_not_found_status_after_abort_confirms_completion() {
-  local case_dir rc head
-  case_dir=$(make_case parked-run-not-found-confirmation)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-
-  rc=0
-  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
-  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
-  FM_FAKE_NM_NOT_FOUND_AFTER_ABORT=1 \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 0 "$rc" "parked-run-not-found-confirmation: explicit not-found should confirm completion"
-  pass "the CLI's exact run-not-found signal confirms completion"
-}
-
-test_parked_own_run_refuses_when_abort_is_unconfirmed() {
-  local case_dir rc head pid
-  case_dir=$(make_case parked-run-abort-unconfirmed)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  ( cd "$case_dir/wt" && exec sleep 300 ) &
-  pid=$!
-  disown
-
-  cat > "$case_dir/fakebin/treehouse" <<EOF
-#!/usr/bin/env bash
-printf 'return\n' >> "$case_dir/treehouse.log"
-EOF
-  chmod +x "$case_dir/fakebin/treehouse"
-
-  rc=0
-  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
-  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
-  FM_FAKE_NM_ABORT_NOOP=1 \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 1 "$rc" "parked-run-abort-unconfirmed: teardown should refuse"
-  assert_grep "REFUSED: no-mistakes run for task-x1 is still parked after axi abort" "$case_dir/stderr" \
-    "parked-run-abort-unconfirmed: teardown did not explain the parked-run refusal"
-  assert_present "$case_dir/wt" \
-    "parked-run-abort-unconfirmed: teardown removed the worktree after refusing"
-  assert_present "$case_dir/state/task-x1.meta" \
-    "parked-run-abort-unconfirmed: teardown removed task metadata after refusing"
-  assert_absent "$case_dir/treehouse.log" \
-    "parked-run-abort-unconfirmed: teardown returned the worktree after refusing"
-  kill -0 "$pid" 2>/dev/null || fail "parked-run-abort-unconfirmed: process reap ran before refusal"
-  kill -KILL "$pid" 2>/dev/null || true
-  pass "teardown refuses before reap or removal when a task-owned run remains parked"
-}
-
-test_another_branchs_parked_run_is_never_touched() {
-  local case_dir rc
-  case_dir=$(make_case parked-run-not-ours)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-
-  local rc=0
-  # A parked run reported for a DIFFERENT branch - e.g. another crew's task
-  # still validating on the shared gate - must never be aborted by this task's
-  # teardown.
-  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/some-other-task deadbeef)" \
-  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 0 "$rc" "parked-run-not-ours: teardown should still succeed"
-  assert_absent "$case_dir/nm-abort.log" \
-    "parked-run-not-ours: teardown called axi abort for a run on another branch"
-  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
-    "parked-run-not-ours: teardown reported aborting a run it does not own"
-  pass "a parked run on another branch is never aborted by this task's teardown (ownership is precise)"
-}
-
-test_own_autonomous_run_is_left_alone() {
-  local case_dir rc head
-  case_dir=$(make_case autonomous-run-left-alone)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-
-  rc=0
-  FM_FAKE_AXI_STATUS="$(running_axi_status_toon fm/task-x1 "$head")" \
-  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 0 "$rc" "autonomous-run-left-alone: teardown should still succeed"
-  assert_absent "$case_dir/nm-abort.log" \
-    "autonomous-run-left-alone: teardown aborted a task-owned autonomous run"
-  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
-    "autonomous-run-left-alone: teardown reported aborting an autonomous run"
-  pass "a task-owned autonomous running step is left alone rather than aborted"
-}
-
 test_leaked_worktree_process_is_reaped() {
   local case_dir rc pid
   case_dir=$(make_case leaked-process-reap)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   land_shippable_commit "$case_dir"
 
   # A backgrounded, disowned process rooted (by cwd) under the task's own
@@ -2142,7 +1912,7 @@ test_leaked_worktree_process_is_reaped() {
 test_leaked_tasktmp_process_is_reaped() {
   local case_dir rc pid
   case_dir=$(make_case leaked-tasktmp-reap)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   printf '%s\n' "tasktmp=$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
   mkdir -p "$case_dir/tasktmp"
   land_shippable_commit "$case_dir"
@@ -2169,7 +1939,7 @@ test_leaked_tasktmp_process_is_reaped() {
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   land_shippable_commit "$case_dir"
   path_without_lsof=$(make_path_without_lsof "$case_dir")
   PATH="$path_without_lsof" command -v lsof >/dev/null 2>&1 \
@@ -2206,7 +1976,7 @@ EOF
 test_lsof_error_refuses_before_removal() {
   local case_dir rc
   case_dir=$(make_case lsof-error-refusal)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   land_shippable_commit "$case_dir"
   cat > "$case_dir/fakebin/lsof" <<'SH'
 #!/usr/bin/env bash
@@ -2233,7 +2003,7 @@ EOF
 test_reused_pid_identity_is_not_force_killed() {
   local case_dir rc pid
   case_dir=$(make_case reused-pid-identity)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   land_shippable_commit "$case_dir"
 
   perl -e '$SIG{TERM} = "IGNORE"; sleep 300' &
@@ -2280,7 +2050,7 @@ SH
 test_exec_changed_process_is_still_reaped() {
   local case_dir rc pid marker done_flag survived=0
   case_dir=$(make_case exec-changed-process)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   land_shippable_commit "$case_dir"
   marker="$case_dir/exec-now"
   done_flag="$case_dir/exec-done"
@@ -2342,7 +2112,7 @@ SH
 test_process_spawned_during_grace_is_reaped_on_later_pass() {
   local case_dir rc pid child_file child_pid="" parent_survived=0 child_survived=0
   case_dir=$(make_case grace-spawn-convergence)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   land_shippable_commit "$case_dir"
   child_file="$case_dir/child.pid"
 
@@ -2385,7 +2155,7 @@ test_process_spawned_during_grace_is_reaped_on_later_pass() {
 test_persistent_scan_refuses_after_bounded_retries() {
   local case_dir rc wt_path fake_pid=99999999
   case_dir=$(make_case persistent-reap-refusal)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   land_shippable_commit "$case_dir"
   wt_path=$(cd "$case_dir/wt" && pwd -P)
   cat > "$case_dir/fakebin/lsof" <<EOF
@@ -2418,7 +2188,7 @@ SH
 test_process_exit_during_identity_lookup_does_not_refuse() {
   local case_dir rc wt_path fake_pid=99999998
   case_dir=$(make_case identity-exit-convergence)
-  write_meta "$case_dir" no-mistakes ship
+  write_meta "$case_dir" direct-PR ship
   land_shippable_commit "$case_dir"
   wt_path=$(cd "$case_dir/wt" && pwd -P)
   cat > "$case_dir/fakebin/lsof" <<EOF
@@ -2456,55 +2226,13 @@ EOF
   pass "a process exiting during identity lookup does not block teardown"
 }
 
-test_run_abort_precedes_process_reap_precedes_worktree_removal() {
-  local case_dir rc head pid abort_log
-  case_dir=$(make_case abort-then-reap-then-remove-order)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  abort_log="$case_dir/nm-abort.log"
-
-  ( cd "$case_dir/wt" && exec sleep 300 ) &
-  pid=$!
-  disown
-  sleep 0.3
-  kill -0 "$pid" 2>/dev/null || fail "abort-then-reap-then-remove-order: setup sleeper did not start"
-
-  # A treehouse fake that snapshots, at the exact moment the destructive
-  # worktree return runs, whether the run was already aborted and whether the
-  # leaked process was already reaped - direct causal proof of ordering from
-  # real observed state, not a source-text or line-number correlation.
-  cat > "$case_dir/fakebin/treehouse" <<EOF
-#!/usr/bin/env bash
-if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
-if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
-exit 0
-EOF
-  chmod +x "$case_dir/fakebin/treehouse"
-
-  rc=0
-  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
-  FM_FAKE_NM_ABORT_LOG="$abort_log" \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  expect_code 0 "$rc" "abort-then-reap-then-remove-order: teardown should still succeed"
-  kill -0 "$pid" 2>/dev/null && { kill -KILL "$pid" 2>/dev/null || true; }
-
-  assert_present "$case_dir/order.log" \
-    "abort-then-reap-then-remove-order: the destructive worktree return was never invoked"
-  assert_grep "abort-already-happened" "$case_dir/order.log" \
-    "abort-then-reap-then-remove-order: the run was not yet aborted when the worktree return ran"
-  assert_grep "reap-already-happened" "$case_dir/order.log" \
-    "abort-then-reap-then-remove-order: the leaked process was not yet reaped when the worktree return ran"
-  pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
-}
-
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
-test_no_mistakes_origin_remote_allows
-test_no_mistakes_truly_unpushed_refuses
+test_direct_pr_origin_remote_allows
+test_direct_pr_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
@@ -2538,13 +2266,6 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
-test_parked_own_run_is_aborted_before_teardown
-test_parked_own_run_refuses_when_abort_is_unconfirmed
-test_mismatched_run_after_abort_refuses_unconfirmed
-test_empty_status_after_abort_refuses_unconfirmed
-test_not_found_status_after_abort_confirms_completion
-test_another_branchs_parked_run_is_never_touched
-test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
@@ -2554,4 +2275,3 @@ test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
-test_run_abort_precedes_process_reap_precedes_worktree_removal

@@ -229,14 +229,6 @@ if [ "${1:-}" = --version ]; then
 fi
 exit 0
 SH
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.31.2 (fake)'
-  exit 0
-fi
-exit 0
-SH
   cat > "$fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
@@ -254,7 +246,7 @@ if [ "${1:-}" = --version ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/gh-axi" "$fakebin/no-mistakes" "$fakebin/tasks-axi" "$fakebin/quota-axi"
+  chmod +x "$fakebin/gh-axi" "$fakebin/tasks-axi" "$fakebin/quota-axi"
 }
 
 new_git_world() {

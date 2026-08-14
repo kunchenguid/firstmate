@@ -48,7 +48,7 @@ trap cleanup EXIT
 # the same clone and fast-forward path as a second Mac.
 (
   cd "$ROOT" || exit
-  tar --exclude=.git --exclude=.no-mistakes --exclude=data --exclude=state --exclude=config -cf - .
+  tar --exclude=.git --exclude=data --exclude=state --exclude=config -cf - .
 ) | (cd "$REMOTE_ROOT" && tar -xf -)
 cat > "$REMOTE_ROOT/bin/tmux" <<SH
 #!/usr/bin/env bash
