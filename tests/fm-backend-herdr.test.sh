@@ -4312,6 +4312,70 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+# Missing-pane relaunch delegates to the same create-before-close husk boundary,
+# but must refuse before it reaches that boundary whenever the recorded
+# identity changed or an endpoint cannot be read confidently.
+run_missing_pane_relaunch_fixture() {  # <case>
+  local case_name=$1 dir out status
+  dir="$TMP_ROOT/missing-pane-$case_name"
+  mkdir -p "$dir"
+  out=$(CASE_NAME="$case_name" CALL_LOG="$dir/calls" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_pane_agent_state() {
+      case "$CASE_NAME" in live) printf live ;; unknown) printf unknown ;; *) printf dead ;; esac
+    }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "workspace get") jq -nc "{result:{workspace:{workspace_id:\"w1\"}}}" ;;
+        "tab list")
+          case "$CASE_NAME" in
+            unreadable) return 1 ;;
+            changed-tab) jq -nc "{result:{tabs:[{tab_id:\"w1:t2\",workspace_id:\"w1\",label:\"foreign\"}]}}" ;;
+            changed-pane) jq -nc "{result:{tabs:[{tab_id:\"w1:t2\",workspace_id:\"w1\",label:\"fm-task\"}]}}" ;;
+            ambiguous-tab) jq -nc "{result:{tabs:[{tab_id:\"w1:t2\",workspace_id:\"w1\",label:\"fm-task\"},{tab_id:\"w1:t2\",workspace_id:\"w1\",label:\"fm-task\"}]}}" ;;
+            *) jq -nc "{result:{tabs:[]}}" ;;
+          esac
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_herdr_pane_for_tab() { [ "$CASE_NAME" = changed-pane ] && printf w1:p9 || printf w1:p2; }
+    fm_backend_herdr_create_task() {
+      printf create >> "$CALL_LOG"
+      [ "$CASE_NAME" != conflicting-pane ] || return 1
+      printf "w1:t3 w1:p3"
+    }
+    fm_backend_herdr_relaunch_missing_pane sess w1 w1:t2 w1:p2 fm-task /tmp/worktree
+  ' "$ROOT" 2>&1)
+  status=$?
+  printf '%s\n' "$out" > "$dir/out"
+  printf '%s\n' "$status" > "$dir/status"
+  return 0
+}
+
+test_missing_pane_relaunch_delegates_exact_replacement() {
+  local dir="$TMP_ROOT/missing-pane-success"
+  run_missing_pane_relaunch_fixture success
+  [ "$(cat "$dir/out")" = "w1:t3 w1:p3" ] || fail "missing-pane replacement should return the create_task endpoint, got '$(cat "$dir/out")'"
+  [ "$(cat "$dir/calls")" = create ] || fail "missing-pane replacement did not delegate to create_task"
+  pass "fm_backend_herdr_relaunch_missing_pane: a vanished pane delegates to the existing husk-replace boundary"
+}
+
+test_missing_pane_relaunch_refusal_boundaries_are_non_mutating() {
+  local case_name dir output
+  for case_name in live unknown unreadable changed-tab changed-pane ambiguous-tab; do
+    dir="$TMP_ROOT/missing-pane-$case_name"
+    run_missing_pane_relaunch_fixture "$case_name"
+    output=$(cat "$dir/out")
+    [ ! -e "$dir/calls" ] || fail "missing-pane relaunch '$case_name' reached create_task: $output"
+  done
+  dir="$TMP_ROOT/missing-pane-conflicting-pane"
+  run_missing_pane_relaunch_fixture conflicting-pane
+  [ "$(cat "$dir/calls")" = create ] || fail "the conflicting-pane case did not reach create_task's duplicate boundary"
+  [ "$(cat "$dir/status")" -ne 0 ] || fail "the conflicting-pane boundary did not return a refusal"
+  pass "fm_backend_herdr_relaunch_missing_pane: live, unreadable, changed, ambiguous, and conflicting endpoints refuse without replacement publication"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4355,6 +4419,8 @@ test_create_task_closes_all_duplicate_husks_after_replacement
 test_create_task_refuses_when_preexisting_husk_tab_remains
 test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
+test_missing_pane_relaunch_delegates_exact_replacement
+test_missing_pane_relaunch_refusal_boundaries_are_non_mutating
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
 test_presentation_defaults_on_at_or_above_the_floor

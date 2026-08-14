@@ -804,7 +804,15 @@ do_relaunch() {
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  state=$(agent_state)
+  if [ "$BACKEND" = herdr ] && [ "$state" = missing ]; then
+    # Herdr can reap a worker's pane after the worker exits. The replacement
+    # launch re-proves that exact missing endpoint and recreates it through the
+    # backend's husk-replace boundary, so there is no agent left to stop here.
+    exit_result=already-missing
+  else
+    exit_result=$(do_exit)
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's

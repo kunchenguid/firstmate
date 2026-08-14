@@ -2047,6 +2047,67 @@ EOF
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
+# fm_backend_herdr_relaunch_missing_pane: create a replacement for a task whose
+# exact recorded Herdr pane has disappeared. This is deliberately narrower than
+# ordinary task creation: the static task identity is already validated by the
+# caller, the original pane must still read structurally dead immediately before
+# creation, and the recorded workspace/tab relation must not have changed.
+# After that preflight it delegates duplicate-label handling to create_task, the
+# existing create-before-close husk-replacement boundary. Echoes "<tab> <pane>".
+fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <old-pane> <label> <cwd>
+  local session=$1 workspace=$2 old_tab=$3 old_pane=$4 label=$5 cwd=$6 info tabs old_count old_pane_now state
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$old_pane")
+  [ "$state" = dead ] || {
+    echo "error: herdr missing-pane relaunch requires the recorded pane to remain gone, got $state" >&2
+    return 1
+  }
+  info=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || {
+    echo "error: herdr missing-pane relaunch cannot verify recorded workspace $workspace" >&2
+    return 1
+  }
+  if ! printf '%s' "$info" | jq -e --arg workspace "$workspace" '
+    .result.workspace.workspace_id == $workspace
+  ' >/dev/null 2>&1; then
+    echo "error: herdr missing-pane relaunch recorded workspace $workspace is ambiguous or changed" >&2
+    return 1
+  fi
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || {
+    echo "error: herdr missing-pane relaunch cannot inspect recorded workspace $workspace" >&2
+    return 1
+  }
+  if ! printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
+    echo "error: herdr missing-pane relaunch recorded workspace $workspace is unreadable" >&2
+    return 1
+  fi
+  old_count=$(printf '%s' "$tabs" | jq -r --arg tab "$old_tab" '
+    [.result.tabs[]? | select(.tab_id == $tab)] | length
+  ' 2>/dev/null) || old_count=unknown
+  case "$old_count" in
+    0) ;;
+    1)
+      if ! printf '%s' "$tabs" | jq -e --arg tab "$old_tab" --arg workspace "$workspace" --arg label "$label" '
+        [.result.tabs[]? | select(.tab_id == $tab)]
+        | length == 1
+        and .[0].workspace_id == $workspace
+        and .[0].label == $label
+      ' >/dev/null 2>&1; then
+        echo "error: herdr missing-pane relaunch recorded tab $old_tab changed identity" >&2
+        return 1
+      fi
+      old_pane_now=$(fm_backend_herdr_pane_for_tab "$session" "$workspace" "$old_tab")
+      [ "$old_pane_now" = "$old_pane" ] || {
+        echo "error: herdr missing-pane relaunch recorded tab $old_tab no longer owns recorded pane $old_pane" >&2
+        return 1
+      }
+      ;;
+    *)
+      echo "error: herdr missing-pane relaunch recorded tab $old_tab is ambiguous" >&2
+      return 1
+      ;;
+  esac
+  fm_backend_herdr_create_task "$session:$workspace" "$label" "$cwd"
+}
+
 # fm_backend_herdr_projection_create_task: create one disposable presentation
 # workspace and its normal fm-<id> task tab without looking up, adopting, or
 # reusing any existing workspace.

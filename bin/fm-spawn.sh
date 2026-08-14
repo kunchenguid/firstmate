@@ -649,6 +649,7 @@ ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 HERDR_PROJECTION_ABORT_CLEANUP=0
+HERDR_MISSING_PANE_PRESENTATION_LOCK=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
@@ -1003,10 +1004,22 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
+  RELAUNCH_MISSING_HERDR_ENDPOINT=0
+  case "$RELAUNCH_STATE" in
+    dead) ;;
+    missing)
+      if [ "$BACKEND" = herdr ]; then
+        RELAUNCH_MISSING_HERDR_ENDPOINT=1
+      else
+        echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 1
+      ;;
+  esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -1846,7 +1859,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "${RELAUNCH_MISSING_HERDR_ENDPOINT:-0}" != 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
   # relaunch a REPLACEMENT rather than a second copy of the task: no new
   # terminal, no second worktree, and every uncommitted change left exactly
@@ -1872,6 +1885,45 @@ case "$BACKEND" in
     WT_TARGET="$WID"
     ;;
   herdr)
+    if [ "$RELAUNCH" -eq 1 ]; then
+      # A Herdr pane can disappear completely after its worker exits while the
+      # task's branch, worktree, metadata, and pipeline custody remain intact.
+      # Recreate only through the backend's exact missing-pane wrapper, which
+      # rechecks the vanished pane, recorded workspace/tab identity, and every
+      # same-label endpoint before entering create_task's husk-replace boundary.
+      # No metadata changes until the replacement pane exists and this normal
+      # relaunch path publishes it.
+      relaunch_wt_real=$(cd "$RELAUNCH_WT" 2>/dev/null && pwd -P) || relaunch_wt_real=
+      relaunch_wt_top=$(git -C "$RELAUNCH_WT" rev-parse --show-toplevel 2>/dev/null || true)
+      relaunch_wt_top_real=$(cd "$relaunch_wt_top" 2>/dev/null && pwd -P 2>/dev/null || true)
+      relaunch_proj_real=$(cd "$PROJ" 2>/dev/null && pwd -P 2>/dev/null || true)
+      if [ -z "$relaunch_wt_real" ] || [ -z "$relaunch_wt_top_real" ] \
+         || [ "$relaunch_wt_real" != "$relaunch_wt_top_real" ] \
+         || [ "$relaunch_wt_real" = "$relaunch_proj_real" ]; then
+        echo "error: task $ID's recorded worktree '$RELAUNCH_WT' is not an isolated worktree root; refusing to recreate a vanished Herdr endpoint" >&2
+        exit 1
+      fi
+      if [ -e "$STATE/$ID.herdr-presentation" ] || [ -L "$STATE/$ID.herdr-presentation" ]; then
+        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+          echo "error: herdr missing-pane relaunch could not acquire its presentation session lock" >&2
+          exit 1
+        }
+        HERDR_MISSING_PANE_PRESENTATION_LOCK=1
+      fi
+      HERDR_TASK_IDS=$(fm_backend_herdr_relaunch_missing_pane \
+        "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$W" "$RELAUNCH_WT") || exit 1
+      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+$HERDR_TASK_IDS
+EOF
+      if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+        echo "error: herdr missing-pane relaunch did not return a replacement tab/pane id for $W" >&2
+        exit 1
+      fi
+      T="$HERDR_SES:$HERDR_PANE_ID"
+      WT=$RELAUNCH_WT
+      WT_TARGET=$T
+      SES=${T%%:*}
+    else
     # fm_backend_herdr_workspace_label resolves the target workspace from
     # FM_HOME. For every KIND except secondmate, this process's own FM_HOME is
     # already the right home (the primary spawning its own crewmate/scout, or
@@ -2037,6 +2089,7 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    fi
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
@@ -2810,6 +2863,9 @@ spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
+  spawn_herdr_presentation_order_lock_release
+elif [ "$HERDR_MISSING_PANE_PRESENTATION_LOCK" -eq 1 ]; then
+  HERDR_MISSING_PANE_PRESENTATION_LOCK=0
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter

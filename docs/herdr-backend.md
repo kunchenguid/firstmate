@@ -258,6 +258,9 @@ Stopping and restarting a named Herdr server preserves workspace, tab, pane, and
 A restored same-labeled tab with a missing pane or no registered agent is a husk.
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
+When `fm-spawn --relaunch` finds that an existing task's exact recorded pane is structurally missing, it may recreate one pane in the recorded workspace through that same create-before-close boundary.
+Before it does so, the task's static endpoint identity, isolated worktree, workspace, recorded tab relation, and every same-label endpoint must remain exact and agent-free.
+A live, unreadable, changed, ambiguous, or conflicting state publishes no replacement.
 
 The generic Herdr agent-liveness probe reuses the same classifier.
 A structurally gone pane becomes `missing`, a restored agent-less shell becomes `dead`, a registered agent becomes `alive`, and an unexpected read becomes `unreadable`.

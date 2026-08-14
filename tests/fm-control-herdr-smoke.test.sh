@@ -42,6 +42,14 @@ fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab se
 
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-control-herdr.XXXXXX")
 SCRATCH=$(cd "$SCRATCH" && pwd)
+FAKE_BIN="$SCRATCH/fakebin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/claude" <<'SH'
+#!/usr/bin/env bash
+sleep 300
+SH
+chmod +x "$FAKE_BIN/claude"
+export PATH="$FAKE_BIN:$PATH"
 HOME_DIR="$SCRATCH/home"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/hsmoke"
 printf '# brief\n' > "$HOME_DIR/data/hsmoke/brief.md"
@@ -146,4 +154,78 @@ case "$OUT" in
 esac
 pass "real herdr: an agent that does not stop fails closed instead of being reported as stopped"
 
+# --- vanished pane: fm-spawn --relaunch recreates the exact task endpoint ---
+# A worker can exit and leave Herdr to reap both its pane and registration while
+# the task's branch, worktree, metadata, and no-mistakes custody remain. The
+# public relaunch path must recreate exactly one replacement pane in the
+# recorded workspace, preserving the task record's non-endpoint fields.
+MISSING_ID=hmissing
+mkdir -p "$HOME_DIR/data/$MISSING_ID"
+printf '# brief\n\nDelivery contract: mode=no-mistakes\n' > "$HOME_DIR/data/$MISSING_ID/brief.md"
+MISSING_SPACE=$("$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" workspace create \
+  --cwd "$WT" --label "fm-control-missing-pane" --no-focus) \
+  || fail "could not create the vanished-pane workspace"
+MISSING_WORKSPACE_ID=$(printf '%s' "$MISSING_SPACE" | jq -r '.result.workspace.workspace_id // empty')
+[ -n "$MISSING_WORKSPACE_ID" ] || fail "vanished-pane workspace returned no id"
+MISSING_IDS=$("$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" tab create \
+  --workspace "$MISSING_WORKSPACE_ID" --cwd "$WT" --label "fm-$MISSING_ID" --no-focus) \
+  || fail "could not create the vanished-pane fixture"
+read -r MISSING_TAB MISSING_PANE <<EOF
+$(printf '%s' "$MISSING_IDS" | jq -r '[.result.tab.tab_id, .result.root_pane.pane_id] | @tsv')
+EOF
+[ -n "$MISSING_TAB" ] && [ -n "$MISSING_PANE" ] || fail "vanished-pane fixture returned incomplete ids"
+{
+  echo "window=$SESSION:$MISSING_PANE"
+  echo "endpoint_task_id=$MISSING_ID"
+  echo "worktree=$WT"
+  echo "project=$PROJ"
+  echo "harness=claude"
+  echo "kind=ship"
+  echo "mode=no-mistakes"
+  echo "yolo=off"
+  echo "tasktmp=/tmp/fm-$MISSING_ID"
+  echo "model=default"
+  echo "effort=default"
+  echo "backend=herdr"
+  echo "herdr_session=$SESSION"
+  echo "herdr_workspace_id=$MISSING_WORKSPACE_ID"
+  echo "herdr_tab_id=$MISSING_TAB"
+  echo "herdr_pane_id=$MISSING_PANE"
+  echo "pr=https://example.invalid/firstmate/pull/1"
+  echo "no_mistakes_run=active-fixture"
+} > "$HOME_DIR/state/$MISSING_ID.meta"
+printf 'preserved\n' > "$WT/uncommitted-missing-pane.txt"
+DEFAULT_BEFORE=$("$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" session list --json \
+  | jq -c '[.sessions[]? | select(.default == true)]')
+"$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" pane close "$MISSING_PANE" >/dev/null \
+  || fail "could not remove the vanished-pane fixture"
+if "$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" pane get "$MISSING_PANE" >/dev/null 2>&1; then
+  fail "vanished-pane fixture still has its old pane"
+fi
+if "$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" agent get "$MISSING_PANE" >/dev/null 2>&1; then
+  fail "vanished-pane fixture still has its old agent registration"
+fi
+OUT=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=herdr HERDR_SESSION="$SESSION" \
+  "$ROOT/bin/fm-spawn.sh" "$MISSING_ID" --relaunch 2>&1) \
+  || fail "fm-spawn --relaunch did not recreate a vanished Herdr pane: $OUT"
+NEW_MISSING_PANE=$(grep '^herdr_pane_id=' "$HOME_DIR/state/$MISSING_ID.meta" | cut -d= -f2-)
+NEW_MISSING_TAB=$(grep '^herdr_tab_id=' "$HOME_DIR/state/$MISSING_ID.meta" | cut -d= -f2-)
+[ -n "$NEW_MISSING_PANE" ] && [ -n "$NEW_MISSING_TAB" ] \
+  && [ "$NEW_MISSING_PANE" != "$MISSING_PANE" ] \
+  || fail "vanished-pane relaunch did not publish a distinct replacement endpoint: $OUT"
+"$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" pane get "$NEW_MISSING_PANE" >/dev/null \
+  || fail "vanished-pane relaunch did not create its recorded replacement pane"
+[ -f "$WT/uncommitted-missing-pane.txt" ] \
+  || fail "vanished-pane relaunch lost an uncommitted worktree file"
+grep -qx 'pr=https://example.invalid/firstmate/pull/1' "$HOME_DIR/state/$MISSING_ID.meta" \
+  || fail "vanished-pane relaunch lost PR custody"
+grep -qx 'no_mistakes_run=active-fixture' "$HOME_DIR/state/$MISSING_ID.meta" \
+  || fail "vanished-pane relaunch lost active no-mistakes custody"
+DEFAULT_AFTER=$("$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" session list --json \
+  | jq -c '[.sessions[]? | select(.default == true)]')
+[ "$DEFAULT_AFTER" = "$DEFAULT_BEFORE" ] \
+  || fail "vanished-pane relaunch changed the default Herdr session"
+pass "real herdr: fm-spawn --relaunch recreates one vanished pane and preserves task custody without changing default"
+
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true
+fm_backend_herdr_kill "$SESSION:$NEW_MISSING_PANE" 2>/dev/null || true

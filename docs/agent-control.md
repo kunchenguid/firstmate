@@ -69,7 +69,11 @@ It is not deterministic across the verified adapters: codex and grok resume only
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
-5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+   When a Herdr pane is already structurally gone, there is no agent left to stop.
+   The transaction records that observed absence and leaves the replacement launch to revalidate it.
+5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`.
+   It normally adopts the recorded endpoint and worktree, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+   For an exact missing Herdr pane only, it revalidates the recorded workspace and tab relation, delegates replacement to Herdr's existing create-before-close husk boundary, then publishes the new endpoint while preserving task identity and the worktree.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
@@ -99,6 +103,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+  The one narrow exception is a Herdr endpoint classified as structurally missing: it may recreate one pane only after the exact recorded workspace, tab identity, isolated worktree, and duplicate-label boundary are revalidated.
+  A live, unreadable, changed, ambiguous, or conflicting endpoint still refuses without publishing a replacement.
 
 ## Capability matrix
 
