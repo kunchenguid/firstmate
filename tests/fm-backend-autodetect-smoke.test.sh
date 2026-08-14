@@ -86,8 +86,8 @@ trap on_exit EXIT
 
 STATE="$TMP_ROOT/state"; DATA="$TMP_ROOT/data"; CONFIG="$TMP_ROOT/config"
 mkdir -p "$STATE" "$DATA/$ID" "$CONFIG"
-# Backend auto-detection is what is under test here, so opt out of the default-on
-# presentation projection and keep the assertions on the flat per-home workspace.
+# Default-path backend resolution is what is under test here, so opt out of the
+# default-on presentation projection and keep the assertions on the flat per-home workspace.
 printf 'off\n' > "$CONFIG/herdr-presentation-spaces"
 printf 'trivial autodetect-smoke brief: nothing to do.\n' > "$DATA/$ID/brief.md"
 
@@ -122,32 +122,32 @@ META="$STATE/$ID.meta"
 assert_contains_local "$(cat "$META")" "backend=herdr" \
   "default-path spawn did not record backend=herdr in meta"
 assert_contains_local "$(cat "$META")" "herdr_session=$HERDR_LAB_SESSION" \
-  "auto-detected spawn did not record the isolated herdr_session in meta"
+  "default-path spawn did not record the isolated herdr_session in meta"
 
 WORKSPACE=$(grep '^herdr_workspace_id=' "$META" | cut -d= -f2-)
-[ -n "$WORKSPACE" ] || fail "auto-detected spawn meta is missing herdr_workspace_id"
+[ -n "$WORKSPACE" ] || fail "default-path spawn meta is missing herdr_workspace_id"
 
 TAB=$(grep '^herdr_tab_id=' "$META" | cut -d= -f2-)
-[ -n "$TAB" ] || fail "auto-detected spawn meta is missing herdr_tab_id"
+[ -n "$TAB" ] || fail "default-path spawn meta is missing herdr_tab_id"
 
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
-  fail "auto-detected spawn did not report a real worktree path"
+  fail "default-path spawn did not report a real worktree path"
 fi
 
 PANE=$(grep '^herdr_pane_id=' "$META" | cut -d= -f2-)
-[ -n "$PANE" ] || fail "auto-detected spawn meta is missing herdr_pane_id"
+[ -n "$PANE" ] || fail "default-path spawn meta is missing herdr_pane_id"
 pass "real Herdr: default-path spawn records backend=herdr and Herdr session/workspace/tab/pane fields in meta"
 
 # --- confirm the trivial launch command actually ran in the herdr pane ------
 
 sleep 1
 CAPTURED=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane read "$PANE" --source recent --lines 200) || \
-  fail "capture failed on the auto-detected herdr pane"
+  fail "capture failed on the default-path Herdr pane"
 CAPTURED=$(printf '%s\n' "$CAPTURED" | tail -n 30)
 case "$CAPTURED" in
   *autodetect-smoke-ok*) : ;;
-  *) fail "the raw launch command did not run in the auto-detected herdr pane"$'\n'"$CAPTURED" ;;
+  *) fail "the raw launch command did not run in the default-path Herdr pane"$'\n'"$CAPTURED" ;;
 esac
 pass "real Herdr: the default-path spawn's launch command actually ran in the Herdr pane"
 
@@ -158,10 +158,10 @@ FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
   FM_CONFIG_OVERRIDE="$CONFIG" \
   "$ROOT/bin/fm-teardown.sh" "$ID" >"$TEARDOWN_OUT" 2>&1
 status=$?
-[ "$status" -eq 0 ] || fail "fm-teardown.sh failed for the auto-detected herdr task"$'\n'"$(cat "$TEARDOWN_OUT")"
+[ "$status" -eq 0 ] || fail "fm-teardown.sh failed for the default-path Herdr task"$'\n'"$(cat "$TEARDOWN_OUT")"
 [ -f "$META" ] && fail "fm-teardown.sh did not remove $META"
 if "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane get "$PANE" >/dev/null 2>&1; then
-  fail "fm-teardown.sh did not close the auto-detected herdr pane"
+  fail "fm-teardown.sh did not close the default-path Herdr pane"
 fi
 WT=
 pass "real Herdr: teardown completes the default-path spawn/teardown cycle (meta cleared, pane closed)"
