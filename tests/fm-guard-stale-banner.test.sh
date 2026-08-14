@@ -263,6 +263,56 @@ test_queued_wake_warning_stays_independent() {
   pass "fm-guard stale banner: queued-wake warning remains independent"
 }
 
+test_queue_reason_uses_shared_snapshot_during_concurrent_drain() {
+  local dir home fakebin ready release guard_pid i out status
+  dir=$(make_guard_case queue-snapshot)
+  home=$(case_home "$dir")
+  rm -f "$home/state/task.meta"
+  printf 'pending wake\n' > "$home/state/.wake-queue"
+  fakebin=$(fm_fakebin "$dir")
+  ready="$dir/verdict-ready"
+  release="$dir/verdict-release"
+  cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_TEST_GUARD_SNAPSHOT_READY"
+while [ ! -e "$FM_TEST_GUARD_SNAPSHOT_RELEASE" ]; do
+  sleep 0.01
+done
+exit 1
+SH
+  chmod +x "$fakebin/stat"
+
+  (
+    PATH="$fakebin:$PATH" \
+      FM_TEST_GUARD_SNAPSHOT_READY="$ready" \
+      FM_TEST_GUARD_SNAPSHOT_RELEASE="$release" \
+      run_guard_case "$dir" > "$dir/guard.out" 2>&1
+    printf '%s\n' "$?" > "$dir/guard.status"
+  ) &
+  guard_pid=$!
+  i=0
+  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$guard_pid" 2>/dev/null || true
+    fail "guard did not reach the post-status watcher verdict"
+  fi
+  : > "$home/state/.wake-queue"
+  : > "$release"
+  wait "$guard_pid"
+  status=$(cat "$dir/guard.status")
+  out=$(cat "$dir/guard.out")
+  expect_code 0 "$status" "guard must remain advisory during a concurrent queue drain"
+  assert_contains "$out" "Durable queued wake delivery pending" \
+    "guard reason did not retain the shared pending-queue snapshot"
+  assert_not_contains "$out" "X-mode relay polling needs supervision" \
+    "concurrent queue drain changed the shared snapshot into a false X-mode reason"
+  pass "fm-guard stale banner: queue reason uses one shared status snapshot"
+}
+
 test_read_only_before_writable_does_not_consume_full_banner() {
   local dir home marker lock out_ro out_rw
   dir=$(make_guard_case read-only-before-writable)
@@ -703,6 +753,7 @@ test_healthy_recovery_rearms_next_stale_episode
 test_concurrent_same_episode_prints_one_full_banner
 test_home_isolation
 test_queued_wake_warning_stays_independent
+test_queue_reason_uses_shared_snapshot_during_concurrent_drain
 test_read_only_before_writable_does_not_consume_full_banner
 test_read_only_during_episode_observes_without_mutating_marker
 test_healthy_read_only_does_not_clear_marker
