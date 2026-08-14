@@ -163,7 +163,7 @@ fm_supervision_model() {
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     claude|cursor) printf 'autoarm\n' ;;
-    pi|pi-signed) printf 'extension\n' ;;
+    omp|pi|pi-signed) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac
 }
@@ -226,6 +226,24 @@ fm_pi_extension_owns_supervision() {
   fm_pid_alive "$session_pid"
 }
 
+# OMP primary supervision evidence follows the same marker protocol as Pi but
+# binds the two tracked `.omp/extensions` files that OMP auto-loads without a
+# trust gate.
+fm_omp_extension_owns_supervision() {
+  local state=$1 root=$2 lock session_pid pair source marker version
+  lock="$state/.lock"
+  for pair in \
+    "fm-primary-omp-watch.ts:.omp-watch-extension-loaded" \
+    "fm-primary-turnend-guard.ts:.omp-turnend-extension-loaded"; do
+    source=${pair%%:*}
+    marker=${pair#*:}
+    version=$(fm_pi_extension_version "$root/.omp/extensions/$source") || return 1
+    fm_pi_extension_loaded "$state/$marker" "$version" "$lock" || return 1
+  done
+  session_pid=$(sed -n '1p' "$lock" 2>/dev/null)
+  fm_pid_alive "$session_pid"
+}
+
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
 # guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
@@ -273,8 +291,10 @@ fm_watcher_supervision_verdict() {
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
-    if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
-      && fm_pi_extension_owns_supervision "$state" "$root"; then
+    if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" && {
+      fm_pi_extension_owns_supervision "$state" "$root" ||
+      fm_omp_extension_owns_supervision "$state" "$root";
+    }; then
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true
     else

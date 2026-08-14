@@ -191,6 +191,7 @@ fm_busy_sources_for_harness() {  # <harness>
       adapter='codex-hook codex-appserver'
       ;;
     opencode*) adapter=opencode-plugin ;;
+    omp) adapter=omp-ext ;;
     pi|pi-signed) adapter=pi-ext ;;
     kimi*)
       fm_busy_kimi_verified || { printf ''; return 0; }

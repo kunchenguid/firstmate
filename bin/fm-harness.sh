@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|omp|pi|pi-signed|grok|kimi|cursor|muse|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -29,13 +29,15 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
+  # Claude, Pi, Grok, OMP, and Cursor set verified markers of their own; codex,
   # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
-  # multiplexer's stored environment can silently misidentify one of them before
+  # multiplexer’s stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
   # Cursor is checked BEFORE claude, deliberately. cursor-agent does NOT clear
@@ -50,6 +52,9 @@ detect_own() {
   # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
   [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
   [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
+  # OMP's child processes retain OMPCODE=1 and also inherit CLAUDECODE=1 for
+  # Claude compatibility. Its native marker must therefore win.
+  [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -71,7 +76,7 @@ detect_own() {
   # subprocesses is unverified (verified: muse 0.1.0-R708.1), so muse is detected
   # by ancestry alone below. Do NOT promote MUSE_CURRENT_SESSION_LOG to a marker
   # without verifying it reaches children AND that it cannot survive in a
-  # multiplexer's stored environment, which is the precedence hazard above.
+  # multiplexer’s stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
   local pid=$$ comm args argv0
   for _ in 1 2 3 4 5 6 7 8; do
@@ -93,11 +98,16 @@ detect_own() {
       # prefix rather than any exact name. Deliberately anchored, never *muse*, so
       # unrelated commands (musescore, amuse) cannot be misread as this harness.
       muse|muse-bin-*) echo muse; return ;;
+      omp) echo omp; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
-      node*|python*)
+      node*|python*|bun*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)
+        if fm_args_are_omp "$comm" "$args"; then
+          echo omp
+          return
+        fi
         case "$args" in
           *claude*) echo claude; return ;;
           *codex*) echo codex; return ;;

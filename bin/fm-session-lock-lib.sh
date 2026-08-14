@@ -17,13 +17,13 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 
 # Known harness command names; extend when a new adapter is verified.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^omp$|^pi$|^pi-signed$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi omp pi-signed pi)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -42,6 +42,23 @@ fm_harness_path_name() {  # <path>
       */"$name"/*) printf '%s' "$name"; return 0 ;;
     esac
   done
+  return 1
+}
+
+# True when the process described by command name $1 and full argument string $2
+# is OMP. OMP runs either as its own command or as `bun <path>/omp ...`; a later
+# `.omp/` configuration argument is not harness identity.
+fm_args_are_omp() {  # <comm> <args>
+  local comm=$1 args=${2-} script
+  case "$(basename -- "$comm")" in
+    omp) return 0 ;;
+    bun)
+      IFS=' ' read -r _ script _ <<EOF
+$args
+EOF
+      case "$script" in omp|*/omp) return 0 ;; esac
+      ;;
+  esac
   return 1
 }
 
@@ -67,13 +84,16 @@ fm_harness_process_matches() {  # <comm> <args>
     return 0
   fi
   argv0=${args%% *}
+  if fm_args_are_omp "$comm" "$args"; then
+    return 0
+  fi
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
-  # Bare interpreter (e.g. node): match the harness name in its script path.
+  # Bare interpreter (e.g. node, python, bun): match the harness name in its script path.
   case "$comm" in
-    *node*|*python*)
+    *node*|*python*|*bun*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0

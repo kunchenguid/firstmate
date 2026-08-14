@@ -63,7 +63,7 @@ fm_control_verb_allowed() {  # <verb>
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse) return 0 ;;
+    claude|codex|opencode|omp|pi|pi-signed|grok|kimi|cursor|muse) return 0 ;;
   esac
   return 1
 }
@@ -78,6 +78,7 @@ fm_control_harness_supported() {  # <harness>
 # family.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
+    omp) printf 'omp' ;;
     pi) printf 'pi' ;;
     pi-signed) printf 'pi-signed' ;;
     claude*) printf 'claude' ;;
@@ -110,7 +111,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # whose Esc only moves focus to the scrollback; grok cancels on Ctrl+C.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|kimi|cursor|muse) printf 'Escape' ;;
+    claude|codex|opencode|omp|pi|pi-signed|kimi|cursor|muse) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -121,7 +122,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode) printf '2' ;;
-    claude|codex|pi|pi-signed|grok|kimi|cursor|muse) printf '1' ;;
+    claude|codex|omp|pi|pi-signed|grok|kimi|cursor|muse) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -139,7 +140,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    claude|codex|opencode|omp|pi|pi-signed|grok|kimi|cursor) ;;
     *) return 1 ;;
   esac
 }
@@ -151,7 +152,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # after an interrupt was measured as variable - sometimes seconds, sometimes
     # not within 20 - so a cancellation claim built on it would be unreliable.
     # Normal turn completion is prompt, which is what the busy fold depends on.
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) printf 'none' ;;
+    claude|codex|opencode|omp|pi|pi-signed|grok|kimi|cursor) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -160,7 +161,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
     claude|opencode|grok|kimi|cursor|muse) printf '/exit' ;;
-    codex|pi|pi-signed) printf '/quit' ;;
+    codex|omp|pi|pi-signed) printf '/quit' ;;
     *) return 1 ;;
   esac
 }
@@ -206,6 +207,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   case "$harness" in
     claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
+    omp) printf '%s\n' "$state/$id.omp-ext.ts" ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     grok)
       printf '%s\n' "$wt/.fm-grok-turnend"
