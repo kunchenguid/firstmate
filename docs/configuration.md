@@ -539,6 +539,7 @@ FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FM_SLACK_BOT_TOKEN=      # Slack bot token for the captain channel; .env opt-in with config/slack-captain-channel
 FM_SLACK_CAPTAIN_CHANNEL_ID=   # optional env override for config/slack-captain-channel
 FM_SLACK_API_URL=https://slack.com/api   # optional Slack API override, mainly for tests

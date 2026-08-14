@@ -57,7 +57,7 @@ cursor=$(fms_poll_cursor_read "$STATE")
 
 collect_messages() {
   local parent_ts=${1:-} data
-  fms_require_configured_channel "$FMS_CHANNEL_ID" || return 1
+  fms_channel_configured || return 1
   data="channel=$(printf '%s' "$FMS_CHANNEL_ID" | jq -sRr @uri)&limit=50"
   if [ "$cursor" != 0 ]; then
     data="${data}&oldest=$(printf '%s' "$cursor" | jq -sRr @uri)"
@@ -121,13 +121,17 @@ printf '%s\n' "$selected_json" > "$MSG_FILE"
 message_text=$(fms_message_text_oneline "$MSG_FILE") || message_text=
 [ -n "$message_text" ] || { emit_error_once "empty captain message"; exit 0; }
 
-if ! fmx_private_artifact_file_valid "$STATE/slack-acked" "$selected" 600 2>/dev/null; then
-  if ! fms_post_ack "$selected" "$ACK_FILE"; then
-    emit_error_once "ack post failed"
-    exit 0
-  fi
+if fmx_private_artifact_file_valid "$STATE/slack-acked" "$selected" 600 2>/dev/null; then
+  :
+else
   case $(fms_ack_claim "$STATE" "$selected"; echo $?) in
-    0) ;;
+    0)
+      if ! fms_post_ack "$selected" "$ACK_FILE"; then
+        fms_ack_claim_release "$STATE" "$selected"
+        emit_error_once "ack post failed"
+        exit 0
+      fi
+      ;;
     1) ;;
     *)
       emit_error_once "cannot record message ack"

@@ -954,7 +954,7 @@ EOF
 # Drops two idempotent, gitignored artifacts:
 #   state/slack-watch.check.sh - byte-static identity shim; the watcher validates
 #                                its bytes and invokes bin/fm-slack-poll.sh directly
-#   config/slack-captain.env   - exports FM_CHECK_INTERVAL=30 for watcher processes
+#   config/slack-captain.env   - exports FM_SLACK_CHECK_INTERVAL=15 for watcher processes
 # On opt-out it removes any such artifacts. Absent token or channel id AND with no
 # leftover artifacts it is a complete no-op.
 slack_captain_setup() {
@@ -978,9 +978,9 @@ slack_captain_setup() {
   if [ -z "$token" ] || [ -z "$channel_id" ] || ! fms_channel_id_valid "$channel_id"; then
     if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
       if slack_remove_artifacts; then
-        echo "FMS: Slack captain channel off - removed poll shim and 30s cadence"
+        echo "FMS: Slack captain channel off - removed poll shim and 15s Slack fast cadence"
       else
-        echo "FMS: Slack captain channel off - failed to remove poll shim or 30s cadence"
+        echo "FMS: Slack captain channel off - failed to remove poll shim or 15s Slack fast cadence"
       fi
     fi
     return 0
@@ -1006,9 +1006,9 @@ slack_captain_setup() {
 
   fms_arm_failed() {
     if slack_remove_artifacts; then
-      echo "FMS: Slack captain channel off - failed to arm poll shim or 30s cadence"
+      echo "FMS: Slack captain channel off - failed to arm poll shim or 15s Slack fast cadence"
     else
-      echo "FMS: Slack captain channel off - failed to arm poll shim or 30s cadence; stale artifacts remain"
+      echo "FMS: Slack captain channel off - failed to arm poll shim or 15s Slack fast cadence; stale artifacts remain"
     fi
   }
 

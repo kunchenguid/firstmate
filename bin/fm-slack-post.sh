@@ -31,7 +31,7 @@ trap 'rm -f "$BODY_FILE"' EXIT
 
 post_message() {
   local text=$1 thread_ts=${2:-} data ts
-  fms_require_configured_channel "$FMS_CHANNEL_ID" || die "refusing channel mismatch on post"
+  fms_channel_configured || die "refusing channel mismatch on post"
   data="channel=$(printf '%s' "$FMS_CHANNEL_ID" | jq -sRr @uri)"
   data="${data}&text=$(printf '%s' "$text" | jq -sRr @uri)"
   if [ -n "$thread_ts" ]; then
@@ -49,7 +49,7 @@ post_message() {
 update_message() {
   local message_ts=$1 text=$2 data
   fms_message_ts_valid "$message_ts" || die "invalid message ts"
-  fms_require_configured_channel "$FMS_CHANNEL_ID" || die "refusing channel mismatch on update"
+  fms_channel_configured || die "refusing channel mismatch on update"
   data="channel=$(printf '%s' "$FMS_CHANNEL_ID" | jq -sRr @uri)"
   data="${data}&ts=$(printf '%s' "$message_ts" | jq -sRr @uri)"
   data="${data}&text=$(printf '%s' "$text" | jq -sRr @uri)"

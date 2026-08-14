@@ -19,10 +19,15 @@ fms_channel_id_valid() {
   esac
 }
 
+fms_channel_configured() {
+  [ -n "${FMS_CHANNEL_ID:-}" ] || return 1
+  fms_channel_id_valid "$FMS_CHANNEL_ID"
+}
+
 fms_require_configured_channel() {
   local channel=$1
-  [ -n "${FMS_CHANNEL_ID:-}" ] || return 1
-  fms_channel_id_valid "$FMS_CHANNEL_ID" || return 1
+  fms_channel_configured || return 1
+  fms_channel_id_valid "$channel" || return 1
   [ "$channel" = "$FMS_CHANNEL_ID" ]
 }
 
@@ -80,40 +85,34 @@ fms_configured() {
     && fms_channel_id_valid "$FMS_CHANNEL_ID"
 }
 
-fms_auth_header_file() {
-  local tmp token=${FMS_TOKEN:-}
+fms_auth_header_spec() {
+  local token=${FMS_TOKEN:-}
   [ -n "$token" ] || return 1
   case "$token" in
     *$'\n'*|*'"'*|*"'"*) return 1 ;;
   esac
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-slack-auth.XXXXXX") || return 1
-  printf 'Authorization: Bearer %s\n' "$token" > "$tmp" || { rm -f -- "$tmp"; return 1; }
-  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  printf '%s\n' "$tmp"
+  printf 'Authorization: Bearer %s' "$token"
 }
 
 # POST application/x-www-form-urlencoded to one Slack method.
 # Prints the response body to stdout; returns curl's exit code.
 # FM_SLACK_CURL_LOG may record argv summaries for tests.
 fms_api_post() {
-  local method=$1 data=$2 ofile=$3 auth_header curl_bin=${FM_SLACK_CURL_BIN:-curl}
+  local method=$1 data=$2 ofile=$3 curl_bin=${FM_SLACK_CURL_BIN:-curl}
   case "$method" in
     auth.test|chat.postMessage|chat.update|conversations.history|conversations.replies) ;;
     *) return 1 ;;
   esac
   command -v "$curl_bin" >/dev/null 2>&1 || return 1
-  auth_header=$(fms_auth_header_file) || return 1
+  fms_auth_header_spec >/dev/null || return 1
   if [ -n "${FM_SLACK_CURL_LOG:-}" ]; then
     printf 'method=%s data=%s\n' "$method" "$data" >> "$FM_SLACK_CURL_LOG"
   fi
   "$curl_bin" -m 10 -sS -o "${ofile:-/dev/stdout}" \
-    -H "@$auth_header" \
+    -H "$(fms_auth_header_spec)" \
     -H 'Content-Type: application/x-www-form-urlencoded; charset=utf-8' \
     --data "$data" \
     "${FMS_API}/${method}" 2>/dev/null
-  local rc=$?
-  rm -f -- "$auth_header"
-  return "$rc"
 }
 
 fms_api_json_ok() {
@@ -192,7 +191,7 @@ fms_message_text_oneline() {
 fms_post_ack() {
   local message_ts=$1 body_file=${2:-} data text
   fms_message_ts_valid "$message_ts" || return 1
-  fms_require_configured_channel "$FMS_CHANNEL_ID" || return 1
+  fms_channel_configured || return 1
   text=$(fms_ack_text)
   [ -n "$text" ] || return 1
   if [ -z "$body_file" ]; then
@@ -211,11 +210,13 @@ fms_ack_claim() {
   local state=$1 ts=$2 dir
   fms_message_ts_valid "$ts" || return 2
   dir="$state/slack-acked"
-  if fmx_private_artifact_file_valid "$dir" "$ts" 600 2>/dev/null; then
-    return 1
-  fi
-  printf '%s\n' "$ts" | fmx_private_artifact_publish_stdin "$dir" "$ts" 600 >/dev/null 2>&1 || return 2
-  return 0
+  printf '%s\n' "$ts" | fmx_private_artifact_publish_stdin_once "$dir" "$ts" 600
+}
+
+fms_ack_claim_release() {
+  local state=$1 ts=$2
+  fms_message_ts_valid "$ts" || return 1
+  rm -f -- "$state/slack-acked/$ts" 2>/dev/null
 }
 
 fms_wake_line() {
@@ -234,11 +235,7 @@ fms_offer_claim() {
   local state=$1 ts=$2 dir
   fms_message_ts_valid "$ts" || return 2
   dir="$state/slack-offered"
-  if fmx_private_artifact_file_valid "$dir" "$ts" 600 2>/dev/null; then
-    return 1
-  fi
-  printf '%s\n' "$ts" | fmx_private_artifact_publish_stdin "$dir" "$ts" 600 >/dev/null 2>&1 || return 2
-  return 0
+  printf '%s\n' "$ts" | fmx_private_artifact_publish_stdin_once "$dir" "$ts" 600
 }
 
 fms_inbox_publish() {
@@ -260,7 +257,5 @@ fms_poll_cursor_read() {
 }
 
 fms_poll_cursor_write() {
-  local state=$1 ts=$2
-  fms_message_ts_valid "$ts" || return 1
-  printf '%s\n' "$ts" | fmx_private_artifact_publish_stdin "$state" "slack-poll.cursor" 600 >/dev/null 2>&1
+  :
 }
