@@ -1363,7 +1363,7 @@ def deployment_parameters(env, state, selected, replacement=False):
     }
 
 
-def verify_credential_disk(env, state):
+def verify_credential_disk(env, state, allow_expected_vm=False):
     expected = state["request"]["credential_lease"]["disk"]
     expected_prefix = "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Compute/disks/".format(
         env["subscription"], env["resource_group"]
@@ -1377,7 +1377,11 @@ def verify_credential_disk(env, state):
     live_identity = disk.get("etag") or properties.get("etag") or properties.get("uniqueId")
     if live_identity != expected["etag"]:
         raise ValidationError("credential lease disk ETag changed")
-    if disk.get("managedBy") or properties.get("managedBy"):
+    managed_by = disk.get("managedBy") or properties.get("managedBy")
+    expected_vm = (state.get("resources") or {}).get("vm_id")
+    if managed_by and not (
+        allow_expected_vm and expected_vm and str(managed_by).lower() == str(expected_vm).lower()
+    ):
         raise ValidationError("credential lease disk is already attached to another cell")
     tags = disk.get("tags") or {}
     if tags.get("credential-lease") != state["request"]["credential_lease"]["lease_id"]:
@@ -1545,9 +1549,12 @@ def dispatch(env, args):
         for path in env["state_dir"].glob("azv-*.json"):
             with contextlib.suppress(OSError, json.JSONDecodeError):
                 value = json.loads(path.read_text(encoding="utf-8"))
-                if value.get("phase") == "queued":
+                if value.get("phase") in ("queued", "starting"):
                     candidates.append(value)
-        candidates.sort(key=lambda item: (item.get("created_at", ""), item.get("cell", "")))
+        candidates.sort(key=lambda item: (
+            0 if item.get("phase") == "starting" else 1,
+            item.get("created_at", ""), item.get("cell", ""),
+        ))
         if not candidates:
             print("AZURE VALIDATION QUEUE empty active=0")
             return
@@ -1567,34 +1574,57 @@ def dispatch(env, args):
         }
         if expected_bindings != actual_bindings:
             raise ValidationError("queued run resource bindings differ from the exact live foundation scope")
-        state["resources"] = live_resources
-        save_state(env, state)
+        recovering = state["phase"] == "starting"
+        if recovering:
+            for key, value in live_resources.items():
+                if key.endswith("_id") and state.get("resources", {}).get(key) != value:
+                    raise ValidationError("starting cell resource bindings differ from its exact recorded identities")
+        else:
+            state["resources"] = live_resources
+            save_state(env, state)
         scope_gate(env)
         foundation_gate(env)
         with CloudAdmissionLease(env, state) as admission_lease:
             foundation_gate(env)
-            verify_credential_disk(env, state)
-            limits = state["request"]["limits"]
-            selected = sku_candidates(env, limits["vcpus"], limits["memory_gib"])[0]
-            selected["owner"] = env["owner"]
-            shape = shared_shape_reserve(env, state, selected)
-            if shape["status"] != "reserved":
-                state.setdefault("admission", {})["shard_plan"] = shape["shard_plan"]
-                state["admission"]["last_refusal"] = {"at": iso_utc(), "reason": shape.get("reason", "")[:400]}
-                save_state(env, state)
-                print("AZURE VALIDATION QUEUED cell={} reason={}".format(state["cell"], shape.get("reason", "")))
-                return
-            state["allocation"] = {"sku": selected["sku"], "sku_family": selected["family"]}
-            state["admission"] = {
-                "at": iso_utc(), "sku": selected["sku"], "sku_family": selected["family"],
-                "hourly_rate": selected["rate"],
-                "actual_usd": shape.get("actual_usd"), "forecast_usd": shape.get("forecast_usd"),
-                "admission_limit_usd": shape.get("admission_limit_usd"),
-                "shape_id": state["cell"], "capacity_fence": state["request"]["fence"].split(":", 1)[-1],
-                "control_amount_usd": shape["control_amount_usd"],
-                "shard_plan": shape["shard_plan"],
-            }
-            transition(env, state, "starting", "shared allocator atomically reserved the complete specialized shape")
+            verify_credential_disk(env, state, allow_expected_vm=recovering)
+            if recovering:
+                allocation = state.get("allocation") or {}
+                admission = state.get("admission") or {}
+                selected = {
+                    "sku": allocation.get("sku"),
+                    "family": allocation.get("sku_family"),
+                    "rate": admission.get("hourly_rate"),
+                    "owner": env["owner"],
+                }
+                if (
+                    selected["sku"] not in VALIDATION_SKUS
+                    or not selected["family"] or not isinstance(selected["rate"], (int, float))
+                    or admission.get("shape_id") != state["cell"]
+                    or len(admission.get("shard_plan") or []) != state["request"]["limits"]["behavior_shards"]
+                ):
+                    raise ValidationError("starting cell lacks its exact allocation and shape reservation")
+            else:
+                limits = state["request"]["limits"]
+                selected = sku_candidates(env, limits["vcpus"], limits["memory_gib"])[0]
+                selected["owner"] = env["owner"]
+                shape = shared_shape_reserve(env, state, selected)
+                if shape["status"] != "reserved":
+                    state.setdefault("admission", {})["shard_plan"] = shape["shard_plan"]
+                    state["admission"]["last_refusal"] = {"at": iso_utc(), "reason": shape.get("reason", "")[:400]}
+                    save_state(env, state)
+                    print("AZURE VALIDATION QUEUED cell={} reason={}".format(state["cell"], shape.get("reason", "")))
+                    return
+                state["allocation"] = {"sku": selected["sku"], "sku_family": selected["family"]}
+                state["admission"] = {
+                    "at": iso_utc(), "sku": selected["sku"], "sku_family": selected["family"],
+                    "hourly_rate": selected["rate"],
+                    "actual_usd": shape.get("actual_usd"), "forecast_usd": shape.get("forecast_usd"),
+                    "admission_limit_usd": shape.get("admission_limit_usd"),
+                    "shape_id": state["cell"], "capacity_fence": state["request"]["fence"].split(":", 1)[-1],
+                    "control_amount_usd": shape["control_amount_usd"],
+                    "shard_plan": shape["shard_plan"],
+                }
+                transition(env, state, "starting", "shared allocator atomically reserved the complete specialized shape")
             admission_lease.renew_and_assert()
             create_cell(env, state, selected)
             admission_lease.assert_held()

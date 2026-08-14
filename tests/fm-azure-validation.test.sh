@@ -302,15 +302,29 @@ PY
 
 credential_disk_identity_contract() {
   python3 - "$HOST" <<'PY' || fail "credential disk uniqueId fallback failed"
-import importlib.util,sys
+import importlib.util,inspect,sys
 spec=importlib.util.spec_from_file_location("validation",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 disk_id="/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/disks/credential-task"
 env={"subscription":"sub","resource_group":"rg"}
-state={"request":{"credential_lease":{"lease_id":"lease-task","disk":{"id":disk_id,"etag":"disk-unique-id"}}}}
-m.read_resource=lambda *_:(True,{"id":disk_id,"properties":{"uniqueId":"disk-unique-id"},"tags":{"credential-lease":"lease-task"}})
+vm_id="/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm-task"
+state={"resources":{"vm_id":vm_id},"request":{"credential_lease":{"lease_id":"lease-task","disk":{"id":disk_id,"etag":"disk-unique-id"}}}}
+disk={"id":disk_id,"properties":{"uniqueId":"disk-unique-id"},"tags":{"credential-lease":"lease-task"}}
+m.read_resource=lambda *_:(True,disk)
 m.verify_credential_disk(env,state)
+disk["managedBy"]=vm_id
+m.verify_credential_disk(env,state,allow_expected_vm=True)
+try: m.verify_credential_disk(env,state)
+except m.ValidationError: pass
+else: raise AssertionError("queued admission accepted an attached credential disk")
+disk["managedBy"]=vm_id+"-foreign"
+try: m.verify_credential_disk(env,state,allow_expected_vm=True)
+except m.ValidationError: pass
+else: raise AssertionError("starting recovery accepted a foreign credential-disk attachment")
+source=inspect.getsource(m.dispatch)
+assert 'value.get("phase") in ("queued", "starting")' in source
+assert 'admission.get("shape_id") != state["cell"]' in source
 PY
-  pass "credential disk validation accepts Azure's uniqueId when disk GET omits ETag"
+  pass "credential disk identity and starting-phase recovery accept only the exact recorded cell"
 }
 
 storage_network_access_contract() {
