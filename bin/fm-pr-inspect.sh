@@ -61,6 +61,25 @@ fm_pr_api_jq_tsv() {
   printf '%s\n' "$body"
 }
 
+fm_pr_api_jq_paginated_tsv() {
+  local endpoint=$1 expression=$2 raw body
+  raw=$(gh-axi api "$endpoint" --paginate --jq "$expression" 2>/dev/null) || return 1
+  case "$raw" in
+    $'api_response:\n  body: "'*$'"\n  truncated: false')
+      body=${raw#*$'\n  body: "'}
+      body=${body%$'"\n  truncated: false'}
+      body=${body//\\t/$'\t'}
+      body=${body//\\n/$'\n'}
+      body=${body//\\"/"}
+      body=${body//\\\\/\\}
+      ;;
+    *$'\n'*|*'api_response:'*) return 1 ;;
+    *) body=$raw ;;
+  esac
+  [ -n "$body" ] || return 1
+  printf '%s\n' "$body"
+}
+
 PR_TSV=$(fm_pr_api_jq_tsv \
   "/repos/$FM_PR_PATH/pulls/$FM_PR_NUMBER" \
   '[.html_url,.head.sha,.state,(.merged|tostring),(.mergeable|tostring),.mergeable_state] | @tsv') \
@@ -83,13 +102,34 @@ IFS=$'\t' read -r status_state status_count status_extra <<< "$status_tsv"
 [ -z "${status_extra:-}" ] && [[ "$status_count" =~ ^[0-9]+$ ]] \
   || { echo "error: GitHub commit-status response was ambiguous" >&2; exit 1; }
 
-runs_tsv=$(fm_pr_api_jq_tsv \
+run_pages=$(fm_pr_api_jq_paginated_tsv \
   "/repos/$FM_PR_PATH/commits/$head_sha/check-runs" \
-  '[(.total_count|tostring),([.check_runs[]|.status]|unique|join(",")),([.check_runs[]|(.conclusion // "")]|unique|join(","))] | @tsv') \
+  '[(.total_count|tostring),(.check_runs|length|tostring),([.check_runs[].status]|unique|join(",")),([.check_runs[]|(.conclusion // "")]|unique|join(","))] | @tsv') \
   || { echo "error: GitHub check-run query failed" >&2; exit 1; }
-IFS=$'\t' read -r run_count run_statuses run_conclusions run_extra <<< "$runs_tsv"
-[ -z "${run_extra:-}" ] && [[ "$run_count" =~ ^[0-9]+$ ]] \
-  || { echo "error: GitHub check-run response was ambiguous" >&2; exit 1; }
+run_count=
+run_seen=0
+run_statuses=
+run_conclusions=
+run_page_count=0
+while IFS=$'\t' read -r page_total page_length page_statuses page_conclusions page_extra || [ -n "${page_total:-}" ]; do
+  [ -n "${page_total:-}" ] && [[ "$page_total" =~ ^[0-9]+$ ]] \
+    || { echo "error: GitHub check-run page total was ambiguous" >&2; exit 1; }
+  [ -n "${page_length:-}" ] && [[ "$page_length" =~ ^[0-9]+$ ]] \
+    || { echo "error: GitHub check-run page length was ambiguous" >&2; exit 1; }
+  [ -z "${page_extra:-}" ] || { echo "error: GitHub check-run page was ambiguous" >&2; exit 1; }
+  if [ -z "$run_count" ]; then
+    run_count=$page_total
+  elif [ "$run_count" -ne "$page_total" ]; then
+    echo "error: GitHub check-run pages reported conflicting totals" >&2
+    exit 1
+  fi
+  run_seen=$((run_seen + page_length))
+  run_page_count=$((run_page_count + 1))
+  [ -n "$page_statuses" ] && run_statuses=${run_statuses:+$run_statuses,}$page_statuses
+  [ -n "$page_conclusions" ] && run_conclusions=${run_conclusions:+$run_conclusions,}$page_conclusions
+done <<< "$run_pages"
+[ "$run_page_count" -gt 0 ] && [ "$run_seen" -eq "$run_count" ] \
+  || { echo "error: GitHub check-run pagination did not cover every reported run" >&2; exit 1; }
 
 checks=green
 if [ "$status_count" -eq 0 ] && [ "$run_count" -eq 0 ]; then
@@ -131,7 +171,8 @@ if [ "$REQUIRE_GREEN" -eq 1 ]; then
   [ "$mergeable" = true ] && [ "$mergeable_state" = clean ] \
     || { echo "error: GitHub PR mergeability is not proven clean" >&2; exit 1; }
   case "$checks" in
-    green|none) ;;
+    green) ;;
+    none) echo "error: required GitHub checks are missing" >&2; exit 1 ;;
     red) echo "error: required GitHub checks are red" >&2; exit 1 ;;
     incomplete) echo "error: required GitHub checks are incomplete" >&2; exit 1 ;;
     *) echo "error: required GitHub checks are ambiguous" >&2; exit 1 ;;

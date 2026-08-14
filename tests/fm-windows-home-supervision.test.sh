@@ -58,23 +58,28 @@ if [ "${1:-}" = api ]; then
       case "${FM_TEST_GH_CASE:-good}" in
         red) emit 'failure\t1' ;;
         pending) emit 'pending\t1' ;;
+        no-checks|pagination-good|pagination-mismatch|pagination-late-red) emit 'success\t0' ;;
         missing-status) emit '' ;;
         *) emit 'success\t1' ;;
       esac
       ;;
     /repos/o/r/commits/*/check-runs)
       case "${FM_TEST_GH_CASE:-good}" in
-        incomplete) emit '1\tin_progress\tsuccess' ;;
-        skipped) emit '1\tcompleted\tskipped' ;;
-        ambiguous) emit '1\tbogus\tsuccess' ;;
-        red) emit '1\tcompleted\tfailure' ;;
-        *) emit '1\tcompleted\tsuccess' ;;
+        no-checks) emit '0\t0\t\t' ;;
+        pagination-good) emit '2\t1\tcompleted\tsuccess\n2\t1\tcompleted\tsuccess' ;;
+        pagination-mismatch) emit '2\t1\tcompleted\tsuccess' ;;
+        pagination-late-red) emit '2\t1\tcompleted\tsuccess\n2\t1\tcompleted\tfailure' ;;
+        incomplete) emit '1\t1\tin_progress\tsuccess' ;;
+        skipped) emit '1\t1\tcompleted\tskipped' ;;
+        ambiguous) emit '1\t1\tbogus\tsuccess' ;;
+        red) emit '1\t1\tcompleted\tfailure' ;;
+        *) emit '1\t1\tcompleted\tsuccess' ;;
       esac
       ;;
     *) exit 1 ;;
   esac
 elif [ "${1:-}" = pr ] && [ "${2:-}" = merge ]; then
-  printf 'pr merge\n' >> "${FM_TEST_GH_LOG:?}"
+  printf '%s\n' "$*" >> "${FM_TEST_GH_LOG:?}"
 else
   exit 1
 fi
@@ -125,6 +130,8 @@ test_capability_and_secure_mode() {
     || fail "secure mode no longer prepares the authenticated poll"
   fm_pr_poll_publish_prepared || fail "secure mode did not publish the authenticated poll"
   [ -f "$state/secure-id.check.sh" ] || fail "secure mode lost its executable poll"
+  [ "$(FM_TEST_REAL_STAT="$REAL_STAT" stat -c %a "$ROOT/bin/fm-pr-inspect.sh")" = 755 ] \
+    || fail "PR inspection helper is not executable"
 
   dir=$(make_case ambiguous)
   make_ambiguous_stat "$dir/fakebin"
@@ -136,7 +143,7 @@ test_capability_and_secure_mode() {
 }
 
 test_data_only_startup() {
-  local dir out
+  local dir out fresh detect
   dir=$(make_case startup)
   make_ambiguous_stat "$dir/fakebin"
   make_gh_axi "$dir/fakebin"
@@ -150,6 +157,26 @@ test_data_only_startup() {
     || fail "data-only startup did not emit BOOTSTRAP_INFO"
   ! grep -q '^PR_CHECK_MIGRATION:' "$dir/bootstrap.out" || fail "migration ran in data-only mode"
   assert_no_data_only_artifacts "$dir/home/state"
+
+  fresh="$dir/fresh-state"
+  env FM_TEST_REAL_STAT="$REAL_STAT" FM_TEST_GH_LOG="$dir/fresh-gh.log" \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$fresh" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_BOOTSTRAP_NETWORK=skip PATH="$dir/fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-bootstrap.sh" > "$dir/fresh.out" 2> "$dir/fresh.err" \
+    || fail "fresh bootstrap failed"
+  [ "$(stat -c %a "$fresh")" = 700 ] || fail "fresh secure state was not created with mode 0700"
+
+  detect="$dir/detect-state"
+  mkdir -p "$detect"
+  chmod 755 "$detect"
+  env FM_TEST_REAL_STAT="$REAL_STAT" FM_TEST_GH_LOG="$dir/detect-gh.log" \
+    FM_HOME="$dir/home" FM_STATE_OVERRIDE="$detect" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+    PATH="$dir/fakebin:$BASE_PATH" "$ROOT/bin/fm-bootstrap.sh" \
+    > "$dir/detect.out" 2> "$dir/detect.err" || fail "detect-only bootstrap failed"
+  [ "$(stat -c %a "$detect")" = 755 ] || fail "detect-only bootstrap changed state mode"
+  ! find "$detect" -mindepth 1 -maxdepth 1 -name '.fm-state-capability.*' -print -quit | grep -q . \
+    || fail "detect-only bootstrap created a capability probe"
   pass "data-only startup uses BOOTSTRAP_INFO and creates no executable artifacts"
 }
 
@@ -197,8 +224,9 @@ test_inspection_and_revalidation() {
   grep -qxF checks=green "$dir/inspect.out" || fail "green checks were not reported"
   FM_TEST_GH_CASE=good run_data_only "$dir" "$ROOT/bin/fm-pr-merge.sh" task-a "$URL" \
     > /dev/null 2> "$dir/merge.err" || fail "authorized pre-merge revalidation failed"
-  grep -q '^pr merge$' "$dir/gh.log" || fail "successful revalidation did not reach merge"
-  for scenario in changed-head red incomplete skipped ambiguous unstable command-failure; do
+  grep -q "^pr merge 7 --repo o/r --squash --match-head-commit $GOOD_HEAD$" "$dir/gh.log" \
+    || fail "successful revalidation did not bind merge to the validated head"
+  for scenario in changed-head no-checks red incomplete skipped ambiguous unstable pagination-mismatch pagination-late-red command-failure; do
     dir=$(make_case "revalidate-$scenario")
     make_ambiguous_stat "$dir/fakebin"
     make_gh_axi "$dir/fakebin"
@@ -210,8 +238,19 @@ test_inspection_and_revalidation() {
     rc=$?
     set -e
     [ "$rc" -ne 0 ] || fail "$scenario revalidation was accepted"
-    ! grep -q '^pr merge$' "$dir/gh.log" || fail "$scenario revalidation reached merge"
+    ! grep -q '^pr merge ' "$dir/gh.log" || fail "$scenario revalidation reached merge"
   done
+  dir=$(make_case revalidate-pagination-good)
+  make_ambiguous_stat "$dir/fakebin"
+  make_gh_axi "$dir/fakebin"
+  : > "$dir/gh.log"
+  record_data_only "$dir"
+  FM_TEST_GH_CASE=pagination-good run_data_only "$dir" "$ROOT/bin/fm-pr-inspect.sh" "$URL" \
+    --expected-head "$GOOD_HEAD" --require-green > "$dir/pagination.out" \
+    || fail "complete paginated check runs were rejected"
+  grep -qxF checks=green "$dir/pagination.out" || fail "complete paginated checks were not green"
+  grep -q '/check-runs --paginate --jq ' "$dir/gh.log" \
+    || fail "check-run inspection did not request pagination"
   pass "direct GitHub status inspection and pre-merge revalidation fail closed"
 }
 

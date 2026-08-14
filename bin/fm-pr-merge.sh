@@ -70,6 +70,7 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   exit 1
 fi
 
+merge_head_args=()
 fm_state_mode_detect "$STATE"
 if [ "$FM_STATE_MODE" = data-only ]; then
   unsafe=$(fm_state_data_only_artifacts "$STATE")
@@ -104,6 +105,7 @@ if [ "$FM_STATE_MODE" = data-only ]; then
     echo "error: data-only merge refused because current GitHub PR identity, head, mergeability, or checks were not fully revalidated" >&2
     exit 1
   }
+  merge_head_args=(--match-head-commit "$recorded_head")
 else
   "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
   grep -qxF "pr=$URL" "$META" || {
@@ -117,4 +119,5 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+  "${merge_args[@]+"${merge_args[@]}"}" "${merge_head_args[@]+"${merge_head_args[@]}"}" "$@"

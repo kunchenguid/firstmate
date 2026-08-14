@@ -1127,10 +1127,12 @@ fi
 # before any tool detection or later bootstrap mutation can leave old artifacts
 # runnable. Detect-only sessions never touch state, and the deferred network pass
 # never repeats it: the local pass that ran first already closed that window.
-if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
-  mkdir -p "$STATE" 2>/dev/null || true
+if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
+    (umask 077; mkdir -p "$STATE") 2>/dev/null || true
+  fi
+  fm_state_mode_detect "$STATE"
 fi
-fm_state_mode_detect "$STATE"
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
   if [ "$FM_STATE_MODE" = secure ]; then
     "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
