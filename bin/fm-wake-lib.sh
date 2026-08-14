@@ -771,6 +771,19 @@ fm_meta_lock_path() {
   printf '%s/.meta-%s.lock\n' "$dir" "$id"
 }
 
+# fm_task_input_lock_path serializes input transactions for one recorded task endpoint.
+# Lifecycle and metadata locks protect ownership and durable task records.
+# They intentionally do not make a read-composer/send-input sequence atomic with ordinary steering.
+# Every runtime-facing input producer for a recorded task shares this lock instead.
+fm_task_input_lock_path() {  # <state-dir> <task-id>
+  local state=$1 id=$2 state_real
+  case "$id" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  state_real=$(CDPATH='' cd -- "$state" 2>/dev/null && pwd -P) || return 1
+  printf '%s/.input-%s.lock\n' "$state_real" "$id"
+}
+
 # fm_task_set_lock_path: the per-home lock guarding WHICH tasks exist in a home,
 # as opposed to fm_meta_lock_path, which guards one task's record.
 #

@@ -145,6 +145,18 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" add tests/lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm helper-change
 
+  : >"$repo/bin/fm-wake-lib.sh"
+  git -C "$repo" add bin/fm-wake-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm wake-helper-baseline
+  printf '\n' >>"$repo/bin/fm-wake-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-session-start.test.sh" "wake helper selects bootstrap coverage"
+  assert_contains "$listed" "tests/fm-backend.test.sh" "wake helper selects backend coverage"
+  assert_contains "$listed" "tests/fm-pr-merge.test.sh" "wake helper selects PR coverage"
+  assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "wake helper selects watcher coverage"
+  git -C "$repo" add bin/fm-wake-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm wake-helper-change
+
   printf '\n' >>"$repo/tests/fm-backend-herdr-eventwait.test.py"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-backend-herdr-smoke.test.sh" "eventwait test selects Herdr coverage"

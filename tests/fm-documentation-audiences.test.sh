@@ -58,6 +58,21 @@ test_repository_inventory_passes() {
     "audience check did not report exact surface coverage"
   assert_contains "$out" "local_links=" \
     "audience check did not report local-link validation"
+  python3 - "$INVENTORY" <<'PY' || fail "captured Codex footer fixtures were not classified as maintainer verification evidence"
+import json
+import sys
+
+surfaces = {
+    entry["path"]: entry["audience"]
+    for entry in json.loads(open(sys.argv[1], encoding="utf-8").read())["surfaces"]
+}
+expected = {
+    "tests/fixtures/codex-effort/codex-0.147-absolute-footer.txt",
+    "tests/fixtures/codex-effort/codex-0.147-home-abbreviated-footer.txt",
+}
+if any(surfaces.get(path) != "maintainer-verification" for path in expected):
+    raise SystemExit(1)
+PY
   pass "documentation inventory classifies every maintained prose surface exactly once"
 }
 

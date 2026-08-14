@@ -17,6 +17,8 @@
 # instead of silently leaving an unsubmitted instruction.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
+# Every recorded-task input transaction, including --key, holds the shared
+# endpoint input lock through its backend delivery and confirmation path.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
 # Slash commands, and codex `$...` skill invocations resolved through harness
 # meta, get a longer pre-Enter settle so completion popups do not swallow Enter.
@@ -338,10 +340,30 @@ MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
-if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
-  MARK_FROM_FIRSTMATE=1
+if [ -n "$TARGET_META" ]; then
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+  if [ -n "$TARGET_SELECTOR" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
+    MARK_FROM_FIRSTMATE=1
+  fi
 fi
+
+INPUT_LOCK=
+INPUT_LOCK_HELD=0
+fm_send_release_input_lock() {
+  if [ "$INPUT_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$INPUT_LOCK"
+    INPUT_LOCK_HELD=0
+  fi
+}
+fm_send_acquire_task_input_lock() {
+  [ -n "$TARGET_TASK_ID" ] || return 0
+  INPUT_LOCK=$(fm_task_input_lock_path "$STATE" "$TARGET_TASK_ID") \
+    || { echo "error: cannot resolve the endpoint input lock for task $TARGET_TASK_ID" >&2; return 1; }
+  fm_lock_acquire_wait "$INPUT_LOCK" \
+    || { echo "error: could not acquire the endpoint input lock for task $TARGET_TASK_ID; message was not sent" >&2; return 1; }
+  INPUT_LOCK_HELD=1
+}
+trap fm_send_release_input_lock EXIT
 
 # Validate the answerer-closes request before any durable mutation or send: the
 # target must have a task ledger in THIS home, the send must carry an answer
@@ -420,6 +442,7 @@ if [ "${1:-}" = "--key" ]; then
   esac
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
+  fm_send_acquire_task_input_lock || exit 1
   if [ "$TARGET_BACKEND" = remote ]; then
     if ! "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh key "$TARGET_REMOTE_ID" "$key" < /dev/null; then
       echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
@@ -433,6 +456,7 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
+  fm_send_acquire_task_input_lock || exit 1
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE
