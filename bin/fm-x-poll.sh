@@ -48,6 +48,19 @@ fmx_load_config
 # Hard no-op when X mode is off: this is what keeps the check shim inert.
 [ -n "$FMX_TOKEN" ] || exit 0
 
+# An opted-in X poll is an executable feature. Prove the state filesystem only
+# after the inert no-token path has returned, so a home without a state
+# directory remains the historical hard no-op.
+# shellcheck source=bin/fm-state-capability-lib.sh
+. "$SCRIPT_DIR/fm-state-capability-lib.sh"
+if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
+  (umask 077; mkdir -p "$STATE") 2>/dev/null || true
+fi
+if fm_state_mode_data_only "$STATE"; then
+  fm_state_mode_refusal "$STATE" "X-mode polling" >&2
+  exit 1
+fi
+
 # Unreconciled terminal results for a public commitment are actionable even when
 # the relay has no new mention, and they outlive any session, so surface them
 # first. The signature compare keeps this to one wake per new result set instead

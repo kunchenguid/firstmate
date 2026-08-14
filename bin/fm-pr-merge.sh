@@ -70,11 +70,47 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   exit 1
 fi
 
-"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
-grep -qxF "pr=$URL" "$META" || {
-  echo "error: PR metadata recording failed" >&2
-  exit 1
-}
+fm_state_mode_detect "$STATE"
+if [ "$FM_STATE_MODE" = data-only ]; then
+  unsafe=$(fm_state_data_only_artifacts "$STATE")
+  [ -z "$unsafe" ] || {
+    echo "error: data-only merge refuses pre-existing executable/check artifacts without executing them: $unsafe" >&2
+    exit 1
+  }
+  fm_pr_metadata_identity_parse "$META" || {
+    echo "error: data-only merge requires valid canonical PR metadata" >&2
+    exit 1
+  }
+  [ "$FM_PR_META_PROVIDER" = github ] && [ "$FM_PR_META_URL" = "$URL" ] || {
+    echo "error: data-only merge refuses unsupported forge or changed canonical PR URL" >&2
+    exit 1
+  }
+  recorded_head=
+  recorded_head_count=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      pr_head=*)
+        recorded_head=${line#pr_head=}
+        recorded_head_count=$((recorded_head_count + 1))
+        ;;
+    esac
+  done < "$META"
+  [ "$recorded_head_count" -eq 1 ] && fm_pr_head_valid "$recorded_head" || {
+    echo "error: data-only merge requires exactly one valid recorded PR head SHA" >&2
+    exit 1
+  }
+  "$SCRIPT_DIR/fm-pr-inspect.sh" "$URL" --expected-head "$recorded_head" --require-green \
+    >/dev/null || {
+    echo "error: data-only merge refused because current GitHub PR identity, head, mergeability, or checks were not fully revalidated" >&2
+    exit 1
+  }
+else
+  "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
+  grep -qxF "pr=$URL" "$META" || {
+    echo "error: PR metadata recording failed" >&2
+    exit 1
+  }
+fi
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then

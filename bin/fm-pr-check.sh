@@ -41,6 +41,48 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   exit 1
 fi
 
+fm_state_mode_detect "$STATE"
+if [ "$FM_STATE_MODE" = data-only ]; then
+  unsafe=$(fm_state_data_only_artifacts "$STATE")
+  [ -z "$unsafe" ] || {
+    echo "error: data-only supervision refuses PR recording while executable/check artifacts exist; remove them only through the secure home owner: $unsafe" >&2
+    exit 1
+  }
+  PR_HEAD=
+  if [ "$PROVIDER" = github ]; then
+    inspection=$("$SCRIPT_DIR/fm-pr-inspect.sh" "$URL") || {
+      echo "error: data-only PR recording could not validate GitHub identity and head through gh-axi" >&2
+      exit 1
+    }
+    inspection_head=
+    inspection_head_count=0
+    while IFS='=' read -r inspection_key inspection_value || [ -n "$inspection_key" ]; do
+      case "$inspection_key" in
+        pr_head=*)
+          inspection_head=${inspection_key#pr_head=}
+          inspection_head_count=$((inspection_head_count + 1))
+          ;;
+        pr_head)
+          inspection_head=$inspection_value
+          inspection_head_count=$((inspection_head_count + 1))
+          ;;
+      esac
+    done <<< "$inspection"
+    [ "$inspection_head_count" -eq 1 ] || inspection_head=
+    PR_HEAD=$inspection_head
+    fm_pr_head_valid "$PR_HEAD" || {
+      echo "error: data-only PR recording received an ambiguous GitHub head" >&2
+      exit 1
+    }
+  fi
+  fm_pr_metadata_record_data_only "$STATE" "$ID" "$URL" "$PR_HEAD" || {
+    echo "error: data-only PR metadata could not be recorded safely" >&2
+    exit 1
+  }
+  printf 'recorded: state/%s.meta (manual PR inspection required before merge)\n' "$ID"
+  exit 0
+fi
+
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
 # Finish only its identity-bound receipt before publishing a replacement poll.

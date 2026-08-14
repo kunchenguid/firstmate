@@ -716,13 +716,22 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
-# Before acquiring the watcher lock or enumerating any runnable check, replace
-# or quarantine checks created by older versions. The migration compares bytes
-# and reads data only; it never invokes legacy check files through Bash.
-"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || {
-  echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
-  exit 1
-}
+# Before acquiring the watcher lock, prove whether this state filesystem can
+# support private executable supervision. Data-only homes never run migration,
+# inspect check contents, or enter the runnable-check loop.
+fm_state_mode_detect "$STATE"
+if [ "$FM_STATE_MODE" = data-only ]; then
+  unsafe=$(fm_state_data_only_artifacts "$STATE")
+  if [ -n "$unsafe" ]; then
+    echo "watcher: data-only supervision refuses pre-existing executable/check artifacts without executing them: $unsafe" >&2
+    exit 1
+  fi
+else
+  "$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || {
+    echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
+    exit 1
+  }
+fi
 
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
@@ -793,7 +802,7 @@ printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/
 # A merged poll may have queued its terminal wake and then lost the process
 # between receipt publication and fixed-path removal.
 # Finish only identity-bound retirement receipts before any check can run.
-if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+if [ "$FM_STATE_MODE" = secure ] && ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; then
   reason="check: rejected unauthenticated PR poll retirement receipts:$FM_PR_POLL_RETIREMENT_REJECTED"
   fm_wake_append check pr-poll-retirement "$reason" || exit 1
   touch "$STATE/.last-check"
@@ -882,7 +891,7 @@ while :; do
   # keeps producing signals - the slow poll (e.g. merge detection) would then
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
-  if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+  if [ "$FM_STATE_MODE" = secure ] && [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue

@@ -37,6 +37,7 @@ fm_custom_check_trust_read() {
 
 fm_custom_check_registered() {
   local state=$1 id=$2 check hash state_device
+  fm_state_mode_secure "$state" || return 1
   check="$state/$id.check.sh"
   fm_custom_check_trust_read "$state" "$id" || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -47,6 +48,7 @@ fm_custom_check_registered() {
 
 fm_custom_check_snapshot_prepare() {
   local state=$1 id=$2 check hash state_device
+  fm_state_mode_secure "$state" || return 1
   fm_custom_check_snapshot_cleanup
   check="$state/$id.check.sh"
   fm_custom_check_trust_read "$state" "$id" || return 1

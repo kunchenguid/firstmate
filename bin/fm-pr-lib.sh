@@ -17,6 +17,9 @@
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
+# shellcheck source=bin/fm-state-capability-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-state-capability-lib.sh"
+
 FM_PR_PROVIDER=
 FM_PR_URL=
 FM_PR_HOST=
@@ -327,6 +330,36 @@ fm_pr_metadata_identity_parse() {
   [ -n "$FM_PR_META_URL" ]
 }
 
+fm_pr_metadata_record_data_only() {
+  local state=$1 id=$2 url=$3 head=$4 meta tmp line state_device
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_url_parse "$url" || return 1
+  [ -z "$head" ] || fm_pr_head_valid "$head" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  meta="$state/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  tmp=$(mktemp "$state/.fm-pr-meta-data-only.XXXXXX") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      pr=*|pr_head=*) ;;
+      *) printf '%s\n' "$line" >> "$tmp" || { rm -f -- "$tmp"; return 1; } ;;
+    esac
+  done < "$meta"
+  printf 'pr=%s\n' "$url" >> "$tmp" || { rm -f -- "$tmp"; return 1; }
+  [ -z "$head" ] || printf 'pr_head=%s\n' "$head" >> "$tmp" \
+    || { rm -f -- "$tmp"; return 1; }
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f -- "$tmp"; return 1; }
+  [ "$(fm_pr_file_device "$tmp")" = "$state_device" ] \
+    || { rm -f -- "$tmp"; return 1; }
+  fm_pr_regular_destination_on_device_or_absent "$meta" "$state_device" \
+    || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$meta" || { rm -f -- "$tmp"; return 1; }
+  fm_pr_metadata_identity_parse "$meta" || return 1
+  [ "$FM_PR_META_URL" = "$url" ]
+}
+
 # Sidecar layout: provider, url, host, path, number, one per line. A sidecar
 # written before the provider tag existed has a URL on its first line and one
 # line fewer, so it fails both the field count and the provider comparison and
@@ -451,6 +484,7 @@ fm_pr_poll_revoke_final() {
 
 fm_pr_poll_prepare() {
   local state=$1 id=$2 provider=$3 url=$4 host=$5 path=$6 number=$7 template=$8
+  fm_state_mode_secure "$state" || return 1
   fm_pr_task_id_valid "$id" || return 1
   fm_pr_url_parse "$url" || return 1
   [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
@@ -581,6 +615,7 @@ fm_pr_poll_publish_prepared() {
 
 fm_pr_poll_artifacts_valid() {
   local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash data_identity check_identity
+  fm_state_mode_secure "$state" || return 1
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1

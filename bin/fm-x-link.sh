@@ -127,6 +127,11 @@ if [ ! -f "$META" ]; then
   exit 1
 fi
 
+if fm_state_mode_data_only "$STATE"; then
+  fm_state_mode_refusal "$STATE" "X-mode task linking" >&2
+  exit 1
+fi
+
 command -v jq >/dev/null 2>&1 || { echo "fm-x-link: jq not found" >&2; exit 1; }
 fmx_load_config
 REQ_PLATFORM=

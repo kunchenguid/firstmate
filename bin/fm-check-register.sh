@@ -22,6 +22,10 @@ ID=$1
 CHECK="$STATE/$ID.check.sh"
 TRUST="$STATE/$ID.check-trust"
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "error: state directory is unavailable" >&2; exit 1; }
+if fm_state_mode_data_only "$STATE"; then
+  fm_state_mode_refusal "$STATE" "custom executable check registration" >&2
+  exit 1
+fi
 [ -f "$CHECK" ] && [ ! -L "$CHECK" ] || { echo "error: custom check is unavailable" >&2; exit 1; }
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 fm_pr_private_file_valid "$CHECK" 700 "$STATE_DEVICE" \

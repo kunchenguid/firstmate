@@ -52,13 +52,12 @@
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
-#          The AXI-family floor policy is owned beside GH_AXI_MIN and
-#          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
+#          The AXI-family floor policy is owned beside GH_AXI_MIN below; the per-tool owners point there. An installed
 #          build below its floor reports MISSING like no-mistakes, so the operator
 #          is asked to upgrade rather than silently running an older tool.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
-#          lavish-axi). A compatible tasks-axi default backend is silent.
+#          tasks-axi). A compatible tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
 #          procedure in AGENTS.md section 4 and
 #          .agents/skills/quota-array-dispatch/SKILL.md.
@@ -134,6 +133,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# shellcheck source=bin/fm-state-capability-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-state-capability-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
@@ -756,7 +757,7 @@ install_cmd() {
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
-    gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
+    gh-axi|chrome-devtools-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
   esac
@@ -784,7 +785,7 @@ missing_tool_diagnostic() {
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -801,7 +802,6 @@ NO_MISTAKES_MIN=1.31.2
 # tasks-axi feature probes are an independent defense-in-depth concern, not part
 # of its floor.
 GH_AXI_MIN=0.1.29
-LAVISH_AXI_MIN=0.1.46
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
@@ -906,6 +906,15 @@ x_mode_setup() {
 
   token=
   [ -f "$env_file" ] && token=$(fmx_env_get FMX_PAIRING_TOKEN "$env_file")
+
+  fm_state_mode_detect "$STATE"
+  if [ "$FM_STATE_MODE" = data-only ]; then
+    unsafe=$(fm_state_data_only_artifacts "$STATE")
+    if [ -n "$token" ] || [ -n "$unsafe" ] || [ -e "$cadence" ] || [ -L "$cadence" ]; then
+      echo "BOOTSTRAP_INFO: X mode is unavailable in data-only supervision; no relay shim or cadence artifact was created; use ordinary chat"
+    fi
+    return 0
+  fi
 
   x_mode_remove_artifacts() {
     local failed=0
@@ -1118,8 +1127,16 @@ fi
 # before any tool detection or later bootstrap mutation can leave old artifacts
 # runnable. Detect-only sessions never touch state, and the deferred network pass
 # never repeats it: the local pass that ran first already closed that window.
+if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
+  mkdir -p "$STATE" 2>/dev/null || true
+fi
+fm_state_mode_detect "$STATE"
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
-  "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
+  if [ "$FM_STATE_MODE" = secure ]; then
+    "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
+  elif [ -d "$STATE" ] && [ ! -L "$STATE" ]; then
+    echo "BOOTSTRAP_INFO: data-only supervision is active because $FM_STATE_MODE_REASON; executable PR checks, X polling, custom checks, and PR-check migration are unavailable"
+  fi
   startup_memory_budget_setup
 fi
 
@@ -1148,9 +1165,6 @@ detect_local_tools() {
   fi
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
-  fi
-  if command -v lavish-axi >/dev/null 2>&1 && ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
-    echo "MISSING: lavish-axi (install: $(install_cmd lavish-axi))"
   fi
   if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
     echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"
