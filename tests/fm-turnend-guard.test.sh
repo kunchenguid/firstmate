@@ -1601,6 +1601,25 @@ test_hook_claude_mode_changed_source_identity_resets_escalation_count() {
   pass "fm-turnend-guard --claude: changed process-source identity resets the identical-block escalation count"
 }
 
+test_hook_claude_mode_source_retirement_during_wait_clears_episode() {
+  local dir out status retire_pid
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget-source-retires")
+  mkdir -p "$dir/state/procevent"
+  : > "$dir/state/procevent/source1.source"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "first source-only no-claim observation must block"
+
+  (sleep 0.1; rm -f "$dir/state/procevent/source1.source") &
+  retire_pid=$!
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=400 run_hook_claude "$dir" false); status=$?
+  wait "$retire_pid"
+  expect_code 0 "$status" "a supervision need retired during claim wait must pass"
+  [ -z "$out" ] || fail "retired supervision need emitted a stale captain escalation: $out"
+  assert_absent "$dir/state/.turnend-claude-blocks" "retired supervision need left the prior block episode"
+  assert_absent "$dir/state/.turnend-claude-escalated" "retired supervision need left the prior escalation marker"
+  pass "fm-turnend-guard --claude: source retirement during claim wait clears the block episode"
+}
+
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
   local dir out out2 status status2
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-verified-alarm")
@@ -1787,6 +1806,7 @@ test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_repeated_identical_block_escalates_once
 test_hook_claude_mode_changed_task_identity_resets_escalation_count
 test_hook_claude_mode_changed_source_identity_resets_escalation_count
+test_hook_claude_mode_source_retirement_during_wait_clears_episode
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
 test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open

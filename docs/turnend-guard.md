@@ -78,9 +78,9 @@ The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 millis
 Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure progression instead of acting as unconditional recovery proof.
 The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.
-When none of those proofs appears and no automatic-failure state exists, the guard blocks twice for the same session and unchanged epoch.
-The second banner directs the model to stop acknowledging the repeated block and escalate the supervision choice to the captain.
-The next unchanged Stop emits one `systemMessage` escalation and ends the continuation loop; `state/.turnend-claude-escalated` suppresses repeats for that episode.
+When none of those proofs appears and no automatic-failure state exists, the first no-claim observation blocks for that session and evidence signature.
+On the second genuinely identical observation, the guard emits exactly one captain-facing `systemMessage` question and ends the continuation loop itself.
+Every later unchanged Stop passes silently through `state/.turnend-claude-escalated`, while changed task or process-source identities reset the count and a supervision need that disappears during the claim wait clears the episode before passing.
 A verified automatic failure retains the separate `FM_CLAUDE_TURNEND_BLOCK_BUDGET` progression (default 3, below Claude's 8-block override) and its stronger attended alarm.
 In Claude mode, positive watcher recovery clears the block budget, one-shot escalation, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.
 The one loud attended fail-open is available only when the auto-arm has recorded an exhausted failure, its one notice is already consumed, the block budget is exhausted, and a final check finds neither a healthy watcher nor an automatic continuation.

@@ -489,6 +489,11 @@ fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
 # budget before considering the verified one-time attended fail-open.
+fm_supervision_status "$STATE" "$GRACE"
+if [ "$FM_SUP_NEEDED" = false ]; then
+  [ -e "$FAILURE_NOTICE" ] || budget_reset
+  exit 0
+fi
 budget_account_current_epoch block || block_stop
 terminal_fail_open
 terminal_status=$?
