@@ -112,8 +112,12 @@ assert all(item["deleteOption"]=="Detach" for item in data)
 credential=next(item for item in data if item["lun"]==1)
 assert credential["name"]=="[last(split(parameters('credentialDiskId'), '/'))]"
 schedule=next(item for item in resources if item["type"]=="Microsoft.DevTestLab/schedules")
+assert schedule["name"]=="[format('shutdown-computevm-{0}', parameters('vmName'))]"
 assert schedule["properties"]["taskType"]=="ComputeVmShutdownTask"
 assert schedule["properties"]["status"]=="Enabled"
+safety=next(item for item in resources if item["type"]=="Microsoft.Compute/virtualMachines/runCommands")
+script=safety["properties"]["source"]["script"]
+assert "decodeUriComponent('%0A')" in script and "\\n" not in script
 assert work["properties"]["networkAccessPolicy"]=="DenyAll"
 assert work["properties"]["publicNetworkAccess"]=="Disabled"
 assert template["parameters"]["vmSize"]["allowedValues"]==[

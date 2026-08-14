@@ -772,7 +772,7 @@ def resource_names(env, token, lease):
         "run_command_name": "validate-a1",
         "run_commands": [],
         "safety_run_command_id": base + "/Microsoft.Compute/virtualMachines/{}/runCommands/safety-shutdown".format(vm),
-        "ttl_schedule_name": "shutdown-{}".format(vm),
+        "ttl_schedule_name": "shutdown-computevm-{}".format(vm),
         "ttl_schedule_id": base + "/Microsoft.DevTestLab/schedules/shutdown-{}".format(vm),
         "identities": {},
     }

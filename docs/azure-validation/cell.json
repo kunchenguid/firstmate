@@ -287,7 +287,7 @@
     {
       "type": "Microsoft.DevTestLab/schedules",
       "apiVersion": "2018-09-15",
-      "name": "[format('shutdown-{0}', parameters('vmName'))]",
+      "name": "[format('shutdown-computevm-{0}', parameters('vmName'))]",
       "location": "[parameters('region')]",
       "tags": "[parameters('tags')]",
       "dependsOn": [
@@ -317,7 +317,7 @@
       ],
       "properties": {
         "source": {
-          "script": "[format('set -eu\\ncat > /etc/systemd/system/fm-azure-validation-expiry.service <<\"EOF\"\\n[Unit]\\nDescription=Stop expired Firstmate Azure validation cell\\n[Service]\\nType=oneshot\\nExecStart=/usr/sbin/shutdown -h now\\nEOF\\ncat > /etc/systemd/system/fm-azure-validation-expiry.timer <<\"EOF\"\\n[Unit]\\nDescription=Bound Azure validation cell lifetime\\n[Timer]\\nOnCalendar={0}\\nPersistent=true\\nUnit=fm-azure-validation-expiry.service\\n[Install]\\nWantedBy=timers.target\\nEOF\\nsystemctl daemon-reload\\nsystemctl enable --now fm-azure-validation-expiry.timer', parameters('expiryUtc'))]"
+          "script": "[format(replace('set -eu|cat > /etc/systemd/system/fm-azure-validation-expiry.service <<\"EOF\"|[Unit]|Description=Stop expired Firstmate Azure validation cell|[Service]|Type=oneshot|ExecStart=/usr/sbin/shutdown -h now|EOF|cat > /etc/systemd/system/fm-azure-validation-expiry.timer <<\"EOF\"|[Unit]|Description=Bound Azure validation cell lifetime|[Timer]|OnCalendar={0}|Persistent=true|Unit=fm-azure-validation-expiry.service|[Install]|WantedBy=timers.target|EOF|systemctl daemon-reload|systemctl enable --now fm-azure-validation-expiry.timer', '|', decodeUriComponent('%0A')), parameters('expiryUtc'))]"
         },
         "asyncExecution": false,
         "timeoutInSeconds": 300,
@@ -340,7 +340,7 @@
     },
     "ttlScheduleId": {
       "type": "string",
-      "value": "[resourceId('Microsoft.DevTestLab/schedules', format('shutdown-{0}', parameters('vmName')))]"
+      "value": "[resourceId('Microsoft.DevTestLab/schedules', format('shutdown-computevm-{0}', parameters('vmName')))]"
     },
     "shardContainerName": {
       "type": "string",
