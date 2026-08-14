@@ -245,7 +245,9 @@ case "$*" in
     exit 0
     ;;
   *"ppid="*)
-    [ -n "${FM_FAKE_HARNESS_PID:-}" ] || exit 1
+    # The lock implementation fails closed when one ancestry hop is
+    # unreadable, so this fixture must model the parent relation even for
+    # cases that deliberately leave the harness pid unconstrained.
     /bin/ps -o ppid= -p "$pid"
     ;;
 esac
@@ -295,6 +297,11 @@ SH
 
 make_fake_ps_omp_holder() {
   local fakebin=$1 holder_pid=$2
+  cat > "$fakebin/omp" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/omp"
   cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 set -u
@@ -307,7 +314,7 @@ done
 case "\$*" in
   *"comm="*)
     if [ "\$pid" = "$holder_pid" ]; then
-      printf '/Users/test/.bun/bin/omp\n'
+      printf '%s/omp\n' "$fakebin"
     else
       printf '/bin/zsh\n'
     fi
@@ -315,7 +322,7 @@ case "\$*" in
     ;;
   *"args="*)
     if [ "\$pid" = "$holder_pid" ]; then
-      printf '/Users/test/.bun/bin/omp --model openai-codex/gpt-5.6-sol\n'
+      printf '%s/omp --model openai-codex/gpt-5.6-sol\n' "$fakebin"
     else
       printf 'zsh\n'
     fi
@@ -1030,7 +1037,13 @@ case "$*" in
       printf '%s\n' bash
     fi
     ;;
-  *"ppid="*) printf '%s\n' "$FM_FAKE_HARNESS_PID" ;;
+  *"ppid="*)
+    if [ "$pid" = "$FM_FAKE_HARNESS_PID" ]; then
+      printf '%s\n' 1
+    else
+      printf '%s\n' "$FM_FAKE_HARNESS_PID"
+    fi
+    ;;
   *) exit 1 ;;
 esac
 SH

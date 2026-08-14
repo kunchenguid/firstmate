@@ -462,6 +462,7 @@ fm_backend_tmux_agent_state() {  # <target> [recorded-harness] [raw-launch]
           return 0
         }
         ;;
+      shell) ;;
       *) printf 'ambiguous'; return 0 ;;
     esac
   fi
