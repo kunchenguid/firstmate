@@ -317,7 +317,7 @@
       ],
       "properties": {
         "source": {
-          "script": "[format(replace('set -eu|cat > /etc/systemd/system/fm-azure-validation-expiry.service <<\"EOF\"|[Unit]|Description=Stop expired Firstmate Azure validation cell|[Service]|Type=oneshot|ExecStart=/usr/sbin/shutdown -h now|EOF|cat > /etc/systemd/system/fm-azure-validation-expiry.timer <<\"EOF\"|[Unit]|Description=Bound Azure validation cell lifetime|[Timer]|OnCalendar={0}|Persistent=true|Unit=fm-azure-validation-expiry.service|[Install]|WantedBy=timers.target|EOF|systemctl daemon-reload|systemctl enable --now fm-azure-validation-expiry.timer', '|', decodeUriComponent('%0A')), parameters('expiryUtc'))]"
+          "script": "[format(replace('set -eu|cat > /etc/systemd/system/fm-azure-validation-expiry.service <<\"EOF\"|[Unit]|Description=Stop expired Firstmate Azure validation cell|[Service]|Type=oneshot|ExecStart=/usr/sbin/shutdown -h now|EOF|cat > /etc/systemd/system/fm-azure-validation-expiry.timer <<\"EOF\"|[Unit]|Description=Bound Azure validation cell lifetime|[Timer]|OnCalendar={0}|Persistent=true|Unit=fm-azure-validation-expiry.service|[Install]|WantedBy=timers.target|EOF|systemctl daemon-reload|systemctl enable --now fm-azure-validation-expiry.timer', '|', uriComponentToString('%0A')), parameters('expiryUtc'))]"
         },
         "asyncExecution": false,
         "timeoutInSeconds": 300,

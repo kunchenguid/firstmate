@@ -117,7 +117,7 @@ assert schedule["properties"]["taskType"]=="ComputeVmShutdownTask"
 assert schedule["properties"]["status"]=="Enabled"
 safety=next(item for item in resources if item["type"]=="Microsoft.Compute/virtualMachines/runCommands")
 script=safety["properties"]["source"]["script"]
-assert "decodeUriComponent('%0A')" in script and "\\n" not in script
+assert "uriComponentToString('%0A')" in script and "\\n" not in script
 assert work["properties"]["networkAccessPolicy"]=="DenyAll"
 assert work["properties"]["publicNetworkAccess"]=="Disabled"
 assert template["parameters"]["vmSize"]["allowedValues"]==[
