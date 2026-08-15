@@ -58,14 +58,14 @@ The third is recorded below.
 | Harness | Version verified | Cold open | Context reset | Context-preserving reopen |
 | --- | --- | --- | --- | --- |
 | Claude | 2.1.222 (Claude Code) | `source=startup`, token quoted back in both `-p` and the TUI | `/clear` reports `source=clear` and `/compact` reports `source=compact`; both re-injected a fresh token that the model quoted back | `claude --continue` reports `source=resume` |
-| Codex | codex-cli 0.146.0 | `source=startup` under `codex exec`, token quoted back | Not reachable from a tracked project registration; see the limit below | `codex exec resume --last` reports `source=resume` |
+| Codex | codex-cli 0.146.0 and 0.147.0 | Under 0.146.0, `source=startup` under `codex exec` reached model context; under 0.147.0, the tracked project `SessionStart` hook also fired in the interactive TUI, but model-context delivery was not measured there | No interactive context-reset source is verified; see the limit below | `codex exec resume --last` reports `source=resume` under 0.146.0 |
 | Pi | 0.82.0 | `source=startup`, token quoted back in both `-p` and the TUI | `/new` raises `session_start` reason `new`, which the extension maps to `clear`; `/compact` raises `session_compact`, and both freshly injected source-stamped tokens were quoted back | `pi -c` reports reason `startup`, not `resume` |
 
 Two harness-specific consequences are load-bearing rather than incidental.
 
-Codex's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
-Codex's run tier is therefore verified only for `codex exec` startup and context-preserving resume.
-The interactive TUI is a known uncovered gap: Firstmate has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
+Codex 0.146.0's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
+The 2026-08-15 codex-cli 0.147.0 lifecycle probe recorded the tracked project `SessionStart` hook in an interactive TUI, so hook reachability is no longer the observed limit on that version.
+Codex's run tier remains verified only for `codex exec` startup and context-preserving resume because the 0.147.0 probe did not measure whether interactive hook stdout reached model context, and no interactive compaction or re-emit source is verified.
 
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
@@ -181,7 +181,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
 | OpenCode | 1.17.18 | Plugin `session.status` | In a real TUI pane: seed, then `busy source=opencode-plugin event=session-busy`, then `idle source=opencode-plugin event=session-status-idle`. |
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
-| Codex | codex-cli 0.147.0 | Per-launch inline `UserPromptSubmit`, `Stop`, and `SessionEnd` hooks plus an absolute deadline | The spawn seed and `UserPromptSubmit` classify busy only while their deadline is live; `Stop` classifies idle; API error and manual interruption omit `Stop`, so they surface as unknown when the endpoint ends or the deadline expires. Strict older or unexpected versions remain `unknown codex-unverified`. |
+| Codex | codex-cli 0.147.0 | Per-launch inline `UserPromptSubmit`, `Stop`, and `SessionEnd` hooks plus an absolute deadline | The spawn seed and `UserPromptSubmit` classify busy only while their deadline is live; `Stop` classifies idle; API error and manual interruption omit `Stop`, so they surface as unknown when `SessionEnd` fires or the deadline expires. Strict older or unexpected versions remain `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
 
