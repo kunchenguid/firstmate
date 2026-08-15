@@ -915,6 +915,7 @@ fm_backend_agent_state() {  # <backend> <target>
 FM_BACKEND_MISSING_GRADE=
 FM_BACKEND_MISSING_SOCKET=
 FM_BACKEND_MISSING_RESPONSE=
+# shellcheck disable=SC2034 # Read by callers after fm_backend_missing_grade returns.
 fm_backend_missing_grade() {  # <backend> <target>
   local backend=$1 target=$2
   FM_BACKEND_MISSING_GRADE=ambiguous

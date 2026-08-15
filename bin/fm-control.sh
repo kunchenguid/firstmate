@@ -885,7 +885,7 @@ do_relaunch() {
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   if [ "$RELAUNCH_RECREATE_ENDPOINT" = 1 ]; then
-    exit_result=endpoint-missing
+    exit_result='endpoint-missing'
   else
     journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
     exit_result=$(do_exit)

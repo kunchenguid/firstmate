@@ -344,7 +344,7 @@ fm_backend_tmux_inspect_endpoint() {  # <target>
       FM_BACKEND_TMUX_INSPECT_RESULT=listed
       FM_BACKEND_TMUX_INSPECT_RESPONSE="session inventory read; it lists $window, so the endpoint is present"
     else
-      FM_BACKEND_TMUX_INSPECT_RESULT=window-absent
+      FM_BACKEND_TMUX_INSPECT_RESULT='window-absent'
       FM_BACKEND_TMUX_INSPECT_RESPONSE="session inventory read; it does not list $window"
     fi
     return 0
@@ -354,7 +354,7 @@ fm_backend_tmux_inspect_endpoint() {  # <target>
     || FM_BACKEND_TMUX_INSPECT_RESPONSE="tmux list-windows exited $inventory_status with no message"
   case "$windows" in
     *"can't find session:"*)
-      FM_BACKEND_TMUX_INSPECT_RESULT=session-absent
+      FM_BACKEND_TMUX_INSPECT_RESULT='session-absent'
       FM_BACKEND_TMUX_INSPECT_SOCKET=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || true
       ;;
     *"no server running on "*)
@@ -485,6 +485,7 @@ EOF
 FM_BACKEND_TMUX_MISSING_GRADE=
 FM_BACKEND_TMUX_MISSING_SOCKET=
 FM_BACKEND_TMUX_MISSING_RESPONSE=
+# shellcheck disable=SC2034 # Read by callers after fm_backend_tmux_missing_grade returns.
 fm_backend_tmux_missing_grade() {  # <target>
   fm_backend_tmux_inspect_endpoint "$1"
   FM_BACKEND_TMUX_MISSING_SOCKET=$FM_BACKEND_TMUX_INSPECT_SOCKET
