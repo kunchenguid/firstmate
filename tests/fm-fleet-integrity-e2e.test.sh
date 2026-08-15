@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$ROOT/bin/fm-secondmate-registry-lib.sh"
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
@@ -179,8 +181,7 @@ test_local_only_integrity_skips_remote_metadata_probes() {
 
 write_seed_receipt() {
   local home=$1 id=$2 returned=$3 projects=$4 scope=$5 digest
-  digest=$(printf 'id=%s\nhome=%s\nprojects=%s\nscope=%s\n' \
-    "$id" "$returned" "$projects" "$scope" | shasum -a 256 | awk '{print $1}')
+  digest=$(secondmate_seed_identity_digest "$id" "$returned" "$projects" "$scope")
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/seed-receipt" <<EOF
 schema=fm-secondmate-seed.v1

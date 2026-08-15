@@ -2323,9 +2323,8 @@ recover_returned_secondmate() {
       echo "REFUSED: secondmate seed receipt home does not match parent metadata; preserving records" >&2
       return 1
     }
-    expected_digest=$(printf 'id=%s\nhome=%s\nprojects=%s\nscope=%s\n' \
-      "$receipt_id" "$receipt_home" "$receipt_projects" "$receipt_scope" \
-      | shasum -a 256 | awk '{print $1}')
+    expected_digest=$(secondmate_seed_identity_digest \
+      "$receipt_id" "$receipt_home" "$receipt_projects" "$receipt_scope")
     [ -n "$expected_digest" ] && [ "$expected_digest" = "$receipt_digest" ] || {
       echo "REFUSED: secondmate seed receipt identity digest is invalid; preserving records" >&2
       return 1

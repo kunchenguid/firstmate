@@ -17,7 +17,9 @@
 #       never converts populated homes in place. The charter brief
 #       is copied to data/charter.md, newly cloned no-mistakes projects are
 #       initialized, an ignored .fm-secondmate-parent binding is published before
-#       the .fm-secondmate-home identity marker, and data/secondmates.md is updated.
+#       the .fm-secondmate-home identity marker, data/secondmates.md is updated,
+#       and the parent retains a seed receipt binding the id, canonical home,
+#       project list, and routing scope.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
@@ -29,7 +31,9 @@
 #   fm-home-seed.sh validate
 #       Refuse records that operational consumers cannot parse, unavailable or
 #       unsafe registry files when present, non-absolute or unresolvable homes,
-#       duplicate ids or homes, and nested or overlapping homes.
+#       duplicate ids or homes, nested or overlapping homes, and equivalent
+#       normalized scopes sharing a project; project clone lists remain
+#       non-exclusive when their routing scopes differ.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -751,8 +755,7 @@ write_seed_receipt() {  # <id> <home> <projects-csv> <brief>
   local id=$1 home=$2 projects_csv=$3 brief=$4 scope receipt tmp digest
   scope=$(registry_scope_for_brief "$brief")
   receipt="$DATA/$id/seed-receipt"
-  digest=$(printf 'id=%s\nhome=%s\nprojects=%s\nscope=%s\n' \
-    "$id" "$home" "$projects_csv" "$scope" | shasum -a 256 | awk '{print $1}') || return 1
+  digest=$(secondmate_seed_identity_digest "$id" "$home" "$projects_csv" "$scope") || return 1
   mkdir -p "$(dirname "$receipt")" || return 1
   tmp="$receipt.tmp.$$"
   {

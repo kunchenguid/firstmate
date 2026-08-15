@@ -31,6 +31,11 @@ SECONDMATE_REGISTRY_ERROR=
 secondmate_registry_lock_path() { printf '%s/.secondmate-registry.lock\n' "$1"; }
 secondmate_reply_lifecycle_lock_path() { printf '%s/.remote-reply-lifecycle-%s.lock\n' "$1" "$2"; }
 
+secondmate_seed_identity_digest() {
+  printf 'id=%s\nhome=%s\nprojects=%s\nscope=%s\n' "$1" "$2" "$3" "$4" \
+    | shasum -a 256 | awk '{print $1}'
+}
+
 secondmate_registry_parse_line() {
   local line=$1
   local local_re='^- ([A-Za-z0-9._-]+) - (.+) \(home:[[:space:]]*([^;)]*);[[:space:]]*scope:[[:space:]]*(.*);[[:space:]]*projects:[[:space:]]*([^;)]*);[[:space:]]*added[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2})\)[[:space:]]*$'
