@@ -2316,10 +2316,8 @@ EOF
   fi
   if [ "$strict_mode" = strict ]; then
     fm_backend_herdr_relaunch_claim_bind_endpoint "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id" || return 1
-    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
-      fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id" || return 1
-      return 1
-    }
+    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+    printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
     if printf '%s' "$list" | jq -e --arg label "$label" 'any(.result.tabs[]?; .label == $label)' >/dev/null 2>&1; then
       fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id" || return 1
       echo "error: herdr tab appeared during replacement for label '$label' in workspace $wsid (session $session)" >&2
@@ -2331,9 +2329,7 @@ EOF
     }
   fi
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
-    if [ "$strict_mode" = strict ]; then
-      fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id"
-    else
+    if [ "$strict_mode" != strict ]; then
       fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id"
     fi || {
       echo "error: could not reclaim replacement herdr pane $pane_id after an unreadable duplicate check for label '$label' in workspace $wsid (session $session)" >&2
@@ -2343,9 +2339,7 @@ EOF
     return 1
   }
   if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
-    if [ "$strict_mode" = strict ]; then
-      fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id"
-    else
+    if [ "$strict_mode" != strict ]; then
       fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id"
     fi || {
       echo "error: could not reclaim replacement herdr pane $pane_id after an unreadable duplicate check for label '$label' in workspace $wsid (session $session)" >&2

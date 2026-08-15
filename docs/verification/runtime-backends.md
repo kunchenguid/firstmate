@@ -580,7 +580,7 @@ That command is the guard that refreshes this record; run it after every Herdr u
 
 ### Missing-pane relaunch scope
 
-The 2026-08-14 missing-pane recovery change was inspected across every supported runtime and primary harness integration.
+The 2026-08-14 missing-pane recovery change was inspected across every supported runtime and verified harness integration.
 
 | Axis | Inspected surface | Unaffected result |
 | --- | --- | --- |
@@ -596,6 +596,7 @@ The 2026-08-14 missing-pane recovery change was inspected across every supported
 | grok | shared launch construction after backend endpoint publication | Herdr claim handling completes before the Grok command is delivered. |
 | kimi | shared launch construction after backend endpoint publication | Herdr claim handling completes before the Kimi command is delivered. |
 | cursor | shared launch construction after backend endpoint publication | Herdr claim handling completes before the Cursor command is delivered. |
+| muse | shared launch construction after backend endpoint publication | Herdr claim handling completes before the Muse command is delivered; its secondmate refusal is an independent harness constraint. |
 
 ### Away-mode transport
 
