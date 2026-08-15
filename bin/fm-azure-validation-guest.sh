@@ -329,7 +329,8 @@ EXPECTED_LUKS=$(jq -r '.credential_lease.disk.luks_uuid' "$REQUEST")
 PROVIDER_PATH=$(jq -r '.credential_lease.paths.provider_home' "$REQUEST")
 ACCOUNT_BINDING_PATH=$(jq -r '.credential_lease.paths.account_binding' "$REQUEST")
 GITHUB_TOKEN_PATH=$(jq -r '.credential_lease.paths.github_token' "$REQUEST")
-python3 - "$CREDENTIAL_MOUNT" "$PROVIDER_PATH" "$ACCOUNT_BINDING_PATH" "$GITHUB_TOKEN_PATH" "$REQUEST" <<'PY'
+LEASE_BINDING_HELPER=$BOOTSTRAP/lease-binding.py
+cat >"$LEASE_BINDING_HELPER" <<'PY'
 import hashlib
 import json
 import os
@@ -386,16 +387,28 @@ for child in sorted(allowed_files):
     digest.update(content)
     digest.update(size.to_bytes(8, "big"))
 actual = "sha256:" + digest.hexdigest()
-if actual != request["credential_lease"]["disk_content_binding"]:
-    # Print both integrity digests (never content): a provider session
-    # legitimately mutates its home, so the operator must roll the lease
-    # descriptor forward from the observed value.
+expected = sys.argv[6] if len(sys.argv) > 6 else ""
+if expected and actual != expected:
+    # Print both integrity digests (never content): the next attempt or the
+    # operator rolls the sealed value forward from the observed one.
     raise SystemExit(
         "validation guest: credential disk content binding mismatch (expected {} observed {})".format(
-            request["credential_lease"]["disk_content_binding"], actual
+            expected, actual
         )
     )
+print(actual)
 PY
+chmod 0700 "$LEASE_BINDING_HELPER"
+# A provider session legitimately mutates its home, so the staged binding can
+# only prove the FIRST attach. Later attempts verify against the binding the
+# previous attempt sealed into the retained identity: a chain of custody from
+# staging through every attempt.
+EXPECTED_BINDING=$(jq -r '.credential_lease.disk_content_binding' "$REQUEST")
+if [ "$MODE" != start ] && [ -f "$STATE/identity.json" ]; then
+  SEALED_BINDING=$(jq -r '.credential_content_binding // empty' "$STATE/identity.json")
+  [ -n "$SEALED_BINDING" ] && EXPECTED_BINDING=$SEALED_BINDING
+fi
+python3 "$LEASE_BINDING_HELPER" "$CREDENTIAL_MOUNT" "$PROVIDER_PATH" "$ACCOUNT_BINDING_PATH" "$GITHUB_TOKEN_PATH" "$REQUEST" "$EXPECTED_BINDING" >/dev/null
 PROVIDER_HOME=$CREDENTIAL_MOUNT/$PROVIDER_PATH
 GITHUB_TOKEN_FILE=$CREDENTIAL_MOUNT/$GITHUB_TOKEN_PATH
 [ -f "$GITHUB_TOKEN_FILE" ] || { echo "validation guest: exact GitHub token file is absent" >&2; exit 125; }
@@ -653,6 +666,12 @@ if [ -n "$RUN_ID" ]; then
   jq --arg run "$RUN_ID" '.run_id=$run' "$IDENTITY" >"$tmp"
   mv "$tmp" "$IDENTITY"
 fi
+# Seal the post-attempt credential binding for the next attempt's custody
+# verification; the session may have legitimately mutated the provider home.
+NEW_BINDING=$(python3 "$LEASE_BINDING_HELPER" "$CREDENTIAL_MOUNT" "$PROVIDER_PATH" "$ACCOUNT_BINDING_PATH" "$GITHUB_TOKEN_PATH" "$REQUEST")
+tmp=$IDENTITY.tmp
+jq --arg binding "$NEW_BINDING" '.credential_content_binding=$binding' "$IDENTITY" >"$tmp"
+mv "$tmp" "$IDENTITY"
 CURRENT_HEAD=$(git -C "$REPO" rev-parse HEAD)
 CURRENT_TREE=$(git -C "$REPO" rev-parse 'HEAD^{tree}')
 REMOTE_HEAD=$(git -C "$REPO" ls-remote --heads origin "refs/heads/$BRANCH" | awk 'NR==1 {print $1}')

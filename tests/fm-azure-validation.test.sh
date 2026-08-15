@@ -159,6 +159,9 @@ assert "awaiting[_ -]approval" in guest
 assert "grep -Eq '^gate:' \"$RUN_LOG\"" in guest
 assert guest.index("gate:") < guest.index('"$STATUS_RC" -eq 0 ] && grep -Eiq')
 assert "credential disk content binding mismatch (expected {} observed {})" in guest
+assert "credential_content_binding // empty" in guest
+assert '.credential_content_binding=$binding' in guest
+assert guest.index("SEALED_BINDING") < guest.index('"$LEASE_BINDING_HELPER" "$CREDENTIAL_MOUNT" "$PROVIDER_PATH" "$ACCOUNT_BINDING_PATH" "$GITHUB_TOKEN_PATH" "$REQUEST" "$EXPECTED_BINDING"')
 assert "cell worktree is detached and no declared branch identity is present" in bridge
 assert '"$NM_BIN" axi sync --recover' in guest
 assert 'cp "$STATUS_LOG" "$EVIDENCE/attempt-$ATTEMPT/status.log"' in guest
