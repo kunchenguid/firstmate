@@ -139,9 +139,11 @@
 #   and reset to origin's current default branch. A local-only ship uses the
 #   local default branch when it is ahead of or diverged from origin, and uses
 #   origin when the local branch is behind it. A local-only project without an
-#   origin uses its local default branch. An unreachable origin for a
-#   remote-backed task, an unresolved default branch, or a non-clean worktree
-#   refuses the spawn rather than risking work based on stale history.
+#   origin resolves its local default from repository-local init.defaultBranch,
+#   then main, then master, and refuses when none names an existing branch. An
+#   unreachable origin for a remote-backed task, an unresolved default branch,
+#   or a non-clean worktree refuses the spawn rather than risking work based on
+#   stale history.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1731,6 +1733,27 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+local_default_branch_without_origin() {
+  local dir=$1 configured branch
+  configured=$(git -C "$dir" config --local --get init.defaultBranch 2>/dev/null || true)
+  if [ -n "$configured" ] && git -C "$dir" show-ref --verify --quiet "refs/heads/$configured"; then
+    printf '%s\n' "$configured"
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
+      printf '%s\n' "$branch"
+      return 0
+    fi
+  done
+  if [ -n "$configured" ]; then
+    echo "error: repository-local init.defaultBranch '$configured' does not name existing local reference 'refs/heads/$configured' in '$dir'; refs/heads/main and refs/heads/master are also missing" >&2
+  else
+    echo "error: repository '$dir' has no repository-local init.defaultBranch; refs/heads/main and refs/heads/master are also missing" >&2
+  fi
+  return 1
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status local_ref local_sha remote_sha
   local has_origin=0
@@ -1754,10 +1777,7 @@ freshen_spawn_worktree_base() {  # <worktree>
   if [ "$has_origin" -eq 1 ]; then
     default=$(default_branch "$worktree") || default=
   else
-    default=$(git -C "$PROJ_ABS" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-    if [ -z "$default" ]; then
-      default=$(default_branch "$PROJ_ABS") || default=
-    fi
+    default=$(local_default_branch_without_origin "$PROJ_ABS") || return 1
   fi
   [ -n "$default" ] || {
     echo "error: could not determine the project's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2

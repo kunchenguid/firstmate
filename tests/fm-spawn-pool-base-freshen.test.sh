@@ -169,24 +169,58 @@ test_local_only_uses_remote_when_local_is_behind() {
 }
 
 test_local_only_without_origin_uses_local_base() {
-  local rec id out status local_head
+  local rec id out status local_head feature_head
   id='pool-local-only-no-origin-r1'
   rec=$(make_case local-only-no-origin "$id" trunk behind)
   read_case_record "$rec"
   git -C "$PROJECT_DIR" remote remove origin
+  git -C "$PROJECT_DIR" config --local init.defaultBranch "$DEFAULT_BRANCH"
   printf 'must survive without an origin\n' > "$PROJECT_DIR/local-trunk.txt"
   git -C "$PROJECT_DIR" add local-trunk.txt
   git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local-trunk
+  local_head=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  git -C "$PROJECT_DIR" checkout --quiet -b fixture-current
+  printf 'must not become the pooled base\n' > "$PROJECT_DIR/feature-only.txt"
+  git -C "$PROJECT_DIR" add feature-only.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-feature
+  feature_head=$(git -C "$PROJECT_DIR" rev-parse HEAD)
 
   out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?
   expect_code 0 "$status" "local-only spawn should work without an origin"
-  local_head=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_head" ] \
-    || fail "local-only spawn without origin did not use the local branch"
+    || fail "local-only spawn without origin did not use repository-local init.defaultBranch"
+  [ "$local_head" != "$feature_head" ] \
+    || fail "fixture did not distinguish the configured default from the current branch"
   assert_grep 'must survive without an origin' "$POOL_DIR/local-trunk.txt" \
     "local-only spawn without origin omitted the local default branch commit"
-  pass "a local-only spawn without origin uses the local default branch"
+  [ ! -e "$POOL_DIR/feature-only.txt" ] \
+    || fail "local-only spawn without origin treated the current feature branch as default"
+  pass "a local-only spawn without origin uses repository-local init.defaultBranch"
+}
+
+test_local_only_without_resolvable_default_refuses_detached_checkout() {
+  local rec id out status before after
+  id='pool-local-only-no-default-r1'
+  rec=$(make_case local-only-no-default "$id" topic behind)
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" remote remove origin
+  git -C "$PROJECT_DIR" config --local init.defaultBranch trunk
+  git -C "$PROJECT_DIR" checkout --quiet --detach
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only spawn used detached HEAD as the default branch"
+  assert_contains "$out" "repository-local init.defaultBranch 'trunk'" \
+    "spawn did not identify the configured local default"
+  assert_contains "$out" "refs/heads/trunk" \
+    "spawn did not name the missing configured local reference"
+  assert_contains "$out" "refs/heads/main and refs/heads/master are also missing" \
+    "spawn did not name the missing fallback references"
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn moved the pool after rejecting an unresolved local default"
+  pass "a detached local-only checkout without a resolvable default is refused"
 }
 
 test_non_main_default_branch_refreshes_before_branching() {
@@ -299,6 +333,7 @@ test_stale_pool_base_refreshes_before_branching
 test_local_only_prefers_ahead_local_base
 test_local_only_uses_remote_when_local_is_behind
 test_local_only_without_origin_uses_local_base
+test_local_only_without_resolvable_default_refuses_detached_checkout
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
