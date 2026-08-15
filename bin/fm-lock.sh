@@ -25,10 +25,11 @@ harness_pid() {
     if printf '%s' "$(basename "$comm")" | grep -qE "$HARNESS_RE"; then
       echo "$pid"; return 0
     fi
-    # Bare interpreter (e.g. node): match the harness name in its script path.
-    case "$comm" in
-      *node*|*python*) printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; } ;;
-    esac
+    # comm alone can miss a harness invoked via a versioned/symlinked binary
+    # (e.g. comm "2.1.233" for a Claude build at .../claude/versions/2.1.233)
+    # or a bare interpreter (e.g. node, python) wrapping the harness script.
+    # args reliably carries the harness name in its path either way.
+    printf '%s' "$args" | grep -qE "$HARNESS_RE" && { echo "$pid"; return 0; }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
