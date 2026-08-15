@@ -1990,8 +1990,195 @@ fm_backend_herdr_agent_alive() {  # <target>
 # the safety argument). An ADOPTED workspace's caller always passes an empty
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
-fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id created_tab created_pane post_create_dup_tabs concurrent_dup_tabs remaining_dup_tabs
+fm_backend_herdr_relaunch_claim_path() {  # <state> <task-id>
+  printf '%s/.%s.herdr-relaunch-claim' "$1" "$2"
+}
+
+fm_backend_herdr_relaunch_claim_create() {  # <state> <task-id> <session> <workspace> <task-label>
+  local state=$1 id=$2 session=$3 workspace=$4 label=$5 path token claim_label tmp
+  case "$id:$session:$workspace:$label" in
+    ''|*$'\n'*|*'\r'*|:::*) return 1 ;;
+  esac
+  [ -d "$state" ] || return 1
+  mkdir -p "$state" || return 1
+  path=$(fm_backend_herdr_relaunch_claim_path "$state" "$id") || return 1
+  [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+  token=$(fm_backend_herdr_projection_id) || return 1
+  claim_label="${label}~claim-${token}"
+  tmp=$(mktemp "$state/.${id}.herdr-relaunch-claim.XXXXXX") || return 1
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! {
+    printf 'version=1\n'
+    printf 'task_id=%s\n' "$id"
+    printf 'session=%s\n' "$session"
+    printf 'workspace_id=%s\n' "$workspace"
+    printf 'task_label=%s\n' "$label"
+    printf 'claim_label=%s\n' "$claim_label"
+    printf 'tab_id=\n'
+    printf 'pane_id=\n'
+  } > "$tmp" || ! ln "$tmp" "$path" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+  printf '%s %s' "$path" "$claim_label"
+}
+
+fm_backend_herdr_relaunch_claim_snapshot() {  # <path> <task-id>
+  local path=$1 id=$2 lines
+  FM_BACKEND_HERDR_RELAUNCH_CLAIM_SESSION=""
+  FM_BACKEND_HERDR_RELAUNCH_CLAIM_WORKSPACE=""
+  FM_BACKEND_HERDR_RELAUNCH_CLAIM_TASK_LABEL=""
+  FM_BACKEND_HERDR_RELAUNCH_CLAIM_LABEL=""
+  FM_BACKEND_HERDR_RELAUNCH_CLAIM_TAB=""
+  FM_BACKEND_HERDR_RELAUNCH_CLAIM_PANE=""
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  lines=$(wc -l < "$path" 2>/dev/null | tr -d '[:space:]')
+  [ "$lines" = 8 ] || return 1
+  [ "$(fm_backend_herdr_projection_journal_field "$path" version)" = 1 ] || return 1
+  [ "$(fm_backend_herdr_projection_journal_field "$path" task_id)" = "$id" ] || return 1
+  FM_BACKEND_HERDR_RELAUNCH_CLAIM_SESSION=$(fm_backend_herdr_projection_journal_field "$path" session) || return 1
+  FM_BACKEND_HERDR_RELAUNCH_CLAIM_WORKSPACE=$(fm_backend_herdr_projection_journal_field "$path" workspace_id) || return 1
+  FM_BACKEND_HERDR_RELAUNCH_CLAIM_TASK_LABEL=$(fm_backend_herdr_projection_journal_field "$path" task_label) || return 1
+  FM_BACKEND_HERDR_RELAUNCH_CLAIM_LABEL=$(fm_backend_herdr_projection_journal_field "$path" claim_label) || return 1
+  FM_BACKEND_HERDR_RELAUNCH_CLAIM_TAB=$(fm_backend_herdr_projection_journal_field "$path" tab_id) || return 1
+  FM_BACKEND_HERDR_RELAUNCH_CLAIM_PANE=$(fm_backend_herdr_projection_journal_field "$path" pane_id) || return 1
+  case "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_SESSION:$FM_BACKEND_HERDR_RELAUNCH_CLAIM_WORKSPACE:$FM_BACKEND_HERDR_RELAUNCH_CLAIM_TASK_LABEL:$FM_BACKEND_HERDR_RELAUNCH_CLAIM_LABEL" in
+    *$'\n'*|*$'\r'*|:::*) return 1 ;;
+  esac
+}
+
+fm_backend_herdr_relaunch_claim_bind_endpoint() {  # <path> <task-id> <tab> <pane>
+  local path=$1 id=$2 tab=$3 pane=$4 state tmp
+  fm_backend_herdr_relaunch_claim_snapshot "$path" "$id" || return 1
+  state=$(dirname "$path")
+  tmp=$(mktemp "$state/.${id}.herdr-relaunch-claim.bind.XXXXXX") || return 1
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! {
+    printf 'version=1\n'
+    printf 'task_id=%s\n' "$id"
+    printf 'session=%s\n' "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_SESSION"
+    printf 'workspace_id=%s\n' "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_WORKSPACE"
+    printf 'task_label=%s\n' "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_TASK_LABEL"
+    printf 'claim_label=%s\n' "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_LABEL"
+    printf 'tab_id=%s\n' "$tab"
+    printf 'pane_id=%s\n' "$pane"
+  } > "$tmp" || ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+fm_backend_herdr_relaunch_claim_remove() {  # <path> <task-id>
+  local path=$1 id=$2
+  fm_backend_herdr_relaunch_claim_snapshot "$path" "$id" || return 1
+  rm -f "$path"
+}
+
+fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <home> <task-label>
+  local session=$1 workspace=$2 id=$3 home=$4 label=$5 state path tab pane tab_info pane_info endpoint_label agent_state list matches
+  state="$home/state"
+  path=$(fm_backend_herdr_relaunch_claim_path "$state" "$id") || return 1
+  [ ! -e "$path" ] && [ ! -L "$path" ] && return 0
+  fm_backend_herdr_relaunch_claim_snapshot "$path" "$id" || return 1
+  [ "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_SESSION" = "$session" ] \
+    && [ "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_WORKSPACE" = "$workspace" ] \
+    && [ "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_TASK_LABEL" = "$label" ] || return 1
+  tab=$FM_BACKEND_HERDR_RELAUNCH_CLAIM_TAB
+  pane=$FM_BACKEND_HERDR_RELAUNCH_CLAIM_PANE
+  if [ -z "$tab" ] || [ -z "$pane" ]; then
+    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+    printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
+    matches=$(printf '%s' "$list" | jq -r --arg claim "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_LABEL" '
+      [.result.tabs[]? | select(.label == $claim)] | length
+    ' 2>/dev/null)
+    case "$matches" in
+      0)
+        fm_backend_herdr_relaunch_claim_remove "$path" "$id" || return 1
+        return 2
+        ;;
+      1) ;;
+      *) return 1 ;;
+    esac
+    tab=$(printf '%s' "$list" | jq -r --arg claim "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_LABEL" '
+      .result.tabs[]? | select(.label == $claim) | .tab_id
+    ' 2>/dev/null)
+    [ -n "$tab" ] || return 1
+    pane=$(fm_backend_herdr_pane_for_tab "$session" "$workspace" "$tab")
+    [ -n "$pane" ] || return 1
+    fm_backend_herdr_relaunch_claim_bind_endpoint "$path" "$id" "$tab" "$pane" || return 1
+  fi
+  tab_info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || {
+    [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" = dead ] || return 1
+    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+    if ! printf '%s' "$list" | jq -e --arg tab "$tab" '
+      (.result.tabs | type) == "array"
+        and all(.result.tabs[]?; .tab_id != $tab)
+    ' >/dev/null 2>&1; then
+      return 1
+    fi
+    fm_backend_herdr_relaunch_claim_remove "$path" "$id" || return 1
+    return 2
+  }
+  pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  endpoint_label=$(printf '%s' "$tab_info" | jq -r '.result.tab.label // empty' 2>/dev/null)
+  if ! printf '%s' "$tab_info" | jq -e --arg tab "$tab" --arg workspace "$workspace" \
+      --arg claim "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_LABEL" --arg label "$label" '
+      .result.tab.tab_id == $tab
+        and .result.tab.workspace_id == $workspace
+        and (.result.tab.label == $claim or .result.tab.label == $label)
+    ' >/dev/null 2>&1 \
+    || ! printf '%s' "$pane_info" | jq -e --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+      .result.pane.pane_id == $pane
+        and .result.pane.tab_id == $tab
+        and .result.pane.workspace_id == $workspace
+    ' >/dev/null 2>&1; then
+    return 1
+  fi
+  case "$endpoint_label" in
+    "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_LABEL"|"$label") ;;
+    *) return 1 ;;
+  esac
+  agent_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+  [ "$agent_state" = no-agent ] || return 1
+  fm_backend_herdr_projection_reclaim_rollback "$session" "$pane" || return 1
+  fm_backend_herdr_relaunch_claim_remove "$path" "$id" || return 1
+  return 2
+}
+
+fm_backend_herdr_relaunch_claim_reclaim() {  # <session> <claim-path> <task-id> <tab> <pane>
+  local session=$1 path=$2 id=$3 tab=$4 pane=$5 tab_info pane_info
+  fm_backend_herdr_relaunch_claim_snapshot "$path" "$id" || return 1
+  [ "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_TAB:$FM_BACKEND_HERDR_RELAUNCH_CLAIM_PANE" = "$tab:$pane" ] || return 1
+  tab_info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+  pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  if ! printf '%s' "$tab_info" | jq -e --arg tab "$tab" \
+      --arg workspace "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_WORKSPACE" \
+      --arg claim "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_LABEL" \
+      --arg label "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_TASK_LABEL" '
+      .result.tab.tab_id == $tab
+        and .result.tab.workspace_id == $workspace
+        and (.result.tab.label == $claim or .result.tab.label == $label)
+    ' >/dev/null 2>&1 \
+    || ! printf '%s' "$pane_info" | jq -e --arg pane "$pane" --arg tab "$tab" \
+      --arg workspace "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_WORKSPACE" '
+      .result.pane.pane_id == $pane
+        and .result.pane.tab_id == $tab
+        and .result.pane.workspace_id == $workspace
+    ' >/dev/null 2>&1; then
+    return 1
+  fi
+  fm_backend_herdr_projection_reclaim_rollback "$session" "$pane" || return 1
+  fm_backend_herdr_relaunch_claim_remove "$path" "$id"
+}
+
+fm_backend_herdr_create_task() {  # <container> <label> <cwd> [<seeded-default-tab> [strict <task-id> <home>]]
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} strict_mode=${5:-} strict_id=${6:-} strict_home=${7:-}
+  local session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id created_tab created_pane post_create_dup_tabs concurrent_dup_tabs remaining_dup_tabs strict_state strict_claim strict_claim_path strict_claim_label
+  case "$strict_mode" in
+    ''|strict) ;;
+    *) return 1 ;;
+  esac
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -2001,6 +2188,10 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
   }
   dup_tab_ids=""
   if [ -n "$dup_tabs" ]; then
+    if [ "$strict_mode" = strict ]; then
+      echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
+      return 1
+    fi
     while IFS= read -r dup; do
       [ -n "$dup" ] || continue
       dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
@@ -2013,18 +2204,42 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
 $dup_tabs
 EOF
   fi
-  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  if [ "$strict_mode" = strict ]; then
+    [ -n "$strict_id" ] && [ -d "$strict_home/state" ] || {
+      echo "error: herdr missing-pane relaunch cannot establish a durable replacement claim" >&2
+      return 1
+    }
+    strict_state="$strict_home/state"
+    strict_claim=$(fm_backend_herdr_relaunch_claim_create "$strict_state" "$strict_id" "$session" "$wsid" "$label") || {
+      echo "error: herdr missing-pane relaunch has an unresolved or unreadable replacement claim for $strict_id" >&2
+      return 1
+    }
+    read -r strict_claim_path strict_claim_label <<EOF
+$strict_claim
+EOF
+  fi
+  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "${strict_claim_label:-$label}" --no-focus 2>/dev/null) || return 1
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
   fi
+  if [ "$strict_mode" = strict ]; then
+    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+    tab_id=$(printf '%s' "$list" | jq -r --arg claim "$strict_claim_label" '
+      [.result.tabs[]? | select(.label == $claim)]
+      | if length == 1 then .[0].tab_id else empty end
+    ' 2>/dev/null)
+    [ -n "$tab_id" ] || return 1
+    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id")
+    [ -n "$pane_id" ] || return 1
+  fi
   created_tab=$(fm_backend_herdr_cli "$session" tab get "$tab_id" 2>/dev/null) || {
     echo "error: could not verify herdr tab create response for replacement tab $tab_id in workspace $wsid (session $session); retaining the unlaunched replacement" >&2
     return 1
   }
-  if ! printf '%s' "$created_tab" | jq -e --arg tab "$tab_id" --arg workspace "$wsid" --arg label "$label" '
+  if ! printf '%s' "$created_tab" | jq -e --arg tab "$tab_id" --arg workspace "$wsid" --arg label "${strict_claim_label:-$label}" '
     .result.tab.tab_id == $tab
       and .result.tab.workspace_id == $workspace
       and .result.tab.label == $label
@@ -2044,8 +2259,22 @@ EOF
     echo "error: herdr tab create response does not bind replacement tab $tab_id and pane $pane_id to label '$label' in workspace $wsid (session $session)" >&2
     return 1
   fi
+  if [ "$strict_mode" = strict ]; then
+    fm_backend_herdr_relaunch_claim_bind_endpoint "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id" || return 1
+    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+    if printf '%s' "$list" | jq -e --arg label "$label" 'any(.result.tabs[]?; .label == $label)' >/dev/null 2>&1; then
+      fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id" || return 1
+      echo "error: herdr tab appeared during replacement for label '$label' in workspace $wsid (session $session)" >&2
+      return 1
+    fi
+    fm_backend_herdr_cli "$session" tab rename "$tab_id" "$label" >/dev/null 2>&1 || return 1
+  fi
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
-    fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id" || {
+    if [ "$strict_mode" = strict ]; then
+      fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id"
+    else
+      fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id"
+    fi || {
       echo "error: could not reclaim replacement herdr pane $pane_id after an unreadable duplicate check for label '$label' in workspace $wsid (session $session)" >&2
       return 1
     }
@@ -2053,7 +2282,11 @@ EOF
     return 1
   }
   if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
-    fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id" || {
+    if [ "$strict_mode" = strict ]; then
+      fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id"
+    else
+      fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id"
+    fi || {
       echo "error: could not reclaim replacement herdr pane $pane_id after an unreadable duplicate check for label '$label' in workspace $wsid (session $session)" >&2
       return 1
     }
@@ -2084,7 +2317,11 @@ $post_create_dup_tabs
 EOF
   concurrent_dup_tabs=${concurrent_dup_tabs//$'\n'/ }
   if [ -n "$concurrent_dup_tabs" ]; then
-    fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id" || {
+    if [ "$strict_mode" = strict ]; then
+      fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id"
+    else
+      fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id"
+    fi || {
       echo "error: could not reclaim replacement herdr pane $pane_id after concurrent tab(s) $concurrent_dup_tabs appeared for label '$label' in workspace $wsid (session $session)" >&2
       return 1
     }
@@ -2124,7 +2361,11 @@ $remaining_dup_tabs
 EOF
     concurrent_dup_tabs=${concurrent_dup_tabs//$'\n'/ }
     if [ -n "$concurrent_dup_tabs" ]; then
-      fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id" || {
+      if [ "$strict_mode" = strict ]; then
+        fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id"
+      else
+        fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id"
+      fi || {
         echo "error: could not reclaim replacement herdr pane $pane_id after concurrent tab(s) $concurrent_dup_tabs appeared for label '$label' in workspace $wsid (session $session)" >&2
         return 1
       }
@@ -2134,7 +2375,11 @@ EOF
     echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session); retaining the unlaunched replacement" >&2
     return 1
   fi
-  printf '%s %s' "$tab_id" "$pane_id"
+  if [ "$strict_mode" = strict ]; then
+    printf '%s %s %s' "$tab_id" "$pane_id" "$strict_claim_path"
+  else
+    printf '%s %s' "$tab_id" "$pane_id"
+  fi
 }
 
 # fm_backend_herdr_relaunch_missing_pane: create a replacement for a task whose
@@ -2146,7 +2391,7 @@ EOF
 # existing create-before-close husk-replacement boundary. Echoes "<tab> <pane>".
 fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <old-pane> <label> <cwd> [<journal> <task-id> <home>]
   local session=$1 workspace=$2 old_tab=$3 old_pane=$4 label=$5 cwd=$6 journal=${7:-} id=${8:-} home=${9:-}
-  local info tabs old_count old_pane_now state canonical_home replacement new_tab new_pane
+  local info tabs old_count old_pane_now state canonical_home replacement claim_status
   state=$(fm_backend_herdr_pane_agent_state "$session" "$old_pane")
   [ "$state" = dead ] || {
     echo "error: herdr missing-pane relaunch requires the recorded pane to remain gone, got $state" >&2
@@ -2213,23 +2458,23 @@ fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <o
       return 1
       ;;
   esac
-  replacement=$(fm_backend_herdr_create_task "$session:$workspace" "$label" "$cwd") || return 1
-  [ -n "$journal" ] || {
-    printf '%s' "$replacement"
-    return 0
-  }
-  read -r new_tab new_pane <<EOF
-$replacement
-EOF
-  if [ -z "$new_tab" ] || [ -z "$new_pane" ] \
-     || ! fm_backend_herdr_projection_journal_replace_endpoint \
-       "$journal" "$id" "$old_tab" "$old_pane" "$new_tab" "$new_pane"; then
-    fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane" || {
-      echo "error: herdr missing-pane relaunch could not roll back its unbound replacement for $id" >&2
-      return 1
-    }
-    echo "error: herdr missing-pane relaunch could not publish the presentation binding for $id" >&2
-    return 1
+  if [ -n "$id" ] && [ -n "$home" ]; then
+    fm_backend_herdr_relaunch_claim_recover "$session" "$workspace" "$id" "$home" "$label"
+    claim_status=$?
+    case "$claim_status" in
+      0) ;;
+      2)
+        echo "error: herdr missing-pane relaunch reclaimed an interrupted replacement for $id; retry the relaunch" >&2
+        return 1
+        ;;
+      *)
+        echo "error: herdr missing-pane relaunch has an unresolved replacement claim for $id" >&2
+        return 1
+        ;;
+    esac
+    replacement=$(fm_backend_herdr_create_task "$session:$workspace" "$label" "$cwd" "" strict "$id" "$home") || return 1
+  else
+    replacement=$(fm_backend_herdr_create_task "$session:$workspace" "$label" "$cwd") || return 1
   fi
   printf '%s' "$replacement"
 }
@@ -2237,8 +2482,13 @@ EOF
 fm_backend_herdr_relaunch_missing_pane_rollback() {
   local session=$1 journal=$2 id=$3 old_tab=$4 old_pane=$5 new_tab=$6 new_pane=$7
   if [ -n "$journal" ]; then
-    fm_backend_herdr_projection_journal_replace_endpoint \
-      "$journal" "$id" "$new_tab" "$new_pane" "$old_tab" "$old_pane" || return 1
+    fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+    if [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$new_tab:$new_pane" ]; then
+      fm_backend_herdr_projection_journal_replace_endpoint \
+        "$journal" "$id" "$new_tab" "$new_pane" "$old_tab" "$old_pane" || return 1
+    elif [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" != "$old_tab:$old_pane" ]; then
+      return 1
+    fi
   fi
   fm_backend_herdr_projection_reclaim_rollback "$session" "$new_pane"
 }

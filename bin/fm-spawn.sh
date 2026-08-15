@@ -657,6 +657,7 @@ HERDR_MISSING_PANE_REPLACEMENT_OLD_TAB=
 HERDR_MISSING_PANE_REPLACEMENT_OLD_PANE=
 HERDR_MISSING_PANE_REPLACEMENT_NEW_TAB=
 HERDR_MISSING_PANE_REPLACEMENT_NEW_PANE=
+HERDR_MISSING_PANE_REPLACEMENT_CLAIM=
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
@@ -742,6 +743,10 @@ spawn_abort_cleanup() {
         "$HERDR_MISSING_PANE_REPLACEMENT_NEW_TAB" \
         "$HERDR_MISSING_PANE_REPLACEMENT_NEW_PANE"; then
       echo "warning: could not roll back Herdr presentation endpoint after aborted relaunch of $ID" >&2
+    elif [ -n "$HERDR_MISSING_PANE_REPLACEMENT_CLAIM" ] \
+      && ! fm_backend_herdr_relaunch_claim_remove \
+        "$HERDR_MISSING_PANE_REPLACEMENT_CLAIM" "$ID"; then
+      echo "warning: could not clear Herdr replacement claim after aborted relaunch of $ID" >&2
     fi
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
@@ -1944,10 +1949,11 @@ case "$BACKEND" in
       HERDR_TASK_IDS=$(fm_backend_herdr_relaunch_missing_pane \
         "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$W" "$RELAUNCH_WT" \
         "$HERDR_MISSING_PANE_PRESENTATION_JOURNAL" "$ID" "$FM_HOME") || exit 1
-      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+      read -r HERDR_TAB_ID HERDR_PANE_ID HERDR_MISSING_PANE_REPLACEMENT_CLAIM <<EOF
 $HERDR_TASK_IDS
 EOF
-      if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+      if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ] \
+         || [ -z "$HERDR_MISSING_PANE_REPLACEMENT_CLAIM" ]; then
         echo "error: herdr missing-pane relaunch did not return a replacement tab/pane id for $W" >&2
         exit 1
       fi
@@ -1955,6 +1961,14 @@ EOF
       HERDR_MISSING_PANE_REPLACEMENT_JOURNAL=$HERDR_MISSING_PANE_PRESENTATION_JOURNAL
       HERDR_MISSING_PANE_REPLACEMENT_NEW_TAB=$HERDR_TAB_ID
       HERDR_MISSING_PANE_REPLACEMENT_NEW_PANE=$HERDR_PANE_ID
+      if [ -n "$HERDR_MISSING_PANE_PRESENTATION_JOURNAL" ] \
+         && ! fm_backend_herdr_projection_journal_replace_endpoint \
+           "$HERDR_MISSING_PANE_PRESENTATION_JOURNAL" "$ID" \
+           "$HERDR_MISSING_PANE_REPLACEMENT_OLD_TAB" "$HERDR_MISSING_PANE_REPLACEMENT_OLD_PANE" \
+           "$HERDR_MISSING_PANE_REPLACEMENT_NEW_TAB" "$HERDR_MISSING_PANE_REPLACEMENT_NEW_PANE"; then
+        echo "error: herdr missing-pane relaunch could not publish the presentation binding for $ID" >&2
+        exit 1
+      fi
       T="$HERDR_SES:$HERDR_PANE_ID"
       WT=$RELAUNCH_WT
       WT_TARGET=$T
@@ -2784,6 +2798,12 @@ preserve_relaunch_meta() {
   fi
 } > "$SPAWN_META_PATH"
 if [ "$RELAUNCH" -eq 1 ]; then
+  if [ -n "$HERDR_MISSING_PANE_REPLACEMENT_CLAIM" ] \
+     && ! fm_backend_herdr_relaunch_claim_remove \
+       "$HERDR_MISSING_PANE_REPLACEMENT_CLAIM" "$ID"; then
+    echo "error: could not finalize Herdr missing-pane replacement claim for $ID" >&2
+    exit 1
+  fi
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
   RELAUNCH_REPLACEMENT_PENDING=0

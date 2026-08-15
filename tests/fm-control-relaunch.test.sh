@@ -160,6 +160,10 @@ penultimate=$((last - 1))
 if [ "${#args[@]}" -ge 2 ] && [ "${args[$penultimate]}" = --session ]; then
   unset "args[$last]" "args[$penultimate]"
 fi
+created_label=
+[ ! -f "$dir/herdr-created-label" ] || created_label=$(cat "$dir/herdr-created-label")
+created_tab_label=$created_label
+[ ! -f "$dir/herdr-created-renamed" ] || created_tab_label=fm-hr1
 case "${args[0]:-} ${args[1]:-}" in
   'session list')
     printf '{"sessions":[{"name":"hses","running":true,"socket_path":"%s/herdr.sock"}]}\n' "$dir"
@@ -175,9 +179,15 @@ case "${args[0]:-} ${args[1]:-}" in
           printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3","workspace_id":"w1","label":"foreign"}}}'
           ;;
         postcreate-conflicting-pane|postcreate-tabs-unavailable|postcreate-tabs-malformed|postclose-tabs-unavailable|postclose-tabs-malformed)
-          printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3","workspace_id":"w1","label":"fm-hr1"}}}'
+          printf '{"result":{"tab":{"tab_id":"w1:t3","workspace_id":"w1","label":"%s"}}}\n' "$created_tab_label"
           ;;
       esac
+      case "$case_name" in
+        postcreate-tab-unreadable|postcreate-response-mismatch|postcreate-conflicting-pane|postcreate-tabs-unavailable|postcreate-tabs-malformed|postclose-tabs-unavailable|postclose-tabs-malformed) exit 0 ;;
+      esac
+    fi
+    if [ "${args[2]:-}" = w1:t3 ] && [ -n "$created_label" ]; then
+      printf '{"result":{"tab":{"tab_id":"w1:t3","workspace_id":"w1","label":"%s"}}}\n' "$created_tab_label"
       exit 0
     fi
     ;;
@@ -227,6 +237,14 @@ case "${args[0]:-} ${args[1]:-}" in
       fi
       exit 0
     fi
+    if [ "${args[2]:-}" = w1:p3 ] && [ -n "$created_label" ]; then
+      if [ -e "$dir/herdr-new-pane-closed" ]; then
+        printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+      else
+        printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p3","tab_id":"w1:t3","workspace_id":"w1"}}}'
+      fi
+      exit 0
+    fi
     ;;
   'agent get')
     if [ "${args[2]:-}" = w1:p3 ] && [ "$case_name" = postcreate-conflicting-pane ]; then
@@ -243,6 +261,10 @@ case "${args[0]:-} ${args[1]:-}" in
     fi
     if [ "${args[2]:-}" = w1:p3 ] && [ "$case_name" = conflicting-pane ]; then
       printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
+      exit 0
+    fi
+    if [ "${args[2]:-}" = w1:p3 ] && [ -n "$created_label" ]; then
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}'
       exit 0
     fi
     [ "${args[2]:-}" = w1:p2 ] && {
@@ -271,15 +293,15 @@ case "${args[0]:-} ${args[1]:-}" in
         printf '%s\n' "$reads" > "$reads_file"
         case "$reads" in
           1|2)
-            printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"}]}}'
+            printf '%s\n' '{"result":{"tabs":[]}}'
             ;;
           3)
-            printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"},{"tab_id":"w1:t3","workspace_id":"w1","label":"fm-hr1"},{"tab_id":"w1:t4","workspace_id":"w1","label":"fm-hr1"}]}}'
+            printf '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"%s"},{"tab_id":"w1:t4","workspace_id":"w1","label":"fm-hr1"}]}}\n' "$created_tab_label"
             ;;
           *)
             case " ${args[*]} " in
               *' --workspace w0 '*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w0:t0","focused":true}]}}' ;;
-              *) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"fm-hr1"},{"tab_id":"w1:t4","workspace_id":"w1","label":"fm-hr1"}]}}' ;;
+              *) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t4","workspace_id":"w1","label":"fm-hr1"}]}}' ;;
             esac
             ;;
         esac
@@ -292,8 +314,8 @@ case "${args[0]:-} ${args[1]:-}" in
         reads=$((reads + 1))
         printf '%s\n' "$reads" > "$reads_file"
         case "$reads" in
-          1|2) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"}]}}' ;;
-          *) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"},{"tab_id":"w1:t4","workspace_id":"w1","label":"fm-hr1"}]}}' ;;
+          1|2) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+          *) printf '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"%s"}]}}\n' "$created_tab_label" ;;
         esac
         exit 0
         ;;
@@ -310,7 +332,7 @@ case "${args[0]:-} ${args[1]:-}" in
         reads=$((reads + 1))
         printf '%s\n' "$reads" > "$reads_file"
         if [ "$reads" -le 2 ]; then
-          printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"}]}}'
+          printf '%s\n' '{"result":{"tabs":[]}}'
         elif [ "$case_name" = postcreate-tabs-unavailable ]; then
           exit 1
         else
@@ -326,10 +348,10 @@ case "${args[0]:-} ${args[1]:-}" in
         printf '%s\n' "$reads" > "$reads_file"
         case "$reads" in
           1|2)
-            printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"}]}}'
+            printf '%s\n' '{"result":{"tabs":[]}}'
             ;;
           3)
-            printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"},{"tab_id":"w1:t3","workspace_id":"w1","label":"fm-hr1"}]}}'
+            printf '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"%s"}]}}\n' "$created_tab_label"
             ;;
           *)
             if [ "$case_name" = postclose-tabs-unavailable ]; then exit 1; fi
@@ -351,6 +373,10 @@ case "${args[0]:-} ${args[1]:-}" in
         printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"},{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"}]}}'
         exit 0
         ;;
+      mismatched-pane)
+        printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"}]}}'
+        exit 0
+        ;;
       conflicting-pane)
         reads_file="$dir/herdr-tab-list-reads"
         reads=0
@@ -364,8 +390,21 @@ case "${args[0]:-} ${args[1]:-}" in
         fi
         exit 0
         ;;
+      conflicting-agentfree-pane)
+        printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"fm-hr1"}]}}'
+        exit 0
+        ;;
     esac
-    printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"fm-hr1"}]}}'
+    case " ${args[*]} " in
+      *' --workspace w0 '*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w0:t0","focused":true}]}}' ;;
+      *)
+    if [ -n "$created_label" ] && [ ! -e "$dir/herdr-new-pane-closed" ]; then
+      printf '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"%s"}]}}\n' "$created_tab_label"
+    else
+      printf '%s\n' '{"result":{"tabs":[]}}'
+    fi
+        ;;
+    esac
     exit 0
     ;;
   'pane list')
@@ -376,18 +415,21 @@ case "${args[0]:-} ${args[1]:-}" in
         [ -f "$reads_file" ] && reads=$(cat "$reads_file")
         reads=$((reads + 1))
         printf '%s\n' "$reads" > "$reads_file"
-        if [ "$reads" -le 2 ]; then
-          printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}'
-        else
-          printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"},{"pane_id":"w1:p4","tab_id":"w1:t4"}]}}'
-        fi
+        printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"},{"pane_id":"w1:p4","tab_id":"w1:t4"}]}}'
         ;;
       postclose-tabs-unavailable|postclose-tabs-malformed)
         printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}'
         ;;
       mismatched-pane) printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p9","tab_id":"w1:t2"}]}}' ;;
       conflicting-pane) printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}' ;;
-      *) printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}' ;;
+      conflicting-agentfree-pane) printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}' ;;
+      *)
+        if [ -n "$created_label" ] && [ ! -e "$dir/herdr-new-pane-closed" ]; then
+          printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}'
+        else
+          printf '%s\n' '{"result":{"panes":[]}}'
+        fi
+        ;;
     esac
     exit 0
     ;;
@@ -398,8 +440,17 @@ case "${args[0]:-} ${args[1]:-}" in
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w0","active_tab_id":"w0:t0","focused":true},{"workspace_id":"w1","active_tab_id":"w1:t3","focused":false}]}}'
       exit 0
     fi
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w0","active_tab_id":"w0:t0","focused":true},{"workspace_id":"w1","active_tab_id":"w1:t3","focused":false}]}}'
+    exit 0
     ;;
   'tab create')
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      [ "${args[$i]}" = --label ] || continue
+      printf '%s\n' "${args[$((i + 1))]}" > "$dir/herdr-created-label"
+      created_label=${args[$((i + 1))]}
+      created_tab_label=$created_label
+      break
+    done
     if [ "$case_name" = postcreate-conflicting-pane ]; then
       printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
       printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}'
@@ -418,7 +469,14 @@ case "${args[0]:-} ${args[1]:-}" in
         ;;
     esac
     printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
-    exit 1
+    printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}'
+    exit 0
+    ;;
+  'tab rename')
+    printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
+    [ "${args[2]:-}" = w1:t3 ] || exit 1
+    : > "$dir/herdr-created-renamed"
+    exit 0
     ;;
   'tab close'|'pane close')
     printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
@@ -426,6 +484,11 @@ case "${args[0]:-} ${args[1]:-}" in
        && { [ "$case_name" = postcreate-conflicting-pane ] \
          || [ "$case_name" = postcreate-tabs-unavailable ] \
          || [ "$case_name" = postcreate-tabs-malformed ]; }; then
+      : > "$dir/herdr-new-pane-closed"
+      exit 0
+    fi
+    if [ "${args[0]:-} ${args[1]:-} ${args[2]:-}" = 'pane close w1:p3' ] \
+       && [ -n "$created_label" ]; then
       : > "$dir/herdr-new-pane-closed"
       exit 0
     fi
@@ -1709,7 +1772,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 
 test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
   local case_name dir out rc before journal_before expected
-  for case_name in live-agent initial-unreadable recheck-unknown workspace-unreadable workspace-changed tabs-unavailable tabs-malformed changed-tab ambiguous-tab mismatched-pane stale-readable conflicting-pane non-isolated-worktree presentation-journal-v1 presentation-journal-mismatched; do
+  for case_name in live-agent initial-unreadable recheck-unknown workspace-unreadable workspace-changed tabs-unavailable tabs-malformed changed-tab ambiguous-tab mismatched-pane stale-readable conflicting-pane conflicting-agentfree-pane non-isolated-worktree presentation-journal-v1 presentation-journal-mismatched; do
     dir=$(new_case "herdr-$case_name" hr1)
     add_herdr_missing_pane_task "$dir" hr1
     make_herdr_missing_pane_stub "$dir" "$case_name"
@@ -1747,6 +1810,7 @@ test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
       mismatched-pane) expected='no longer owns recorded pane w1:p2' ;;
       stale-readable) expected='requires the recorded pane to remain gone, got no-agent' ;;
       conflicting-pane) expected="herdr tab 'fm-hr1' already exists" ;;
+      conflicting-agentfree-pane) expected="herdr tab 'fm-hr1' already exists" ;;
       non-isolated-worktree) expected='not an isolated worktree root' ;;
       presentation-journal-v1) expected='presentation binding for hr1 is ambiguous or changed' ;;
       presentation-journal-mismatched) expected='presentation binding for hr1 is ambiguous or changed' ;;
@@ -1809,7 +1873,15 @@ test_spawn_relaunch_refuses_an_unbound_herdr_create_response() {
     "an unbound create response must not close an unverified tab"
   [ -z "$(cat "$dir/fake/literal")" ] \
     || fail "an unbound create response must not deliver a second worker launch"
-  pass "fm-spawn --relaunch: an unbound Herdr create response refuses before cleanup"
+  out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a recovered unbound create response should require a retry"
+  assert_contains "$out" "reclaimed an interrupted replacement" \
+    "the claim recovery should identify its task-owned cleanup"
+  assert_contains "$(cat "$dir/fake/herdr-mutations")" 'pane close w1:p3' \
+    "the claim recovery should reclaim the unverified temporary endpoint"
+  [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+    || fail "claim recovery must clear the recovered create claim"
+  pass "fm-spawn --relaunch: unbound Herdr creation is recovered without foreign cleanup"
 }
 
 test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
@@ -1829,28 +1901,18 @@ test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
       "the post-create $case_name fixture did not cross the replacement-create boundary"
     [ -z "$(cat "$dir/fake/literal")" ] \
       || fail "a post-create $case_name read must not deliver a second worker launch"
-    case "$case_name" in
-      postcreate-tab-unreadable|postcreate-pane-unreadable)
-        assert_not_contains "$mutations" 'pane close' \
-          "an unverified replacement must not close any endpoint after $case_name"
-        assert_not_contains "$mutations" 'tab close' \
-          "an unverified replacement must not close any tab after $case_name"
-        ;;
-      postcreate-tabs-unavailable|postcreate-tabs-malformed)
-        assert_contains "$mutations" 'pane close w1:p3' \
-          "a verified replacement must be reclaimed after $case_name"
-        assert_not_contains "$mutations" 'tab close w1:t2' \
-          "a $case_name read must not close the recorded vanished tab"
-        ;;
-      postclose-tabs-unavailable|postclose-tabs-malformed)
-        assert_contains "$mutations" 'tab close w1:t2' \
-          "the $case_name fixture did not reach the final verification boundary"
-        assert_not_contains "$mutations" 'pane close w1:p3' \
-          "a final $case_name read must retain the verified replacement"
-        ;;
-    esac
+    assert_not_contains "$mutations" 'pane close' \
+      "an unreadable $case_name response must not close an unverified endpoint"
+    out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+    expect_code 1 "$rc" "a recovered $case_name endpoint should require a retry"
+    assert_contains "$out" "reclaimed an interrupted replacement" \
+      "the $case_name claim recovery should identify its task-owned cleanup"
+    assert_contains "$(cat "$dir/fake/herdr-mutations")" 'pane close w1:p3' \
+      "the $case_name claim recovery must reclaim only the recorded temporary endpoint"
+    [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+      || fail "the $case_name claim recovery must clear its durable claim"
   done
-  pass "fm-spawn --relaunch: post-create Herdr read failures preserve metadata and safe endpoint ownership"
+  pass "fm-spawn --relaunch: post-create Herdr read failures recover only task-owned endpoints"
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
