@@ -409,7 +409,6 @@ case "${args[0]:-} ${args[1]:-}" in
         case "$reads" in
           1|2|3) printf '%s\n' '{"result":{"tabs":[]}}' ;;
           4|5) printf '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"%s"}]}}\n' "$created_tab_label" ;;
-          6) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"fm-hr1"}]}}' ;;
           6)
             if [ "$case_name" = final-tabs-stale ]; then
               printf '%s\n' '{"result":{"tabs":[]}}'
@@ -419,7 +418,11 @@ case "${args[0]:-} ${args[1]:-}" in
             ;;
           *)
             if [ "$case_name" = final-tabs-unavailable ]; then exit 1; fi
-            printf '%s\n' '{}'
+            if [ "$case_name" = final-tabs-stale ]; then
+              printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"fm-hr1"}]}}'
+            else
+              printf '%s\n' '{}'
+            fi
             ;;
         esac
         exit 0
@@ -2044,6 +2047,8 @@ test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
     if [ "$case_name" = final-tabs-stale ]; then
       assert_contains "$(cat "$dir/home/state/.hr1.herdr-relaunch-claim")" 'tab_id=w1:t3' \
         "a stale final list must retain the verified replacement claim"
+      assert_contains "$(cat "$dir/home/state/.hr1.herdr-relaunch-claim")" 'pane_id=w1:p3' \
+        "a stale final list must retain the verified replacement endpoint"
     fi
     creates_before=$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')
     if [ "$case_name" = postcreate-zero-match ]; then
