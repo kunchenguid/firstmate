@@ -55,7 +55,8 @@ routine_run_head_parse() {  # <crew-state-line>
 }
 
 routine_validate() {  # <task-id>
-  local id=$1 meta="$STATE/$id.meta" status="$STATE/$id.status" current_state kind
+  local id=$1
+  local meta="$STATE/$id.meta" status="$STATE/$id.status" current_state kind
   [ -f "$meta" ] && [ ! -L "$meta" ] || fail "$id has no task metadata"
   kind=$(meta_value "$meta" kind)
   [ "$kind" = ship ] || fail "$id is not kind ship (kind=${kind:-unknown})"
@@ -85,7 +86,8 @@ routine_validate() {  # <task-id>
 }
 
 record_routine_completion() {  # <task-id>
-  local id=$1 meta="$STATE/$id.meta" lock tmp line
+  local id=$1
+  local meta="$STATE/$id.meta" lock tmp line
   lock=$(fm_meta_lock_path "$meta") || fail "could not lock $id metadata"
   fm_lock_acquire_wait "$lock" || fail "could not lock $id metadata"
   if ! fm_pr_metadata_identity_parse "$meta" \
@@ -131,7 +133,8 @@ record_routine_completion() {  # <task-id>
 }
 
 require_routine_completion() {  # <task-id>
-  local id=$1 meta="$STATE/$id.meta" recorded_pr recorded_head recorded_run_head
+  local id=$1
+  local meta="$STATE/$id.meta" recorded_pr recorded_head recorded_run_head
   recorded_pr=$(meta_value "$meta" routine_complete_pr)
   recorded_head=$(meta_value "$meta" routine_complete_pr_head)
   recorded_run_head=$(meta_value "$meta" routine_complete_run_head)

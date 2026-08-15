@@ -315,6 +315,7 @@ fm_pr_metadata_identity_parse() {
         if [ "$seen_pr" -eq 1 ]; then
           value=${line#pr_head=}
           if fm_pr_head_valid "$value"; then
+            # shellcheck disable=SC2034 # Consumed by callers that source this library.
             FM_PR_META_HEAD=$value
           else
             post_pr_invalid=1

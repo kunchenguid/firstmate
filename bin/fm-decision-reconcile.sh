@@ -358,7 +358,7 @@ command_retire() {
     body="${body}"$'\n'"Retired by policy reconciliation."
     tasks_axi update "$id" --body "$body" >/dev/null \
       || fail "could not record retirement on $id"
-    tasks_axi done "$id" >/dev/null || fail "could not retire $id"
+    tasks_axi "done" "$id" >/dev/null || fail "could not retire $id"
     printf 'retired: %s\n' "$id"
   done
 }
