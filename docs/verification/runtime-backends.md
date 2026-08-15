@@ -180,6 +180,26 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+### Legacy Herdr binding repair
+
+The guarded `bin/fm-herdr-legacy-repair.sh` evidence conjunction was validated on 2026-08-14 with herdr 0.8.0 through the isolated lab helper.
+
+```sh
+tests/fm-herdr-legacy-repair.test.sh
+tests/fm-herdr-legacy-repair-e2e.test.sh
+```
+
+Bounded output from the real-Herdr run:
+
+```text
+ok - a live-topology mismatch refuses before any change against real Herdr
+ok - a fully provable legacy record repairs exactly once against real Herdr evidence
+ok - the repair reruns as a no-op with the pane untouched
+```
+
+The lab session's real workspace/tab/pane ids fed the recorded evidence, a deliberately wrong recorded tab refused with the pane preserved, and the default-session tripwire stayed byte-identical through provision, repair, rerun, and teardown.
+The repair is harness-neutral: it reads only the shared metadata shape, git state, and Herdr's structured topology and agent-status responses, never a harness-specific surface.
+
 ## Herdr
 
 The compatibility floor is protocol 14.

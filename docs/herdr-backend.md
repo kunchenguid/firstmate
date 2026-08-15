@@ -200,6 +200,13 @@ A Herdr pane id contains a colon, so the adapter splits `window=` on the first c
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
 
+## Legacy record repair
+
+A Herdr task record written before `endpoint_task_id=` existed cannot pass the shared endpoint-identity validation until repaired, so teardown and control refuse it and a finished endpoint can keep producing watcher alerts.
+`bin/fm-herdr-legacy-repair.sh <task-id>` is the one guarded path that restores that binding, and only for a legacy primary-home Herdr record whose independent evidence all agrees; its header and `--help` own the exact evidence conjunction, refusal behavior, and idempotence contract.
+It binds only - it never closes a pane, deletes a record, or issues a mutating Herdr command - and cleanup afterwards remains ordinary `bin/fm-teardown.sh`, which re-runs its own complete landed-work and confirmed-close safety against the repaired record.
+Ordinary cleanup and control keep refusing unbound records implicitly; nothing repairs a binding as a side effect.
+
 ## Current transport behavior
 
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
@@ -327,6 +334,8 @@ tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
+tests/fm-herdr-legacy-repair.test.sh
+tests/fm-herdr-legacy-repair-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```

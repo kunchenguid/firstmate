@@ -159,7 +159,7 @@ family_for_basename() {
     fm-backend-herdr-eventwait-smoke.test.sh|fm-backend-herdr-presentation-e2e.test.sh|\
     fm-backend-herdr-launcher-workspace-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
-    fm-herdr-session-cleanup-e2e.test.sh|\
+    fm-herdr-session-cleanup-e2e.test.sh|fm-herdr-legacy-repair-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh|\
     fm-control-herdr-smoke.test.sh)
       printf '%s\n' real-herdr-gated
@@ -193,7 +193,8 @@ family_for_basename() {
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
-    fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
+    fm-herdr-session-cleanup.test.sh|fm-herdr-legacy-repair.test.sh|\
+    fm-send-resolve-key.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
@@ -403,6 +404,8 @@ tests/fm-gotmp.test.sh 308
 tests/fm-grok-continuity-live-e2e.test.sh 19
 tests/fm-grok-stop-live-e2e.test.sh 19
 tests/fm-guard-stale-banner.test.sh 2917
+tests/fm-herdr-legacy-repair-e2e.test.sh 21
+tests/fm-herdr-legacy-repair.test.sh 20823
 tests/fm-herdr-session-cleanup.test.sh 4802
 tests/fm-kimi-harness.test.sh 12590
 tests/fm-opencode-primary-live-e2e.test.sh 18
@@ -858,6 +861,16 @@ families_for_changed_path() {
     bin/fm-herdr-session-cleanup.sh)
       printf '%s\n' session-bootstrap
       printf '%s\n' real-herdr-gated
+      printf '%s\n' backend-dispatch
+      ;;
+    bin/fm-herdr-legacy-repair.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' real-herdr-gated
+      ;;
+    bin/fm-landed-lib.sh)
+      # Shared landed-work predicates, sourced by bin/fm-teardown.sh (pr-forge)
+      # and bin/fm-herdr-legacy-repair.sh (backend-dispatch).
+      printf '%s\n' pr-forge
       printf '%s\n' backend-dispatch
       ;;
     bin/backends/zellij*|tests/zellij-test-safety.sh)
