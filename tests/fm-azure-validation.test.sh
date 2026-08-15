@@ -163,6 +163,8 @@ assert "credential_content_binding // empty" in guest
 assert '.credential_content_binding=$binding' in guest
 assert guest.index("SEALED_BINDING") < guest.index('"$LEASE_BINDING_HELPER" "$CREDENTIAL_MOUNT" "$PROVIDER_PATH" "$ACCOUNT_BINDING_PATH" "$GITHUB_TOKEN_PATH" "$REQUEST" "$EXPECTED_BINDING"')
 assert "cell worktree is detached and no declared branch identity is present" in bridge
+assert 'refs = ["HEAD"]' in bridge
+assert '"bundle", "create", str(bundle)] + refs' in bridge
 assert '"$NM_BIN" axi sync --recover' in guest
 assert 'cp "$STATUS_LOG" "$EVIDENCE/attempt-$ATTEMPT/status.log"' in guest
 assert '"reattaching", "collected")' in host

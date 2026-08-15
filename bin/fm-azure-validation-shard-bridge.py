@@ -186,10 +186,19 @@ def submit_requests(environment, kind, count, command):
     round_dir = environment["exchange"] / round_id
     round_dir.mkdir(mode=0o700)
     bundle = round_dir / "snapshot.bundle"
-    run([
-        "git", "-C", str(repo), "bundle", "create", str(bundle),
-        "refs/heads/" + branch,
-    ])
+    # The gate snapshot is detached: the recorded head (with the pipeline's
+    # rebase and fix commits) exists only at HEAD, and the branch ref, when
+    # present at all, still points at the pre-pipeline commit. Bundle HEAD
+    # always so the host can materialize the exact requested head, and carry
+    # the branch ref alongside when the snapshot has one.
+    refs = ["HEAD"]
+    branch_probe = run(
+        ["git", "-C", str(repo), "show-ref", "--verify", "--quiet", "refs/heads/" + branch],
+        check=False,
+    )
+    if branch_probe.returncode == 0:
+        refs.append("refs/heads/" + branch)
+    run(["git", "-C", str(repo), "bundle", "create", str(bundle)] + refs)
     run(["git", "bundle", "verify", str(bundle)])
     snapshot_digest = digest_file(bundle)
     requests = []
