@@ -30,11 +30,14 @@
 # git against any local repository.
 # It never calls a backend, signals a process, removes tasktmp, runs treehouse,
 # changes a branch, refreshes a clone, or deletes a working copy.
+# Before mutating state it locks the home task set and every other metadata
+# record, then refuses any raw runtime-slot or collapsed watcher-key collision.
 #
 # A successful retirement leaves state/.record-retired-<task-id>, whose format
 # is owned by fm-record-retire-lib.sh.
 # That marker mutes late status and turn-end writes from the intentionally
 # untouched agent until a later fresh spawn of the same id clears it.
+# It never mutes slot-keyed stale wakes because those carry no task identity.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -124,10 +127,13 @@ fm_refuse_if_gate_agent
 
 META="$STATE/$ID.meta"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
+TASK_SET_LOCK=
 META_LOCK=
 CONTROL_LOCK_HELD=0
+TASK_SET_LOCK_HELD=0
 META_LOCK_HELD=0
 QUEUE_LOCK_HELD=0
+OTHER_META_LOCKS=()
 
 release_locks() {
   local status=$?
@@ -135,6 +141,13 @@ release_locks() {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
     QUEUE_LOCK_HELD=0
   fi
+  local index
+  index=${#OTHER_META_LOCKS[@]}
+  while [ "$index" -gt 0 ]; do
+    index=$((index - 1))
+    fm_lock_release "${OTHER_META_LOCKS[$index]}" || true
+  done
+  OTHER_META_LOCKS=()
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
@@ -143,10 +156,19 @@ release_locks() {
     fm_lock_release "$CONTROL_LOCK" || true
     CONTROL_LOCK_HELD=0
   fi
+  if [ "$TASK_SET_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$TASK_SET_LOCK" || true
+    TASK_SET_LOCK_HELD=0
+  fi
   return "$status"
 }
 trap release_locks EXIT
 
+TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") \
+  || refuse "task-set lock cannot be resolved for $STATE"
+fm_lock_try_acquire "$TASK_SET_LOCK" \
+  || refuse "the task set is changing; runtime-slot exclusivity cannot be established"
+TASK_SET_LOCK_HELD=1
 fm_lock_try_acquire "$CONTROL_LOCK" \
   || refuse "another lifecycle action is already running for task $ID; nothing was changed"
 CONTROL_LOCK_HELD=1
@@ -163,6 +185,23 @@ meta_exact() {  # <key>
   value=$(grep "^$key=" "$META" | cut -d= -f2-)
   [ -n "$value" ] || return 1
   printf '%s' "$value"
+}
+
+meta_file_exact() {  # <metadata-path> <key>
+  local file=$1 key=$2 count value
+  count=$(grep -c "^$key=" "$file" 2>/dev/null || true)
+  [ "$count" = 1 ] || return 1
+  value=$(grep "^$key=" "$file" | cut -d= -f2-)
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+watcher_state_key() {  # <window>
+  local key=$1
+  key=${key//:/_}
+  key=${key//\//_}
+  key=${key//./_}
+  printf '%s' "$key"
 }
 
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || refuse "state device cannot be established"
@@ -196,6 +235,39 @@ case "$KIND" in
   secondmate) refuse "secondmate homes require the dedicated teardown path" ;;
   *) refuse "unsupported task kind '$KIND'" ;;
 esac
+
+lock_and_verify_runtime_slot_exclusive() {
+  local other other_id other_window other_key other_lock target_key
+  target_key=$(watcher_state_key "$WINDOW")
+  for other in "$STATE"/*.meta; do
+    [ -e "$other" ] || [ -L "$other" ] || continue
+    [ "$other" != "$META" ] || continue
+    regular_single_link "$other" "$STATE_DEVICE" \
+      || refuse "runtime-slot exclusivity is unprovable because metadata is unsafe at $other"
+    other_lock=$(fm_meta_lock_path "$other") \
+      || refuse "runtime-slot exclusivity is unprovable because a metadata lock cannot be resolved for $other"
+    fm_lock_try_acquire "$other_lock" \
+      || refuse "runtime-slot exclusivity is unprovable because metadata is changing at $other"
+    OTHER_META_LOCKS+=("$other_lock")
+    regular_single_link "$other" "$STATE_DEVICE" \
+      || refuse "runtime-slot exclusivity is unprovable because metadata changed at $other"
+    other_id=$(meta_file_exact "$other" endpoint_task_id) \
+      || refuse "runtime-slot exclusivity requires one exact endpoint_task_id in $other"
+    [ "${other##*/}" = "$other_id.meta" ] \
+      || refuse "runtime-slot exclusivity found a mismatched task binding in $other"
+    other_window=$(meta_file_exact "$other" window) \
+      || refuse "runtime-slot exclusivity requires one exact window in $other"
+    if [ "$other_window" = "$WINDOW" ]; then
+      refuse "runtime slot is also recorded by $other_id; no record state was retired"
+    fi
+    other_key=$(watcher_state_key "$other_window")
+    if [ "$other_key" = "$target_key" ]; then
+      refuse "watcher state key is also recorded by $other_id; no record state was retired"
+    fi
+  done
+}
+
+lock_and_verify_runtime_slot_exclusive
 
 validate_report_safety() {
   local report
@@ -295,9 +367,7 @@ ARTIFACTS=(
   "$STATE/.seen-${ID}_turn-ended"
   "$STATE/.hb-surfaced-$ID"
 )
-WINDOW_KEY=${WINDOW//:/_}
-WINDOW_KEY=${WINDOW_KEY//\//_}
-WINDOW_KEY=${WINDOW_KEY//./_}
+WINDOW_KEY=$(watcher_state_key "$WINDOW")
 for prefix in hash count stale stale-since paused paused-rechecked paused-resurfaced wedge-escalations; do
   ARTIFACTS+=("$STATE/.$prefix-$WINDOW_KEY")
 done
