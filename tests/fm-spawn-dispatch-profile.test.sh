@@ -335,11 +335,12 @@ test_active_dispatch_profile_allows_explicit_harness() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high --dispatch-resolved)
   status=$?
   expect_code 0 "$status" "explicit harness should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_grep "dispatch=resolved" "$HOME_DIR/state/$id.meta" "explicit resolved attestation did not land in meta"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not thread model and effort"
@@ -354,11 +355,12 @@ test_active_dispatch_profile_allows_positional_harness() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" codex --model gpt-5 --effort high)
+    "$id" "$PROJ_DIR" codex --model gpt-5 --effort high --dispatch-resolved)
   status=$?
   expect_code 0 "$status" "positional harness should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report positional codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_grep "dispatch=resolved" "$HOME_DIR/state/$id.meta" "positional resolved attestation did not land in meta"
   pass "active crew-dispatch profile allows the legacy positional harness form"
 }
 
@@ -370,11 +372,12 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+    "$id" "$PROJ_DIR" "custom-agent --flag" --dispatch-resolved)
   status=$?
   expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
+  assert_grep "dispatch=resolved" "$HOME_DIR/state/$id.meta" "raw-command resolved attestation did not land in meta"
   launch=$(cat "$LAUNCH_LOG")
   [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
@@ -631,13 +634,15 @@ test_batch_forwards_shared_profile_flags() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high --dispatch-resolved)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
   assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"
   assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"
   assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5 high
   assert_meta_profile "$HOME_DIR/state/$id2.meta" codex gpt-5 high
+  assert_grep "dispatch=resolved" "$HOME_DIR/state/$id1.meta" "batch did not forward attestation to first task meta"
+  assert_grep "dispatch=resolved" "$HOME_DIR/state/$id2.meta" "batch did not forward attestation to second task meta"
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
@@ -855,6 +860,239 @@ test_linked_telemetry_identifiers_chain_one_task_root() {
   pass "linked telemetry identifiers chain a retry under one task root and are refused when unsafe, orphaned, or batched"
 }
 
+# --- dispatch attestation backstop ------------------------------------------
+#
+# The explicit-harness guard above only proves *something* was passed. The
+# measured failure it was built from (2026-08-15) was firstmate hand-picking an
+# explicit harness for every dispatch while crew-dispatch.json sat on disk
+# unread, so the guard stayed green while the rule was broken. The attestation
+# backstop closes that gap: when profiles are active, an explicit harness must
+# be accompanied by a declaration of HOW it was chosen - either --dispatch-resolved
+# (firstmate consulted the profiles) or --dispatch-override-reason "<why>"
+# (firstmate deliberately departed). A bare explicit harness is refused, because
+# that is the silent hand-pick the guard exists to catch. The guard never reads
+# crew-dispatch.json to verify the harness matches; it checks that resolution
+# HAPPENED, not what it produced, and records the override reason in meta.
+
+test_active_profile_refuses_explicit_harness_without_attestation() {
+  local rec id resolved_id out status
+  # The bare explicit harness is the silent hand-pick the guard exists to catch.
+  id=profile-no-attestation-z30
+  rec=$(make_spawn_case profile-no-attestation claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 1 "$status" "explicit harness without attestation should be refused when profiles are active"
+  assert_contains "$out" "config/crew-dispatch.json is active" \
+    "refusal did not name the active dispatch profile file"
+  assert_contains "$out" "--dispatch-resolved" "refusal did not name the resolved attestation flag"
+  assert_contains "$out" "--dispatch-override-reason" "refusal did not name the override attestation flag"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal should happen before meta is written"
+
+  # The same guard must NOT fire when the caller did the right thing: a resolved
+  # attestation passes. This second direction is what makes the test die on a
+  # predicate weakened to constant true (which would refuse both) and on a
+  # predicate that refuses every explicit harness (which would refuse both),
+  # not only on deletion/unreachability/weakening that lets the bare case through.
+  resolved_id=profile-no-attestation-resolved-z30b
+  rec=$(make_spawn_case profile-no-attestation-resolved claude "$resolved_id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$resolved_id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high --dispatch-resolved)
+  status=$?
+  expect_code 0 "$status" "explicit harness with --dispatch-resolved should pass the same guard"
+  assert_contains "$out" "spawned $resolved_id harness=codex" "resolved attestation spawn did not pass"
+  pass "active profile refuses a bare explicit harness that skipped profile consultation while passing a resolved one"
+}
+
+test_active_profile_requires_attestation_for_scout() {
+  local rec id resolved_id out status
+  # Scouts are in scope with crewmates: the guard keys on "not a secondmate", so a
+  # predicate narrowed to the ship kind would let every scout skip consultation.
+  id=profile-scout-no-attestation-z38
+  rec=$(make_spawn_case profile-scout-no-attestation claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high --scout)
+  status=$?
+  expect_code 1 "$status" "scout with an explicit harness but no attestation should be refused"
+  assert_contains "$out" "--dispatch-resolved" "scout refusal did not name the resolved attestation flag"
+  assert_contains "$out" "--dispatch-override-reason" "scout refusal did not name the override attestation flag"
+  assert_absent "$HOME_DIR/state/$id.meta" "scout attestation refusal should happen before meta is written"
+
+  resolved_id=profile-scout-resolved-z39
+  rec=$(make_spawn_case profile-scout-resolved claude "$resolved_id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$resolved_id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high --scout --dispatch-resolved)
+  status=$?
+  expect_code 0 "$status" "scout with --dispatch-resolved should pass the same guard"
+  assert_contains "$out" "spawned $resolved_id harness=codex" "resolved scout spawn did not pass"
+  assert_grep "dispatch=resolved" "$HOME_DIR/state/$resolved_id.meta" \
+    "resolved scout attestation did not land in meta"
+  pass "active profile requires and records the dispatch attestation on scout spawns too"
+}
+
+test_active_profile_refuses_multiline_override_reason() {
+  local rec id out status
+  # state/<id>.meta is one key=value per line and every reader takes the LAST match,
+  # so a newline in the free-text reason would forge a later worktree= line and
+  # point peek and teardown at another directory.
+  id=profile-override-multiline-z40
+  rec=$(make_spawn_case profile-override-multiline claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high \
+    --dispatch-override-reason "codex quota out"$'\n'"worktree=/tmp/forged-by-reason")
+  status=$?
+  expect_code 1 "$status" "a multi-line override reason should be refused"
+  assert_contains "$out" "--dispatch-override-reason must be a single line" \
+    "refusal did not explain the single-line meta contract"
+  assert_absent "$HOME_DIR/state/$id.meta" "multi-line reason should be refused before meta is written"
+  pass "active profile refuses a multi-line override reason that would forge a meta key"
+}
+
+test_active_profile_allows_resolved_attestation_and_records_it() {
+  local rec id out status meta
+  id=profile-resolved-z31
+  rec=$(make_spawn_case profile-resolved claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high --dispatch-resolved)
+  status=$?
+  expect_code 0 "$status" "explicit harness with --dispatch-resolved should pass"
+  assert_contains "$out" "spawned $id harness=codex" "resolved attestation spawn did not report codex"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "dispatch=resolved" "$meta" "resolved attestation did not land dispatch=resolved in meta"
+  pass "active profile allows a resolved attestation and records dispatch=resolved in meta"
+}
+
+test_active_profile_records_override_reason_in_meta() {
+  local rec id out status meta
+  id=profile-override-z32
+  rec=$(make_spawn_case profile-override claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model sonnet --effort high \
+    --dispatch-override-reason "captain instruction: use claude for this task")
+  status=$?
+  expect_code 0 "$status" "explicit harness with --dispatch-override-reason should pass"
+  assert_contains "$out" "spawned $id harness=claude" "override spawn did not report claude"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "dispatch=override" "$meta" "override attestation did not land dispatch=override in meta"
+  assert_grep "dispatch_override_reason=captain instruction: use claude for this task" "$meta" \
+    "override attestation did not land the reason text in meta"
+  pass "active profile records a deliberate override and its reason in meta"
+}
+
+test_active_profile_refuses_both_attestations() {
+  local rec id out status
+  id=profile-both-attestations-z33
+  rec=$(make_spawn_case profile-both-attestations claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high \
+    --dispatch-resolved --dispatch-override-reason "captain instruction")
+  status=$?
+  expect_code 1 "$status" "passing both attestations should be refused as ambiguous"
+  assert_contains "$out" "pass exactly one of --dispatch-resolved or --dispatch-override-reason" \
+    "refusal did not name the mutual-exclusion contract"
+  assert_absent "$HOME_DIR/state/$id.meta" "ambiguous-attestation refusal should happen before meta is written"
+  pass "active profile refuses when both attestations are supplied"
+}
+
+test_active_profile_refuses_override_reason_without_explicit_harness() {
+  local rec id out status
+  id=profile-override-no-harness-z34
+  rec=$(make_spawn_case profile-override-no-harness claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --mode no-mistakes --yolo off \
+    --dispatch-override-reason "captain instruction")
+  status=$?
+  expect_code 1 "$status" "override reason without an explicit harness should be refused"
+  assert_contains "$out" "config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules" \
+    "override-without-harness refusal did not reuse the explicit-harness backstop"
+  assert_absent "$HOME_DIR/state/$id.meta" "override-without-harness refusal should happen before meta is written"
+  pass "active profile refuses an override reason that has no harness to override from"
+}
+
+test_no_profile_does_not_require_attestation() {
+  local rec id out status meta
+  id=profile-absent-no-attestation-z35
+  rec=$(make_spawn_case profile-absent-no-attestation claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model sonnet --effort high)
+  status=$?
+  expect_code 0 "$status" "absent profiles should not require attestation"
+  assert_contains "$out" "spawned $id harness=claude" "no-profile spawn did not report claude"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_no_grep "dispatch=" "$meta" "absent profiles should not record a dispatch attestation line"
+  pass "absent crew-dispatch.json does not require or record an attestation"
+}
+
+test_active_profile_batch_forwards_resolved_attestation() {
+  local rec id1 id2 out status
+  id1=profile-batch-resolved-a-z36
+  id2=profile-batch-resolved-b-z37
+  rec=$(make_spawn_case profile-batch-resolved claude "$id1" "$id2")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high --dispatch-resolved)
+  status=$?
+  expect_code 0 "$status" "batch with shared --dispatch-resolved should succeed"
+  assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"
+  assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"
+  assert_grep "dispatch=resolved" "$HOME_DIR/state/$id1.meta" "batch did not forward attestation to first task meta"
+  assert_grep "dispatch=resolved" "$HOME_DIR/state/$id2.meta" "batch did not forward attestation to second task meta"
+  pass "batch dispatch forwards shared --dispatch-resolved to every pair"
+}
+
+test_active_profile_batch_refuses_without_attestation() {
+  local rec id1 id2 out status
+  # The batch guard must refuse the whole invocation up front, before any pair is
+  # re-execed: without it each pair would still fail its own guard, so the only
+  # observable difference is that no pair is ever attempted.
+  id1=profile-batch-no-attestation-a-z41
+  id2=profile-batch-no-attestation-b-z42
+  rec=$(make_spawn_case profile-batch-no-attestation claude "$id1" "$id2")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+  status=$?
+  expect_code 1 "$status" "batch with a shared harness but no attestation should be refused"
+  assert_contains "$out" "--dispatch-resolved" "batch refusal did not name the resolved attestation flag"
+  assert_not_contains "$out" "batch: FAILED to spawn" \
+    "batch refused per pair instead of refusing the whole invocation before any spawn"
+  assert_absent "$HOME_DIR/state/$id1.meta" "batch refusal should happen before the first pair spawns"
+  assert_absent "$HOME_DIR/state/$id2.meta" "batch refusal should happen before the second pair spawns"
+  [ ! -s "$LAUNCH_LOG" ] || fail "batch refusal still launched a harness"$'\n'"launch log: $(cat "$LAUNCH_LOG")"
+  pass "batch dispatch refuses a shared harness with no attestation before any pair spawns"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
@@ -865,6 +1103,16 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_active_profile_refuses_explicit_harness_without_attestation
+test_active_profile_requires_attestation_for_scout
+test_active_profile_refuses_multiline_override_reason
+test_active_profile_allows_resolved_attestation_and_records_it
+test_active_profile_records_override_reason_in_meta
+test_active_profile_refuses_both_attestations
+test_active_profile_refuses_override_reason_without_explicit_harness
+test_no_profile_does_not_require_attestation
+test_active_profile_batch_forwards_resolved_attestation
+test_active_profile_batch_refuses_without_attestation
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

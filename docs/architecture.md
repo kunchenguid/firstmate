@@ -169,7 +169,8 @@ The dispatch file is intentionally judgment-based: firstmate reads the natural-l
 Alongside those routing axes it passes the telemetry-only `--task-class` it classified at intake and, on a bounded-implementation task it deliberately rotated off its default tuple, the `--exploration` marker; `harness-adapters` owns when to classify and when to rotate.
 The shell scripts validate the JSON shape and verified harness/effort combinations, but they do not parse task intent, match natural-language rules, or own array selection.
 The session-start bootstrap step keeps valid dispatch configuration silent unless verbose facts are enabled and surfaces a concise invalid-config line when validation fails.
-When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
+When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness and without an attestation recording how that harness was chosen, so `config/crew-harness` is only automatic when no dispatch profile file is active.
+The attestation flags, the refusals, and the resulting task-meta record are owned by [configuration.md](configuration.md#crew-dispatch-profiles-configcrew-dispatchjson).
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, grok, pi, opencode, and kimi while preserving the requested profile for later audit.
