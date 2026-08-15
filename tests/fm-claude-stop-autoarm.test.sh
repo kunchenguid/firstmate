@@ -204,6 +204,40 @@ test_inert_without_session_lock() {
   pass "auto-arm: inert with no session lock"
 }
 
+test_entry_trace_names_gate_and_stays_bounded() {
+  local dir unwritable out status lines i
+  dir=$(make_primary_dir "$TMP_ROOT/entry-trace")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+
+  out=$(printf '%s\n' '{"session_id":"trace"}' \
+    | FM_HOME="$dir" bash "$dir/bin/fm-claude-stop-autoarm.sh" 2>&1); status=$?
+  expect_code 0 "$status" "a missing session lock must keep the hook silent"
+  [ -z "$out" ] || fail "entry tracing changed hook output: $out"
+  assert_grep 'event=entry' "$dir/state/.claude-autoarm-entry-trace" "entry trace did not record hook entry"
+  assert_grep 'event=gate-lock-missing' "$dir/state/.claude-autoarm-entry-trace" "entry trace did not name the missing-lock gate"
+  assert_absent "$dir/state/.claude-autoarm-entry-trace.lock" "entry trace left its trimming lock behind"
+
+  i=0
+  while [ "$i" -lt 260 ]; do
+    printf 'at=0 pid=0 event=fixture-%s\n' "$i" >> "$dir/state/.claude-autoarm-entry-trace"
+    i=$((i + 1))
+  done
+  printf '%s\n' '{"session_id":"trace"}' \
+    | FM_HOME="$dir" bash "$dir/bin/fm-claude-stop-autoarm.sh" >/dev/null 2>&1
+  lines=$(awk 'END { print NR }' "$dir/state/.claude-autoarm-entry-trace")
+  [ "$lines" -eq 256 ] || fail "entry trace must self-trim to 256 lines, got $lines"
+
+  unwritable=$(make_primary_dir "$TMP_ROOT/entry-trace-unwritable")
+  : > "$unwritable/state/task.meta"
+  mkdir "$unwritable/state/.claude-autoarm-entry-trace"
+  out=$(printf '%s\n' '{"session_id":"trace"}' \
+    | FM_HOME="$unwritable" bash "$unwritable/bin/fm-claude-stop-autoarm.sh" 2>&1); status=$?
+  expect_code 0 "$status" "an unavailable entry trace must not change the selected hook gate"
+  [ -z "$out" ] || fail "unavailable entry tracing changed hook output: $out"
+  pass "auto-arm: best-effort entry trace names the selected gate, self-trims, and cannot become a hook failure"
+}
+
 test_reclaims_stale_session_lock_before_arming() {
   local dir out status expected_owner actual_owner
   dir=$(make_primary_dir "$TMP_ROOT/stale-lock")
@@ -326,6 +360,19 @@ test_inert_when_fleet_idle() {
   assert_present "$dir/state/.claude-autoarm-failure-notified" "idle state without positive recovery reset the failure notice"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "idle state without positive recovery reset the attended alarm"
   pass "auto-arm: inert with nothing in flight and no X-mode need"
+}
+
+test_arms_for_queue_only_delivery_need() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/queue-only")
+  FM_STATE_OVERRIDE="$dir/state" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append check pending-result "check: pending result"' _ "$dir" \
+    || fail "could not seed the durable wake"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a queued wake must keep the auto-arm active after its source retires"
+  [ -e "$dir/state/arm-ran" ] || fail "hook took gate-no-supervision with a queued wake pending"
+  pass "auto-arm: queue-only delivery need arms the cycle"
 }
 
 # --- the armed cycle ----------------------------------------------------------
@@ -579,12 +626,14 @@ test_fm_lock_status_still_works_with_shared_lib() {
 
 test_inert_in_child_worktree
 test_inert_without_session_lock
+test_entry_trace_names_gate_and_stays_bounded
 test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
+test_arms_for_queue_only_delivery_need
 test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner

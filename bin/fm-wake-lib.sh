@@ -299,7 +299,7 @@ fm_lock_clean_known_files() {
 fm_lock_set_role() {
   local lockdir=$1 role=$2 current pid back
   case "$role" in
-    autoarm|terminal-check) : ;;
+    autoarm|terminal-check|terminal-escalation) : ;;
     *) return 1 ;;
   esac
   current=${BASHPID:-$$}
@@ -735,8 +735,11 @@ fm_lock_try_acquire() {
 
   # Compare against ${BASHPID:-$$} inline, never via a command substitution:
   # $() forks a subshell whose BASHPID is not this frame's pid.
+  # Stock macOS Bash has no BASHPID and keeps $$ unchanged in a subshell, so
+  # BASH_SUBSHELL must also prove this is the original holding frame.
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ] \
+    && [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
     # lock mid-critical-section (e.g. TERM inside a recovery-marker section,
@@ -903,6 +906,7 @@ fm_failure_episode_reset() {
   esac
   for path in \
     "$state/.turnend-claude-blocks" \
+    "$state/.turnend-claude-escalated" \
     "$state/.claude-autoarm-failure-notified" \
     "$state/.claude-autoarm-failure-alarmed"
   do
@@ -913,6 +917,7 @@ fm_failure_episode_reset() {
   done
   if ! rm -f \
     "$state/.turnend-claude-blocks" \
+    "$state/.turnend-claude-escalated" \
     "$state/.claude-autoarm-failure-notified" \
     "$state/.claude-autoarm-failure-alarmed" \
     2>/dev/null; then
@@ -1131,6 +1136,7 @@ EOF
 }
 
 FM_WAKE_EVENT_LINE=
+FM_WAKE_EVENT_TRUNCATED=false
 FM_WAKE_UNREAD_LINES=
 fm_wake_status_cursor_offset() {  # <validated-status-path> -> already-presented byte offset
   local path=$1 offset
@@ -1140,27 +1146,29 @@ fm_wake_status_cursor_offset() {  # <validated-status-path> -> already-presented
   printf '%s' "$offset"
 }
 
-# O_NOFOLLOW read of every still-unread status byte. min-offset is the
-# already-presented cursor from classify-lib. Lines whose bytes begin before
-# that offset are not replayed. Prints nothing and returns 1 when no unread
-# non-blank line exists.
-fm_wake_unread_events() {  # <validated-status-path> <unused-tail-byte-cap> <min-offset> [<end-offset>]
-  local path=$1 min_offset=$3 end_offset=${4:-} result size chunk chunk_start
+# O_NOFOLLOW read of a bounded tail of the still-unread status bytes.
+# min-offset is the already-presented cursor from classify-lib, while end-offset
+# pins the read to the caller's snapshot.
+fm_wake_unread_events() {  # <validated-status-path> <tail-byte-cap> <min-offset> [<end-offset>]
+  local path=$1 tail_bytes=$2 min_offset=$3 end_offset=${4:-} result size chunk chunk_start rest
   local LC_ALL=C
   FM_WAKE_EVENT_LINE=
+  FM_WAKE_EVENT_TRUNCATED=false
   FM_WAKE_UNREAD_LINES=
+  case "$tail_bytes" in ''|*[!0-9]*|0) return 1 ;; esac
   case "$min_offset" in ''|*[!0-9]*) min_offset=0 ;; esac
   result=$(perl -MFcntl=:DEFAULT -e '
-    my ($path, $start, $end) = @ARGV;
+    my ($path, $min, $end, $limit) = @ARGV;
     sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
     my @stat = stat $file or exit 1;
     exit 1 unless -f _;
     my $size = $stat[7];
-    exit 1 unless $size =~ /\A\d+\z/ && $start =~ /\A\d+\z/ && $start <= $size;
+    exit 1 unless $size =~ /\A\d+\z/ && $min =~ /\A\d+\z/ && $min <= $size;
     $end = $size unless length $end;
-    exit 1 unless $end =~ /\A\d+\z/ && $start <= $end && $end <= $size;
+    exit 1 unless $end =~ /\A\d+\z/ && $min <= $end && $end <= $size;
+    my $start = $end - $min > $limit ? $end - $limit : $min;
     seek($file, $start, 0) or exit 1;
-    printf "%s\t", $end or exit 1;
+    printf "%s\t%s\t", $end, $start or exit 1;
     my $remaining = $end - $start;
     while ($remaining > 0) {
       my $read = read($file, my $buffer, $remaining);
@@ -1169,20 +1177,17 @@ fm_wake_unread_events() {  # <validated-status-path> <unused-tail-byte-cap> <min
       print $buffer or exit 1;
       $remaining -= $read;
     }
-  ' "$path" "$min_offset" "$end_offset" 2>/dev/null) || return 1
+  ' "$path" "$min_offset" "$end_offset" "$tail_bytes" 2>/dev/null) || return 1
   size=${result%%$'\t'*}
-  chunk=${result#*$'\t'}
-  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  rest=${result#*$'\t'}
+  chunk_start=${rest%%$'\t'*}
+  chunk=${rest#*$'\t'}
+  case "$size$chunk_start" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$chunk" ] || return 1
   [ "$min_offset" -lt "$size" ] || return 1
-  chunk_start=$min_offset
-  FM_WAKE_UNREAD_LINES=$(printf '%s' "$chunk" | LC_ALL=C awk -v start="$chunk_start" -v min="$min_offset" '
-    BEGIN { pos = start + 0 }
-    {
-      line_start = pos
-      pos += length($0) + 1
-      if ($0 ~ /[^[:space:]]/ && line_start >= min) print $0
-    }
+  [ "$chunk_start" -eq "$min_offset" ] || FM_WAKE_EVENT_TRUNCATED=true
+  FM_WAKE_UNREAD_LINES=$(printf '%s' "$chunk" | LC_ALL=C awk '
+    /[^[:space:]]/ { print }
   ') || return 1
   [ -n "$FM_WAKE_UNREAD_LINES" ] || return 1
   FM_WAKE_EVENT_LINE=$(printf '%s\n' "$FM_WAKE_UNREAD_LINES" | tail -1)
@@ -1194,10 +1199,15 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 }
 
 # Print supplemental drain-time context only after the caller has committed the
-# raw queue consumption and released the append lock.
+# raw queue presentation and released the append lock.
+# Read, item, and global limits keep status-file volume from making annotation
+# enrichment unbounded; the separate status presentation still owns every
+# unread status line captured by the same snapshot.
 fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   local rows=$1 snapshot=${2:-} manifest status_key mode path prefix line task endpoint
-  local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line
+  local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line suffix keep bytes
+  local output='' used=0 omitted=0 read_omitted=0 annotation_marker marker_reserve=192
+  local tail_bytes=8192 item_bytes=2048 global_bytes=8192 read_cap=8 reads=0 event_index
   local LC_ALL=C
 
   manifest=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
@@ -1227,20 +1237,17 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   while IFS=$(printf '\t') read -r status_key mode; do
     [ -n "$status_key" ] || continue
     path="$STATE/$status_key"
-    # A turn-ended-only (historical) row's annotation would show unread status
-    # lines even when those bytes are fully covered by the seen marker - already
-    # surfaced to firstmate or deliberately absorbed by the signal triage.
-    # Presenting such an already-announced line again makes a bare turn-end look
-    # like fresh progress, so skip the annotation when the status file's
-    # signature still matches its marker (a proven replay). Any uncertainty -
-    # missing marker, unreadable signature - keeps the annotation with its
-    # existing historical caveat. A direct status row is annotated for every
-    # still-unread line since the last drain presentation; already-presented
-    # bytes are not replayed.
+    # A historical row whose status signature is already seen is a proven
+    # replay and must not make an old line look fresh.
     if [ "$mode" = historical ] && fm_wake_signal_seen_current "$STATE" "$path"; then
       continue
     fi
-    offset=$(fm_wake_status_cursor_offset "$path") || return 1
+    if [ "$reads" -ge "$read_cap" ]; then
+      read_omitted=$((read_omitted + 1))
+      continue
+    fi
+    reads=$((reads + 1))
+    offset=$(fm_wake_status_cursor_offset "$path") || continue
     endpoint=
     if [ -n "$snapshot" ]; then
       task=${status_key%.status}
@@ -1252,16 +1259,14 @@ EOF
       [ -n "$endpoint" ] || continue
     fi
     if [ -n "$endpoint" ] && [ "$offset" -ge "$endpoint" ]; then continue; fi
-    if ! fm_wake_unread_events "$path" 0 "$offset" "$endpoint"; then
-      # Annotation enrichment is supplemental to the already-printed durable
-      # wake rows. A file that disappears, rotates, or becomes unreadable after
-      # the snapshot must not suppress annotations for other status files; the
-      # presentation commit will reject a changed snapshot identity.
+    if ! fm_wake_unread_events "$path" "$tail_bytes" "$offset" "$endpoint"; then
       continue
     fi
     last_event=$FM_WAKE_EVENT_LINE
+    event_index=0
     while IFS= read -r event_line || [ -n "$event_line" ]; do
       [ -n "$event_line" ] || continue
+      event_index=$((event_index + 1))
       event_line=$(printf '%s' "$event_line" | LC_ALL=C tr '\t\r' '  ')
       prefix="wake annotation: latest wake-EVENT observed at drain, not current state"
       if [ "$event_line" != "$last_event" ]; then
@@ -1271,7 +1276,24 @@ EOF
         prefix="$prefix; historical / not necessarily the triggering event"
       fi
       line="$prefix: $status_key: $event_line"
-      printf '%s\n' "$line" || return 1
+      suffix=''
+      if [ "$FM_WAKE_EVENT_TRUNCATED" = true ] && [ "$event_index" -eq 1 ]; then
+        suffix=' [truncated]'
+      fi
+      line="$line$suffix"
+      if [ $(( ${#line} + 1 )) -gt "$item_bytes" ]; then
+        suffix=' [truncated]'
+        keep=$((item_bytes - ${#suffix} - 1))
+        line="${line:0:$keep}$suffix"
+      fi
+      bytes=$(( ${#line} + 1 ))
+      if [ $((used + bytes + marker_reserve)) -gt "$global_bytes" ]; then
+        omitted=$((omitted + 1))
+        continue
+      fi
+      output="$output$line
+"
+      used=$((used + bytes))
     done <<EOF
 $FM_WAKE_UNREAD_LINES
 EOF
@@ -1279,5 +1301,14 @@ EOF
 $manifest
 EOF
 
+  printf '%s' "$output"
+  if [ "$omitted" -gt 0 ]; then
+    annotation_marker="wake annotation: $omitted annotations omitted (global enrichment byte cap)"
+    printf '%s\n' "$annotation_marker"
+  fi
+  if [ "$read_omitted" -gt 0 ]; then
+    annotation_marker="wake annotation: $read_omitted annotations omitted (enrichment read cap)"
+    printf '%s\n' "$annotation_marker"
+  fi
   return 0
 }
