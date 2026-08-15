@@ -810,6 +810,47 @@ test_no_run_busy_pane() {
   pass "no run + a busy semantic record reads working, attributed to its source"
 }
 
+# Gap fix: a cline crew used to read `unknown - harness state unavailable`, which
+# left supervision unable to tell a working worker from a wedged one by anything
+# but watching its token counter by hand. It now folds cline's own session record.
+test_cline_reports_a_real_state_from_its_session_record() {
+  reset_fakes
+  local d out root
+  d=$(new_case cline-session)
+  make_repo_on_branch "$d/wt" fm/feat-cl
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cl.meta" "window=fm:fm-feat-cl" "worktree=$d/wt" "kind=ship" "harness=cline"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  root="$d/clinesessions"
+  mkdir -p "$root/s1"
+  cat > "$root/s1/s1.json" <<EOF
+{"session_id":"s1","status":"running","workspace_root":"$d/wt","messages_path":"$root/s1/s1.messages.json"}
+EOF
+  printf 'sessions_root=%s\nworkspace_root=%s\n' "$root" "$d/wt" > "$d/state/feat-cl.cline-session"
+  out=$(run_crew_state "$d" feat-cl)
+  assert_contains "$out" "state: working" "a running cline session must read working"
+  assert_contains "$out" "cline-session" "the cline verdict must name its semantic source"
+  assert_not_contains "$out" "harness state unavailable" "cline must no longer report an unavailable harness state"
+
+  # The wedge: a message the agent accepted and never processed. No turn is
+  # running, so this must not read working off the busy path. The classifier
+  # separates it from a finished turn as `idle cline-session-stalled`
+  # (tests/fm-cline-harness.test.sh pins that); this layer folds every idle
+  # verdict into the same fall-through, so the distinction stops at the
+  # classifier until fm-crew-state's rendered state vocabulary is extended.
+  cat > "$root/s1/s1.json" <<EOF
+{"session_id":"s1","status":"idle","workspace_root":"$d/wt","messages_path":"$root/s1/s1.messages.json"}
+EOF
+  cat > "$root/s1/s1.messages.json" <<'EOF'
+{"messages":[{"role":"user","content":[{"type":"text","text":"go"}]}]}
+EOF
+  out=$(run_crew_state "$d" feat-cl)
+  assert_not_contains "$out" "state: working" "a queued-but-unprocessed cline turn must not read working"
+  assert_not_contains "$out" "harness state unavailable" "an unprocessed cline turn is a read state, not an unreadable one"
+  pass "a cline crew reports a real state and never reads an unprocessed turn as working"
+}
+
 # A converted adapter must NOT read working from rendered footer text: the
 # redesign removed that dependency, so a pane painting "esc to interrupt" with
 # no semantic record is unknown, never working and never silently idle.
@@ -1340,6 +1381,7 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
+test_cline_reports_a_real_state_from_its_session_record
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record

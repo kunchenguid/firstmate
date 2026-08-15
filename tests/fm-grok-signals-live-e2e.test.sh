@@ -13,7 +13,6 @@
 # upgrade.
 set -u
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GROK_BIN=$(command -v grok 2>/dev/null || true)
 LAB=
 VERSION=
@@ -88,11 +87,13 @@ case "$NOPTY" in
   *"Device not configured"*|*"os error 6"*) ;;
   *) fail "grok's no-pty failure text changed; re-verify that firstmate still separates it from an auth fault (got: $NOPTY)" ;;
 esac
-case "$NOPTY" in
-  *auth*|*login*|*credential*|*unauthorized*|*"API key"*)
-    fail "grok's no-pty failure now mentions authentication, so a harness artifact could be misread as a credential need: $NOPTY"
-    ;;
-esac
+for word in auth login credential unauthorized "API key"; do
+  case "$NOPTY" in
+    *"$word"*)
+      fail "grok's no-pty failure now mentions '$word', so a harness artifact could be misread as a credential need: $NOPTY"
+      ;;
+  esac
+done
 pass "grok's no-pty failure is an OS device error and names no credential problem"
 
 # --- capacity evidence, or the honest absence of it -------------------------

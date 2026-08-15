@@ -39,6 +39,10 @@ Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
 
+Most verified adapters stop on a slash command typed into their composer.
+cline has no such command at all, so it is stopped by its verified exit KEY, a single Ctrl+C - which is the same key grok uses to INTERRUPT.
+That inversion is why the two axes are recorded separately and never inferred from each other, and the exit key is refused before anything is sent when the recorded backend cannot deliver that exact key.
+
 An interrupt is not complete until the composer is empty.
 muse is the one verified adapter that restores the cancelled prompt back into its composer as real text, so its interrupt key is followed by a Ctrl+U clear; without it the next submitted line - including this plane's own exit command - would concatenate onto the restored prompt and submit both as one line.
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
@@ -112,7 +116,7 @@ Backend capability comes from each adapter's real surface, not from a policy cho
 | cmux | yes | yes | yes | yes | no |
 | orca | no | yes | yes | no | no |
 
-Per-harness interrupt keys, repeat counts, composer clears, exit commands, and supported task kinds live in `bin/fm-control-lib.sh` and are exercised for every verified harness by `tests/fm-control.test.sh`.
+Per-harness interrupt keys, repeat counts, composer clears, exit commands or exit keys, and supported task kinds live in `bin/fm-control-lib.sh` and are exercised for every verified harness by `tests/fm-control.test.sh`.
 The empirical basis for each adapter's value is the `harness-adapters` skill's verification record for that adapter.
 
 ## Verification

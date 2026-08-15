@@ -488,7 +488,7 @@ do_exit() {
       || die "the exit command could not be sent to task $ID on $BACKEND"
   fi
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
-    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
+    die "exit-delivered $ID interrupt=$interrupt_result exit-${key:+key}${key:-command}=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.

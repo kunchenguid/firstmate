@@ -161,18 +161,32 @@ mkdir -p "$STATE"
 sleep 1
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter || fail "could not submit the probe turn"
 
+# Observe the turn from the instant it is submitted. Everything that could be
+# checked first - a quota refusal, the binding, the recorded mode - is checked
+# INSIDE this loop rather than before it, because each pre-check would spend
+# part of the only window in which the turn is observably in flight. That
+# sequencing is what a first cut of this guard got wrong: it read the fold only
+# after the turn had already finished, and reported the source broken when it
+# was not.
+#
 # A quota refusal renders like a completed turn, which is exactly why it must be
 # named rather than allowed to pass as one. Refuse a vacuous pass.
-if wait_for_pane 12 'ClinePass limit reached|usage limit'; then
-  fail "the provider refused the probe turn (ClinePass limit reached), so no live turn lifecycle was observed; re-run when the limit resets"
-fi
-
 RECORD=
-for _ in $(seq 1 100); do
-  RECORD=$(fm_busy_cline_session_record "$STATE" live 2>/dev/null || true)
-  [ -n "$RECORD" ] && break
+TURN_STATE=
+for _ in $(seq 1 200); do
+  if capture | grep -qE 'ClinePass limit reached|usage limit'; then
+    fail "the provider refused the probe turn (ClinePass limit reached), so no live turn lifecycle was observed; re-run when the limit resets"
+  fi
+  if [ -z "$RECORD" ]; then
+    RECORD=$(fm_busy_cline_session_record "$STATE" live 2>/dev/null || true)
+  fi
+  if [ -n "$RECORD" ]; then
+    TURN_STATE=$(fm_busy_cline_session_state "$RECORD" 2>/dev/null || true)
+    [ "$TURN_STATE" = busy ] && break
+  fi
   sleep 0.2
 done
+
 [ -n "$RECORD" ] || fail "the real cline pane produced no uniquely bound workspace session record"
 pass "the real cline pane binds to exactly one of its own session records"
 
@@ -183,14 +197,8 @@ MODE=$(LC_ALL=C jq -r '.metadata.mode // empty' "$RECORD" 2>/dev/null || true)
   || fail "the real session record reports mode '$MODE', so the crewmate did not run in act mode"
 pass "the real session record structurally confirms the crewmate ran in act mode"
 
-TURN_STATE=
-for _ in $(seq 1 150); do
-  TURN_STATE=$(fm_busy_cline_session_state "$RECORD" 2>/dev/null || true)
-  [ "$TURN_STATE" = busy ] && break
-  sleep 0.2
-done
 [ "$TURN_STATE" = busy ] \
-  || fail "fm_busy_cline_session_state never observed the real turn in flight (read '$TURN_STATE')"
+  || fail "fm_busy_cline_session_state never observed the real turn in flight (read '$TURN_STATE'); a turn that settled before it could be observed is not proof the source works"
 pass "cline's real session record classifies busy in flight"
 
 # --- interrupt key: Escape cancels the TURN and leaves the agent running ----
@@ -205,9 +213,17 @@ wait_for_pane 20 'Ask anything\.\.\.|What can I do for you\?' \
   || fail "cline's composer did not return to an idle placeholder after its interrupt key"
 # The composer must not hold the cancelled prompt, or the next submitted line
 # would concatenate onto it - the reason the clear-key table exists.
-if capture | grep -qE '❯ Count slowly from 1 to 60'; then
-  fail "cline restored the cancelled prompt into its composer, so it needs a clear key the control plane does not record"
-fi
+#
+# Read the LAST prompt-glyph row only. The submitted prompt is also echoed into
+# the conversation above the composer, so a whole-pane search finds it in the
+# scrollback and reports a restored prompt that is not there.
+COMPOSER_ROW=$(capture | grep -a '❯' | tail -1)
+case "$COMPOSER_ROW" in
+  *'Ask anything'*|*'What can I do for you'*) ;;
+  *)
+    fail "after its interrupt key cline's composer row reads '$COMPOSER_ROW' rather than an idle placeholder; if it now restores the cancelled prompt it needs a clear key the control plane does not record"
+    ;;
+esac
 pass "cline's recorded interrupt key cancels the turn without polluting the composer"
 
 for _ in $(seq 1 150); do
