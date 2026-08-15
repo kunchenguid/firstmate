@@ -4,8 +4,12 @@
 # documented between the verb and the colon (needs-decision [key=x]: note), but
 # workers commonly write the colon first (needs-decision: [key=x] note); that
 # stated key must be honored, never silently folded into the shared "default"
-# bucket where an answer can close the wrong record (issue #2109). These tests
-# drive the REAL status_open_decisions / status_open_decisions_incremental
+# bucket where an answer can close the wrong record (issue #2109). Also covers
+# status_line_verb's bracket-tag stripping: a remote secondmate reply prepends
+# a "[corr=...]" correlation tag before (or without) "[key=...]", and every
+# such tag before the colon must be stripped so the leading word is the bare
+# verb, regardless of order or count. These tests drive the REAL
+# status_line_verb / status_open_decisions / status_open_decisions_incremental
 # functions over crafted status files and assert their folded output, never the
 # fold's own source text. Cross-drain cursor persistence and the incremental
 # cost bound live in tests/fm-wake-drain-open-decisions-cursor.test.sh; the
@@ -148,6 +152,90 @@ test_malformed_stated_key_never_collapses_to_default() {
   pass "a malformed stated key is rejected in both positions, never folded as default"
 }
 
+# A remote secondmate reply routinely prepends a "[corr=<hex>]" correlation
+# tag ahead of "[key=...]" (issue: a remote reply's "needs-decision
+# [corr=d448ea86afa4bf67] [key=x]: ..." folded to no open decision at all,
+# because the verb parser only stripped a leading "[key=...]" token and left
+# the corr tag glued onto the returned verb word). These cases drive the real
+# status_line_verb directly, over every bracket-tag shape that precedes the
+# colon, to pin the general fix: strip EVERY "[name=value]" tag there, not
+# just "[key=...]", regardless of order or count.
+test_status_line_verb_strips_every_bracket_tag_before_colon() {
+  local v
+
+  v=$(status_line_verb 'needs-decision [corr=d448ea86afa4bf67] [key=loan-installment-cadence-amount]: fill in the terms')
+  [ "$v" = "needs-decision" ] || fail "corr-then-key tag order: got '$v'"
+
+  v=$(status_line_verb 'needs-decision [key=loan-installment-cadence-amount] [corr=d448ea86afa4bf67]: fill in the terms')
+  [ "$v" = "needs-decision" ] || fail "key-then-corr tag order: got '$v'"
+
+  v=$(status_line_verb 'needs-decision [corr=d448ea86afa4bf67]: fill in the terms')
+  [ "$v" = "needs-decision" ] || fail "corr-only tag: got '$v'"
+
+  v=$(status_line_verb 'blocked [corr=aaaa1111bbbb2222] [key=creds]: waiting on the deploy token')
+  [ "$v" = "blocked" ] || fail "blocked with corr+key: got '$v'"
+
+  v=$(status_line_verb 'resolved [corr=aaaa1111bbbb2222] [key=creds]: answered: rotated')
+  [ "$v" = "resolved" ] || fail "resolved with corr+key: got '$v'"
+
+  pass "status_line_verb strips every bracket tag before the colon, in any order, and recovers the bare verb"
+}
+
+test_corr_and_key_tags_open_and_close_under_the_stated_key() {
+  local dir expected
+  dir=$(case_dir corr-and-key)
+  printf 'needs-decision [corr=d448ea86afa4bf67] [key=loan-installment-cadence-amount]: pick the cadence\n' \
+    > "$dir/t.status"
+  expected=$(printf 'loan-installment-cadence-amount\tneeds-decision\tpick the cadence\n')
+  assert_fold "$dir/t.status" "$expected" "corr-then-key opens under the stated key"
+
+  printf 'resolved [corr=d448ea86afa4bf67] [key=loan-installment-cadence-amount]: answered: monthly\n' \
+    >> "$dir/t.status"
+  assert_fold "$dir/t.status" "" "corr-then-key resolution closes the same stated key"
+  pass "a [corr=...] tag ahead of [key=...] no longer swallows the verb: opens and closes under the stated key"
+}
+
+test_corr_only_tag_opens_as_default_like_a_bare_line() {
+  local dir bare corred
+  dir=$(case_dir corr-only)
+  printf 'needs-decision: which vendor\n' > "$dir/bare.status"
+  printf 'needs-decision [corr=d448ea86afa4bf67]: which vendor\n' > "$dir/corred.status"
+
+  bare=$(status_open_decisions "$dir/bare.status")
+  corred=$(status_open_decisions "$dir/corred.status")
+  [ "$corred" = "$bare" ] \
+    || fail "a corr-only tag folded differently than the bare line: '$corred' vs '$bare'"
+  assert_fold "$dir/corred.status" "$(printf 'default\tneeds-decision\twhich vendor\n')" "corr-only tag"
+  pass "a [corr=...] tag with no stated key opens under 'default', exactly like a bare needs-decision line"
+}
+
+test_key_only_before_colon_still_opens_no_regression() {
+  local dir
+  dir=$(case_dir key-only-no-corr)
+  printf 'needs-decision [key=loan-installment-cadence-amount]: pick the cadence\n' > "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'loan-installment-cadence-amount\tneeds-decision\tpick the cadence\n')" \
+    "key-only before colon, no corr tag"
+  pass "a [key=x] tag alone (no corr tag) still opens x - no regression from the tag-stripping fix"
+}
+
+test_blocked_and_resolved_are_tag_order_independent() {
+  local dir
+  dir=$(case_dir blocked-tag-order)
+  printf 'blocked [corr=aaaa1111bbbb2222] [key=creds]: waiting on the deploy token\n' > "$dir/a.status"
+  assert_fold "$dir/a.status" "$(printf 'creds\tblocked\twaiting on the deploy token\n')" \
+    "blocked corr-then-key"
+
+  printf 'blocked [key=creds] [corr=aaaa1111bbbb2222]: waiting on the deploy token\n' > "$dir/b.status"
+  assert_fold "$dir/b.status" "$(printf 'creds\tblocked\twaiting on the deploy token\n')" \
+    "blocked key-then-corr"
+
+  printf 'blocked [corr=aaaa1111bbbb2222] [key=creds]: waiting on the deploy token\n' > "$dir/c.status"
+  printf 'resolved [corr=aaaa1111bbbb2222] [key=creds]: answered: rotated\n' >> "$dir/c.status"
+  assert_fold "$dir/c.status" "" "blocked/resolved corr+key close together regardless of tag order"
+  pass "blocked/resolved parse their bare verb with any bracket-tag order preceding the colon"
+}
+
 test_incremental_agrees_with_full_fold_across_appends() {
   local dir f expected
   dir=$(case_dir incremental)
@@ -178,4 +266,9 @@ test_blocked_is_position_tolerant_like_needs_decision
 test_two_colon_form_decisions_stay_distinct
 test_mid_note_prose_mention_is_not_a_stated_key
 test_malformed_stated_key_never_collapses_to_default
+test_status_line_verb_strips_every_bracket_tag_before_colon
+test_corr_and_key_tags_open_and_close_under_the_stated_key
+test_corr_only_tag_opens_as_default_like_a_bare_line
+test_key_only_before_colon_still_opens_no_regression
+test_blocked_and_resolved_are_tag_order_independent
 test_incremental_agrees_with_full_fold_across_appends
