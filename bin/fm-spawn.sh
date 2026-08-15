@@ -1939,11 +1939,26 @@ case "$BACKEND" in
       if [ -e "$STATE/$ID.herdr-presentation" ] || [ -L "$STATE/$ID.herdr-presentation" ]; then
         HERDR_MISSING_PANE_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
       fi
-      spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
-        echo "error: herdr missing-pane relaunch could not acquire its presentation session lock" >&2
-        exit 1
-      }
-      HERDR_MISSING_PANE_PRESENTATION_LOCK=1
+      if [ -n "${FM_CONTROL_HERDR_SESSION_LOCK:-}" ]; then
+        herdr_control_lock_expected=$(fm_backend_herdr_presentation_session_lock_path "$HERDR_SES") || {
+          echo "error: herdr missing-pane relaunch could not resolve its presentation session lock" >&2
+          exit 1
+        }
+        herdr_control_lock_owner=$(cat "$herdr_control_lock_expected/pid" 2>/dev/null || true)
+        if [ "$SPAWN_CONTROL_PARENT" != 1 ] \
+           || [ "$FM_CONTROL_HERDR_SESSION_LOCK" != "$herdr_control_lock_expected" ] \
+           || [ "$herdr_control_lock_owner" != "$PPID" ] \
+           || ! fm_pid_alive "$herdr_control_lock_owner"; then
+          echo "error: herdr missing-pane relaunch lacks its controlling session lock" >&2
+          exit 1
+        fi
+      else
+        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+          echo "error: herdr missing-pane relaunch could not acquire its presentation session lock" >&2
+          exit 1
+        }
+        HERDR_MISSING_PANE_PRESENTATION_LOCK=1
+      fi
       HERDR_MISSING_PANE_REPLACEMENT_OLD_TAB=$HERDR_TAB_ID
       HERDR_MISSING_PANE_REPLACEMENT_OLD_PANE=$HERDR_PANE_ID
       HERDR_TASK_IDS=$(fm_backend_herdr_relaunch_missing_pane \

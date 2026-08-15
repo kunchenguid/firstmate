@@ -148,6 +148,8 @@ die() {  # <message>
 
 CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
+HERDR_RELAUNCH_SESSION_LOCK=
+HERDR_RELAUNCH_SESSION_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
 
@@ -156,6 +158,10 @@ control_cleanup() {
   if [ "$RELAUNCH_ACTIVE" = 1 ] \
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
+  fi
+  if [ "$HERDR_RELAUNCH_SESSION_LOCK_HELD" = 1 ]; then
+    HERDR_RELAUNCH_SESSION_LOCK_HELD=0
+    fm_lock_release "$HERDR_RELAUNCH_SESSION_LOCK" || true
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
@@ -347,12 +353,26 @@ refresh_published_relaunch_endpoint() {
 }
 
 preflight_missing_herdr_relaunch() {
-  local state session pane workspace tab journal
+  local state session pane workspace tab journal attempt
   [ "$BACKEND" = herdr ] || return 0
-  state=$(agent_state)
-  [ "$state" = missing ] || return 0
   session=${T%%:*}
   pane=${T#*:}
+  fm_backend_source herdr || die "could not load the Herdr backend preflight for $ID"
+  HERDR_RELAUNCH_SESSION_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$session") \
+    || die "could not resolve the Herdr session lock for $ID"
+  attempt=0
+  while ! fm_lock_try_acquire "$HERDR_RELAUNCH_SESSION_LOCK"; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 50 ] || die "could not acquire the Herdr session lock for $ID"
+    sleep 0.1
+  done
+  HERDR_RELAUNCH_SESSION_LOCK_HELD=1
+  state=$(agent_state)
+  if [ "$state" != missing ]; then
+    HERDR_RELAUNCH_SESSION_LOCK_HELD=0
+    fm_lock_release "$HERDR_RELAUNCH_SESSION_LOCK" || true
+    return 0
+  fi
   workspace=$(fm_meta_get "$META" herdr_workspace_id)
   tab=$(fm_meta_get "$META" herdr_tab_id)
   [ -n "$workspace" ] && [ -n "$tab" ] || die "task $ID has incomplete Herdr endpoint metadata; refusing to relaunch a missing pane"
@@ -360,7 +380,6 @@ preflight_missing_herdr_relaunch() {
   if [ -e "$STATE/$ID.herdr-presentation" ] || [ -L "$STATE/$ID.herdr-presentation" ]; then
     journal="$STATE/$ID.herdr-presentation"
   fi
-  fm_backend_source herdr || die "could not load the Herdr backend preflight for $ID"
   fm_backend_herdr_relaunch_missing_pane_preflight \
     "$session" "$workspace" "$tab" "$pane" "$LABEL" "$journal" "$ID" "$FM_HOME" \
     || die "task $ID's missing Herdr pane failed recovery preflight; no relaunch record or instructions were changed"
@@ -797,7 +816,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line spawn_result
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -854,8 +873,23 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+  if [ "$HERDR_RELAUNCH_SESSION_LOCK_HELD" = 1 ]; then
+    if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+        FM_CONTROL_HERDR_SESSION_LOCK="$HERDR_RELAUNCH_SESSION_LOCK" \
+        "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
+      spawn_result=0
+    else
+      spawn_result=$?
+    fi
+    HERDR_RELAUNCH_SESSION_LOCK_HELD=0
+    fm_lock_release "$HERDR_RELAUNCH_SESSION_LOCK" || true
+  elif FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
+    spawn_result=0
+  else
+    spawn_result=$?
+  fi
+  if [ "$spawn_result" -eq 0 ]; then
     RELAUNCH_META_PUBLISHED=1
   else
     [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
