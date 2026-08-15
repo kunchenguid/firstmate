@@ -169,8 +169,8 @@ fms_api_response_channel_ok() {
 fms_bot_user_id_load() {
   local state=$1 cache body_file
   FMS_BOT_USER_ID=
-  cache="$state/slack-bot-user"
-  if fmx_private_artifact_file_valid "$state" "slack-bot-user" 600 2>/dev/null; then
+  cache="$state/slack-bot-user/slack-bot-user"
+  if fmx_private_artifact_file_valid "$state/slack-bot-user" "slack-bot-user" 600 2>/dev/null; then
     FMS_BOT_USER_ID=$(cat "$cache" 2>/dev/null) || FMS_BOT_USER_ID=
     [ -n "$FMS_BOT_USER_ID" ] && return 0
   fi
@@ -186,8 +186,11 @@ fms_bot_user_id_load() {
   FMS_BOT_USER_ID=$(jq -r '.user_id // empty' "$body_file" 2>/dev/null) || FMS_BOT_USER_ID=
   rm -f -- "$body_file"
   [ -n "$FMS_BOT_USER_ID" ] || return 1
-  printf '%s\n' "$FMS_BOT_USER_ID" \
-    | fmx_private_artifact_publish_stdin "$state" "slack-bot-user" 600 >/dev/null 2>&1 || true
+  if ! fmx_private_artifact_publish_stdin "$state/slack-bot-user" "slack-bot-user" 600 \
+    <<< "$FMS_BOT_USER_ID"; then
+    printf 'failed to publish private Slack bot user cache\n' >&2
+    return 1
+  fi
   return 0
 }
 
@@ -305,8 +308,8 @@ fms_refusal_publish() {
 
 fms_poll_cursor_read() {
   local state=$1 cursor
-  cursor="$state/slack-poll.cursor"
-  if fmx_private_artifact_file_valid "$state" "slack-poll.cursor" 600 2>/dev/null; then
+  cursor="$state/slack-poll.cursor/slack-poll.cursor"
+  if fmx_private_artifact_file_valid "$state/slack-poll.cursor" "slack-poll.cursor" 600 2>/dev/null; then
     cat "$cursor" 2>/dev/null
     return 0
   fi

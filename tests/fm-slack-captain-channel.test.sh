@@ -462,7 +462,7 @@ unset FM_SLACK_CURL_LOG FAKE_SLACK_POST FAKE_SLACK_UPDATE
 export FAKE_SLACK_CHANNEL=$CHANNEL_ID
 ts=$(run_post "$home" "$fakebin" board "board v1")
 [ "$ts" = "1786735224.690829" ] || fail "board post must return ts"
-[ -f "$home/state/slack-board.meta" ] || fail "board meta must be recorded"
+[ -f "$home/state/slack-board.meta/slack-board.meta" ] || fail "board meta must be recorded"
 ts2=$(run_post "$home" "$fakebin" board "board v2")
 [ "$ts2" = "1786735224.690829" ] || fail "board update must return same ts"
 pass "fm-slack-post board creates then updates in place"
@@ -477,7 +477,7 @@ export FAKE_SLACK_CHANNEL=$CHANNEL_ID
 run_post "$home" "$fakebin" board "board v1" >/dev/null \
   || fail "board setup post must succeed"
 printf 'channel=C_WRONGCHAN\nts=1786735224.690829\n' \
-  | fmx_private_artifact_publish_stdin "$home/state" "slack-board.meta" 600 \
+  | fmx_private_artifact_publish_stdin "$home/state/slack-board.meta" "slack-board.meta" 600 \
   || fail "board channel mismatch setup failed"
 if run_post "$home" "$fakebin" board "board v2" >/dev/null 2>&1; then
   fail "board update must refuse a mismatched stored channel"

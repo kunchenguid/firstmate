@@ -23,16 +23,18 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 fms_load_config
 fms_configured || exit 0
 
-ERROR_FILE="$STATE/slack-poll.error"
+ERROR_FILE="$STATE/slack-poll.error/slack-poll.error"
 
 emit_error_once() {
   local msg=$1
-  if fmx_private_artifact_file_valid "$STATE" "slack-poll.error" 600 \
+  if fmx_private_artifact_file_valid "$STATE/slack-poll.error" "slack-poll.error" 600 \
     && [ "$(cat "$ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
     return 0
   fi
-  printf '%s\n' "$msg" \
-    | fmx_private_artifact_publish_stdin "$STATE" "slack-poll.error" 600 2>/dev/null || true
+  if ! fmx_private_artifact_publish_stdin "$STATE/slack-poll.error" "slack-poll.error" 600 \
+    <<< "$msg"; then
+    printf 'failed to publish Slack poll error marker\n' >&2
+  fi
   printf 'slack-captain-error %s\n' "$msg"
 }
 

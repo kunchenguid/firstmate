@@ -202,9 +202,9 @@ test_poll_auth_error_reports_once() {
   expect_code 0 "$rc" "poll auth error exit"
   [ "$out" = "x-mode-error relay returned HTTP 401" ] \
     || fail "poll auth error must emit one visible diagnostic (got: $out)"
-  assert_present "$home/state/x-poll.error" "poll auth error must write a dedupe marker"
-  [ "$(path_mode "$home/state")" = 700 ] || fail "poll auth error must create private state"
-  [ "$(path_mode "$home/state/x-poll.error")" = 600 ] || fail "poll auth error marker must be private"
+  assert_present "$home/state/x-poll.error/x-poll.error" "poll auth error must write a dedupe marker"
+  [ "$(path_mode "$home/state/x-poll.error")" = 700 ] || fail "poll auth error marker directory must be private"
+  [ "$(path_mode "$home/state/x-poll.error/x-poll.error")" = 600 ] || fail "poll auth error marker must be private"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FAKE_POLL_CODE=401 \
     "$ROOT/bin/fm-x-poll.sh"); rc=$?
@@ -215,8 +215,27 @@ test_poll_auth_error_reports_once() {
     "$ROOT/bin/fm-x-poll.sh"); rc=$?
   expect_code 0 "$rc" "poll recovered auth error exit"
   [ -z "$out" ] || fail "poll recovery 204 must stay silent (got: $out)"
-  assert_absent "$home/state/x-poll.error" "poll 204 must clear the auth diagnostic marker"
+  assert_absent "$home/state/x-poll.error/x-poll.error" "poll 204 must clear the auth diagnostic marker"
   pass "fm-x-poll surfaces auth/config errors once and clears on recovery"
+}
+
+test_poll_error_publication_failure_is_loud() {
+  local home fakebin err out rc
+  home="$TMP_ROOT/poll-error-public-dir"; mkdir -p "$home/state/x-poll.error"
+  fakebin=$(make_fake_curl "$home")
+  chmod 700 "$home/state"
+  chmod 755 "$home/state/x-poll.error"
+  err="$home/stderr"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+    FMX_PAIRING_TOKEN=tok-public-dir FAKE_POLL_CODE=401 \
+    "$ROOT/bin/fm-x-poll.sh" 2>"$err"); rc=$?
+  expect_code 0 "$rc" "poll public marker directory exit"
+  [ "$out" = "x-mode-error relay returned HTTP 401" ] \
+    || fail "poll public marker directory must still emit the diagnostic (got: $out)"
+  assert_present "$err" "poll must surface a failed private marker publication"
+  rg -F "failed to publish X poll error marker" "$err" >/dev/null \
+    || fail "poll must name the failed private marker publication"
+  pass "fm-x-poll surfaces a publication failure in a non-private directory"
 }
 
 test_poll_error_private_publication_rejects_unsafe_paths() {
@@ -239,7 +258,8 @@ test_poll_error_private_publication_rejects_unsafe_paths() {
   chmod 700 "$home/state"
   target="$home/external-error"
   printf 'relay returned HTTP 401\n' > "$target"
-  ln -s "$target" "$home/state/x-poll.error"
+  mkdir "$home/state/x-poll.error"
+  ln -s "$target" "$home/state/x-poll.error/x-poll.error"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FMX_PAIRING_TOKEN=tok-linked-marker FAKE_POLL_CODE=401 \
     "$ROOT/bin/fm-x-poll.sh"); rc=$?
@@ -248,13 +268,15 @@ test_poll_error_private_publication_rejects_unsafe_paths() {
     || fail "poll must not dedupe through a linked diagnostic marker (got: $out)"
   [ "$(cat "$target")" = "relay returned HTTP 401" ] \
     || fail "poll must not write through a linked diagnostic marker"
-  [ -L "$home/state/x-poll.error" ] || fail "poll must not replace a rejected linked diagnostic marker"
+  [ -L "$home/state/x-poll.error/x-poll.error" ] || fail "poll must not replace a rejected linked diagnostic marker"
 
   home="$TMP_ROOT/poll-error-hardlink-marker"; mkdir -p "$home/state"
   fakebin=$(make_fake_curl "$home")
   chmod 700 "$home/state"
-  marker="$home/state/x-poll.error"
-  hardlink="$home/state/x-poll.alias"
+  mkdir "$home/state/x-poll.error"
+  chmod 700 "$home/state/x-poll.error"
+  marker="$home/state/x-poll.error/x-poll.error"
+  hardlink="$home/state/x-poll.error/x-poll.alias"
   printf 'relay returned HTTP 401\n' > "$marker"
   chmod 600 "$marker"
   ln "$marker" "$hardlink"
@@ -359,19 +381,19 @@ test_poll_offer_claim_failure_reports_once() {
   expect_code 0 "$rc" "first offer claim failure poll exit"
   [ "$out" = "x-mode-error cannot record mention offer" ] \
     || fail "an offer claim failure must emit one diagnostic (got: $out)"
-  assert_present "$home/state/x-poll.claim-error" "offer claim failure must write a dedupe marker"
+  assert_present "$home/state/x-poll.claim-error/x-poll.claim-error" "offer claim failure must write a dedupe marker"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FMX_PAIRING_TOKEN=tok-claim-failure FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
     "$ROOT/bin/fm-x-poll.sh"); rc=$?
   expect_code 0 "$rc" "repeated offer claim failure poll exit"
   [ -z "$out" ] || fail "a repeated offer claim failure must stay silent (got: $out)"
-  assert_present "$home/state/x-poll.claim-error" "a repeated offer claim failure must retain its dedupe marker"
+  assert_present "$home/state/x-poll.claim-error/x-poll.claim-error" "a repeated offer claim failure must retain its dedupe marker"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FMX_PAIRING_TOKEN=tok-claim-failure FAKE_POLL_CODE=204 \
     "$ROOT/bin/fm-x-poll.sh"); rc=$?
   expect_code 0 "$rc" "no-pending poll after offer claim failure exit"
   [ -z "$out" ] || fail "a no-pending poll must stay silent after an offer claim failure (got: $out)"
-  assert_present "$home/state/x-poll.claim-error" \
+  assert_present "$home/state/x-poll.claim-error/x-poll.claim-error" \
     "a no-pending poll must retain the offer claim dedupe marker"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FMX_PAIRING_TOKEN=tok-claim-failure FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
@@ -387,7 +409,7 @@ test_poll_offer_claim_failure_reports_once() {
   expect_code 0 "$rc" "recovered offer claim poll exit"
   [ "$out" = "x-mention req-claim-failure" ] \
     || fail "a recovered offer claim must emit the mention wake (got: $out)"
-  assert_absent "$home/state/x-poll.claim-error" "a successful offer claim must clear the diagnostic marker"
+  assert_absent "$home/state/x-poll.claim-error/x-poll.claim-error" "a successful offer claim must clear the diagnostic marker"
   pass "fm-x-poll retains offer claim diagnostics until recovery"
 }
 
@@ -449,7 +471,7 @@ SH
     || fail "poll inbox commit failure must emit an error, not a wake marker (got: $out)"
   assert_absent "$home/state/x-inbox/req-rename.json" "poll must not report a committed inbox file that was not created"
   assert_absent "$home/state/x-inbox/req-rename.json.tmp" "poll must clean up the failed inbox temp file"
-  assert_present "$home/state/x-poll.error" "poll inbox commit failure must write a dedupe marker"
+  assert_present "$home/state/x-poll.error/x-poll.error" "poll inbox commit failure must write a dedupe marker"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
     FAKE_POLL_CODE=200 FAKE_POLL_BODY="$body" \
     "$ROOT/bin/fm-x-poll.sh"); rc=$?
@@ -462,7 +484,7 @@ SH
   expect_code 0 "$rc" "poll recovered inbox commit failure exit"
   [ "$out" = "x-mention req-rename" ] \
     || fail "poll must emit the mention marker once the inbox write succeeds (got: $out)"
-  assert_absent "$home/state/x-poll.error" "successful inbox write must clear the diagnostic marker"
+  assert_absent "$home/state/x-poll.error/x-poll.error" "successful inbox write must clear the diagnostic marker"
   pass "fm-x-poll reports inbox commit failures without emitting a mention wake"
 }
 
@@ -2799,6 +2821,7 @@ test_poll_empty_env_token_overrides_env_file
 test_poll_204_is_silent
 test_poll_empty_env_relay_overrides_env_file
 test_poll_auth_error_reports_once
+test_poll_error_publication_failure_is_loud
 test_poll_error_private_publication_rejects_unsafe_paths
 test_poll_question_stashes_and_marks
 test_poll_mentions_wake_once_per_durable_offer

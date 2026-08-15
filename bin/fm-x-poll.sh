@@ -64,38 +64,42 @@ if fm_pf_has_events "$STATE"; then
   fi
 fi
 
-ERROR_FILE="$STATE/x-poll.error"
-CLAIM_ERROR_FILE="$STATE/x-poll.claim-error"
+ERROR_FILE="$STATE/x-poll.error/x-poll.error"
+CLAIM_ERROR_FILE="$STATE/x-poll.claim-error/x-poll.claim-error"
 
 emit_error_once() {
   local msg=$1
-  if fmx_private_artifact_file_valid "$STATE" "x-poll.error" 600 \
+  if fmx_private_artifact_file_valid "$STATE/x-poll.error" "x-poll.error" 600 \
     && [ "$(cat "$ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
     return 0
   fi
-  printf '%s\n' "$msg" \
-    | fmx_private_artifact_publish_stdin "$STATE" "x-poll.error" 600 2>/dev/null || true
+  if ! fmx_private_artifact_publish_stdin "$STATE/x-poll.error" "x-poll.error" 600 \
+    <<< "$msg"; then
+    printf 'failed to publish X poll error marker\n' >&2
+  fi
   printf 'x-mode-error %s\n' "$msg"
 }
 
 clear_error() {
-  fmx_private_artifact_dir_device "$STATE" >/dev/null 2>&1 || return 0
+  fmx_private_artifact_dir_device "$STATE/x-poll.error" >/dev/null 2>&1 || return 0
   rm -f "$ERROR_FILE" 2>/dev/null || true
 }
 
 emit_claim_error_once() {
   local msg=$1
-  if fmx_private_artifact_file_valid "$STATE" "x-poll.claim-error" 600 \
+  if fmx_private_artifact_file_valid "$STATE/x-poll.claim-error" "x-poll.claim-error" 600 \
     && [ "$(cat "$CLAIM_ERROR_FILE" 2>/dev/null)" = "$msg" ]; then
     return 0
   fi
-  printf '%s\n' "$msg" \
-    | fmx_private_artifact_publish_stdin "$STATE" "x-poll.claim-error" 600 2>/dev/null || true
+  if ! fmx_private_artifact_publish_stdin "$STATE/x-poll.claim-error" "x-poll.claim-error" 600 \
+    <<< "$msg"; then
+    printf 'failed to publish X poll claim error marker\n' >&2
+  fi
   printf 'x-mode-error %s\n' "$msg"
 }
 
 clear_claim_error() {
-  fmx_private_artifact_dir_device "$STATE" >/dev/null 2>&1 || return 0
+  fmx_private_artifact_dir_device "$STATE/x-poll.claim-error" >/dev/null 2>&1 || return 0
   rm -f "$CLAIM_ERROR_FILE" 2>/dev/null || true
 }
 

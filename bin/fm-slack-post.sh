@@ -60,22 +60,24 @@ update_message() {
 }
 
 board_meta_read() {
-  local meta=$STATE/slack-board.meta
-  fmx_private_artifact_file_valid "$STATE" "slack-board.meta" 600 2>/dev/null || return 1
+  local meta=$STATE/slack-board.meta/slack-board.meta
+  fmx_private_artifact_file_valid "$STATE/slack-board.meta" "slack-board.meta" 600 2>/dev/null || return 1
   grep '^ts=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-
 }
 
 board_meta_channel() {
-  local meta=$STATE/slack-board.meta
-  fmx_private_artifact_file_valid "$STATE" "slack-board.meta" 600 2>/dev/null || return 1
+  local meta=$STATE/slack-board.meta/slack-board.meta
+  fmx_private_artifact_file_valid "$STATE/slack-board.meta" "slack-board.meta" 600 2>/dev/null || return 1
   grep '^channel=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-
 }
 
 board_meta_write() {
   local ts=$1
   fms_message_ts_valid "$ts" || return 1
-  printf 'channel=%s\nts=%s\n' "$FMS_CHANNEL_ID" "$ts" \
-    | fmx_private_artifact_publish_stdin "$STATE" "slack-board.meta" 600 >/dev/null 2>&1
+  fmx_private_artifact_publish_stdin "$STATE/slack-board.meta" "slack-board.meta" 600 <<EOF
+channel=$FMS_CHANNEL_ID
+ts=$ts
+EOF
 }
 
 cmd=${1-}
