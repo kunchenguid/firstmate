@@ -32,7 +32,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
-| `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
+| `relaunch` | Replace the running agent with a new one in the same worktree, normally reusing its endpoint and recreating it before launch only when the backend authoritatively reports it missing, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the validated replacement endpoint, and the durable record names both that endpoint and the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -68,15 +68,22 @@ It is not deterministic across the verified adapters: codex and grok resume only
 3. **Record the note.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
-4. **Stop the old agent** through the `exit` verb, with its postcondition.
-5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+4. **Classify and stop the old agent.**
+   An alive or agent-free endpoint follows the ordinary `exit` postcondition.
+   An authoritatively missing endpoint has no agent to stop, so the transaction records that fact and proceeds without sending lifecycle input.
+   Ambiguous, unreadable, and unverified states refuse before the progress note or durable record changes.
+5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`.
+   The ordinary path adopts the recorded endpoint and worktree.
+   Missing-endpoint recovery asks the launch owner to recheck that the endpoint is still missing, recreate only the shell endpoint in the recorded worktree, and publish the validated replacement identity.
+   Both paths clear the previous harness's per-task wiring and arm a fresh busy generation.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
 ### Failure and rollback
 
-- A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
+- A preflight refusal **before** the progress note is recorded leaves the durable record and the instructions byte-identical.
 - A launch failure **after** the agent is stopped restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
+- A missing-endpoint recreation failure before publication likewise keeps the prior durable record and progress note, with the existing worktree untouched.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
 
@@ -98,7 +105,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   zellij, orca, and cmux are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
-- `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+- `fm-spawn --relaunch` independently requires either a positively agent-free recorded endpoint or an explicit missing-endpoint recovery whose `missing` verdict it rechecks under the lifecycle locks.
+  It verifies the adopted or recreated shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
 
 ## Capability matrix
 

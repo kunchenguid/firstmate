@@ -98,6 +98,43 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
   printf '%s\n' "$wid"
 }
 
+# Recreate an authoritatively missing task endpoint at its recorded address.
+# The caller retains the existing worktree and task record; this function only
+# creates the shell endpoint that can host the replacement agent.
+fm_backend_tmux_recreate_task() {  # <session:window> <worktree> -> prints window id
+  local target=$1 worktree=$2 session window state wid
+  case "$target" in
+    *:*:*)
+      echo "error: tmux task endpoint '$target' is malformed" >&2
+      return 1
+      ;;
+    *:*) ;;
+    *)
+      echo "error: tmux task endpoint '$target' is malformed" >&2
+      return 1
+      ;;
+  esac
+  session=${target%%:*}
+  window=${target#*:}
+  [ -n "$session" ] && [ -n "$window" ] || {
+    echo "error: tmux task endpoint '$target' is malformed" >&2
+    return 1
+  }
+  state=$(fm_backend_tmux_agent_state "$target")
+  [ "$state" = missing ] || {
+    echo "error: tmux task endpoint '$target' reads '$state', not missing; refusing to create a duplicate endpoint" >&2
+    return 1
+  }
+  if tmux has-session -t "$session" 2>/dev/null; then
+    fm_backend_tmux_create_task "$session" "$window" "$worktree"
+    return
+  fi
+  wid=$(tmux new-session -dP -F '#{window_id}' -s "$session" -n "$window" -c "$worktree") || return 1
+  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
+  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  printf '%s\n' "$wid"
+}
+
 # fm_backend_tmux_current_path: the live pane's current working directory, or
 # empty on any tmux error. Mirrors fm-spawn.sh's worktree-discovery poll:
 # `tmux display-message -p -t "$T" '#{pane_current_path}'`.
