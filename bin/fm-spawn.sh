@@ -2129,6 +2129,14 @@ EOF
       fi
     fi
     if [ "$HERDR_PROJECTED" -ne 1 ]; then
+      HERDR_SES=$(fm_backend_herdr_session)
+      if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
+        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+          echo "error: herdr task create could not acquire its session lock" >&2
+          exit 1
+        }
+        HERDR_SESSION_LAUNCH_LOCK=1
+      fi
       HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace
@@ -2138,15 +2146,11 @@ EOF
       # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
       CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
-      HERDR_SES=${CONTAINER%%:*}
+      [ "${CONTAINER%%:*}" = "$HERDR_SES" ] || {
+        echo "error: herdr task create resolved a different session after acquiring its session lock" >&2
+        exit 1
+      }
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
-        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
-          echo "error: herdr task create could not acquire its session lock" >&2
-          exit 1
-        }
-        HERDR_SESSION_LAUNCH_LOCK=1
-      fi
       HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS

@@ -2172,6 +2172,43 @@ fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <
   esac
   agent_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
   [ "$agent_state" = no-agent ] || return 1
+  if [ "$mode" = recover ] \
+     && [ "$endpoint_label" = "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_LABEL" ]; then
+    fm_backend_herdr_relaunch_missing_pane_context_validate \
+      "$session" "$workspace" "$old_tab" "$old_pane" "$label" 1 "$tab" || return 1
+    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+    if ! printf '%s' "$list" | jq -e --arg label "$label" '
+      (.result.tabs | type) == "array"
+        and all(.result.tabs[]?; .label != $label)
+    ' >/dev/null 2>&1; then
+      return 1
+    fi
+    fm_backend_herdr_cli "$session" tab rename "$tab" "$label" >/dev/null 2>&1 || return 1
+    tab_info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+    pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+    if ! printf '%s' "$tab_info" | jq -e --arg tab "$tab" --arg workspace "$workspace" --arg label "$label" '
+        .result.tab.tab_id == $tab
+          and .result.tab.workspace_id == $workspace
+          and .result.tab.label == $label
+      ' >/dev/null 2>&1 \
+      || ! printf '%s' "$pane_info" | jq -e --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+        .result.pane.pane_id == $pane
+          and .result.pane.tab_id == $tab
+          and .result.pane.workspace_id == $workspace
+      ' >/dev/null 2>&1 \
+      || [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" != no-agent ]; then
+      return 1
+    fi
+    list=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+    if ! printf '%s' "$list" | jq -e --arg tab "$tab" --arg workspace "$workspace" --arg label "$label" '
+      [.result.tabs[]? | select(.label == $label)]
+      | length == 1
+        and .[0].tab_id == $tab
+        and .[0].workspace_id == $workspace
+    ' >/dev/null 2>&1; then
+      return 1
+    fi
+  fi
   if [ "$mode" = recover ] && [ "$claim_bound" = 0 ]; then
     fm_backend_herdr_relaunch_claim_bind_endpoint "$path" "$id" "$tab" "$pane" || return 1
   fi

@@ -2256,6 +2256,34 @@ test_spawn_relaunch_holds_herdr_session_lock_through_submission() {
   pass "fm-spawn --relaunch: holds the Herdr session lock through worker submission"
 }
 
+test_spawn_relaunch_finishes_an_interrupted_herdr_claim_rename() {
+  local dir out rc mutations
+  dir=$(new_case herdr-interrupted-claim-rename hr1)
+  add_herdr_missing_pane_task "$dir" hr1
+  make_herdr_missing_pane_stub "$dir" normal
+  printf '%s\n' 'fm-hr1~claim-0123456789ABCDEFGHIJKL' > "$dir/fake/herdr-created-label"
+  {
+    echo 'version=1'
+    echo 'task_id=hr1'
+    echo 'session=hses'
+    echo 'workspace_id=w1'
+    echo 'task_label=fm-hr1'
+    echo 'claim_label=fm-hr1~claim-0123456789ABCDEFGHIJKL'
+    echo 'tab_id=w1:t3'
+    echo 'pane_id=w1:p3'
+  } > "$dir/home/state/.hr1.herdr-relaunch-claim"
+  out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "an interrupted private-label claim should resume the relaunch"
+  mutations=$(cat "$dir/fake/herdr-mutations")
+  assert_contains "$mutations" 'tab rename w1:t3 fm-hr1' \
+    "a recovered private-label claim must finish its exact task-label rename"
+  [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+    || fail "a recovered private-label claim was not finalized after publication"
+  [ "$(meta_field "$dir" hr1 herdr_tab_id)" = w1:t3 ] \
+    || fail "a recovered private-label claim did not publish its exact replacement tab"
+  pass "fm-spawn --relaunch: recovered Herdr claims finish private-label renames"
+}
+
 test_spawn_relaunch_preserves_an_interrupted_claim_on_conflict() {
   local dir out rc meta_before claim_before
   dir=$(new_case herdr-interrupted-claim-conflict hr1)
@@ -2345,4 +2373,5 @@ test_spawn_relaunch_rechecks_recorded_herdr_identity_before_create
 test_spawn_relaunch_handles_definite_and_ambiguous_herdr_create_failures
 test_spawn_relaunch_preserves_an_interrupted_claim_on_conflict
 test_spawn_relaunch_holds_herdr_session_lock_through_submission
+test_spawn_relaunch_finishes_an_interrupted_herdr_claim_rename
 test_spawn_relaunch_retains_prepublication_herdr_claims
