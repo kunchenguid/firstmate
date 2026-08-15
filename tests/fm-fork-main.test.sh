@@ -54,7 +54,8 @@ new_world() { # <name>
   git clone -q "$w/upstream.git" "$w/seed" 2>/dev/null
   git -C "$w/seed" config commit.gpgsign false
   printf 'base\n' > "$w/seed/base.txt"
-  cp "$ROOT/fork-divergences.json" "$w/seed/fork-divergences.json"
+  jq '.upstream_syncs = [] | .divergences = [] | .retired_upstream = []' \
+    "$ROOT/fork-divergences.json" > "$w/seed/fork-divergences.json"
   git -C "$w/seed" add .
   git -C "$w/seed" commit -qm base
   git -C "$w/seed" push -q origin main

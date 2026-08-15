@@ -240,3 +240,4 @@ fm_cursor_process_matches() {  # <comm> <args> [argv0]
   case "$comm" in */*) fm_cursor_path_is_cursor "$comm" && return 0 ;; esac
   return 1
 }
+

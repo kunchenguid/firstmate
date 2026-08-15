@@ -1,6 +1,15 @@
 {
   "schema": "firstmate.fork-divergences.v1",
-  "upstream_syncs": [],
+  "upstream_syncs": [
+    {
+      "date": "2026-08-15",
+      "fork_before": "2def68de4882b16f3c5160dc44616a650606b321",
+      "upstream_before": "85e750ab9b76df275c1f6b9e2bc95b671955bae9",
+      "upstream_after": "6789876442d0fb6da9f70d86399a2930c5073ae2",
+      "touched": [],
+      "validation_pr": null
+    }
+  ],
   "divergences": [],
   "retired_upstream": []
 }

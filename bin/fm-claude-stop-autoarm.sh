@@ -116,9 +116,10 @@ trace_entry_event entry
 
 # Cursor loads the tracked Claude settings too. Cursor has no asyncRewake, so if
 # a future Cursor build starts firing the Claude-shaped Stop entry, this arm
-# would run synchronously inside Cursor's stop step and hold that turn open for
-# the declared multi-hour timeout. Cursor's own park adapter owns its turn
-# boundary, so stand down on a Cursor-delivered payload.
+# would run SYNCHRONOUSLY inside Cursor's stop step and hold that turn open for
+# the declared multi-hour timeout - the exact wedge grok 1.0.0 produced
+# (docs/turnend-guard.md "Harness integrations"). Cursor's own park adapter owns
+# its turn boundary, so stand down on a Cursor-delivered payload.
 if fm_hook_payload_is_foreign_host "$PAYLOAD"; then
   trace_entry_event gate-foreign-host
   exit 0
