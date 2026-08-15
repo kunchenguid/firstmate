@@ -335,6 +335,12 @@ test_claude_busy_signature_uses_real_capture_shapes() {
     pane_busy omp omp \
       || fail "OMP captured $omp_spinner spinner frame should be busy"
   done
+  omp_line=$(printf ' ◐ Working\xe2\x80\xa6 [esc]')
+  printf '%s\n' "$omp_line" | LC_ALL=C grep -qE "$FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT" \
+    || fail "OMP multibyte spinner frame must match under LC_ALL=C"
+  printf '%s\n' "$omp_line" > "$composer"
+  LC_ALL=C pane_busy omp omp \
+    || fail "OMP multibyte spinner frame should be busy under LC_ALL=C"
   pane_busy no-harness && fail "OMP footer must not widen the no-harness fallback"
   printf 'Working...\n' > "$composer"
   pane_busy omp && fail "OMP print-mode output without its TUI esc footer must stay idle"

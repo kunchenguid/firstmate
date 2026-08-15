@@ -1134,7 +1134,7 @@ launch_template() {
     # restrictive tools.approvalMode=always-ask config, so an unattended pane
     # cannot silently park at an approval prompt after a local config change.
     omp)
-      printf '%s' '__OMPBIN__ --advisor --approval-mode=yolo'
+      printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __OMPBIN__ --advisor --approval-mode=yolo'
       if [ "$kind" = secondmate ]; then
         printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else

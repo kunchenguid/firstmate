@@ -255,6 +255,10 @@ SH
   got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     FM_TEST_OMP_SHAPE=package PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
   [ "$got" = omp ] || fail "OMP package ancestry resolved '$got', expected omp"
+  got=$(PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS \
+    "$ROOT/bin/fm-harness.sh")
+  [ "$got" = omp ] || fail "sanitized Pi-family environment resolved '$got', expected omp"
   if env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
     FM_TEST_OMP_SHAPE=decoy PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh" | grep -qx omp; then
     fail "an unrelated Bun program was detected as OMP"
