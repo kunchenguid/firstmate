@@ -17,9 +17,10 @@ usage: fm-fleet-reconcile.sh scan [--json|--check]
        fm-fleet-reconcile.sh recover-returned-secondmate <id>
 
 Use scan for a read-only integrity report. The returned-secondmate action is
-only for a home whose Firstmate seed receipt, empty returned shape, absent
-runtime endpoint, and absent Treehouse lease all match exactly; it refuses
-ambiguous or arbitrary missing homes and never uses --force.
+only for a home whose Firstmate seed receipt or bounded legacy-charter identity,
+empty returned shape, absent runtime endpoint, and absent Treehouse lease all
+match exactly; it refuses unsafe ambiguity or arbitrary missing homes and never
+uses --force.
 EOF
 }
 

@@ -648,10 +648,15 @@ task_integrity_json() {  # <backlog-json> <tasks-json>
       ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
     def terminal_signal:
       (.current_state.state == "done" or .current_state.state == "failed")
-      or ((.hints.last_event_text // "") | test("^(done|failed)(:|[[:space:]])"));
+      or (.current_state.state == "unknown"
+          and .endpoint.exists == false
+          and ((.hints.last_event_text // "") | test("^(done|failed)(:|[[:space:]])")));
     def classification($task; $row):
       if $task.kind == "secondmate" then
-        if (($task.endpoint.exists // null) == true and $task.current_state.state != "unknown")
+        if (($task.endpoint.exists // null) == true
+            and $task.current_state.state != "unknown"
+            and $task.paths.home.present == true
+            and $task.paths.worktree.present == true)
         then "persistent"
         else "unreconciled" end
       elif $row == null then "unreconciled"
@@ -685,7 +690,9 @@ task_integrity_json() {  # <backlog-json> <tasks-json>
           "in-flight task has no live recorded endpoint"
         end
       elif $classification == "unreconciled" then
-        if $row == null then "task metadata has no structured backlog record"
+        if $task.kind == "secondmate" and ($task.paths.home.present != true or $task.paths.worktree.present != true) then
+          "persistent secondmate home or worktree is absent"
+        elif $row == null then "task metadata has no structured backlog record"
         elif ($task.endpoint.exists == true) and ($task.paths.worktree.present != true) then
           "endpoint exists but recorded worktree is absent"
         elif ($task.endpoint.exists == null) then

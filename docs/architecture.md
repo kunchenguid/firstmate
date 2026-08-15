@@ -53,7 +53,7 @@ For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
 Each task also carries a read-only integrity classification that separates real working, deliberate holds, completion awaiting guarded cleanup, stale endpoint or worktree records, and unreconciled evidence.
 `bin/fm-fleet-integrity.sh` exposes the bounded local-only integrity report used by startup and operators, and `bin/fm-fleet-reconcile.sh` delegates the returned-secondmate recovery to `fm-teardown.sh`.
-The recovery requires the exact seed receipt, an empty returned home shape, an absent runtime endpoint, an absent Treehouse lease, and a uniquely matching route before retiring parent metadata and the route.
+The recovery requires either the exact seed receipt or a legacy charter whose summary, routing scope, and project clones match parent metadata and the target route, plus an empty returned home shape, an absent runtime endpoint, an absent Treehouse lease, and a target-bound safe route retirement before retiring parent metadata and the route.
 It preserves every ambiguous, dirty, unresolved, inaccessible, or uncertain record and never supplies discard authority.
 The script header owns the exact JSON schema.
 

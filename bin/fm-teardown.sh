@@ -165,6 +165,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-secondmate-charter-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -2293,7 +2295,7 @@ remove_secondmate_registry_entry() {
 recover_returned_secondmate() {
   local receipt receipt_id receipt_home receipt_projects receipt_scope receipt_digest
   local expected_digest route_home route_projects route_scope home_key entry treehouse_status state_entries
-  local identity_source seed_brief
+  local identity_source seed_brief receipt_summary route_summary meta_projects retiring_meta
   [ "$KIND" = secondmate ] || {
     echo "REFUSED: returned-home recovery is only for kind=secondmate metadata" >&2
     return 1
@@ -2339,8 +2341,18 @@ recover_returned_secondmate() {
     fi
     receipt_id=$ID
     receipt_home=$HOME_PATH
-    receipt_projects=$(meta_value "$META" projects)
-    receipt_scope=
+    receipt_projects=$(registry_projects_for_brief "$seed_brief")
+    receipt_scope=$(registry_scope_for_brief "$seed_brief")
+    receipt_summary=$(registry_summary_for_brief "$seed_brief")
+    meta_projects=$(meta_value "$META" projects)
+    [ -n "$receipt_scope" ] && [ -n "$receipt_summary" ] || {
+      echo "REFUSED: legacy charter identity is incomplete for $ID; preserving records" >&2
+      return 1
+    }
+    [ "$(secondmate_registry_project_key "$meta_projects")" = "$(secondmate_registry_project_key "$receipt_projects")" ] || {
+      echo "REFUSED: legacy charter projects do not match parent metadata; preserving records" >&2
+      return 1
+    }
     receipt_digest=
   fi
   [ -d "$HOME_PATH" ] && [ ! -L "$HOME_PATH" ] || {
@@ -2392,7 +2404,7 @@ recover_returned_secondmate() {
     echo "REFUSED: the exact secondmate home is still leased or treehouse status is malformed; preserving records" >&2
     return 1
   }
-  secondmate_registry_validate_bindings "$SECONDMATE_REG" secondmate_registry_path_key "$ID" "$HOME_PATH" || {
+  secondmate_registry_validate_bindings "$SECONDMATE_REG" secondmate_registry_path_key "$ID" "$HOME_PATH" retire || {
     echo "REFUSED: secondmate route identity is not uniquely validated: $SECONDMATE_REGISTRY_ERROR" >&2
     return 1
   }
@@ -2404,7 +2416,11 @@ recover_returned_secondmate() {
   }
   route_scope=$SECONDMATE_REGISTRY_SCOPE
   if [ "$identity_source" = legacy-charter ]; then
-    receipt_scope=$route_scope
+    route_summary=$SECONDMATE_REGISTRY_SUMMARY
+    [ "$route_summary" = "$receipt_summary" ] || {
+      echo "REFUSED: secondmate route summary does not match its legacy charter identity; preserving records" >&2
+      return 1
+    }
   fi
   [ "$(secondmate_registry_path_key "$route_home")" = "$home_key" ] \
     && [ "$(secondmate_registry_project_key "$route_projects")" = "$(secondmate_registry_project_key "$receipt_projects")" ] \
@@ -2417,20 +2433,32 @@ recover_returned_secondmate() {
     return 1
   fi
   validate_pr_poll_cleanup "$STATE" "$ID" || return 1
-  remove_secondmate_registry_entry "$ID" || {
-    echo "error: could not retire the returned secondmate route; preserving metadata" >&2
-    return 1
-  }
   remove_grok_turnend_auth "$STATE" "$ID" || return 1
   remove_kimi_turnend_auth "$STATE" "$ID" || return 1
   fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
   remove_pr_poll_artifacts "$STATE" "$ID" || return 1
   retire_busy_state "$STATE" "$ID" "$(fm_meta_get "$META" busy_gen)" || return 1
   status_retire_presentation_task "$STATE" "$ID" || return 1
-  rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+  retiring_meta="$STATE/.$ID.meta.retiring.$$"
+  mv "$META" "$retiring_meta" || {
+    echo "error: could not stage returned-secondmate metadata retirement; preserving the route" >&2
+    return 1
+  }
+  remove_secondmate_registry_entry "$ID" || {
+    mv "$retiring_meta" "$META" || {
+      echo "error: could not restore returned-secondmate metadata after route retirement failed: $retiring_meta" >&2
+      return 1
+    }
+    echo "error: could not retire the returned secondmate route; restored metadata" >&2
+    return 1
+  }
+  rm -f "$STATE/$ID.turn-ended" "$retiring_meta" \
     "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
     "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
-    "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session"
+    "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" || {
+      echo "error: returned-secondmate route retired but staged cleanup evidence remains at $retiring_meta" >&2
+      return 1
+    }
   printf 'returned-home recovery %s complete (%s identity and completed lease return proved)\n' "$ID" "$identity_source"
 }
 

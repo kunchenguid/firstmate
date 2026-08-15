@@ -136,7 +136,7 @@ secondmate_registry_path_key() {
 }
 
 secondmate_registry_validate_bindings() {
-  local reg=$1 resolver=$2 expected_id=${3:-} expected_home=${4:-}
+  local reg=$1 resolver=$2 expected_id=${3:-} expected_home=${4:-} purpose=${5:-dispatch}
   local tmp snapshot bindings line id host root home home_key scope_key project_key duplicate_homes duplicate_ids overlaps ambiguous_routes expected_home_key
   SECONDMATE_REGISTRY_MATCH_HOST=
   SECONDMATE_REGISTRY_MATCH_ROOT=
@@ -145,6 +145,10 @@ secondmate_registry_validate_bindings() {
   SECONDMATE_REGISTRY_MATCH_PROJECTS=
   SECONDMATE_REGISTRY_MATCH_REMOTE=0
   SECONDMATE_REGISTRY_ERROR=
+  case "$purpose" in
+    dispatch|retire) ;;
+    *) SECONDMATE_REGISTRY_ERROR="invalid registry validation purpose: $purpose"; return 1 ;;
+  esac
   case "$expected_id" in *[!A-Za-z0-9._-]*) SECONDMATE_REGISTRY_ERROR="invalid secondmate id: $expected_id"; return 1 ;; esac
   if [ ! -f "$reg" ] || [ -L "$reg" ]; then
     SECONDMATE_REGISTRY_ERROR="secondmate registry is unavailable or unsafe: $reg"
@@ -312,7 +316,7 @@ secondmate_registry_validate_bindings() {
     SECONDMATE_REGISTRY_ERROR="overlapping secondmate home assignment: $overlaps"
     return 1
   }
-  ambiguous_routes=$(awk -F '\t' '
+  ambiguous_routes=$(awk -F '\t' -v retirement_id="$expected_id" -v purpose="$purpose" '
     function shares(a, b,    na, nb, aa, bb, i, j) {
       na=split(a, aa, ","); nb=split(b, bb, ",")
       for (i=1; i<=na; i++) for (j=1; j<=nb; j++) if (aa[i] == bb[j] && aa[i] != "") return 1
@@ -320,7 +324,8 @@ secondmate_registry_validate_bindings() {
     }
     {
       for (i = 1; i <= count; i++) {
-        if ($3 == scope[i] && shares($4, projects[i])) {
+        if ($3 == scope[i] && shares($4, projects[i]) &&
+            !(purpose == "retire" && (retirement_id == $2 || retirement_id == id[i]))) {
           print id[i] " and " $2 " have equivalent scopes for shared project(s)"
           bad=1
         }

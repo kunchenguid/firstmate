@@ -42,3 +42,15 @@ registry_scope_for_brief() {
     brief_section_text "$brief" "Routing scope" | normalize_registry_text
   fi
 }
+
+registry_projects_for_brief() {
+  local brief=$1
+  brief_section_text "$brief" "Project clones" | awk '
+    /^[[:space:]]*-[[:space:]]+/ {
+      sub(/^[[:space:]]*-[[:space:]]+/, "")
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+      if ($0 != "") out = out (out == "" ? "" : ", ") $0
+    }
+    END { print out }
+  '
+}
