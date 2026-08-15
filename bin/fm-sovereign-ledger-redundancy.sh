@@ -8,7 +8,7 @@
 #
 # snapshot creates a complete staging bundle then atomically publishes it into an absent replica path.
 # refresh advances only a verifying byte-exact ledger.tsv prefix while every other bundle file is identical.
-# verify fails loudly on a stale prefix, a divergence, symlinks, non-regular files, an incomplete layout, or a hard link.
+# verify fails loudly on a stale prefix, a divergence, symlinks, non-regular files, an incomplete layout, or any shared file identity.
 # No replica-controlled code runs until all bundle bytes have been compared to the primary.
 # This script never admits, rewrites, repairs, or attributes a ruling.
 set -euo pipefail
@@ -62,14 +62,26 @@ compare_files() {
   done < <(bundle_entries "$primary")
 }
 
-file_identity() {
+file_lstat_identity() {
   stat -f '%d:%i' "$1" 2>/dev/null || stat -c '%d:%i' "$1"
 }
 
-require_independent_ledger_file() {
-  local primary=$1 replica=$2
-  [ "$(file_identity "$primary/ledger.tsv")" != "$(file_identity "$replica/ledger.tsv")" ] \
-    || die "replica ledger.tsv is hard-linked to the primary, not a second copy"
+file_stat_identity() {
+  stat -L -f '%d:%i' "$1" 2>/dev/null || stat -L -c '%d:%i' "$1"
+}
+
+require_independent_bundle_files() {
+  local primary=$1 replica=$2 entry primary_lstat replica_lstat primary_stat replica_stat
+  while IFS= read -r entry; do
+    primary_lstat=$(file_lstat_identity "$primary/$entry")
+    replica_lstat=$(file_lstat_identity "$replica/$entry")
+    [ "$primary_lstat" != "$replica_lstat" ] \
+      || die "replica $entry shares the primary lstat identity (device:inode), not a separate file"
+    primary_stat=$(file_stat_identity "$primary/$entry")
+    replica_stat=$(file_stat_identity "$replica/$entry")
+    [ "$primary_stat" != "$replica_stat" ] \
+      || die "replica $entry resolves to the primary object (device:inode), not a separate file"
+  done < <(bundle_entries "$primary")
 }
 
 verify_with_primary() {
@@ -99,7 +111,7 @@ verify_exact_pair() {
   local primary=$1 replica=$2
   preflight_pair "$primary" "$replica"
   compare_files "$primary" "$replica"
-  require_independent_ledger_file "$primary" "$replica"
+  require_independent_bundle_files "$primary" "$replica"
   verify_with_primary "$primary" "$primary"
   verify_with_primary "$primary" "$replica"
 }
@@ -113,11 +125,20 @@ copy_bundle() {
 }
 
 copy_ledger_atomically() {
-  local primary=$1 replica=$2 tmp
-  tmp="$replica/.ledger.tsv.tmp.$$"
+  local primary=$1 replica=$2 parent base tmp
+  parent=$(dirname "$replica")
+  base=$(basename "$replica")
+  tmp=$(mktemp "$parent/.${base}.ledger.tsv.tmp.XXXXXX") \
+    || die "could not create refresh staging file beside replica"
   umask 077
-  cp -p "$primary/ledger.tsv" "$tmp"
-  mv "$tmp" "$replica/ledger.tsv"
+  if ! cp -p "$primary/ledger.tsv" "$tmp"; then
+    rm -f -- "$tmp"
+    die "could not stage primary ledger.tsv for refresh"
+  fi
+  if ! mv "$tmp" "$replica/ledger.tsv"; then
+    rm -f -- "$tmp"
+    die "could not publish refreshed replica ledger.tsv"
+  fi
 }
 
 cmd_snapshot() {
@@ -135,10 +156,14 @@ cmd_snapshot() {
   parent=$(dirname "$replica_input")
   base=$(basename "$replica_input")
   [ -d "$parent" ] || die "replica parent directory does not exist: $parent"
-  stage=$(mktemp -d "$parent/.${base}.stage.XXXXXX")
+  stage=$(mktemp -d "$parent/.${base}.stage.XXXXXX") \
+    || die "could not create replica staging directory"
+  trap 'rm -rf -- "$stage"' EXIT HUP INT TERM
   copy_bundle "$primary" "$stage"
   verify_exact_pair "$primary" "$stage"
   mv "$stage" "$replica_input"
+  stage=
+  trap - EXIT HUP INT TERM
   printf 'SNAPSHOT PASS (replica created: %s)\n' "$(canonical_dir "$replica_input")"
 }
 
@@ -171,7 +196,7 @@ cmd_verify() {
     die "replica ledger.tsv diverges from primary"
   fi
   verify_exact_pair "$primary" "$replica"
-  printf 'REDUNDANCY VERIFY PASS (bundle identical and independently stored)\n'
+  printf 'REDUNDANCY VERIFY PASS (bundle byte-identical; every member has distinct lstat and stat identities)\n'
 }
 
 case "${1:-}" in
