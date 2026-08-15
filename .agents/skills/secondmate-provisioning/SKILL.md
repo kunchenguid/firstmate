@@ -223,6 +223,8 @@ The main firstmate reconciles only direct reports.
 Each secondmate is a firstmate in its own home, so it runs recovery on startup and reconciles its own crewmates.
 A secondmate's recovery reconciles only work that is already its own and then idles.
 It never initiates a survey or audit during recovery.
+If a local secondmate home has already completed its Treehouse return and is empty apart from an empty `state/` directory while parent metadata and its route survive, use `bin/fm-fleet-reconcile.sh recover-returned-secondmate <id>` instead of raw cleanup or an ordinary respawn.
+That command delegates to the guarded teardown owner and preserves the records unless the identity-bound recovery contract in [`docs/architecture.md`](../../../docs/architecture.md) is proved exactly.
 
 ## Retirement and teardown
 
