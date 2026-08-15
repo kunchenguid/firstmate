@@ -189,7 +189,7 @@ fms_bot_user_id_load() {
   if ! fmx_private_artifact_publish_stdin "$state/slack-bot-user" "slack-bot-user" 600 \
     <<< "$FMS_BOT_USER_ID"; then
     printf 'failed to publish private Slack bot user cache\n' >&2
-    return 1
+    printf 'slack-captain-warning bot user cache publication failed\n'
   fi
   return 0
 }

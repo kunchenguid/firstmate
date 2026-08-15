@@ -106,6 +106,14 @@ run_post() {
     "$ROOT/bin/fm-slack-post.sh" "$@"
 }
 
+private_mode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
 count_ack_posts() {
   local log=$1 encoded
   encoded=$(printf '%s' "$ACK_TEXT" | jq -sRr @uri)
@@ -114,6 +122,53 @@ count_ack_posts() {
     END { print n + 0 }
   ' "$log"
 }
+
+test_poll_continues_after_bot_cache_write_failure() {
+  local home fakebin log out rc
+  home="$TMP_ROOT/bot-cache-write-failure"
+  make_home "$home"
+  mkdir "$home/state/slack-bot-user"
+  chmod 755 "$home/state/slack-bot-user"
+  fakebin=$(make_fake_curl "$home/fake-cache-failure")
+  log="$home/curl.log"
+  : > "$log"
+  export FM_SLACK_CURL_LOG="$log"
+  export FAKE_SLACK_BOT_USER="$BOT_USER"
+  export FAKE_SLACK_CHANNEL="$CHANNEL_ID"
+  export FAKE_SLACK_HISTORY='{"ok":true,"messages":[{"type":"message","user":"U_CAPTAIN1","text":"cache failure still wakes","ts":"1786735226.111111"}]}'
+  out=$(run_poll "$home" "$fakebin"); rc=$?
+  [ "$rc" -eq 0 ] || fail "poll must continue after a bot cache publication failure"
+  [[ "$out" == *"slack-captain-message 1786735226.111111"* ]] \
+    || fail "poll must still collect messages after a bot cache publication failure: $out"
+  [[ "$out" != *"auth.test failed"* ]] \
+    || fail "poll must not misreport a bot cache publication failure as auth.test failed"
+  [[ "$out" == *"slack-captain-warning bot user cache publication failed"* ]] \
+    || fail "poll must surface the bot cache publication failure distinctly"
+  rg -F '/conversations.history' "$log" >/dev/null \
+    || fail "poll must reach conversations.history after a bot cache publication failure"
+  pass "fm-slack-poll continues after a successful auth with a failed bot cache publication"
+}
+
+test_poll_continues_after_bot_cache_write_failure
+
+test_private_artifact_path_works_under_public_state() {
+  local home fakebin out rc
+  home="$TMP_ROOT/public-state-success"
+  make_home "$home"
+  chmod 755 "$home/state"
+  fakebin=$(make_fake_curl "$home/fake-public-state")
+  export FAKE_SLACK_HISTORY='{"ok":true,"messages":[]}'
+  out=$(run_poll "$home" "$fakebin"); rc=$?
+  [ "$rc" -eq 0 ] && [ -z "$out" ] \
+    || fail "private artifact publication under a public state parent must stay quiet"
+  [ "$(private_mode "$home/state/slack-bot-user")" = 700 ] \
+    || fail "bot cache directory must be mode 700 under a public state parent"
+  [ "$(private_mode "$home/state/slack-bot-user/slack-bot-user")" = 600 ] \
+    || fail "bot cache file must be mode 600 under a public state parent"
+  pass "private artifact publication succeeds under a public state parent"
+}
+
+test_private_artifact_path_works_under_public_state
 
 # --- poll inert defaults ----------------------------------------------------
 
