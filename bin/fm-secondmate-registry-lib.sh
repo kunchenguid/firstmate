@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034 # parsed fields are output globals for sourcing callers.
-# Shared parser for data/secondmates.md records.
+# Shared parser for data/secondmates.md records and owner of the canonical
+# secondmate seed-identity serialization and digest.
 #
 # A generated local record ends with this explicit structured suffix:
 #   (home: ...; scope: ...; projects: ...; added YYYY-MM-DD)
