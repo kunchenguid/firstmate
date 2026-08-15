@@ -7,14 +7,19 @@ SOURCE="$ROOT/bin/fm-sovereign-ledger-redundancy.sh"
 TEST="$ROOT/tests/fm-sovereign-ledger-redundancy.test.sh"
 EVIDENCE=
 MODE=mutation
-if [ "${1:-}" = --self-test-evidence-containment ]; then
-  [ "$#" -eq 1 ] || { printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment]\n' "$0" >&2; exit 2; }
+EVIDENCE_FIXTURE=
+if [ "${1:-}" = --self-test-evidence-fixture ]; then
+  [ "$#" -eq 2 ] || { printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  MODE=fixture
+  EVIDENCE_FIXTURE=$2
+elif [ "${1:-}" = --self-test-evidence-containment ]; then
+  [ "$#" -eq 1 ] || { printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   MODE=containment
 elif [ "${1:-}" = --write-evidence ]; then
-  [ "$#" -eq 2 ] || { printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment]\n' "$0" >&2; exit 2; }
+  [ "$#" -eq 2 ] || { printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   EVIDENCE=$2
 elif [ "$#" -ne 0 ]; then
-  printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment]\n' "$0" >&2
+  printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2
   exit 2
 fi
 
@@ -100,9 +105,30 @@ publish_evidence() {
     || { evidence_refuse "published evidence did not retain exact bytes: $relative"; return 1; }
 }
 
-self_test_evidence_containment() {
-  local lab scope safe fake_data fake_state outside source pass_count=0 fail_count=0
-  lab="$TMP/evidence-containment"
+evidence_fixture_ids() {
+  printf '%s\n' absolute traversal symlink-leaf-data symlink-parent symlink-parent-state resolved-outside hard-link unresolved-parent existing legitimate
+}
+
+evidence_fixture_description() {
+  case "$1" in
+    absolute) printf '%s\n' 'absolute destination aimed at fake data is refused' ;;
+    traversal) printf '%s\n' 'dot-dot traversal aimed at fake data is refused' ;;
+    symlink-leaf-data) printf '%s\n' 'symlinked leaf aimed at fake data is refused' ;;
+    symlink-parent) printf '%s\n' 'symlinked parent directory is refused' ;;
+    symlink-parent-state) printf '%s\n' 'symlinked parent aimed at fake state is refused' ;;
+    resolved-outside) printf '%s\n' 'destination resolving outside after parent resolution is refused' ;;
+    hard-link) printf '%s\n' 'existing hard-linked destination is refused without mutation' ;;
+    unresolved-parent) printf '%s\n' 'unresolved destination parent is refused' ;;
+    existing) printf '%s\n' 'existing destination is refused without mutation' ;;
+    legitimate) printf '%s\n' 'legitimate in-scope publication remains exact' ;;
+    *) return 1 ;;
+  esac
+}
+
+run_evidence_fixture() {
+  local id=$1 lab scope safe fake_data fake_state outside source relative forbidden
+  evidence_fixture_description "$id" >/dev/null || return 2
+  lab="$TMP/evidence-containment/$id"
   scope="$lab/scope"
   safe="$scope/safe"
   fake_data="$lab/fake-data"
@@ -112,56 +138,66 @@ self_test_evidence_containment() {
   source="$lab/evidence.md"
   printf 'bounded evidence\n' > "$source"
 
-  containment_pass() { printf '  PASS  %s\n' "$1"; pass_count=$((pass_count + 1)); }
-  containment_fail() { printf '  FAIL  %s\n' "$1"; fail_count=$((fail_count + 1)); }
-  expect_refused_absent() {
-    local description=$1 relative=$2 forbidden=$3
-    if publish_evidence "$scope" "$relative" "$source" >/dev/null 2>&1; then
-      containment_fail "$description"
-    elif [ -e "$forbidden" ] || [ -L "$forbidden" ]; then
-      containment_fail "$description"
-    else
-      containment_pass "$description"
-    fi
-  }
+  case "$id" in
+    absolute)
+      relative="$fake_data/absolute.md"; forbidden=$relative ;;
+    traversal)
+      relative='../fake-data/traversal.md'; forbidden="$fake_data/traversal.md" ;;
+    symlink-leaf-data)
+      ln -s "$fake_data/symlink-leaf.md" "$safe/symlink-leaf.md"
+      relative='safe/symlink-leaf.md'; forbidden="$fake_data/symlink-leaf.md" ;;
+    symlink-parent)
+      mkdir "$scope/inside-target"
+      ln -s "$scope/inside-target" "$safe/symlink-parent"
+      relative='safe/symlink-parent/evidence.md'; forbidden="$scope/inside-target/evidence.md" ;;
+    symlink-parent-state)
+      ln -s "$fake_state" "$scope/state-link"
+      relative='state-link/evidence.md'; forbidden="$fake_state/evidence.md" ;;
+    resolved-outside)
+      ln -s "$outside" "$safe/outside-link"
+      relative='safe/outside-link/evidence.md'; forbidden="$outside/evidence.md" ;;
+    hard-link)
+      printf 'hard-link sentinel\n' > "$fake_data/hard-target.md"
+      ln "$fake_data/hard-target.md" "$safe/hard-link.md"
+      publish_evidence "$scope" 'safe/hard-link.md' "$source" >/dev/null 2>&1 && return 1
+      [ "$(cat "$fake_data/hard-target.md")" = 'hard-link sentinel' ]
+      return ;;
+    unresolved-parent)
+      relative='missing/evidence.md'; forbidden="$scope/missing/evidence.md" ;;
+    existing)
+      printf 'existing sentinel\n' > "$safe/existing.md"
+      publish_evidence "$scope" 'safe/existing.md' "$source" >/dev/null 2>&1 && return 1
+      [ "$(cat "$safe/existing.md")" = 'existing sentinel' ]
+      return ;;
+    legitimate)
+      publish_evidence "$scope" 'safe/legitimate.md' "$source" >/dev/null 2>&1 \
+        && cmp -s "$source" "$safe/legitimate.md"
+      return ;;
+  esac
+  publish_evidence "$scope" "$relative" "$source" >/dev/null 2>&1 && return 1
+  [ ! -e "$forbidden" ] && [ ! -L "$forbidden" ]
+}
 
-  expect_refused_absent 'absolute destination aimed at fake data is refused' "$fake_data/absolute.md" "$fake_data/absolute.md"
-  expect_refused_absent 'dot-dot traversal aimed at fake data is refused' '../fake-data/traversal.md' "$fake_data/traversal.md"
-  ln -s "$fake_data/symlink-leaf.md" "$safe/symlink-leaf.md"
-  expect_refused_absent 'symlinked leaf aimed at fake data is refused' 'safe/symlink-leaf.md' "$fake_data/symlink-leaf.md"
-  mkdir "$scope/inside-target"
-  ln -s "$scope/inside-target" "$safe/symlink-parent"
-  expect_refused_absent 'symlinked parent directory is refused' 'safe/symlink-parent/evidence.md' "$scope/inside-target/evidence.md"
-  ln -s "$fake_state" "$scope/state-link"
-  expect_refused_absent 'symlinked parent aimed at fake state is refused' 'state-link/evidence.md' "$fake_state/evidence.md"
-  ln -s "$outside" "$safe/outside-link"
-  expect_refused_absent 'destination resolving outside after parent resolution is refused' 'safe/outside-link/evidence.md' "$outside/evidence.md"
-  printf 'hard-link sentinel\n' > "$fake_data/hard-target.md"
-  ln "$fake_data/hard-target.md" "$safe/hard-link.md"
-  if publish_evidence "$scope" 'safe/hard-link.md' "$source" >/dev/null 2>&1 \
-    || [ "$(cat "$fake_data/hard-target.md")" != 'hard-link sentinel' ]; then
-    containment_fail 'existing hard-linked destination is refused without mutation'
-  else
-    containment_pass 'existing hard-linked destination is refused without mutation'
-  fi
-  expect_refused_absent 'unresolved destination parent is refused' 'missing/evidence.md' "$scope/missing/evidence.md"
-  printf 'existing sentinel\n' > "$safe/existing.md"
-  if publish_evidence "$scope" 'safe/existing.md' "$source" >/dev/null 2>&1 \
-    || [ "$(cat "$safe/existing.md")" != 'existing sentinel' ]; then
-    containment_fail 'existing destination is refused without mutation'
-  else
-    containment_pass 'existing destination is refused without mutation'
-  fi
-  if publish_evidence "$scope" 'safe/legitimate.md' "$source" >/dev/null 2>&1 \
-    && cmp -s "$source" "$safe/legitimate.md"; then
-    containment_pass 'legitimate in-scope publication remains exact'
-  else
-    containment_fail 'legitimate in-scope publication remains exact'
-  fi
+self_test_evidence_containment() {
+  local id description pass_count=0 fail_count=0
+  while IFS= read -r id; do
+    description=$(evidence_fixture_description "$id")
+    if run_evidence_fixture "$id"; then
+      printf '  PASS  %s\n' "$description"
+      pass_count=$((pass_count + 1))
+    else
+      printf '  FAIL  %s\n' "$description"
+      fail_count=$((fail_count + 1))
+    fi
+  done < <(evidence_fixture_ids)
   printf 'CONTAINMENT FIXTURES passed=%s failed=%s\n' "$pass_count" "$fail_count"
   [ "$pass_count" -eq 10 ] && [ "$fail_count" -eq 0 ]
 }
 
+if [ "$MODE" = fixture ]; then
+  run_evidence_fixture "$EVIDENCE_FIXTURE"
+  exit
+fi
 if [ "$MODE" = containment ]; then
   self_test_evidence_containment
   exit
@@ -362,12 +398,37 @@ EVIDENCE_STAGE="$TMP/evidence.md"
     printf '```sh\n'
     printf 'tests/fm-sovereign-ledger-evidence-publish.mutation.sh\n'
     printf '```\n\n'
-    printf 'Observed bounded output:\n\n'
+    printf 'Observed bounded summary:\n\n'
     printf '```text\n'
     printf 'CONTAINMENT FIXTURES passed=10 failed=0\n'
-    printf 'PUBLISH MUTANT P001 KILLED substitutions=1\n'
-    printf 'PUBLISH MUTATION SUMMARY enforcing_lines=1 killed=1 survived=0 void=0 denominator=1\n'
-    printf '```\n'
+    printf 'PUBLISH MUTANT P001 anchor=resolved-path-validator-call substitutions=1 killed=5 survived=4 void=0\n'
+    printf 'PUBLISH MUTANT P002 anchor=exclusive-create-flag substitutions=1 killed=0 survived=9 void=0\n'
+    printf 'PUBLISH MATRIX SUMMARY mechanisms=3 written_boundaries=2 natural_boundaries=1 mutants=2 fixtures=9 cells=18 killed=5 survived=13 void=0\n'
+    printf '```\n\n'
+    printf 'The three independent mechanisms are the resolved-path validator, exclusive `O_EXCL` creation, and the natural unresolved-parent failure from `sysopen`.\n'
+    printf 'The natural boundary has no written clause to substitute, so the written-mutant denominator is two while the enforcing-mechanism denominator is three.\n'
+    printf 'A survived cell means the named different boundary still refused that fixture; zero substitutions make every cell for that mutant void.\n'
+    printf 'The symlinked leaf, hard-link, and existing-leaf fixtures are defended only by `O_EXCL` when the validator call is neutralized.\n\n'
+    printf '| Mutant | Stable exact boundary anchor | Substitutions | Fixture | Outcome | Different surviving boundary |\n'
+    printf '| --- | --- | ---: | --- | --- | --- |\n'
+    printf '| `P001` | `resolved-path-validator-call` | 1 | `absolute` | KILLED | - |\n'
+    printf '| `P001` | `resolved-path-validator-call` | 1 | `traversal` | KILLED | - |\n'
+    printf '| `P001` | `resolved-path-validator-call` | 1 | `symlink-leaf-data` | SURVIVED | `exclusive-create-O_EXCL` |\n'
+    printf '| `P001` | `resolved-path-validator-call` | 1 | `symlink-parent` | KILLED | - |\n'
+    printf '| `P001` | `resolved-path-validator-call` | 1 | `symlink-parent-state` | KILLED | - |\n'
+    printf '| `P001` | `resolved-path-validator-call` | 1 | `resolved-outside` | KILLED | - |\n'
+    printf '| `P001` | `resolved-path-validator-call` | 1 | `hard-link` | SURVIVED | `exclusive-create-O_EXCL` |\n'
+    printf '| `P001` | `resolved-path-validator-call` | 1 | `unresolved-parent` | SURVIVED | `natural-unresolved-parent` |\n'
+    printf '| `P001` | `resolved-path-validator-call` | 1 | `existing` | SURVIVED | `exclusive-create-O_EXCL` |\n'
+    printf '| `P002` | `exclusive-create-flag` | 1 | `absolute` | SURVIVED | `resolved-path-validator` |\n'
+    printf '| `P002` | `exclusive-create-flag` | 1 | `traversal` | SURVIVED | `resolved-path-validator` |\n'
+    printf '| `P002` | `exclusive-create-flag` | 1 | `symlink-leaf-data` | SURVIVED | `resolved-path-validator` |\n'
+    printf '| `P002` | `exclusive-create-flag` | 1 | `symlink-parent` | SURVIVED | `resolved-path-validator` |\n'
+    printf '| `P002` | `exclusive-create-flag` | 1 | `symlink-parent-state` | SURVIVED | `resolved-path-validator` |\n'
+    printf '| `P002` | `exclusive-create-flag` | 1 | `resolved-outside` | SURVIVED | `resolved-path-validator` |\n'
+    printf '| `P002` | `exclusive-create-flag` | 1 | `hard-link` | SURVIVED | `resolved-path-validator` |\n'
+    printf '| `P002` | `exclusive-create-flag` | 1 | `unresolved-parent` | SURVIVED | `resolved-path-validator` |\n'
+    printf '| `P002` | `exclusive-create-flag` | 1 | `existing` | SURVIVED | `resolved-path-validator` |\n'
 } > "$EVIDENCE_STAGE"
 
 printf 'MUTATION SUMMARY killed=%s survived=%s void=%s denominator=%s\n' "$killed" "$survived" "$void" "$denominator"
