@@ -141,6 +141,47 @@ test_merge_failure_propagates_after_recording() {
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
 }
 
+test_verified_head_change_refuses_before_metadata_refresh() {
+  local case_dir rc
+  case_dir=$(make_case verified-head-changed)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_PR_EXPECTED_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/14 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "verified-head-changed: merge should refuse a changed PR head"
+  assert_grep 'error: PR head changed after verification' "$case_dir/stderr" \
+    "verified-head-changed: refusal did not explain the changed head"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "verified-head-changed: merge ran despite a changed PR head"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "verified-head-changed: metadata refresh ran despite a changed PR head"
+  pass "fm-pr-merge refuses a PR head that changed after verification"
+}
+
+test_verified_head_is_bound_to_final_merge() {
+  local case_dir head
+  case_dir=$(make_case verified-head-matches)
+  head=cccccccccccccccccccccccccccccccccccccccc
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/gh-axi.log"
+
+  FM_PR_EXPECTED_HEAD="$head" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/16 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "verified-head-matches: fm-pr-merge rejected the verified PR head"
+
+  grep -qxF "pr merge 16 --repo example/repo --squash --match-head-commit $head" "$case_dir/gh-axi.log" \
+    || fail "verified-head-matches: final merge was not bound to the verified head"
+  pass "fm-pr-merge binds the final forge merge to the verified PR head"
+}
+
 test_extra_merge_args_forwarded() {
   local case_dir rc
   case_dir=$(make_case extra-args)
@@ -303,6 +344,8 @@ test_parses_pr_url_for_gh_axi() {
 
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
+test_verified_head_change_refuses_before_metadata_refresh
+test_verified_head_is_bound_to_final_merge
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge

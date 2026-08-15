@@ -45,8 +45,8 @@ test_policy_list_includes_routine_completion() {
   pass "policy-list reads the tracked operating policy registry"
 }
 
-test_resolve_hold_closes_duplicate_question() {
-  local home id show
+test_resolve_hold_refuses_captain_escalation() {
+  local home id show rc
   home=$(make_home resolve-hold)
   id=sample-plan-m6-decision-launch-library-tier
   cat > "$home/data/backlog.md" <<EOF
@@ -60,12 +60,37 @@ EOF
   tasks_axi() { (cd "$home" && tasks-axi "$@"); }
   tasks_axi add "$id" "Choose launch library tier" --kind captain --repo sample >/dev/null
   tasks_axi hold "$id" --reason "budget" --kind captain >/dev/null
-  run_reconcile "$home" resolve-hold "$id" --policy no-human-recording-library >/dev/null \
-    || fail "resolve-hold did not close the duplicate captain hold"
+  set +e
+  run_reconcile "$home" resolve-hold "$id" --policy no-human-recording-library >/dev/null 2>&1
+  rc=$?
+  set -u
+  [ "$rc" -ne 0 ] || fail "resolve-hold closed a captain-escalated duplicate hold"
+  show=$(cd "$home" && tasks-axi show "$id" --full)
+  assert_contains "$show" "held: yes" "captain-escalated hold was not left open"
+  pass "resolve-hold leaves captain-escalated duplicate holds open"
+}
+
+test_resolve_hold_closes_non_escalated_duplicate_question() {
+  local home id show
+  home=$(make_home resolve-hold-none)
+  id=sample-plan-m6-decision-standard-repo
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+
+## Queued
+- [ ] $id - Choose standard repository flow (repo: sample) (kind: captain) (hold: process) (hold-kind: captain)
+
+## Done
+EOF
+  tasks_axi() { (cd "$home" && tasks-axi "$@"); }
+  tasks_axi add "$id" "Choose standard repository flow" --kind captain --repo sample >/dev/null
+  tasks_axi hold "$id" --reason "process" --kind captain >/dev/null
+  run_reconcile "$home" resolve-hold "$id" --policy dotfiles-normal-repo >/dev/null \
+    || fail "resolve-hold did not close a non-escalated duplicate captain hold"
   show=$(cd "$home" && tasks-axi show "$id" --full)
   assert_contains "$show" "Resolution recorded by fm-decision-hold" "resolved hold lost durable decision record"
-  assert_contains "$show" "policy=no-human-recording-library" "resolved hold is not linked to the policy id"
-  pass "resolve-hold closes a duplicate captain hold with a durable policy link"
+  assert_contains "$show" "policy=dotfiles-normal-repo" "resolved hold is not linked to the policy id"
+  pass "resolve-hold closes non-escalated duplicate holds with a durable policy link"
 }
 
 test_retire_marks_tasks_done() {
@@ -88,8 +113,36 @@ EOF
   pass "retire records a durable retirement decision and closes the task"
 }
 
+test_retire_refuses_unclassified_captain_hold() {
+  local home id show rc
+  home=$(make_home retire-held)
+  id=sample-captain-exception
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+
+## Queued
+- [ ] $id - Captain exception (repo: sample) (kind: captain) (hold: exception) (hold-kind: captain)
+
+## Done
+EOF
+  tasks_axi() { (cd "$home" && tasks-axi "$@"); }
+  tasks_axi add "$id" "Captain exception" --kind captain --repo sample >/dev/null
+  tasks_axi hold "$id" --reason "exception" --kind captain >/dev/null
+  printf 'Retired by policy reconciliation.\n' > "$home/decision.txt"
+  set +e
+  run_reconcile "$home" retire "$id" --decision-file "$home/decision.txt" >/dev/null 2>&1
+  rc=$?
+  set -u
+  [ "$rc" -ne 0 ] || fail "retire closed an unclassified captain hold"
+  show=$(cd "$home" && tasks-axi show "$id" --full)
+  assert_contains "$show" "held: yes" "retire did not leave the captain hold open"
+  pass "retire leaves unclassified captain holds open"
+}
+
 test_policy_list_includes_routine_completion
-test_resolve_hold_closes_duplicate_question
+test_resolve_hold_refuses_captain_escalation
+test_resolve_hold_closes_non_escalated_duplicate_question
 test_retire_marks_tasks_done
+test_retire_refuses_unclassified_captain_hold
 
 echo "all decision reconciliation tests passed"

@@ -145,6 +145,14 @@ write_policy_decision() {  # <path> <policy-id>
   } > "$path"
 }
 
+require_policy_auto_close() {  # <policy-id>
+  local policy_id=$1 escalation
+  escalation=$(policy_lookup "$policy_id" captain_escalation) \
+    || fail "unknown policy id: $policy_id"
+  [ "$escalation" = none ] \
+    || fail "policy $policy_id requires captain escalation ($escalation); hold remains open"
+}
+
 command_policy_list() {
   require_python_toml
   [ -f "$POLICIES" ] || fail "policy registry missing: $POLICIES"
@@ -254,6 +262,7 @@ command_resolve_hold() {
   validate_slug hold-id "$hold_id"
   validate_slug policy-id "$policy_id"
   policy_lookup "$policy_id" summary >/dev/null || fail "unknown policy id: $policy_id"
+  require_policy_auto_close "$policy_id"
   parse_hold_id "$hold_id"
   if [ -z "$decision_file" ]; then
     tmp=$(mktemp "${TMPDIR:-/tmp}/fm-policy-decision.XXXXXX") || exit 1
@@ -269,7 +278,7 @@ command_resolve_hold() {
 }
 
 command_retire() {
-  local decision_file='' ids='' id show body held kind state
+  local decision_file='' ids='' id show body held kind
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -293,11 +302,11 @@ command_retire() {
     show=$(task_show "$id") || fail "task $id is absent from the active backlog"
     held=$(show_field "$show" held)
     kind=$(show_field "$show" kind)
-    state=$(show_field "$show" state)
-    if [ "$kind" = captain ] && [ "$held" = yes ] && [ "$state" = queued ]; then
+    if [ "$kind" = captain ] && [ "$held" = yes ]; then
       case "$id" in
         *-decision-*)
           parse_hold_id "$id"
+          require_policy_auto_close career-retired
           "$SCRIPT_DIR/fm-decision-hold.sh" decline "$HOLD_ORIGIN" "$HOLD_KEY" \
             --decision-file "$decision_file" >/dev/null \
             || fail "could not retire active captain hold $id"
@@ -305,6 +314,9 @@ command_retire() {
             || fail "retired hold but could not link career-retired policy on $id"
           printf 'retired: %s\n' "$id"
           continue
+          ;;
+        *)
+          fail "$id is an active captain hold and must remain open for captain resolution"
           ;;
       esac
     fi

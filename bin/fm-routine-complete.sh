@@ -41,7 +41,7 @@ meta_value() {
 }
 
 routine_verify() {  # <task-id>
-  local id=$1 meta="$STATE/$id.meta" status="$STATE/$id.status" current_state pr_url kind
+  local id=$1 meta="$STATE/$id.meta" status="$STATE/$id.status" current_state pr_url pr_head kind
   [ -f "$meta" ] && [ ! -L "$meta" ] || fail "$id has no task metadata"
   kind=$(meta_value "$meta" kind)
   [ "$kind" = ship ] || fail "$id is not kind ship (kind=${kind:-unknown})"
@@ -55,9 +55,12 @@ routine_verify() {  # <task-id>
   pr_url=$(meta_value "$meta" pr)
   [ -n "$pr_url" ] || fail "$id has no recorded pr= metadata"
   fm_pr_url_parse "$pr_url" || fail "$id has invalid pr metadata: $pr_url"
+  pr_head=$(meta_value "$meta" pr_head)
+  fm_pr_head_valid "$pr_head" || fail "$id has no verified pr_head= metadata"
   if status_open_decisions "$status" | grep -q .; then
     fail "$id still has open keyed status decisions"
   fi
+  ROUTINE_VERIFIED_PR_HEAD=$pr_head
   printf 'eligible: %s routine completion after verification gate\n' "$id"
 }
 
@@ -75,7 +78,8 @@ command_merge() {
   [ "${1:-}" = "--" ] && shift
   fm_pr_task_id_valid "$id" || fail "invalid task id: $id"
   routine_verify "$id" >/dev/null
-  "$SCRIPT_DIR/fm-pr-merge.sh" "$id" "$(meta_value "$STATE/$id.meta" pr)" -- "$@"
+  FM_PR_EXPECTED_HEAD=$ROUTINE_VERIFIED_PR_HEAD \
+    "$SCRIPT_DIR/fm-pr-merge.sh" "$id" "$(meta_value "$STATE/$id.meta" pr)" -- "$@"
   printf 'routine-merged: %s\n' "$id"
 }
 

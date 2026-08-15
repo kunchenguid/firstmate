@@ -58,13 +58,13 @@ members = [
 ]
 
 [package.security-delivery]
-owner = "genpeli-exposed-groq-key-rotation-v1"
-summary = "Security-sensitive credential rotation, Apple IAP verification, and GitHub Actions restoration for private repositories."
+owner = "security-delivery-owner-v1"
+summary = "Security-sensitive delivery work is coordinated through private repositories."
 members = [
-  "genpeli-exposed-groq-key-rotation-v1",
-  "fix-apple-iap-verification-s3",
-  "invoz-github-actions-no-runs-composer-w7-decision-actions-account-unblock",
-  "invoz-macos-ci-bootstrap-q3",
+  "security-delivery-owner-v1",
+  "security-delivery-followup-a1",
+  "security-delivery-followup-b2",
+  "security-delivery-followup-c3",
 ]
 
 [package.fleet-infrastructure]

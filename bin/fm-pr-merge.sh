@@ -63,11 +63,46 @@ reject_repo_overrides() {
 
 reject_repo_overrides "$@" || exit 1
 
+reject_head_overrides() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --match-head-commit|--match-head-commit=*)
+        echo "error: extra merge arguments must not override the verified PR head" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
+reject_head_overrides "$@" || exit 1
+
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
+fi
+
+EXPECTED_HEAD=${FM_PR_EXPECTED_HEAD:-}
+if [ -n "$EXPECTED_HEAD" ]; then
+  if ! fm_pr_head_valid "$EXPECTED_HEAD"; then
+    echo "error: verified PR head is invalid" >&2
+    exit 1
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "error: gh is required to verify the current PR head" >&2
+    exit 1
+  fi
+  if ! CURRENT_HEAD=$(gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+    || ! fm_pr_head_valid "$CURRENT_HEAD"; then
+    echo "error: could not resolve the current PR head" >&2
+    exit 1
+  fi
+  if [ "$CURRENT_HEAD" != "$EXPECTED_HEAD" ]; then
+    echo "error: PR head changed after verification" >&2
+    exit 1
+  fi
 fi
 
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
@@ -76,9 +111,15 @@ grep -qxF "pr=$URL" "$META" || {
   exit 1
 }
 
+if [ -n "$EXPECTED_HEAD" ] && ! grep -qxF "pr_head=$EXPECTED_HEAD" "$META"; then
+  echo "error: PR head changed while refreshing merge metadata" >&2
+  exit 1
+fi
+
 merge_args=()
 if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
+[ -z "$EXPECTED_HEAD" ] || merge_args+=(--match-head-commit "$EXPECTED_HEAD")
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
