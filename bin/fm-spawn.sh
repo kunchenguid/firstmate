@@ -138,12 +138,16 @@
 #   from the project's authoritative base. Remote-backed ships and scouts fetch
 #   and reset to origin's current default branch. A local-only ship uses the
 #   local default branch when it is ahead of or diverged from origin, and uses
-#   origin when the local branch is behind it. A local-only project without an
-#   origin resolves its local default from repository-local init.defaultBranch,
-#   then main, then master, and refuses when none names an existing branch.
+#   origin when the local branch is behind it. This authority comes only from
+#   the explicit task mode, never from the project name. When origin exists,
+#   origin/HEAD names the default branch. A local-only project without origin
+#   resolves its local default from repository-local init.defaultBranch, then
+#   main, then master, without consulting the current branch or detached HEAD,
+#   and refuses when none names an existing branch.
 #   Global and system init.defaultBranch values are intentionally ignored, so a
 #   project without origin should declare its default in repository-local
 #   init.defaultBranch for Firstmate to identify a non-main, non-master default.
+#   The selected commit is frozen before reset and HEAD is verified afterward.
 #   An unreachable origin for a remote-backed task, an unresolved default
 #   branch, or a non-clean worktree refuses the spawn rather than risking work
 #   based on stale history.
