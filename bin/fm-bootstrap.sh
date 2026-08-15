@@ -1121,6 +1121,11 @@ fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
   "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
   startup_memory_budget_setup
+  # Herdr orphan pane sweep: close panes in this home's workspace whose
+  # fm-<id> tab label proves they were crewmate panes, but whose task record
+  # is gone and whose agent is no longer live. The reaper gates itself on
+  # backend=herdr internally, so non-herdr homes pay only an early exit.
+  "$SCRIPT_DIR/fm-herdr-orphan-reaper.sh" --close || true
 fi
 
 # Local detection: presence, version floors, and configuration. Nothing here
