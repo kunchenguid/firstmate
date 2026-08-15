@@ -34,7 +34,7 @@
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
-#   cursor-hook      reserved: Cursor Agent, gated by fm_busy_cursor_agent_verified
+#   cursor-hook      Cursor Agent lifecycle hooks
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
 #   fm-interrupt     a firstmate-controlled interruption of the worker
@@ -101,9 +101,10 @@ fm_busy_kimi_verified() {
 
 # Cursor Agent verification gate. A controlled run on 2026.08.11-e8db854 proved
 # that project .cursor/hooks.json and ~/.cursor/hooks.json compose, and that
-# beforeSubmitPrompt/stop brackets a real interactive turn. fm-spawn wires that
-# lifecycle through a project-local cursor-hook source. The rendered spinner,
-# Working label, and ctrl+c footer remain presentation and are never trusted.
+# beforeSubmitPrompt/stop brackets a real interactive turn. fm-spawn wires those
+# edges plus SessionEnd through a project-local cursor-hook source; a successful
+# firstmate Escape writes idle/fm-interrupt. The rendered spinner, Working label,
+# and ctrl+c footer remain presentation and are never trusted.
 FM_BUSY_CURSOR_AGENT_VERIFIED_VERSIONS="2026.08.11-e8db854"
 
 fm_busy_cursor_agent_verified() {

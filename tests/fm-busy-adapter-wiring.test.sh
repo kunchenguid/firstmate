@@ -272,11 +272,19 @@ test_cursor_hooks_semantic_lifecycle() {
   state="$HOME_DIR/state"
   hooks="$WT_DIR/.cursor/hooks.json"
   assert_present "$hooks" "cursor-agent spawn did not write project-local hooks"
-  jq -e '.version == 1 and .hooks.beforeSubmitPrompt and .hooks.stop' "$hooks" >/dev/null \
+  jq -e '.version == 1 and .hooks.beforeSubmitPrompt and .hooks.stop and .hooks.SessionEnd' "$hooks" >/dev/null \
     || fail "cursor-agent hooks do not expose the verified lifecycle"
 
   status=$(git -C "$WT_DIR" status --short --untracked-files=all)
   [ -z "$status" ] || fail "project-local Cursor hooks surfaced in the worktree diff: $status"
+
+  mkdir -p "$WT_DIR/.cursor/rules"
+  printf '%s\n' 'A real project rule must stay reviewable.' > "$WT_DIR/.cursor/rules/team.mdc"
+  status=$(git -C "$WT_DIR" status --short --untracked-files=all)
+  printf '%s\n' "$status" | rg -Fq '?? .cursor/rules/team.mdc' \
+    || fail "a real Cursor project rule was hidden with the hook artifact: $status"
+  printf '%s\n' "$status" | rg -Fq '.cursor/hooks.json' \
+    && fail "project-local Cursor hooks surfaced after adding a project rule: $status"
 
   rm -f "$state/$id.turn-ended"
   run_cursor_hook "$hooks" stop || fail "stop hook command failed"
@@ -289,10 +297,16 @@ test_cursor_hooks_semantic_lifecycle() {
   [ "$out" = "busy cursor-hook" ] \
     || fail "beforeSubmitPrompt must classify 'busy cursor-hook', got '$out'"
 
+  run_cursor_hook "$hooks" SessionEnd || fail "SessionEnd hook command failed"
+  out=$(classify cursor-agent "$id" "$state")
+  [ "$out" = "idle cursor-hook" ] \
+    || fail "SessionEnd must classify 'idle cursor-hook', got '$out'"
+
+  run_cursor_hook "$hooks" beforeSubmitPrompt || fail "final beforeSubmitPrompt hook command failed"
   run_cursor_hook "$hooks" stop || fail "final stop hook command failed"
   out=$(classify cursor-agent "$id" "$state")
   [ "$out" = "idle cursor-hook" ] || fail "final stop must classify 'idle cursor-hook', got '$out'"
-  pass "cursor-agent project hooks stay out of diffs and drive semantic busy-to-idle classification"
+  pass "cursor-agent project hooks stay out of diffs and close semantic turns on stop and SessionEnd"
 }
 
 test_claude_hooks_semantic_lifecycle() {

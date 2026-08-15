@@ -389,7 +389,7 @@ Cursor Agent launches with a positional prompt as `cursor-agent --trust --force 
 
 | Fact | Value |
 |---|---|
-| Busy state | Project-local `beforeSubmitPrompt` and `stop` hooks drive `busy cursor-hook` and `idle cursor-hook`; `stop` also writes the turn-end notification. A spinner, `Working`, and `ctrl+c to stop` remain rendered presentation, not state sources. |
+| Busy state | Project-local `beforeSubmitPrompt` opens the turn as `busy cursor-hook`; `stop` and `SessionEnd` close it as `idle cursor-hook`, and `stop` also writes the turn-end notification. A successful firstmate Escape records `idle fm-interrupt`. A spinner, `Working`, and `ctrl+c to stop` remain rendered presentation, not state sources. |
 | Exit command | One `Ctrl+D` from the empty composer exits after a short delay. |
 | Interrupt | Single Escape, live-verified by cancelling an active `sleep 30` tool call. |
 | Resume | `cursor-agent --continue` resumes the most recent session for the workspace. The CLI also exposes `--resume [chatId]`, `cursor-agent resume`, and `cursor-agent ls`. |
@@ -411,8 +411,9 @@ Always confirm current availability with `cursor-agent models`, because the acco
 
 Cursor project hooks and Pedro's existing global hooks compose on 2026.08.11-e8db854.
 A controlled listener made the existing global hook observable without editing it: global `SessionStart`/`SessionEnd` events and a project hook fired in the same run, and a real interactive submission emitted `Start` (`beforeSubmitPrompt`) followed by `Stop`.
-`fm-spawn` installs that lifecycle in the disposable worktree's `.cursor/hooks.json` and excludes `.cursor/` through git info/exclude so it cannot surface in project diffs or pull requests.
-The hooks drive the classifier through the trusted `cursor-hook` source and let the watcher absorb ordinary turn-end wakes while a new turn is provably active.
+`fm-spawn` installs that lifecycle in the disposable worktree's `.cursor/hooks.json` and excludes only that generated file through git info/exclude so it cannot surface in project diffs or pull requests while project-owned `.cursor/` files remain reviewable.
+The hooks drive the classifier through the trusted `cursor-hook` source, `SessionEnd` prevents a process exit from stranding busy state, and a successful firstmate Escape records the interrupt close directly.
+The watcher can absorb ordinary turn-end wakes while a new turn is provably active.
 Ordinary Cursor crewmate and scout dispatch is unattended-capable; primary and secondmate support remain unavailable.
 Never modify Pedro's global Cursor files without his explicit approval.
 

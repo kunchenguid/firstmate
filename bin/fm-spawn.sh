@@ -2139,19 +2139,20 @@ EOF
       ;;
     cursor-agent*)
       # Cursor composes project-local hooks with the operator's global hooks.
-      # beforeSubmitPrompt opens the semantic turn and stop closes it while
-      # preserving the watcher's turn-end notification. The whole project-local
-      # directory is excluded through git info/exclude so no Cursor hook artifact
-      # can surface in a project diff or pull request.
+      # beforeSubmitPrompt opens the semantic turn; stop and SessionEnd close it.
+      # Stop also preserves the watcher's turn-end notification. Only the generated
+      # hooks file is excluded through git info/exclude, so real project-owned
+      # Cursor configuration remains visible in diffs and pull requests.
       mkdir -p "$WT/.cursor"
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source cursor-hook"
       j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event before-submit-prompt 2>/dev/null || true")
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+      j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
       cat > "$WT/.cursor/hooks.json" <<EOF
-{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":"$j_submit"}],"stop":[{"command":"$j_stop"}]}}
+{"version":1,"hooks":{"beforeSubmitPrompt":[{"command":"$j_submit"}],"stop":[{"command":"$j_stop"}],"SessionEnd":[{"command":"$j_sessionend"}]}}
 EOF
-      exclude_path '.cursor/'
+      exclude_path '.cursor/hooks.json'
       ;;
     codex*)
       # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
