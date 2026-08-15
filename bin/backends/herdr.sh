@@ -1646,16 +1646,38 @@ fm_backend_herdr_launcher_identity() {  # <session>
   return 0
 }
 
-# fm_backend_herdr_project_binding_path <state-dir> <project-name>: resolve the
-# home-local exact-id binding record for one registered project name. Project
-# names become filenames, so only the registry's safe identifier shape is
-# accepted; an unsafe name makes project placement fall back flat.
-fm_backend_herdr_project_binding_path() {  # <state-dir> <project-name>
-  local state=$1 project_name=$2
+# fm_backend_herdr_project_dir_hash <project-dir>: a stable short digest of the
+# canonical project directory, used only to key the binding filename.
+fm_backend_herdr_project_dir_hash() {  # <project-dir>
+  local dir=$1 digest
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$dir" | shasum -a 256 2>/dev/null | awk '{print substr($1, 1, 16)}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$dir" | sha256sum 2>/dev/null | awk '{print substr($1, 1, 16)}')
+  else
+    digest=$(printf '%s' "$dir" | cksum 2>/dev/null | awk '{printf "%08x%08x", $1, $2}')
+  fi
+  case "$digest" in
+    *[!0-9a-f]*|'') return 1 ;;
+  esac
+  printf '%s' "$digest"
+}
+
+# fm_backend_herdr_project_binding_path <state-dir> <project-name> <project-dir>:
+# resolve the home-local exact-id binding record for one project. The filename
+# is keyed by the registered name PLUS a stable digest of the canonical project
+# directory, so two same-named projects in different directories keep
+# independent durable bindings; the name itself stays a cosmetic label only.
+# Project names become filenames, so only the registry's safe identifier shape
+# is accepted; an unsafe name makes project placement fall back flat.
+fm_backend_herdr_project_binding_path() {  # <state-dir> <project-name> <project-dir>
+  local state=$1 project_name=$2 project_dir=$3 dir_hash
   case "$project_name" in
     ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
-  printf '%s/%s%s' "$state" "$FM_BACKEND_HERDR_PROJECT_BINDING_PREFIX" "$project_name"
+  [ -n "$project_dir" ] || return 1
+  dir_hash=$(fm_backend_herdr_project_dir_hash "$project_dir") || return 1
+  printf '%s/%s%s-%s' "$state" "$FM_BACKEND_HERDR_PROJECT_BINDING_PREFIX" "$project_name" "$dir_hash"
 }
 
 # Read one complete binding and reject malformed, duplicate, cross-project, or
@@ -1746,7 +1768,7 @@ fm_backend_herdr_project_workspace_ensure() {  # <session> <project-dir> <state-
       return 1
       ;;
   esac
-  binding=$(fm_backend_herdr_project_binding_path "$state" "$project_name") || {
+  binding=$(fm_backend_herdr_project_binding_path "$state" "$project_name" "$project_dir") || {
     echo "warning: herdr project-space placement cannot represent project name '$project_name'; using the ordinary flat layout" >&2
     return 1
   }

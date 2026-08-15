@@ -69,11 +69,15 @@
 #   exception: it stands up that secondmate home's own workspace.
 #   A home can opt into per-project grouping with config/herdr-project-spaces.
 #   That path binds the canonical project directory and registered basename to
-#   one exact workspace id in state/.herdr-project-space-<project-name>, validates
-#   that id live before every use, and never adopts by label. It wins over the
-#   presentation projection for project-resolvable crewmate and scout spawns.
-#   Any ambiguous grouping placement warns and falls back to the ordinary flat
-#   layout. --secondmate placement is unchanged.
+#   one exact workspace id in
+#   state/.herdr-project-space-<project-name>-<dir-hash> (the hash keys the
+#   canonical project directory so same-named projects stay independent),
+#   validates that id live before every use, and never adopts by label. It wins
+#   over creating a NEW presentation projection for project-resolvable crewmate
+#   and scout spawns, but a pending presentation journal still runs the full
+#   recovery guard first - a stale journal never grants launch authority, with
+#   or without grouping. Any ambiguous grouping placement warns and falls back
+#   to the ordinary flat layout. --secondmate placement is unchanged.
 #   Herdr additionally uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
@@ -1909,8 +1913,7 @@ case "$BACKEND" in
     if [ "$KIND" != secondmate ] && fm_backend_herdr_project_spaces_enabled "$CONFIG"; then
       HERDR_PROJECT_GROUPING=1
     fi
-    if [ "$KIND" != secondmate ] && [ "$HERDR_PROJECT_GROUPING" -ne 1 ] \
-      && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
+    if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
@@ -1955,7 +1958,8 @@ case "$BACKEND" in
         else
           spawn_herdr_presentation_order_lock_release
         fi
-      elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      elif [ "$HERDR_PROJECT_GROUPING" -ne 1 ] \
+        && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
         # Session lock path resolution and exact parent binding both need a
         # live named-session socket before journal publication.
         if ! fm_backend_herdr_server_ensure "$HERDR_SES"; then

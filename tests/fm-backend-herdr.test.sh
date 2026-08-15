@@ -884,8 +884,40 @@ EOF
   pass "herdr project spaces: one project reuses one exact workspace while another project gets a separate workspace"
 }
 
+test_project_workspace_same_basename_projects_keep_stable_separate_bindings() {
+  local dir state project_a project_b log fb out ws_a1 ws_b1 ws_a2 ws_b2
+  dir="$TMP_ROOT/project-space-same-basename"; state="$dir/home-state"
+  project_a="$dir/clients/a/site"; project_b="$dir/clients/b/site"
+  mkdir -p "$state" "$project_a" "$project_b"; log="$dir/log"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$dir/state.json" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_project_workspace_ensure fmtest "$1" "$3" site || exit 1
+      ws_a1=$FM_BACKEND_HERDR_PROJECT_WS_ID
+      fm_backend_herdr_project_workspace_ensure fmtest "$2" "$3" site || exit 1
+      ws_b1=$FM_BACKEND_HERDR_PROJECT_WS_ID
+      fm_backend_herdr_project_workspace_ensure fmtest "$1" "$3" site || exit 1
+      ws_a2=$FM_BACKEND_HERDR_PROJECT_WS_ID
+      fm_backend_herdr_project_workspace_ensure fmtest "$2" "$3" site || exit 1
+      ws_b2=$FM_BACKEND_HERDR_PROJECT_WS_ID
+      printf "%s %s %s %s\n" "$ws_a1" "$ws_b1" "$ws_a2" "$ws_b2"
+    ' "$ROOT" "$project_a" "$project_b" "$state") || fail "same-basename alternating ensure sequence failed"
+  read -r ws_a1 ws_b1 ws_a2 ws_b2 <<EOF
+$out
+EOF
+  [ "$ws_a1" != "$ws_b1" ] || fail "two same-basename projects shared one workspace: $out"
+  [ "$ws_a1" = "$ws_a2" ] || fail "alternating spawns churned project A's exact binding: $out"
+  [ "$ws_b1" = "$ws_b2" ] || fail "alternating spawns churned project B's exact binding: $out"
+  [ "$(jq -r '.workspaces | length' "$dir/state.json")" = 2 ] \
+    || fail "same-basename projects did not stabilize on exactly two workspaces"
+  [ "$(find "$state" -name '.herdr-project-space-site-*' | wc -l | tr -d ' ')" = 2 ] \
+    || fail "same-basename projects did not keep two independent durable binding files"
+  pass "herdr project spaces: same-basename projects keep stable independent path-keyed bindings"
+}
+
 test_project_workspace_stale_binding_creates_fresh_workspace() {
-  local dir state project log fb first second third tmp
+  local dir state project log fb first second third tmp binding
   dir="$TMP_ROOT/project-space-stale"; state="$dir/home-state"; project="$dir/mf-website"
   mkdir -p "$state" "$project"; log="$dir/log"; : > "$log"
   fb=$(make_herdr_statefake "$dir")
@@ -899,7 +931,13 @@ test_project_workspace_stale_binding_creates_fresh_workspace() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_project_workspace_ensure fmtest "$1" "$2" mf-website || exit 1; printf "%s\n" "$FM_BACKEND_HERDR_PROJECT_WS_ID"' \
       "$ROOT" "$project" "$state") || fail "stale binding did not create a fresh project workspace"
   [ "$first" != "$second" ] || fail "a dead exact workspace binding was reused"
-  [ "$(sed -n 's/^workspace_id=//p' "$state/.herdr-project-space-mf-website")" = "$second" ] \
+  binding=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_project_binding_path "$1" mf-website "$2"' \
+    "$ROOT" "$state" "$project") || fail "binding path resolution failed"
+  case "$binding" in
+    "$state/.herdr-project-space-mf-website-"*) ;;
+    *) fail "binding filename is not keyed by project name plus directory hash: $binding" ;;
+  esac
+  [ "$(sed -n 's/^workspace_id=//p' "$binding")" = "$second" ] \
     || fail "the stale binding was not atomically replaced with the fresh response id"
   jq --arg w "$second" '(.workspaces[] | select(.workspace_id == $w) | .label) = "renamed-by-human"' \
     "$dir/state.json" > "$tmp" && mv "$tmp" "$dir/state.json"
@@ -4463,6 +4501,7 @@ test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
 test_project_spaces_flag_is_opt_in_and_presence_compatible
 test_project_workspace_create_reuse_and_project_separation
+test_project_workspace_same_basename_projects_keep_stable_separate_bindings
 test_project_workspace_stale_binding_creates_fresh_workspace
 test_project_workspace_never_adopts_by_colliding_label
 test_presentation_defaults_on_at_or_above_the_floor

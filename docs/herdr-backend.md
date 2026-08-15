@@ -78,10 +78,12 @@ The setting reaches only the Herdr backend and is inherited into secondmate home
 When enabled, each project-resolvable crewmate or scout spawn uses the canonical spawn project directory and its registered project or repository basename.
 The workspace carries that project name as its cosmetic label and contains the ordinary `fm-<id>` task tabs for that project.
 Two tasks for one project therefore share one workspace as separate tabs, while different projects receive different workspaces.
-When both Herdr layout flags are enabled, `config/herdr-project-spaces` wins for project-resolvable crewmate and scout spawns, so no disposable presentation workspace is created for those tasks.
+When both Herdr layout flags are enabled, `config/herdr-project-spaces` wins for project-resolvable crewmate and scout spawns, so no new disposable presentation workspace is created for those tasks.
+A task that still has a pending presentation journal from an earlier projected spawn runs the full journal recovery guard first, exactly as without grouping: a live projected pane is reclaimed in place, a dead one is retired, and an ambiguous one refuses the spawn, so a stale journal never admits a duplicate agent into a project workspace.
 A `--secondmate` spawn keeps its existing dedicated-home workspace behavior unchanged.
 
-Placement authority is the durable home-local `state/.herdr-project-space-<project-name>` binding, which records the canonical project directory, registered project name, named session, and exact workspace id.
+Placement authority is the durable home-local `state/.herdr-project-space-<project-name>-<dir-hash>` binding, which records the canonical project directory, registered project name, named session, and exact workspace id.
+The `<dir-hash>` filename component is a stable short digest of the canonical project directory, so two projects that share a basename in different directories keep independent durable bindings instead of overwriting each other; the registered name remains only the cosmetic workspace label.
 Before every reuse, Firstmate validates that exact id live in the recorded named session and confirms its expected project label.
 A label is never searched, matched, or adopted, because Herdr does not enforce label uniqueness.
 If the exact workspace is missing, dead, renamed away from the registered project name, or bound to another project or named session, Firstmate creates a fresh workspace with `--no-focus` and records only the exact id returned by that create response.
