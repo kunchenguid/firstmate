@@ -400,7 +400,7 @@ case "${args[0]:-} ${args[1]:-}" in
         esac
         exit 0
         ;;
-      final-tabs-unavailable|final-tabs-malformed)
+      final-tabs-unavailable|final-tabs-malformed|final-tabs-stale)
         reads_file="$dir/herdr-tab-list-reads"
         reads=0
         [ -f "$reads_file" ] && reads=$(cat "$reads_file")
@@ -410,6 +410,13 @@ case "${args[0]:-} ${args[1]:-}" in
           1|2|3) printf '%s\n' '{"result":{"tabs":[]}}' ;;
           4|5) printf '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"%s"}]}}\n' "$created_tab_label" ;;
           6) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"fm-hr1"}]}}' ;;
+          6)
+            if [ "$case_name" = final-tabs-stale ]; then
+              printf '%s\n' '{"result":{"tabs":[]}}'
+            else
+              printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"fm-hr1"}]}}'
+            fi
+            ;;
           *)
             if [ "$case_name" = final-tabs-unavailable ]; then exit 1; fi
             printf '%s\n' '{}'
@@ -2000,7 +2007,7 @@ test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable() {
 
 test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
   local case_name dir out rc before claim_before mutations creates_before
-  for case_name in postcreate-tab-unreadable postcreate-pane-unreadable postcreate-tabs-unavailable postcreate-tabs-malformed postbind-tabs-unavailable postbind-tabs-malformed postcreate-zero-match postclose-tabs-unavailable postclose-tabs-malformed final-tabs-unavailable final-tabs-malformed; do
+  for case_name in postcreate-tab-unreadable postcreate-pane-unreadable postcreate-tabs-unavailable postcreate-tabs-malformed postbind-tabs-unavailable postbind-tabs-malformed postcreate-zero-match postclose-tabs-unavailable postclose-tabs-malformed final-tabs-unavailable final-tabs-malformed final-tabs-stale; do
     dir=$(new_case "herdr-$case_name" hr1)
     add_herdr_missing_pane_task "$dir" hr1
     make_herdr_missing_pane_stub "$dir" "$case_name"
@@ -2027,11 +2034,16 @@ test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
     if [ "$case_name" = postclose-tabs-unavailable ] \
        || [ "$case_name" = postclose-tabs-malformed ] \
        || [ "$case_name" = final-tabs-unavailable ] \
-       || [ "$case_name" = final-tabs-malformed ]; then
+       || [ "$case_name" = final-tabs-malformed ] \
+       || [ "$case_name" = final-tabs-stale ]; then
       assert_contains "$mutations" 'tab rename w1:t3 fm-hr1' \
         "a final $case_name check must run after the verified replacement is renamed"
       assert_not_contains "$mutations" 'tab close w1:t3' \
         "a final $case_name check must retain its verified replacement tab"
+    fi
+    if [ "$case_name" = final-tabs-stale ]; then
+      assert_contains "$(cat "$dir/home/state/.hr1.herdr-relaunch-claim")" 'tab_id=w1:t3' \
+        "a stale final list must retain the verified replacement claim"
     fi
     creates_before=$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')
     if [ "$case_name" = postcreate-zero-match ]; then

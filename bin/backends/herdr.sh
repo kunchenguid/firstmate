@@ -2361,8 +2361,6 @@ EOF
       and .[0].label == $label
   ' >/dev/null 2>&1 \
      || [ "$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id")" != "$pane_id" ]; then
-    [ "$strict_mode" != strict ] \
-      || fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id" || return 1
     echo "error: herdr tab create response does not bind replacement tab $tab_id and pane $pane_id to label '$label' in workspace $wsid (session $session)" >&2
     return 1
   fi
