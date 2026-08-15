@@ -7,8 +7,10 @@ The owned denominator is 72 enforcing clauses, ten more than round 3's 62 attemp
 Every run copied the implementation under one scoped `mktemp -d`; the live ledger, `data/`, and `state/` were never inputs or targets.
 
 ```sh
-tests/fm-sovereign-ledger-redundancy.mutation.sh --write-evidence docs/verification/sovereign-ledger-redundancy-mutation.md
+tests/fm-sovereign-ledger-redundancy.mutation.sh --write-evidence sovereign-ledger-redundancy-mutation.candidate.md
 ```
+
+Evidence publication rejects existing destinations, so the candidate is reviewed against this record before replacement rather than overwriting it in place.
 
 Observed summary: `killed=47 survived=25 void=0 denominator=72`; the intentional no-op control recorded `substitutions=1 status=0 outcome=SURVIVED`.
 
@@ -86,3 +88,19 @@ Observed summary: `killed=47 survived=25 void=0 denominator=72`; the intentional
 | `M070` | `copy.preserve-mode` | 1 | SURVIVED | 0 | Bundle copying preserves required executable modes. |
 | `M071` | `copy.private-umask` | 1 | SURVIVED | 0 | Bundle staging uses a private creation mask. |
 | `M072` | `copy.exact-read-count` | 1 | SURVIVED | 0 | Copying must cover exactly four members. |
+
+## Evidence publication containment
+
+The publication chokepoint was verified with scoped temporary fixtures on 2026-08-15.
+
+```sh
+tests/fm-sovereign-ledger-evidence-publish.mutation.sh
+```
+
+Observed bounded output:
+
+```text
+CONTAINMENT FIXTURES passed=10 failed=0
+PUBLISH MUTANT P001 KILLED substitutions=1
+PUBLISH MUTATION SUMMARY enforcing_lines=1 killed=1 survived=0 void=0 denominator=1
+```
