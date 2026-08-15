@@ -340,6 +340,15 @@ case "${args[0]:-} ${args[1]:-}" in
         fi
         exit 0
         ;;
+      postcreate-zero-match)
+        reads_file="$dir/herdr-tab-list-reads"
+        reads=0
+        [ -f "$reads_file" ] && reads=$(cat "$reads_file")
+        reads=$((reads + 1))
+        printf '%s\n' "$reads" > "$reads_file"
+        printf '%s\n' '{"result":{"tabs":[]}}'
+        exit 0
+        ;;
       postclose-tabs-unavailable|postclose-tabs-malformed)
         reads_file="$dir/herdr-tab-list-reads"
         reads=0
@@ -1916,8 +1925,8 @@ test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable() {
 }
 
 test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
-  local case_name dir out rc before mutations creates_before
-  for case_name in postcreate-tab-unreadable postcreate-pane-unreadable postcreate-tabs-unavailable postcreate-tabs-malformed postclose-tabs-unavailable postclose-tabs-malformed; do
+  local case_name dir out rc before claim_before mutations creates_before
+  for case_name in postcreate-tab-unreadable postcreate-pane-unreadable postcreate-tabs-unavailable postcreate-tabs-malformed postcreate-zero-match postclose-tabs-unavailable postclose-tabs-malformed; do
     dir=$(new_case "herdr-$case_name" hr1)
     add_herdr_missing_pane_task "$dir" hr1
     make_herdr_missing_pane_stub "$dir" "$case_name"
@@ -1935,6 +1944,19 @@ test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
     [ -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
       || fail "the $case_name refusal must retain its durable recovery claim"
     creates_before=$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')
+    if [ "$case_name" = postcreate-zero-match ]; then
+      claim_before="$dir/claim-before"
+      cp "$dir/home/state/.hr1.herdr-relaunch-claim" "$claim_before"
+      out=$(FM_FAKE_HERDR_CASE="$case_name" run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+      expect_code 1 "$rc" "a repeated zero-match read must retain its unresolved claim"
+      cmp -s "$before" "$dir/home/state/hr1.meta" \
+        || fail "a repeated zero-match read changed the task's serialized metadata"
+      cmp -s "$claim_before" "$dir/home/state/.hr1.herdr-relaunch-claim" \
+        || fail "a repeated zero-match read changed the durable recovery claim"
+      mutations=$(cat "$dir/fake/herdr-mutations")
+      [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = "$creates_before" ] \
+        || fail "a repeated zero-match read created another endpoint"
+    fi
     out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
     expect_code 1 "$rc" "a recovered $case_name claim should require an explicit retry"
     assert_contains "$out" "reclaimed an interrupted replacement" \

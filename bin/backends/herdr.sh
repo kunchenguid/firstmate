@@ -2120,10 +2120,7 @@ fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <
       [.result.tabs[]? | select(.label == $claim)] | length
     ' 2>/dev/null)
     case "$matches" in
-      0)
-        fm_backend_herdr_relaunch_claim_remove "$path" "$id" || return 1
-        return 2
-        ;;
+      0) return 1 ;;
       1) ;;
       *) return 1 ;;
     esac
@@ -2265,10 +2262,7 @@ EOF
       [.result.tabs[]? | select(.label == $claim)] | length
     ' 2>/dev/null) || return 1
     case "$strict_claim_matches" in
-      0)
-        fm_backend_herdr_relaunch_claim_remove "$strict_claim_path" "$strict_id" || return 1
-        return 1
-        ;;
+      0) return 1 ;;
       1) ;;
       *) return 1 ;;
     esac
