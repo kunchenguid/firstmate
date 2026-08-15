@@ -1053,6 +1053,52 @@ SH
   pass "bootstrap requires the annotation-aware Lavish fork"
 }
 
+test_bootstrap_surfaces_modern_pi_author_capture_gap() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/author-identity-sweep"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  cat > "$case_dir/home/state/bad-modern-pi.meta" <<'EOF'
+window=firstmate:fm-bad-modern-pi
+harness=pi
+kind=ship
+author_identity_snapshot_epoch=launch-bound-v1
+EOF
+  cat > "$case_dir/home/state/good-modern-pi.meta" <<'EOF'
+window=firstmate:fm-good-modern-pi
+harness=pi
+kind=ship
+author_account_identity=account-A
+author_identity_snapshot_epoch=launch-bound-v1
+EOF
+  cat > "$case_dir/home/state/legacy-pi.meta" <<'EOF'
+window=firstmate:fm-legacy-pi
+harness=pi
+kind=ship
+EOF
+  cat > "$case_dir/home/state/bad-secondmate.meta" <<'EOF'
+window=firstmate:fm-bad-secondmate
+harness=pi
+kind=secondmate
+author_identity_snapshot_epoch=launch-bound-v1
+EOF
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" \
+    FM_ROOT_OVERRIDE="$case_dir/home" FM_BOOTSTRAP_DETECT_ONLY=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" \
+    "AUTHOR_IDENTITY_CAPTURE_GAP: bad-modern-pi: modern Pi task metadata records launch-bound-v1 without exactly one non-empty author_account_identity; informational only, review independence is structural" \
+    "bootstrap did not surface the existing Pi metadata gap"
+  assert_not_contains "$out" "AUTHOR_IDENTITY_CAPTURE_GAP: good-modern-pi:" \
+    "bootstrap misclassified a Pi lane with complete launch-bound identity proof"
+  assert_not_contains "$out" "AUTHOR_IDENTITY_CAPTURE_GAP: legacy-pi:" \
+    "bootstrap reclassified a genuinely pre-snapshot Pi lane as failed modern capture"
+  assert_not_contains "$out" "AUTHOR_IDENTITY_CAPTURE_GAP: bad-secondmate:" \
+    "bootstrap applied a merge-gate diagnostic to a persistent supervisor"
+  pass "bootstrap reports existing modern Pi author-capture gaps without making them fatal"
+}
+
 test_bootstrap_surfaces_low_treehouse_capacity_read_only() {
   local case_dir fakebin pool out
   case_dir="$TMP_ROOT/treehouse-capacity"
@@ -1129,6 +1175,11 @@ if [ "${FM_TEST_FOCUSED:-}" = treehouse-capacity ]; then
   exit 0
 fi
 
+if [ "${FM_TEST_FOCUSED:-}" = author-identity-sweep ]; then
+  test_bootstrap_surfaces_modern_pi_author_capture_gap
+  exit 0
+fi
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_git_is_required_with_supported_install_instruction
@@ -1154,4 +1205,5 @@ test_agent_fleet_install_requires_manual_release
 test_invalid_account_routing_policy_is_reported
 test_enforced_dispatch_validation_rejects_poolless_quota_rules
 test_lavish_requires_store_forward_fork
+test_bootstrap_surfaces_modern_pi_author_capture_gap
 test_bootstrap_surfaces_low_treehouse_capacity_read_only

@@ -17,6 +17,7 @@
 #                 "NUDGE_SECONDMATES: fm-<id>...",
 #                 "REPORT_RETENTION: unavailable: <reason>",
 #                 "TREEHOUSE_CAPACITY: LOW pool=<path> available=<n> ...",
+#                 "AUTHOR_IDENTITY_CAPTURE_GAP: <id>: <reason>",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: <outcome>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          A NUDGE_SECONDMATES line lists the RUNNING secondmate task selectors
@@ -147,6 +148,12 @@ treehouse_capacity_check() {
   [ -z "$out" ] || printf '%s\n' "$out"
   [ "$status" -eq 0 ] \
     || echo "TREEHOUSE_CAPACITY: unavailable reason=capacity-check-failed status=$status"
+}
+
+author_identity_sweep() {
+  [ -x "$SCRIPT_DIR/fm-author-identity-sweep.sh" ] || return 0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-author-identity-sweep.sh"
 }
 
 checkout_refresh_ensure() {
@@ -955,6 +962,7 @@ account_routing_dependency_preflight
 if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "TASKS_AXI: available"
 fi
+author_identity_sweep
 checkout_refresh_ensure
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   report_retention_ensure

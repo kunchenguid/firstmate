@@ -16,12 +16,21 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  has-session|display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows|has-session|new-session|new-window|kill-window) exit 0 ;;
+  has-session)
+    case "$*" in
+      *fm-*) [ -e "${FM_FAKE_ENDPOINT_MARKER:?}" ]; exit ;;
+      *) printf 'firstmate\n'; exit 0 ;;
+    esac
+    ;;
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows|new-session) exit 0 ;;
+  new-window) : > "${FM_FAKE_ENDPOINT_MARKER:?}"; exit 0 ;;
+  kill-window) rm -f "${FM_FAKE_ENDPOINT_MARKER:?}"; exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       printf '%s\n' "$*" >> "$FM_FAKE_LAUNCH_LOG"
@@ -38,9 +47,45 @@ set -u
 if [ -n "${FM_FAKE_TREEHOUSE_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 fi
-if [ "${1:-}" = get ]; then
-  printf '%s\n' "${FM_FAKE_TREEHOUSE_WORKTREE:?}"
-fi
+case "${1:-}" in
+  get)
+    python3 - "${FM_FAKE_TREEHOUSE_STATE:?}" "${FM_FAKE_TREEHOUSE_WORKTREE:?}" <<'PY'
+import json
+import os
+import sys
+
+state_path, target = sys.argv[1:]
+with open(state_path, encoding="utf-8") as stream:
+    state = json.load(stream)
+for entry in state.get("worktrees", []):
+    if isinstance(entry, dict) and os.path.realpath(entry.get("path", "")) == os.path.realpath(target):
+        entry["leased"] = True
+        entry["lease_holder"] = os.environ["FM_FAKE_TREEHOUSE_HOLDER"]
+with open(state_path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+PY
+    [ -z "${FM_FAKE_TREEHOUSE_LEASE_MARKER:-}" ] || : > "$FM_FAKE_TREEHOUSE_LEASE_MARKER"
+    printf '%s\n' "$FM_FAKE_TREEHOUSE_WORKTREE"
+    ;;
+  return)
+    python3 - "${FM_FAKE_TREEHOUSE_STATE:?}" "$PWD" <<'PY'
+import json
+import os
+import sys
+
+state_path, target = sys.argv[1:]
+with open(state_path, encoding="utf-8") as stream:
+    state = json.load(stream)
+for entry in state.get("worktrees", []):
+    if isinstance(entry, dict) and os.path.realpath(entry.get("path", "")) == os.path.realpath(target):
+        entry["leased"] = False
+        entry.pop("lease_holder", None)
+with open(state_path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+PY
+    [ -z "${FM_FAKE_TREEHOUSE_LEASE_MARKER:-}" ] || rm -f "$FM_FAKE_TREEHOUSE_LEASE_MARKER"
+    ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/treehouse"
@@ -53,17 +98,26 @@ make_spawn_case() {
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   project="$case_dir/project"
-  worktree="$case_dir/worktree"
+  worktree="$home/treehouse-pools/profile/1/project"
   launch_log="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" \
-    "$home/treehouse-pools"
+    "$home/treehouse-pools/profile/1"
   printf '%s\n' codex > "$home/config/crew-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
   printf '# Backlog\n\n## In flight\n' > "$home/data/backlog.md"
   fm_git_worktree "$project" "$worktree" "wt-$name"
   git -C "$worktree" checkout --quiet --detach HEAD
   git -C "$project" branch --quiet -D "wt-$name"
+  python3 - "$home/treehouse-pools/profile/treehouse-state.json" "$worktree" <<'PY'
+import json
+import os
+import sys
+
+state_path, worktree = sys.argv[1:]
+with open(state_path, "w", encoding="utf-8") as stream:
+    json.dump({"worktrees": [{"name": "1", "path": os.path.realpath(worktree)}]}, stream)
+PY
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
@@ -84,6 +138,7 @@ run_spawn() {
   local home=$1 worktree=$2 fakebin=$3 launch_log=$4
   shift 4
   : > "$launch_log"
+  : > "$home/tmux.log"
   : > "$home/treehouse.log"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -92,12 +147,61 @@ run_spawn() {
     FM_CHECKOUT_REFRESH_STATE_BASE="$home/checkout-refresh-state" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$worktree" TMUX="fake,1,0" \
     FM_FAKE_TREEHOUSE_WORKTREE="$worktree" FM_FAKE_TREEHOUSE_LOG="$home/treehouse.log" \
-    FM_FAKE_LAUNCH_LOG="$launch_log" \
+    FM_FAKE_TREEHOUSE_STATE="$home/treehouse-pools/profile/treehouse-state.json" \
+    FM_FAKE_TREEHOUSE_HOLDER="firstmate-${1:-unknown}" \
+    FM_FAKE_TREEHOUSE_LEASE_MARKER="$home/worktree-leased" \
+    FM_FAKE_ENDPOINT_MARKER="$home/endpoint-live" \
+    FM_FAKE_TMUX_LOG="$home/tmux.log" FM_FAKE_LAUNCH_LOG="$launch_log" \
     PATH="${FM_TEST_PATH_OVERRIDE:-$fakebin:$PATH}" "$SPAWN" "$@" 2>&1
 }
 
 empty_backlog() {
   printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$1"
+}
+
+test_genuine_spawn_failure_rolls_back_all_task_resources() {
+  local record id out status
+  id=spawn-rollback-z0
+  record=$(make_spawn_case rollback "$id")
+  read_spawn_case "$record"
+
+  out=$(FM_ACCOUNT_ROUTING_TEST_LAB=firstmate-account-routing-test-lab-v1 \
+    FM_TEST_TASKTMP_CREATE_FAIL=1 \
+    run_spawn "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJECT_DIR")
+  status=$?
+  expect_code 1 "$status" "genuine spawn setup failure should be refused"
+  assert_contains "$out" "test-only task temp creation failure for $id" \
+    "spawn setup failure did not expose its reason"
+  assert_grep 'new-window ' "$HOME_DIR/tmux.log" \
+    "spawn setup failure fixture never created the endpoint it was meant to roll back"
+  assert_grep 'kill-window ' "$HOME_DIR/tmux.log" \
+    "spawn setup failure did not remove its prepared endpoint"
+  assert_absent "$HOME_DIR/endpoint-live" \
+    "spawn setup failure left its endpoint alive"
+  assert_absent "$HOME_DIR/worktree-leased" \
+    "spawn setup failure retained its workspace lease marker"
+  python3 - "$HOME_DIR/treehouse-pools/profile/treehouse-state.json" <<'PY' \
+    || fail "spawn setup failure retained its Treehouse lease"
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    entries = json.load(stream)["worktrees"]
+assert len(entries) == 1
+assert entries[0].get("leased") is not True
+assert "lease_holder" not in entries[0]
+PY
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "spawn setup failure left partial task metadata"
+  assert_absent "$HOME_DIR/state/.worktree-acquire-$id.pending" \
+    "spawn setup failure left its acquisition record"
+  if find "$HOME_DIR/state" -maxdepth 1 -name "*$id*" -print -quit | grep -q .; then
+    fail "spawn setup failure left a partial task state record"
+  fi
+  if find "$HOME_DIR/state/.task-tmp" -maxdepth 1 -name "fm-$id-*" -print -quit 2>/dev/null | grep -q .; then
+    fail "spawn setup failure left its task temp"
+  fi
+  pass "genuine spawn failure leaves no endpoint, workspace lease, or partial task record"
 }
 
 test_new_ship_without_row_is_refused_with_fix() {
@@ -269,6 +373,7 @@ test_batch_checks_each_pair_and_continues() {
   pass "batch dispatch checks every pair and continues after a backlog refusal"
 }
 
+test_genuine_spawn_failure_rolls_back_all_task_resources
 test_new_ship_without_row_is_refused_with_fix
 test_rows_in_manual_backlog_allow_ship_and_scout
 test_missing_tasks_axi_falls_back_to_manual_read
