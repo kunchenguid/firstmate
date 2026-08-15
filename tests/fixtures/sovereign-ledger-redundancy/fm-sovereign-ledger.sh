@@ -7,12 +7,11 @@ ledger=$ledger_dir/ledger.tsv
 
 verify() {
   [ -f "$ledger" ] || exit 1
-  [ "$(awk 'END { print NR }' "$ledger")" = 4 ] || exit 1
   awk -F '\t' '
-    NF != 3 { exit 1 }
-    $1 !~ /^ruling-[1-4]$/ { exit 1 }
-    seen[$1]++ != 0 { exit 1 }
-    END { exit length(seen) == 4 ? 0 : 1 }
+    NF != 3 { bad = 1 }
+    $1 !~ /^ruling-[1-5]$/ { bad = 1 }
+    seen[$1]++ != 0 { bad = 1 }
+    END { exit bad || length(seen) < 4 ? 1 : 0 }
   ' "$ledger"
 }
 

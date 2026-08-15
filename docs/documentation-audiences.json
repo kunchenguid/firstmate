@@ -109,6 +109,10 @@
   ],
   "surfaces": [
     {
+      "path": "tests/fixtures/sovereign-ledger-redundancy/CONTRACT.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": ".agents/skills/afk/SKILL.md",
       "audience": "agent-runtime"
     },
