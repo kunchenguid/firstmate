@@ -59,7 +59,8 @@ fm_control_verb_allowed() {  # <verb>
 }
 
 # The harnesses whose control mechanics are verified. Mirrors AGENTS.md
-# section 4's verified-adapter list; an unverified adapter is refused rather
+# section 4's verified-adapter list, plus cursor-agent as an intake alias
+# for cursor (bin/fm-cursor-lib.sh). An unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in

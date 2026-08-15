@@ -381,7 +381,7 @@ Do not confuse `harness=cursor` using a `cursor-grok-4.5-*` model with `harness=
 | Fact | Value |
 |---|---|
 | Binary | Resolved through `fm_cursor_resolve_binary` (bin/fm-cursor-lib.sh). `cursor` is NOT the CLI: the installed names are `cursor-agent` and the legacy alias `agent`, both symlinked into `~/.local/share/cursor-agent/versions/<version>/cursor-agent`. The STABLE launcher is used, never the versioned target, which the CLI replaces on its own auto-update. |
-| Launch | A positional prompt with `--trust`, `--yolo`, `--model <model>` when selected, and `--workspace <absolute-task-worktree>`, behind `env -u` of the foreign primary markers. |
+| Launch | A positional prompt with `--trust`, `--yolo`, `--model auto` or another catalog id, and `--workspace <absolute-task-worktree>`, behind `env -u` of the foreign primary markers. |
 | Models | Validate against `cursor-agent --list-models` for the current account rather than a fixed list; that list has already drifted once. The crew default is `auto` (listed as `Auto (current, default)`). Other ids must come from that same catalog; an assumed low/medium Grok id is invalid. |
 | Busy state | Its own per-conversation transcript, folded on demand by `bin/fm-busy-lib.sh` (source `cursor-transcript`). Each turn is bracketed by a `role:user` open and a typed `turn_ended` close covering `success` and `aborted`, so unlike Claude's `Stop` hook this source covers manual interruption. Nothing is armed and no record is ever seeded. Backend-agnostic, and confirmed identical on tmux and Herdr. |
 | Exit command | `/exit` |

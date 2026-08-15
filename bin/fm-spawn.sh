@@ -107,6 +107,7 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). cursor-agent is accepted only as
 #   an intake alias for cursor (bin/fm-cursor-lib.sh); recorded identity stays cursor.
+#   A cursor spawn with no chosen model launches --model auto.
 #   A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
