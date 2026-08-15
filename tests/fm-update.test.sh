@@ -143,15 +143,15 @@ set -eu
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "repo view")
-    if [ "${FM_TEST_GH_MODE:-fork}" = api-fail ]; then
-      echo "authentication required" >&2
-      exit 1
-    fi
-    if [ "${FM_TEST_GH_MODE:-fork}" = direct ]; then
-      printf 'acme/firstmate-fork\tfalse\tmain\t\n'
-    else
-      printf 'acme/firstmate-fork\ttrue\tmain\tacme/firstmate\n'
-    fi
+    case "${FM_TEST_GH_MODE:-fork}" in
+      api-fail)
+        echo "authentication required" >&2
+        exit 1
+        ;;
+      direct) printf 'acme/firstmate-fork\tfalse\tmain\t\n' ;;
+      fork-missing-parent*) printf 'acme/firstmate-fork\ttrue\tmain\t\n' ;;
+      *) printf 'acme/firstmate-fork\ttrue\tmain\tacme/firstmate\n' ;;
+    esac
     ;;
   "repo sync")
     upstream_ref=refs/fm-test/upstream
@@ -167,7 +167,28 @@ case "${1:-} ${2:-}" in
       "refs/heads/$FM_TEST_DEFAULT:refs/heads/$FM_TEST_DEFAULT"
     ;;
   "api repos/"*)
-    git --git-dir="$FM_TEST_FORK_REPO" rev-parse "refs/heads/$FM_TEST_DEFAULT"
+    case "${2:-}" in
+      repos/acme/firstmate-fork)
+        case "${FM_TEST_GH_MODE:-fork}" in
+          fork-missing-parent) printf 'true\tacme/firstmate\tacme/firstmate\n' ;;
+          fork-missing-parent-rest-missing-parent) printf 'true\t\t\n' ;;
+          fork-missing-parent-rest-invalid-source) printf 'true\tacme/firstmate\tnot-a-source\n' ;;
+          fork-missing-parent-rest-contradictory-source) printf 'true\tacme/firstmate\tacme/other\n' ;;
+          fork-missing-parent-rest-configured-mismatch) printf 'true\tacme/firstmate\tacme/firstmate\n' ;;
+          *)
+            echo "unexpected repository metadata request: $*" >&2
+            exit 2
+            ;;
+        esac
+        ;;
+      repos/acme/firstmate-fork/commits/main)
+        git --git-dir="$FM_TEST_FORK_REPO" rev-parse "refs/heads/$FM_TEST_DEFAULT"
+        ;;
+      *)
+        echo "unexpected gh invocation: $*" >&2
+        exit 2
+        ;;
+    esac
     ;;
   *)
     echo "unexpected gh invocation: $*" >&2
@@ -461,6 +482,8 @@ test_github_fork_ahead_sync_and_convergence_order() {
   grep -q '^repo view ' "$w/gh.log" || fail "GitHub metadata inspection was not invoked"
   grep -q '^repo sync acme/firstmate-fork --branch main$' "$w/gh.log" \
     || fail "guarded GitHub fork sync was not invoked"
+  assert_not_contains "$(cat "$w/gh.log")" "api repos/acme/firstmate-fork --jq" \
+    "GraphQL parent path unexpectedly requested REST metadata"
   pass "T12 GitHub fork sync precedes local, secondmate, and config convergence"
 }
 
@@ -480,6 +503,108 @@ test_github_fork_already_current() {
   [ "$(cat "$w/order.log")" = config ] || fail "config convergence skipped for current fork"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] || fail "current checkout moved"
   pass "T13 already-current GitHub fork is an idempotent update"
+}
+
+test_github_fork_missing_graphql_parent_uses_rest_metadata() {
+  local w out expected gh_log rc
+  w=$(new_world github-missing-graphql-parent)
+  configure_github_world "$w"
+  bump_upstream "$w" graphql-parent-fallback
+  expected=$(git --git-dir="$w/upstream.git" rev-parse refs/heads/main)
+
+  out=$(FM_TEST_GH_MODE=fork-missing-parent run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || fail "GraphQL-missing-parent fork update failed: $out"
+  assert_contains "$out" "upstream: github acme/firstmate" \
+    "REST parent metadata was not accepted"
+  assert_contains "$out" "fork-sync: updated " \
+    "REST parent fallback did not synchronize the fork"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$expected" ] \
+    || fail "REST parent fallback did not advance the local checkout"
+  gh_log=$(cat "$w/gh.log")
+  assert_contains "$gh_log" "api repos/acme/firstmate-fork" \
+    "GraphQL-missing parent did not request authenticated REST metadata"
+  pass "T28 GraphQL-missing fork parent falls back to authenticated REST metadata"
+}
+
+test_github_fork_missing_graphql_parent_rest_missing_parent_refused() {
+  local w out before rc
+  w=$(new_world github-rest-missing-parent)
+  configure_github_world "$w"
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(FM_TEST_GH_MODE=fork-missing-parent-rest-missing-parent \
+    run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "REST-missing-parent fork update unexpectedly succeeded"
+  assert_contains "$out" \
+    "update refused: GitHub REST fork inspection did not identify a valid parent" \
+    "missing REST parent was not refused clearly"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "local checkout moved after missing REST parent"
+  assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
+    "fork sync ran despite missing REST parent"
+  pass "T29 GraphQL-missing fork parent refuses when REST has no valid parent"
+}
+
+test_github_fork_missing_graphql_parent_rest_invalid_or_contradictory_source_refused() {
+  local w out before rc
+  w=$(new_world github-rest-invalid-source)
+  configure_github_world "$w"
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(FM_TEST_GH_MODE=fork-missing-parent-rest-invalid-source \
+    run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "REST-invalid-source fork update unexpectedly succeeded"
+  assert_contains "$out" \
+    "update refused: GitHub REST fork inspection did not identify a valid source" \
+    "invalid REST source was not refused"
+  assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
+    "fork sync ran despite invalid REST source"
+
+  w=$(new_world github-rest-contradictory-source)
+  configure_github_world "$w"
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(FM_TEST_GH_MODE=fork-missing-parent-rest-contradictory-source \
+    run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "REST-contradictory-source fork update unexpectedly succeeded"
+  assert_contains "$out" \
+    "update refused: GitHub REST fork inspection returned contradictory parent and source identities" \
+    "contradictory REST parent and source were not refused"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "local checkout moved after contradictory REST source"
+  assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
+    "fork sync ran despite contradictory REST source"
+  pass "T30 GraphQL-missing fork parent refuses invalid or contradictory REST source"
+}
+
+test_github_rest_parent_keeps_configured_upstream_validation() {
+  local w out before rc
+  w=$(new_world github-rest-upstream-mismatch)
+  configure_github_world "$w"
+  git -C "$w/main" remote set-url upstream https://github.com/acme/not-the-parent.git
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(FM_TEST_GH_MODE=fork-missing-parent-rest-configured-mismatch \
+    run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "REST parent bypassed configured upstream validation"
+  assert_contains "$out" \
+    "update refused: unsupported topology: configured upstream acme/not-the-parent differs from GitHub parent acme/firstmate" \
+    "configured upstream mismatch was not refused after REST fallback"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "local checkout moved after configured upstream mismatch via REST"
+  assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
+    "fork sync ran despite configured upstream mismatch via REST"
+  pass "T31 REST parent preserves configured-upstream identity validation"
 }
 
 test_downstream_fork_divergence_requires_reviewed_import() {
@@ -789,6 +914,10 @@ test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_github_fork_ahead_sync_and_convergence_order
 test_github_fork_already_current
+test_github_fork_missing_graphql_parent_uses_rest_metadata
+test_github_fork_missing_graphql_parent_rest_missing_parent_refused
+test_github_fork_missing_graphql_parent_rest_invalid_or_contradictory_source_refused
+test_github_rest_parent_keeps_configured_upstream_validation
 test_downstream_fork_divergence_requires_reviewed_import
 test_help_owns_downstream_import_boundary
 test_reviewed_integration_restores_downstream_updates
