@@ -10,7 +10,7 @@ Firstmate ships two session-open tiers, and the tier is a property of the harnes
 | Run | Executes `bin/fm-session-start.sh` in the hook and lets its ordered digest land in model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, Cursor |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
-Codex's interactive TUI has no tracked session-open, compaction, or re-emit channel and is not covered by either tier.
+Codex-cli 0.147.0's interactive TUI runs the tracked project `SessionStart` hook, but model-context delivery and context-reset sources remain unverified there, so it is not covered by either tier.
 The run tier exists because the nudge can only ask.
 An agent can defer an instruction, including when a first-command skill has its own read-only path.
 Running the digest inside the hook removes that discretion, so even a session whose first command is a skill has already taken the helm.
@@ -69,7 +69,7 @@ A lock another session holds and a truncated digest therefore surface as digest 
 | --- | --- | --- | --- |
 | Claude | Run | `.claude/settings.json` registers one unmatched `SessionStart` hook, invoked through `CLAUDE_PROJECT_DIR` with a 180s timeout; the wrapper reads `source` from the hook payload. | Native stdout context injection is supported. |
 | Codex exec | Run | `.codex/hooks.json` anchors to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and pipes the hook payload into the wrapper with a 180s timeout. | Native stdout context injection is supported under `codex exec`. |
-| Codex interactive TUI | Uncovered | None. | Codex 0.146.0 does not fire the tracked project `SessionStart` hook in its interactive TUI; Firstmate ships no global hook, has no tracked compaction or re-emit channel, and does not claim instruction-refresh delivery for this surface. |
+| Codex interactive TUI | Uncovered | `.codex/hooks.json` fires its tracked project `SessionStart` hook on codex-cli 0.147.0. | The hook firing alone does not prove that its stdout reaches model context, and no tracked compaction or re-emit source is verified, so Firstmate does not claim startup or instruction-refresh delivery for this surface. |
 | Pi / pi-signed | Run | `.pi/extensions/fm-primary-turnend-guard.ts` maps `session_start` reasons `startup`, `new`, `resume`, and `fork` onto wrapper sources, refines a Pi-reported `startup` to `resume` only when a continuation, resume-selection, or explicit-session flag accompanies a session header older than the current process, maps a fork flag to `fork`, handles `session_compact` as the compaction equivalent, and injects the output with `pi.sendMessage`; setup-created entries such as `--name` are not restoration evidence. | The custom message reaches model context without racing an initial positional prompt; Pi's `reload` reason is deliberately unmapped, as it always was. |
 | OpenCode | Nudge | `.opencode/plugins/fm-primary-sessionstart-nudge.js` listens for `session.created`, runs once per session id, and calls `client.session.promptAsync` only when the wrapper prints a nudge. | Interactive TUI delivery is supported; headless `opencode run` is intentionally fail-open because the process can exit before the queued turn. That early exit is also why OpenCode cannot use the run tier. |
 | Grok | Nudge | `.grok/hooks/fm-primary-sessionstart-nudge.json` registers a project `SessionStart` hook and invokes the wrapper through inline-defaulted `${GROK_WORKSPACE_ROOT:-}`. | The project hook runs when the checkout is trusted, but Grok currently discards hook stdout from model context, so this path is intentionally fail-open and cannot use the run tier. |
@@ -77,7 +77,7 @@ A lock another session holds and a truncated digest therefore surface as digest 
 | Cursor compaction | Uncovered | None. | Cursor's `preCompact` response can return only `user_message` and is absent from Cursor's `additional_context` step set, so it cannot inject a re-emit digest. Delivering one needs its own design and is deliberately deferred to a follow-up; a Cursor primary does not re-emit its digest after a compaction. |
 
 Cursor's `sessionStart` fires at every session open with no source distinction, including a resumed session, so a resume re-runs the full digest; that is redundant and idempotent rather than a lost helm.
-Cursor's compaction surface is uncovered in the same sense as Codex's interactive TUI above: Firstmate registers nothing for `preCompact`, so a compacted Cursor session keeps whatever context survived rather than receiving a fresh digest.
+Cursor's compaction surface is uncovered in the same sense as Codex's interactive context-reset path above: Firstmate registers nothing for `preCompact`, so a compacted Cursor session keeps whatever context survived rather than receiving a fresh digest.
 
 Pi is the only adapter that injects a message rather than hook stdout, so whatever it injects must carry operational provenance or the Ahoy skill would have to guess whether it was captain-authored.
 The extension therefore encodes an unencoded digest as `session-start` operational input before sending it, and leaves the already-encoded nudge alone.
