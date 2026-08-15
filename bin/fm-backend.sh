@@ -895,6 +895,55 @@ fm_backend_agent_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_missing_grade: how much a `missing` verdict proves, for the one
+# caller that acts on it destructively enough to need the distinction - creating
+# a replacement endpoint. `missing` means "the recorded endpoint is not there",
+# which comes from two observations of very different strength:
+#   strong     a reachable runtime answered and the endpoint is absent from it,
+#              so nothing can still be running at that address.
+#   ambiguous  the runtime itself could not be reached, so its silence cannot
+#              distinguish a wiped endpoint from one this process cannot see.
+# Only `strong` licenses creating an endpoint without a human decision. Sets
+# FM_BACKEND_MISSING_GRADE plus FM_BACKEND_MISSING_SOCKET and
+# FM_BACKEND_MISSING_RESPONSE - the concrete address consulted and the answer it
+# gave - so the caller can hand a human the evidence rather than a verdict. It
+# sets variables instead of printing because command substitution would discard
+# them. An unrecognized backend grades ambiguous: never having asked is the
+# weakest evidence of all.
+FM_BACKEND_MISSING_GRADE=
+FM_BACKEND_MISSING_SOCKET=
+FM_BACKEND_MISSING_RESPONSE=
+fm_backend_missing_grade() {  # <backend> <target>
+  local backend=$1 target=$2
+  FM_BACKEND_MISSING_GRADE=ambiguous
+  FM_BACKEND_MISSING_SOCKET=
+  FM_BACKEND_MISSING_RESPONSE=
+  fm_backend_source "$backend" || {
+    FM_BACKEND_MISSING_RESPONSE="backend '$backend' could not be loaded"
+    return 0
+  }
+  case "$backend" in
+    tmux)
+      fm_backend_tmux_missing_grade "$target"
+      FM_BACKEND_MISSING_GRADE=$FM_BACKEND_TMUX_MISSING_GRADE
+      FM_BACKEND_MISSING_SOCKET=$FM_BACKEND_TMUX_MISSING_SOCKET
+      FM_BACKEND_MISSING_RESPONSE=$FM_BACKEND_TMUX_MISSING_RESPONSE
+      ;;
+    herdr)
+      # Herdr reaches `missing` only from a SUCCESSFUL pane read that reported a
+      # structurally gone pane; every failed or unexpected API read already
+      # classifies `unreadable`, so a missing verdict here is always strong.
+      FM_BACKEND_MISSING_GRADE=strong
+      FM_BACKEND_MISSING_SOCKET=$target
+      FM_BACKEND_MISSING_RESPONSE="pane read succeeded and reported the pane structurally gone"
+      ;;
+    *)
+      FM_BACKEND_MISSING_RESPONSE="backend '$backend' has no recovery-grade classifier"
+      ;;
+  esac
+  return 0
+}
+
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.
