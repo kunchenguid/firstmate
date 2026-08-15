@@ -63,6 +63,13 @@ The crewmate-only Muse Code 0.1.0-R708.1 adapter was verified separately on 2026
 Its installed `muse-bin-0.1.0-R708.1` foreground identity classified `alive`, while `musescore`, `amuse`, `muse-binary`, and `muse-bind` remained ambiguous in the portable regression.
 [`muse.md`](muse.md#process-identity) owns the artifact identity and launcher evidence for that verification.
 
+OMP 17.3.4 was verified separately on 2026-08-14 in a private tmux lab.
+Its interactive TUI reports the generic `bun` command name, with argv naming the selected `omp` launcher.
+The liveness probe therefore treats Bun as alive only when the task's recorded `harness=omp` scopes the decision and the foreground argv structurally identifies OMP or its pi-coding-agent package.
+An unrelated Bun foreground process remains ambiguous, never alive.
+This OMP evidence covers worker and secondmate endpoint liveness only.
+The tracked primary-session `.pi/extensions/fm-primary-*.ts` behavior was not reverified for OMP 17.3.4.
+
 Bounded observed output:
 
 ```text
@@ -171,6 +178,7 @@ The dedicated tmux cell removed ambient tmux variables, required a socket-bound 
 Valid cleanup removed only the exact task-bound target and left the control window live.
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
+OMP shares that cleanup boundary and its per-task Pi-compatible extension sidecar is likewise removed only after endpoint validation.
 
 ## Composer classification matrix
 

@@ -104,15 +104,15 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
+#   new adapters. For pi, pi-signed, and omp, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
-#   A missing selected executable refuses before endpoint creation, and pi-signed
-#   never falls back to pi.
+#   A missing selected executable refuses before endpoint creation, pi-signed
+#   never falls back to pi, and omp never falls back to a Pi executable.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -151,6 +151,7 @@
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
+#     __OMPBIN__   quoted concrete OMP executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
@@ -439,7 +440,7 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor) ;;
     *)
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -993,6 +994,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
+  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
   # A relaunch must PROVE the previous agent is gone before it launches another
@@ -1002,12 +1004,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
   }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_PRIOR_HARNESS")
   [ "$RELAUNCH_STATE" = dead ] || {
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
   }
-  RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1046,7 +1047,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+''|claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|muse)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1074,7 +1075,7 @@ shell_quote() {
   printf "'"
 }
 
-resolve_pi_executable() {
+resolve_harness_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
   [ -x "$candidate" ] || return 1
@@ -1122,6 +1123,18 @@ launch_template() {
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'
+      if [ "$kind" = secondmate ]; then
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      else
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
+      ;;
+    # OMP 17.3.4 supports Pi's extension dialect but does not promise a
+    # permissive local config. --approval-mode=yolo was verified to override a
+    # restrictive tools.approvalMode=always-ask config, so an unattended pane
+    # cannot silently park at an approval prompt after a local config change.
+    omp)
+      printf '%s' '__OMPBIN__ --advisor --approval-mode=yolo'
       if [ "$kind" = secondmate ]; then
         printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
@@ -1229,7 +1242,7 @@ fi
 
 case "$HARNESS" in
   pi|pi-signed)
-    PI_BIN=$(resolve_pi_executable "$HARNESS") || {
+    PI_BIN=$(resolve_harness_executable "$HARNESS") || {
       echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
       exit 1
     }
@@ -1239,6 +1252,12 @@ case "$HARNESS" in
     fi
     LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
     LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
+    ;;
+  omp)
+    OMP_BIN=$(resolve_harness_executable omp) || {
+      echo "error: omp executable not found on PATH; install it or select a different verified harness" >&2
+      exit 1
+    }
     ;;
   cursor)
     # `cursor` is not the CLI name, and the legacy alias `agent` is far too
@@ -1361,7 +1380,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -1396,6 +1415,14 @@ effort_flag_for_harness() {
     pi|pi-signed)
       # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
       # its --thinking flag.
+      case "$effort" in
+        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+      esac
+      ;;
+    omp)
+      # OMP advertises extra values, but firstmate's shared profile axis is
+      # low|medium|high|xhigh|max. Its CLI silently accepts invalid values, so
+      # this explicit advertised intersection is safer than error probing.
       case "$effort" in
         low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
       esac
@@ -1835,7 +1862,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
         ;;
     esac
   fi
-  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target")
+  old_state=$(fm_backend_agent_alive "$old_backend" "$old_target" "$(fm_meta_get "$meta" harness)")
   case "$old_state" in
     dead) return 0 ;;
     alive|unknown)
@@ -2319,7 +2346,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|omp)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2413,7 +2440,7 @@ export const FmBusyState = async () => {
 EOF
       exclude_path '.opencode/plugins/fm-busy-state.js'
       ;;
-    pi|pi-signed)
+    pi|pi-signed|omp)
       # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
       # loaded from inside the project (verified live), but an explicit -e path
       # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
@@ -2724,6 +2751,7 @@ LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
+  omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}

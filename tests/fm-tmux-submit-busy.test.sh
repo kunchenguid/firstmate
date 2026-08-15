@@ -322,6 +322,16 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   printf 'Working...\n' > "$composer"
   pane_busy pi pi || fail "Pi Working footer should be busy"
   pane_busy pi-signed pi-signed || fail "pi-signed should share Pi's exact Working footer"
+  # OMP's interactive TUI uses U+2026, not Pi's print-mode ASCII dots. Its
+  # matcher is scoped and structural so a locale-sensitive literal cannot make
+  # a healthy OMP worker read idle.
+  printf ' Working… [esc]\n' > "$composer"
+  pane_busy omp omp || fail "OMP TUI Working ellipsis footer should be busy"
+  pane_busy no-harness && fail "OMP footer must not widen the no-harness fallback"
+  printf 'Working...\n' > "$composer"
+  pane_busy omp && fail "OMP print-mode output without its TUI esc footer must stay idle"
+  printf ' Working… [escape]\n' > "$composer"
+  pane_busy omp && fail "OMP matcher must require the exact esc footer"
   printf 'Ctrl+c:cancel\n' > "$composer"
   pane_busy grok grok || fail "Grok cancel footer should be busy"
   pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"

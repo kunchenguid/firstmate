@@ -24,6 +24,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-omp-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-omp-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -246,6 +248,22 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
+# fm_backend_tmux_foreground_process_args: each foreground-process-group
+# member's kernel command name plus full argv, tab-separated. The OMP liveness
+# rule needs full argv because its command name is generic `bun`.
+fm_backend_tmux_foreground_process_args() {  # <target>
+  local target=$1 tty pid pgid tpgid comm args
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
+  [ -n "$tty" ] || return 0
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+        printf '%s\t%s\n' "$comm" "$args"
+      done
+}
+
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
@@ -262,9 +280,9 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # live worktree, while the foreground process group - when it is readable - is
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
-fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
-  local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
+fm_backend_tmux_agent_state() {  # <target> [expected-harness]
+  local target=$1 expected_harness=${2:-} comm session window windows inventory_status
+  local foreground argv0s process_args name args fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -317,6 +335,23 @@ EOF
 $argv0s
 EOF
 
+  # `bun` is a generic runtime and never belongs in the normal name classifier.
+  # A recorded `harness=omp` scopes this exception to one task, and the shared
+  # matcher still requires OMP's own launcher/package argv evidence. A Bun pane
+  # that fails either condition remains ambiguous, never spuriously alive.
+  if [ "$expected_harness" = omp ]; then
+    process_args=$(fm_backend_tmux_foreground_process_args "$target")
+    while IFS=$'\t' read -r name args; do
+      [ -n "$name" ] || continue
+      if fm_omp_process_matches "$name" "$args"; then
+        printf 'alive'
+        return 0
+      fi
+    done <<EOF
+$process_args
+EOF
+  fi
+
   comm=$(fm_backend_tmux_current_command "$target") || {
     printf 'unreadable'
     return 0
@@ -348,8 +383,8 @@ EOF
 
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
-fm_backend_tmux_agent_alive() {  # <target>
-  case "$(fm_backend_tmux_agent_state "$1")" in
+fm_backend_tmux_agent_alive() {  # <target> [expected-harness]
+  case "$(fm_backend_tmux_agent_state "$1" "${2:-}")" in
     alive) printf 'alive' ;;
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;

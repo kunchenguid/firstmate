@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|muse|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -29,6 +29,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-omp-lib.sh
+. "$SCRIPT_DIR/fm-omp-lib.sh"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
@@ -95,6 +97,13 @@ detect_own() {
       muse|muse-bin-*) echo muse; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
+      bun|bun-*)
+        # omp 17.3.4 exports no PI_CODING_AGENT marker and runs under generic
+        # bun. Require the launcher/package argv evidence so unrelated Bun
+        # programs do not become Firstmate primaries.
+        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        if fm_omp_process_matches "$comm" "$args"; then echo omp; return; fi
+        ;;
       node*|python*)
         # Bare interpreter: match the harness name in its script path.
         args=$(ps -o args= -p "$pid" 2>/dev/null)

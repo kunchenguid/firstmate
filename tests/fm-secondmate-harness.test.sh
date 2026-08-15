@@ -224,6 +224,51 @@ SH
   pass "pi-signed identity: authoritative launch selection distinguishes shared wrapper ancestry"
 }
 
+test_omp_bun_ancestry_detection() {
+  local dir fakebin got
+  dir="$TMP_ROOT/omp-bun-identity"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$field:${FM_TEST_OMP_SHAPE:-omp}" in
+  comm=*) printf '%s\n' bun ;;
+  args=:omp) printf '%s\n' 'bun /Users/test/.bun/bin/omp --advisor' ;;
+  args=:package) printf '%s\n' 'bun /tmp/node_modules/@oh-my-pi/pi-coding-agent/dist/index.js' ;;
+  args=*) printf '%s\n' 'bun /tmp/unrelated-bun-program.js' ;;
+  ppid=*) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = omp ] || fail "OMP bun launcher ancestry resolved '$got', expected omp"
+  got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    FM_TEST_OMP_SHAPE=package PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh")
+  [ "$got" = omp ] || fail "OMP package ancestry resolved '$got', expected omp"
+  if env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    FM_TEST_OMP_SHAPE=decoy PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-harness.sh" | grep -qx omp; then
+    fail "an unrelated Bun program was detected as OMP"
+  fi
+  PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT" \
+    || fail "session-lock liveness rejected structural OMP Bun evidence"
+  if PATH="$fakebin:$BASE_PATH" FM_TEST_OMP_SHAPE=decoy bash -c \
+    '. "$0/bin/fm-session-lock-lib.sh"; kill() { return 0; }; fm_harness_pid_alive 777' "$ROOT"; then
+    fail "session-lock liveness accepted an unrelated Bun program"
+  fi
+  pass "OMP identity: Bun ancestry requires launcher or package argv evidence"
+}
+
 test_dash_leading_process_names_are_basename_operands() {
   local dir fakebin got err status
   dir="$TMP_ROOT/dash-leading-process-names"
@@ -2524,6 +2569,7 @@ test_harness_resolution
 test_cursor_marker_detection
 test_secondmate_model_effort_tokens
 test_pi_signed_detection_and_session_lock_identity
+test_omp_bun_ancestry_detection
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
 test_spawn_split_and_inherit

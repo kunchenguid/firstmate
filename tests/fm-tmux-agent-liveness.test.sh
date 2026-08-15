@@ -54,6 +54,7 @@ export PATH
 ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
+ln -s "$(command -v bash)" "$LAB/bin/bun"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
@@ -77,6 +78,19 @@ wait
 SH
 chmod +x "$LAB/bin/agent-launcher"
 
+# OMP's visible process name is generic `bun`, so a real foreground process
+# must carry the OMP launcher path in argv and an explicit recorded harness
+# scope before the liveness probe calls it alive.
+cat > "$LAB/bin/omp" <<'SH'
+#!/usr/bin/env bash
+while :; do sleep 60; done
+SH
+cat > "$LAB/bin/not-omp" <<'SH'
+#!/usr/bin/env bash
+while :; do sleep 60; done
+SH
+chmod +x "$LAB/bin/omp" "$LAB/bin/not-omp"
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
@@ -93,10 +107,10 @@ new_window() {  # <name> <cmd...>
     || fail "could not create window $name"
 }
 
-wait_for_state() {  # <target> <expected> [tries]
-  local target=$1 expected=$2 tries=${3:-100} got i=0
+wait_for_state() {  # <target> <expected> [tries] [expected-harness]
+  local target=$1 expected=$2 tries=${3:-100} expected_harness=${4:-} got i=0
   while [ "$i" -lt "$tries" ]; do
-    got=$(fm_backend_agent_state tmux "$target")
+    got=$(fm_backend_agent_state tmux "$target" "$expected_harness")
     [ "$got" = "$expected" ] && return 0
     sleep 0.1
     i=$((i + 1))
@@ -154,6 +168,20 @@ new_window agent "$LAB/bin/claude-link" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+
+# --- OMP's scoped Bun identity ----------------------------------------------
+
+new_window omp "$LAB/bin/bun" "$LAB/bin/omp"
+wait_for_state "$SESSION:omp" ambiguous 100 \
+  || fail "an OMP-shaped Bun process without recorded OMP scope must stay ambiguous"
+wait_for_state "$SESSION:omp" alive 100 omp \
+  || fail "a live OMP Bun process with recorded OMP scope must classify alive"
+pass "tmux liveness: a live OMP Bun process requires and honors recorded OMP scope"
+
+new_window omp-decoy "$LAB/bin/bun" "$LAB/bin/not-omp"
+wait_for_state "$SESSION:omp-decoy" ambiguous 100 omp \
+  || fail "a scoped but unrelated Bun process must stay ambiguous"
+pass "tmux liveness: recorded OMP scope does not adopt an unrelated Bun process"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy
