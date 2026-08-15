@@ -27,6 +27,7 @@ install_cd_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-pretool-check.sh"
+  cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-cd-command-policy.mjs" "$dir/bin/fm-cd-command-policy.mjs"
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
   chmod +x "$dir/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-command-policy.mjs"
@@ -372,6 +373,10 @@ test_policy_cli_direct() {
 
 # --- per-harness wiring -----------------------------------------------------
 
+# Delegated to bin/fm-lint.sh, the single owner of the lint definition including
+# --external-sources; calling the linter directly here would be a second copy of
+# that definition, and would disagree the moment this checker sourced a shared
+# library.
 test_scripts_are_shellcheck_clean() {
   # Skip where ShellCheck is absent, exactly as the sibling guard's test does
   # (tests/fm-arm-pretool-check.test.sh). Without this, a suite runner that does
@@ -379,10 +384,11 @@ test_scripts_are_shellcheck_clean() {
   # the invocation exits 127, stderr is discarded, and the failure names the
   # wrong culprit. The file itself stays covered by the lint job, which owns the
   # canonical file set and the pinned version (bin/fm-lint.sh).
+  local out
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
-  shellcheck "$ROOT/bin/fm-cd-pretool-check.sh" >/dev/null 2>&1 \
-    || fail "bin/fm-cd-pretool-check.sh is not shellcheck-clean"
-  pass "bin/fm-cd-pretool-check.sh is shellcheck-clean"
+  out=$("$ROOT/bin/fm-lint.sh" "$ROOT/bin/fm-cd-pretool-check.sh" 2>&1) \
+    || fail "bin/fm-cd-pretool-check.sh is not lint-clean under the pinned definition: $out"
+  pass "bin/fm-cd-pretool-check.sh is clean under bin/fm-lint.sh"
 }
 
 test_full_acceptance_matrix

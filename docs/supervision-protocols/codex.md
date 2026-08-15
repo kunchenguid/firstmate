@@ -6,7 +6,7 @@ This is the durable wake path; the bounded foreground checkpoint remains only as
 
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
-   After handling all emitted wakes and reconciling open decisions, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
+   After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
 2. Source `__FM_X_MODE_ENV__` first when Relay is active.
 3. Ensure the present-mode daemon is running with `bin/fm-present-launch.sh start`.
    It is idempotent: it no-ops when the daemon is already live and reconciles a leaked terminal from a prior crash before relaunching.
