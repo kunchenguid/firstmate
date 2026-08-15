@@ -5,7 +5,7 @@
 # This is the one implementation of "advance a firstmate checkout to a base by a
 # clean fast-forward, never forcing, merging, or stashing" used by every sync
 # path:
-#   - /updatefirstmate (bin/fm-update.sh) pulls from origin: base_mode "origin".
+#   - /updatefirstmate (bin/fm-update.sh) pulls from tracked upstream: base_mode "upstream".
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
@@ -195,15 +195,15 @@ validate_secondmate_home() {
 # the local-HEAD sync never fetches.
 FETCHED=""
 fetch_once() {
-  local dir=$1 common
+  local dir=$1 remote=${2:-origin} common
   common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
   if [ -n "$common" ]; then
     case " $FETCHED " in
-      *" $common "*) return 0 ;;
+      *" $common:$remote "*) return 0 ;;
     esac
   fi
-  if git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
-    [ -n "$common" ] && FETCHED="$FETCHED $common"
+  if git -C "$dir" fetch "$remote" --prune --quiet 2>/dev/null; then
+    [ -n "$common" ] && FETCHED="$FETCHED $common:$remote"
     return 0
   fi
   return 1
@@ -259,8 +259,10 @@ live_secondmate_meta_records() {
 #   FF_INSTR  = comma list of changed instruction paths (only when updated)
 #
 # base_mode selects where the fast-forward base comes from:
-#   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
-#                  path); requires an origin remote and network reachability.
+#   origin       - fetch origin and advance to origin/<default> (legacy); requires an
+#                  origin remote and network reachability.
+#   upstream     - fetch tracked remote and advance to tracked upstream branch (the
+#                  /updatefirstmate path); requires a tracking remote and network reachability.
 #   <commit-ish> - advance to that LOCAL commit with NO fetch and no origin
 #                  dependency (the local-HEAD secondmate sync). The commit must
 #                  already exist in the target's object store, which it always does
@@ -296,11 +298,31 @@ ff_target() {
       echo "$label: skipped: no origin remote"
       return 0
     fi
-    if ! fetch_once "$dir"; then
+    if ! fetch_once "$dir" origin; then
       echo "$label: skipped: fetch failed"
       return 0
     fi
     base="origin/$default"
+  elif [ "$base_mode" = upstream ]; then
+    local remote
+    remote=$(git -C "$dir" config "branch.$default.remote" 2>/dev/null || true)
+    if [ -z "$remote" ]; then
+      echo "$label: skipped: no tracking remote for $default"
+      return 0
+    fi
+    if ! git -C "$dir" remote get-url "$remote" >/dev/null 2>&1; then
+      echo "$label: skipped: no $remote remote"
+      return 0
+    fi
+    if ! fetch_once "$dir" "$remote"; then
+      echo "$label: skipped: fetch failed"
+      return 0
+    fi
+    base=$(git -C "$dir" rev-parse --abbrev-ref "$default@{upstream}" 2>/dev/null || true)
+    if [ -z "$base" ]; then
+      echo "$label: skipped: no upstream branch for $default"
+      return 0
+    fi
   else
     base="$base_mode"
   fi
