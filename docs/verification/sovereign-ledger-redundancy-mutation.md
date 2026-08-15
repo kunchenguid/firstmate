@@ -103,11 +103,14 @@ Observed bounded summary:
 CONTAINMENT FIXTURES passed=10 failed=0
 PUBLISH MUTANT P001 anchor=resolved-path-validator-call substitutions=1 killed=5 survived=4 void=0
 PUBLISH MUTANT P002 anchor=exclusive-create-flag substitutions=1 killed=0 survived=9 void=0
-PUBLISH MATRIX SUMMARY mechanisms=3 written_boundaries=2 natural_boundaries=1 mutants=2 fixtures=9 cells=18 killed=5 survived=13 void=0
+PUBLISH MUTANT P003 anchor=symlink-component-precheck substitutions=1 killed=1 survived=8 void=0
+PUBLISH MUTANT P004 anchor=canonical-structural-containment substitutions=1 killed=1 survived=8 void=0
+PUBLISH MATRIX SUMMARY mechanisms=5 written_boundaries=4 natural_boundaries=1 mutants=4 fixtures=9 cells=36 killed=7 survived=29 void=0
 ```
 
-The three independent mechanisms are the resolved-path validator, exclusive `O_EXCL` creation, and the natural unresolved-parent failure from `sysopen`.
-The natural boundary has no written clause to substitute, so the written-mutant denominator is two while the enforcing-mechanism denominator is three.
+The five measured mechanisms are the resolved-path validator call, exclusive `O_EXCL` creation, the symlink-component precheck, canonical structural containment, and the natural unresolved-parent failure from `sysopen`.
+The natural boundary has no written clause to substitute, so the written-mutant denominator is four while the measured enforcing-boundary denominator is five.
+The `resolved-outside` fixture passes the component precheck as a real directory, swaps that directory to a scoped fake-outside link, and requires the canonical structural-containment refusal.
 A survived cell means the named different boundary still refused that fixture; zero substitutions make every cell for that mutant void.
 The symlinked leaf, hard-link, and existing-leaf fixtures are defended only by `O_EXCL` when the validator call is neutralized.
 
@@ -131,3 +134,21 @@ The symlinked leaf, hard-link, and existing-leaf fixtures are defended only by `
 | `P002` | `exclusive-create-flag` | 1 | `hard-link` | SURVIVED | `resolved-path-validator` |
 | `P002` | `exclusive-create-flag` | 1 | `unresolved-parent` | SURVIVED | `resolved-path-validator` |
 | `P002` | `exclusive-create-flag` | 1 | `existing` | SURVIVED | `resolved-path-validator` |
+| `P003` | `symlink-component-precheck` | 1 | `absolute` | SURVIVED | `absolute-path-validator` |
+| `P003` | `symlink-component-precheck` | 1 | `traversal` | SURVIVED | `path-component-validator` |
+| `P003` | `symlink-component-precheck` | 1 | `symlink-leaf-data` | SURVIVED | `symlink-leaf-validator` |
+| `P003` | `symlink-component-precheck` | 1 | `symlink-parent` | KILLED | - |
+| `P003` | `symlink-component-precheck` | 1 | `symlink-parent-state` | SURVIVED | `canonical-structural-containment` |
+| `P003` | `symlink-component-precheck` | 1 | `resolved-outside` | SURVIVED | `canonical-structural-containment` |
+| `P003` | `symlink-component-precheck` | 1 | `hard-link` | SURVIVED | `existing-leaf-validator` |
+| `P003` | `symlink-component-precheck` | 1 | `unresolved-parent` | SURVIVED | `canonical-parent-resolution` |
+| `P003` | `symlink-component-precheck` | 1 | `existing` | SURVIVED | `existing-leaf-validator` |
+| `P004` | `canonical-structural-containment` | 1 | `absolute` | SURVIVED | `absolute-path-validator` |
+| `P004` | `canonical-structural-containment` | 1 | `traversal` | SURVIVED | `path-component-validator` |
+| `P004` | `canonical-structural-containment` | 1 | `symlink-leaf-data` | SURVIVED | `symlink-leaf-validator` |
+| `P004` | `canonical-structural-containment` | 1 | `symlink-parent` | SURVIVED | `symlink-component-precheck` |
+| `P004` | `canonical-structural-containment` | 1 | `symlink-parent-state` | SURVIVED | `symlink-component-precheck` |
+| `P004` | `canonical-structural-containment` | 1 | `resolved-outside` | KILLED | - |
+| `P004` | `canonical-structural-containment` | 1 | `hard-link` | SURVIVED | `existing-leaf-validator` |
+| `P004` | `canonical-structural-containment` | 1 | `unresolved-parent` | SURVIVED | `canonical-parent-resolution` |
+| `P004` | `canonical-structural-containment` | 1 | `existing` | SURVIVED | `existing-leaf-validator` |
