@@ -49,7 +49,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   It pins one exact shellcheck version and refuses to run under any other; print it with `bin/fm-lint.sh --required-version` and install that build locally.
   Scripts must also parse under stock macOS Bash 3.2, which the `macos-stock-bash` CI job enforces with a `bash -n` sweep over the whole lint file set.
   One 3.2 trap that sweep cannot always catch: in `var=$(cat <<'X' ... X)` the lexer scans textually for the matching `)` of the command substitution and tracks quote state through the here-document body, without honoring the here-document.
-  So a single apostrophe, an unbalanced quote, or an unbalanced paren anywhere in that body - a `case` pattern like `*y*)`, a bare `)` in a string, or a word like `it's` - breaks parsing of the entire rest of the script, not just the generated value, and `bash -n` fails on the whole file.
+  So a single apostrophe, an unbalanced quote, or an unbalanced paren anywhere in that body - a `case` pattern like `*y*)`, a bare `)` in a string, or a word like `it's` - breaks parsing of the entire rest of the script, not just the generated value.
+  Most such bodies make `bash -n` fail loudly on the whole file, which is why the sweep catches them, but a body that happens to leave the script parseable (for example `foo) :; (:`) passes `bash -n` and only silently leaves the variable empty at runtime.
   A quoted `<<'X'` delimiter does not protect against this.
   Build such a variable with `IFS= read -r -d '' var <<'X' ... X` instead, which keeps the body outside that scan; ShellCheck does not flag the substitution form.
   This defect class is recorded in issues #166, #958, and #1069, with the prior art and its regression coverage in [`tests/fm-brief.test.sh`](tests/fm-brief.test.sh).
