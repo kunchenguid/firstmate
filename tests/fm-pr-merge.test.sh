@@ -16,12 +16,13 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
-#   (i) unresolved inline comments and changes-requested reviews block with bodies
+#   (i) unresolved inline comments and current changes-requested reviews block with bodies
 #   (j) forge-confirmed resolved and outdated inline threads do not block
 #   (k) whole-PR conversation comments are printed in full but never block
 #   (l) missing resolution evidence and every surface's API failure fail closed
 #   (m) an explicit human override is recorded before the merge proceeds
 #   (n) that override audit record never reads as a captain-relevant decision
+#   (o) later approvals and dismissals supersede historical change requests
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -94,9 +95,8 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
-# gh-axi mock answering each review surface from per-case fixture files, in the
-# TOON shape the real `gh-axi api --jq` emits: keys appear in the order the jq
-# filter built them, never sorted.
+# gh-axi mock answering each review surface from per-case TOON fixture files.
+# The production parser resolves columns from each fixture's header.
 add_gh_review_gate_mock() {
   local case_dir=$1
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
@@ -358,6 +358,46 @@ test_changes_requested_review_blocks_merge() {
   assert_no_grep 'pr merge 38' "$case_dir/gh-axi.log" \
     "changes-requested-review: gh-axi pr merge was invoked"
   pass "fm-pr-merge blocks on a review the forge still reports as changes-requested"
+}
+
+test_later_approval_supersedes_changes_requested_review() {
+  local case_dir
+  case_dir=$(make_case superseded-changes-requested-review)
+  mkdir -p "$case_dir/wt"
+  add_gh_review_gate_mock "$case_dir"
+  printf '[3]{id,state,author}:\n  703,CHANGES_REQUESTED,reviewer\n  704,COMMENTED,reviewer\n  705,APPROVED,reviewer\n' \
+    > "$case_dir/reviews"
+  printf 'body_chunks[1]: "Superseded change request"\n' \
+    > "$case_dir/review-body-703"
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/43 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "superseded-changes-requested-review: fm-pr-merge failed"
+
+  assert_no_grep 'Superseded change request' "$case_dir/stderr" \
+    "superseded-changes-requested-review: historical verdict still blocked"
+  assert_grep 'pr merge 43 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    "superseded-changes-requested-review: later approval did not clear the gate"
+  pass "fm-pr-merge uses each reviewer's latest standing verdict"
+}
+
+test_dismissed_review_remains_nonblocking_after_comment() {
+  local case_dir
+  case_dir=$(make_case dismissed-review)
+  mkdir -p "$case_dir/wt"
+  add_gh_review_gate_mock "$case_dir"
+  printf '[2]{id,state,author}:\n  706,DISMISSED,reviewer\n  707,COMMENTED,reviewer\n' \
+    > "$case_dir/reviews"
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/44 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "dismissed-review: fm-pr-merge failed"
+
+  assert_grep 'pr merge 44 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    "dismissed-review: dismissed verdict blocked after a later comment"
+  pass "fm-pr-merge honors dismissed reviews as nonblocking standing verdicts"
 }
 
 test_conversation_api_failure_fails_closed() {
@@ -699,6 +739,8 @@ test_resolved_inline_comment_does_not_block
 test_outdated_inline_comment_does_not_block
 test_conversation_comment_is_printed_without_blocking
 test_changes_requested_review_blocks_merge
+test_later_approval_supersedes_changes_requested_review
+test_dismissed_review_remains_nonblocking_after_comment
 test_missing_inline_resolution_state_fails_closed
 test_review_comment_override_is_logged_and_merges
 test_override_audit_line_is_not_captain_relevant

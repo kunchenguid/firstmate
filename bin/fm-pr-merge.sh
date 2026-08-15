@@ -122,9 +122,8 @@ grep -qxF "pr=$URL" "$META" || {
   exit 1
 }
 
-# gh-axi renders every API response as TOON and keeps the key order of the jq
-# filter that built each object rather than sorting it, so a table's field
-# positions are always read from that table's own header instead of assumed.
+# gh-axi renders every API response as TOON. A table's field positions are
+# always read from that table's own header instead of assuming a key order.
 TOON_COUNT=0
 TOON_KEYS=
 
@@ -222,19 +221,62 @@ else
   INLINE_API_FAILED=1
 fi
 
-# A review's own state is the forge's current verdict on the whole PR, so the
-# full review list is fetched and the changes-requested ones are selected here
-# rather than in the jq filter, which would break the full-page pagination probe.
+# GitHub returns the full review history in chronological order. COMMENTED and
+# PENDING entries do not change a reviewer's standing verdict; APPROVED,
+# CHANGES_REQUESTED, and DISMISSED do. Folding that history per reviewer honors
+# dismissals and prevents a superseded change request from blocking forever.
 CHANGES_REQUESTED_REVIEWS=
 REVIEW_API_FAILED=0
+CURRENT_REVIEW_VERDICTS=
+
+derive_current_review_verdicts() {
+  local records=$1 review_id review_state review_author extra
+  local current_id current_state current_author current_extra updated
+  CURRENT_REVIEW_VERDICTS=
+  while IFS=$'\t' read -r review_id review_state review_author extra; do
+    [ -n "$review_id" ] || continue
+    [ -z "$extra" ] || return 1
+    case "$review_id" in
+      *[!0-9]*) return 1 ;;
+    esac
+    [ -n "$review_author" ] || return 1
+    case "$review_state" in
+      COMMENTED|PENDING)
+        continue
+        ;;
+      APPROVED|CHANGES_REQUESTED|DISMISSED)
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+
+    updated=
+    while IFS=$'\t' read -r current_id current_state current_author current_extra; do
+      [ -n "$current_id" ] || continue
+      [ -z "$current_extra" ] || return 1
+      [ "$current_author" = "$review_author" ] && continue
+      [ -z "$updated" ] || updated+=$'\n'
+      updated+="$current_id"$'\t'"$current_state"$'\t'"$current_author"
+    done <<< "$CURRENT_REVIEW_VERDICTS"
+    CURRENT_REVIEW_VERDICTS=$updated
+    [ -z "$CURRENT_REVIEW_VERDICTS" ] || CURRENT_REVIEW_VERDICTS+=$'\n'
+    CURRENT_REVIEW_VERDICTS+="$review_id"$'\t'"$review_state"$'\t'"$review_author"
+  done <<< "$records"
+}
+
 if fetch_paged_records "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/reviews" \
   '[.[] | {id, state, author: .user.login}]' id state author; then
-  while IFS=$'\t' read -r review_id review_state review_author; do
-    [ -n "$review_id" ] || continue
-    [ "$review_state" = CHANGES_REQUESTED ] || continue
-    [ -z "$CHANGES_REQUESTED_REVIEWS" ] || CHANGES_REQUESTED_REVIEWS+=$'\n'
-    CHANGES_REQUESTED_REVIEWS+="$review_id"$'\t'"$review_author"
-  done <<< "$FETCHED_RECORDS"
+  if derive_current_review_verdicts "$FETCHED_RECORDS"; then
+    while IFS=$'\t' read -r review_id review_state review_author; do
+      [ -n "$review_id" ] || continue
+      [ "$review_state" = CHANGES_REQUESTED ] || continue
+      [ -z "$CHANGES_REQUESTED_REVIEWS" ] || CHANGES_REQUESTED_REVIEWS+=$'\n'
+      CHANGES_REQUESTED_REVIEWS+="$review_id"$'\t'"$review_author"
+    done <<< "$CURRENT_REVIEW_VERDICTS"
+  else
+    REVIEW_API_FAILED=1
+  fi
 else
   REVIEW_API_FAILED=1
 fi
@@ -410,9 +452,8 @@ if [ "$INLINE_API_FAILED" -eq 0 ] && [ -n "$INLINE_COMMENTS" ]; then
   done <<< "$INLINE_COMMENTS"
 fi
 
-# A changes-requested review is the forge's own standing verdict on the whole
-# PR, so it blocks until the forge stops reporting that state - through a new
-# review or an explicit dismissal - or a human logs the override.
+# A reviewer's current changes-requested verdict blocks until that reviewer
+# submits a later verdict, the review is dismissed, or a human logs the override.
 if [ "$REVIEW_API_FAILED" -eq 0 ] && [ -n "$CHANGES_REQUESTED_REVIEWS" ]; then
   echo "error: reviews requesting changes block merge:" >&2
   while IFS=$'\t' read -r review_id review_author extra; do

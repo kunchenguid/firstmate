@@ -141,6 +141,9 @@ test_signal_reason_is_actionable_classifier() {
   signal_reason_is_actionable "$state/d.status" || fail "a failed: line was not actionable"
   printf 'merged\n' > "$state/e.status"
   signal_reason_is_actionable "$state/e.status" || fail "a legacy merged line was not actionable"
+  printf 'note: PR ready checks green merged ready in branch failed:\n' > "$state/f.status"
+  signal_reason_is_actionable "$state/f.status" \
+    && fail "an informational note containing legacy wake tokens was actionable"
   pass "signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced"
 }
 
@@ -188,6 +191,8 @@ test_classifier_primitives() {
     && fail "working: predecessor prose wrongly recognized as captain-relevant"
   status_is_captain_relevant "working: PR ready checks green merged ready in branch" \
     && fail "working: free-text tokens wrongly recognized as captain-relevant"
+  status_is_captain_relevant "note: PR ready checks green merged ready in branch failed:" \
+    && fail "note: free-text tokens wrongly recognized as captain-relevant"
   status_is_captain_relevant "done: PR https://x/pull/76 checks green" \
     || fail "genuine done: checks green not captain-relevant"
   status_is_terminal_verb "done: PR https://x/pull/76 checks green" \
