@@ -8,10 +8,13 @@
 #
 # snapshot creates a complete staging bundle then atomically publishes it into an absent replica path.
 # refresh advances only a verifying byte-exact ledger.tsv prefix while every other bundle file is identical.
-# verify fails loudly on a stale prefix, a divergence, symlinks, non-regular files, an incomplete layout, or any shared file identity.
+# verify fails loudly on containment, a stale prefix, a divergence, symlinks, non-regular files, an incomplete layout, or overlapping file-identity sets.
 # No replica-controlled code runs until all bundle bytes have been compared to the primary.
 # This script never admits, rewrites, repairs, or attributes a ruling.
 set -euo pipefail
+
+BUNDLE_MEMBER_COUNT=4
+BUNDLE_ENTRIES=
 
 die() {
   printf 'REFUSED: %s\n' "$*" >&2
@@ -31,57 +34,135 @@ canonical_dir() {
   )
 }
 
-bundle_entries() {
-  find "$1" -mindepth 1 -maxdepth 1 -print | sed "s#^$1/##" | LC_ALL=C sort
+bundle_manifest() {
+  printf '%s\n' CONTRACT.md fm-sovereign-ledger.sh ledger.tsv tests.sh
+}
+
+collect_bundle_entries() {
+  local dir=$1 count
+  if ! count=$(find "$dir" -mindepth 1 -maxdepth 1 -exec /bin/sh -c '
+    for entry do printf "x\n"; done
+  ' sh {} + | wc -l | tr -d '[:space:]'); then
+    die "could not enumerate ledger bundle: $dir"
+  fi
+  [ "$count" -eq "$BUNDLE_MEMBER_COUNT" ] \
+    || die "ledger bundle must contain exactly $BUNDLE_MEMBER_COUNT manifest members, found $count: $dir"
+  BUNDLE_ENTRIES=$(bundle_manifest)
 }
 
 require_bundle() {
-  local dir=$1 entry
-  [ -f "$dir/ledger.tsv" ] || die "ledger bundle is incomplete: missing $dir/ledger.tsv"
-  [ -f "$dir/CONTRACT.md" ] || die "ledger bundle is incomplete: missing $dir/CONTRACT.md"
-  [ -f "$dir/fm-sovereign-ledger.sh" ] || die "ledger bundle is incomplete: missing $dir/fm-sovereign-ledger.sh"
-  [ -x "$dir/fm-sovereign-ledger.sh" ] || die "ledger verifier is not executable: $dir/fm-sovereign-ledger.sh"
+  local dir=$1 entry checked=0
+  BUNDLE_ENTRIES=$(bundle_manifest)
   while IFS= read -r entry; do
+    [ -e "$dir/$entry" ] || die "ledger bundle is incomplete: missing $dir/$entry"
     [ -L "$dir/$entry" ] && die "ledger bundle contains a symlink: $dir/$entry"
     [ -f "$dir/$entry" ] || die "ledger bundle contains a non-regular file: $dir/$entry"
-  done < <(bundle_entries "$dir")
+    checked=$((checked + 1))
+  done <<< "$BUNDLE_ENTRIES"
+  collect_bundle_entries "$dir"
+  [ "$checked" -eq "$BUNDLE_MEMBER_COUNT" ] \
+    || die "ledger bundle manifest check read $checked of $BUNDLE_MEMBER_COUNT members: $dir"
+  [ -x "$dir/fm-sovereign-ledger.sh" ] || die "ledger verifier is not executable: $dir/fm-sovereign-ledger.sh"
 }
 
 compare_layout() {
-  local primary=$1 replica=$2
-  diff -u <(bundle_entries "$primary") <(bundle_entries "$replica") >/dev/null \
-    || die "replica bundle layout differs from primary"
+  local primary=$1 replica=$2 primary_entries replica_entries
+  collect_bundle_entries "$primary"
+  primary_entries=$BUNDLE_ENTRIES
+  collect_bundle_entries "$replica"
+  replica_entries=$BUNDLE_ENTRIES
+  [ "$primary_entries" = "$replica_entries" ] || die "replica bundle layout differs from primary"
 }
 
 compare_files() {
-  local primary=$1 replica=$2 skip=${3:-} entry
+  local primary=$1 replica=$2 skip=${3:-} entry compared=0 expected=$BUNDLE_MEMBER_COUNT
+  collect_bundle_entries "$primary"
+  [ -z "$skip" ] || expected=$((expected - 1))
   while IFS= read -r entry; do
     [ "$entry" = "$skip" ] && continue
     cmp -s "$primary/$entry" "$replica/$entry" \
       || die "replica differs from primary: $entry"
-  done < <(bundle_entries "$primary")
+    compared=$((compared + 1))
+  done <<< "$BUNDLE_ENTRIES"
+  [ "$compared" -eq "$expected" ] \
+    || die "byte comparison read $compared of $expected required bundle members"
+}
+
+portable_file_identity() {
+  local follow=$1 path=$2 identity
+  if [ "$follow" = true ]; then
+    if identity=$(stat -L -f '%d:%i' "$path" 2>/dev/null); then
+      :
+    elif identity=$(stat -L -c '%d:%i' "$path" 2>/dev/null); then
+      :
+    else
+      return 1
+    fi
+  elif identity=$(stat -f '%d:%i' "$path" 2>/dev/null); then
+    :
+  elif identity=$(stat -c '%d:%i' "$path" 2>/dev/null); then
+    :
+  else
+    return 1
+  fi
+  printf '%s\n' "$identity" | LC_ALL=C grep -Eq '^[0-9]+:[0-9]+$' || return 1
+  printf '%s\n' "$identity"
 }
 
 file_lstat_identity() {
-  stat -f '%d:%i' "$1" 2>/dev/null || stat -c '%d:%i' "$1"
+  portable_file_identity false "$1"
 }
 
 file_stat_identity() {
-  stat -L -f '%d:%i' "$1" 2>/dev/null || stat -L -c '%d:%i' "$1"
+  portable_file_identity true "$1"
 }
 
 require_independent_bundle_files() {
-  local primary=$1 replica=$2 entry primary_lstat replica_lstat primary_stat replica_stat
+  local primary=$1 replica=$2 entry index=0 replica_index primary_index
+  local primary_lstat replica_lstat primary_stat replica_stat
+  local -a entries primary_lstats replica_lstats primary_stats replica_stats
+  collect_bundle_entries "$primary"
   while IFS= read -r entry; do
-    primary_lstat=$(file_lstat_identity "$primary/$entry")
-    replica_lstat=$(file_lstat_identity "$replica/$entry")
-    [ "$primary_lstat" != "$replica_lstat" ] \
-      || die "replica $entry shares the primary lstat identity (device:inode), not a separate file"
-    primary_stat=$(file_stat_identity "$primary/$entry")
-    replica_stat=$(file_stat_identity "$replica/$entry")
-    [ "$primary_stat" != "$replica_stat" ] \
-      || die "replica $entry resolves to the primary object (device:inode), not a separate file"
-  done < <(bundle_entries "$primary")
+    entries[index]=$entry
+    primary_lstat=$(file_lstat_identity "$primary/$entry") \
+      || die "could not establish a portable file identity: $primary/$entry"
+    replica_lstat=$(file_lstat_identity "$replica/$entry") \
+      || die "could not establish a portable file identity: $replica/$entry"
+    primary_stat=$(file_stat_identity "$primary/$entry") \
+      || die "could not establish a portable file identity: $primary/$entry"
+    replica_stat=$(file_stat_identity "$replica/$entry") \
+      || die "could not establish a portable file identity: $replica/$entry"
+    primary_lstats[index]=$primary_lstat
+    replica_lstats[index]=$replica_lstat
+    primary_stats[index]=$primary_stat
+    replica_stats[index]=$replica_stat
+    index=$((index + 1))
+  done <<< "$BUNDLE_ENTRIES"
+  [ "$index" -eq "$BUNDLE_MEMBER_COUNT" ] \
+    || die "identity verification read $index of $BUNDLE_MEMBER_COUNT required bundle members"
+  for ((replica_index = 0; replica_index < BUNDLE_MEMBER_COUNT; replica_index++)); do
+    for ((primary_index = 0; primary_index < BUNDLE_MEMBER_COUNT; primary_index++)); do
+      if [ "${replica_lstats[$replica_index]}" = "${primary_lstats[$primary_index]}" ]; then
+        if [ "${entries[$replica_index]}" = "${entries[$primary_index]}" ]; then
+          die "replica ${entries[$replica_index]} shares the primary lstat identity (device:inode), not a separate file"
+        fi
+        die "replica ${entries[$replica_index]} shares storage with primary member ${entries[$primary_index]} by lstat identity (device:inode)"
+      fi
+      if [ "${replica_stats[$replica_index]}" = "${primary_stats[$primary_index]}" ]; then
+        if [ "${entries[$replica_index]}" = "${entries[$primary_index]}" ]; then
+          die "replica ${entries[$replica_index]} resolves to the primary object (device:inode), not a separate file"
+        fi
+        die "replica ${entries[$replica_index]} resolves to primary member ${entries[$primary_index]} by stat identity (device:inode)"
+      fi
+    done
+  done
+}
+
+require_noncontained_pair() {
+  local primary=$1 replica=$2
+  [ "$primary" != "$replica" ] || die "primary and replica directories must differ"
+  case "$primary/" in "$replica/"*) die "primary and replica directories must not contain one another" ;; esac
+  case "$replica/" in "$primary/"*) die "primary and replica directories must not contain one another" ;; esac
 }
 
 verify_with_primary() {
@@ -117,11 +198,15 @@ verify_exact_pair() {
 }
 
 copy_bundle() {
-  local primary=$1 replica=$2 entry
+  local primary=$1 replica=$2 entry copied=0
   umask 077
+  collect_bundle_entries "$primary"
   while IFS= read -r entry; do
     cp -p "$primary/$entry" "$replica/$entry"
-  done < <(bundle_entries "$primary")
+    copied=$((copied + 1))
+  done <<< "$BUNDLE_ENTRIES"
+  [ "$copied" -eq "$BUNDLE_MEMBER_COUNT" ] \
+    || die "bundle copy read $copied of $BUNDLE_MEMBER_COUNT required members"
 }
 
 copy_ledger_atomically() {
@@ -146,7 +231,7 @@ cmd_snapshot() {
   primary=$(canonical_dir "$primary")
   if [ -e "$replica_input" ]; then
     replica=$(canonical_dir "$replica_input")
-    [ "$primary" != "$replica" ] || die "primary and replica directories must differ"
+    require_noncontained_pair "$primary" "$replica"
     verify_exact_pair "$primary" "$replica"
     printf 'SNAPSHOT PASS (replica already identical: %s)\n' "$replica"
     return
@@ -154,8 +239,10 @@ cmd_snapshot() {
   require_bundle "$primary"
   verify_with_primary "$primary" "$primary"
   parent=$(dirname "$replica_input")
-  base=$(basename "$replica_input")
   [ -d "$parent" ] || die "replica parent directory does not exist: $parent"
+  parent=$(canonical_dir "$parent")
+  base=$(basename "$replica_input")
+  require_noncontained_pair "$primary" "$parent/$base"
   stage=$(mktemp -d "$parent/.${base}.stage.XXXXXX") \
     || die "could not create replica staging directory"
   trap 'rm -rf -- "$stage"' EXIT HUP INT TERM
@@ -171,7 +258,7 @@ cmd_refresh() {
   local primary replica
   primary=$(canonical_dir "$1")
   replica=$(canonical_dir "$2")
-  [ "$primary" != "$replica" ] || die "primary and replica directories must differ"
+  require_noncontained_pair "$primary" "$replica"
   preflight_pair "$primary" "$replica"
   verify_with_primary "$primary" "$primary"
   verify_with_primary "$primary" "$replica"
@@ -186,7 +273,7 @@ cmd_verify() {
   local primary replica
   primary=$(canonical_dir "$1")
   replica=$(canonical_dir "$2")
-  [ "$primary" != "$replica" ] || die "primary and replica directories must differ"
+  require_noncontained_pair "$primary" "$replica"
   preflight_pair "$primary" "$replica"
   if ! cmp -s "$primary/ledger.tsv" "$replica/ledger.tsv"; then
     verify_with_primary "$primary" "$primary"
@@ -196,7 +283,7 @@ cmd_verify() {
     die "replica ledger.tsv diverges from primary"
   fi
   verify_exact_pair "$primary" "$replica"
-  printf 'REDUNDANCY VERIFY PASS (bundle byte-identical; every member has distinct lstat and stat identities)\n'
+  printf 'REDUNDANCY VERIFY PASS (exact 4-member manifest byte-read; primary and replica identity sets disjoint)\n'
 }
 
 case "${1:-}" in
