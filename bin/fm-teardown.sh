@@ -104,11 +104,18 @@
 #     crew's worktree, so they are not orphaned by removing the worktree.
 #     conclude_task_no_mistakes_run attributes the active-or-most-recent run to
 #     THIS task only when its branch AND code identity (bin/fm-nm-run-lib.sh's
-#     fm_nm_head_matches_worktree, the same rule bin/fm-crew-state.sh uses) both
-#     match this worktree, then runs `no-mistakes axi abort --run <id>` for
+#     fm_nm_head_matches_worktree, the strict readable-head ancestry rule and
+#     the narrower of the two that owner exports - bin/fm-crew-state.sh reads
+#     current state through the wider custody-aware fm_nm_run_matches_worktree)
+#     both match this worktree, then runs `no-mistakes axi abort --run <id>` for
 #     that verified run instance. A run already terminal
 #     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
 #     an already-aborted run reads back terminal and is skipped on retry.
+#     Known limitation of this guarded abort: a run parked at a gate AFTER the
+#     pipeline committed its own gate fixes has a head that exists only in the
+#     gate repo and is unreadable from this worktree, so it fails the strict
+#     binding and is silently skipped here, and that orphaned run keeps holding
+#     a fleet slot.
 #   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
 #     started under the worktree (or its per-task tasktmp) does not receive the
 #     SIGHUP/SIGTERM that closing the backend pane sends to its own foreground
