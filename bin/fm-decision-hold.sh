@@ -7,8 +7,8 @@
 # The invoking agent inventories unresolved decisions, assigns stable keys, and
 # routes dependent work. This script supplies deterministic identities, creates
 # and verifies structured tasks-axi captain holds, records completion attestation
-# in the originating task's metadata, and closes a hold only after a durable
-# decision record has been linked to existing dependent work.
+# in the originating task's metadata, and requires a durable captain decision
+# record before it closes or repairs a hold.
 #
 # A hold identity is <origin-id>-decision-<decision-key>. Origin ids and decision
 # keys must already be privacy-safe slugs. Repeating `hold` with the same identity
@@ -25,6 +25,8 @@
 #   fm-decision-hold.sh state <origin-id> <decision-key>...
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
+#   fm-decision-hold.sh decline <origin-id> <decision-key> --decision-file <path>
+#   fm-decision-hold.sh repair <origin-id> <decision-key> --decision-file <path>
 #
 # `complete` is the shared investigation and visual-review completion gate.
 # `--none` is an explicit semantic attestation that the just-reviewed surface has
@@ -46,10 +48,31 @@
 # "<decision-key>\t<held|resolved|archived|invalid|absent>" line per requested key
 # and is what bin/fm-decision-ledger.sh calls for per-key dispositions.
 #
-# `resolve` requires every --routed-to task to exist and to be blocked by the hold.
-# It writes the captain decision and routed identities into the hold body, clears
-# those dependency edges, and only then marks the hold Done. A failure before the
-# final step leaves the captain hold open.
+# `resolve` and `decline` close active holds; `repair` attests a hold already closed
+# outside this script. All three paths require a non-empty captain decision file of
+# at most 8192 bytes, record the same durable resolution block in the hold body, and
+# store the decision digest plus routed identities so an exact retry is idempotent
+# while a changed decision or, for `resolve`, routed set is rejected. New records
+# include a `Resolution mode:` naming their path; older routed records remain valid.
+#
+# `resolve` is the routed path. It requires every --routed-to task to exist and to
+# be blocked by the hold. It writes the captain decision and routed identities into
+# the hold body, clears those dependency edges, and only then marks the hold Done.
+# A failure before the final step leaves the captain hold open.
+#
+# `decline` is the unrouted path for a decision the captain answered with no
+# follow-up work. It takes no --routed-to task, records `(none)` as the routed
+# identities, and closes an actively held hold. It refuses while any task is still
+# blocked by the hold, because releasing routed work without recording it is
+# `resolve`'s job.
+#
+# `repair` records the missing resolution block on a hold that was already closed
+# outside this script, so `verify` stops failing on an origin whose decision was
+# genuinely answered. It never reopens a hold, never clears a dependency edge, and
+# refuses a hold that is still actively held, so an unanswered decision keeps
+# blocking teardown until `resolve` or `decline` closes it with the captain's word.
+# It also refuses an identity that does not carry surviving captain-hold
+# provenance, so an ordinary captain-kind task cannot be repaired into a decision.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -122,6 +145,25 @@ hold_id() {  # <origin-id> <decision-key>
   printf '%s-decision-%s\n' "$1" "$2"
 }
 
+# The routed-identity token recorded when a close path routes no work. Slug
+# validation rejects parentheses, so no real task identity can collide with it.
+ROUTED_NONE='(none)'
+
+DECISION_TEXT=''
+DECISION_DIGEST=''
+
+load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
+  local path=$1 decision
+  [ -n "$path" ] || fail "--decision-file is required"
+  [ -f "$path" ] || fail "decision file does not exist: $path"
+  decision=$(cat "$path")
+  [ -n "$decision" ] || fail "decision file must not be empty"
+  [ "$(printf '%s' "$decision" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
+    || fail "decision file exceeds 8192 bytes"
+  DECISION_TEXT=$decision
+  DECISION_DIGEST=$(sha256_text "$decision")
+}
+
 tasks_axi() {
   (cd "$FM_HOME" && tasks-axi "$@")
 }
@@ -183,6 +225,68 @@ origin_open_decisions() {  # <origin-id>
   printf '%s' "$open"
 }
 
+body_has_resolution_record() {  # <hold-body>
+  case "$1" in
+    *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
+  esac
+  return 1
+}
+
+resolution_body() {  # <mode> <routed-csv> [routed-task-id...]
+  local mode=$1 routed_csv=$2 body dep
+  shift 2
+  # Command substitution strips the trailing newline, so restore it before the
+  # routed-work list to keep each entry on its own durable backlog line.
+  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\nResolution mode: %s\n\nCaptain decision:\n%s\n\nRouted work:' \
+    "$DECISION_DIGEST" "$routed_csv" "$mode" "$DECISION_TEXT")
+  body="${body}"$'\n'
+  if [ "$#" -eq 0 ]; then
+    body="${body}${ROUTED_NONE}"$'\n'
+  else
+    for dep in "$@"; do
+      body="${body}- ${dep}"$'\n'
+    done
+  fi
+  printf '%s' "$body"
+}
+
+# tasks-axi quotes multi-entry blocked_by as "a,b,c"; strip so edge ids match.
+normalized_blocked_by() {  # <show-output>
+  local blocked
+  blocked=$(show_field "$1" blocked_by | tr -d '[:space:]')
+  blocked=${blocked#\"}
+  blocked=${blocked%\"}
+  printf '%s' "$blocked"
+}
+
+# Space-separated ids of live work still blocked by <hold-id>. The listing is only
+# a cheap prefilter whose first field is always an unquoted id; every candidate is
+# confirmed against its own authoritative record before it is reported.
+tasks_blocked_by() {  # <hold-id>
+  local id=$1 rows row candidate show found=''
+  rows=$(tasks_axi list --fields blocked_by) \
+    || fail "could not read backlog work while checking what $id still blocks"
+  while IFS= read -r row; do
+    case "$row" in
+      *"$id"*) : ;;
+      *) continue ;;
+    esac
+    candidate=${row%%,*}
+    candidate=${candidate// /}
+    [ -n "$candidate" ] || continue
+    [ "$candidate" != "$id" ] || continue
+    case "$candidate" in
+      *[!A-Za-z0-9._-]*) continue ;;
+    esac
+    show=$(task_show "$candidate") || continue
+    list_has_key "$(normalized_blocked_by "$show")" "$id" || continue
+    found="${found}${found:+ }$candidate"
+  done <<EOF
+$rows
+EOF
+  printf '%s' "$found"
+}
+
 verify_hold_active() {  # <hold-id>
   local id=$1 show state held kind hold_kind
   show=$(task_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
@@ -236,7 +340,7 @@ archived_resolution_body() {  # <hold-id>
           continue
         }
         if (line ~ /^Decision digest: [0-9a-f]+$/ && length(line) == 81) digest = 1
-        else if (line ~ /^Routed identities: [A-Za-z0-9._,-]+$/) routes = 1
+        else if (line ~ /^Routed identities: ([A-Za-z0-9._,-]+|\(none\))$/) routes = 1
         else if (index(line, "Routed work:") == 1) routed = 1
       }
       return (opened && digest && routes && routed)
@@ -254,13 +358,6 @@ archived_resolution_body() {  # <hold-id>
     inrec { line = $0; sub(/^  /, "", line); body = body line "\n"; next }
     END { flush(); if (!found) exit 1; printf "%s", out }
   ' "$archive"
-}
-
-has_resolution_record() {  # <hold-body>
-  case "$1" in
-    *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
-  esac
-  return 1
 }
 
 # The ONE classifier for a hold identity's durable state, used by every gate here
@@ -282,7 +379,7 @@ hold_state() {  # <hold-id>
       printf 'held\n'
       return 0
     fi
-    if [ "$state" = "done" ] && [ "$kind" = captain ] && has_resolution_record "$body"; then
+    if [ "$state" = "done" ] && [ "$kind" = captain ] && body_has_resolution_record "$body"; then
       printf 'resolved\n'
       return 0
     fi
@@ -453,10 +550,17 @@ EOF
 
     # Transfer any still-open status decision to its durable backlog owner so the
     # live status fold does not duplicate the same Captain's Call item.
+    # The transfer line is this home's own bookkeeping close, written by the
+    # turn that just reviewed the decision, so it uses the guarded
+    # self-announced append (bin/fm-wake-lib.sh) and does not wake this same
+    # session; an append failure still fails this command loudly.
     while IFS=$'\t' read -r key _verb _summary; do
       [ -n "$key" ] || continue
       list_has_key "$keys" "$key" || continue
-      printf 'captain-held [key=%s]: tracked by %s\n' "$key" "$(hold_id "$origin" "$key")" >> "$status_file"
+      transfer_rc=0
+      fm_wake_status_append_self_announced "$STATE" "$status_file" \
+        "captain-held [key=$key]: tracked by $(hold_id "$origin" "$key")" || transfer_rc=$?
+      [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin/$key"
       key_seen=1
     done <<EOF
 $raw_open
@@ -515,7 +619,7 @@ command_state() {
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body archived_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body archived_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -528,27 +632,21 @@ command_resolve() {
   done
   validate_slug origin-id "$origin"
   validate_slug decision-key "$key"
-  [ -n "$decision_file" ] || fail "--decision-file is required"
-  [ -f "$decision_file" ] || fail "decision file does not exist: $decision_file"
-  decision=$(cat "$decision_file")
-  [ -n "$decision" ] || fail "decision file must not be empty"
-  [ "$(printf '%s' "$decision" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
-    || fail "decision file exceeds 8192 bytes"
-  [ -n "$routed" ] || fail "at least one --routed-to task is required"
+  load_decision "$decision_file"
+  [ -n "$routed" ] || fail "at least one --routed-to task is required; use decline when the captain's answer routes no work"
   routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
   routed_csv=$(printf '%s\n' "$routed" | tr ' ' ',')
-  decision_digest=$(sha256_text "$decision")
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if archived_body=$(archived_resolution_body "$id"); then
-    verify_archived_resolution_identity "$id" "$archived_body" "$decision_digest" "$routed_csv"
+    verify_archived_resolution_identity "$id" "$archived_body" "$DECISION_DIGEST" "$routed_csv"
     printf 'resolved: %s\n' "$id"
     return 0
   fi
   if verify_hold_resolved "$id"; then
     hold_show=$(task_show "$id")
     hold_body=$(show_field "$hold_show" body)
-    verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
+    verify_resolution_identity "$id" "$hold_body" "$DECISION_DIGEST" "$routed_csv"
     printf 'resolved: %s\n' "$id"
     return 0
   fi
@@ -557,7 +655,7 @@ command_resolve() {
   hold_body=$(show_field "$hold_show" body)
   case "$hold_body" in
     *"Resolution recorded by fm-decision-hold."*)
-      verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
+      verify_resolution_identity "$id" "$hold_body" "$DECISION_DIGEST" "$routed_csv"
       resolution_recorded=1
       ;;
   esac
@@ -567,42 +665,117 @@ command_resolve() {
     state=$(show_field "$show" state)
     [ "$state" != "done" ] || [ "$resolution_recorded" = 1 ] \
       || fail "routed task $dep is already done"
-    # tasks-axi quotes multi-entry blocked_by as "a,b,c"; strip so edge ids match.
-    blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
-    blocked=${blocked#\"}
-    blocked=${blocked%\"}
-    case ",$blocked," in
-      *",$id,"*) : ;;
-      *)
-        case "$hold_body" in
-          *"Resolution recorded by fm-decision-hold."*"- $dep"*) : ;;
-          *) fail "routed task $dep is not durably blocked by $id" ;;
-        esac
-        ;;
-    esac
+    blocked=$(normalized_blocked_by "$show")
+    if ! list_has_key "$blocked" "$id"; then
+      case "$hold_body" in
+        *"Resolution recorded by fm-decision-hold."*"- $dep"*) : ;;
+        *) fail "routed task $dep is not durably blocked by $id" ;;
+      esac
+    fi
   done
 
-  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$decision")
-  for dep in $routed; do
-    body="${body}- ${dep}"$'\n'
-  done
+  # shellcheck disable=SC2086  # routed is a validated space-separated slug list.
+  body=$(resolution_body routed "$routed_csv" $routed)
   tasks_axi update "$id" --body "$body" >/dev/null \
     || fail "could not record the captain decision on $id"
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
-    blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
-    blocked=${blocked#\"}
-    blocked=${blocked%\"}
-    case ",$blocked," in
-      *",$id,"*)
-        tasks_axi unblock "$dep" --by "$id" >/dev/null \
-          || fail "could not route the recorded decision to $dep"
-        ;;
-    esac
+    if list_has_key "$(normalized_blocked_by "$show")" "$id"; then
+      tasks_axi unblock "$dep" --by "$id" >/dev/null \
+        || fail "could not route the recorded decision to $dep"
+    fi
   done
   tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
   verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
   printf 'resolved: %s -> %s\n' "$id" "$routed"
+}
+
+parse_decision_only_flags() {  # <args...>; prints the --decision-file value
+  local decision_file=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --decision-file) shift; decision_file=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  printf '%s' "$decision_file"
+}
+
+command_decline() {
+  local origin=${1:-} key=${2:-} decision_file id body hold_show hold_body state dependents
+  [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+  shift 2
+  decision_file=$(parse_decision_only_flags "$@") || exit 2
+  validate_slug origin-id "$origin"
+  validate_slug decision-key "$key"
+  load_decision "$decision_file"
+  require_tasks_axi
+  id=$(hold_id "$origin" "$key")
+  if verify_hold_resolved "$id"; then
+    hold_show=$(task_show "$id")
+    hold_body=$(show_field "$hold_show" body)
+    verify_resolution_identity "$id" "$hold_body" "$DECISION_DIGEST" "$ROUTED_NONE"
+    printf 'declined: %s\n' "$id"
+    return 0
+  fi
+  hold_show=$(task_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
+  state=$(show_field "$hold_show" state)
+  [ "$state" != "done" ] \
+    || fail "captain hold $id was closed outside fm-decision-hold; use repair to record the captain decision"
+  verify_hold_active "$id"
+  hold_body=$(show_field "$hold_show" body)
+  case "$hold_body" in
+    *"Resolution recorded by fm-decision-hold."*)
+      verify_resolution_identity "$id" "$hold_body" "$DECISION_DIGEST" "$ROUTED_NONE"
+      ;;
+  esac
+  dependents=$(tasks_blocked_by "$id") || exit 1
+  [ -z "$dependents" ] \
+    || fail "captain hold $id still blocks routed work ($dependents); use resolve to record that work"
+  body=$(resolution_body declined "$ROUTED_NONE")
+  tasks_axi update "$id" --body "$body" >/dev/null \
+    || fail "could not record the captain decision on $id"
+  tasks_axi "done" "$id" >/dev/null || fail "could not close declined captain hold $id"
+  verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
+  printf 'declined: %s\n' "$id"
+}
+
+command_repair() {
+  local origin=${1:-} key=${2:-} decision_file id body show state kind hold_kind hold_body
+  [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+  shift 2
+  decision_file=$(parse_decision_only_flags "$@") || exit 2
+  validate_slug origin-id "$origin"
+  validate_slug decision-key "$key"
+  load_decision "$decision_file"
+  require_tasks_axi
+  id=$(hold_id "$origin" "$key")
+  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  kind=$(show_field "$show" kind)
+  [ "$kind" = captain ] || fail "backlog item $id is not kind captain"
+  # tasks-axi keeps hold_kind after a close, so it is the surviving proof that
+  # this identity really was a captain hold rather than an ordinary captain-kind
+  # task that was never held for the captain at all.
+  hold_kind=$(show_field "$show" hold_kind)
+  [ "$hold_kind" = captain ] \
+    || fail "backlog item $id was never held for the captain; repair records a captain decision only on a captain hold"
+  state=$(show_field "$show" state)
+  hold_body=$(show_field "$show" body)
+  if [ "$state" = "done" ] && body_has_resolution_record "$hold_body"; then
+    verify_resolution_identity "$id" "$hold_body" "$DECISION_DIGEST" "$ROUTED_NONE"
+    printf 'repaired: %s\n' "$id"
+    return 0
+  fi
+  [ "$state" = "done" ] \
+    || fail "captain hold $id is still open (state=$state); use resolve or decline to close it with the captain's decision"
+  body=$(resolution_body repaired "$ROUTED_NONE")
+  tasks_axi update "$id" --body "$body" >/dev/null \
+    || fail "could not record the captain decision on $id"
+  show=$(task_show "$id") || fail "captain decision $id disappeared while recording the repair"
+  [ "$(show_field "$show" state)" = "done" ] || fail "repairing $id reopened a closed captain decision"
+  verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
+  printf 'repaired: %s\n' "$id"
 }
 
 case "${1:-}" in
@@ -612,6 +785,8 @@ case "${1:-}" in
   verify) shift; command_verify "$@" ;;
   state) shift; command_state "$@" ;;
   resolve) shift; command_resolve "$@" ;;
+  decline) shift; command_decline "$@" ;;
+  repair) shift; command_repair "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

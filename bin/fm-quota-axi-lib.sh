@@ -9,7 +9,7 @@
 # turns a failing check into the operator-facing MISSING diagnostic, which is
 # what keeps an older build from reaching a dispatch intake at all.
 
-FM_QUOTA_AXI_MIN=0.1.17
+FM_QUOTA_AXI_MIN=0.1.25
 
 fm_quota_axi_compatible() {
   local timeout=${1:-} output parts major minor patch extra
