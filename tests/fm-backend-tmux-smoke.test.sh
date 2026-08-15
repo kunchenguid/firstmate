@@ -169,5 +169,22 @@ state=$(fm_backend_agent_state tmux "$TARGET")
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
 
+# --- recreate the exact missing endpoint ------------------------------------
+
+recreated_id=$(fm_backend_tmux_recreate_task "$TARGET" "$HOME") \
+  || fail "fm_backend_tmux_recreate_task failed to restore the missing task window"
+[ -n "$recreated_id" ] || fail "fm_backend_tmux_recreate_task returned no stable window id"
+tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \
+  || fail "the recreated task window is not visible at its recorded address"
+[ "$(tmux display-message -p -t "$recreated_id" '#{pane_current_path}')" = "$HOME" ] \
+  || fail "the recreated endpoint did not start in the requested existing worktree"
+state=$(fm_backend_agent_state tmux "$TARGET")
+[ "$state" = dead ] \
+  || fail "the recreated shell endpoint should classify as agent-free, got '$state'"
+if fm_backend_tmux_recreate_task "$TARGET" "$HOME" 2>/dev/null; then
+  fail "fm_backend_tmux_recreate_task should refuse while the endpoint already exists"
+fi
+pass "real tmux: a missing task endpoint is recreated once at its recorded address and worktree"
+
 cleanup_all
 trap - EXIT

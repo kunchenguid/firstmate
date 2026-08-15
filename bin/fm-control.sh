@@ -32,8 +32,8 @@
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent).
 #   relaunch   Transactionally replace the running agent with a new one, in the
-#              SAME endpoint and SAME worktree, on the same or a newly chosen
-#              harness/model/effort - so switching harness is one ordinary use
+#              SAME worktree and normally the same endpoint, on the same or a
+#              newly chosen harness/model/effort - so switching harness is one ordinary use
 #              of this verb. With no explicit axis, a secondmate re-resolves its
 #              durable config/secondmate-harness pin (harness plus its optional
 #              model and effort tokens) exactly as any other respawn does, while
@@ -44,9 +44,13 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
-#              Records a durable checkpoint and that note, exits the old agent,
-#              then delegates the launch to its single owner,
-#              bin/fm-spawn.sh --relaunch. A failure before publication keeps
+#              Records a durable checkpoint and that note, exits the old agent
+#              when one exists, then delegates the launch to its single owner,
+#              bin/fm-spawn.sh --relaunch. When the backend authoritatively
+#              reports the recorded endpoint missing, the launch owner
+#              rechecks that verdict and creates a fresh endpoint in the same
+#              worktree. Ambiguous and unreadable states refuse before the note
+#              or durable record changes. A failure before publication keeps
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
@@ -150,6 +154,8 @@ CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
+RELAUNCH_RECREATE_ENDPOINT=0
+RELAUNCH_PRIOR_TARGET=
 
 control_cleanup() {
   local status=$?
@@ -568,6 +574,10 @@ relaunch_rollback() {
           journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-agent-dead" || true
           echo "error: $ID's agent stopped but relaunch did not reach replacement launch; no agent is running, and its work plus progress note are preserved at $WT" >&2
           ;;
+        missing)
+          journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-endpoint-missing" || true
+          echo "error: $ID's endpoint is still missing and relaunch did not reach replacement launch; its durable record, work, and progress note are preserved" >&2
+          ;;
         *)
           journal_write "failed:$RELAUNCH_PHASE" "rollback=none-agent-state-$state" || true
           echo "error: relaunch of $ID failed while stopping the old agent and its state is '$state'; the durable record and progress note were retained for recovery" >&2
@@ -590,7 +600,11 @@ relaunch_rollback() {
         echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT" >&2
       else
         journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
-        echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
+        if [ "$RELAUNCH_RECREATE_ENDPOINT" = 1 ]; then
+          echo "error: $ID's missing endpoint could not be recreated; its prior durable record, work, and progress note are preserved at $WT" >&2
+        else
+          echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
+        fi
       fi
       ;;
   esac
@@ -766,11 +780,20 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line outcome_suffix
   local -a spawn_args
 
   require_state_verified_backend relaunch
   resolve_relaunch_profile
+  RELAUNCH_PRIOR_TARGET=$T
+  state=$(agent_state)
+  case "$state" in
+    alive|dead) ;;
+    missing) RELAUNCH_RECREATE_ENDPOINT=1 ;;
+    *)
+      die "task $ID's endpoint reads '$state', not alive, dead, or authoritatively missing; refusing to relaunch from an ambiguous endpoint state or change its durable record"
+      ;;
+  esac
 
   case "$KIND" in
     ship|scout)
@@ -803,8 +826,12 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
-  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  if [ "$RELAUNCH_RECREATE_ENDPOINT" = 1 ]; then
+    exit_result=endpoint-missing
+  else
+    journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
+    exit_result=$(do_exit)
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
@@ -812,6 +839,7 @@ do_relaunch() {
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
+  [ "$RELAUNCH_RECREATE_ENDPOINT" = 0 ] || spawn_args+=(--recreate-endpoint)
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
@@ -823,14 +851,25 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
+  fm_backend_validate_task_endpoint "$META" "$ID" \
+    || die "the replacement for $ID published endpoint metadata that cannot be validated"
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = "$BACKEND" ] \
+    || die "the replacement for $ID changed backend from $BACKEND to $FM_BACKEND_VALIDATED_BACKEND during relaunch"
+  T=$FM_BACKEND_VALIDATED_TARGET
+
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
   }
   RELAUNCH_AGENT_CONFIRMED=1
 
-  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" \
+    "exit_result=$exit_result" "previous_endpoint=$RELAUNCH_PRIOR_TARGET"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  outcome_suffix=
+  if [ "$RELAUNCH_RECREATE_ENDPOINT" = 1 ]; then
+    outcome_suffix=" endpoint-recreated previous-endpoint=$RELAUNCH_PRIOR_TARGET"
+  fi
+  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT$outcome_suffix"
 }
 
 # --- verbs ------------------------------------------------------------------

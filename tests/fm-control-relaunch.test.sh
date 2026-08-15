@@ -17,6 +17,9 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. An authoritatively missing endpoint is recreated in the recorded
+#      worktree, while ambiguous state refuses unchanged and repeat recovery
+#      never creates a duplicate endpoint.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -111,6 +114,33 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  has-session) [ -s "$D/sessions" ]; exit $? ;;
+  new-session)
+    printf 'new-session\n' >> "$D/lifecycle"
+    session=
+    window=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -s) shift; session=$1 ;;
+        -n) shift; window=$1 ;;
+      esac
+      shift
+    done
+    printf '%s\n' "$session" > "$D/sessions"
+    printf '%s\n' "$window" > "$D/windows"
+    printf '@replacement\n'
+    exit 0 ;;
+  set-window-option) exit 0 ;;
+  new-window)
+    printf 'new-window\n' >> "$D/lifecycle"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -n) shift; printf '%s\n' "$1" > "$D/windows" ;;
+      esac
+      shift
+    done
+    printf '@replacement\n'
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -128,6 +158,8 @@ new_case() {
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
+  : > "$dir/fake/lifecycle"
+  : > "$dir/fake/sessions"
   printf 'claude' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
@@ -1312,6 +1344,95 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
 }
 
+test_missing_endpoint_relaunch_creates_a_fresh_endpoint_without_touching_work() {
+  local dir out rc before_status before_diff
+  dir=$(new_case missing-endpoint rl36)
+  add_ship_task "$dir" rl36 claude
+  printf 'tracked work in progress\n' >> "$dir/wt/README.md"
+  printf 'preserve exactly\n' > "$dir/wt/uncommitted.txt"
+  before_status=$(git -C "$dir/wt" status --porcelain=v1 --untracked-files=all)
+  before_diff=$(git -C "$dir/wt" diff --binary)
+  : > "$dir/fake/windows"
+
+  out=$(run_control "$dir" rl36 relaunch --note "runtime wiped the endpoint"); rc=$?
+
+  expect_code 0 "$rc" "an authoritatively missing endpoint should be recreated"$'\n'"$out"
+  assert_contains "$out" "previous-endpoint=fmses:fm-rl36" \
+    "the outcome should distinguish the replaced missing endpoint"
+  [ "$(meta_field "$dir" rl36 window)" = "fmses:fm-rl36" ] \
+    || fail "the durable record should name the fresh endpoint"
+  [ "$(git -C "$dir/wt" status --porcelain=v1 --untracked-files=all)" = "$before_status" ] \
+    || fail "relaunch must preserve the worktree status exactly"
+  [ "$(git -C "$dir/wt" diff --binary)" = "$before_diff" ] \
+    || fail "relaunch must preserve tracked changes exactly"
+  [ "$(cat "$dir/wt/uncommitted.txt")" = "preserve exactly" ] \
+    || fail "relaunch must preserve untracked file contents exactly"
+  pass "fm-control relaunch: a missing endpoint is recreated without touching work"
+}
+
+test_spawn_recreate_endpoint_requires_the_control_transaction() {
+  local dir out rc
+  dir=$(new_case direct-missing-endpoint rl39)
+  add_ship_task "$dir" rl39 claude
+  : > "$dir/fake/windows"
+
+  out=$(run_spawn "$dir" rl39 --relaunch --recreate-endpoint --harness claude); rc=$?
+
+  expect_code 1 "$rc" "direct spawn must not acquire missing-endpoint recreation authority"
+  assert_contains "$out" "authorized only by bin/fm-control.sh" \
+    "the refusal should name the control transaction that owns recreation"
+  [ -z "$(cat "$dir/fake/lifecycle")" ] \
+    || fail "a direct spawn must not create a missing endpoint"
+  pass "fm-spawn --relaunch: only fm-control's locked transaction may recreate an endpoint"
+}
+
+test_ambiguous_endpoint_state_refuses_without_changing_the_record() {
+  local dir out rc before_meta before_brief
+  dir=$(new_case ambiguous-endpoint rl37)
+  add_ship_task "$dir" rl37 claude
+  printf 'node' > "$dir/fake/command"
+  before_meta=$(cat "$dir/home/state/rl37.meta")
+  before_brief=$(cat "$dir/home/data/rl37/brief.md")
+
+  out=$(run_control "$dir" rl37 relaunch --note "must not land"); rc=$?
+
+  expect_code 1 "$rc" "an ambiguous endpoint must fail closed"
+  assert_contains "$out" "ambiguous" "the refusal should distinguish ambiguity from a missing endpoint"
+  [ "$(cat "$dir/home/state/rl37.meta")" = "$before_meta" ] \
+    || fail "an ambiguous endpoint must preserve the durable record byte-for-byte"
+  [ "$(cat "$dir/home/data/rl37/brief.md")" = "$before_brief" ] \
+    || fail "an ambiguous endpoint must preserve the instructions byte-for-byte"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "an ambiguous endpoint must receive no lifecycle input"
+  [ -z "$(cat "$dir/fake/lifecycle")" ] \
+    || fail "an ambiguous endpoint must not create a replacement endpoint"
+  pass "fm-control relaunch: ambiguous endpoint state fails closed without changing the task"
+}
+
+test_missing_endpoint_relaunch_is_repeat_safe() {
+  local dir first second rc
+  dir=$(new_case repeat-missing-endpoint rl38)
+  add_ship_task "$dir" rl38 claude
+  : > "$dir/fake/windows"
+
+  first=$(run_control "$dir" rl38 relaunch --note "first recovery"); rc=$?
+  expect_code 0 "$rc" "the first recovery should recreate the missing endpoint"$'\n'"$first"
+  second=$(run_control "$dir" rl38 relaunch --note "repeat recovery"); rc=$?
+  expect_code 0 "$rc" "a repeated relaunch should replace the running worker without duplicating it"$'\n'"$second"
+
+  [ "$(cat "$dir/fake/windows")" = "fm-rl38" ] \
+    || fail "repeat relaunch must leave exactly one endpoint for the task"
+  [ "$(cat "$dir/fake/lifecycle")" = "new-session" ] \
+    || fail "repeat relaunch must create a fresh endpoint only for the missing incarnation"
+  [ "$(meta_field "$dir" rl38 window)" = "fmses:fm-rl38" ] \
+    || fail "repeat relaunch must retain the replacement endpoint identity"
+  pass "fm-control relaunch: repeating recovery never creates a duplicate worker endpoint"
+}
+
+test_ambiguous_endpoint_state_refuses_without_changing_the_record
+test_spawn_recreate_endpoint_requires_the_control_transaction
+test_missing_endpoint_relaunch_creates_a_fresh_endpoint_without_touching_work
+test_missing_endpoint_relaunch_is_repeat_safe
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
