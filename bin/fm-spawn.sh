@@ -150,6 +150,9 @@
 #   The command's completion status is recorded privately so an immediate
 #   refusal (including an already-existing target) is reported without waiting
 #   for the cwd timeout; any existing or partly-created worktree is preserved.
+#   No working-directory read is issued until that status is published, so a
+#   backend whose read is an active pane probe never types into the operator's
+#   still-running command.
 #   The usual two-identical-cwd-read isolation proof, 60 one-second polls, base
 #   refresh, and failure preservation remain unchanged.
 #   The setting is deliberately ignored by --relaunch, --secondmate, and Orca:
@@ -2346,32 +2349,44 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # a mismatch just becomes the new candidate rather than resetting the wait, so a
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  #
+  # A project command's cwd read waits for the atomically published completion
+  # status first, and the poll issues NO read at all before that. The read is
+  # passive only on tmux: herdr's project-command read, zellij's and cmux's
+  # reads are ACTIVE probes that type a `pwd` line into the pane. The operator's
+  # acquisition command owns that pane's foreground while it runs and may read
+  # its own stdin, so probing it would inject text into trusted local code for a
+  # value this loop discards until the command reports completion anyway.
   candidate=""
   acquire_complete=0
   for _ in $(seq 1 60); do
-    if [ "$WORKTREE_PROVIDER" = project-command ] \
-       && [ -f "$SPAWN_WORKTREE_ACQUIRE_STATUS" ]; then
-      acquire_rc=
-      IFS= read -r acquire_rc < "$SPAWN_WORKTREE_ACQUIRE_STATUS" || {
-        echo "error: could not read completion status for project worktree acquisition; existing work is preserved. Inspect window $T" >&2
-        exit 1
-      }
-      case "$acquire_rc" in
-        0) acquire_complete=1 ;;
-        ''|*[!0-9]*)
-          echo "error: project worktree acquisition returned an invalid completion status; existing work is preserved. Inspect window $T" >&2
+    if [ "$WORKTREE_PROVIDER" = project-command ] && [ "$acquire_complete" -ne 1 ]; then
+      if [ -f "$SPAWN_WORKTREE_ACQUIRE_STATUS" ]; then
+        acquire_rc=
+        IFS= read -r acquire_rc < "$SPAWN_WORKTREE_ACQUIRE_STATUS" || {
+          echo "error: could not read completion status for project worktree acquisition; existing work is preserved. Inspect window $T" >&2
           exit 1
-          ;;
-        *)
-          echo "error: project worktree acquisition for '$PROJ_ABS' exited with status $acquire_rc before entering an isolated worktree; any existing or partly-created target is preserved. Inspect window $T, land or deliberately remove that target, then retry" >&2
-          exit 1
-          ;;
-      esac
+        }
+        case "$acquire_rc" in
+          0) acquire_complete=1 ;;
+          ''|*[!0-9]*)
+            echo "error: project worktree acquisition returned an invalid completion status; existing work is preserved. Inspect window $T" >&2
+            exit 1
+            ;;
+          *)
+            echo "error: project worktree acquisition for '$PROJ_ABS' exited with status $acquire_rc before entering an isolated worktree; any existing or partly-created target is preserved. Inspect window $T, land or deliberately remove that target, then retry" >&2
+            exit 1
+            ;;
+        esac
+      fi
+      if [ "$acquire_complete" -ne 1 ]; then
+        candidate=""
+        sleep 1
+        continue
+      fi
     fi
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ "$WORKTREE_PROVIDER" = project-command ] && [ "$acquire_complete" -ne 1 ]; then
-      candidate=""
-    elif [ -n "$p" ]; then
+    if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
       if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then

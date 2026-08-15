@@ -49,7 +49,10 @@
 # holds it to the same contract: a project-command child worktree is removed
 # through registered native Git removal, never handed to `treehouse return` and
 # never rm -rf'd behind a failed return, and a child whose removal contract
-# cannot be honored retains its records instead of being discarded.
+# cannot be honored retains its records instead of being discarded. The provider
+# field is schema-checked for every child and descendant by the non-destructive
+# preflight, so an unknown or misplaced value refuses while every endpoint,
+# worktree, and record in that home tree is still intact.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -2052,7 +2055,7 @@ preflight_descendant_task_locks() {
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_provider
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2064,6 +2067,20 @@ validate_firstmate_home_children_removal() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
+    child_provider=$(meta_value "$child_meta" worktree_provider)
+    case "$child_provider" in
+      '') ;;
+      project-command)
+        if [ "$child_backend" = orca ] || [ "$child_kind" = secondmate ]; then
+          echo "REFUSED: child $child_id records worktree_provider=project-command with backend=$child_backend kind=$child_kind, which has no removal contract; forced teardown changed nothing" >&2
+          return 1
+        fi
+        ;;
+      *)
+        echo "REFUSED: child $child_id records unsupported worktree provider '$child_provider'; forced teardown changed nothing" >&2
+        return 1
+        ;;
+    esac
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt

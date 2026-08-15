@@ -2553,6 +2553,9 @@ fm_backend_herdr_current_path() {  # <target> [worktree-provider]
 # block, joining wrapped path lines. Empty output means "no answer yet", which
 # fm-spawn.sh's poll treats as not-settled, so a missed probe costs one more
 # poll rather than a wrong worktree. Scoped to that worktree-discovery poll.
+# It types into the pane, so fm-spawn.sh calls it for a project-command
+# acquisition only AFTER that command's completion status is published - never
+# while the operator's own command still owns the pane's foreground and stdin.
 fm_backend_herdr_probe_current_path() {  # <target>
   local target=$1 out line marker_begin="__FM_HERDR_CWD_BEGIN__" marker_end="__FM_HERDR_CWD_END__" in_block=0 chunk="" last=""
   fm_backend_herdr_target_ready "$target" || return 0

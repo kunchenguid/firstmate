@@ -15,8 +15,9 @@
 #
 # The same executable interface also covers the optional per-project acquisition
 # command: safe <slug> substitution, a creator-plus-cd command that actually
-# enters the prepared worktree, two-read settling after command completion, and
-# an immediate preserving refusal when a retry finds the target already present.
+# enters the prepared worktree, two-read settling after command completion, no
+# working-directory read at all until that completion is published, and an
+# immediate preserving refusal when a retry finds the target already present.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -157,6 +158,11 @@ case "$*" in
     n=0
     [ ! -f "$FM_FAKE_PANE_COUNTFILE" ] || n=$(cat "$FM_FAKE_PANE_COUNTFILE")
     printf '%s\n' "$((n + 1))" > "$FM_FAKE_PANE_COUNTFILE"
+    published=no
+    for status_file in "$FM_FAKE_STATE"/.worktree-acquire-*.status; do
+      [ ! -e "$status_file" ] || published=yes
+    done
+    printf 'cwd-read acquire-status-published=%s\n' "$published" >> "$FM_FAKE_PROBE_LOG"
     cat "$FM_FAKE_PANE_PATH_FILE"
     exit 0
     ;;
@@ -178,11 +184,20 @@ case "${1:-}" in
     payload=${1:-}
     case "$payload" in
       *__fm_worktree_acquire*)
-        (
-          cd "$FM_FAKE_PROJECT" || exit 1
-          eval "$payload"
-          pwd -P > "$FM_FAKE_PANE_PATH_FILE"
-        )
+        if [ -n "${FM_FAKE_ACQUIRE_DELAY:-}" ]; then
+          (
+            sleep "$FM_FAKE_ACQUIRE_DELAY"
+            cd "$FM_FAKE_PROJECT" || exit 1
+            eval "$payload"
+            pwd -P > "$FM_FAKE_PANE_PATH_FILE"
+          ) >/dev/null 2>&1 &
+        else
+          (
+            cd "$FM_FAKE_PROJECT" || exit 1
+            eval "$payload"
+            pwd -P > "$FM_FAKE_PANE_PATH_FILE"
+          )
+        fi
         ;;
     esac
     exit 0
@@ -236,6 +251,7 @@ SH
   : > "$case_dir/tmux.log"
   : > "$case_dir/treehouse.log"
   : > "$case_dir/prepare.log"
+  : > "$case_dir/cwd-read.log"
   printf '%s\n' "$case_dir|$home|$project|$prepared|$fakebin"
 }
 
@@ -265,6 +281,9 @@ run_project_command_spawn() {  # <id>
     FM_FAKE_TMUX_LOG="$CUSTOM_CASE/tmux.log" \
     FM_FAKE_TREEHOUSE_LOG="$CUSTOM_CASE/treehouse.log" \
     FM_FAKE_PREPARE_LOG="$CUSTOM_CASE/prepare.log" \
+    FM_FAKE_PROBE_LOG="$CUSTOM_CASE/cwd-read.log" \
+    FM_FAKE_STATE="$CUSTOM_HOME/state" \
+    FM_FAKE_ACQUIRE_DELAY="${FM_FAKE_ACQUIRE_DELAY:-}" \
     PATH="$CUSTOM_FAKEBIN:$PATH" \
     "$SPAWN" "$id" "$CUSTOM_PROJECT" --mode no-mistakes --yolo off 2>&1
 }
@@ -336,6 +355,39 @@ test_existing_project_target_refuses_quickly_and_preserves_work() {
   pass "an existing project target refuses promptly and preserves its unlanded work"
 }
 
+# The pane's working-directory read is an ACTIVE probe on herdr, zellij, and
+# cmux: it types a `pwd` line into the very pane the acquisition command is
+# running in, so a read issued while a trusted project command still owns that
+# pane's foreground injects text into the operator's own code. The shared poll
+# must issue no working-directory read at all until the command's completion
+# status is published, and must still settle on two agreeing reads afterwards.
+test_no_cwd_read_before_project_command_completion() {
+  local rec id out status wt reads
+  id='prepared-slow-z7'
+  rec=$(make_project_command_case project-command-slow "$id")
+  read_project_command_record "$rec"
+
+  FM_FAKE_ACQUIRE_DELAY=3
+  out=$(run_project_command_spawn "$id")
+  status=$?
+  FM_FAKE_ACQUIRE_DELAY=
+
+  expect_code 0 "$status" "a slow project acquisition should still spawn successfully"$'\n'"$out"
+  assert_no_grep 'acquire-status-published=no' "$CUSTOM_CASE/cwd-read.log" \
+    "the poll read the pane's working directory while the project command still owned that pane"
+  assert_grep 'acquire-status-published=yes' "$CUSTOM_CASE/cwd-read.log" \
+    "the poll never read the pane's working directory after the command reported completion"
+  wt="$CUSTOM_PREPARED/$id"
+  assert_grep "worktree=$wt" "$CUSTOM_HOME/state/$id.meta" \
+    "a slow project acquisition did not record its prepared worktree"
+  reads=$(grep -c 'cwd-read ' "$CUSTOM_CASE/cwd-read.log")
+  [ "$reads" -ge 2 ] \
+    || fail "a slow acquisition was accepted without two working-directory reads"
+  assert_acquire_status_artifacts_cleaned \
+    "a slow acquisition left its private completion-status artifacts behind"
+  pass "no working-directory read is issued until the project command publishes its completion status"
+}
+
 test_project_command_config_requires_one_placeholder_line() {
   local rec id out status config
 
@@ -375,6 +427,7 @@ test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_project_command_creates_and_enters_attached_worktree
 test_existing_project_target_refuses_quickly_and_preserves_work
+test_no_cwd_read_before_project_command_completion
 test_project_command_config_requires_one_placeholder_line
 
 echo "# all fm-spawn-worktree-settle tests passed"

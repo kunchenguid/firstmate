@@ -1847,6 +1847,55 @@ SH
   pass "forced secondmate cleanup removes a project-command child through registered native Git, never Treehouse"
 }
 
+# Children are enumerated in name order, so an unknown provider recorded on the
+# SECOND child is only a genuine pre-cleanup refusal if the FIRST child's pane,
+# worktree, and records all survive it. The provider schema check therefore
+# belongs in the non-destructive preflight, alongside every other child refusal.
+test_forced_secondmate_unknown_child_provider_refuses_before_changes() {
+  local case_dir home rc child
+  case_dir=$(make_case unknown-child-provider)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  printf 'worktree_provider=some-future-provider\n' >> "$home/state/child-b.meta"
+  : > "$case_dir/kill.log"
+  : > "$case_dir/treehouse.log"
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/kill.log"
+exit 0
+SH
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "unknown-child-provider: forced teardown accepted an unknown child worktree provider"
+  [ ! -s "$case_dir/kill.log" ] \
+    || fail "unknown-child-provider: refusal killed an endpoint before the schema check"
+  [ ! -s "$case_dir/treehouse.log" ] \
+    || fail "unknown-child-provider: refusal returned a worktree before the schema check"
+  for child in child-a child-b; do
+    [ -e "$home/state/$child.meta" ] \
+      || fail "unknown-child-provider: refusal erased $child's durable record"
+    [ -d "$case_dir/$child-wt" ] \
+      || fail "unknown-child-provider: refusal removed $child's worktree"
+  done
+  [ -d "$home" ] || fail "unknown-child-provider: refusal removed the secondmate home"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "unknown-child-provider: refusal erased the parent record"
+  assert_grep "unsupported worktree provider 'some-future-provider'" "$case_dir/stderr" \
+    "unknown-child-provider: refusal did not name the unsupported provider"
+  assert_grep "forced teardown changed nothing" "$case_dir/stderr" \
+    "unknown-child-provider: refusal did not explain its non-mutating boundary"
+  pass "an unknown child worktree provider refuses in preflight, before any child is torn down"
+}
+
 configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" nested_home="$1/secondmate-home/nested-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -2675,6 +2724,7 @@ test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_secondmate_project_command_child_uses_native_git_cleanup
+test_forced_secondmate_unknown_child_provider_refuses_before_changes
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
