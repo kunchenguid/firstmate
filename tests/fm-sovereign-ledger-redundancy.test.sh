@@ -122,7 +122,14 @@ for entry in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
   check_fails_with "verify REFUSES a symlinked $entry" 'ledger bundle contains a symlink' "$TOOL" verify "$PRIMARY" "$symlink_replica"
 done
 
-echo 'T5 replica bytes are compared before replica-controlled code can execute'
+echo 'T5 non-regular bundle members are refused before comparison or execution'
+NONREGULAR="$TMP/non-regular-replica"
+check_ok 'snapshot CREATES a non-regular member fixture bundle' "$TOOL" snapshot "$PRIMARY" "$NONREGULAR"
+unlink "$NONREGULAR/tests.sh"
+mkfifo "$NONREGULAR/tests.sh"
+check_fails_with 'verify REFUSES a FIFO bundle member' 'ledger bundle contains a non-regular file' "$TOOL" verify "$PRIMARY" "$NONREGULAR"
+
+echo 'T6 replica bytes are compared before replica-controlled code can execute'
 ORDERING="$TMP/ordering-replica"
 ORDERING_PROOF="$TMP/replica-code-ran"
 check_ok 'snapshot CREATES an ordering fixture bundle' "$TOOL" snapshot "$PRIMARY" "$ORDERING"
@@ -131,7 +138,7 @@ chmod +x "$ORDERING/fm-sovereign-ledger.sh"
 check_fails 'verify REFUSES a changed replica verifier' "$TOOL" verify "$PRIMARY" "$ORDERING"
 if [ ! -e "$ORDERING_PROOF" ]; then ok 'changed replica verifier never executed'; else bad 'changed replica verifier executed before byte comparison'; fi
 
-echo 'T6 divergence and extra files are detected and never repaired'
+echo 'T7 divergence and extra files are detected and never repaired'
 printf 'tamper\n' >> "$REPLICA/CONTRACT.md"
 check_fails 'verify FAILS when replica contract bytes diverge' "$TOOL" verify "$PRIMARY" "$REPLICA"
 check_fails 'snapshot REFUSES to overwrite a divergent replica' "$TOOL" snapshot "$PRIMARY" "$REPLICA"
@@ -141,7 +148,7 @@ check_fails_with 'verify REFUSES an unexpected replica file' 'replica bundle lay
 unlink "$REPLICA/EXTRA-CONTRACT.md"
 check_ok 'verify PASSES after fixture restore' "$TOOL" verify "$PRIMARY" "$REPLICA"
 
-echo 'T7 an invalid primary is never copied'
+echo 'T8 an invalid primary is never copied'
 INVALID="$TMP/invalid-primary"
 mkdir -p "$INVALID"
 cp "$PRIMARY"/* "$INVALID/"
@@ -151,12 +158,41 @@ INVALID_REPLICA="$TMP/invalid-replica"
 check_fails 'snapshot REFUSES a primary rejected by its own verifier' "$TOOL" snapshot "$INVALID" "$INVALID_REPLICA"
 if [ ! -e "$INVALID_REPLICA" ]; then ok 'rejected primary leaves no replica directory behind'; else bad 'rejected primary wrote a replica directory'; fi
 
-echo 'T8 a hard link is not accepted as redundancy'
-HARDLINK="$TMP/hardlink-replica"
-check_ok 'snapshot CREATES a hard-link fixture bundle' "$TOOL" snapshot "$PRIMARY" "$HARDLINK"
-unlink "$HARDLINK/ledger.tsv"
-ln "$PRIMARY/ledger.tsv" "$HARDLINK/ledger.tsv"
-check_fails 'verify FAILS when replica ledger.tsv is hard-linked to primary' "$TOOL" verify "$PRIMARY" "$HARDLINK"
+echo 'T9 each identity check fires independently'
+IDENTITY_PRIMARY="$TMP/identity-primary"
+IDENTITY_REPLICA="$TMP/identity-replica"
+IDENTITY_STAT_BIN="$TMP/identity-stat-bin"
+check_ok 'snapshot CREATES an identity-check fixture bundle' "$TOOL" snapshot "$PRIMARY" "$IDENTITY_PRIMARY"
+check_ok 'snapshot CREATES an identity-check replica bundle' "$TOOL" snapshot "$PRIMARY" "$IDENTITY_REPLICA"
+mkdir "$IDENTITY_STAT_BIN"
+# shellcheck disable=SC2016
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'target="${!#}"' \
+  'follow=false' \
+  'for argument in "$@"; do if [ "$argument" = "-L" ]; then follow=true; fi; done' \
+  'case "$target" in' \
+  '  *identity-primary/*) side=primary ;;' \
+  '  *identity-replica/*) side=replica ;;' \
+  '  *) exit 70 ;;' \
+  'esac' \
+  'case "${IDENTITY_MODE}:${follow}" in' \
+  '  lstat:false|stat:true) printf "shared:identity\\n" ;;' \
+  '  *) printf "%s:identity\\n" "$side" ;;' \
+  'esac' > "$IDENTITY_STAT_BIN/stat"
+chmod +x "$IDENTITY_STAT_BIN/stat"
+check_fails_with 'verify REFUSES a shared lstat identity even when stat identities differ' 'replica CONTRACT.md shares the primary lstat identity' env PATH="$IDENTITY_STAT_BIN:$PATH" IDENTITY_MODE=lstat IDENTITY_PRIMARY="$IDENTITY_PRIMARY" IDENTITY_REPLICA="$IDENTITY_REPLICA" "$TOOL" verify "$IDENTITY_PRIMARY" "$IDENTITY_REPLICA"
+check_fails_with 'verify REFUSES a shared stat identity even when lstat identities differ' 'replica CONTRACT.md resolves to the primary object' env PATH="$IDENTITY_STAT_BIN:$PATH" IDENTITY_MODE=stat IDENTITY_PRIMARY="$IDENTITY_PRIMARY" IDENTITY_REPLICA="$IDENTITY_REPLICA" "$TOOL" verify "$IDENTITY_PRIMARY" "$IDENTITY_REPLICA"
+
+echo 'T10 every bundle member must have separate lstat and stat identities'
+for entry in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
+  hardlink_replica="$TMP/hardlink-$entry"
+  check_ok "snapshot CREATES a $entry hard-link fixture" "$TOOL" snapshot "$PRIMARY" "$hardlink_replica"
+  unlink "$hardlink_replica/$entry"
+  ln "$PRIMARY/$entry" "$hardlink_replica/$entry"
+  check_fails_with "verify REFUSES a hard-linked $entry by lstat identity" "replica $entry shares the primary lstat identity" "$TOOL" verify "$PRIMARY" "$hardlink_replica"
+done
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
