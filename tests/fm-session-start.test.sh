@@ -1073,9 +1073,16 @@ EOF
   git -C "$root" commit -q -m fixture
   git clone -q "$root" "$home/meta-clean-wt"
   git clone -q "$root" "$home/meta-dirty-wt"
+  git -C "$home/meta-dirty-wt" checkout -q -b orphan-feature
+  printf 'unlanded\n' > "$home/meta-dirty-wt/unlanded.txt"
+  git -C "$home/meta-dirty-wt" add unlanded.txt
+  git -C "$home/meta-dirty-wt" commit -q -m unlanded-fixture
   printf 'dirty\n' > "$home/meta-dirty-wt/tracked.txt"
+  git clone -q "$root" "$home/meta-untracked-wt"
+  printf 'untracked\n' > "$home/meta-untracked-wt/untracked.txt"
   printf 'window=fm-sess:meta-clean\nkind=ship\nworktree=%s\n' "$home/meta-clean-wt" > "$home/state/meta-clean.meta"
   printf 'window=fm-sess:meta-dirty\nkind=ship\nworktree=%s\n' "$home/meta-dirty-wt" > "$home/state/meta-dirty.meta"
+  printf 'window=fm-sess:meta-untracked\nkind=ship\nworktree=%s\n' "$home/meta-untracked-wt" > "$home/state/meta-untracked.meta"
   printf 'window=fm-sess:secondmate\nkind=secondmate\n' > "$home/state/fleet-mate.meta"
   printf 'resolved: archival candidate\n' > "$home/state/stale-orphan.status"
   touch -t 202608010000 "$home/state/stale-orphan.status"
@@ -1087,10 +1094,10 @@ EOF
   contradictions=$(printf '%s\n' "$out" | contradiction_section)
 
   assert_contains "$contradictions" "RECORD CONTRADICTIONS" "startup digest omitted the contradiction section"
-  assert_contains "$contradictions" "meta-without-backlog (3): meta-clean(tracked-dirty=0,unlanded=0), meta-dirty(tracked-dirty=1,unlanded=0), meta-only(tracked-dirty=unknown,unlanded=unknown)" \
+  assert_contains "$contradictions" "meta-without-backlog (4): meta-clean(dirty=0,unlanded=0), meta-dirty(dirty=1,unlanded=1), meta-only(dirty=unknown,unlanded=unknown), meta-untracked(dirty=1,unlanded=0)" \
     "startup digest missed metadata without a backlog row or its risk counts"
-  assert_contains "$contradictions" "meta-clean(tracked-dirty=0,unlanded=0), meta-dirty(tracked-dirty=1,unlanded=0)" \
-    "startup digest did not print bounded dirty and unlanded counts for orphan metadata"
+  assert_contains "$contradictions" "meta-untracked(dirty=1,unlanded=0)" \
+    "startup digest treated untracked-only work as clean"
   assert_contains "$contradictions" "complete-but-live-meta (2): complete-done-meta, complete-flight-meta" \
     "startup digest did not distinguish checked backlog rows from absent backlog rows"
   meta_line=$(printf '%s\n' "$contradictions" | awk '/^- meta-without-backlog / { print }')

@@ -100,17 +100,17 @@ fm_record_contradiction_default_branch() {  # <worktree>
 
 fm_record_contradiction_worktree_risk() {  # <worktree>
   local worktree=$1 default dirty_files dirty unlanded
-  [ -d "$worktree" ] || { printf 'tracked-dirty=unknown,unlanded=unknown'; return 0; }
+  [ -d "$worktree" ] || { printf 'dirty=unknown,unlanded=unknown'; return 0; }
   git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-    || { printf 'tracked-dirty=unknown,unlanded=unknown'; return 0; }
-  dirty_files=$(git -C "$worktree" diff --name-only HEAD 2>/dev/null) \
-    || { printf 'tracked-dirty=unknown,unlanded=unknown'; return 0; }
+    || { printf 'dirty=unknown,unlanded=unknown'; return 0; }
+  dirty_files=$(git -C "$worktree" status --porcelain 2>/dev/null) \
+    || { printf 'dirty=unknown,unlanded=unknown'; return 0; }
   dirty=$(printf '%s\n' "$dirty_files" | awk 'NF { count++ } END { print count + 0 }')
   default=$(fm_record_contradiction_default_branch "$worktree") \
-    || { printf 'tracked-dirty=%s,unlanded=unknown' "$dirty"; return 0; }
+    || { printf 'dirty=%s,unlanded=unknown' "$dirty"; return 0; }
   unlanded=$(git -C "$worktree" rev-list --count "$default..HEAD" 2>/dev/null) \
-    || { printf 'tracked-dirty=%s,unlanded=unknown' "$dirty"; return 0; }
-  printf 'tracked-dirty=%s,unlanded=%s' "$dirty" "$unlanded"
+    || { printf 'dirty=%s,unlanded=unknown' "$dirty"; return 0; }
+  printf 'dirty=%s,unlanded=%s' "$dirty" "$unlanded"
 }
 
 fm_record_contradiction_gh_bounded() {  # <seconds> <gh-axi args...>
@@ -242,8 +242,13 @@ fm_record_contradictions_observe_meta() {  # <meta> <id> <endpoint> <state-dir>
     case "$backlog_state" in
       complete) fm_record_contradiction_append complete "$id" ;;
       absent)
-        worktree=$(fm_meta_get "$meta" worktree)
-        risk=$(fm_record_contradiction_worktree_risk "$worktree")
+        if [ "$FM_RECORD_CONTRADICTION_META_COUNT" -lt "$FM_RECORD_CONTRADICTION_LIMIT_EFFECTIVE" ]; then
+          worktree=$(fm_meta_get "$meta" worktree)
+          risk=$(fm_record_contradiction_worktree_risk "$worktree")
+        else
+          risk=
+        fi
+        [ -n "$risk" ] || risk=unknown
         fm_record_contradiction_append meta "$id($risk)"
         ;;
     esac
