@@ -1240,6 +1240,11 @@ GUARD_OFF_JOURNAL="$HOME_DIR/state/$GUARD_OFF_ID.herdr-presentation"
 [ -f "$GUARD_OFF_JOURNAL" ] || fail "presentation-off guard fixture published no journal"
 printf 'off\n' > "$HOME_DIR/config/herdr-presentation-spaces"
 : > "$HOME_DIR/config/herdr-project-spaces"
+# The fixture pane runs a plain sleep, which reads positively agent-free, so
+# register a live agent on the exact journal-bound pane to model the
+# crashed-spawn-with-live-worker case the guard must refuse.
+lab pane report-agent "$GUARD_OFF_OLD_PANE" --source fm-projection-e2e --agent test-agent --state working >/dev/null \
+  || fail "could not register the live-agent fixture on the journal-bound pane"
 GUARD_OFF_START=$(log_line_count)
 if spawn_task "$GUARD_OFF_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/guard-off-live.out" 2> "$TMP_ROOT/guard-off-live.err"; then
   fail "a live journal-bound endpoint admitted a duplicate launch under presentation-off grouping"
@@ -1274,6 +1279,47 @@ rm -f "$HOME_DIR/config/herdr-project-spaces"
 "$REAL_TREEHOUSE" return --force "$GUARD_OFF_OLD_WT" >/dev/null 2>&1 || true
 "$REAL_TREEHOUSE" return --force "$GUARD_OFF_NEW_WT" >/dev/null 2>&1 || true
 pass "real Herdr lab: a pending journal runs the recovery guard under presentation-off project grouping - live refuses, agent-free reclaims exactly"
+
+# Project grouping wins over presentation for fresh project-resolvable spawns:
+# with presentation left on (empty file) and project spaces opted in, two fresh
+# tasks for one project skip the disposable projection, publish no journal, and
+# land as ordinary task tabs in one exact-id-bound project-labeled workspace.
+: > "$HOME_DIR/config/herdr-project-spaces"
+GROUP_START=$(log_line_count)
+for GROUP_ID in group-fresh-a group-fresh-b; do
+  mkdir -p "$HOME_DIR/data/$GROUP_ID"
+  printf 'Project grouping precedence fixture.\n' > "$HOME_DIR/data/$GROUP_ID/brief.md"
+  spawn_task "$GROUP_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/$GROUP_ID.out" 2> "$TMP_ROOT/$GROUP_ID.err" \
+    || fail "project-grouped spawn $GROUP_ID failed: $(cat "$TMP_ROOT/$GROUP_ID.err")"
+  [ ! -e "$HOME_DIR/state/$GROUP_ID.herdr-presentation" ] \
+    || fail "project grouping still published a presentation journal for $GROUP_ID"
+done
+[ -z "$(projection_labels_from_log "$GROUP_START")" ] \
+  || fail "project grouping created a disposable presentation workspace anyway"
+GROUP_WS_A=$(grep '^herdr_workspace_id=' "$HOME_DIR/state/group-fresh-a.meta" | cut -d= -f2-)
+GROUP_WS_B=$(grep '^herdr_workspace_id=' "$HOME_DIR/state/group-fresh-b.meta" | cut -d= -f2-)
+[ -n "$GROUP_WS_A" ] || fail "grouped spawn A recorded no workspace id"
+[ "$GROUP_WS_A" = "$GROUP_WS_B" ] \
+  || fail "two grouped tasks did not share one exact project workspace: $GROUP_WS_A vs $GROUP_WS_B"
+GROUP_PROJECT_NAME=$(basename "$PROJECT_DIR")
+[ "$(lab workspace get "$GROUP_WS_A" | jq -r '.result.workspace.label')" = "$GROUP_PROJECT_NAME" ] \
+  || fail "the project workspace label is not the registered project name"
+GROUP_TABS=$(lab tab list --workspace "$GROUP_WS_A" | jq -r '[.result.tabs[].label] | sort | join(",")')
+[ "$GROUP_TABS" = "fm-group-fresh-a,fm-group-fresh-b" ] \
+  || fail "the project workspace does not hold exactly the two ordinary task tabs: $GROUP_TABS"
+GROUP_BINDING=$(find "$HOME_DIR/state" -name ".herdr-project-space-$GROUP_PROJECT_NAME-*" -type f)
+[ "$(printf '%s\n' "$GROUP_BINDING" | grep -c .)" = 1 ] \
+  || fail "expected exactly one durable project-space binding: $GROUP_BINDING"
+[ "$(sed -n 's/^workspace_id=//p' "$GROUP_BINDING")" = "$GROUP_WS_A" ] \
+  || fail "the durable binding does not carry the exact bound workspace id"
+for GROUP_ID in group-fresh-a group-fresh-b; do
+  GROUP_WT=$(remember_meta_worktree "$HOME_DIR/state/$GROUP_ID.meta")
+  teardown_task "$GROUP_ID" "$HOME_DIR" > "$TMP_ROOT/$GROUP_ID.teardown.out" 2> "$TMP_ROOT/$GROUP_ID.teardown.err" \
+    || fail "grouped task $GROUP_ID teardown failed: $(cat "$TMP_ROOT/$GROUP_ID.teardown.err")"
+  "$REAL_TREEHOUSE" return --force "$GROUP_WT" >/dev/null 2>&1 || true
+done
+rm -f "$HOME_DIR/config/herdr-project-spaces"
+pass "real Herdr lab: fresh grouped spawns share one exact project workspace and skip the presentation projection"
 
 # A secondmate child binds and reclaims only inside its own home and parent.
 CROSS_RESTART_ID=wheel-child-resume
