@@ -13,7 +13,7 @@
 #   fm-decision-reconcile.sh link-policy <task-id> --policy <policy-id>
 #   fm-decision-reconcile.sh resolve-hold <hold-id> --policy <policy-id> \
 #     [--decision-file <path>]
-#   fm-decision-reconcile.sh retire <task-id>... --decision-file <path>
+#   fm-decision-reconcile.sh retire <task-id>... --decision-file <path> [--policy <policy-id>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -137,6 +137,7 @@ write_policy_decision() {  # <path> <policy-id>
   summary=$(policy_lookup "$policy_id" summary) || fail "unknown policy id: $policy_id"
   escalation=$(policy_lookup "$policy_id" captain_escalation 2>/dev/null || true)
   {
+    printf 'policy=%s\n' "$policy_id"
     printf 'Resolved by operating policy %s.\n' "$policy_id"
     printf '%s\n' "$summary"
     if [ -n "$escalation" ] && [ "$escalation" != none ]; then
@@ -264,25 +265,29 @@ command_resolve_hold() {
   policy_lookup "$policy_id" summary >/dev/null || fail "unknown policy id: $policy_id"
   require_policy_auto_close "$policy_id"
   parse_hold_id "$hold_id"
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-policy-decision.XXXXXX") || exit 1
   if [ -z "$decision_file" ]; then
-    tmp=$(mktemp "${TMPDIR:-/tmp}/fm-policy-decision.XXXXXX") || exit 1
     write_policy_decision "$tmp" "$policy_id"
-    decision_file=$tmp
+  else
+    {
+      printf 'policy=%s\n' "$policy_id"
+      cat "$decision_file"
+    } > "$tmp" || { rm -f "$tmp"; fail "could not prepare policy decision for $hold_id"; }
   fi
+  decision_file=$tmp
   "$SCRIPT_DIR/fm-decision-hold.sh" decline "$HOLD_ORIGIN" "$HOLD_KEY" \
     --decision-file "$decision_file"
-  command_link_policy "$hold_id" --policy "$policy_id" >/dev/null \
-    || fail "resolved hold but could not link policy on $hold_id"
   [ -z "$tmp" ] || rm -f "$tmp"
   printf 'policy-resolved: %s via %s\n' "$hold_id" "$policy_id"
 }
 
 command_retire() {
-  local decision_file='' ids='' id show body held kind
+  local decision_file='' policy_id='' ids='' id show body held kind
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
+      --policy) shift; policy_id=${1:-} ;;
       --) shift; break ;;
       -*) usage >&2; exit 2 ;;
       *) ids="${ids}${ids:+ }$1" ;;
@@ -303,15 +308,22 @@ command_retire() {
     held=$(show_field "$show" held)
     kind=$(show_field "$show" kind)
     if [ "$kind" = captain ] && [ "$held" = yes ]; then
+      validate_slug policy-id "$policy_id"
+      require_policy_auto_close "$policy_id"
       case "$id" in
         *-decision-*)
+          local policy_decision
           parse_hold_id "$id"
-          require_policy_auto_close career-retired
+          policy_decision=$(mktemp "${TMPDIR:-/tmp}/fm-policy-decision.XXXXXX") \
+            || fail "could not prepare policy decision for $id"
+          {
+            printf 'policy=%s\n' "$policy_id"
+            cat "$decision_file"
+          } > "$policy_decision" || { rm -f "$policy_decision"; fail "could not prepare policy decision for $id"; }
           "$SCRIPT_DIR/fm-decision-hold.sh" decline "$HOLD_ORIGIN" "$HOLD_KEY" \
-            --decision-file "$decision_file" >/dev/null \
-            || fail "could not retire active captain hold $id"
-          command_link_policy "$id" --policy career-retired >/dev/null \
-            || fail "retired hold but could not link career-retired policy on $id"
+            --decision-file "$policy_decision" >/dev/null \
+            || { rm -f "$policy_decision"; fail "could not retire active captain hold $id"; }
+          rm -f "$policy_decision"
           printf 'retired: %s\n' "$id"
           continue
           ;;

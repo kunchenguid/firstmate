@@ -85,6 +85,11 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
 fi
 
 EXPECTED_HEAD=${FM_PR_EXPECTED_HEAD:-}
+EXPECTED_URL=${FM_PR_EXPECTED_URL:-}
+if [ -n "$EXPECTED_URL" ] && [ "$EXPECTED_URL" != "$URL" ]; then
+  echo "error: verified PR URL does not match the merge request" >&2
+  exit 1
+fi
 if [ -n "$EXPECTED_HEAD" ]; then
   if ! fm_pr_head_valid "$EXPECTED_HEAD"; then
     echo "error: verified PR head is invalid" >&2
@@ -101,6 +106,15 @@ if [ -n "$EXPECTED_HEAD" ]; then
   fi
   if [ "$CURRENT_HEAD" != "$EXPECTED_HEAD" ]; then
     echo "error: PR head changed after verification" >&2
+    exit 1
+  fi
+fi
+
+if [ -n "$EXPECTED_URL" ]; then
+  if ! fm_pr_metadata_identity_parse "$META" \
+    || [ "$FM_PR_META_URL" != "$EXPECTED_URL" ] \
+    || [ "$FM_PR_META_HEAD" != "$EXPECTED_HEAD" ]; then
+    echo "error: PR metadata changed after verification" >&2
     exit 1
   fi
 fi

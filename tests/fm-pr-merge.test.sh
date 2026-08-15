@@ -182,6 +182,36 @@ test_verified_head_is_bound_to_final_merge() {
   pass "fm-pr-merge binds the final forge merge to the verified PR head"
 }
 
+test_verified_pr_identity_change_refuses_before_metadata_refresh() {
+  local case_dir head rc
+  case_dir=$(make_case verified-pr-changed)
+  head=dddddddddddddddddddddddddddddddddddddddd
+  mkdir -p "$case_dir/wt"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "kind=ship" \
+    "pr=https://github.com/example/other/pull/17" \
+    "pr_head=$head"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_PR_EXPECTED_URL=https://github.com/example/repo/pull/17 FM_PR_EXPECTED_HEAD="$head" \
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/17 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "verified-pr-changed: merge should refuse changed PR metadata"
+  assert_grep 'error: PR metadata changed after verification' "$case_dir/stderr" \
+    "verified-pr-changed: refusal did not identify changed PR metadata"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "verified-pr-changed: merge ran for changed PR metadata"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "verified-pr-changed: metadata refresh ran for changed PR metadata"
+  pass "fm-pr-merge refuses PR metadata that changed after verification"
+}
+
 test_extra_merge_args_forwarded() {
   local case_dir rc
   case_dir=$(make_case extra-args)
@@ -346,6 +376,7 @@ test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_verified_head_change_refuses_before_metadata_refresh
 test_verified_head_is_bound_to_final_merge
+test_verified_pr_identity_change_refuses_before_metadata_refresh
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge
