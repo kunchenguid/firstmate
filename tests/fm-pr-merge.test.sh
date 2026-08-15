@@ -57,6 +57,10 @@ case "\${1:-} \${2:-}" in
     ;;
   "pr merge")
     printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
+    if [ -n "\${FM_TEST_GH_MERGE_STARTED:-}" ]; then
+      : > "\$FM_TEST_GH_MERGE_STARTED"
+      while [ ! -e "\$FM_TEST_GH_MERGE_RELEASE" ]; do sleep 0.05; done
+    fi
     exit 0
     ;;
 esac
@@ -96,6 +100,15 @@ run_pr_merge() {
     return 1
   fi
   return "$rc"
+}
+
+wait_for_file() {
+  local path=$1 attempts=0
+  while [ ! -e "$path" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  [ -e "$path" ] || fail "timed out waiting for $path"
 }
 
 test_records_pr_and_head_before_merging() {
@@ -209,6 +222,46 @@ test_verified_pr_identity_change_refuses_before_metadata_refresh() {
   assert_absent "$case_dir/state/task-x1.check.sh" \
     "verified-pr-changed: metadata refresh ran for changed PR metadata"
   pass "fm-pr-merge refuses PR metadata that changed after verification"
+}
+
+test_merge_holds_metadata_lock_through_forge_invocation() {
+  local case_dir merge_pid check_pid merge_rc check_rc started release
+  case_dir=$(make_case merge-metadata-lock)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" ffffffffffffffffffffffffffffffffffffffff
+  : > "$case_dir/gh.log"
+  started="$case_dir/merge.started"
+  release="$case_dir/merge.release"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_GH_LOG="$case_dir/gh.log" FM_TEST_GH_MERGE_STARTED="$started" \
+    FM_TEST_GH_MERGE_RELEASE="$release" PATH="$case_dir/fakebin:$PATH" \
+    "$PR_MERGE" task-x1 https://github.com/example/repo/pull/18 \
+      > "$case_dir/merge.stdout" 2> "$case_dir/merge.stderr" &
+  merge_pid=$!
+  wait_for_file "$started"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-pr-check.sh" task-x1 https://github.com/example/other/pull/19 \
+      > "$case_dir/check.stdout" 2> "$case_dir/check.stderr" &
+  check_pid=$!
+  sleep 0.2
+  kill -0 "$check_pid" 2>/dev/null \
+    || fail "metadata reassignment completed while the forge merge was active"
+  grep -qxF 'pr=https://github.com/example/repo/pull/18' "$case_dir/state/task-x1.meta" \
+    || fail "metadata reassignment changed the merge identity before the forge returned"
+
+  : > "$release"
+  wait "$merge_pid"
+  merge_rc=$?
+  wait "$check_pid"
+  check_rc=$?
+  expect_code 0 "$merge_rc" "metadata-lock: merge should succeed"
+  expect_code 0 "$check_rc" "metadata-lock: reassignment should complete after merge"
+  grep -qxF 'pr=https://github.com/example/other/pull/19' "$case_dir/state/task-x1.meta" \
+    || fail "metadata-lock: reassignment did not complete after the forge merge"
+  pass "fm-pr-merge holds metadata identity through the forge invocation"
 }
 
 test_extra_merge_args_forwarded() {
@@ -416,6 +469,7 @@ test_merge_failure_propagates_after_recording
 test_verified_head_change_refuses_before_metadata_refresh
 test_verified_head_is_bound_to_final_merge
 test_verified_pr_identity_change_refuses_before_metadata_refresh
+test_merge_holds_metadata_lock_through_forge_invocation
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge

@@ -150,6 +150,32 @@ EOF
   pass "retire records a durable retirement decision and closes the task"
 }
 
+test_retire_refuses_unheld_captain_escalation() {
+  local home id show rc
+  home=$(make_home retire-unheld-escalation)
+  id=sample-unheld-privacy-task
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+
+## Queued
+- [ ] $id - Privacy-sensitive retirement (repo: sample) (kind: captain)
+
+## Done
+EOF
+  (cd "$home" && tasks-axi add "$id" "Privacy-sensitive retirement" --kind captain --repo sample) >/dev/null
+  printf 'Retirement requested.\n' > "$home/decision.txt"
+  set +e
+  run_reconcile "$home" retire "$id" --decision-file "$home/decision.txt" --policy no-human-recording-library >/dev/null 2>&1
+  rc=$?
+  set -u
+  [ "$rc" -ne 0 ] || fail "retire closed an unheld captain task with an escalated policy"
+  show=$(cd "$home" && tasks-axi show "$id" --full)
+  case "$show" in
+    *"state: done"*) fail "retire marked an escalated unheld captain task done" ;;
+  esac
+  pass "retire leaves unheld captain tasks open for escalated policies"
+}
+
 test_retire_requires_explicit_policy_for_captain_hold() {
   local home id show rc
   home=$(make_home retire-held)
@@ -200,12 +226,51 @@ EOF
   pass "retire closes career holds only with an explicit non-escalated policy"
 }
 
+test_retire_cleans_temporary_decision_after_hold_failure() {
+  local home id show rc real_tasks_axi
+  home=$(make_home retire-temp-cleanup)
+  id=sample-career-v1-decision-temp-cleanup
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+
+## Queued
+- [ ] $id - Retire career item (repo: job-tracker) (kind: captain) (hold: retirement) (hold-kind: captain)
+
+## Done
+EOF
+  tasks_axi() { (cd "$home" && tasks-axi "$@"); }
+  tasks_axi add "$id" "Retire career item" --kind captain --repo job-tracker >/dev/null
+  tasks_axi hold "$id" --reason "retirement" --kind captain >/dev/null
+  printf 'Career work is retired.\n' > "$home/decision.txt"
+  mkdir -p "$home/tmp" "$home/fakebin"
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$home/fakebin/tasks-axi" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = update ]; then exit 1; fi
+exec "$real_tasks_axi" "\$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  set +e
+  TMPDIR="$home/tmp" PATH="$home/fakebin:$PATH" \
+    run_reconcile "$home" retire "$id" --decision-file "$home/decision.txt" --policy career-retired >/dev/null 2>&1
+  rc=$?
+  set -u
+  [ "$rc" -ne 0 ] || fail "retire unexpectedly closed a hold after decision recording failed"
+  show=$(cd "$home" && tasks-axi show "$id" --full)
+  assert_contains "$show" "held: yes" "retire did not leave the failed captain hold open"
+  [ -z "$(find "$home/tmp" -type f -name 'fm-policy-decision.*' -print -quit)" ] \
+    || fail "retire left a temporary decision copy after failure"
+  pass "retire cleans temporary decision copies after hold failures"
+}
+
 test_policy_list_includes_routine_completion
 test_resolve_hold_refuses_captain_escalation
 test_resolve_hold_closes_non_escalated_duplicate_question
 test_resolve_hold_leaves_open_when_policy_link_fails
 test_retire_marks_tasks_done
+test_retire_refuses_unheld_captain_escalation
 test_retire_requires_explicit_policy_for_captain_hold
 test_retire_closes_career_hold_with_explicit_policy
+test_retire_cleans_temporary_decision_after_hold_failure
 
 echo "all decision reconciliation tests passed"

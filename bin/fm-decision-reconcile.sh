@@ -43,6 +43,10 @@ resolve_tmp_cleanup() {
   [ -z "${RESOLVE_TMP:-}" ] || rm -f "$RESOLVE_TMP"
 }
 
+retire_tmp_cleanup() {
+  [ -z "${RETIRE_TMP:-}" ] || rm -f "$RETIRE_TMP"
+}
+
 require_python_toml() {
   command -v python3 >/dev/null 2>&1 || fail "python3 is required to read policy TOML"
   python3 - <<'PY' >/dev/null 2>&1 || fail "python3 with tomllib is required to read policy TOML"
@@ -317,22 +321,27 @@ command_retire() {
     show=$(task_show "$id") || fail "task $id is absent from the active backlog"
     held=$(show_field "$show" held)
     kind=$(show_field "$show" kind)
-    if [ "$kind" = captain ] && [ "$held" = yes ]; then
+    if [ "$kind" = captain ]; then
       require_policy_auto_close "$policy_id"
+    fi
+    if [ "$kind" = captain ] && [ "$held" = yes ]; then
       case "$id" in
         *-decision-*)
-          local policy_decision
           parse_hold_id "$id"
-          policy_decision=$(mktemp "${TMPDIR:-/tmp}/fm-policy-decision.XXXXXX") \
+          RETIRE_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-policy-decision.XXXXXX") \
             || fail "could not prepare policy decision for $id"
+          trap retire_tmp_cleanup EXIT
+          trap 'retire_tmp_cleanup; exit 1' HUP INT TERM
           {
             printf 'policy=%s\n' "$policy_id"
             cat "$decision_file"
-          } > "$policy_decision" || { rm -f "$policy_decision"; fail "could not prepare policy decision for $id"; }
+          } > "$RETIRE_TMP" || fail "could not prepare policy decision for $id"
           "$SCRIPT_DIR/fm-decision-hold.sh" decline "$HOLD_ORIGIN" "$HOLD_KEY" \
-            --decision-file "$policy_decision" >/dev/null \
-            || { rm -f "$policy_decision"; fail "could not retire active captain hold $id"; }
-          rm -f "$policy_decision"
+            --decision-file "$RETIRE_TMP" >/dev/null \
+            || fail "could not retire active captain hold $id"
+          retire_tmp_cleanup
+          trap - EXIT HUP INT TERM
+          RETIRE_TMP=''
           printf 'retired: %s\n' "$id"
           continue
           ;;

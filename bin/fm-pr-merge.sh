@@ -18,6 +18,19 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
+META_LOCK=
+META_LOCK_HELD=0
+merge_cleanup() {
+  if [ "$META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$META_LOCK" || true
+    META_LOCK_HELD=0
+  fi
+}
+trap merge_cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -125,6 +138,23 @@ reject_requirement_bypasses() {
 
 reject_requirement_bypasses "$@" || exit 1
 
+require_current_head_match() {
+  local current_head
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "error: gh is required to verify the current PR head" >&2
+    return 1
+  fi
+  if ! current_head=$(gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+    || ! fm_pr_head_valid "$current_head"; then
+    echo "error: could not resolve the current PR head" >&2
+    return 1
+  fi
+  if [ "$current_head" != "$EXPECTED_HEAD" ]; then
+    echo "error: PR head changed after verification" >&2
+    return 1
+  fi
+}
+
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ]; then
@@ -143,19 +173,7 @@ if [ -n "$EXPECTED_HEAD" ]; then
     echo "error: verified PR head is invalid" >&2
     exit 1
   fi
-  if ! command -v gh >/dev/null 2>&1; then
-    echo "error: gh is required to verify the current PR head" >&2
-    exit 1
-  fi
-  if ! CURRENT_HEAD=$(gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
-    || ! fm_pr_head_valid "$CURRENT_HEAD"; then
-    echo "error: could not resolve the current PR head" >&2
-    exit 1
-  fi
-  if [ "$CURRENT_HEAD" != "$EXPECTED_HEAD" ]; then
-    echo "error: PR head changed after verification" >&2
-    exit 1
-  fi
+  require_current_head_match || exit 1
 fi
 
 if [ -n "$EXPECTED_URL" ]; then
@@ -178,6 +196,28 @@ if [ -n "$EXPECTED_HEAD" ] && ! grep -qxF "pr_head=$EXPECTED_HEAD" "$META"; then
   exit 1
 fi
 
+META_LOCK=$(fm_meta_lock_path "$META") || {
+  echo "error: could not lock task metadata" >&2
+  exit 1
+}
+fm_lock_acquire_wait "$META_LOCK" || {
+  echo "error: could not lock task metadata" >&2
+  exit 1
+}
+META_LOCK_HELD=1
+if ! fm_pr_metadata_identity_parse "$META" || [ "$FM_PR_META_URL" != "$URL" ]; then
+  echo "error: PR metadata changed while preparing merge" >&2
+  exit 1
+fi
+if [ -n "$EXPECTED_URL" ] \
+  && { [ "$FM_PR_META_URL" != "$EXPECTED_URL" ] || [ "$FM_PR_META_HEAD" != "$EXPECTED_HEAD" ]; }; then
+  echo "error: PR metadata changed after verification" >&2
+  exit 1
+fi
+if [ -n "$EXPECTED_HEAD" ]; then
+  require_current_head_match || exit 1
+fi
+
 merge_args=()
 if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
@@ -187,3 +227,6 @@ normalize_merge_args "$@" || exit 1
 
 gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" \
   "${NORMALIZED_MERGE_ARGS[@]+"${NORMALIZED_MERGE_ARGS[@]}"}"
+fm_lock_release "$META_LOCK" || exit 1
+META_LOCK_HELD=0
+trap - EXIT HUP INT TERM
