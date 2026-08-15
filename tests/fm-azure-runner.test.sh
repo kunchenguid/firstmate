@@ -144,6 +144,7 @@ assert "If-Match=" in host and "runner-cost-reservation" in host
 assert 'command_env.setdefault("FM_HOME", str(ROOT))' in host
 assert 'command_env["FM_HOME"] = str(ROOT)' not in host
 assert 'str(Path(command_env["FM_HOME"]) / "state" / "azure-workers")' in host
+assert host.count('item.get("cleanup-verified-at") == "none"') == 2
 assert 'binding_keys = ("remote", "source_ref", "source_head", "source_ancestors")' in host
 assert host.count('expected.get(key) != proof_identity[key]') == 1
 assert '"default_head": default_head,' in host

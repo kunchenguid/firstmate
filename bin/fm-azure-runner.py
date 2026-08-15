@@ -2351,12 +2351,21 @@ def reserve_budget_management(env, state, lease, limits, admitted_cost=None):
             return admitted_cost
         return budget_gate(
             env, limits,
+            # Stamped reservations are retained 72h for audit only; counting
+            # them as live exposure saturates the ceiling after a long
+            # campaign day. Only unstamped reservations are outstanding,
+            # matching the commissioning gate's semantics.
             outstanding_reservations=sum(
-                item["amount_usd"] for item in reservations if item["id"] != existing[0]["id"]
+                item["amount_usd"] for item in reservations
+                if item["id"] != existing[0]["id"]
+                and item.get("cleanup-verified-at") == "none"
             ),
             parent_managed=bool(state["request"].get("capacity_parent")),
         )
-    outstanding = sum(item["amount_usd"] for item in reservations)
+    outstanding = sum(
+        item["amount_usd"] for item in reservations
+        if item.get("cleanup-verified-at") == "none"
+    )
     if admitted_cost is not None:
         cost = admitted_cost
     else:
