@@ -43,6 +43,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-backend.sh
+# shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 
 MODE=report
@@ -103,6 +104,27 @@ is_claimed() {
   return 1
 }
 
+fm_herdr_orphan_process_age() {
+  local pid=$1 lstart now start_time
+  lstart=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | awk '{$1=$1; print}')
+  [ -n "$lstart" ] || return 1
+  now=$(date "+%s")
+  if date --version >/dev/null 2>&1; then
+    start_time=$(date -d "$lstart" "+%s" 2>/dev/null) || return 1
+  else
+    start_time=$(date -j -f "%a %b %d %T %Y" "$lstart" "+%s" 2>/dev/null) || return 1
+  fi
+  echo "$((now - start_time))"
+}
+
+OUR_OWN_LABEL=""
+if [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ]; then
+  my_id=$(cat "$FM_HOME/.fm-secondmate-home" 2>/dev/null || true)
+  if [ -n "$my_id" ]; then
+    OUR_OWN_LABEL="fm-$my_id"
+  fi
+fi
+
 # List all tabs in this home's workspace that have fm-<id> labels.
 TABS_JSON=$(fm_backend_herdr_cli "$SESSION" tab list --workspace "$HOME_WORKSPACE_ID" 2>/dev/null) || {
   echo "HERDR_ORPHAN_REAPER: could not list tabs in workspace $HOME_WORKSPACE_ID"
@@ -129,6 +151,13 @@ while IFS=$'\t' read -r tab_id label; do
     continue
   fi
 
+  # Safety check 1.5: is this pane THIS home's own supervisor pane?
+  if [ -n "$OUR_OWN_LABEL" ] && [ "$label" = "$OUR_OWN_LABEL" ]; then
+    echo "HERDR_ORPHAN_REAPER: SKIP $pane_id (tab $label) - this home's own supervisor pane"
+    refused_count=$((refused_count + 1))
+    continue
+  fi
+
   # Safety check 2: does this pane have a live agent?
   agent_status=$(fm_backend_herdr_agent_status_raw "$SESSION" "$pane_id")
   case "$agent_status" in
@@ -138,6 +167,24 @@ while IFS=$'\t' read -r tab_id label; do
       continue
       ;;
   esac
+
+  # Safety check 3: is this pane too young?
+  # The live-agent guard loses a startup race: between a pane being created and its agent
+  # registering, the pane looks abandoned. We add a 15-second age floor to provide generous
+  # headroom over the typical 1-3 seconds pane creation and startup actually costs.
+  # We fail closed: if we cannot determine the process age, we refuse to close the pane.
+  info=$(fm_backend_herdr_cli "$SESSION" pane process-info --pane "$pane_id" 2>/dev/null || true)
+  shell_pid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' 2>/dev/null || true)
+  age_sec=
+  if [ -n "$shell_pid" ]; then
+    age_sec=$(fm_herdr_orphan_process_age "$shell_pid") || age_sec=
+  fi
+  if [ -z "$age_sec" ] || [ "$age_sec" -lt 15 ]; then
+    echo "HERDR_ORPHAN_REAPER: SKIP $pane_id (tab $label) - pane is too young (${age_sec:-unknown}s < 15s)"
+    refused_count=$((refused_count + 1))
+    continue
+  fi
 
   # This pane is an orphan: fm-<id> label, unclaimed, no live agent.
   orphan_count=$((orphan_count + 1))
