@@ -1995,9 +1995,9 @@ test_spawn_relaunch_preserves_a_postcreate_herdr_conflict_claim() {
   pass "fm-spawn --relaunch: a post-create Herdr conflict retains its exact claim"
 }
 
-test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable() {
+test_spawn_relaunch_recovers_herdr_claims_with_spaced_home_paths() {
   local dir out rc before mutations creates_before
-  dir=$(new_case herdr-postcreate-response hr1)
+  dir=$(new_case "herdr postcreate response" hr1)
   add_herdr_missing_pane_task "$dir" hr1
   make_herdr_missing_pane_stub "$dir" postcreate-response-mismatch
   before="$dir/meta-before"
@@ -2029,7 +2029,7 @@ test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable() {
     || fail "the unbound create response recovery must finalize its durable claim"
   [ "$(meta_field "$dir" hr1 herdr_pane_id)" = w1:p3 ] \
     || fail "the unbound create response recovery did not publish its verified replacement pane"
-  pass "fm-spawn --relaunch: unbound Herdr creation reconciles exact recovery"
+  pass "fm-spawn --relaunch: claim recovery preserves spaced home paths"
 }
 
 test_spawn_relaunch_preserves_unbound_claim_for_live_agent() {
@@ -2338,7 +2338,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything
 test_control_relaunch_preflights_missing_herdr_pane_before_recording_note
 test_spawn_relaunch_preserves_a_postcreate_herdr_conflict_claim
-test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable
+test_spawn_relaunch_recovers_herdr_claims_with_spaced_home_paths
 test_spawn_relaunch_preserves_unbound_claim_for_live_agent
 test_spawn_relaunch_handles_postcreate_herdr_read_failures
 test_spawn_relaunch_rechecks_recorded_herdr_identity_before_create

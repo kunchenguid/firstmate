@@ -2021,7 +2021,7 @@ fm_backend_herdr_relaunch_claim_create() {  # <state> <task-id> <session> <works
     return 1
   fi
   rm -f "$tmp"
-  printf '%s %s' "$path" "$claim_label"
+  printf '%s\t%s' "$path" "$claim_label"
 }
 
 fm_backend_herdr_relaunch_claim_snapshot() {  # <path> <task-id>
@@ -2175,7 +2175,7 @@ fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <
   if [ "$mode" = recover ] && [ "$claim_bound" = 0 ]; then
     fm_backend_herdr_relaunch_claim_bind_endpoint "$path" "$id" "$tab" "$pane" || return 1
   fi
-  printf '%s %s %s %s' "$tab" "$pane" "$path" "$journal_state"
+  printf '%s\t%s\t%s\t%s' "$tab" "$pane" "$path" "$journal_state"
   return 3
 }
 
@@ -2247,7 +2247,7 @@ EOF
       echo "error: herdr missing-pane relaunch has an unresolved or unreadable replacement claim for $strict_id" >&2
       return 1
     }
-    read -r strict_claim_path strict_claim_label <<EOF
+    IFS=$'\t' read -r strict_claim_path strict_claim_label <<EOF
 $strict_claim
 EOF
     if [ -n "$strict_old_tab" ] && [ -n "$strict_old_pane" ] \
@@ -2426,7 +2426,7 @@ EOF
     return 1
   fi
   if [ "$strict_mode" = strict ]; then
-    printf '%s %s %s' "$tab_id" "$pane_id" "$strict_claim_path"
+    printf '%s\t%s\t%s' "$tab_id" "$pane_id" "$strict_claim_path"
   else
     printf '%s %s' "$tab_id" "$pane_id"
   fi
