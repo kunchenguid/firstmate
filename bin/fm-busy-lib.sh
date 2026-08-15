@@ -139,7 +139,7 @@ fm_busy_codex_appserver_observable() {
 fm_busy_codex_hooks_verified() {
   local version major minor patch
   version=$(codex --version 2>/dev/null) || return 1
-  if [[ ! "$version" =~ ^codex-cli[[:space:]]+([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+  if [[ ! "$version" =~ ^codex-cli[[:space:]]+(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
     return 1
   fi
   major=${BASH_REMATCH[1]}

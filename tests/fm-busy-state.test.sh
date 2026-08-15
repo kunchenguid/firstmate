@@ -269,11 +269,20 @@ test_codex_version_gate_and_deadline() {
   [ -z "$(fm_busy_sources_for_harness codex)" ] \
     || fail "codex must trust no semantic source until one is verified"
 
+  FM_FAKE_CODEX_VERSION='codex-cli 00.147.0'
+  fm_busy_codex_hooks_verified \
+    && fail "a Codex version with a non-canonical major component must stay unverified"
+
+  FM_FAKE_CODEX_VERSION='codex-cli 0.147.00'
+  fm_busy_codex_hooks_verified \
+    && fail "a Codex version with a non-canonical patch component must stay unverified"
+
   FM_FAKE_CODEX_VERSION='codex-cli 0.147.0-beta.1'
   out=$(fm_busy_classify tmux w1 codex t1 "$state")
   [ "$out" = "unknown codex-unverified" ] || fail "unexpected version syntax must stay unverified, got '$out'"
 
   FM_FAKE_CODEX_VERSION='codex-cli 0.147.0'
+  fm_busy_codex_hooks_verified || fail "canonical Codex 0.147.0 must pass the version gate"
   out=$(fm_busy_classify tmux w1 codex t1 "$state")
   [ "$out" = "unknown codex-deadline-missing" ] \
     || fail "a verified Codex busy record without a deadline must surface unknown, got '$out'"
