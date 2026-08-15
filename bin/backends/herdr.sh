@@ -2166,11 +2166,11 @@ fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <
     "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_LABEL"|"$label") ;;
     *) return 1 ;;
   esac
+  agent_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+  [ "$agent_state" = no-agent ] || return 1
   if [ "$claim_bound" = 0 ]; then
     fm_backend_herdr_relaunch_claim_bind_endpoint "$path" "$id" "$tab" "$pane" || return 1
   fi
-  agent_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
-  [ "$agent_state" = no-agent ] || return 1
   if [ "$journal_state" = new ]; then
     fm_backend_herdr_projection_journal_replace_endpoint \
       "$journal" "$id" "$tab" "$pane" "$old_tab" "$old_pane" || return 1

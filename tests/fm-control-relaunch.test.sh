@@ -255,6 +255,10 @@ case "${args[0]:-} ${args[1]:-}" in
     fi
     ;;
   'agent get')
+    if [ "${args[2]:-}" = w1:p3 ] && [ "$case_name" = unbound-claim-live-agent ]; then
+      printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}'
+      exit 0
+    fi
     if [ "${args[2]:-}" = w1:p3 ] && [ "$case_name" = postcreate-conflicting-pane ]; then
       printf '%s\n' '{"error":{"code":"agent_not_found"}}'
       exit 0
@@ -2008,6 +2012,33 @@ test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable() {
   pass "fm-spawn --relaunch: unbound Herdr creation preserves exact recovery"
 }
 
+test_spawn_relaunch_preserves_unbound_claim_for_live_agent() {
+  local dir out rc before claim_before mutations creates_before
+  dir=$(new_case herdr-unbound-claim-live-agent hr1)
+  add_herdr_missing_pane_task "$dir" hr1
+  make_herdr_missing_pane_stub "$dir" postcreate-response-mismatch
+  before="$dir/meta-before"
+  cp "$dir/home/state/hr1.meta" "$before"
+  out=$(FM_FAKE_HERDR_CASE=postcreate-response-mismatch run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "an unbound Herdr claim setup must refuse"
+  claim_before="$dir/claim-before"
+  cp "$dir/home/state/.hr1.herdr-relaunch-claim" "$claim_before"
+  mutations=$(cat "$dir/fake/herdr-mutations")
+  creates_before=$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')
+  out=$(FM_FAKE_HERDR_CASE=unbound-claim-live-agent run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a live agent in an unbound Herdr claim must refuse"
+  cmp -s "$before" "$dir/home/state/hr1.meta" \
+    || fail "a live agent in an unbound Herdr claim changed task metadata"
+  cmp -s "$claim_before" "$dir/home/state/.hr1.herdr-relaunch-claim" \
+    || fail "a live agent in an unbound Herdr claim changed the durable claim"
+  mutations=$(cat "$dir/fake/herdr-mutations")
+  [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = "$creates_before" ] \
+    || fail "a live agent in an unbound Herdr claim created another endpoint"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "a live agent in an unbound Herdr claim delivered a worker launch"
+  pass "fm-spawn --relaunch: live agent preserves unbound Herdr claim"
+}
+
 test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
   local case_name dir out rc before claim_before mutations creates_before
   for case_name in postcreate-tab-unreadable postcreate-pane-unreadable postcreate-tabs-unavailable postcreate-tabs-malformed postbind-tabs-unavailable postbind-tabs-malformed postcreate-zero-match postclose-tabs-unavailable postclose-tabs-malformed final-tabs-unavailable final-tabs-malformed final-tabs-stale; do
@@ -2245,6 +2276,7 @@ test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything
 test_control_relaunch_preflights_missing_herdr_pane_before_recording_note
 test_spawn_relaunch_reclaims_a_postcreate_herdr_conflict
 test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable
+test_spawn_relaunch_preserves_unbound_claim_for_live_agent
 test_spawn_relaunch_handles_postcreate_herdr_read_failures
 test_spawn_relaunch_rechecks_recorded_herdr_identity_before_create
 test_spawn_relaunch_handles_definite_and_ambiguous_herdr_create_failures
