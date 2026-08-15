@@ -8,6 +8,8 @@ TEST="$ROOT/tests/fm-sovereign-ledger-redundancy.test.sh"
 EVIDENCE=
 MODE=mutation
 EVIDENCE_FIXTURE=
+EVIDENCE_SWAP_PATH=
+EVIDENCE_SWAP_TARGET=
 if [ "${1:-}" = --self-test-evidence-fixture ]; then
   [ "$#" -eq 2 ] || { printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   MODE=fixture
@@ -37,18 +39,31 @@ evidence_refuse() {
 }
 
 canonical_evidence_dir() {
-  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  local path=$1 permit_prechecked_link=${2:-no}
+  [ -d "$path" ] || return 1
+  [ "$permit_prechecked_link" = yes ] || [ ! -L "$path" ] || return 1
   (
-    cd -- "$1" 2>/dev/null
+    cd -- "$path" 2>/dev/null
     pwd -P
   )
+}
+
+evidence_after_component_precheck() {
+  local candidate=$1
+  if [ -n "$EVIDENCE_SWAP_PATH" ] && [ "$candidate" = "$EVIDENCE_SWAP_PATH" ]; then
+    rmdir -- "$candidate" || return 1
+    ln -s "$EVIDENCE_SWAP_TARGET" "$candidate" || return 1
+    EVIDENCE_SWAP_PATH=
+  fi
 }
 
 evidence_validate_destination() {
   local scope_input=$1 relative=$2 scope cursor remaining component resolved leaf
   case "$relative" in /*) evidence_refuse "absolute evidence destination is forbidden: $relative"; return 1 ;; esac
+  [ ! -L "$scope_input" ] \
+    || { evidence_refuse "evidence scope is symlinked: $scope_input"; return 1; }
   scope=$(canonical_evidence_dir "$scope_input") \
-    || { evidence_refuse "evidence scope is unresolved or symlinked: $scope_input"; return 1; }
+    || { evidence_refuse "evidence scope is unresolved: $scope_input"; return 1; }
   cursor=$scope
   remaining=$relative
   while [[ "$remaining" == */* ]]; do
@@ -57,7 +72,9 @@ evidence_validate_destination() {
     case "$component" in ''|.|..) evidence_refuse "unsafe evidence destination component: $relative"; return 1 ;; esac
     [ ! -L "$cursor/$component" ] \
       || { evidence_refuse "evidence destination has a symlinked parent: $relative"; return 1; }
-    resolved=$(canonical_evidence_dir "$cursor/$component") \
+    evidence_after_component_precheck "$cursor/$component" \
+      || { evidence_refuse "evidence destination precheck transition failed: $relative"; return 1; }
+    resolved=$(canonical_evidence_dir "$cursor/$component" yes) \
       || { evidence_refuse "evidence destination parent is unresolved: $relative"; return 1; }
     case "$resolved/" in "$scope/"*) ;; *) evidence_refuse "evidence destination resolves outside its scope: $relative"; return 1 ;; esac
     cursor=$resolved
@@ -126,14 +143,14 @@ evidence_fixture_description() {
 }
 
 run_evidence_fixture() {
-  local id=$1 lab scope safe fake_data fake_state outside source relative forbidden
+  local id=$1 lab scope safe fake_data fake_state outside source relative forbidden output
   evidence_fixture_description "$id" >/dev/null || return 2
   lab="$TMP/evidence-containment/$id"
   scope="$lab/scope"
   safe="$scope/safe"
   fake_data="$lab/fake-data"
   fake_state="$lab/fake-state"
-  outside="$lab/outside"
+  outside="$lab/fake-outside"
   mkdir -p "$safe/inside-parent" "$fake_data" "$fake_state" "$outside"
   source="$lab/evidence.md"
   printf 'bounded evidence\n' > "$source"
@@ -154,8 +171,10 @@ run_evidence_fixture() {
       ln -s "$fake_state" "$scope/state-link"
       relative='state-link/evidence.md'; forbidden="$fake_state/evidence.md" ;;
     resolved-outside)
-      ln -s "$outside" "$safe/outside-link"
-      relative='safe/outside-link/evidence.md'; forbidden="$outside/evidence.md" ;;
+      mkdir "$safe/canonical-boundary"
+      EVIDENCE_SWAP_PATH=$(canonical_evidence_dir "$safe/canonical-boundary")
+      EVIDENCE_SWAP_TARGET=$outside
+      relative='safe/canonical-boundary/evidence.md'; forbidden="$safe/canonical-boundary/evidence.md" ;;
     hard-link)
       printf 'hard-link sentinel\n' > "$fake_data/hard-target.md"
       ln "$fake_data/hard-target.md" "$safe/hard-link.md"
@@ -174,6 +193,16 @@ run_evidence_fixture() {
         && cmp -s "$source" "$safe/legitimate.md"
       return ;;
   esac
+  if [ "$id" = resolved-outside ]; then
+    output="$lab/refusal.out"
+    publish_evidence "$scope" "$relative" "$source" > "$output" 2>&1 && return 1
+    case "$(cat "$output")" in
+      *'evidence destination resolves outside its scope'*) ;;
+      *) return 1 ;;
+    esac
+    [ ! -e "$forbidden" ] && [ ! -L "$forbidden" ]
+    return
+  fi
   publish_evidence "$scope" "$relative" "$source" >/dev/null 2>&1 && return 1
   [ ! -e "$forbidden" ] && [ ! -L "$forbidden" ]
 }
@@ -403,10 +432,13 @@ EVIDENCE_STAGE="$TMP/evidence.md"
     printf 'CONTAINMENT FIXTURES passed=10 failed=0\n'
     printf 'PUBLISH MUTANT P001 anchor=resolved-path-validator-call substitutions=1 killed=5 survived=4 void=0\n'
     printf 'PUBLISH MUTANT P002 anchor=exclusive-create-flag substitutions=1 killed=0 survived=9 void=0\n'
-    printf 'PUBLISH MATRIX SUMMARY mechanisms=3 written_boundaries=2 natural_boundaries=1 mutants=2 fixtures=9 cells=18 killed=5 survived=13 void=0\n'
+    printf 'PUBLISH MUTANT P003 anchor=symlink-component-precheck substitutions=1 killed=1 survived=8 void=0\n'
+    printf 'PUBLISH MUTANT P004 anchor=canonical-structural-containment substitutions=1 killed=1 survived=8 void=0\n'
+    printf 'PUBLISH MATRIX SUMMARY mechanisms=5 written_boundaries=4 natural_boundaries=1 mutants=4 fixtures=9 cells=36 killed=7 survived=29 void=0\n'
     printf '```\n\n'
-    printf 'The three independent mechanisms are the resolved-path validator, exclusive `O_EXCL` creation, and the natural unresolved-parent failure from `sysopen`.\n'
-    printf 'The natural boundary has no written clause to substitute, so the written-mutant denominator is two while the enforcing-mechanism denominator is three.\n'
+    printf 'The five measured mechanisms are the resolved-path validator call, exclusive `O_EXCL` creation, the symlink-component precheck, canonical structural containment, and the natural unresolved-parent failure from `sysopen`.\n'
+    printf 'The natural boundary has no written clause to substitute, so the written-mutant denominator is four while the measured enforcing-boundary denominator is five.\n'
+    printf 'The `resolved-outside` fixture passes the component precheck as a real directory, swaps that directory to a scoped fake-outside link, and requires the canonical structural-containment refusal.\n'
     printf 'A survived cell means the named different boundary still refused that fixture; zero substitutions make every cell for that mutant void.\n'
     printf 'The symlinked leaf, hard-link, and existing-leaf fixtures are defended only by `O_EXCL` when the validator call is neutralized.\n\n'
     printf '| Mutant | Stable exact boundary anchor | Substitutions | Fixture | Outcome | Different surviving boundary |\n'
@@ -429,6 +461,24 @@ EVIDENCE_STAGE="$TMP/evidence.md"
     printf '| `P002` | `exclusive-create-flag` | 1 | `hard-link` | SURVIVED | `resolved-path-validator` |\n'
     printf '| `P002` | `exclusive-create-flag` | 1 | `unresolved-parent` | SURVIVED | `resolved-path-validator` |\n'
     printf '| `P002` | `exclusive-create-flag` | 1 | `existing` | SURVIVED | `resolved-path-validator` |\n'
+    printf '| `P003` | `symlink-component-precheck` | 1 | `absolute` | SURVIVED | `absolute-path-validator` |\n'
+    printf '| `P003` | `symlink-component-precheck` | 1 | `traversal` | SURVIVED | `path-component-validator` |\n'
+    printf '| `P003` | `symlink-component-precheck` | 1 | `symlink-leaf-data` | SURVIVED | `symlink-leaf-validator` |\n'
+    printf '| `P003` | `symlink-component-precheck` | 1 | `symlink-parent` | KILLED | - |\n'
+    printf '| `P003` | `symlink-component-precheck` | 1 | `symlink-parent-state` | SURVIVED | `canonical-structural-containment` |\n'
+    printf '| `P003` | `symlink-component-precheck` | 1 | `resolved-outside` | SURVIVED | `canonical-structural-containment` |\n'
+    printf '| `P003` | `symlink-component-precheck` | 1 | `hard-link` | SURVIVED | `existing-leaf-validator` |\n'
+    printf '| `P003` | `symlink-component-precheck` | 1 | `unresolved-parent` | SURVIVED | `canonical-parent-resolution` |\n'
+    printf '| `P003` | `symlink-component-precheck` | 1 | `existing` | SURVIVED | `existing-leaf-validator` |\n'
+    printf '| `P004` | `canonical-structural-containment` | 1 | `absolute` | SURVIVED | `absolute-path-validator` |\n'
+    printf '| `P004` | `canonical-structural-containment` | 1 | `traversal` | SURVIVED | `path-component-validator` |\n'
+    printf '| `P004` | `canonical-structural-containment` | 1 | `symlink-leaf-data` | SURVIVED | `symlink-leaf-validator` |\n'
+    printf '| `P004` | `canonical-structural-containment` | 1 | `symlink-parent` | SURVIVED | `symlink-component-precheck` |\n'
+    printf '| `P004` | `canonical-structural-containment` | 1 | `symlink-parent-state` | SURVIVED | `symlink-component-precheck` |\n'
+    printf '| `P004` | `canonical-structural-containment` | 1 | `resolved-outside` | KILLED | - |\n'
+    printf '| `P004` | `canonical-structural-containment` | 1 | `hard-link` | SURVIVED | `existing-leaf-validator` |\n'
+    printf '| `P004` | `canonical-structural-containment` | 1 | `unresolved-parent` | SURVIVED | `canonical-parent-resolution` |\n'
+    printf '| `P004` | `canonical-structural-containment` | 1 | `existing` | SURVIVED | `existing-leaf-validator` |\n'
 } > "$EVIDENCE_STAGE"
 
 printf 'MUTATION SUMMARY killed=%s survived=%s void=%s denominator=%s\n' "$killed" "$survived" "$void" "$denominator"

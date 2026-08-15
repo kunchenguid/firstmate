@@ -23,6 +23,20 @@ surviving_defender() {
       printf '%s\n' natural-unresolved-parent ;;
     P002:*)
       printf '%s\n' resolved-path-validator ;;
+    P003:absolute|P004:absolute)
+      printf '%s\n' absolute-path-validator ;;
+    P003:traversal|P004:traversal)
+      printf '%s\n' path-component-validator ;;
+    P003:symlink-leaf-data|P004:symlink-leaf-data)
+      printf '%s\n' symlink-leaf-validator ;;
+    P003:symlink-parent-state|P003:resolved-outside)
+      printf '%s\n' canonical-structural-containment ;;
+    P004:symlink-parent|P004:symlink-parent-state)
+      printf '%s\n' symlink-component-precheck ;;
+    P003:hard-link|P003:existing|P004:hard-link|P004:existing)
+      printf '%s\n' existing-leaf-validator ;;
+    P003:unresolved-parent|P004:unresolved-parent)
+      printf '%s\n' canonical-parent-resolution ;;
     *)
       printf '%s\n' - ;;
   esac
@@ -85,11 +99,17 @@ publish_mutant P001 resolved-path-validator-call \
 publish_mutant P002 exclusive-create-flag \
   'O_WRONLY | O_CREAT | O_EXCL' \
   'O_WRONLY | O_CREAT'
+publish_mutant P003 symlink-component-precheck \
+  '[ ! -L "$cursor/$component" ]' \
+  'true'
+publish_mutant P004 canonical-structural-containment \
+  'case "$resolved/" in "$scope/"*) ;; *) evidence_refuse "evidence destination resolves outside its scope: $relative"; return 1 ;; esac' \
+  ':'
 "$SUBJECT" --self-test-evidence-containment >/dev/null
-printf 'PUBLISH MATRIX SUMMARY mechanisms=3 written_boundaries=2 natural_boundaries=1 mutants=%s fixtures=9 cells=%s killed=%s survived=%s void=%s\n' \
+printf 'PUBLISH MATRIX SUMMARY mechanisms=5 written_boundaries=4 natural_boundaries=1 mutants=%s fixtures=9 cells=%s killed=%s survived=%s void=%s\n' \
   "$mutants" "$cells" "$killed" "$survived" "$void"
-[ "$mutants" -eq 2 ]
-[ "$cells" -eq 18 ]
-[ "$killed" -eq 5 ]
-[ "$survived" -eq 13 ]
+[ "$mutants" -eq 4 ]
+[ "$cells" -eq 36 ]
+[ "$killed" -eq 7 ]
+[ "$survived" -eq 29 ]
 [ "$void" -eq 0 ]
