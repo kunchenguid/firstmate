@@ -2524,10 +2524,57 @@ fm_backend_herdr_target_ready() {  # <target>
 # `.result.pane.foreground_cwd` tracks the ACTUALLY RUNNING foreground
 # process's cwd instead, which is what changes when an acquisition command enters
 # its worktree - confirmed live against a real Treehouse acquisition.
-fm_backend_herdr_current_path() {  # <target>
+#
+# That read answers "where is the live foreground process", which is only the
+# question worth asking while an acquisition command is still holding a
+# worktree subshell open. A trusted project-local acquisition command
+# (docs/configuration.md "Project worktree acquisition") has the opposite
+# shape: `<creator> <slug> && cd <path>/<slug>` runs its `cd` in the pane's OWN
+# top-level shell and then EXITS, so by the time the acquisition reports
+# completion there is no foreground process left to read and `cwd` is still
+# frozen at pane-creation time. That provider therefore reads the shell's own
+# cwd through the active marker probe below instead - the same workaround
+# zellij and cmux already use for their frozen cwd fields.
+fm_backend_herdr_current_path() {  # <target> [worktree-provider]
+  if [ "${2:-}" = project-command ]; then
+    fm_backend_herdr_probe_current_path "$1"
+    return 0
+  fi
   fm_backend_herdr_target_ready "$1" || return 0
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+}
+
+# fm_backend_herdr_probe_current_path: the pane's own top-level shell cwd, or
+# empty on any error, read by active probe rather than any pane field. Mirrors
+# fm_backend_zellij_current_path / fm_backend_cmux_current_path verbatim in
+# spirit: print `$PWD` between unique markers (atomically submitted, mirroring
+# send_text_line), briefly settle, then capture and read only that marked
+# block, joining wrapped path lines. Empty output means "no answer yet", which
+# fm-spawn.sh's poll treats as not-settled, so a missed probe costs one more
+# poll rather than a wrong worktree. Scoped to that worktree-discovery poll.
+fm_backend_herdr_probe_current_path() {  # <target>
+  local target=$1 out line marker_begin="__FM_HERDR_CWD_BEGIN__" marker_end="__FM_HERDR_CWD_END__" in_block=0 chunk="" last=""
+  fm_backend_herdr_target_ready "$target" || return 0
+  fm_backend_herdr_send_text_line "$target" "printf '%s\n' '$marker_begin'; pwd; printf '%s\n' '$marker_end'" || return 0
+  sleep 0.3
+  out=$(fm_backend_herdr_capture "$target" 200) || return 0
+  while IFS= read -r line; do
+    if [ "$line" = "$marker_begin" ]; then
+      in_block=1
+      chunk=""
+      continue
+    fi
+    if [ "$line" = "$marker_end" ]; then
+      case "$chunk" in /*) last=$chunk ;; esac
+      in_block=0
+      continue
+    fi
+    [ "$in_block" -eq 1 ] && chunk="$chunk$line"
+  done <<EOF
+$out
+EOF
+  printf '%s' "$last"
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,

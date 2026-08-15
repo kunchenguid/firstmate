@@ -28,6 +28,11 @@ A tmux pane nested inside Herdr resolves to tmux because the innermost multiplex
 An auto-detected Herdr spawn prints an opt-out notice.
 
 Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
+
+`pane get` reports `foreground_cwd` for the live foreground process, which is what Treehouse worktree discovery reads, while `cwd` stays frozen at pane creation.
+A project-local acquisition command runs its `cd` in the pane's own top-level shell and then exits, leaving no foreground process to read.
+Worktree discovery for that provider therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines, exactly as the Zellij and cmux backends already do.
+This active probe is scoped to spawn-time worktree discovery and is not advertised as a general live-cwd API.
 No separate first-run provisioning is required.
 
 The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.

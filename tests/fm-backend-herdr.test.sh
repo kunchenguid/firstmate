@@ -2939,6 +2939,51 @@ test_current_path_reads_cwd() {
   pass "fm_backend_herdr_current_path: reads pane foreground_cwd (the live running process), not the frozen creation-time cwd"
 }
 
+test_current_path_probes_for_a_project_command_acquisition() {
+  local dir log resp fb out
+  # A trusted project-local acquisition command runs `<creator> <slug> && cd
+  # <path>/<slug>` in the pane's OWN top-level shell and then exits, so once it
+  # reports completion there is no foreground process left for foreground_cwd
+  # to describe and `cwd` is still frozen at pane-creation time. Discovery for
+  # that provider must instead read the shell's own cwd back from a marked
+  # probe, exactly as zellij and cmux do.
+  dir="$TMP_ROOT/cwd-project-command"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: pane run (the marked probe; silent on success)
+  # 2: pane read (the capture the marked cwd is read back from)
+  printf '%s\n' '/tmp/project' \
+    '__FM_HERDR_CWD_BEGIN__' \
+    '/tmp/prepared/task-slug' \
+    '__FM_HERDR_CWD_END__' \
+    '/tmp/prepared/task-slug $ ' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_path default:w1:p2 project-command' "$ROOT" )
+  [ "$out" = "/tmp/prepared/task-slug" ] \
+    || fail "a project-command acquisition should report the marked probe's cwd, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''run'$'\x1f''w1:p2' \
+    "current_path did not submit the cwd probe into the pane"
+  assert_contains "$(cat "$log")" "__FM_HERDR_CWD_BEGIN__" \
+    "current_path did not send the cwd begin marker"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2' \
+    "current_path did not read the probe back from the pane"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''get'$'\x1f''w1:p2' \
+    "a project-command acquisition must not depend on foreground_cwd after a top-level shell cd"
+  pass "fm_backend_herdr_current_path: a project-command acquisition reads its cwd from an active marked probe, never foreground_cwd"
+}
+
+test_current_path_probe_reports_nothing_without_its_marker() {
+  local dir log resp fb out
+  # No marked block yet (the probe has not rendered) must read as "no answer
+  # yet" so fm-spawn.sh's poll keeps waiting, never as some other pane line.
+  dir="$TMP_ROOT/cwd-project-command-unmarked"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '/tmp/project' '/tmp/project $ ' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_current_path default:w1:p2 project-command' "$ROOT" )
+  [ -z "$out" ] || fail "an unmarked capture must report no path at all, got '$out'"
+  pass "fm_backend_herdr_current_path: an unrendered probe reports no path instead of an unmarked pane line"
+}
+
 # --- busy_state (semantic agent state) ---------------------------------------
 
 test_busy_state_working_maps_to_busy() {
@@ -4425,6 +4470,8 @@ test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
+test_current_path_probes_for_a_project_command_acquisition
+test_current_path_probe_reports_nothing_without_its_marker
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
