@@ -2252,7 +2252,13 @@ EOF
 $strict_claim
 EOF
   fi
-  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "${strict_claim_label:-$label}" --no-focus 2>/dev/null) || return 1
+  if ! out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "${strict_claim_label:-$label}" --no-focus 2>/dev/null); then
+    if [ "$strict_mode" = strict ] \
+       && printf '%s' "$out" | jq -e '.error.code == "server_not_running"' >/dev/null 2>&1; then
+      fm_backend_herdr_relaunch_claim_remove "$strict_claim_path" "$strict_id" || return 1
+    fi
+    return 1
+  fi
   if [ "$strict_mode" = strict ]; then
     list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
       return 1

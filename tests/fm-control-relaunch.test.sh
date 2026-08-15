@@ -153,6 +153,7 @@ make_herdr_missing_pane_stub() {  # <case-dir> <case>
 #!/usr/bin/env bash
 set -u
 dir=$FM_FAKE_DIR
+case_root=$(cd "$dir/.." && pwd -P)
 case_name=$FM_FAKE_HERDR_CASE
 args=("$@")
 last=$(( ${#args[@]} - 1 ))
@@ -167,6 +168,13 @@ created_tab_label=$created_label
 case "${args[0]:-} ${args[1]:-}" in
   'session list')
     printf '{"sessions":[{"name":"hses","running":true,"socket_path":"%s/herdr.sock"}]}\n' "$dir"
+    exit 0
+    ;;
+  'status --json')
+    printf '%s\n' '{"server":{"running":true}}'
+    exit 0
+    ;;
+  'server ')
     exit 0
     ;;
   'tab get')
@@ -196,7 +204,7 @@ case "${args[0]:-} ${args[1]:-}" in
       if [ -e "$dir/herdr-new-pane-closed" ]; then
         printf '%s\n' '{"error":{"code":"pane_not_found"}}'
       else
-        printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p3","tab_id":"w1:t3","workspace_id":"w1"}}}'
+        printf '{"result":{"pane":{"pane_id":"w1:p3","tab_id":"w1:t3","workspace_id":"w1","foreground_cwd":"%s"}}}\n' "$case_root/wt"
       fi
       exit 0
     fi
@@ -241,7 +249,7 @@ case "${args[0]:-} ${args[1]:-}" in
       if [ -e "$dir/herdr-new-pane-closed" ]; then
         printf '%s\n' '{"error":{"code":"pane_not_found"}}'
       else
-        printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p3","tab_id":"w1:t3","workspace_id":"w1"}}}'
+        printf '{"result":{"pane":{"pane_id":"w1:p3","tab_id":"w1:t3","workspace_id":"w1","foreground_cwd":"%s"}}}\n' "$case_root/wt"
       fi
       exit 0
     fi
@@ -349,6 +357,13 @@ case "${args[0]:-} ${args[1]:-}" in
         printf '%s\n' '{"result":{"tabs":[]}}'
         exit 0
         ;;
+      postcreate-ambiguous-create-failure)
+        if [ -n "$created_label" ]; then
+          exit 1
+        fi
+        printf '%s\n' '{"result":{"tabs":[]}}'
+        exit 0
+        ;;
       postclose-tabs-unavailable|postclose-tabs-malformed)
         reads_file="$dir/herdr-tab-list-reads"
         reads=0
@@ -453,6 +468,10 @@ case "${args[0]:-} ${args[1]:-}" in
     exit 0
     ;;
   'tab create')
+    if [ "$case_name" = postcreate-definite-create-failure ]; then
+      printf '%s\n' '{"error":{"code":"server_not_running","message":"no herdr server is running"}}'
+      exit 1
+    fi
     for ((i = 0; i < ${#args[@]}; i++)); do
       [ "${args[$i]}" = --label ] || continue
       printf '%s\n' "${args[$((i + 1))]}" > "$dir/herdr-created-label"
@@ -460,6 +479,11 @@ case "${args[0]:-} ${args[1]:-}" in
       created_tab_label=$created_label
       break
     done
+    if [ "$case_name" = postcreate-ambiguous-create-failure ]; then
+      printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
+      printf '%s\n' '{"error":{"code":"transport_unavailable","message":"connection reset"}}'
+      exit 1
+    fi
     if [ "$case_name" = postcreate-conflicting-pane ]; then
       printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
       printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}'
@@ -485,6 +509,10 @@ case "${args[0]:-} ${args[1]:-}" in
     printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
     [ "${args[2]:-}" = w1:t3 ] || exit 1
     : > "$dir/herdr-created-renamed"
+    exit 0
+    ;;
+  'pane run'|'pane send-text'|'pane send-keys')
+    printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
     exit 0
     ;;
   'tab close'|'pane close')
@@ -1974,6 +2002,65 @@ test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
   pass "fm-spawn --relaunch: post-create failures recover exact claims without duplicates"
 }
 
+test_spawn_relaunch_handles_definite_and_ambiguous_herdr_create_failures() {
+  local dir out rc before claim_before mutations attempts_before
+  dir=$(new_case herdr-definite-create-failure hr1)
+  add_herdr_missing_pane_task "$dir" hr1
+  make_herdr_missing_pane_stub "$dir" postcreate-definite-create-failure
+  before="$dir/meta-before"
+  cp "$dir/home/state/hr1.meta" "$before"
+  out=$(FM_FAKE_HERDR_CASE=postcreate-definite-create-failure run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a definite Herdr create failure must refuse"
+  cmp -s "$before" "$dir/home/state/hr1.meta" \
+    || fail "a definite Herdr create failure changed task metadata"
+  [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+    || fail "a definite no-side-effect create failure retained a claim"
+  [ ! -e "$dir/fake/herdr-mutations" ] \
+    || fail "a definite no-side-effect create failure mutated Herdr"
+  out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "a retry after a definite Herdr create failure must succeed"
+  [ "$(meta_field "$dir" hr1 herdr_tab_id)" = w1:t3 ] \
+    || fail "a retry after a definite create failure did not publish the replacement endpoint"
+  mutations=$(cat "$dir/fake/herdr-mutations")
+  [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = 1 ] \
+    || fail "a retry after a definite create failure created more than one endpoint"
+
+  dir=$(new_case herdr-ambiguous-create-failure hr1)
+  add_herdr_missing_pane_task "$dir" hr1
+  make_herdr_missing_pane_stub "$dir" postcreate-ambiguous-create-failure
+  before="$dir/meta-before"
+  cp "$dir/home/state/hr1.meta" "$before"
+  out=$(FM_FAKE_HERDR_CASE=postcreate-ambiguous-create-failure run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "an ambiguous Herdr create failure must refuse"
+  cmp -s "$before" "$dir/home/state/hr1.meta" \
+    || fail "an ambiguous Herdr create failure changed task metadata"
+  [ -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+    || fail "an ambiguous Herdr create failure did not retain its recovery claim"
+  claim_before="$dir/claim-before"
+  cp "$dir/home/state/.hr1.herdr-relaunch-claim" "$claim_before"
+  mutations=$(cat "$dir/fake/herdr-mutations")
+  attempts_before=$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')
+  out=$(FM_FAKE_HERDR_CASE=postcreate-ambiguous-create-failure run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "an unresolved ambiguous Herdr create failure must block retry launch"
+  cmp -s "$before" "$dir/home/state/hr1.meta" \
+    || fail "an unresolved ambiguous create failure changed task metadata"
+  cmp -s "$claim_before" "$dir/home/state/.hr1.herdr-relaunch-claim" \
+    || fail "an unresolved ambiguous create failure changed its recovery claim"
+  mutations=$(cat "$dir/fake/herdr-mutations")
+  [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = "$attempts_before" ] \
+    || fail "an unresolved ambiguous create failure launched a second endpoint"
+  out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a reconciled ambiguous Herdr create failure should require an explicit retry"
+  assert_contains "$out" "reclaimed an interrupted replacement" \
+    "the ambiguous create recovery should reconcile its exact claimed endpoint"
+  mutations=$(cat "$dir/fake/herdr-mutations")
+  [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = "$attempts_before" ] \
+    || fail "ambiguous create reconciliation launched another endpoint"
+  [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+    || fail "ambiguous create reconciliation did not clear its recovered claim"
+  pass "fm-spawn --relaunch: Herdr create failures preserve safe retry boundaries"
+}
+
 test_spawn_relaunch_preserves_an_interrupted_claim_on_conflict() {
   local dir out rc meta_before claim_before
   dir=$(new_case herdr-interrupted-claim-conflict hr1)
@@ -2058,4 +2145,5 @@ test_control_relaunch_preflights_missing_herdr_pane_before_recording_note
 test_spawn_relaunch_reclaims_a_postcreate_herdr_conflict
 test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable
 test_spawn_relaunch_handles_postcreate_herdr_read_failures
+test_spawn_relaunch_handles_definite_and_ambiguous_herdr_create_failures
 test_spawn_relaunch_preserves_an_interrupted_claim_on_conflict

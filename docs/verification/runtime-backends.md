@@ -578,6 +578,25 @@ The registry read through `herdr pane report-agent` is the same source `fm_backe
 The missing-pane fixture removes the exact recorded pane and registration through the named lab, then drives the public relaunch command while preserving an uncommitted file, recorded PR and no-mistakes custody, and a byte-identical default-session snapshot.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
+### Missing-pane relaunch scope
+
+The 2026-08-14 missing-pane recovery change was inspected across every supported runtime and primary harness integration.
+
+| Axis | Inspected surface | Unaffected result |
+| --- | --- | --- |
+| tmux | `bin/fm-spawn.sh` default backend path and `bin/backends/tmux.sh` | No Herdr claim, session-lock, or endpoint fields are read or written. |
+| zellij | `bin/fm-spawn.sh` Zellij branch and `bin/backends/zellij.sh` | Its recorded session, tab, and pane remain outside the Herdr recovery branch. |
+| orca | `bin/fm-spawn.sh` Orca branch and `bin/backends/orca.sh` | Its worktree and terminal endpoint contract has no Herdr session state. |
+| cmux | `bin/fm-spawn.sh` cmux branch and `bin/backends/cmux.sh` | Its workspace and surface endpoint contract has no Herdr session state. |
+| claude | shared launch construction after backend endpoint publication | Herdr claim handling completes before the Claude command is delivered. |
+| codex | shared launch construction after backend endpoint publication | Herdr claim handling completes before the Codex command is delivered. |
+| opencode | shared launch construction after backend endpoint publication | Herdr claim handling completes before the OpenCode command is delivered. |
+| pi | shared launch construction after backend endpoint publication | Herdr claim handling completes before the Pi command is delivered. |
+| pi-signed | shared launch construction after backend endpoint publication | Herdr claim handling completes before the signed Pi command is delivered. |
+| grok | shared launch construction after backend endpoint publication | Herdr claim handling completes before the Grok command is delivered. |
+| kimi | shared launch construction after backend endpoint publication | Herdr claim handling completes before the Kimi command is delivered. |
+| cursor | shared launch construction after backend endpoint publication | Herdr claim handling completes before the Cursor command is delivered. |
+
 ### Away-mode transport
 
 The Pi/Herdr return and injection path was reverified on Herdr 0.7.3 and Pi 0.80.7:
