@@ -12,6 +12,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+REAL_GIT=$(command -v git)
 TMP_ROOT=$(fm_test_tmproot fm-spawn-pool-base-freshen)
 
 make_spawn_fakebin() {
@@ -30,6 +31,19 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${FM_FAKE_MERGE_BASE_FAILURE:-0}" = 1 ] \
+  && [ "${1:-}" = -C ] \
+  && [ "${2:-}" = "${FM_FAKE_MERGE_BASE_DIR:-}" ] \
+  && [ "${3:-}" = merge-base ] \
+  && [ "${4:-}" = --is-ancestor ]; then
+  exit 2
+fi
+exec "${FM_REAL_GIT:?}" "$@"
+SH
+  chmod +x "$fakebin/git"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
@@ -89,6 +103,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    FM_REAL_GIT="$REAL_GIT" FM_FAKE_MERGE_BASE_DIR="$PROJECT_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
 }
@@ -206,6 +221,25 @@ test_local_only_prefers_diverged_local_base() {
       "$(git -C "$POOL_DIR" rev-parse HEAD)" "$local_head" "$remote_head" "$(cat "$POOL_DIR/local-main.txt")"
   fi
   pass "a local-only spawn uses the local default branch when it diverged from origin"
+}
+
+test_local_only_refuses_failed_ancestry_inspection() {
+  local rec id out status before after
+  id='pool-local-only-ancestry-failure-r1'
+  rec=$(make_case local-only-ancestry-failure "$id" main ahead)
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(FM_FAKE_MERGE_BASE_FAILURE=1 run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only spawn continued after ancestry inspection failed"
+  assert_contains "$out" "could not compare local default 'refs/heads/main'" \
+    "spawn did not identify the failed local ancestry comparison"
+  assert_contains "$out" "inspect the repository object graph and retry" \
+    "spawn did not provide remediation for a failed ancestry comparison"
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn moved the pool after ancestry inspection failed"
+  pass "a failed local-only ancestry inspection refuses the pooled worktree"
 }
 
 test_remote_backed_mode_uses_origin_when_local_is_ahead() {
@@ -400,6 +434,7 @@ test_stale_pool_base_refreshes_before_branching
 test_local_only_prefers_ahead_local_base
 test_local_only_uses_remote_when_local_is_behind
 test_local_only_prefers_diverged_local_base
+test_local_only_refuses_failed_ancestry_inspection
 test_remote_backed_mode_uses_origin_when_local_is_ahead
 test_local_only_without_origin_uses_local_base
 test_local_only_without_resolvable_default_refuses_detached_checkout

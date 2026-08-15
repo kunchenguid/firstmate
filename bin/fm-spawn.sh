@@ -1758,7 +1758,7 @@ local_default_branch_without_origin() {
 }
 
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status local_ref local_sha remote_sha
+  local worktree=$1 default target expected actual status local_ref local_sha remote_sha ancestry_status
   local has_origin=0
   if git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
     has_origin=1
@@ -1800,8 +1800,20 @@ freshen_spawn_worktree_base() {  # <worktree>
     if [ "$MODE" = local-only ]; then
       local_ref="refs/heads/$default"
       local_sha=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$local_ref^{commit}" 2>/dev/null || true)
-      if [ -n "$local_sha" ] && ! git -C "$PROJ_ABS" merge-base --is-ancestor "$local_sha" "$remote_sha"; then
-        target="$local_ref"
+      if [ -n "$local_sha" ]; then
+        if git -C "$PROJ_ABS" merge-base --is-ancestor "$local_sha" "$remote_sha"; then
+          ancestry_status=0
+        else
+          ancestry_status=$?
+        fi
+        case "$ancestry_status" in
+          0) ;;
+          1) target="$local_ref" ;;
+          *)
+            echo "error: could not compare local default '$local_ref' ('$local_sha') with remote default 'origin/$default' ('$remote_sha') for project '$PROJ_ABS'; inspect the repository object graph and retry" >&2
+            return 1
+            ;;
+        esac
       fi
     fi
   fi
