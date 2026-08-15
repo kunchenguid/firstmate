@@ -69,7 +69,7 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = --list-models ]; then
   [ "${FM_FAKE_CURSOR_LIST_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CURSOR_LIST_STATUS}"
-  printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\ncursor-grok-4.5-high - Grok 4.5 High}"
+  printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\nauto - Auto (current, default)\ncursor-grok-4.5-high - Grok 4.5 High}"
 fi
 exit 0
 SH
@@ -556,6 +556,27 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   pass "cursor receives its model-qualified reasoning class and exact task workspace"
 }
 
+test_cursor_defaults_to_auto_and_normalizes_cursor_agent_alias() {
+  local rec id out status launch
+  id=profile-cursor-auto-z6f
+  rec=$(make_spawn_case profile-cursor-auto cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness cursor-agent)
+  status=$?
+  expect_code 0 "$status" "cursor-agent alias spawn without a model should succeed"
+  assert_contains "$out" "spawned $id harness=cursor" \
+    "cursor-agent alias must record the canonical cursor adapter"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor auto default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--trust --yolo --model 'auto' --workspace '$WT_DIR'" \
+    "cursor launch without an explicit model must pass --model auto"
+  assert_not_contains "$launch" "cursor-agent --trust" \
+    "cursor-agent must remain an intake alias, not a second launch template"
+  pass "cursor-agent alias records cursor and defaults the model to auto"
+}
+
 test_cursor_refuses_model_absent_from_live_catalog() {
   local rec id out status
   id=profile-cursor-unsupported-z6d
@@ -844,6 +865,7 @@ test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
 test_cursor_threads_model_workspace_and_omits_effort_axis
+test_cursor_defaults_to_auto_and_normalizes_cursor_agent_alias
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis

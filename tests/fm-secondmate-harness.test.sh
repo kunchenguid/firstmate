@@ -96,6 +96,8 @@ signed Pi wrapper remains a distinct secondmate value^codex^pi-signed^pi-signed^
 secondmate=default defers to crew^codex^default^codex^codex
 crew=default resolves to own, secondmate follows^default^-^claude^claude
 secondmate=default with crew absent -> own^-^default^claude^claude
+cursor-agent crew alias normalizes to cursor^cursor-agent^-^cursor^cursor
+cursor-agent secondmate alias normalizes to cursor^codex^cursor-agent^cursor^codex
 ROWS
   pass "A1 fm-harness.sh secondmate resolves the fallback chain; crew mode unchanged"
 }

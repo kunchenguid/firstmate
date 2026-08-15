@@ -11,6 +11,11 @@
       "why": "Use the cheapest fast profile when the task is narrow and low ambiguity."
     },
     {
+      "when": "The captain asked for Cursor, or the work should run on the native Cursor Agent CLI.",
+      "use": { "harness": "cursor", "model": "auto" },
+      "why": "Cursor goes through harness=cursor (native cursor-agent CLI) with model auto. Do not send Cursor work through harness=pi and a cursor-agent/* plugin model."
+    },
+    {
       "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
       "use": [
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },

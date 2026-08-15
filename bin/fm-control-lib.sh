@@ -63,7 +63,7 @@ fm_control_verb_allowed() {  # <verb>
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse) return 0 ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|cursor-agent|muse) return 0 ;;
   esac
   return 1
 }
@@ -85,7 +85,7 @@ fm_control_harness_family() {  # <recorded-harness>
     opencode*) printf 'opencode' ;;
     grok*) printf 'grok' ;;
     kimi*) printf 'kimi' ;;
-    cursor*) printf 'cursor' ;;
+    cursor-agent|cursor*) printf 'cursor' ;;
     muse*) printf 'muse' ;;
     *) return 1 ;;
   esac

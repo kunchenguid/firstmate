@@ -105,7 +105,9 @@
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
-#   overrides it for this spawn (either kind). A non-flag string containing
+#   overrides it for this spawn (either kind). cursor-agent is accepted only as
+#   an intake alias for cursor (bin/fm-cursor-lib.sh); recorded identity stays cursor.
+#   A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
@@ -291,7 +293,7 @@ for a in "$@"; do
       --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
     esac
     case "$want_value" in
-      harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
+      harness) HARNESS_ARG=$(fm_cursor_normalize_harness "$a"); HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
@@ -308,7 +310,7 @@ for a in "$@"; do
     --secondmate) KIND=secondmate; KIND_SET=1 ;;
     --relaunch) RELAUNCH=1 ;;
     --harness) want_value=harness ;;
-    --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
+    --harness=*) HARNESS_ARG=$(fm_cursor_normalize_harness "${a#--harness=}"); HARNESS_SET=1 ;;
     --model) want_value=model ;;
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
@@ -434,7 +436,7 @@ spawn_remote_secondmate() {
   if [ -n "$HARNESS_ARG" ]; then
     harness=$HARNESS_ARG
   elif [ -n "$positional" ]; then
-    harness=$positional
+    harness=$(fm_cursor_normalize_harness "$positional")
   else
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
@@ -1046,7 +1048,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|cursor-agent|muse)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -1067,6 +1069,10 @@ else
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+case "$ARG3" in
+  *' '*) ;;
+  *) ARG3=$(fm_cursor_normalize_harness "$ARG3") ;;
+esac
 
 shell_quote() {
   printf "'"
@@ -1211,7 +1217,7 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
   *)
-    HARNESS=$ARG3
+    HARNESS=$(fm_cursor_normalize_harness "$ARG3")
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
@@ -1247,6 +1253,11 @@ case "$HARNESS" in
     # missing install a loud spawn refusal instead of a pane that dies with a
     # command-not-found the supervisor would read as a wedged worker.
     CURSOR_BIN=$(fm_cursor_resolve_binary) || exit 1
+    # Cursor's own catalog default is auto. Apply it only when no model was
+    # chosen, so an explicit --model and a recorded relaunch model still win.
+    if [ "$MODEL_SET" -eq 0 ] && { [ -z "$MODEL" ] || [ "$MODEL" = default ]; }; then
+      MODEL=auto
+    fi
     if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
       if CURSOR_MODELS=$(fm_cursor_list_models "$CURSOR_BIN"); then
         if ! printf '%s\n' "$CURSOR_MODELS" | fm_cursor_catalog_has_model "$MODEL"; then

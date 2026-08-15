@@ -120,6 +120,12 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/timeout" <<'SH'
+#!/usr/bin/env bash
+shift
+exec "$@"
+SH
+  chmod +x "$fb/timeout"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
@@ -539,6 +545,27 @@ test_relaunch_onto_an_unverified_harness_is_refused() {
   assert_contains "$out" "not a verified harness" "the refusal should name the unverified adapter"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch must not stop the agent"
   pass "fm-control relaunch: refuses to relaunch onto an adapter with no verified mechanics"
+}
+
+test_relaunch_normalizes_cursor_agent_alias() {
+  local dir out rc
+  dir=$(new_case cursoralias rl8b)
+  add_ship_task "$dir" rl8b claude
+  cat > "$dir/fakebin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --list-models ]; then
+  printf '%s\n' 'Available models' 'auto - Auto (current, default)'
+fi
+exit 0
+SH
+  chmod +x "$dir/fakebin/cursor-agent"
+  printf 'cursor-agent' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl8b relaunch --harness cursor-agent --note "native cursor"); rc=$?
+  expect_code 0 "$rc" "relaunch onto cursor-agent should succeed as cursor"$'
+'"$out"
+  [ "$(meta_field "$dir" rl8b harness)" = cursor ] \
+    || fail "cursor-agent relaunch must record harness=cursor"
+  pass "fm-control relaunch: cursor-agent is only an intake alias for cursor"
 }
 
 test_prior_harness_turnend_registry_entry_is_cleared() {
@@ -1325,6 +1352,7 @@ test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
+test_relaunch_normalizes_cursor_agent_alias
 test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
