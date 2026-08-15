@@ -13,6 +13,23 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
+make_spawn_pi_probe() {
+  local fakebin=$1 tool=$2
+  cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --help ]; then
+  if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
+    printf '%s\n' 'Pi 0.82.0' 'Options: --help'
+  else
+    printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode>'
+  fi
+fi
+exit 0
+SH
+  chmod +x "$fakebin/$tool"
+}
+
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -42,7 +59,23 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse pi-signed
+  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+shift
+exec "$@"
+SH
+  cat > "$fakebin/cursor-agent" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --list-models ]; then
+  [ "${FM_FAKE_CURSOR_LIST_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CURSOR_LIST_STATUS}"
+  printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\ncursor-grok-4.5-high - Grok 4.5 High}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  make_spawn_pi_probe "$fakebin" pi
+  make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
 }
 
@@ -93,7 +126,10 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
+    FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
+    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -129,9 +165,25 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
+}
+
+test_non_cursor_launch_clears_inherited_cursor_markers() {
+  local rec id out status launch
+  id=profile-claude-cursor-markers-z1b
+  rec=$(make_spawn_case profile-claude-cursor-markers claude "$id")
+  read_case_record "$rec"
+
+  out=$(CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn under Cursor markers should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
+    "non-cursor launch must clear both inherited Cursor identity markers"
+  pass "non-cursor launches clear inherited Cursor identity markers"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -470,6 +522,76 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   pass "grok omits unsupported xhigh reasoning effort"
 }
 
+test_cursor_threads_model_workspace_and_omits_effort_axis() {
+  local rec id out status launch
+  id=profile-cursor-z6c
+  rec=$(make_spawn_case profile-cursor cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model cursor-grok-4.5-high --effort high)
+  status=$?
+  expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
+    "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
+  # The executable is RESOLVED, never named: `cursor` is not the CLI, so a
+  # literal `cursor agent` command cannot run on a machine that has only the
+  # real installed names.
+  assert_not_contains "$launch" "cursor agent --trust" \
+    "cursor launch must resolve its executable, not invoke a literal 'cursor agent'"
+  assert_contains "$launch" "cursor-agent" "cursor launch did not resolve a cursor executable"
+  # -w/--worktree would allocate a SECOND worktree under ~/.cursor/worktrees and
+  # break the isolation contract the spawn assertion depends on.
+  assert_not_contains "$launch" " --worktree" "cursor launch must never allocate a second worktree"
+  assert_not_contains "$launch" " -w " "cursor launch must never allocate a second worktree"
+  # An inherited CLAUDECODE would otherwise outrank cursor's own marker.
+  assert_contains "$launch" "env -u CLAUDECODE" "cursor launch must clear foreign primary markers"
+  assert_contains "$launch" "encode launch-brief" "cursor launch did not deliver the brief positionally"
+  assert_not_contains "$launch" "--effort" "cursor launch must not invent a separate effort flag"
+  assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not invent a separate reasoning-effort flag"
+  assert_grep 'harness=cursor' "$HOME_DIR/state/$id.meta" "cursor harness was not recorded in meta"
+  assert_grep 'model=cursor-grok-4.5-high' "$HOME_DIR/state/$id.meta" "cursor model was recorded as default"
+  pass "cursor receives its model-qualified reasoning class and exact task workspace"
+}
+
+test_cursor_refuses_model_absent_from_live_catalog() {
+  local rec id out status
+  id=profile-cursor-unsupported-z6d
+  rec=$(make_spawn_case profile-cursor-unsupported cursor "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model cursor-grok-4.5)
+  status=$?
+  expect_code 1 "$status" "cursor spawn should refuse a model absent from a successful catalog"
+  assert_contains "$out" "Cursor model 'cursor-grok-4.5' is not available" \
+    "cursor model refusal did not identify the unavailable model"
+  assert_contains "$out" "--list-models" \
+    "cursor model refusal did not tell the caller how to find valid ids"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cursor model refusal must happen before launch"
+  pass "cursor refuses model ids absent from its resolved binary's live catalog"
+}
+
+test_cursor_failed_catalog_probe_does_not_block_spawn() {
+  local rec id out status launch
+  id=profile-cursor-catalog-unreachable-z6e
+  rec=$(make_spawn_case profile-cursor-catalog-unreachable cursor "$id")
+  read_case_record "$rec"
+
+  FM_TEST_CURSOR_LIST_STATUS=124 \
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --model cursor-catalog-unreachable)
+  status=$?
+  expect_code 0 "$status" "cursor spawn should fail open when the bounded catalog query fails"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'cursor-catalog-unreachable'" \
+    "failed catalog lookup incorrectly removed the requested model"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-catalog-unreachable default
+  pass "cursor preserves the requested model when its live catalog is unreachable"
+}
+
 test_opencode_threads_model_and_ignores_effort_axis() {
   local rec id out status launch
   id=profile-opencode-z7
@@ -501,7 +623,7 @@ test_pi_threads_model_and_max_effort() {
   expect_code 0 "$status" "pi spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi pi --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi launch did not force the regular TUI while threading the requested model and max thinking level"
   assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
     "pi launch still exports the removed Calm input-reroute binding"
@@ -523,7 +645,7 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$out" "spawned $id harness=pi-signed" "pi-signed spawn did not preserve its visible identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed openai-codex/gpt-5.6-sol max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi-signed launch did not force the regular TUI with Pi's model, thinking, and extension semantics"
   assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
     "pi-signed launch lost the canonical typed launch-brief envelope"
@@ -541,6 +663,36 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$ext" '"--source", "pi-ext"' "pi extension does not attribute its semantic source"
   assert_contains "$ext" 'pi.on("turn_end"' "pi extension lost the turn-end notification touch"
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
+}
+
+test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
+  local harness version rec id out status launch
+  for harness in pi pi-signed; do
+    for version in 0.82.0 0.84.0; do
+      id="profile-${harness}-tui-${version//./}-z8d"
+      rec=$(make_spawn_case "profile-__MODELFLAG__-${harness}-tui-${version//./}" "$harness" "$id")
+      read_case_record "$rec"
+
+      out=$(FM_TEST_PI_VERSION="$version" \
+        run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "$id" "$PROJ_DIR")
+      status=$?
+      expect_code 0 "$status" "$harness $version spawn should succeed"
+      launch=$(cat "$LAUNCH_LOG")
+      assert_contains "$launch" "'$FAKEBIN_DIR/$harness'" \
+        "$harness $version launch must use the executable selected for probing"
+      assert_not_contains "$launch" "FM_PI_HARNESS=$harness $harness" \
+        "$harness $version launch must not re-resolve a bare executable in the worker"
+      if [ "$version" = 0.82.0 ]; then
+        assert_not_contains "$launch" "--tui-mode" \
+          "$harness $version launch must omit unsupported --tui-mode"
+      else
+        assert_contains "$launch" "'$FAKEBIN_DIR/$harness' --tui-mode regular" \
+          "$harness $version launch must preserve the regular TUI"
+      fi
+    done
+  done
+  pass "Pi launch probing omits --tui-mode on older Pi and preserves it on supporting Pi"
 }
 
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
@@ -583,7 +735,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
     "pi-signed secondmate spawn did not preserve its runtime identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "FM_PI_HARNESS=pi-signed pi-signed --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
+  assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
@@ -618,7 +770,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -675,6 +827,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_profile_defaults
+test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
@@ -690,8 +843,12 @@ test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
+test_cursor_threads_model_workspace_and_omits_effort_axis
+test_cursor_refuses_model_absent_from_live_catalog
+test_cursor_failed_catalog_probe_does_not_block_spawn
 test_opencode_threads_model_and_ignores_effort_axis
 test_pi_threads_model_and_max_effort
+test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity

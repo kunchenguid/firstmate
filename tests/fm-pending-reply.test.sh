@@ -306,6 +306,53 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
   pass "second missed turn escalates once and remains durable"
 }
 
+# Wake-gate helpers reading the production seen-signature owner directly, so
+# these assertions consume the exact gate the watcher's signal scan uses.
+seen_gate() {  # <state> <file>: 0 when every byte is already announced
+  FM_STATE_OVERRIDE="$1" bash -c '. "$1"; fm_wake_signal_seen_current "$2" "$3"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
+}
+prime_seen() {  # <state> <file>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1"; sig=$(fm_wake_signal_sig "$3") || exit 1
+    printf "%s" "$sig" > "$(fm_wake_signal_seen_path "$2" "$3")"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
+}
+
+test_escalation_wakes_and_its_close_stays_quiet() {
+  local home state corr
+  home=$(setup_parent escalation-wake-gate)
+  state="$home/state"
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  export FM_PENDING_REPLY_NOW=4200
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "confirm the notarization")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  : > "$state/hibit.status"
+  prime_seen "$state" "$state/hibit.status" || fail "could not prime the announced baseline"
+  # A NEW blocker must wake: the escalation append leaves unannounced bytes.
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation should fire"
+  if seen_gate "$state" "$state/hibit.status"; then
+    fail "a new pending-reply escalation was hidden from the watcher's signal gate"
+  fi
+  prime_seen "$state" "$state/hibit.status" || fail "could not mark the escalation announced"
+  # A genuinely new correlated reply must wake too.
+  printf 'done [corr=%s]: notarization confirmed\n' "$corr" >> "$state/hibit.status"
+  if seen_gate "$state" "$state/hibit.status"; then
+    fail "a new correlated reply was hidden from the watcher's signal gate"
+  fi
+  prime_seen "$state" "$state/hibit.status" || fail "could not mark the reply announced"
+  # The home's own escalation CLOSE is bookkeeping and stays quiet.
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "correlated reply should resolve"
+  grep -Fq "resolved [key=pending-reply-$corr]" "$state/hibit.status" \
+    || fail "resolution did not close the escalation decision"
+  seen_gate "$state" "$state/hibit.status" \
+    || fail "the home's own escalation close re-woke its own watcher gate"
+  pass "escalations and replies wake; the home's own escalation close stays quiet"
+}
+
 test_escalation_publication_failure_retries() {
   local home state corr rec target escalations
   home=$(setup_parent escalation-retry)
@@ -1046,6 +1093,7 @@ test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
+test_escalation_wakes_and_its_close_stays_quiet
 test_escalation_publication_failure_retries
 test_legacy_escalation_closes_default_decision
 test_legacy_escalation_does_not_close_taken_default_decision
