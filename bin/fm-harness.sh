@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|muse|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -27,14 +27,29 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$SCRIPT_DIR/fm-cursor-lib.sh"
+
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
   # Keep marker detection before ancestry detection as an explicit precedence rule.
-  # Only claude, pi, and grok set verified markers of their own; codex, opencode,
-  # kimi, and muse are markerless, so a foreign marker retained in a terminal
+  # Claude, Pi, Grok, and Cursor set verified markers of their own; codex,
+  # opencode, Kimi, and Muse are markerless, so a foreign marker retained in a terminal
   # multiplexer's stored environment can silently misidentify one of them before
   # ancestry is consulted. This is a precedence hazard, not evidence that
   # CLAUDECODE inheritance into a kimi child was observed; it was not observed.
+  # Cursor is checked BEFORE claude, deliberately. cursor-agent does NOT clear
+  # an inherited CLAUDECODE, so a cursor worker launched from a claude primary
+  # carries BOTH markers and whichever is tested first wins. Cursor's own
+  # markers are unambiguous when present, so ordering them first is what makes
+  # the verdict correct; bin/fm-spawn.sh additionally clears the foreign markers
+  # at the launch boundary. Both are kept: the launch sanitization only covers
+  # sessions fm-spawn started, while this ordering also covers a cursor session
+  # a human started by hand. Verified live on cursor-agent 2026.08.11-e8db854:
+  # CURSOR_INVOKED_AS=cursor-agent is set on the agent process itself, and
+  # CURSOR_AGENT=1 is set for the child/tool processes this script runs as.
+  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
+  [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -58,9 +73,14 @@ detect_own() {
   # without verifying it reaches children AND that it cannot survive in a
   # multiplexer's stored environment, which is the precedence hazard above.
   # Layer 2: walk the parent chain and match the command name.
-  local pid=$$ comm args
+  local pid=$$ comm args argv0
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+    argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
+    if fm_cursor_process_matches "$comm" '' "$argv0"; then
+      echo cursor
+      return
+    fi
     case "$(basename -- "$comm")" in
       *claude*) echo claude; return ;;
       *codex*) echo codex; return ;;

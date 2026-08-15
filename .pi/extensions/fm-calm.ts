@@ -159,12 +159,17 @@ export default function (pi: ExtensionAPI) {
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
   const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
   const calmPreferencePath = resolve(configDirectory, "calm");
+  // "max" is the legacy value written by the removed third presentation level, whose
+  // behavior is now ordinary Calm; a home upgraded from it restores as on rather than
+  // dropping to off. docs/configuration.md owns the persisted value schema.
   const loadCalmPreference = (): boolean => {
+    let stored: string;
     try {
-      return readFileSync(calmPreferencePath, "utf8").trim() === "on";
+      stored = readFileSync(calmPreferencePath, "utf8").trim();
     } catch {
       return false;
     }
+    return stored === "on" || stored === "max";
   };
   const persistCalmPreference = (active: boolean): void => {
     mkdirSync(dirname(calmPreferencePath), { recursive: true });
@@ -450,6 +455,8 @@ export default function (pi: ExtensionAPI) {
       if (active) activateBuiltInsIfNeeded(ctx.ui);
       publishPresentationState();
       applyWorkingPresentation(ctx.ui, true);
+      // Pi re-runs every assistant row's layout from this call even when the label is
+      // unchanged, which is what makes a toggle apply to rows already on screen.
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
       ctx.ui.setStatus("firstmate-calm", undefined);
 

@@ -177,8 +177,8 @@ Transport normalization rewrites NUL, every other C0 control except tab and newl
 If the confined remote reader permanently refuses a referenced document, the mate's line is mirrored with its original pointer and the adapter appends one keyed escalation naming the gap instead of stalling the stream.
 An SSH exit status of 255 while fetching a referenced document leaves the delta uncommitted for the process-event runner's normal retry because remote completion is unknown.
 The process-event runner applies each captured delta through this adapter as soon as it is captured, so a mirrored reply reaches the primary status channel without depending on the wake handler running the adapter itself.
-A mirrored line that carries a correlation token settles its pending-reply record and closes that request's own open escalation decision, while an application that does not complete leaves the capture unacknowledged for the documented handler retry path.
-The [process-to-event operating contract](configuration.md#process-to-event-sources-stateprocevent) owns that automatic application and its retry boundary.
+A mirrored line that carries a correlation token settles its pending-reply record and closes that request's own open escalation decision.
+The [process-to-event operating contract](configuration.md#process-to-event-sources-stateprocevent) owns automatic application, one-announcement replay deduplication, and the unhandled fallback path.
 The source log is never truncated or consumed.
 A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
 
