@@ -528,6 +528,43 @@ procevent_surface_queued() {
   wake "$reason"
 }
 
+slack_socket_surfaced_marker() {  # <queue-key>
+  printf '%s/.seen-slack-socket-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
+}
+
+slack_socket_surface_after_output() {
+  local output_status=$1 marker tmp status=0
+  if [ "$output_status" -eq 0 ]; then
+    marker=$(slack_socket_surfaced_marker "$SLACK_SOCKET_SURFACED_KEY")
+    tmp=$(umask 077; mktemp "$STATE/.seen-slack-socket.XXXXXX") || status=1
+    if [ "$status" -eq 0 ] && ! mv -f -- "$tmp" "$marker"; then
+      rm -f -- "$tmp"
+      status=1
+    fi
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+# Socket workers append the same check payload the poll path emits, then this
+# active watcher surfaces it. The durable queue is written before the marker,
+# so a watcher exit cannot suppress an unconsumed captain message.
+slack_socket_surface_queued() {
+  local key payload marker
+  [ -s "$FM_WAKE_QUEUE" ] || return 0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  while IFS=$(printf '\t') read -r _ _ kind key payload; do
+    [ "$kind" = check ] || continue
+    case "$key" in slack-socket:*) ;; *) continue ;; esac
+    marker=$(slack_socket_surfaced_marker "$key")
+    [ -e "$marker" ] && continue
+    SLACK_SOCKET_SURFACED_KEY=$key
+    FM_WAKE_POST_OUTPUT_ACTION=slack_socket_surface_after_output
+    wake "$payload"
+  done < "$FM_WAKE_QUEUE"
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+}
+
 run_check_process() {
   local c=$1
   shift
@@ -813,6 +850,7 @@ while :; do
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
   procevent_surface_queued
+  slack_socket_surface_queued
 
   # Slack captain channel poll: fast path on the watcher cycle (default 15s).
   # Other *.check.sh sweeps stay on CHECK_INTERVAL (default 300s).

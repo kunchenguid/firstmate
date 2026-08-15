@@ -430,6 +430,10 @@ The Slack captain channel is an optional phone mirror for status, decisions, and
 It is off unless the firstmate home's gitignored `.env` contains a non-empty `FM_SLACK_BOT_TOKEN` and gitignored `config/slack-captain-channel` names exactly one valid private-channel id.
 Bootstrap never discovers channels: it reads only that configured id and arms polling when both values are present.
 
+Socket Mode is armed alongside that poll when `.env` also contains `FM_SLACK_APP_TOKEN` and gitignored `config/slack-captain-user` pins one valid Slack user id.
+The socket path verifies that user id on every event, records refused events under `state/slack-refused/` by message timestamp or envelope id when malformed, and never acknowledges or wakes for them.
+The poll remains independently armed and is not retired by enabling Socket Mode.
+
 The locked session-start bootstrap step writes `state/slack-watch.check.sh`, a byte-static identity shim for `bin/fm-slack-poll.sh`, and `config/slack-captain.env`, which exports `FM_SLACK_CHECK_INTERVAL=15` for watcher processes in that home.
 `bin/fm-watch.sh` sources `config/x-mode.env` and `config/slack-captain.env` at process start when either file exists.
 The watcher runs the Slack shim on the 15-second poll cycle via a dedicated fast path; every other `*.check.sh` sweep stays on the default 300-second `CHECK_INTERVAL`.
@@ -438,6 +442,14 @@ The watcher runs the Slack shim on the 15-second poll cycle via a dedicated fast
 It never calls `conversations.list` or any other discovery API.
 A newly offered human captain message is acknowledged once in-thread with a fixed constant (`On it.`), stashed at `state/slack-inbox/<ts>.json`, and wakes firstmate once with `slack-captain-message <ts><TAB><text>`.
 Ack markers under `state/slack-acked/` and offer markers under `state/slack-offered/` keep repeats silent across later polls and watcher restarts.
+
+`bin/fm-slack-socket.mjs` starts from Slack's `apps.connections.open` response, acknowledges every envelope before dispatch, and reconnects clean socket closures without alarming.
+Both clean disconnects and instantly failed connection attempts use bounded backoff, so a local connect failure cannot become a hot retry loop.
+Individual Socket Mode event frames avoid the poll path's repeated full-window response transfer, removing that response-size exposure from push delivery while the poll remains available as a backstop.
+The socket does not claim to replay events from a disconnected interval or call channel history to reconstruct them.
+While both transports run, the unchanged full-window poll is the gap-recovery path; retiring it remains blocked on separate evidence for socket-specific replay or backfill.
+`bin/fm-procevent-slack-socket.sh` registers that long-lived worker with existing process-event supervision, so watcher reconciliation restores a missing owner and supported home teardown retires it.
+Ordinary message classification remains owned by `fms_is_non_captain_message` in `bin/fm-slack-lib.sh`; both transports use the same inbox, acknowledgement, offer, and wake formats.
 
 `bin/fm-slack-post.sh` posts and updates messages only on the configured channel id.
 `board` creates one living status message and later edits it in place via `chat.update`, recording `state/slack-board.meta`.
@@ -449,7 +461,7 @@ Never post proprietary code, credentials, or company-confidential context in the
 ## Process-to-event sources (state/procevent)
 
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
-`bin/fm-procevent.sh` owns the generic contract; `bin/fm-procevent-lavish.sh` is the first adapter and wraps only the currently published `lavish-axi poll` interface.
+`bin/fm-procevent.sh` owns the generic contract; thin adapters include `bin/fm-procevent-lavish.sh` for the published `lavish-axi poll` interface and `bin/fm-procevent-slack-socket.sh` for the long-lived Slack worker.
 
 This section is the single owner of the runner's operating contract.
 Registration writes one private record under `state/procevent/`, and a completed result plus its immutable adapter identity are captured under `state/procevent-inbox/` before it is published.
@@ -541,7 +553,9 @@ FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi sta
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
 FMX_PAIRING_TOKEN=      # X mode pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FM_SLACK_BOT_TOKEN=      # Slack bot token for the captain channel; .env opt-in with config/slack-captain-channel
+FM_SLACK_APP_TOKEN=      # Slack Socket Mode app token; requires config/slack-captain-user and leaves the poll armed
 FM_SLACK_CAPTAIN_CHANNEL_ID=   # optional env override for config/slack-captain-channel
+FM_SLACK_CAPTAIN_USER_ID=      # optional env override for config/slack-captain-user
 FM_SLACK_API_URL=https://slack.com/api   # optional Slack API override, mainly for tests
 FMX_RELAY_URL=https://myfirstmate.io   # optional X relay override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct X client invocations; bootstrap still checks $FM_HOME/.env

@@ -1038,6 +1038,33 @@ EOF
   echo "FMS: Slack captain channel on - poll armed via state/slack-watch.check.sh; 15s Slack fast cadence in config/slack-captain.env"
 }
 
+# Socket Mode push transport (opt-in alongside the poll). It becomes eligible
+# only when the app token and pinned captain user id are present in addition to
+# the poll's bot token and channel id. The generic process-event registry owns
+# the worker and makes every supervision model reconcile its liveness.
+slack_socket_setup() {
+  local source="$STATE/procevent/slack-captain-socket.source" tool missing=0
+  fms_load_config
+  for tool in node curl jq; do
+    command -v "$tool" >/dev/null 2>&1 || missing=1
+  done
+  if ! fms_socket_configured || [ "$missing" -ne 0 ]; then
+    if [ -e "$source" ]; then
+      if FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-slack-socket.sh" retire >/dev/null 2>&1; then
+        echo "FMS: Slack Socket Mode off - retired supervised socket consumer; poll unchanged"
+      else
+        echo "FMS: Slack Socket Mode off - failed to retire supervised socket consumer; poll unchanged"
+      fi
+    fi
+    return 0
+  fi
+  if FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-slack-socket.sh" arm >/dev/null 2>&1; then
+    echo "FMS: Slack Socket Mode on - supervised socket consumer armed alongside poll"
+  else
+    echo "FMS: Slack Socket Mode off - failed to arm supervised socket consumer; poll unchanged"
+  fi
+}
+
 crew_dispatch_validate() {
   local file err
   file="$CONFIG/crew-dispatch.json"
@@ -1235,6 +1262,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_handoff_resume
   x_mode_setup
   slack_captain_setup
+  slack_socket_setup
   fleet_sync
 fi
 secondmate_handoff_detect

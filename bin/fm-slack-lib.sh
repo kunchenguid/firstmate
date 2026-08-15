@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared config, channel enforcement, and Slack Web API helpers for the captain
-# channel poll (fm-slack-poll.sh) and post client (fm-slack-post.sh).
+# channel poll, Socket Mode consumer, and post client.
 # Slack is opt-in: a non-empty FM_SLACK_BOT_TOKEN in the home .env plus a
 # configured channel id in config/slack-captain-channel. Without both the poll is
 # a hard no-op. Never enumerate conversations; every read and post path takes the
@@ -15,6 +15,13 @@ fms_channel_id_valid() {
   case "$id" in
     C[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]*) return 0 ;;
     G[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fms_user_id_valid() {
+  case "$1" in
+    U[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -56,7 +63,7 @@ fms_config_channel_read() {
   printf '%s' "$line"
 }
 
-# Resolve FMS_TOKEN, FMS_CHANNEL_ID, and FMS_API (default https://slack.com/api).
+# Resolve Slack credentials and pinned captain-channel identities.
 # Env wins over files. Missing token or channel leaves both empty.
 fms_load_config() {
   local env_file="${FMS_ENV_FILE:-$FM_HOME/.env}" channel_file
@@ -71,6 +78,16 @@ fms_load_config() {
   else
     FMS_CHANNEL_ID=$(fms_config_channel_read "$channel_file")
   fi
+  if [ -n "${FM_SLACK_APP_TOKEN+x}" ]; then
+    FMS_APP_TOKEN=${FM_SLACK_APP_TOKEN-}
+  else
+    FMS_APP_TOKEN=$(fmx_env_get FM_SLACK_APP_TOKEN "$env_file")
+  fi
+  if [ -n "${FM_SLACK_CAPTAIN_USER_ID+x}" ]; then
+    FMS_CAPTAIN_USER_ID=${FM_SLACK_CAPTAIN_USER_ID-}
+  else
+    FMS_CAPTAIN_USER_ID=$(fms_config_channel_read "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/slack-captain-user")
+  fi
   if [ -n "${FM_SLACK_API_URL+x}" ]; then
     FMS_API=${FM_SLACK_API_URL-}
   else
@@ -83,6 +100,11 @@ fms_load_config() {
 fms_configured() {
   [ -n "${FMS_TOKEN:-}" ] && [ -n "${FMS_CHANNEL_ID:-}" ] \
     && fms_channel_id_valid "$FMS_CHANNEL_ID"
+}
+
+fms_socket_configured() {
+  fms_configured && [ -n "${FMS_APP_TOKEN:-}" ] \
+    && fms_user_id_valid "${FMS_CAPTAIN_USER_ID:-}"
 }
 
 fms_auth_header_file() {
@@ -258,6 +280,27 @@ fms_inbox_publish() {
   dir="$state/slack-inbox"
   jq '.' "$payload_file" 2>/dev/null \
     | fmx_private_artifact_publish_stdin "$dir" "${ts}.json" 600 >/dev/null 2>&1
+}
+
+fms_refusal_publish() {
+  local state=$1 ts=$2 reason=$3 envelope_id=$4 payload_file=$5 dir key checksum
+  dir="$state/slack-refused"
+  if fms_message_ts_valid "$ts"; then
+    key=$ts
+  else
+    case "$envelope_id" in
+      ''|.*|*/*|*[!A-Za-z0-9._-]*) key= ;;
+      *) key="envelope-$envelope_id" ;;
+    esac
+    if [ -z "$key" ] || [ "${#key}" -gt 120 ]; then
+      checksum=$(printf '%s' "$envelope_id" | cksum | awk '{print $1}') || return 1
+      key="invalid-$checksum"
+    fi
+  fi
+  jq -n --arg reason "$reason" --arg envelope_id "$envelope_id" \
+    --slurpfile event "$payload_file" \
+    '{reason:$reason,envelope_id:$envelope_id,event:$event[0]}' \
+    | fmx_private_artifact_publish_stdin "$dir" "${key}.json" 600 >/dev/null 2>&1
 }
 
 fms_poll_cursor_read() {
