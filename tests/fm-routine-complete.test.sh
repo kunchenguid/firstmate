@@ -44,13 +44,15 @@ test_verify_accepts_current_done_run_step_with_pr() {
     "pr_head=1111111111111111111111111111111111111111"
   printf 'done: PR https://github.com/example/sample/pull/1 checks green\n' \
     > "$home/state/$id.status"
-  reader=$(write_crew_state_reader "$home/fakebin" 'state: done · source: run-step · checks green')
+  reader=$(write_crew_state_reader "$home/fakebin" 'state: done · source: run-step · checks green · run-head: 1111111111111111111111111111111111111111')
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_CREW_STATE_BIN="$reader" \
     "$ROUTINE" verify "$id" >/dev/null || fail "verify rejected an eligible routine ship task"
   grep -qxF 'routine_complete_pr=https://github.com/example/sample/pull/1' "$home/state/$id.meta" \
     || fail "verify did not persist the canonical routine completion PR"
   grep -qxF 'routine_complete_pr_head=1111111111111111111111111111111111111111' "$home/state/$id.meta" \
     || fail "verify did not persist the routine completion PR head"
+  grep -qxF 'routine_complete_run_head=1111111111111111111111111111111111111111' "$home/state/$id.meta" \
+    || fail "verify did not persist the run identity bound to completion"
   pass "verify accepts a current done run-step with recorded PR metadata"
 }
 
@@ -88,7 +90,7 @@ test_verify_rejects_open_status_decision() {
 needs-decision [key=api-shape]: choose response format
 done: PR https://github.com/example/sample/pull/2 checks green
 EOF
-  reader=$(write_crew_state_reader "$home/fakebin" 'state: done · source: run-step · checks green')
+  reader=$(write_crew_state_reader "$home/fakebin" 'state: done · source: run-step · checks green · run-head: 2222222222222222222222222222222222222222')
   set +e
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_CREW_STATE_BIN="$reader" \
     "$ROUTINE" verify "$id" >/dev/null 2>&1
@@ -111,7 +113,7 @@ test_merge_binds_verified_head_to_forge_merge() {
     "pr_head=$head"
   printf 'done: PR https://github.com/example/sample/pull/4 checks green\n' \
     > "$home/state/$id.status"
-  reader=$(write_crew_state_reader "$home/fakebin" 'state: done · source: run-step · checks green')
+  reader=$(write_crew_state_reader "$home/fakebin" "state: done · source: run-step · checks green · run-head: $head")
   write_forge_mocks "$home/fakebin" "$head"
   : > "$home/gh.log"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_CREW_STATE_BIN="$reader" \
@@ -139,7 +141,7 @@ test_merge_refuses_without_prior_completion_evidence() {
     "pr_head=$head"
   printf 'done: PR https://github.com/example/sample/pull/5 checks green\n' \
     > "$home/state/$id.status"
-  reader=$(write_crew_state_reader "$home/fakebin" 'state: done · source: run-step · checks green')
+  reader=$(write_crew_state_reader "$home/fakebin" "state: done · source: run-step · checks green · run-head: $head")
   write_forge_mocks "$home/fakebin" "$head"
   : > "$home/gh.log"
   set +e
@@ -166,7 +168,7 @@ test_merge_refuses_pr_identity_changed_after_verify() {
     "pr_head=$head"
   printf 'done: PR https://github.com/example/sample/pull/6 checks green\n' \
     > "$home/state/$id.status"
-  reader=$(write_crew_state_reader "$home/fakebin" 'state: done · source: run-step · checks green')
+  reader=$(write_crew_state_reader "$home/fakebin" "state: done · source: run-step · checks green · run-head: $head")
   write_forge_mocks "$home/fakebin" "$head"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_CREW_STATE_BIN="$reader" \
     "$ROUTINE" verify "$id" >/dev/null || fail "verify did not record completion evidence"
@@ -183,11 +185,36 @@ test_merge_refuses_pr_identity_changed_after_verify() {
   pass "routine merge refuses a PR changed after verification"
 }
 
+test_verify_refuses_pr_recorded_after_a_different_run() {
+  local home id reader rc run_head pr_head
+  home="$TMP_ROOT/run-head-mismatch"
+  id=sample-run-head-mismatch-ship
+  run_head=7777777777777777777777777777777777777777
+  pr_head=8888888888888888888888888888888888888888
+  mkdir -p "$home/state"
+  fm_write_meta "$home/state/$id.meta" \
+    "kind=ship" \
+    "pr=https://github.com/example/sample/pull/7" \
+    "pr_head=$pr_head"
+  printf 'done: selected verification path completed\n' > "$home/state/$id.status"
+  reader=$(write_crew_state_reader "$home/fakebin" "state: done · source: run-step · checks green · run-head: $run_head")
+  set +e
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_CREW_STATE_BIN="$reader" \
+    "$ROUTINE" verify "$id" >/dev/null 2>&1
+  rc=$?
+  set -u
+  [ "$rc" -ne 0 ] || fail "verify accepted PR metadata recorded after a different successful run"
+  ! grep -q '^routine_complete_' "$home/state/$id.meta" \
+    || fail "verify wrote completion evidence for a PR outside the successful run"
+  pass "verify binds PR metadata to the successful run head"
+}
+
 test_verify_accepts_current_done_run_step_with_pr
 test_verify_rejects_stale_green_status_when_run_is_working
 test_verify_rejects_open_status_decision
 test_merge_binds_verified_head_to_forge_merge
 test_merge_refuses_without_prior_completion_evidence
 test_merge_refuses_pr_identity_changed_after_verify
+test_verify_refuses_pr_recorded_after_a_different_run
 
 echo "all routine completion tests passed"

@@ -43,6 +43,17 @@ meta_value() {
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+routine_run_head_parse() {  # <crew-state-line>
+  local state=$1 marker=" · run-head: " run_head
+  case "$state" in
+    *"$marker"*) ;;
+    *) return 1 ;;
+  esac
+  run_head=${state##*"$marker"}
+  fm_pr_head_valid "$run_head" || return 1
+  ROUTINE_VERIFIED_RUN_HEAD=$run_head
+}
+
 routine_validate() {  # <task-id>
   local id=$1 meta="$STATE/$id.meta" status="$STATE/$id.status" current_state kind
   [ -f "$meta" ] && [ ! -L "$meta" ] || fail "$id has no task metadata"
@@ -55,12 +66,16 @@ routine_validate() {  # <task-id>
     "state: done · source: run-step"*) : ;;
     *) fail "$id is not verification-complete (current state: $current_state)" ;;
   esac
+  routine_run_head_parse "$current_state" \
+    || fail "$id verification state has no resolved run head"
   fm_pr_metadata_identity_parse "$meta" \
     || fail "$id has invalid PR metadata"
   [ "$FM_PR_META_PROVIDER" = github ] \
     || fail "$id has no mergeable GitHub PR metadata"
   fm_pr_head_valid "$FM_PR_META_HEAD" \
     || fail "$id has no verified pr_head= metadata"
+  [ "$FM_PR_META_HEAD" = "$ROUTINE_VERIFIED_RUN_HEAD" ] \
+    || fail "$id PR head is not the verified run head"
   if status_open_decisions "$status" | grep -q .; then
     fail "$id still has open keyed status decisions"
   fi
@@ -85,7 +100,7 @@ record_routine_completion() {  # <task-id>
   }
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      routine_complete_pr=*|routine_complete_pr_head=*) ;;
+      routine_complete_pr=*|routine_complete_pr_head=*|routine_complete_run_head=*) ;;
       *) printf '%s\n' "$line" >> "$tmp" || {
         rm -f "$tmp"
         fm_lock_release "$lock" || true
@@ -96,6 +111,7 @@ record_routine_completion() {  # <task-id>
   {
     printf 'routine_complete_pr=%s\n' "$ROUTINE_VERIFIED_PR_URL"
     printf 'routine_complete_pr_head=%s\n' "$ROUTINE_VERIFIED_PR_HEAD"
+    printf 'routine_complete_run_head=%s\n' "$ROUTINE_VERIFIED_RUN_HEAD"
   } >> "$tmp" || {
     rm -f "$tmp"
     fm_lock_release "$lock" || true
@@ -115,10 +131,11 @@ record_routine_completion() {  # <task-id>
 }
 
 require_routine_completion() {  # <task-id>
-  local id=$1 meta="$STATE/$id.meta" recorded_pr recorded_head
+  local id=$1 meta="$STATE/$id.meta" recorded_pr recorded_head recorded_run_head
   recorded_pr=$(meta_value "$meta" routine_complete_pr)
   recorded_head=$(meta_value "$meta" routine_complete_pr_head)
-  [ -n "$recorded_pr" ] && [ -n "$recorded_head" ] \
+  recorded_run_head=$(meta_value "$meta" routine_complete_run_head)
+  [ -n "$recorded_pr" ] && [ -n "$recorded_head" ] && [ -n "$recorded_run_head" ] \
     || fail "$id has no prior routine completion evidence"
   fm_pr_url_parse "$recorded_pr" \
     || fail "$id has invalid routine completion PR evidence"
@@ -126,8 +143,13 @@ require_routine_completion() {  # <task-id>
     || fail "$id has non-canonical routine completion PR evidence"
   fm_pr_head_valid "$recorded_head" \
     || fail "$id has invalid routine completion head evidence"
+  fm_pr_head_valid "$recorded_run_head" \
+    || fail "$id has invalid routine completion run-head evidence"
+  [ "$recorded_head" = "$recorded_run_head" ] \
+    || fail "$id routine completion evidence is not bound to its verified run"
   [ "$recorded_pr" = "$ROUTINE_VERIFIED_PR_URL" ] \
     && [ "$recorded_head" = "$ROUTINE_VERIFIED_PR_HEAD" ] \
+    && [ "$recorded_run_head" = "$ROUTINE_VERIFIED_RUN_HEAD" ] \
     || fail "$id PR metadata changed after routine completion"
 }
 

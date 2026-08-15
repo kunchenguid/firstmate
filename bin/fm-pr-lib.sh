@@ -321,7 +321,7 @@ fm_pr_metadata_identity_parse() {
           fi
         fi
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*|routine_complete_pr=*|routine_complete_pr_head=*)
+      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*|routine_complete_pr=*|routine_complete_pr_head=*|routine_complete_run_head=*)
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1

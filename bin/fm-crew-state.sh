@@ -16,7 +16,10 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail> · run-head: <full commit>
+#
+# `run-head` is emitted only for a run-step source and is the resolved code
+# identity of that attributed run.
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -82,10 +85,11 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
-# Emit the one canonical line and exit 0. Detail is optional.
-emit() {  # <state> <source> [detail]
+# Emit the one canonical line and exit 0. Detail and run head are optional.
+emit() {  # <state> <source> [detail] [run-head]
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
+  [ -n "${4:-}" ] && line="$line${SEP}run-head: $4"
   printf '%s\n' "$line"
   exit 0
 }
@@ -332,8 +336,8 @@ nm_ci_checks_state() {
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
 # is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# matching row as "<status>|<short-sha>", or empty when the branch has no run
+# within FM_CREW_STATE_RUNS_LIMIT rows.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
@@ -354,7 +358,7 @@ nm_runs_status_for_branch() {  # <branch>
       if ! nm_coarse_head_matches_worktree "$sha"; then
         continue
       fi
-      printf '%s' "$st"
+      printf '%s|%s' "$st" "$sha"
       return 0
     fi
   done <<< "$out"
@@ -388,6 +392,7 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+COARSE_HEAD=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -404,8 +409,10 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
+      COARSE_RUN=$(nm_runs_status_for_branch "$CREW_BRANCH")
+      if [ -n "$COARSE_RUN" ]; then
+        COARSE_STATUS=${COARSE_RUN%%|*}
+        COARSE_HEAD=${COARSE_RUN#*|}
         HAVE_RUN=1
         RUN_SOURCE=coarse
       fi
@@ -418,6 +425,7 @@ fi
 if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
+  RUN_HEAD=""
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
@@ -436,8 +444,13 @@ if [ "$HAVE_RUN" = 1 ]; then
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
+    RUN_HEAD=$(git -C "$WT" rev-parse --verify "${COARSE_HEAD}^{commit}" 2>/dev/null) \
+      || emit unknown none "run head unavailable"
   else
     status=$(strip_quotes "$(nm_field status)")
+    run_head=$(strip_quotes "$(nm_field head)")
+    RUN_HEAD=$(git -C "$WT" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) \
+      || emit unknown none "run head unavailable"
     RUN_STATUS=$status
     outcome=$(strip_quotes "$(nm_field outcome)")
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
@@ -528,7 +541,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
-  emit "$RUN_STATE" run-step "$RUN_DETAIL"
+  emit "$RUN_STATE" run-step "$RUN_DETAIL" "$RUN_HEAD"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------
