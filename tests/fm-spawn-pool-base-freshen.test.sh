@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Regression tests for fm-spawn's pooled-worktree base refresh.
 #
-# A treehouse pool can return a clean detached worktree whose origin/main was
-# advanced after the worktree was allocated.
+# A treehouse pool can return a clean detached worktree whose authoritative
+# base moved after the worktree was allocated.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin/main tip or stops when origin is
-# unreachable.
+# selects the base from task mode and Git ancestry or stops when that base is
+# unsafe or cannot be resolved.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -66,6 +66,8 @@ make_case() {
   if [ "$relation" = ahead ]; then
     git -C "$project" fetch --quiet origin
     git -C "$project" merge --quiet --ff-only "origin/$default"
+  fi
+  if [ "$relation" = ahead ] || [ "$relation" = diverged ]; then
     printf 'must survive a local-only spawn\n' > "$project/local-main.txt"
     git -C "$project" add local-main.txt
     git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local-main
@@ -146,6 +148,10 @@ test_local_only_prefers_ahead_local_base() {
     || fail "fixture made the local branch diverge from origin/main instead of advancing it"
   assert_grep 'must survive a local-only spawn' "$POOL_DIR/local-main.txt" \
     "local-only spawn omitted the local-only commit"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed local-only ahead base: HEAD=%s local=%s origin/main=%s local-main=%s\n' \
+      "$(git -C "$POOL_DIR" rev-parse HEAD)" "$local_head" "$remote_head" "$(cat "$POOL_DIR/local-main.txt")"
+  fi
   pass "a local-only spawn uses the local default branch when it is ahead of origin"
 }
 
@@ -165,7 +171,64 @@ test_local_only_uses_remote_when_local_is_behind() {
     || fail "fixture did not leave the local branch behind origin/main"
   assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-main.txt" \
     "local-only spawn omitted the newer remote commit"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed local-only behind base: HEAD=%s local=%s origin/main=%s advanced-main=%s\n' \
+      "$(git -C "$POOL_DIR" rev-parse HEAD)" \
+      "$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)" \
+      "$remote_head" "$(cat "$POOL_DIR/advanced-main.txt")"
+  fi
   pass "a local-only spawn uses origin when the local default branch is behind it"
+}
+
+test_local_only_prefers_diverged_local_base() {
+  local rec id out status local_head remote_head
+  id='pool-local-only-diverged-r1'
+  rec=$(make_case local-only-diverged "$id" main diverged)
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "local-only spawn should use the local branch when it diverged"
+  local_head=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+  remote_head=$(git -C "$POOL_DIR" rev-parse origin/main)
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_head" ] \
+    || fail "local-only spawn did not use the diverged authoritative local branch"
+  if git -C "$PROJECT_DIR" merge-base --is-ancestor "$local_head" "$remote_head" \
+    || git -C "$PROJECT_DIR" merge-base --is-ancestor "$remote_head" "$local_head"; then
+    fail "fixture did not diverge the local branch from origin/main"
+  fi
+  assert_grep 'must survive a local-only spawn' "$POOL_DIR/local-main.txt" \
+    "local-only spawn omitted the diverged local commit"
+  [ ! -e "$POOL_DIR/advanced-main.txt" ] \
+    || fail "local-only spawn used the diverged remote branch instead of the local branch"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed local-only diverged base: HEAD=%s local=%s origin/main=%s local-main=%s advanced-main=absent\n' \
+      "$(git -C "$POOL_DIR" rev-parse HEAD)" "$local_head" "$remote_head" "$(cat "$POOL_DIR/local-main.txt")"
+  fi
+  pass "a local-only spawn uses the local default branch when it diverged from origin"
+}
+
+test_remote_backed_mode_uses_origin_when_local_is_ahead() {
+  local rec id out status local_head remote_head
+  id='pool-remote-mode-local-ahead-r1'
+  rec=$(make_case remote-mode-local-ahead "$id" main ahead)
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "remote-backed spawn should use origin when the local branch is ahead"
+  local_head=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+  remote_head=$(git -C "$POOL_DIR" rev-parse origin/main)
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$remote_head" ] \
+    || fail "remote-backed spawn did not use origin when the local branch was ahead"
+  [ "$local_head" != "$remote_head" ] || fail "fixture did not leave the local branch ahead of origin/main"
+  [ ! -e "$POOL_DIR/local-main.txt" ] \
+    || fail "remote-backed spawn used the ahead local branch instead of origin"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed remote-backed local-ahead base: HEAD=%s local=%s origin/main=%s local-main=absent\n' \
+      "$(git -C "$POOL_DIR" rev-parse HEAD)" "$local_head" "$remote_head"
+  fi
+  pass "a remote-backed spawn uses origin when the local default branch is ahead"
 }
 
 test_local_only_without_origin_uses_local_base() {
@@ -196,6 +259,10 @@ test_local_only_without_origin_uses_local_base() {
     "local-only spawn without origin omitted the local default branch commit"
   [ ! -e "$POOL_DIR/feature-only.txt" ] \
     || fail "local-only spawn without origin treated the current feature branch as default"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed local-only no-origin base: HEAD=%s local-default=%s current-feature=%s local-trunk=%s feature-only=absent\n' \
+      "$(git -C "$POOL_DIR" rev-parse HEAD)" "$local_head" "$feature_head" "$(cat "$POOL_DIR/local-trunk.txt")"
+  fi
   pass "a local-only spawn without origin uses repository-local init.defaultBranch"
 }
 
@@ -332,6 +399,8 @@ test_unresolved_remote_default_refuses_pool() {
 test_stale_pool_base_refreshes_before_branching
 test_local_only_prefers_ahead_local_base
 test_local_only_uses_remote_when_local_is_behind
+test_local_only_prefers_diverged_local_base
+test_remote_backed_mode_uses_origin_when_local_is_ahead
 test_local_only_without_origin_uses_local_base
 test_local_only_without_resolvable_default_refuses_detached_checkout
 test_non_main_default_branch_refreshes_before_branching
