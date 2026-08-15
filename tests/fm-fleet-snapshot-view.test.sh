@@ -676,6 +676,33 @@ test_open_decision_survives_later_unrelated_event() {
   pass "durable fold keeps an open decision past a later unrelated event"
 }
 
+test_open_decision_survives_done_on_same_key() {
+  local home fakebin out
+  home=$(make_home same-key-done)
+  mkdir -p "$home/secondmate-home"
+  fm_write_meta "$home/state/same-key-done.meta" \
+    "window=firstmate:fm-same-key-done" \
+    "worktree=$home/secondmate-home" \
+    "project=$home/secondmate-home" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home/secondmate-home" \
+    "projects=alpha"
+  printf 'needs-decision [key=scope]: choose the delegated scope\n' > "$home/state/same-key-done.status"
+  printf 'done [key=scope]: implementation finished\n' >> "$home/state/same-key-done.status"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "same-key-done")
+    | .hints.pending_decision == true
+      and (.hints.open_decisions | length) == 1
+      and .hints.open_decisions[0].key == "scope"
+      and .hints.open_decisions[0].verb == "needs-decision"
+  ' >/dev/null || fail "done on the decision key must not close it: $out"
+  pass "durable fold keeps an open decision past done on the same key"
+}
+
 test_secondmate_open_decision_survives_live_endpoint() {
   local home fakebin out
   home=$(make_home active-secondmate)
@@ -825,6 +852,7 @@ test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
+test_open_decision_survives_done_on_same_key
 test_secondmate_open_decision_survives_live_endpoint
 test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution

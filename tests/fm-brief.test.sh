@@ -573,6 +573,12 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter lost same-key closure for a reportable material phase"
   assert_grep 'resolved [key=<work-slug>]' "$brief" \
     "secondmate charter lost resolved closure for a keyed material phase"
+  assert_grep "Use \`needs-decision\` only for an actual question that requires a captain choice" "$brief" \
+    "secondmate charter must reserve needs-decision for actual questions"
+  assert_grep "A keyed decision closes only with \`resolved\` naming that key" "$brief" \
+    "secondmate charter must require keyed resolved events"
+  assert_grep "\`done\` records work completion and never closes a decision key." "$brief" \
+    "secondmate charter must keep done separate from decision closure"
 
   assert_grep 'include that exact token in your parent status reply' "$brief" \
     "secondmate charter lost correlated parent results"
