@@ -268,11 +268,11 @@ test_x_link_and_teardown_refusal_remain_visible() {
   pass "follow-up obligations and ordinary teardown refusals stay visible"
 }
 
-make_treehouse_fixture() {  # <name>
-  local name=$1 project pool worktree
+make_treehouse_fixture() {  # <name> [pool-root]
+  local name=$1 pool_root=${2:-$TMP} project pool worktree
   project="$TMP/$name-project"
-  pool="$TMP/$name-pool"
-  worktree="$TMP/$name-pool/1/worktree"
+  pool="$pool_root/$name-pool"
+  worktree="$pool/1/worktree"
   fm_git_init_commit "$project"
   mkdir -p "$pool/1"
   git -C "$project" worktree add -q --detach "$worktree" HEAD
@@ -348,6 +348,108 @@ test_dead_acquisition_recovers_but_live_owner_is_untouched() {
   [ -f "$live_record" ] || fail "live acquisition record was removed"
   [ ! -s "$FM_FAKE_TEARDOWN_LOG" ] || fail "live acquisition invoked teardown"
   pass "crashed acquisition is recovered only after exact owner death proof"
+}
+
+test_pre_acquisition_record_without_worktree_is_cleared() {
+  local fixture project worktree record state out rc id=pre-acquisition-empty
+  reset_logs
+  fixture=$(make_treehouse_fixture pre-acquisition-seed "$HOME_DIR/.treehouse")
+  project=${fixture%%$'\t'*}
+  worktree=${fixture#*$'\t'}
+  state="$(dirname "$(dirname "$worktree")")/treehouse-state.json"
+  python3 - "$state" "$(dirname "$(dirname "$worktree")")/2/worktree" <<'PY'
+import json
+import sys
+
+state_path, available_path = sys.argv[1:]
+with open(state_path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["worktrees"].append({"path": available_path})
+with open(state_path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+PY
+  write_dead_acquisition "$id" "$project" "" direct
+  record="$HOME_DIR/state/.worktree-acquire-$id.pending"
+  out=$(FM_AUTO_REAP_STALE_SECS=1 "$AUTO_REAP" maintenance 2>&1); rc=$?
+  expect_code 0 "$rc" "pre-acquisition maintenance"
+  assert_contains "$out" "auto-reap cleared $id" "pre-acquisition record was not cleared"
+  [ ! -e "$record" ] || fail "pre-acquisition record with no created resources survived"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "pre-acquisition recovery invented cleanup metadata"
+  [ ! -s "$FM_FAKE_TEARDOWN_LOG" ] || fail "pre-acquisition record invoked teardown without a lease"
+  [ -d "$worktree" ] || fail "unrelated pool worktree was changed while proving holder absence"
+  pass "a never-acquired spawn record is cleared after pool-directed holder absence proof"
+}
+
+test_pre_acquisition_record_requires_one_empty_worktree_field() {
+  local fixture project worktree record out rc id
+  reset_logs
+  fixture=$(make_treehouse_fixture pre-acquisition-shape-seed "$HOME_DIR/.treehouse")
+  project=${fixture%%$'\t'*}
+  worktree=${fixture#*$'\t'}
+
+  for id in missing-worktree duplicate-worktree; do
+    write_dead_acquisition "$id" "$project" "" direct
+    record="$HOME_DIR/state/.worktree-acquire-$id.pending"
+    if [ "$id" = missing-worktree ]; then
+      sed -i.bak '/^worktree=/d' "$record"
+    else
+      printf 'worktree=\n' >> "$record"
+    fi
+    rm -f "$record.bak"
+    touch -t 202001010000 "$record"
+    out=$(FM_AUTO_REAP_STALE_SECS=1 "$AUTO_REAP" maintenance 2>&1); rc=$?
+    expect_code 0 "$rc" "$id maintenance"
+    assert_contains "$out" "must contain exactly one worktree field" \
+      "$id record did not report malformed worktree authority"
+    [ -f "$record" ] || fail "$id record was cleared by pre-acquisition absence proof"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$id record invented cleanup metadata"
+    [ ! -s "$FM_FAKE_TEARDOWN_LOG" ] || fail "$id record invoked teardown"
+    rm -f "$record"
+  done
+  [ -d "$worktree" ] || fail "malformed records changed an unrelated pool worktree"
+  pass "pre-acquisition recovery requires exactly one empty worktree field"
+}
+
+test_real_worktree_with_held_lease_still_refuses() {
+  local fixture project worktree record state out rc id=held-lease-refusal
+  reset_logs
+  fixture=$(make_treehouse_fixture "$id")
+  project=${fixture%%$'\t'*}
+  worktree=${fixture#*$'\t'}
+  state="$(dirname "$(dirname "$worktree")")/treehouse-state.json"
+  write_dead_acquisition "$id" "$project" "$worktree" direct
+  record="$HOME_DIR/state/.worktree-acquire-$id.pending"
+  FM_FAKE_TEARDOWN_STATUS=1
+  export FM_FAKE_TEARDOWN_STATUS
+  out=$(FM_AUTO_REAP_STALE_SECS=1 "$AUTO_REAP" maintenance 2>&1); rc=$?
+  expect_code 0 "$rc" "held lease maintenance remains a successful sweep"
+  assert_contains "$out" "ordinary teardown refused" "held lease refusal was not surfaced"
+  [ -f "$record" ] || fail "held lease lost its acquisition authority after refusal"
+  [ -f "$HOME_DIR/state/$id.meta" ] || fail "held lease lost its cleanup metadata after refusal"
+  assert_contains "$(cat "$state")" "firstmate-$id" "held lease was altered by absence recovery"
+  rm -f "$record" "$HOME_DIR/state/$id.meta"
+  pass "a real recorded worktree with a held lease remains protected on teardown refusal"
+}
+
+test_pre_acquisition_corrupt_pool_state_stays_distinct() {
+  local fixture project worktree record state out rc id=pre-acquisition-corrupt
+  reset_logs
+  fixture=$(make_treehouse_fixture pre-acquisition-corrupt-seed "$HOME_DIR/.treehouse")
+  project=${fixture%%$'\t'*}
+  worktree=${fixture#*$'\t'}
+  state="$(dirname "$(dirname "$worktree")")/treehouse-state.json"
+  write_dead_acquisition "$id" "$project" "" direct
+  record="$HOME_DIR/state/.worktree-acquire-$id.pending"
+  printf '{broken\n' > "$state"
+  out=$(FM_AUTO_REAP_STALE_SECS=1 "$AUTO_REAP" maintenance 2>&1); rc=$?
+  expect_code 0 "$rc" "corrupt pre-acquisition pool maintenance"
+  assert_contains "$out" "CORRUPT authoritative Treehouse lease state" \
+    "corrupt pre-acquisition pool lost its distinct verdict"
+  [ -f "$record" ] || fail "corrupt pre-acquisition pool removed acquisition authority"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "corrupt pre-acquisition pool invented cleanup metadata"
+  [ ! -s "$FM_FAKE_TEARDOWN_LOG" ] || fail "corrupt pre-acquisition pool invoked teardown"
+  rm -f "$record"
+  pass "corrupt pool state remains a distinct fail-closed pre-acquisition verdict"
 }
 
 test_dirty_stranded_worktree_is_retained_by_real_teardown() {
@@ -634,6 +736,10 @@ test_detached_scout_skips_run_attribution_but_surfaces_teardown_refusal
 test_scout_skip_requires_detached_head_and_complete_metadata
 test_x_link_and_teardown_refusal_remain_visible
 test_dead_acquisition_recovers_but_live_owner_is_untouched
+test_pre_acquisition_record_without_worktree_is_cleared
+test_pre_acquisition_record_requires_one_empty_worktree_field
+test_real_worktree_with_held_lease_still_refuses
+test_pre_acquisition_corrupt_pool_state_stays_distinct
 test_dirty_stranded_worktree_is_retained_by_real_teardown
 test_unregistered_treehouse_lease_retains_acquisition_authority
 test_malformed_treehouse_leases_retain_acquisition_authority

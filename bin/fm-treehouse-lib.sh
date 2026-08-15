@@ -2,9 +2,13 @@
 # Shared Treehouse lease authority helpers.
 #
 # Consumers may prove that one exact worktree is durably leased to one exact
-# holder, or resolve the unique leased worktree for an exact project and holder.
-# The latter is intentionally narrow: it walks only Git's registered worktrees
-# for the trusted project and refuses zero or multiple matches.
+# holder, resolve the unique leased worktree for an exact project and holder, or
+# prove holder absence from the unique per-home pool registered to a project.
+# Lease resolution is intentionally narrow: it walks only Git's registered
+# worktrees for the trusted project and refuses zero or multiple matches.
+# Absence proof always scans authoritative pool state because a Treehouse lease
+# can survive after its worktree registration disappears.
+# Real Treehouse available entries may omit `leased`; absence means unleased.
 
 fm_treehouse_state_for_worktree() {  # <worktree>
   local worktree=$1 slot pool state
@@ -104,11 +108,46 @@ EOF
   esac
 }
 
-fm_treehouse_prove_task_lease_absent() {  # <recorded-worktree> <expected-holder>
-  local recorded_worktree=$1 expected_holder=$2 slot pool state
-  [ -n "$recorded_worktree" ] || return 1
-  slot=$(dirname "$recorded_worktree")
-  pool=$(fm_checkout_trusted_dir "$(dirname "$slot")") || return 1
+fm_treehouse_project_pool() {  # <project> <pool-root>
+  local project=$1 pool_root=$2 listed line candidate common project_common
+  local slot pool candidate_root matches=0 match=
+  project=$(fm_checkout_trusted_dir "$project") || return 1
+  [ "$(git -C "$project" rev-parse --show-toplevel 2>/dev/null)" = "$project" ] || return 1
+  pool_root=$(fm_checkout_trusted_dir "$pool_root") || return 1
+  project_common=$(fm_checkout_git_common_dir "$project") || return 1
+  listed=$(git -C "$project" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        candidate=$(fm_checkout_trusted_dir "${line#worktree }" 2>/dev/null || true)
+        [ -n "$candidate" ] || continue
+        [ "$candidate" != "$project" ] || continue
+        common=$(fm_checkout_git_common_dir "$candidate" 2>/dev/null || true)
+        [ "$common" = "$project_common" ] || continue
+        slot=$(fm_checkout_trusted_dir "$(dirname "$candidate")" 2>/dev/null || true)
+        [ -n "$slot" ] || continue
+        pool=$(fm_checkout_trusted_dir "$(dirname "$slot")" 2>/dev/null || true)
+        [ -n "$pool" ] || continue
+        candidate_root=$(fm_checkout_trusted_dir "$(dirname "$pool")" 2>/dev/null || true)
+        [ "$candidate_root" = "$pool_root" ] || continue
+        if [ -z "$match" ]; then
+          match=$pool
+          matches=1
+        elif [ "$match" != "$pool" ]; then
+          matches=2
+        fi
+        ;;
+    esac
+  done <<EOF
+$listed
+EOF
+  [ "$matches" -eq 1 ] || return 1
+  printf '%s\n' "$match"
+}
+
+fm_treehouse_prove_pool_task_lease_absent() {  # <pool> <expected-holder>
+  local pool=$1 expected_holder=$2 state
+  pool=$(fm_checkout_trusted_dir "$pool") || return 1
   state="$pool/treehouse-state.json"
   [ -f "$state" ] && [ ! -L "$state" ] || return 1
   python3 - "$state" "$expected_holder" <<'PY'
@@ -156,8 +195,8 @@ try:
         if canonical_path in seen_paths:
             raise TypeError("worktree paths must be unique")
         seen_paths.add(canonical_path)
-        if not isinstance(leased, bool):
-            raise TypeError("leased must be a boolean")
+        if leased is not None and not isinstance(leased, bool):
+            raise TypeError("leased must be a boolean or absent")
         if not isinstance(destroying, bool):
             raise TypeError("destroying must be a boolean when present")
         if destroying:
@@ -182,4 +221,18 @@ except (TypeError, KeyError) as error:
     )
     raise SystemExit(2)
 PY
+}
+
+fm_treehouse_prove_project_task_lease_absent() {  # <project> <expected-holder> <pool-root>
+  local project=$1 expected_holder=$2 pool_root=$3 pool
+  pool=$(fm_treehouse_project_pool "$project" "$pool_root") || return 1
+  fm_treehouse_prove_pool_task_lease_absent "$pool" "$expected_holder"
+}
+
+fm_treehouse_prove_task_lease_absent() {  # <recorded-worktree> <expected-holder>
+  local recorded_worktree=$1 expected_holder=$2 slot pool
+  [ -n "$recorded_worktree" ] || return 1
+  slot=$(dirname "$recorded_worktree")
+  pool=$(fm_checkout_trusted_dir "$(dirname "$slot")") || return 1
+  fm_treehouse_prove_pool_task_lease_absent "$pool" "$expected_holder"
 }

@@ -50,8 +50,9 @@ A merged PR check, an approved local-only merge, or a completed scout delegates 
 Before that teardown, an exactly attributed active no-mistakes run is canceled by run ID; a cross-branch run whose exact ID is unavailable is retained rather than guessed.
 X-mode-linked tasks wait for their final follow-up, and persistent secondmates are never auto-reaped.
 Every spawn writes an owner-stamped Treehouse acquisition record before leasing a slot and removes it once task metadata takes authority.
-The watcher recovers a stranded pre-metadata lease only after the record exceeds `FM_AUTO_REAP_STALE_SECS` and the recorded PID plus process start time proves dead or reused, then installs cleanup metadata and runs the same ordinary teardown proof.
-An indeterminate owner, ambiguous lease, protected worktree state, unlanded commit, endpoint uncertainty, or teardown error stays on disk and produces an actionable `auto-reap:` wake.
+The watcher examines a stranded pre-metadata acquisition only after the record exceeds `FM_AUTO_REAP_STALE_SECS` and the recorded PID plus process start time proves dead or reused.
+For an exact never-acquired record - one empty `worktree` field with both endpoint and task-temp phases `not-created` - it clears the record only after the project's unique per-home Treehouse pool proves that holder absent; an acquired record keeps the stricter recorded-worktree-directed proof before cleanup metadata is installed and ordinary teardown runs.
+An indeterminate owner, malformed acquisition record (including a missing or duplicate `worktree` field), absent or ambiguous project pool, held lease, malformed authoritative pool state, protected worktree state, unlanded commit, endpoint uncertainty, or teardown error stays on disk and produces an actionable `auto-reap:` wake; malformed authoritative state retains the distinct `CORRUPT` verdict.
 `state/.auto-reap.log` records successful reaping and the recovery cases that need a durable corruption or retention diagnostic.
 This Firstmate tooling change requires no web-app, API, or realtime deployment.
 

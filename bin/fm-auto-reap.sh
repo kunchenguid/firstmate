@@ -8,8 +8,9 @@
 #
 # `maintenance` recovers pre-metadata Treehouse acquisitions left by a crashed
 # spawn. A record is eligible only after an age threshold and exact PID/start-time
-# death proof. Recovery installs fail-closed cleanup metadata, then invokes the
-# same ordinary teardown proof. Every refusal stays on disk and is printed.
+# death proof. An exact never-acquired record is cleared only after a project-pool
+# holder-absence proof; acquired records install fail-closed cleanup metadata and
+# invoke ordinary teardown. Every refusal stays on disk and is printed.
 # Usage: fm-auto-reap.sh task <id> <pr-merged|scout-done|local-merged>
 #        fm-auto-reap.sh maintenance
 set -eu
@@ -70,6 +71,20 @@ single_meta_value() {  # <file> <key>
   count=$(printf '%s\n' "$values" | awk 'NF { n++ } END { print n + 0 }')
   [ "$count" -eq 1 ] || return 1
   printf '%s\n' "$values"
+}
+
+single_meta_value_allow_empty() {  # <file> <key>
+  local file=$1 key=$2
+  awk -v key="$key" '
+    index($0, key "=") == 1 {
+      count++
+      value = substr($0, length(key) + 2)
+    }
+    END {
+      if (count != 1) exit 1
+      print value
+    }
+  ' "$file"
 }
 
 status_last_verb() {  # <task>
@@ -435,7 +450,11 @@ recover_acquisition() {  # <record>
     refuse "created task temp phase has an unsafe root; retained stale acquisition"
     return 0
   fi
-  recorded_worktree=$(sed -n 's/^worktree=//p' "$record" | tail -1)
+  recorded_worktree=$(single_meta_value_allow_empty "$record" worktree) || {
+    fm_account_lifecycle_lock_release "$lock" >/dev/null 2>&1 || true
+    refuse "acquisition record must contain exactly one worktree field" || true
+    return 0
+  }
   if [ -n "$recorded_worktree" ]; then
     worktree=$(fm_checkout_trusted_dir "$recorded_worktree" 2>/dev/null || true)
     [ -n "$worktree" ] && fm_treehouse_require_task_lease "$worktree" "$holder" >/dev/null 2>&1 || worktree=
@@ -449,7 +468,16 @@ recover_acquisition() {  # <record>
       find_status=$?
     fi
     if [ "$find_status" -eq 2 ]; then
-      if fm_treehouse_prove_task_lease_absent "$recorded_worktree" "$holder" >/dev/null 2>&1; then
+      if [ -z "$recorded_worktree" ] && [ "$endpoint_phase" = not-created ] \
+        && [ "$tasktmp_phase" = not-created ]; then
+        if fm_treehouse_prove_project_task_lease_absent \
+            "$project" "$holder" "$home_real/.treehouse" >/dev/null 2>&1; then
+          absence_status=0
+        else
+          absence_status=$?
+        fi
+      elif fm_treehouse_prove_task_lease_absent \
+          "$recorded_worktree" "$holder" >/dev/null 2>&1; then
         absence_status=0
       else
         absence_status=$?
@@ -570,7 +598,7 @@ maintenance() {
         fi
         [ "$probe_status" -eq 0 ] || continue
         AUTO_REAP_PR_VERIFIED=1 reap_task "$id" pr-merged
-        ;;
+      ;;
     esac
   done
 }
