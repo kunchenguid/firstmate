@@ -971,14 +971,23 @@ def compose_shard_plan(selected_family, shards, rate_lookup):
     if not shard_skus:
         raise ValidationError("no reviewed shard family remains beside the selected control family")
     plan = []
+    shard_limits = dict(runner.RESOURCE_CLASSES["behavior-heavy"])
     for shard in range(1, int(shards) + 1):
         sku = shard_skus[(shard - 1) % len(shard_skus)]
+        # The constituent must cover the child runner's own parent-managed
+        # first-day itemized bound, or its idempotent re-admission can never
+        # fit the cushion; the exact same bound model produces the amount.
+        limits = dict(shard_limits, sku=sku, sku_family=runner.SKU_FAMILY[sku])
+        bound = runner.itemized_cost_bound(
+            float(rate_lookup(sku)), runner.MAX_BILLABLE_LIFETIME_HOURS,
+            limits, parent_managed=True,
+        )
         plan.append({
             "shard": shard,
             "invocation": "azr-" + uuid.uuid4().hex[:12],
             "sku": sku,
             "sku_family": runner.SKU_FAMILY[sku],
-            "amount_usd": round(float(rate_lookup(sku)) * 24.0 * 1.5 + 5.0, 6),
+            "amount_usd": round(bound["total"] + 1.0, 6),
         })
     return plan
 

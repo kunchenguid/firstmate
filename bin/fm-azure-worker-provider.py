@@ -58,7 +58,7 @@ SPECIALIZED_ROLES = {
     "validation-shard", "validation-cell", "policy-review", "browser-tool",
     "networkless-verifier", "crosscheck-tool",
 }
-SAFE_INVOCATION = re.compile(r"^azr-[0-9a-f]{12}(?:-a[2-9][0-9]*)?$")
+SAFE_INVOCATION = re.compile(r"^azr-[0-9a-f]{12}(?:-a(?:[2-9]|[1-9][0-9]+))?$")
 RUNNER_COMMISSIONING_SKU_POOL = (
     "Standard_D4as_v7",
     "Standard_D4as_v6",

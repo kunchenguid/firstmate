@@ -149,6 +149,9 @@ assert host.count('materialize_shard_repo(request, extracted)') == 3
 assert '"snapshot_bundle": str(extracted / "snapshot.bundle"),' in host
 assert '"invocation": plan["invocation"],' not in host[host.index('def prepare_shard_runner'):host.index('def run_shard_invocations')]
 assert host.index('save_state(env, state)', host.index('runner_stderr_tail"] = stderr')) < host.index('one or more shard transports retained ambiguous state')
+assert "parent_managed=True," in host
+assert 'round(bound["total"] + 1.0, 6)' in host
+assert host.count('* 24.0 * 1.5 + 5.0') == 1
 assert 'create_run_command(env, state, "start", input_url=input_url, output_url=output_url)' in host
 assert '"running", "reattaching", "collected")' in host
 for value in ("MemoryMax","MemorySwapMax=0","TasksMax","CPUQuota=700%","PrivateTmp=yes","ProtectSystem=strict","CapabilityBoundingSet=","cryptsetup luksUUID","provider account-binding marker mismatch","credential disk content binding mismatch","FM_AZURE_VALIDATION_RUNTIME_PATH","axi status","/dev/disk/azure/scsi1/lun","/dev/disk/azure/data/by-lun/"):

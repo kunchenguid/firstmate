@@ -5,7 +5,9 @@
     "region": {
       "type": "string",
       "defaultValue": "eastus",
-      "allowedValues": ["eastus"]
+      "allowedValues": [
+        "eastus"
+      ]
     },
     "vmName": {
       "type": "string",
@@ -101,7 +103,9 @@
       "apiVersion": "2024-03-01",
       "name": "[parameters('vmName')]",
       "location": "[parameters('region')]",
-      "zones": ["1"],
+      "zones": [
+        "1"
+      ],
       "tags": "[parameters('tags')]",
       "identity": {
         "type": "UserAssigned",
@@ -127,7 +131,15 @@
           "adminUsername": "fmbootstrap",
           "linuxConfiguration": {
             "disablePasswordAuthentication": true,
-            "provisionVMAgent": true
+            "provisionVMAgent": true,
+            "ssh": {
+              "publicKeys": [
+                {
+                  "path": "/home/fmbootstrap/.ssh/authorized_keys",
+                  "keyData": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCaAn1stDlmF2Wo5Dn44vAV+AzWGUIBaXvoCEJdxmx6Xhq6ElG4OQj0VAJkBhIqtXGIdUgObA0/ix3U4WIgwX/JYWcgYhQ8yZsNnYIfn6cfTduCD+4kJdHnss8S2C268S/4GszEH90cpSUI5bMXXVB1Adsntnz4S3Q1Z2hsB33zKOaB/sDnKYCck8y17JWTLCmVlwRpjiCL2NnKNwNkYbVeNa2U98/OJbHA2UGttqpI/GKnb2wB/iZV9KQ/Cf1kHIvJO99IFT12AKL2YoApLVVWrd2cxOHt2uAvnI3Pc+Qh2p8AZz++00eso1cmXkD5VzTNTpOnYPmGJAEO4Lo2Mb+00Op+LHWoPXifHtBt2E3588JPxSx/cXUaLIpvHHs7RwWSG+88rXQY1s628ZrhJFn7U/1logJ6lJo5exJAqDDzwlagdIxzCeNiyoKp/GQpwtSPYK1EIQDHqoYcBR6BJsRAbeZPzQ3TS/6lwEFE9EWfzohhHkVthPqsblympNQmWr8= firstmate-runner-blackhole"
+                }
+              ]
+            }
           }
         },
         "storageProfile": {
@@ -176,7 +188,7 @@
       ],
       "properties": {
         "source": {
-          "script": "[format('set -eu\\ncat > /etc/systemd/system/fm-azure-runner-expiry.service <<\"EOF\"\\n[Unit]\\nDescription=Stop expired disposable Firstmate Azure runner\\n[Service]\\nType=oneshot\\nExecStart=/usr/sbin/shutdown -h now\\nEOF\\ncat > /etc/systemd/system/fm-azure-runner-expiry.timer <<\"EOF\"\\n[Unit]\\nDescription=Bound disposable Firstmate Azure runner lifetime\\n[Timer]\\nOnCalendar={0}\\nPersistent=true\\nUnit=fm-azure-runner-expiry.service\\n[Install]\\nWantedBy=timers.target\\nEOF\\nsystemctl daemon-reload\\nsystemctl enable --now fm-azure-runner-expiry.timer', parameters('expiryUtc'))]"
+          "script": "[format(replace('set -eu|cat > /etc/systemd/system/fm-azure-runner-expiry.service <<\"EOF\"|[Unit]|Description=Stop expired disposable Firstmate Azure runner|[Service]|Type=oneshot|ExecStart=/usr/sbin/shutdown -h now|EOF|cat > /etc/systemd/system/fm-azure-runner-expiry.timer <<\"EOF\"|[Unit]|Description=Bound disposable Firstmate Azure runner lifetime|[Timer]|OnCalendar={0}|Persistent=true|Unit=fm-azure-runner-expiry.service|[Install]|WantedBy=timers.target|EOF|systemctl daemon-reload|systemctl enable --now fm-azure-runner-expiry.timer', '|', uriComponentToString('%0A')), parameters('expiryUtc'))]"
         },
         "asyncExecution": false,
         "timeoutInSeconds": 300,
@@ -186,7 +198,7 @@
     {
       "type": "Microsoft.DevTestLab/schedules",
       "apiVersion": "2018-09-15",
-      "name": "[format('shutdown-{0}', parameters('vmName'))]",
+      "name": "[format('shutdown-computevm-{0}', parameters('vmName'))]",
       "location": "[parameters('region')]",
       "tags": "[parameters('tags')]",
       "dependsOn": [

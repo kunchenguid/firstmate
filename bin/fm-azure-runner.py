@@ -45,13 +45,19 @@ CONTROL_CONTAINER = "runner-control"
 SCHEMA = "fm.azure-command/v1"
 RESULT_SCHEMA = "fm.azure-command-result/v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
-SAFE_INVOCATION = re.compile(r"^azr-[a-z0-9]{12}(?:-a[2-9][0-9]*)?$")
+SAFE_INVOCATION = re.compile(r"^azr-[a-z0-9]{12}(?:-a(?:[2-9]|[1-9][0-9]+))?$")
 SAFE_ARTIFACT = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/+@:-]{1,240}$")
 SAFE_PUBLIC_GIT_REMOTE = re.compile(r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$")
 SAFE_PUBLIC_GIT_REF = re.compile(
     r"^refs/(?:heads/[A-Za-z0-9._/-]{1,200}|pull/[1-9][0-9]*/head)$"
 )
 LOCAL_COMMAND_TIMEOUT_SECONDS = 300
+# A TrustedLaunch VM deployment routinely outlives the general command bound,
+# especially with sibling shard deployments in flight; the ARM call gets its
+# own generous-but-bounded deadline.
+DEPLOYMENT_TIMEOUT_SECONDS = 900
+# Admission-lock acquisition tries, spaced ten seconds apart.
+LEASE_ACQUIRE_ATTEMPTS = 90
 COST_QUERY_TIMEOUT_SECONDS = 60
 COST_RETRY_DEADLINE_SECONDS = 900
 COST_CACHE_MAX_AGE_SECONDS = 4 * 60 * 60
@@ -933,8 +939,10 @@ def prepare(env, args, parent_state=None):
             "os_disk_id": "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.Compute/disks/{}".format(env["subscription"], env["resource_group"], disk_name),
             "run_command_name": "execute",
             "safety_run_command_name": "safety-shutdown",
-            "ttl_schedule_name": "shutdown-{}".format(vm_name),
-            "ttl_schedule_id": "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.DevTestLab/schedules/shutdown-{}".format(
+            # DevTestLab requires the exact name shutdown-computevm-<vmName>;
+            # anything else fails the deployment at the schedule resource.
+            "ttl_schedule_name": "shutdown-computevm-{}".format(vm_name),
+            "ttl_schedule_id": "/subscriptions/{}/resourceGroups/{}/providers/Microsoft.DevTestLab/schedules/shutdown-computevm-{}".format(
                 env["subscription"], env["resource_group"], vm_name
             ),
             "identities": {},
@@ -1997,8 +2005,13 @@ def commissioning_cost_gate(env, state, limits):
     exact_commissioning_budget(env)
     inventory_reservation_ids = commissioning_inventory_gate(env, state)
     rate = retail_rate(env, limits["sku"])
-    first_hour = itemized_cost_bound(rate, 1, limits)
-    first_day = itemized_cost_bound(rate, MAX_BILLABLE_LIFETIME_HOURS, limits)
+    # A shard under a validation capacity parent omits the shared foundation
+    # share the parent already reserved, exactly as the strict budget gate
+    # does; without this the child's bound exceeds its pre-reserved shape
+    # cushion and idempotent constituent re-admission can never succeed.
+    parent_managed = bool(state.get("request", {}).get("capacity_parent"))
+    first_hour = itemized_cost_bound(rate, 1, limits, parent_managed=parent_managed)
+    first_day = itemized_cost_bound(rate, MAX_BILLABLE_LIFETIME_HOURS, limits, parent_managed=parent_managed)
     if not 0 < first_day["total"] < float("inf"):
         raise RunnerError("commissioning-bounded full 24-hour itemized maximum is not finite and positive")
     reservations = list_management_reservations(env)
@@ -2376,9 +2389,26 @@ def reserve_budget_management(env, state, lease, limits, admitted_cost=None):
 
 def mark_management_reservation_cleanup_verified(env, state):
     with ManagementAdmissionLease(env, state) as lease:
-        identity, _, _ = az_command(env, [
+        identity, show_rc, show_stderr = az_command(env, [
             "resource", "show", "--ids", reservation_id(env, state["invocation"]), "--api-version", "2023-01-31",
-        ])
+        ], check=False)
+        if show_rc != 0:
+            # A reservation resource that no longer exists holds no Azure
+            # capacity or spend; proven absence completes verification, while
+            # any other read failure stays ambiguous and refuses.
+            listing, list_rc, list_stderr = az_command(env, [
+                "resource", "list", "--resource-group", env["resource_group"],
+            ], check=False)
+            if list_rc != 0:
+                raise RunnerError("cost reservation absence is ambiguous: {}; {}".format(show_stderr, list_stderr))
+            target = reservation_id(env, state["invocation"]).lower()
+            if any(str(item.get("id", "")).lower() == target for item in listing):
+                raise RunnerError("cost reservation resource exists but is unreadable: {}".format(show_stderr))
+            transition(
+                env, state, state["phase"],
+                "cost reservation resource proven absent; cleanup verification recorded on absence",
+            )
+            return
         entry = parse_management_reservation(env, identity)
         expected_fence = state["request"]["fence"].split(":", 1)[1]
         expected_mode = state["request"].get("cost_admission_mode", STRICT_COST_ADMISSION_MODE)
@@ -2386,9 +2416,12 @@ def mark_management_reservation_cleanup_verified(env, state):
             entry is None
             or entry["fence-digest"] != expected_fence
             or entry["cost-admission-mode"] != expected_mode
-            or entry["cleanup-verified-at"] != "none"
         ):
             raise RunnerError("cost reservation cleanup binding is not exact")
+        if entry["cleanup-verified-at"] != "none":
+            # A repeated cleanup finds its own earlier verification stamp;
+            # the exact fence and mode above prove it is this invocation's.
+            return
         require_zero_effective_rbac(env, entry["principal_id"], "cleanup cost reservation principal")
         tags = dict(identity.get("tags") or {})
         tags["cleanup-verified-at"] = iso_utc()
@@ -2520,7 +2553,10 @@ class ManagementAdmissionLease:
             self.expires_at = time.monotonic() + LEASE_DURATION_SECONDS
 
     def __enter__(self):
-        for _ in range(7):
+        # Sibling shard runners legitimately hold this lease through their
+        # own admission and VM creation, so the wait must cover several
+        # multi-minute predecessors before failing closed.
+        for _ in range(LEASE_ACQUIRE_ATTEMPTS):
             metadata, etag = self._read()
             expiry = metadata.get("lockexpiry")
             busy = False
@@ -2692,6 +2728,10 @@ def immutable_identity(resource, label):
         identity["resource_guid"] = properties.get("resourceGuid") or resource.get("resourceGuid")
     elif label == "disk":
         identity["unique_id"] = properties.get("uniqueId") or resource.get("uniqueId")
+        # Managed-disk GETs return no body etag at any current API version;
+        # the immutable uniqueId substitutes, matching the validation
+        # controller's disk identity contract.
+        identity["etag"] = identity["etag"] or identity["unique_id"]
     elif label == "run-command":
         identity["provisioning_state"] = properties.get("provisioningState")
     elif label == "ttl-schedule":
@@ -2703,7 +2743,14 @@ def immutable_identity(resource, label):
         "run-command": "provisioning_state",
         "ttl-schedule": "task_type",
     }[label]
-    if not identity["id"] or not identity["etag"] or not identity.get(required):
+    # Run commands and DevTestLab schedules return no body etag on GET,
+    # exactly as the validation controller's identity contract records;
+    # their stable field plus the exact id carry the identity.
+    if (
+        not identity["id"]
+        or (label not in ("run-command", "ttl-schedule") and not identity["etag"])
+        or not identity.get(required)
+    ):
         raise RunnerError("created {} immutable identity is incomplete".format(label))
     return identity
 
@@ -2769,7 +2816,7 @@ def create_vm(env, state):
         state["request"]["compute_deallocation_deadline"].replace("Z", "+00:00")
     )
     required_lead = dt.timedelta(
-        seconds=AZURE_SCHEDULE_MINIMUM_LEAD_SECONDS + LOCAL_COMMAND_TIMEOUT_SECONDS
+        seconds=AZURE_SCHEDULE_MINIMUM_LEAD_SECONDS + DEPLOYMENT_TIMEOUT_SECONDS
     )
     if deadline <= now_utc() + required_lead:
         raise RunnerError(
@@ -2781,7 +2828,7 @@ def create_vm(env, state):
             "deployment", "group", "create", "--resource-group", env["resource_group"],
             "--name", state["resources"]["deployment"], "--template-file", str(TEMPLATE),
             "--parameters", "@" + str(params), "--mode", "Incremental",
-        ])
+        ], timeout_seconds=DEPLOYMENT_TIMEOUT_SECONDS)
     finally:
         params.unlink(missing_ok=True)
     exists, vm = read_exact_resource(env, state["resources"]["vm_id"], "vm")
@@ -3076,14 +3123,33 @@ def verify_resource_tags(env, state, resource, label):
             raise RunnerError("live {} cleanup tag mismatch: {}".format(label, key))
 
 
-def verify_live_resource_identity(env, state, kind, resource_id, identity_key=None, require_vm_relation=True):
+def verify_live_resource_identity(env, state, kind, resource_id, identity_key=None, require_vm_relation=True, stable_only=False):
     exists, resource = read_exact_resource(env, resource_id, kind)
     if not exists:
         return False, None
     verify_resource_tags(env, state, resource, kind)
     identity_key = identity_key or kind
     recorded = state["resources"].get("identities", {}).get(identity_key)
-    if recorded is None or immutable_identity(resource, kind) != recorded:
+    live = immutable_identity(resource, kind)
+    if recorded is None:
+        raise RunnerError("live {} immutable identity changed; cleanup retained ambiguous state".format(kind))
+    if kind == "run-command":
+        # Execution mutates a run command's etag and provisioning state, so
+        # the exact resource id plus the verified ownership tags carry its
+        # whole identity.
+        if live["id"] != recorded["id"]:
+            raise RunnerError("live {} immutable identity changed; cleanup retained ambiguous state".format(kind))
+    elif stable_only:
+        # Deleting the VM mutates every dependent resource's etag, so the
+        # absence fence compares the stable immutable field and exact id
+        # instead of the full creation-time identity.
+        stable_field = {
+            "vm": "instance_id", "nic": "resource_guid", "disk": "unique_id",
+            "run-command": "provisioning_state", "ttl-schedule": "task_type",
+        }[kind]
+        if live["id"] != recorded["id"] or live.get(stable_field) != recorded.get(stable_field):
+            raise RunnerError("live {} immutable identity changed; cleanup retained ambiguous state".format(kind))
+    elif live != recorded:
         raise RunnerError("live {} immutable identity changed; cleanup retained ambiguous state".format(kind))
     if require_vm_relation and kind == "nic" and str(resource.get("properties", {}).get("virtualMachine", {}).get("id", "")).lower() != state["resources"]["vm_id"].lower():
         raise RunnerError("live NIC is not managed by the exact runner VM")
@@ -3126,12 +3192,19 @@ def classify_disposable_resources(env, state, include_vm=True):
         or str(item.get("id", "")).lower().startswith(vm_child_prefix)
     ]
     residual_ids = {str(item.get("id", "")).lower() for item in residual}
-    unknown = sorted(residual_ids - expected_ids)
+    # The durable cost-reservation identity carries this invocation's binding
+    # tag by design and is verified and released through its own lane, never
+    # deleted here; it must not read as an unplanned residual.
+    reservation_resource = reservation_id(env, state["invocation"]).lower()
+    unknown = sorted(residual_ids - expected_ids - {reservation_resource})
     if unknown:
         raise RunnerError("VM-absent invocation has an unplanned residual resource; cleanup retained ambiguous state")
     classified = []
     for kind, identity_key, resource_id in planned:
-        exists, resource = verify_live_resource_identity(env, state, kind, resource_id, identity_key)
+        exists, resource = verify_live_resource_identity(
+            env, state, kind, resource_id, identity_key,
+            require_vm_relation=False, stable_only=True,
+        )
         if exists:
             classified.append((kind, identity_key, resource_id, resource))
     return classified
@@ -3152,15 +3225,26 @@ def delete_resource(env, state, resource_id, kind):
 
 def delete_classified_resource(env, state, resource_id, kind, identity_key, resource):
     url = resource_url(resource_id, RESOURCE_API_VERSIONS[kind])
-    _, rc, stderr = az_command(env, [
-        "rest", "--method", "delete", "--url", url,
-        "--headers", "If-Match={}".format(resource["etag"]),
-    ], check=False)
+    arguments = ["rest", "--method", "delete", "--url", url]
+    if resource.get("etag"):
+        arguments += ["--headers", "If-Match={}".format(resource["etag"])]
+    _, rc, stderr = az_command(env, arguments, check=False)
     if rc != 0:
         raise RunnerError("conditional exact {} deletion failed: {}".format(kind, stderr))
-    remains, _ = read_exact_resource(env, resource_id, kind)
-    if remains:
-        raise RunnerError("exact {} still exists after conditional delete".format(kind))
+    # ARM deletions are asynchronous: a half-deleted resource can keep
+    # listing while its GET already fails, so absence is proven by a
+    # bounded poll rather than one immediate read-back.
+    deadline = time.monotonic() + 90
+    while True:
+        try:
+            remains, _ = read_exact_resource(env, resource_id, kind)
+        except RunnerError:
+            remains = True
+        if not remains:
+            return
+        if time.monotonic() >= deadline:
+            raise RunnerError("exact {} still exists after conditional delete".format(kind))
+        time.sleep(5)
 
 
 def adopt_expected_detach(env, state, kind, identity_key, resource_id):
@@ -3184,7 +3268,7 @@ def adopt_expected_detach(env, state, kind, identity_key, resource_id):
 
 
 def cleanup(env, state):
-    if state.get("phase") not in ("result-collected", "cleanup-retained", "complete"):
+    if state.get("phase") not in ("result-collected", "cleanup-retained", "compute-removed", "complete"):
         raise RunnerError("cleanup requires a safely collected result; active or ambiguous work is retained")
     if state.get("phase") == "complete":
         return
@@ -3219,7 +3303,12 @@ def cleanup(env, state):
         raise
     payload_dir = Path(state["input_path"]).parent
     if payload_dir.parent == env["state_dir"] / "payloads":
-        shutil.rmtree(payload_dir, ignore_errors=False)
+        # A repeated cleanup can race an earlier partial removal; an already
+        # absent tree is exactly the desired end state.
+        try:
+            shutil.rmtree(payload_dir, ignore_errors=False)
+        except FileNotFoundError:
+            pass
     if state.get("reservation_recorded"):
         try:
             mark_management_reservation_cleanup_verified(env, state)
@@ -3342,7 +3431,7 @@ def resume(env, state):
         cleanup(env, state)
         print_logs_and_summary(state, result)
         return int(result["exit_code"])
-    if phase == "result-collected" or phase == "cleanup-retained":
+    if phase in ("result-collected", "cleanup-retained", "compute-removed"):
         cleanup(env, state)
         print_logs_and_summary(state, state["result"])
         return int(state["result"]["exit_code"])

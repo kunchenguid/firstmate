@@ -98,10 +98,36 @@ assert set(template["parameters"]["vmSize"]["allowedValues"]) >= {"Standard_D4as
 assert vm["identity"]["type"] == "UserAssigned"
 assert "controllerIdentityId" in json.dumps(vm["identity"])
 assert "publicipaddress" not in json.dumps(nic).lower()
-assert "ssh" not in json.dumps(vm["properties"]["osProfile"]).lower()
+linux=vm["properties"]["osProfile"]["linuxConfiguration"]
+assert linux["disablePasswordAuthentication"] is True
+runner_key=linux["ssh"]["publicKeys"][0]
+assert runner_key["path"]=="/home/fmbootstrap/.ssh/authorized_keys"
+assert runner_key["keyData"].startswith("ssh-rsa ") and runner_key["keyData"].endswith(" firstmate-runner-blackhole")
+assert "adminPassword" not in json.dumps(vm["properties"]["osProfile"])
 assert "customdata" not in json.dumps(template).lower()
 for value in ("PrivateNetwork=yes","RestrictAddressFamilies=AF_UNIX","IPAddressDeny=any","CapabilityBoundingSet=CAP_SETUID CAP_SETGID","AmbientCapabilities=","NoNewPrivileges=yes"):
     assert value in guest
+for value in ("positional parameters are forbidden","REQUEST_B64=${request_b64:-}","EXECUTOR_B64=${executor_b64:-}","unset request_b64 vm_resource_id"):
+    assert value in guest
+assert 'install -m 0400 -o fmrunner -g fmrunner "$SNAPSHOT" /work/snapshot.bundle' in guest
+assert "git -C /work/repo fetch /work/snapshot.bundle" in guest
+assert 'fetch "$SNAPSHOT"' not in guest
+assert "GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/work/repo" in guest
+assert guest.index("runuser -u fmrunner -- git -C /work/repo init") < guest.index("GIT_CONFIG_KEY_0=safe.directory")
+assert guest.index("cd /work/repo") < guest.index("uv venv --python")
+executor_text=open("bin/fm-azure-runner-exec.py").read()
+assert "output directory is not a fresh root-owned staging area" in executor_text
+assert 'open(stdout_path, "xb"' in executor_text
+assert "def enter_repo_as_runner():" in executor_text
+assert "preexec_fn=enter_repo_as_runner," in executor_text
+assert "cwd=str(repo)," not in executor_text
+assert executor_text.index("drop_privileges(uid, gid,") < executor_text.index("os.chdir(str(repo))")
+assert "x-ms-meta-result_digest" in guest and "x-ms-meta-result-digest" not in guest
+assert 'SAFE_INVOCATION = re.compile(r"^azr-[a-z0-9]{12}(?:-a(?:[2-9]|[1-9][0-9]+))?$")' in host
+assert '[ -s "$OUTPUT/result.json" ] || { echo "guest bootstrap: isolated executor failed"' in guest
+assert "TimeoutStopSec=15" in guest
+assert guest.index('[ "$NETWORK_BYTES" -eq 0 ] ||') < guest.index('if [ "$EXECUTOR_STATUS" -ne 0 ]; then')
+assert "$#\" -eq 10" not in guest
 run_at=guest.index("systemd-run --quiet")
 input_token_at=guest.index("metadata/identity/oauth2/token")
 output_token_at=guest.rindex("metadata/identity/oauth2/token")
@@ -118,6 +144,41 @@ assert "If-Match=" in host and "runner-cost-reservation" in host
 assert 'command_env.setdefault("FM_HOME", str(ROOT))' in host
 assert 'command_env["FM_HOME"] = str(ROOT)' not in host
 assert 'str(Path(command_env["FM_HOME"]) / "state" / "azure-workers")' in host
+schedule=next(r for r in template["resources"] if r["type"]=="Microsoft.DevTestLab/schedules")
+assert schedule["name"]=="[format('shutdown-computevm-{0}', parameters('vmName'))]"
+safety=next(r for r in template["resources"] if r["type"]=="Microsoft.Compute/virtualMachines/runCommands")
+safety_script=safety["properties"]["source"]["script"]
+assert "uriComponentToString('%0A')" in safety_script and "\\n" not in safety_script
+assert "residual_ids - expected_ids - {reservation_resource}" in host
+assert host.index("reservation_resource = reservation_id") < host.index("unknown = sorted")
+assert "cost reservation resource proven absent; cleanup verification recorded on absence" in host
+assert "cost reservation absence is ambiguous" in host
+assert 'parent_managed = bool(state.get("request", {}).get("capacity_parent"))' in host
+assert host.count("itemized_cost_bound(rate, MAX_BILLABLE_LIFETIME_HOURS, limits, parent_managed=parent_managed)") >= 1
+assert host.index('if entry["cleanup-verified-at"] != "none":') < host.index("tags[\"cleanup-verified-at\"] = iso_utc()")
+assert host.count('identity["etag"] = identity["etag"] or identity["unique_id"]') == 1
+assert 'label not in ("run-command", "ttl-schedule") and not identity["etag"]' in host
+assert 'if resource.get("etag"):' in host
+assert "stable_only=True," in host
+assert "require_vm_relation=False," in host
+assert '"nic": "resource_guid", "disk": "unique_id",' in host
+assert 'if kind == "run-command":' in host
+assert "elif stable_only:" in host
+assert host.index('if kind == "run-command":') < host.index("elif stable_only:")
+assert "still exists after conditional delete" in host
+assert host.index("deadline = time.monotonic() + 90") < host.index("still exists after conditional delete")
+assert 'if phase in ("result-collected", "cleanup-retained", "compute-removed"):' in host
+assert '("result-collected", "cleanup-retained", "compute-removed", "complete")' in host
+assert "except FileNotFoundError:" in host[host.index("payload_dir = Path"):host.index("payload_dir = Path")+700]
+provider_text=open("bin/fm-azure-worker-provider.py").read()
+assert 'SAFE_INVOCATION = re.compile(r"^azr-[0-9a-f]{12}(?:-a(?:[2-9]|[1-9][0-9]+))?$")' in provider_text
+assert '"ttl_schedule_name": "shutdown-computevm-{}".format(vm_name)' in host
+assert "schedules/shutdown-computevm-{}" in host
+assert "DEPLOYMENT_TIMEOUT_SECONDS = 900" in host
+assert "LEASE_ACQUIRE_ATTEMPTS = 90" in host
+assert "for _ in range(LEASE_ACQUIRE_ATTEMPTS):" in host
+assert "timeout_seconds=DEPLOYMENT_TIMEOUT_SECONDS" in host
+assert "AZURE_SCHEDULE_MINIMUM_LEAD_SECONDS + DEPLOYMENT_TIMEOUT_SECONDS" in host
 start=host.index("def dispatch_prepared")
 assert host.index("shared_capacity_reserve(env, state, cost)", start) < host.index("create_vm(env, state)", start)
 assert host.index("lease.renew_and_assert()", start) < host.index("create_vm(env, state)", start)

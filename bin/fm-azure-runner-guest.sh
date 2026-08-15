@@ -4,18 +4,26 @@
 set -euo pipefail
 umask 077
 
-[ "$#" -eq 10 ] || { echo "guest bootstrap: expected ten bound parameters" >&2; exit 125; }
-REQUEST_B64=$1
-VM_RESOURCE_ID=$2
-VM_INSTANCE_ID=$3
-GUEST_DIGEST=$4
-STORAGE_ACCOUNT=$5
-CONTAINER=$6
-OUTPUT_BLOB=$7
-INPUT_BLOB=$8
-IDENTITY_CLIENT_ID=$9
-EXECUTOR_B64=${10}
-set --
+# Managed Run Command delivers parameters as environment variables named
+# after each declared parameter, never as positional arguments; the
+# validation cell guest proved this contract live.
+[ "$#" -eq 0 ] || { echo "guest bootstrap: positional parameters are forbidden" >&2; exit 125; }
+REQUEST_B64=${request_b64:-}
+VM_RESOURCE_ID=${vm_resource_id:-}
+VM_INSTANCE_ID=${vm_instance_id:-}
+GUEST_DIGEST=${guest_digest:-}
+STORAGE_ACCOUNT=${storage_account:-}
+CONTAINER=${container:-}
+OUTPUT_BLOB=${output_blob:-}
+INPUT_BLOB=${input_blob:-}
+IDENTITY_CLIENT_ID=${identity_client_id:-}
+EXECUTOR_B64=${executor_b64:-}
+unset request_b64 vm_resource_id vm_instance_id guest_digest storage_account
+unset container output_blob input_blob identity_client_id executor_b64
+for bound in "$REQUEST_B64" "$VM_RESOURCE_ID" "$VM_INSTANCE_ID" "$GUEST_DIGEST" "$STORAGE_ACCOUNT" "$CONTAINER" "$OUTPUT_BLOB" "$INPUT_BLOB" "$IDENTITY_CLIENT_ID" "$EXECUTOR_B64"; do
+  [ -n "$bound" ] || { echo "guest bootstrap: expected ten bound parameters" >&2; exit 125; }
+done
+unset bound
 case "$GUEST_DIGEST" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "guest bootstrap: bad protocol digest" >&2; exit 125 ;; esac
 case "$STORAGE_ACCOUNT" in [a-z0-9][a-z0-9]*) ;; *) echo "guest bootstrap: bad storage name" >&2; exit 125 ;; esac
 [ "$CONTAINER" = validation-shards ] || { echo "guest bootstrap: bad result container" >&2; exit 125; }
@@ -113,6 +121,10 @@ chown fmrunner:fmrunner /work
 
 runuser -u fmrunner -- git -C /work/repo init -q
 runuser -u fmrunner -- git -C /work/repo remote add origin "$REMOTE"
+# Root's read-only identity verification would refuse the runner-owned
+# repository as dubious (CVE-2022-24765); scope the exception through the
+# environment exactly as the validation cell guest does.
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/work/repo
 if [ "$SOURCE_MODE" = private-parent-bundle ]; then
   [ "$INPUT_BLOB" = "$(read_request repository.input_blob)" ] || { echo "guest bootstrap: private snapshot blob mismatch" >&2; exit 125; }
   SNAPSHOT=$BASE/snapshot.bundle
@@ -130,7 +142,13 @@ if [ "$SOURCE_MODE" = private-parent-bundle ]; then
   [ "$(stat -c %s "$SNAPSHOT")" = "$(read_request repository.snapshot_bytes)" ] \
     && [ "sha256:$(sha256sum "$SNAPSHOT" | awk '{print $1}')" = "$(read_request repository.snapshot_digest)" ] \
     || { echo "guest bootstrap: private snapshot digest/size mismatch" >&2; exit 125; }
-  runuser -u fmrunner -- git -C /work/repo fetch "$SNAPSHOT" "$COMMIT"
+  # The bootstrap base is root-only (umask 077), unreadable to the
+  # unprivileged fetch; the digest-verified snapshot moves onto the
+  # runner-owned work filesystem for the fetch and is removed after it.
+  install -m 0400 -o fmrunner -g fmrunner "$SNAPSHOT" /work/snapshot.bundle
+  rm -f "$SNAPSHOT"
+  runuser -u fmrunner -- git -C /work/repo fetch /work/snapshot.bundle "$COMMIT"
+  rm -f /work/snapshot.bundle
 elif [ "$SOURCE_REF" != none ] && [ "$SOURCE_HEAD" = "$COMMIT" ]; then
   [ "$INPUT_BLOB" = none ] || { echo "guest bootstrap: public source received a private snapshot blob" >&2; exit 125; }
   run_bootstrap_network runuser -u fmrunner -- git -C /work/repo fetch --depth=1 origin "$SOURCE_REF"
@@ -169,6 +187,10 @@ while IFS=$'\t' read -r url file bytes digest; do
 done <"$BASE/wheels.tsv"
 chown -R fmrunner:fmrunner /work/home/.fm-runner-tools
 [ "sha256:$(sha256sum /work/repo/tools/agent-fleet/uv.lock | awk '{print $1}')" = "$(read_request protocol.agent_fleet_python.lock_digest)" ] || { echo "guest bootstrap: lock mismatch" >&2; exit 125; }
+# The run-command handler's download directory is root-only, so the
+# unprivileged uv invocations must not inherit it as their working
+# directory (uv's config discovery reads ./uv.toml and refuses on EACCES).
+cd /work/repo
 runuser -u fmrunner -- /work/home/.fm-runner-tools/uv/uv venv --python /usr/bin/python3 /work/repo/tools/agent-fleet/.venv >/dev/null
 runuser -u fmrunner -- env UV_OFFLINE=1 UV_NO_INDEX=1 /work/home/.fm-runner-tools/uv/uv pip install --python /work/repo/tools/agent-fleet/.venv/bin/python --offline --no-index --find-links /work/home/.fm-runner-tools/wheelhouse pytest ruff >/dev/null
 
@@ -201,10 +223,17 @@ systemd-run --quiet --wait --collect --unit "$UNIT" --property=Type=exec --prope
   --property=ProtectKernelTunables=yes --property=ProtectKernelModules=yes --property=ProtectControlGroups=yes \
   --property=RestrictRealtime=yes --property=RestrictSUIDSGID=yes --property=LockPersonality=yes \
   --property='CapabilityBoundingSet=CAP_SETUID CAP_SETGID' --property=AmbientCapabilities= \
-  --property="ReadWritePaths=/work $OUTPUT" /usr/bin/python3 "$EXECUTOR" "$REQUEST" /work/repo "$OUTPUT" "$RUNNER_UID" "$RUNNER_GID" "$VM_RESOURCE_ID" "$VM_INSTANCE_ID"
+  --property=TimeoutStopSec=15 --property="ReadWritePaths=/work $OUTPUT" /usr/bin/python3 "$EXECUTOR" "$REQUEST" /work/repo "$OUTPUT" "$RUNNER_UID" "$RUNNER_GID" "$VM_RESOURCE_ID" "$VM_INSTANCE_ID"
 EXECUTOR_STATUS=$?
 set -e
-[ "$NETWORK_BYTES" -eq 0 ] && [ "$EXECUTOR_STATUS" -eq 0 ] || { echo "guest bootstrap: isolated executor failed" >&2; exit 125; }
+[ "$NETWORK_BYTES" -eq 0 ] || { echo "guest bootstrap: isolated executor failed" >&2; exit 125; }
+if [ "$EXECUTOR_STATUS" -ne 0 ]; then
+  # Lingering repository-test daemons can hold the cgroup past stop-sigterm
+  # and fail the unit after the executor already finished its protocol; the
+  # executor writes its result atomically as its last act, so that result is
+  # the authority and only its absence makes the unit status fatal.
+  [ -s "$OUTPUT/result.json" ] || { echo "guest bootstrap: isolated executor failed" >&2; exit 125; }
+fi
 
 python3 - "$REQUEST" /work/repo "$OUTPUT" "$ARTIFACT_BYTES" <<'PY'
 import hashlib,json,os,pathlib,shutil,stat,sys
@@ -237,10 +266,10 @@ chmod 0600 "$TOKEN_FILE"
 UPLOAD_URL="https://${STORAGE_ACCOUNT}.blob.core.windows.net/${CONTAINER}/${OUTPUT_BLOB}"
 run_bootstrap_network curl --fail --silent --show-error --connect-timeout 30 --max-time 600 -X PUT \
   -H "Authorization: Bearer $(<"$TOKEN_FILE")" -H 'x-ms-version: 2023-11-03' -H 'x-ms-blob-type: BlockBlob' \
-  -H "x-ms-meta-result-digest: ${RESULT_DIGEST#sha256:}" --upload-file "$RESULT_ARCHIVE" "$UPLOAD_URL"
+  -H "x-ms-meta-result_digest: ${RESULT_DIGEST#sha256:}" --upload-file "$RESULT_ARCHIVE" "$UPLOAD_URL"
 run_bootstrap_network curl --fail --silent --show-error --head --connect-timeout 30 --max-time 60 \
   -H "Authorization: Bearer $(<"$TOKEN_FILE")" -H 'x-ms-version: 2023-11-03' "$UPLOAD_URL" >"$BASE/result-head"
-grep -qi "^x-ms-meta-result-digest: ${RESULT_DIGEST#sha256:}" "$BASE/result-head" || { echo "guest bootstrap: uploaded result verification failed" >&2; exit 125; }
+grep -qi "^x-ms-meta-result_digest: ${RESULT_DIGEST#sha256:}" "$BASE/result-head" || { echo "guest bootstrap: uploaded result verification failed" >&2; exit 125; }
 rm -f "$TOKEN_FILE" "$BASE/result-head"
 RESULT_B64=$(base64 -w0 "$OUTPUT/result.json")
 BOOT_ID=$(cat /proc/sys/kernel/random/boot_id)

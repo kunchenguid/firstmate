@@ -175,7 +175,17 @@ def main():
         argv, limits = verify_request(request)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return fail(str(exc))
-    output.mkdir(mode=0o700, parents=True, exist_ok=False)
+    try:
+        output.mkdir(mode=0o700, parents=True, exist_ok=False)
+    except FileExistsError:
+        # The guest pre-creates the output directory so the hardened unit
+        # can bind it writable under ProtectSystem=strict; accept it only
+        # root-owned and empty, and keep the exclusive log creates below as
+        # the per-run freshness fence.
+        details = output.stat()
+        if details.st_uid != 0 or any(output.iterdir()):
+            return fail("output directory is not a fresh root-owned staging area")
+        os.chmod(output, 0o700)
     stdout_path = output / "stdout.log"
     stderr_path = output / "stderr.log"
     stdout_handle = open(stdout_path, "xb", buffering=0)
@@ -192,14 +202,21 @@ def main():
     }
     started = time.monotonic()
     try:
+        def enter_repo_as_runner():
+            # The unit's bounding set has no CAP_DAC_OVERRIDE, so root
+            # cannot enter the 0700 runner-owned repository; the child
+            # drops privileges first and then changes directory as the
+            # runner user, instead of Popen's early root chdir.
+            drop_privileges(uid, gid, limits["pid_max"], limits["disk_bytes"])
+            os.chdir(str(repo))
+
         process = subprocess.Popen(
             argv,
-            cwd=str(repo),
             env=child_env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            preexec_fn=lambda: drop_privileges(uid, gid, limits["pid_max"], limits["disk_bytes"]),
+            preexec_fn=enter_repo_as_runner,
             close_fds=True,
         )
         selector = selectors.DefaultSelector()
