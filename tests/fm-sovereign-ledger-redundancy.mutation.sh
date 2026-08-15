@@ -404,10 +404,12 @@ set -e
 if [ "$control_substitutions" -eq 1 ] && [ "$control_status" -eq 0 ]; then
   control_outcome=SURVIVED
 else
-  control_outcome=FAILED
+control_outcome=FAILED
 fi
 printf 'CONTROL %s substitutions=%s status=%s\n' "$control_outcome" "$control_substitutions" "$control_status"
 
+PUBLICATION_MATRIX="$TMP/evidence-publication-matrix.md"
+"$ROOT/tests/fm-sovereign-ledger-evidence-publish.mutation.sh" --markdown > "$PUBLICATION_MATRIX"
 EVIDENCE_STAGE="$TMP/evidence.md"
 {
     printf '# Sovereign ledger redundancy mutation evidence\n\n'
@@ -461,6 +463,8 @@ Every mutant records exactly one substitution and every one of its twelve fixtur
 Every survived cell printed by the command names the actual remaining boundary that refused publication.
 The `resolved-outside` fixture passes the component precheck as a real directory, swaps it to a scoped fake-outside link, and remains safe through final structural containment when the earlier canonical containment clause is neutralized.
 EVIDENCE_PUBLICATION
+    printf '\n'
+    cat "$PUBLICATION_MATRIX"
 } > "$EVIDENCE_STAGE"
 
 printf 'MUTATION SUMMARY killed=%s survived=%s void=%s denominator=%s\n' "$killed" "$survived" "$void" "$denominator"
