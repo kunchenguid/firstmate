@@ -2366,6 +2366,17 @@ def prepare_shard_runner(env, state, blob, request, extracted, plan):
         return existing
     repo = materialize_shard_repo(request, extracted)
     invocation = plan["invocation"]
+    # A round may stage more than one request on the same shard constituent
+    # (behavior tests plus lint). The constituent's invocation id is one-shot,
+    # so only the first record may claim it; every later record derives its
+    # own deterministic invocation from its request digest.
+    claimed = any(
+        value.get("invocation") == invocation
+        and value.get("request_digest") != key
+        for value in state.get("shard_runs", {}).values()
+    )
+    if claimed:
+        invocation = "azr-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
     record = {
         "blob": blob,
         "request_digest": key,

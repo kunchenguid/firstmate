@@ -146,6 +146,8 @@ assert 'value.get("parent_invocation") == current' in host
 assert 'def materialize_shard_repo' in host
 assert 'if not Path(existing["repo"]).is_dir():' in host
 assert host.count('materialize_shard_repo(request, extracted)') == 3
+assert 'value.get("invocation") == invocation' in host
+assert 'invocation = "azr-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]' in host
 assert '"snapshot_bundle": str(extracted / "snapshot.bundle"),' in host
 assert '"invocation": plan["invocation"],' not in host[host.index('def prepare_shard_runner'):host.index('def run_shard_invocations')]
 assert host.index('save_state(env, state)', host.index('runner_stderr_tail"] = stderr')) < host.index('one or more shard transports retained ambiguous state')
