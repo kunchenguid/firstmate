@@ -386,6 +386,22 @@ test_portable_shard_union_and_coverage_guard() {
   pass "portable shard union, disjointness, and coverage guard hold"
 }
 
+test_coverage_guard_is_locale_independent() {
+  local locale c_out non_c_out
+  locale=en_AU.UTF-8
+  if ! locale -a 2>/dev/null | grep -qi '^en_AU\.utf8$'; then
+    pass "coverage guard locale independence: $locale not installed, skipping"
+    return
+  fi
+  c_out=$(LC_ALL=C "$RUNNER" --check-coverage) \
+    || fail "coverage guard failed under LC_ALL=C"
+  non_c_out=$(LC_ALL="$locale" "$RUNNER" --check-coverage) \
+    || fail "coverage guard failed under LC_ALL=$locale: sorted-input tools (comm/uniq) must force byte collation, not inherit the caller's locale"
+  [ "$non_c_out" = "$c_out" ] \
+    || fail "coverage guard output differs between LC_ALL=C and LC_ALL=$locale"
+  pass "coverage guard holds under a non-C collation locale ($locale)"
+}
+
 test_portable_serial_shards_partition_the_serial_lane() {
   local lanes count serial shard listed union dups shard_lane total cap
   lanes=$("$RUNNER" --list-lanes)
@@ -715,6 +731,7 @@ test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
+test_coverage_guard_is_locale_independent
 test_portable_serial_shards_partition_the_serial_lane
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
