@@ -171,17 +171,24 @@ pass "tmux liveness: a harness-named foreground process classifies alive"
 
 # --- OMP's scoped Bun identity ----------------------------------------------
 
-new_window omp "$LAB/bin/bun" "$LAB/bin/omp"
+# OMP's real Bun argv retains the launcher followed by its advisor, model,
+# effort, and positional-brief tokens. This must not regress to a fixture that
+# only works when argv happens to end exactly at the launcher path.
+new_window omp "$LAB/bin/bun" "$LAB/bin/omp" --advisor \
+  --model claude-sonnet-5 --thinking low 'Reply with exactly the word PONG and nothing else.'
 wait_for_state "$SESSION:omp" ambiguous 100 \
   || fail "an OMP-shaped Bun process without recorded OMP scope must stay ambiguous"
 wait_for_state "$SESSION:omp" alive 100 omp \
   || fail "a live OMP Bun process with recorded OMP scope must classify alive"
 pass "tmux liveness: a live OMP Bun process requires and honors recorded OMP scope"
 
-new_window omp-decoy "$LAB/bin/bun" "$LAB/bin/not-omp"
+# A plain Bun program remains unrelated even with stale or malformed OMP task
+# metadata. This is the negative that prevents the scoped exception from
+# turning generic Bun panes into live crewmates.
+new_window omp-decoy "$LAB/bin/bun" "$LAB/bin/not-omp" somescript.js
 wait_for_state "$SESSION:omp-decoy" ambiguous 100 omp \
   || fail "a scoped but unrelated Bun process must stay ambiguous"
-pass "tmux liveness: recorded OMP scope does not adopt an unrelated Bun process"
+pass "tmux liveness: recorded OMP scope does not adopt a plain unrelated Bun program"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy

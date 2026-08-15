@@ -241,7 +241,7 @@ while [ "$#" -gt 0 ]; do
 done
 case "$field:${FM_TEST_OMP_SHAPE:-omp}" in
   comm=*) printf '%s\n' bun ;;
-  args=:omp) printf '%s\n' 'bun /Users/test/.bun/bin/omp --advisor' ;;
+  args=:omp) printf '%s\n' 'bun /Users/test/.bun/bin/omp --advisor --model claude-sonnet-5 --thinking low Reply with exactly the word PONG and nothing else.' ;;
   args=:package) printf '%s\n' 'bun /tmp/node_modules/@oh-my-pi/pi-coding-agent/dist/index.js' ;;
   args=*) printf '%s\n' 'bun /tmp/unrelated-bun-program.js' ;;
   ppid=*) printf '%s\n' 1 ;;

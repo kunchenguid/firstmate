@@ -16,7 +16,9 @@ fm_omp_process_matches() {  # <comm> <args>
     *) return 1 ;;
   esac
   case "$args" in
-    *'/pi-coding-agent/'*|*'/omp '|*'/omp') return 0 ;;
+    # Keep the bare launcher form for argv ending at omp, and accept trailing
+    # argv tokens for the real OMP shape: `bun /path/omp --advisor ...`.
+    *'/pi-coding-agent/'*|*'/omp '*|*'/omp') return 0 ;;
   esac
   return 1
 }
