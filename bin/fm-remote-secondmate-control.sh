@@ -2,7 +2,7 @@
 # Host-local lifecycle control for the remote secondmate home selected by fm-on.
 #
 # Usage:
-#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
+#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent] [tier]
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message>
@@ -133,7 +133,7 @@ cmd_route() {
 }
 
 cmd_launch() {
-  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
+  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-} tier=${7:-standard}
   local current meta out herdr_session
 
   validate_id "$id"
@@ -143,6 +143,7 @@ cmd_launch() {
     *) die "unverified remote secondmate harness: $harness" ;;
   esac
   case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
+  case "$tier" in standard|fast) ;; *) die "invalid remote secondmate tier: $tier" ;; esac
   # Herdr is required on this host, not merely preferred: its server belongs to
   # the GUI login session, so the endpoint survives every SSH disconnection that
   # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
@@ -168,6 +169,7 @@ cmd_launch() {
   ARGS=("$id" "$TARGET_HOME" --secondmate --harness "$harness" --backend "$selected_backend")
   [ "$model" = - ] || ARGS+=(--model "$model")
   [ "$effort" = - ] || ARGS+=(--effort "$effort")
+  [ "$tier" = standard ] || ARGS+=(--tier "$tier")
   [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
@@ -290,7 +292,7 @@ cmd_retire() {
 }
 
 case "${1:-}" in
-  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
+  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 7 ] || usage; cmd_launch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -eq 2 ] || usage; cmd_send "$@" ;;

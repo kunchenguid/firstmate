@@ -154,6 +154,7 @@ add_ship_task() {
     echo "tasktmp=/tmp/fm-$id"
     echo "model=default"
     echo "effort=default"
+    echo "tier=standard"
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
@@ -509,13 +510,14 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   local dir out rc
   dir=$(new_case keepprofile rl6)
   add_ship_task "$dir" rl6 claude
-  sed 's/^model=default$/model=opus/; s/^effort=default$/effort=high/' \
+  sed 's/^model=default$/model=opus/; s/^effort=default$/effort=high/; s/^tier=standard$/tier=fast/' \
     "$dir/home/state/rl6.meta" > "$dir/home/state/rl6.meta.tmp"
   mv "$dir/home/state/rl6.meta.tmp" "$dir/home/state/rl6.meta"
   out=$(run_control "$dir" rl6 relaunch --note "same runtime"); rc=$?
   expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
   [ "$(meta_field "$dir" rl6 model)" = opus ] || fail "the model should carry across a same-harness relaunch"
   [ "$(meta_field "$dir" rl6 effort)" = high ] || fail "the effort should carry across a same-harness relaunch"
+  [ "$(meta_field "$dir" rl6 tier)" = fast ] || fail "the serving tier should carry across a same-harness relaunch"
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
 }
 

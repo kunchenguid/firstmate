@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--tier <standard|fast>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--tier <standard|fast>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--tier <standard|fast>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -16,7 +16,7 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--tier <standard|fast>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -26,7 +26,7 @@
 #   backend, kind, project or home, worktree, endpoint - comes from the task's
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
-#   model, and effort may change, which is what makes a harness switch one
+#   model, effort, and tier may change, which is what makes a harness switch one
 #   ordinary relaunch. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
@@ -34,10 +34,11 @@
 #   the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
-#   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
-#   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   --model <name>, --effort <low|medium|high|xhigh|max>, and
+#   --tier <standard|fast> are concrete profile axes chosen by firstmate at intake.
+#   The tier defaults to standard and is only threaded into Codex, whose installed
+#   CLI was verified to support the service-tier override; an explicit tier on
+#   another harness is recorded and omitted with a warning.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -141,7 +142,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   source of truth; shared --scout/--harness/--model/--effort/--tier/--backend/--mode/--yolo
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -161,6 +162,7 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+#     __TIERFLAG__  quoted Codex service-tier override
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -271,6 +273,7 @@ KIND_SET=0
 HARNESS_ARG=
 MODEL=
 EFFORT=
+TIER=standard
 BACKEND_ARG=
 MODE=
 YOLO=
@@ -278,6 +281,7 @@ TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+TIER_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -294,6 +298,7 @@ for a in "$@"; do
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
+      tier) TIER=$a; TIER_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
@@ -313,6 +318,8 @@ for a in "$@"; do
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --tier) want_value=tier ;;
+    --tier=*) TIER=${a#--tier=}; TIER_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     --mode) want_value=mode ;;
@@ -328,6 +335,7 @@ done
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
+[ "$TIER_SET" -eq 0 ] || [ -n "$TIER" ] || { echo "error: --tier requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
@@ -348,6 +356,10 @@ fi
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
+esac
+case "$TIER" in
+  standard|fast) ;;
+  *) echo "error: --tier must be one of standard, fast" >&2; exit 1 ;;
 esac
 
 # --relaunch reuses an existing task's endpoint, worktree, project, and kind,
@@ -397,7 +409,7 @@ else
 fi
 
 spawn_remote_secondmate() {
-  local id=$1 remote host root home harness positional model effort backend out rc meta tmp
+  local id=$1 remote host root home harness positional model effort tier backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
@@ -449,6 +461,7 @@ spawn_remote_secondmate() {
   esac
   model=${MODEL:--}
   effort=${EFFORT:--}
+  tier=$TIER
   if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
     if [ "$MODEL_SET" -eq 0 ]; then
       model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
@@ -478,6 +491,15 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
       echo "error: invalid configured remote secondmate effort: $effort" >&2
+      return 1
+      ;;
+  esac
+  case "$tier" in
+    standard|fast) ;;
+    *)
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: invalid remote secondmate tier: $tier" >&2
       return 1
       ;;
   esac
@@ -556,7 +578,9 @@ spawn_remote_secondmate() {
     remote_traceparent=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$meta" || true)
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
-  [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  if [ -n "$remote_traceparent" ] || [ "$TIER_SET" -eq 1 ]; then
+    launch_args+=("$remote_traceparent" "$tier")
+  fi
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
@@ -619,6 +643,7 @@ spawn_remote_secondmate() {
     echo "tasktmp="
     echo "model=${model#-}"
     echo "effort=${effort#-}"
+    echo "tier=$tier"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
     echo "remote_host=$host"
@@ -754,6 +779,7 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            echo "tier=${TIER:-standard}"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -862,6 +888,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ "$TIER_SET" -eq 0 ] || shared_args+=(--tier "$TIER")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -1008,6 +1035,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  if [ "$TIER_SET" -eq 0 ]; then
+    TIER=$(fm_meta_get "$RELAUNCH_META" tier)
+    [ -n "$TIER" ] || TIER=standard
+  fi
+  case "$TIER" in
+    standard|fast) ;;
+    *) echo "error: task $ID has invalid recorded tier '$TIER'; refusing relaunch" >&2; exit 1 ;;
+  esac
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1114,9 +1149,9 @@ launch_template() {
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG____TIERFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG____TIERFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1257,6 +1292,10 @@ case "$HARNESS" in
     fi
     ;;
 esac
+
+if [ "$TIER_SET" -eq 1 ] && [ "$HARNESS" != codex ]; then
+  echo "warning: harness '$HARNESS' has no verified serving-tier flag; recording tier=$TIER and omitting it from launch" >&2
+fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
@@ -1421,6 +1460,23 @@ effort_flag_for_harness() {
     # task metadata but never reaches the launch command. Cursor encodes effort
     # in model ids such as cursor-grok-4.5-high, so it also receives no separate
     # effort flag.
+  esac
+}
+
+tier_flag_for_harness() {
+  local harness=$1 tier=$2
+  [ -n "$tier" ] || return 0
+  case "$harness" in
+    codex)
+      # Codex 0.147.0 renders service_tier=default as the standard tier and
+      # service_tier=priority as Fast. Its model catalog advertises priority
+      # but no neutral tier, so default is the empirically verified override
+      # that defeats the operator's global priority setting without a warning.
+      case "$tier" in
+        standard) printf -- '-c %s ' "$(shell_quote "service_tier=\"default\"")" ;;
+        fast) printf -- '-c %s ' "$(shell_quote "service_tier=\"priority\"")" ;;
+      esac
+      ;;
   esac
 }
 
@@ -2632,7 +2688,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort tier busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2650,6 +2706,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  echo "tier=${TIER:-standard}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -2714,8 +2771,10 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+TIERFLAG=$(tier_flag_for_harness "$HARNESS" "$TIER")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__TIERFLAG__/$TIERFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
