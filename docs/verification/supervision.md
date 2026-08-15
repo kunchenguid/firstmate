@@ -432,6 +432,11 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
 
+OpenCode 1.18.15 active-conversation wake routing was verified deterministically on 2026-08-15 with `tests/fm-pi-watch-extension.test.sh`.
+The two-session cases passed with `ok - OpenCode existing watcher retargets terminal delivery to the newer idle session` and `ok - OpenCode old wake turn cannot reclaim the newer idle session`.
+The full live command `FM_OPENCODE_LIVE_E2E=1 bash tests/fm-opencode-primary-live-e2e.test.sh` was run twice but did not reach watcher routing because its older native Ahoy setup failed first with `OpenCode native later-message setup did not run session start exactly once`.
+No live OpenCode claim is made for the new routing behavior; [issue 2433](https://github.com/kunchenguid/firstmate/issues/2433) tracks that prerequisite repair.
+
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 
 Pi same-process session-transition ownership was verified on 2026-07-27 against the tracked extension with a faithful in-process factory rebind (module cache retained, real arm children):

@@ -20,6 +20,8 @@ let retryTimer = null;
 let retryFailures = 0;
 let launchInFlight = null;
 let restorationInFlight = null;
+let deliverySessionID = "";
+const pendingWakeTurns = new Map();
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
 let armRecovery = new WeakMap();
@@ -185,13 +187,22 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
 }
 
 async function sendPrompt(paths, client, sessionID, text, recovery) {
+  const targetSessionID = deliverySessionID || sessionID;
   const encoded = await encodeFirstmateOperationalInput(paths.root, "watcher", text);
-  await client.session.promptAsync({
-    path: { id: sessionID },
-    body: {
-      parts: [{ type: "text", text: encoded }],
-    },
-  });
+  pendingWakeTurns.set(targetSessionID, (pendingWakeTurns.get(targetSessionID) ?? 0) + 1);
+  try {
+    await client.session.promptAsync({
+      path: { id: targetSessionID },
+      body: {
+        parts: [{ type: "text", text: encoded }],
+      },
+    });
+  } catch (error) {
+    const pending = pendingWakeTurns.get(targetSessionID) ?? 0;
+    if (pending <= 1) pendingWakeTurns.delete(targetSessionID);
+    else pendingWakeTurns.set(targetSessionID, pending - 1);
+    throw error;
+  }
   if (recovery) {
     const result = spawnSync(
       "bash",
@@ -207,6 +218,18 @@ async function sendPrompt(paths, client, sessionID, text, recovery) {
 
 function wakePrompt(reason) {
   return `WATCHER FIRED - drain queued wakes with bin/fm-wake-drain.sh and handle the reported wake. Watcher continuity is plugin-owned.\n\n${reason}`;
+}
+
+function observeIdleSession(sessionID) {
+  const pending = pendingWakeTurns.get(sessionID) ?? 0;
+  if (pending > 0) {
+    // A plugin-injected turn finishing after a captain session switch must not
+    // reclaim future wake delivery for the older conversation.
+    if (pending === 1) pendingWakeTurns.delete(sessionID);
+    else pendingWakeTurns.set(sessionID, pending - 1);
+    return;
+  }
+  deliverySessionID = sessionID;
 }
 
 function surfaceFailure(paths, client, sessionID, reason) {
@@ -441,6 +464,7 @@ export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
       if (event.type !== "session.idle") return;
       const sessionID = event.properties?.sessionID;
       if (!sessionID) return;
+      observeIdleSession(sessionID);
       void ensureArm(paths, sessionID, client);
     },
   };

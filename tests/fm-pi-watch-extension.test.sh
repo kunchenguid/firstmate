@@ -1499,6 +1499,158 @@ EOF
   pass "OpenCode watcher plugin starts one successor before wake prompt delivery settles"
 }
 
+test_opencode_existing_arm_retargets_new_idle_session() {
+  local plugin repo home log release stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-session-retarget-root"
+  home="$TMP_ROOT/opencode-session-retarget-home"
+  log="$TMP_ROOT/opencode-session-retarget.log"
+  release="$TMP_ROOT/opencode-session-retarget.release"
+  stop="$TMP_ROOT/opencode-session-retarget.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
+  printf 'signal: terminal outcome\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const promptSessions = [];
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      promptSessions.push(request.path.id);
+    },
+  },
+};
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const idle = (sessionID) => ({ event: { type: "session.idle", properties: { sessionID } } });
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event(idle("session-old"));
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("old session did not establish the watcher");
+await hooks.event(idle("session-new"));
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+for (let i = 0; i < 500 && promptSessions.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (promptSessions.length !== 1 || promptSessions[0] !== "session-new") {
+  throw new Error(`terminal wake targeted ${promptSessions.join(",") || "no session"}, expected session-new`);
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 2) throw new Error(`session handoff duplicated the singleton watcher: ${rows.join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "OpenCode must retarget an existing arm to the newer idle session"
+  [ -z "$out" ] || fail "OpenCode session-retarget test printed output: $out"
+  pass "OpenCode existing watcher retargets terminal delivery to the newer idle session"
+}
+
+test_opencode_old_wake_turn_cannot_reclaim_new_session() {
+  local plugin repo home log release_first release_second stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-session-handoff-race-root"
+  home="$TMP_ROOT/opencode-session-handoff-race-home"
+  log="$TMP_ROOT/opencode-session-handoff-race.log"
+  release_first="$TMP_ROOT/opencode-session-handoff-race.first"
+  release_second="$TMP_ROOT/opencode-session-handoff-race.second"
+  stop="$TMP_ROOT/opencode-session-handoff-race.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  while [ ! -e "$FM_RELEASE_FIRST" ]; do sleep 0.02; done
+  printf 'signal: first terminal outcome\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  while [ ! -e "$FM_RELEASE_SECOND" ]; do sleep 0.02; done
+  printf 'signal: second terminal outcome\n'
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FIRST="$release_first" FM_RELEASE_SECOND="$release_second" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const promptSessions = [];
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      promptSessions.push(request.path.id);
+    },
+  },
+};
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const idle = (sessionID) => ({ event: { type: "session.idle", properties: { sessionID } } });
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event(idle("session-old"));
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+writeFileSync(process.env.FM_RELEASE_FIRST, "release\n");
+for (let i = 0; i < 500 && promptSessions.length < 1; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (promptSessions[0] !== "session-old") throw new Error(`first wake missed the original session: ${promptSessions.join(",")}`);
+await hooks.event(idle("session-new"));
+await hooks.event(idle("session-old"));
+writeFileSync(process.env.FM_RELEASE_SECOND, "release\n");
+for (let i = 0; i < 500 && promptSessions.length < 2; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (promptSessions.length !== 2 || promptSessions[1] !== "session-new") {
+  throw new Error(`old wake turn reclaimed delivery: ${promptSessions.join(",") || "no sessions"}`);
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 3) throw new Error(`session handoff race duplicated the singleton watcher: ${rows.join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "OpenCode must not let an old wake turn reclaim a newer idle session"
+  [ -z "$out" ] || fail "OpenCode handoff-race test printed output: $out"
+  pass "OpenCode old wake turn cannot reclaim the newer idle session"
+}
+
 test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   local plugin repo home log release retired stop out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -2171,6 +2323,8 @@ test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
+test_opencode_existing_arm_retargets_new_idle_session
+test_opencode_old_wake_turn_cannot_reclaim_new_session
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry
