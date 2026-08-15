@@ -6,11 +6,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE="$ROOT/bin/fm-sovereign-ledger-redundancy.sh"
 TEST="$ROOT/tests/fm-sovereign-ledger-redundancy.test.sh"
 EVIDENCE=
-if [ "${1:-}" = --write-evidence ]; then
-  [ "$#" -eq 2 ] || { printf 'usage: %s [--write-evidence <path>]\n' "$0" >&2; exit 2; }
+MODE=mutation
+if [ "${1:-}" = --self-test-evidence-containment ]; then
+  [ "$#" -eq 1 ] || { printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment]\n' "$0" >&2; exit 2; }
+  MODE=containment
+elif [ "${1:-}" = --write-evidence ]; then
+  [ "$#" -eq 2 ] || { printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment]\n' "$0" >&2; exit 2; }
   EVIDENCE=$2
 elif [ "$#" -ne 0 ]; then
-  printf 'usage: %s [--write-evidence <path>]\n' "$0" >&2
+  printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment]\n' "$0" >&2
   exit 2
 fi
 
@@ -21,6 +25,147 @@ killed=0
 survived=0
 void=0
 denominator=0
+
+evidence_refuse() {
+  printf 'REFUSED: %s\n' "$*" >&2
+  return 1
+}
+
+canonical_evidence_dir() {
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  (
+    cd -- "$1" 2>/dev/null
+    pwd -P
+  )
+}
+
+evidence_validate_destination() {
+  local scope_input=$1 relative=$2 scope cursor remaining component resolved leaf
+  case "$relative" in /*) evidence_refuse "absolute evidence destination is forbidden: $relative"; return 1 ;; esac
+  scope=$(canonical_evidence_dir "$scope_input") \
+    || { evidence_refuse "evidence scope is unresolved or symlinked: $scope_input"; return 1; }
+  cursor=$scope
+  remaining=$relative
+  while [[ "$remaining" == */* ]]; do
+    component=${remaining%%/*}
+    remaining=${remaining#*/}
+    case "$component" in ''|.|..) evidence_refuse "unsafe evidence destination component: $relative"; return 1 ;; esac
+    [ ! -L "$cursor/$component" ] \
+      || { evidence_refuse "evidence destination has a symlinked parent: $relative"; return 1; }
+    resolved=$(canonical_evidence_dir "$cursor/$component") \
+      || { evidence_refuse "evidence destination parent is unresolved: $relative"; return 1; }
+    case "$resolved/" in "$scope/"*) ;; *) evidence_refuse "evidence destination resolves outside its scope: $relative"; return 1 ;; esac
+    cursor=$resolved
+  done
+  leaf=$remaining
+  case "$leaf" in ''|.|..) evidence_refuse "unsafe evidence destination leaf: $relative"; return 1 ;; esac
+  [ ! -L "$cursor/$leaf" ] \
+    || { evidence_refuse "evidence destination leaf is symlinked: $relative"; return 1; }
+  [ ! -e "$cursor/$leaf" ] \
+    || { evidence_refuse "evidence destination already exists: $relative"; return 1; }
+  case "$cursor/$leaf" in "$scope/"*) ;; *) evidence_refuse "evidence destination is outside its scope: $relative"; return 1 ;; esac
+  EVIDENCE_DESTINATION="$cursor/$leaf"
+}
+
+publish_evidence() {
+  local scope=$1 relative=$2 source=$3 destination
+  [ -f "$source" ] && [ ! -L "$source" ] \
+    || { evidence_refuse "evidence source is not a regular file"; return 1; }
+  case "$relative" in /*) destination=$relative ;; *) destination="$scope/$relative" ;; esac
+  EVIDENCE_DESTINATION=$destination
+  evidence_validate_destination "$scope" "$relative" "$destination" || return 1
+  destination=$EVIDENCE_DESTINATION
+  perl -MFcntl=O_WRONLY,O_CREAT,O_EXCL -e '
+    use strict;
+    use warnings;
+    my ($source, $destination) = @ARGV;
+    open my $input, "<", $source or die "$source: $!\n";
+    binmode $input;
+    local $/;
+    my $content = <$input>;
+    close $input or die "$source: $!\n";
+    sysopen my $output, $destination, O_WRONLY | O_CREAT | O_EXCL, 0600
+      or die "$destination: $!\n";
+    binmode $output;
+    my $offset = 0;
+    while ($offset < length $content) {
+      my $written = syswrite $output, $content, length($content) - $offset, $offset;
+      die "$destination: $!\n" unless defined $written;
+      $offset += $written;
+    }
+    close $output or die "$destination: $!\n";
+  ' "$source" "$destination" 2>/dev/null \
+    || { evidence_refuse "could not exclusively publish evidence: $relative"; return 1; }
+  cmp -s "$source" "$destination" \
+    || { evidence_refuse "published evidence did not retain exact bytes: $relative"; return 1; }
+}
+
+self_test_evidence_containment() {
+  local lab scope safe fake_data fake_state outside source pass_count=0 fail_count=0
+  lab="$TMP/evidence-containment"
+  scope="$lab/scope"
+  safe="$scope/safe"
+  fake_data="$lab/fake-data"
+  fake_state="$lab/fake-state"
+  outside="$lab/outside"
+  mkdir -p "$safe/inside-parent" "$fake_data" "$fake_state" "$outside"
+  source="$lab/evidence.md"
+  printf 'bounded evidence\n' > "$source"
+
+  containment_pass() { printf '  PASS  %s\n' "$1"; pass_count=$((pass_count + 1)); }
+  containment_fail() { printf '  FAIL  %s\n' "$1"; fail_count=$((fail_count + 1)); }
+  expect_refused_absent() {
+    local description=$1 relative=$2 forbidden=$3
+    if publish_evidence "$scope" "$relative" "$source" >/dev/null 2>&1; then
+      containment_fail "$description"
+    elif [ -e "$forbidden" ] || [ -L "$forbidden" ]; then
+      containment_fail "$description"
+    else
+      containment_pass "$description"
+    fi
+  }
+
+  expect_refused_absent 'absolute destination aimed at fake data is refused' "$fake_data/absolute.md" "$fake_data/absolute.md"
+  expect_refused_absent 'dot-dot traversal aimed at fake data is refused' '../fake-data/traversal.md' "$fake_data/traversal.md"
+  ln -s "$fake_data/symlink-leaf.md" "$safe/symlink-leaf.md"
+  expect_refused_absent 'symlinked leaf aimed at fake data is refused' 'safe/symlink-leaf.md' "$fake_data/symlink-leaf.md"
+  mkdir "$scope/inside-target"
+  ln -s "$scope/inside-target" "$safe/symlink-parent"
+  expect_refused_absent 'symlinked parent directory is refused' 'safe/symlink-parent/evidence.md' "$scope/inside-target/evidence.md"
+  ln -s "$fake_state" "$scope/state-link"
+  expect_refused_absent 'symlinked parent aimed at fake state is refused' 'state-link/evidence.md' "$fake_state/evidence.md"
+  ln -s "$outside" "$safe/outside-link"
+  expect_refused_absent 'destination resolving outside after parent resolution is refused' 'safe/outside-link/evidence.md' "$outside/evidence.md"
+  printf 'hard-link sentinel\n' > "$fake_data/hard-target.md"
+  ln "$fake_data/hard-target.md" "$safe/hard-link.md"
+  if publish_evidence "$scope" 'safe/hard-link.md' "$source" >/dev/null 2>&1 \
+    || [ "$(cat "$fake_data/hard-target.md")" != 'hard-link sentinel' ]; then
+    containment_fail 'existing hard-linked destination is refused without mutation'
+  else
+    containment_pass 'existing hard-linked destination is refused without mutation'
+  fi
+  expect_refused_absent 'unresolved destination parent is refused' 'missing/evidence.md' "$scope/missing/evidence.md"
+  printf 'existing sentinel\n' > "$safe/existing.md"
+  if publish_evidence "$scope" 'safe/existing.md' "$source" >/dev/null 2>&1 \
+    || [ "$(cat "$safe/existing.md")" != 'existing sentinel' ]; then
+    containment_fail 'existing destination is refused without mutation'
+  else
+    containment_pass 'existing destination is refused without mutation'
+  fi
+  if publish_evidence "$scope" 'safe/legitimate.md' "$source" >/dev/null 2>&1 \
+    && cmp -s "$source" "$safe/legitimate.md"; then
+    containment_pass 'legitimate in-scope publication remains exact'
+  else
+    containment_fail 'legitimate in-scope publication remains exact'
+  fi
+  printf 'CONTAINMENT FIXTURES passed=%s failed=%s\n' "$pass_count" "$fail_count"
+  [ "$pass_count" -eq 10 ] && [ "$fail_count" -eq 0 ]
+}
+
+if [ "$MODE" = containment ]; then
+  self_test_evidence_containment
+  exit
+fi
 
 apply_mutation() {
   local target=$1 line=$2 from=$3 to=$4 count_file=$5
@@ -194,18 +339,17 @@ else
 fi
 printf 'CONTROL %s substitutions=%s status=%s\n' "$control_outcome" "$control_substitutions" "$control_status"
 
-if [ -n "$EVIDENCE" ]; then
-  case "$EVIDENCE" in /*) ;; *) EVIDENCE="$PWD/$EVIDENCE" ;; esac
-  case "$EVIDENCE" in "$ROOT"/*) ;; *) printf 'evidence path must stay under %s\n' "$ROOT" >&2; exit 2 ;; esac
-  {
+EVIDENCE_STAGE="$TMP/evidence.md"
+{
     printf '# Sovereign ledger redundancy mutation evidence\n\n'
     printf 'Audience: maintainer verification.\n\n'
     printf 'Verified on 2026-08-15 against the R4 sovereign-ledger redundancy implementation.\n'
     printf 'The owned denominator is 72 enforcing clauses, ten more than round 3\047s 62 attempted mutants because R4 added exact enumeration and read denominators, portable BSD/GNU identity selection, containment rejection, and full cross-member inode-set enforcement.\n'
     printf 'Every run copied the implementation under one scoped `mktemp -d`; the live ledger, `data/`, and `state/` were never inputs or targets.\n\n'
     printf '```sh\n'
-    printf 'tests/fm-sovereign-ledger-redundancy.mutation.sh --write-evidence docs/verification/sovereign-ledger-redundancy-mutation.md\n'
+    printf 'tests/fm-sovereign-ledger-redundancy.mutation.sh --write-evidence sovereign-ledger-redundancy-mutation.candidate.md\n'
     printf '```\n\n'
+    printf 'Evidence publication rejects existing destinations, so the candidate is reviewed against this record before replacement rather than overwriting it in place.\n\n'
     printf 'Observed summary: `killed=%s survived=%s void=%s denominator=%s`; the intentional no-op control recorded `substitutions=%s status=%s outcome=%s`.\n\n' "$killed" "$survived" "$void" "$denominator" "$control_substitutions" "$control_status" "$control_outcome"
     printf '| Mutant | Stable exact clause anchor | Substitutions | Outcome | Status | Unenforced claim when survived |\n'
     printf '| --- | --- | ---: | --- | ---: | --- |\n'
@@ -213,8 +357,18 @@ if [ -n "$EVIDENCE" ]; then
       if [ "$outcome" != SURVIVED ]; then claim=-; fi
       printf '| `%s` | `%s` | %s | %s | %s | %s |\n' "$id" "$anchor" "$count" "$outcome" "$status" "$claim"
     done < "$RESULTS"
-  } > "$EVIDENCE"
-fi
+    printf '\n## Evidence publication containment\n\n'
+    printf 'The publication chokepoint was verified with scoped temporary fixtures on 2026-08-15.\n\n'
+    printf '```sh\n'
+    printf 'tests/fm-sovereign-ledger-evidence-publish.mutation.sh\n'
+    printf '```\n\n'
+    printf 'Observed bounded output:\n\n'
+    printf '```text\n'
+    printf 'CONTAINMENT FIXTURES passed=10 failed=0\n'
+    printf 'PUBLISH MUTANT P001 KILLED substitutions=1\n'
+    printf 'PUBLISH MUTATION SUMMARY enforcing_lines=1 killed=1 survived=0 void=0 denominator=1\n'
+    printf '```\n'
+} > "$EVIDENCE_STAGE"
 
 printf 'MUTATION SUMMARY killed=%s survived=%s void=%s denominator=%s\n' "$killed" "$survived" "$void" "$denominator"
 [ "$void" -eq 0 ]
@@ -222,3 +376,6 @@ printf 'MUTATION SUMMARY killed=%s survived=%s void=%s denominator=%s\n' "$kille
 [ "$survived" -eq 25 ]
 [ "$control_substitutions" -eq 1 ]
 [ "$control_outcome" = SURVIVED ]
+if [ -n "$EVIDENCE" ]; then
+  publish_evidence "$ROOT/docs/verification" "$EVIDENCE" "$EVIDENCE_STAGE"
+fi
