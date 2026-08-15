@@ -350,7 +350,7 @@ Require the matching `resolved` event, forbid `--yes`, and require the worker to
 Resume fleet supervision immediately after the decision lands.
 
 Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
-Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed is done; a checks-passed claim is done only when `bin/fm-crew-state.sh` scores at least one successful check and no pending, failed, cancelled, skipped, or never-run conclusions; failed or cancelled is failed.
+Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed is done; a checks-passed claim is done only when `bin/fm-crew-state.sh` scores at least one successful check and no pending, failed, cancelled, skipped, or never-run conclusions; a run that only reports completion, with no outcome to score, is unknown rather than done; failed or cancelled is failed.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
 

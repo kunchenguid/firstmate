@@ -52,6 +52,8 @@ Any direct or remaining historical annotation prints every status line unread at
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, and `bin/fm-ci-verdict-lib.sh` scores it: only a completed success with no pending, failed, cancelled, skipped, or never-run conclusions reports done, while a cancelled, empty, or later re-arm, failed-check, or issue marker returns the crew to working.
+A terminal `checks-passed` outcome is scored through that same owner, so a claim the scorer does not read as green reports blocked, and a missing or unreadable ci log reports unknown, instead of done.
+A terminal run that carries no outcome at all, including the coarse runs-list `completed` row that has no step, gate, or check evidence to score, reads unknown rather than done.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
