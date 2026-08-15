@@ -7,7 +7,7 @@
 #
 # Usage:
 #   fm-routine-complete.sh verify <task-id>
-#   fm-routine-complete.sh merge <task-id> [-- <extra gh-axi pr merge args>]
+#   fm-routine-complete.sh merge <task-id> [-- <extra gh pr merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
