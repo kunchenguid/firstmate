@@ -680,6 +680,38 @@ try: m.budget_gate(strict_env,limits)
 except m.RunnerError: pass
 else: raise AssertionError("strict admission bypassed unavailable Cost Management")
 assert calls==[False,True]
+# The untrained-forecast seam: strict mode substitutes the readable actual for
+# a forecast HTTP 424 only under the operator's explicit
+# FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST=1, and never for other failures.
+import os as _os
+m.retail_rate=lambda _env,_sku:0.1
+def untrained_query(_env,forecast=False,**_kwargs):
+    if forecast: raise m.RunnerError("Cost Management forecast failed with HTTP 424")
+    return 1.5
+m.cost_query=untrained_query
+_os.environ.pop("FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST",None)
+try: m.budget_gate(strict_env,limits)
+except m.RunnerError as exc: assert "HTTP 424" in str(exc)
+else: raise AssertionError("strict admission accepted an untrained forecast without operator confirmation")
+_os.environ["FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST"]="1"
+admitted=m.budget_gate(strict_env,limits)
+assert admitted["forecast"]==1.5 and admitted["actual"]==1.5
+def throttled_query(_env,forecast=False,**_kwargs):
+    if forecast: raise m.RunnerError("Cost Management forecast remained throttled with no exact authoritative cache (missing server retry guidance)")
+    return 1.5
+m.cost_query=throttled_query
+admitted=m.budget_gate(strict_env,limits)
+assert admitted["forecast"]==1.5
+_os.environ.pop("FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST",None)
+try: m.budget_gate(strict_env,limits)
+except m.RunnerError as exc: assert "remained throttled" in str(exc)
+else: raise AssertionError("throttled forecast substituted without operator confirmation")
+_os.environ["FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST"]="1"
+m.cost_query=cost_query
+try: m.budget_gate(strict_env,limits)
+except m.RunnerError as exc: assert "HTTP 424" not in str(exc)
+else: raise AssertionError("operator confirmation leaked beyond the untrained-forecast case")
+_os.environ.pop("FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST",None)
 # Dispatch requires exact explicit confirmation only for commissioning mode.
 minimal={"invocation":"azr-aaaaaaaaaaaa","parent_invocation":None,"request":{"fence":"sha256:"+"a"*64,"lineage_root_invocation":"azr-aaaaaaaaaaaa","cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE}}
 try: m.dispatch_prepared(env,minimal,"sub",None)

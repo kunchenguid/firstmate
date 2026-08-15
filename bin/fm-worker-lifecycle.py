@@ -804,6 +804,25 @@ def outstanding_cost_reservations(
     return author + specialized + projected
 
 
+def reported_forecast(admitted, actual, forecast):
+    """Report the seam-substituted forecast when admission relied on it.
+
+    capacity_admission substitutes the readable actual for an unreadable
+    forecast only under the operator's commissioning confirmation; a
+    successful admission with no readable forecast can only mean that
+    substitution ran, so callers see the exact admitted evidence instead
+    of a None that reads as omitted.
+    """
+    if (
+        admitted
+        and forecast is None
+        and isinstance(actual, (int, float))
+        and not isinstance(actual, bool)
+    ):
+        return float(actual)
+    return forecast
+
+
 def capacity_admission(
     env, state, inventory, candidate, provisional=(), ignore_reservation_id=None
 ):
@@ -812,16 +831,17 @@ def capacity_admission(
     forecast = metrics.get("forecast_usd")
     if (
         forecast is None
-        and metrics.get("forecast_untrained") is True
         and isinstance(actual, (int, float))
         and not isinstance(actual, bool)
         and env["policy_phase"] == "commissioning"
         and os.environ.get("FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST") == "1"
     ):
         # Bootstrap-only seam: a fresh resource group cannot train the
-        # forecast model until real spend exists. With the operator's explicit
-        # commissioning confirmation, the readable actual substitutes as the
-        # conservative forecast; any other unreadable telemetry still refuses.
+        # forecast model until real spend exists, and concurrent shard
+        # admissions can exhaust the throttle window before the endpoint
+        # even returns its untrained refusal. With the operator's explicit
+        # commissioning confirmation, the readable actual substitutes for
+        # any unreadable forecast; an unreadable actual still refuses.
         forecast = float(actual)
     if not isinstance(actual, (int, float)) or not isinstance(forecast, (int, float)):
         return False, "shared actual or forecast spend is unreadable"
@@ -1800,7 +1820,7 @@ def command_capacity_reserve(env, args):
         "status": candidate["status"],
         "reason": "" if admitted else reason,
         "actual_usd": actual,
-        "forecast_usd": forecast,
+        "forecast_usd": reported_forecast(admitted, actual, forecast),
         "admission_limit_usd": budget_limit(env),
     }, sort_keys=True, separators=(",", ":")))
 
@@ -1926,7 +1946,7 @@ def command_capacity_reserve_shape(env, args):
             for entry in entries
         ],
         "actual_usd": actual,
-        "forecast_usd": forecast,
+        "forecast_usd": reported_forecast(admitted, actual, forecast),
         "admission_limit_usd": budget_limit(env),
     }, sort_keys=True, separators=(",", ":")))
 

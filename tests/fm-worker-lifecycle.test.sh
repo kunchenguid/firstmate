@@ -171,10 +171,11 @@ for field in ("actual_usd", "forecast_usd"):
     changed = copy.deepcopy(inventory)
     changed["metrics"][field] = None
     assert module.admission_result(env, state, changed, 1, item)[0] is False
-# Bootstrap-only untrained-forecast seam: the exact Cost Management
-# insufficient-training-data refusal may substitute the readable actual as the
-# conservative forecast, but only in commissioning phase with the operator's
-# explicit confirmation; every other unreadable shape still refuses.
+# Bootstrap-only untrained-forecast seam: with the operator's explicit
+# commissioning confirmation, any unreadable forecast (the exact untrained
+# refusal or a throttle-exhausted read against the same untrained endpoint)
+# substitutes the readable actual as the conservative forecast; without the
+# confirmation, or with an unreadable actual, admission still refuses.
 untrained = copy.deepcopy(inventory)
 untrained["metrics"]["forecast_usd"] = None
 untrained["metrics"]["forecast_untrained"] = True
@@ -184,12 +185,21 @@ try:
     assert module.admission_result(env, state, untrained, 1, item)[0] is True
     plain_unreadable = copy.deepcopy(inventory)
     plain_unreadable["metrics"]["forecast_usd"] = None
-    assert module.admission_result(env, state, plain_unreadable, 1, item)[0] is False
+    assert module.admission_result(env, state, plain_unreadable, 1, item)[0] is True
     no_actual = copy.deepcopy(untrained)
     no_actual["metrics"]["actual_usd"] = None
     assert module.admission_result(env, state, no_actual, 1, item)[0] is False
 finally:
     del os.environ["FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST"]
+plain_unreadable = copy.deepcopy(inventory)
+plain_unreadable["metrics"]["forecast_usd"] = None
+assert module.admission_result(env, state, plain_unreadable, 1, item)[0] is False
+# The reserve report carries the seam-substituted forecast, so an admission
+# that relied on the substitution never reads as omitted evidence.
+assert module.reported_forecast(True, 3.25, None) == 3.25
+assert module.reported_forecast(False, 3.25, None) is None
+assert module.reported_forecast(True, None, None) is None
+assert module.reported_forecast(True, 3.25, 7.5) == 7.5
 changed = copy.deepcopy(inventory)
 changed["metrics"]["regional_limit_vcpus"] = 127
 assert module.admission_result(env, state, changed, 1, item)[0] is False
