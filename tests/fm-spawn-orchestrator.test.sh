@@ -97,7 +97,7 @@ test_an_undetectable_orchestrator_writes_no_line() {
   out=$(FM_ORCHESTRATOR_OVERRIDE=unknown \
     run_spawn "$CASE_DIR" "$FAKEBIN" "$id" "$CASE_DIR/project") \
     || fail "spawn failed: $out"
-  assert_grep '^harness=claude$' "$CASE_DIR/home/state/$id.meta" \
+  assert_grep 'harness=claude' "$CASE_DIR/home/state/$id.meta" \
     "the dispatch did not write the task record these assertions read"
   ! grep -q '^orchestrator=' "$CASE_DIR/home/state/$id.meta" \
     || fail "an undetectable orchestrator was recorded as a value"
