@@ -357,6 +357,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/sovereign-ledger-redundancy-mutation.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/stow-memory.md",
       "audience": "maintainer-verification"
     },
