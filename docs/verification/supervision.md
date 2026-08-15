@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports current session-start, turn-end, watcher-continuity, and wedge-alarm guarantees.
+This record supports current session-start, crew-state attribution, turn-end, watcher-continuity, and wedge-alarm guarantees.
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
@@ -202,6 +202,34 @@ Deterministic entry points:
 ```sh
 tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
+tests/fm-crew-state.test.sh
+```
+
+## Crew-state run attribution
+
+The rules in [`bin/fm-nm-run-lib.sh`](../../bin/fm-nm-run-lib.sh) decide whether a no-mistakes run is a crew's current state.
+They rest on where the pipeline keeps a run's commits, verified on 2026-08-15 against no-mistakes v1.51.1.
+
+A run under way commits its gate fixes into a private per-repository gate clone under `~/.no-mistakes/repos/<id>.git` and publishes nothing to the crew's checkout, so the run head reported by `no-mistakes runs` and `axi status` is normally a commit the crew's worktree cannot read at all.
+
+```sh
+git --git-dir=~/.no-mistakes/repos/754af6f91a5d.git log --oneline -3 259cfbbd
+```
+
+```
+259cfbb no-mistakes(review): make host fingerprint guard tolerate unreadable subtrees
+cfca078 no-mistakes(review): harden host-mutation guard, dedupe sudo invocation branches
+4d10703 fix: align installer and root helper on a co-located bundle
+```
+
+The crew's worktree head was `4d10703`, the two commits above it were the run's own review fixes, and that branch had no `refs/remotes/origin/` entry in the gate clone because the run had not reached its push step.
+So the run head was genuinely a descendant of the worktree head and still unreadable from the worktree, which is why local ancestry alone cannot decide a live run and pipeline custody settles it instead.
+
+Run lifecycle words come from the same binary: it carries a run as `pending` or `running` while it owns the branch and as `completed`, `failed`, or `cancelled` afterwards, matching its own active-run query `status IN ('pending', 'running')`.
+
+Deterministic entry point:
+
+```sh
 tests/fm-crew-state.test.sh
 ```
 

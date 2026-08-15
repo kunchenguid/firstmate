@@ -24,10 +24,16 @@
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
-#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
-#      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      When the worktree can READ the run head, a run matches if that head
+#      equals the worktree HEAD, or the worktree HEAD is an ancestor of it
+#      (pipeline fix commits advanced the run on the same line of history);
+#      local work that advanced past the run head, or diverged from it,
+#      invalidates attribution. When the worktree CANNOT read the run head,
+#      the run's own lifecycle decides: a live run holds custody of this exact
+#      branch and its gate-fix commits are simply unpublished, so it matches,
+#      while a terminal run is unbindable history and does not. The coarse
+#      fallback only ever considers the branch's newest run, because an older
+#      one has already been superseded. bin/fm-nm-run-lib.sh owns both rules.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -348,15 +354,16 @@ nm_runs_status_for_branch() {  # <branch>
     rest=${rest#* }
     rest=$(trim "$rest")
     sha=${rest%% *}
-    if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
-      printf '%s' "$st"
-      return 0
-    fi
+    [ "$br" = "$branch" ] || continue
+    # The list is newest-first, so the branch's topmost row is its only
+    # candidate: every row below it is a run that this one already superseded,
+    # and reporting a superseded terminal outcome as the branch's CURRENT
+    # state is how a live lane gets read as failed. When the newest row does
+    # not bind to this worktree, say nothing and let the pane/status-log
+    # fallback answer instead of reaching back into that history.
+    nm_coarse_run_matches_worktree "$sha" "$st" || return 0
+    printf '%s' "$st"
+    return 0
   done <<< "$out"
   return 0
 }
@@ -365,20 +372,24 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
-nm_run_head_matches_worktree() {
-  local run_head
+# 0 if the axi-status run is this worktree's current run. Branch match is a
+# precondition (caller). Rule owned by fm_nm_run_matches_worktree in
+# bin/fm-nm-run-lib.sh: readable head decides by ancestry, unreadable head
+# decides by whether the pipeline still holds the branch. `outcome` is the
+# authoritative terminal marker, so a run that reports one is judged as
+# history even while its `status` field still reads like a step.
+nm_run_matches_worktree() {
+  local run_head run_status
   run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
+  run_status=$(strip_quotes "$(nm_field outcome)")
+  [ -n "$run_status" ] || run_status=$(strip_quotes "$(nm_field status)")
+  fm_nm_run_matches_worktree "$WT" "$run_head" "$run_status"
 }
 
-# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
-nm_coarse_head_matches_worktree() {  # <short-sha>
-  fm_nm_head_matches_worktree "$WT" "$1"
+# Coarse runs-list rows are "<status> <branch> <short-sha> ...", where the
+# status word is the run's own lifecycle status. Same rule, same owner.
+nm_coarse_run_matches_worktree() {  # <short-sha> <status-word>
+  fm_nm_run_matches_worktree "$WT" "$1" "$2"
 }
 
 HAVE_RUN=0
@@ -394,7 +405,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_matches_worktree; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with

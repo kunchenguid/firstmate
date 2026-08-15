@@ -1309,6 +1309,137 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# --- in-flight pipeline heads the worktree has never seen --------------------
+#
+# While a run is under way, no-mistakes commits its gate fixes into its own
+# private gate repository and publishes nothing to the crew's checkout until
+# the push step, so the run head is a commit the worktree cannot read at all.
+# That is the healthy shape of a live run, not a rewritten tip - but it fails
+# every local ancestry proof identically, which is what let a superseded failed
+# run be reported as an actively validating lane's current state.
+#
+# A sha with no object behind it, so the ancestry proof has nothing to decide
+# against - exactly what an unpublished pipeline fix commit looks like locally.
+UNPUBLISHED_SHA=fe1dc0de
+
+test_unpublished_pipeline_head_beats_older_failed_run() {
+  reset_fakes
+  local d short out
+  d=$(new_case unpublished-supersedes-failed)
+  make_repo_on_branch "$d/wt" fm/feat-inflight
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" rev-parse --verify --quiet "$UNPUBLISHED_SHA^{commit}" >/dev/null 2>&1 \
+    && fail "fixture sha must not resolve in the worktree"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/inflight.meta" "window=fm:fm-inflight" "worktree=$d/wt" "kind=ship"
+  # The repo-wide answer belongs to another lane, so this lane resolves through
+  # the runs list, where its live run sits above the earlier failed one that
+  # still carries this worktree's exact head.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa1  2026-08-15 09:40
+  running    fm/feat-inflight ${UNPUBLISHED_SHA}  2026-08-15 09:31
+  failed     fm/feat-inflight ${short}  2026-08-15 08:02
+EOF
+)"
+  out=$(run_crew_state "$d" inflight)
+  assert_contains "$out" "state: working" "a live run with an unpublished head is the branch's current state"
+  assert_contains "$out" "source: run-step" "the live run is attributed, not skipped"
+  assert_not_contains "$out" "state: failed" "the superseded failed run must not be reported as current"
+  pass "unpublished pipeline head does not fall through to an older failed run"
+}
+
+test_unpublished_pipeline_head_attributed_on_own_branch() {
+  reset_fakes
+  local d out
+  d=$(new_case unpublished-own-branch)
+  make_repo_on_branch "$d/wt" fm/feat-inflight-direct
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/inflight-direct.meta" "window=fm:fm-inflight-direct" "worktree=$d/wt" "kind=ship"
+  # Same lane seen through the detailed path: its own branch, its own live run,
+  # a head two gate-fix commits ahead and not yet published anywhere local.
+  FM_FAKE_RUN_HEAD="$UNPUBLISHED_SHA"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-inflight-direct)"
+  out=$(run_crew_state "$d" inflight-direct)
+  assert_contains "$out" "source: run-step" "a live run keeps its full step detail while its head is unpublished"
+  assert_contains "$out" "state: parked" "the gate the live run is parked at is still reported"
+  assert_contains "$out" "parked at review" "gate detail survives the unreadable head"
+  pass "live run with an unpublished head keeps full run-step detail"
+}
+
+# The other half of the rule: an unreadable head on a TERMINAL run is history
+# that cannot be bound to this worktree's code, which is precisely the stale
+# outcome that must never be reported as current.
+test_unreadable_terminal_run_head_not_attributed() {
+  reset_fakes
+  local d out
+  d=$(new_case unreadable-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-foreign
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/foreign.meta" "window=fm:fm-foreign" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing the follow-up stage\n' > "$d/state/foreign.status"
+  FM_FAKE_RUN_HEAD="$UNPUBLISHED_SHA"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-foreign)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" foreign
+  out=$(run_crew_state "$d" foreign)
+  assert_not_contains "$out" "source: run-step" "a terminal run on an unbindable head must not be attributed"
+  assert_not_contains "$out" "state: failed" "an unbindable terminal outcome must not become current state"
+  assert_contains "$out" "source: status-log" "falls back to current-state sources instead"
+  pass "terminal run whose head the worktree cannot read is not attributed"
+}
+
+# Supersession: once the branch's newest run is unbindable, the scan must stop
+# rather than reaching back to an older row that still matches this worktree.
+test_superseded_older_run_never_answers_for_the_branch() {
+  reset_fakes
+  local d short out
+  d=$(new_case superseded-older-row)
+  make_repo_on_branch "$d/wt" fm/feat-superseded
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/superseded.meta" "window=fm:fm-superseded" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: reworking after the failed run\n' > "$d/state/superseded.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa1  2026-08-15 09:40
+  failed     fm/feat-superseded ${UNPUBLISHED_SHA}  2026-08-15 09:20
+  completed  fm/feat-superseded ${short}  2026-08-15 08:02  https://github.com/o/r/pull/9
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" superseded
+  out=$(run_crew_state "$d" superseded)
+  assert_not_contains "$out" "source: run-step" "a superseded older row must not answer for the branch"
+  assert_not_contains "$out" "state: done" "an already-superseded completed run must not read as current"
+  assert_contains "$out" "source: status-log" "falls back to current-state sources instead"
+  pass "an older superseded run never answers for the branch"
+}
+
+# Branch equality is still the precondition: another lane's live run stays that
+# lane's, unreadable head or not.
+test_other_branch_live_run_with_unreadable_head_ignored() {
+  reset_fakes
+  local d out
+  d=$(new_case unreadable-other-branch)
+  make_repo_on_branch "$d/wt" fm/feat-mine
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mine.meta" "window=fm:fm-mine" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'done: implemented, ready to validate\n' > "$d/state/mine.status"
+  FM_FAKE_RUN_HEAD="$UNPUBLISHED_SHA"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-theirs)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-theirs ${UNPUBLISHED_SHA}  2026-08-15 09:40
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" mine
+  out=$(run_crew_state "$d" mine)
+  assert_not_contains "$out" "source: run-step" "another branch's live run must not be attributed"
+  assert_contains "$out" "source: status-log" "falls back to this crew's own current-state sources"
+  pass "another branch's live run with an unreadable head is still ignored"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1358,5 +1489,10 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_unpublished_pipeline_head_beats_older_failed_run
+test_unpublished_pipeline_head_attributed_on_own_branch
+test_unreadable_terminal_run_head_not_attributed
+test_superseded_older_run_never_answers_for_the_branch
+test_other_branch_live_run_with_unreadable_head_ignored
 
 echo "all fm-crew-state tests passed"
