@@ -300,6 +300,8 @@ command_retire() {
   done
   [ -n "$decision_file" ] || fail "--decision-file is required"
   [ -f "$decision_file" ] || fail "decision file does not exist: $decision_file"
+  validate_slug policy-id "$policy_id"
+  policy_lookup "$policy_id" summary >/dev/null || fail "unknown policy id: $policy_id"
   [ -n "$ids" ] || fail "at least one task id is required"
   require_tasks_axi
   for id in $ids; do
@@ -308,7 +310,6 @@ command_retire() {
     held=$(show_field "$show" held)
     kind=$(show_field "$show" kind)
     if [ "$kind" = captain ] && [ "$held" = yes ]; then
-      validate_slug policy-id "$policy_id"
       require_policy_auto_close "$policy_id"
       case "$id" in
         *-decision-*)
@@ -333,6 +334,10 @@ command_retire() {
       esac
     fi
     body=$(show_field "$show" body)
+    case "$body" in
+      *"policy=${policy_id}"*) : ;;
+      *) body="${body}"$'\n'"policy=${policy_id}" ;;
+    esac
     body="${body}"$'\n'"Retired by policy reconciliation."
     tasks_axi update "$id" --body "$body" >/dev/null \
       || fail "could not record retirement on $id"

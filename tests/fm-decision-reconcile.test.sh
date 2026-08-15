@@ -142,6 +142,7 @@ EOF
   run_reconcile "$home" retire sample-career-task --decision-file "$home/decision.txt" --policy career-retired >/dev/null \
     || fail "retire did not complete"
   show=$(cd "$home" && tasks-axi show sample-career-task --full)
+  assert_contains "$show" "policy=career-retired" "retired task is not linked to its policy"
   assert_contains "$show" "state: done" "retire did not mark the task done"
   pass "retire records a durable retirement decision and closes the task"
 }
