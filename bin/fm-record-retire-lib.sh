@@ -13,8 +13,9 @@
 #   window=<recorded runtime target>
 #   meta_sha256=<lowercase sha256 of the retired metadata bytes>
 #
-# The watcher suppresses only a regular, non-symlink marker with this exact
-# shape and task binding.
+# The watcher suppresses only id-keyed signal and check wakes for a regular,
+# non-symlink marker with this exact shape and task binding.
+# Slot-keyed stale wakes are never marker-muted because they carry no task id.
 # An invalid marker is inert, so corruption fails toward surfacing work.
 
 FM_RECORD_RETIRED_SCHEMA=fm-record-retired.v1
@@ -106,7 +107,7 @@ fm_record_retire_marker_clear_for_spawn() {  # <state-dir> <task-id>
 }
 
 fm_record_retire_wake_muted() {  # <state-dir> <kind> <key>
-  local state=$1 kind=$2 key=$3 id marker window
+  local state=$1 kind=$2 key=$3 id
   case "$kind" in
     signal)
       case "$key" in
@@ -123,16 +124,10 @@ fm_record_retire_wake_muted() {  # <state-dir> <kind> <key>
       esac
       fm_record_retire_marker_valid "$state" "$id"
       ;;
-    stale)
-      for marker in "$state"/.record-retired-*; do
-        [ -e "$marker" ] || continue
-        id=${marker##*/.record-retired-}
-        fm_record_retire_marker_valid "$state" "$id" || continue
-        window=$(fm_record_retire_marker_window "$state" "$id") || continue
-        [ "$window" = "$key" ] && return 0
-      done
-      return 1
-      ;;
+    # A stale wake is keyed only by a runtime slot and carries no task id.
+    # It can never be attributed safely to one retired record, so markers do
+    # not mute it.
+    stale) return 1 ;;
     *) return 1 ;;
   esac
 }

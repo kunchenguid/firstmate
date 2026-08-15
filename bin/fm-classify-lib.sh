@@ -30,7 +30,13 @@
 # bin/ script (which sets its own SCRIPT_DIR) or directly by a test.
 _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
 # shellcheck source=bin/fm-record-retire-lib.sh
-. "$_FM_CLASSIFY_LIB_DIR/fm-record-retire-lib.sh"
+if [ -r "$_FM_CLASSIFY_LIB_DIR/fm-record-retire-lib.sh" ]; then
+  . "$_FM_CLASSIFY_LIB_DIR/fm-record-retire-lib.sh"
+else
+  # A partial-bin recovery copy has no retirement-marker authority.
+  # Treat every marker as inert so status remains visible.
+  fm_record_retire_marker_valid() { return 1; }
+fi
 
 # The crew current-state reader used for the "provably working" decision.
 # Overridable so tests can stub the run-step/pane verdict without a real worktree
