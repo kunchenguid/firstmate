@@ -2065,9 +2065,16 @@ def shared_capacity_role(state):
 
 def shared_capacity_environment(env):
     command_env = dict(os.environ)
-    command_env["FM_HOME"] = str(ROOT)
+    # The allocator store is fenced to its home identity, so the operator's
+    # exported FM_HOME must win when the runner executes from a different
+    # checkout; the script root is only the fallback, and the state dir
+    # defaults beside whichever home is declared.
+    command_env.setdefault("FM_HOME", str(ROOT))
     command_env["FM_AZURE_WORKER_STATE_DIR"] = str(
-        Path(os.environ.get("FM_AZURE_SHARED_CAPACITY_STATE_DIR", str(ROOT / "state" / "azure-workers"))).resolve()
+        Path(os.environ.get(
+            "FM_AZURE_SHARED_CAPACITY_STATE_DIR",
+            str(Path(command_env["FM_HOME"]) / "state" / "azure-workers"),
+        )).resolve()
     )
     if env["budget_limit"] == 1500:
         command_env["FM_AZURE_WORKER_POLICY_PHASE"] = "commissioning"

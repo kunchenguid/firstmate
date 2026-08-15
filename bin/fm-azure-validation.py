@@ -944,7 +944,10 @@ def runner_module():
 
 def lifecycle_command(env, arguments):
     command_env = os.environ.copy()
-    command_env["FM_HOME"] = str(ROOT)
+    # The allocator store is fenced to its home identity, so the operator's
+    # exported FM_HOME must win when the CLI runs from a different checkout;
+    # the script root is only the fallback when no home is declared.
+    command_env.setdefault("FM_HOME", str(ROOT))
     executable = os.environ.get(
         "FM_AZURE_VALIDATION_LIFECYCLE", str(ROOT / "bin" / "fm-worker-lifecycle.sh")
     )

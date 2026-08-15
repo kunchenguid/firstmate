@@ -115,6 +115,9 @@ assert "protectedParameters" not in host
 assert "generate-sas" not in host
 assert "controller_identity_client_id" in host
 assert "If-Match=" in host and "runner-cost-reservation" in host
+assert 'command_env.setdefault("FM_HOME", str(ROOT))' in host
+assert 'command_env["FM_HOME"] = str(ROOT)' not in host
+assert 'str(Path(command_env["FM_HOME"]) / "state" / "azure-workers")' in host
 start=host.index("def dispatch_prepared")
 assert host.index("shared_capacity_reserve(env, state, cost)", start) < host.index("create_vm(env, state)", start)
 assert host.index("lease.renew_and_assert()", start) < host.index("create_vm(env, state)", start)
