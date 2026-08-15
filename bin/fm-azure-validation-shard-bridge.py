@@ -187,10 +187,12 @@ def submit_requests(environment, kind, count, command):
     round_dir.mkdir(mode=0o700)
     bundle = round_dir / "snapshot.bundle"
     # The runner admits only a single bundle head named for the source ref at
-    # the snapshot's exact HEAD commit. The gate snapshot is detached with its
-    # branch ref lagging HEAD by the pipeline's own commits, so advance the
-    # ref forward-only to HEAD before bundling; a HEAD that does not descend
-    # from the ref refuses rather than rewriting history.
+    # the snapshot's exact HEAD commit. The gate snapshot is detached, and its
+    # branch ref can lag HEAD by the pipeline's own commits or point at
+    # pre-rebase history the pipeline has already rewritten, so the ref always
+    # follows HEAD before bundling; a non-fast-forward move is reported for
+    # the record instead of refusing, because the snapshot HEAD is the exact
+    # commit under validation whatever its relation to the stale local ref.
     ref = "refs/heads/" + branch
     on_branch = run(["git", "-C", str(repo), "symbolic-ref", "--quiet", "HEAD"], check=False)
     if on_branch.returncode != 0:
@@ -201,7 +203,10 @@ def submit_requests(environment, kind, count, command):
                 check=False,
             )
             if ancestry.returncode != 0:
-                raise BridgeError("snapshot HEAD does not descend from the branch ref; refusing to move it")
+                print(
+                    "shard bridge: branch ref {} does not fast-forward to the snapshot HEAD (pipeline rewrite); following HEAD".format(branch),
+                    file=sys.stderr,
+                )
         run(["git", "-C", str(repo), "branch", "-f", branch, "HEAD"])
     run(["git", "-C", str(repo), "bundle", "create", str(bundle), ref])
     run(["git", "bundle", "verify", str(bundle)])

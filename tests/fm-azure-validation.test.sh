@@ -163,7 +163,9 @@ assert "credential_content_binding // empty" in guest
 assert '.credential_content_binding=$binding' in guest
 assert guest.index("SEALED_BINDING") < guest.index('"$LEASE_BINDING_HELPER" "$CREDENTIAL_MOUNT" "$PROVIDER_PATH" "$ACCOUNT_BINDING_PATH" "$GITHUB_TOKEN_PATH" "$REQUEST" "$EXPECTED_BINDING"')
 assert "cell worktree is detached and no declared branch identity is present" in bridge
-assert "refusing to move it" in bridge
+assert "refusing to move it" not in bridge
+assert "does not fast-forward to the snapshot HEAD" in bridge
+assert bridge.index("does not fast-forward") < bridge.index('"branch", "-f"')
 assert '"branch", "-f", branch, "HEAD"' in bridge
 assert '"bundle", "create", str(bundle), ref' in bridge
 assert bridge.index("merge-base") < bridge.index('"branch", "-f"')
