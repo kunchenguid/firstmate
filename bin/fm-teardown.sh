@@ -54,7 +54,10 @@
 # the retired home. Removing a leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--force|--recover-returned-secondmate]
+#   --recover-returned-secondmate is a preservation-first, identity-bound path
+#   for a local secondmate whose seeded home has already returned but whose
+#   parent route and metadata survived; it never discards child work.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -174,6 +177,8 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=${2:-}
+RECOVER_RETURNED_SECOND_MATE=0
+[ "$FORCE" = "--recover-returned-secondmate" ] && RECOVER_RETURNED_SECOND_MATE=1
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
@@ -420,12 +425,19 @@ remote_secondmate_teardown_locked() {
   return "$rc"
 }
 
-if remote_secondmate_teardown_locked; then
-  exit 0
+if [ "$RECOVER_RETURNED_SECOND_MATE" -eq 1 ]; then
+  [ -z "$(fm_meta_get "$META" remote_host)" ] || {
+    echo "REFUSED: returned-home recovery does not support a remote secondmate route; preserve it for same-host reconciliation" >&2
+    exit 1
+  }
 else
-  remote_teardown_rc=$?
+  if remote_secondmate_teardown_locked; then
+    exit 0
+  else
+    remote_teardown_rc=$?
+  fi
+  [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 fi
-[ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
@@ -2277,6 +2289,155 @@ remove_secondmate_registry_entry() {
   fm_lock_release "$lock"
   return "$rc"
 }
+
+recover_returned_secondmate() {
+  local receipt receipt_id receipt_home receipt_projects receipt_scope receipt_digest
+  local expected_digest route_home route_projects route_scope home_key entry treehouse_status state_entries
+  local identity_source seed_brief
+  [ "$KIND" = secondmate ] || {
+    echo "REFUSED: returned-home recovery is only for kind=secondmate metadata" >&2
+    return 1
+  }
+  receipt="$DATA/$ID/seed-receipt"
+  receipt_field() {
+    grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  }
+  if [ -f "$receipt" ] && [ ! -L "$receipt" ]; then
+    identity_source=seed-receipt
+    [ "$(receipt_field "$receipt" schema)" = fm-secondmate-seed.v1 ] || {
+      echo "REFUSED: secondmate seed receipt has an unsupported schema; preserving records" >&2
+      return 1
+    }
+    receipt_id=$(receipt_field "$receipt" id)
+    receipt_home=$(receipt_field "$receipt" home)
+    receipt_projects=$(receipt_field "$receipt" projects)
+    receipt_scope=$(receipt_field "$receipt" scope)
+    receipt_digest=$(receipt_field "$receipt" identity_digest)
+    [ "$receipt_id" = "$ID" ] || {
+      echo "REFUSED: secondmate seed receipt identity does not match $ID; preserving records" >&2
+      return 1
+    }
+    [ "$receipt_home" = "$HOME_PATH" ] || {
+      echo "REFUSED: secondmate seed receipt home does not match parent metadata; preserving records" >&2
+      return 1
+    }
+    expected_digest=$(printf 'id=%s\nhome=%s\nprojects=%s\nscope=%s\n' \
+      "$receipt_id" "$receipt_home" "$receipt_projects" "$receipt_scope" \
+      | shasum -a 256 | awk '{print $1}')
+    [ -n "$expected_digest" ] && [ "$expected_digest" = "$receipt_digest" ] || {
+      echo "REFUSED: secondmate seed receipt identity digest is invalid; preserving records" >&2
+      return 1
+    }
+  else
+    identity_source='legacy-charter'
+    seed_brief="$DATA/$ID/brief.md"
+    if [ ! -f "$seed_brief" ] || [ -L "$seed_brief" ] || [ ! -s "$seed_brief" ] \
+      || ! grep -Fx '# Routing scope' "$seed_brief" >/dev/null 2>&1 \
+      || ! grep -Fx '# Project clones' "$seed_brief" >/dev/null 2>&1; then
+      echo "REFUSED: no identity-bound seed receipt or legacy charter for $ID; preserving records" >&2
+      return 1
+    fi
+    receipt_id=$ID
+    receipt_home=$HOME_PATH
+    receipt_projects=$(meta_value "$META" projects)
+    receipt_scope=
+    receipt_digest=
+  fi
+  [ -d "$HOME_PATH" ] && [ ! -L "$HOME_PATH" ] || {
+    echo "REFUSED: returned secondmate home is missing or unsafe; preserving records" >&2
+    return 1
+  }
+  home_key=$(CDPATH='' cd -- "$HOME_PATH" 2>/dev/null && pwd -P) || {
+    echo "REFUSED: returned secondmate home cannot be resolved; preserving records" >&2
+    return 1
+  }
+  [ "$home_key" = "$receipt_home" ] || {
+    echo "REFUSED: returned secondmate home path changed; preserving records" >&2
+    return 1
+  }
+  [ -d "$HOME_PATH/state" ] && [ ! -L "$HOME_PATH/state" ] || {
+    echo "REFUSED: returned secondmate home has no safe empty state directory; preserving records" >&2
+    return 1
+  }
+  for entry in "$HOME_PATH"/* "$HOME_PATH"/.[!.]* "$HOME_PATH"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    [ "$entry" = "$HOME_PATH/state" ] || {
+      echo "REFUSED: returned secondmate home is not empty apart from state; preserving records" >&2
+      return 1
+    }
+  done
+  state_entries=$(find -P "$HOME_PATH/state" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) || {
+    echo "REFUSED: returned secondmate state directory is inaccessible; preserving records" >&2
+    return 1
+  }
+  [ -z "$state_entries" ] || {
+    echo "REFUSED: returned secondmate state directory still contains records; preserving records" >&2
+    return 1
+  }
+  if git -C "$HOME_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "REFUSED: returned secondmate home is still a git worktree; preserving records" >&2
+    return 1
+  fi
+  command -v treehouse >/dev/null 2>&1 || {
+    echo "REFUSED: treehouse status is unavailable; cannot prove the lease returned" >&2
+    return 1
+  }
+  treehouse_status=$(cd "$FM_ROOT" && treehouse status --json 2>/dev/null) || {
+    echo "REFUSED: treehouse status failed; cannot prove the lease returned" >&2
+    return 1
+  }
+  printf '%s\n' "$treehouse_status" | jq -e --arg home "$home_key" \
+    'type == "array" and (any(.[]?; (.path // "") == $home and .status == "leased") | not)' \
+    >/dev/null 2>&1 || {
+    echo "REFUSED: the exact secondmate home is still leased or treehouse status is malformed; preserving records" >&2
+    return 1
+  }
+  secondmate_registry_validate_bindings "$SECONDMATE_REG" secondmate_registry_path_key "$ID" "$HOME_PATH" || {
+    echo "REFUSED: secondmate route identity is not uniquely validated: $SECONDMATE_REGISTRY_ERROR" >&2
+    return 1
+  }
+  route_home=$SECONDMATE_REGISTRY_MATCH_HOME
+  route_projects=$SECONDMATE_REGISTRY_MATCH_PROJECTS
+  secondmate_registry_line_for_id "$SECONDMATE_REG" "$ID" || {
+    echo "REFUSED: secondmate route is missing or ambiguous; preserving records" >&2
+    return 1
+  }
+  route_scope=$SECONDMATE_REGISTRY_SCOPE
+  if [ "$identity_source" = legacy-charter ]; then
+    receipt_scope=$route_scope
+  fi
+  [ "$(secondmate_registry_path_key "$route_home")" = "$home_key" ] \
+    && [ "$(secondmate_registry_project_key "$route_projects")" = "$(secondmate_registry_project_key "$receipt_projects")" ] \
+    && [ "$(secondmate_registry_scope_key "$route_scope")" = "$(secondmate_registry_scope_key "$receipt_scope")" ] || {
+    echo "REFUSED: secondmate route does not match its seed identity; preserving records" >&2
+    return 1
+  }
+  if [ -n "$T" ] && fm_backend_target_exists "$BACKEND" "$T" "fm-$ID" >/dev/null 2>&1; then
+    echo "REFUSED: secondmate endpoint is still present; preserving records" >&2
+    return 1
+  fi
+  validate_pr_poll_cleanup "$STATE" "$ID" || return 1
+  remove_secondmate_registry_entry "$ID" || {
+    echo "error: could not retire the returned secondmate route; preserving metadata" >&2
+    return 1
+  }
+  remove_grok_turnend_auth "$STATE" "$ID" || return 1
+  remove_kimi_turnend_auth "$STATE" "$ID" || return 1
+  fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
+  remove_pr_poll_artifacts "$STATE" "$ID" || return 1
+  retire_busy_state "$STATE" "$ID" "$(fm_meta_get "$META" busy_gen)" || return 1
+  status_retire_presentation_task "$STATE" "$ID" || return 1
+  rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+    "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
+    "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
+    "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session"
+  printf 'returned-home recovery %s complete (%s identity and completed lease return proved)\n' "$ID" "$identity_source"
+}
+
+if [ "$RECOVER_RETURNED_SECOND_MATE" -eq 1 ]; then
+  recover_returned_secondmate || exit $?
+  exit 0
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 

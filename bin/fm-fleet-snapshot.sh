@@ -39,6 +39,9 @@
 #     current backlog rows). Does not invent live tasks; meta remains truth for
 #     workers. Bearings maps failures into omitted[] disclosure (and a Charted
 #     Next gate line) rather than silent empty Underway.
+#   integrity: {schema,valid,failures[],counts,provenance} - read-only joins of
+#     backlog, metadata, current-state, endpoint, worktree, registered route,
+#     and returned-home evidence. Integrity failures are never cleanup authority.
 #   secondmate_current: {records[],total,shown,truncated} - bounded current summaries
 #     for registered secondmates, selected from validated structured state inside
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
@@ -52,6 +55,8 @@
 #     structured homes with an unknown current classification are partial, not
 #     unreadable, and retain independently trustworthy structured surfaces.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
+#     Registered routes also carry normalized scope/project overlap evidence; an
+#     equivalent scope sharing a project is ambiguous and not an authority.
 #
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
@@ -631,6 +636,89 @@ main_inventory_json() {  # <backlog-json> <tasks-json>
       }'
 }
 
+# Join durable backlog, metadata, endpoint, worktree, and current-state evidence
+# into one operator-facing integrity classification. This is deliberately a
+# read-only projection: cleanup remains owned by fm-teardown and backlog changes
+# remain owned by tasks-axi.
+task_integrity_json() {  # <backlog-json> <tasks-json>
+  jq -n \
+    --argjson backlog "$1" \
+    --argjson tasks "$2" '
+    def backlog_by_id($id):
+      ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
+    def terminal_signal:
+      (.current_state.state == "done" or .current_state.state == "failed")
+      or ((.hints.last_event_text // "") | test("^(done|failed)(:|[[:space:]])"));
+    def classification($task; $row):
+      if $task.kind == "secondmate" then
+        if (($task.endpoint.exists // null) == true and $task.current_state.state != "unknown")
+        then "persistent"
+        else "unreconciled" end
+      elif $row == null then "unreconciled"
+      elif $row.state == "done" or terminal_signal then "completed-awaiting-cleanup"
+      elif $row.state == "in_flight" then
+        if ($task.endpoint.exists == false)
+        then "stale"
+        elif ($task.endpoint.exists == null)
+          or ($task.paths.worktree.present != true)
+        then "unreconciled"
+        elif $task.current_state.state == "working" then "working"
+        elif $task.current_state.state == "parked" then "parked"
+        elif $task.current_state.state == "paused" then "paused"
+        elif $task.current_state.state == "blocked" then "blocked"
+        else "unreconciled" end
+      elif $row.state == "queued" then "queued"
+      else "unreconciled" end;
+    def reason($task; $row; $classification):
+      if $classification == "completed-awaiting-cleanup" then
+        if $row != null and $row.state == "done" then
+          "backlog is Done but task metadata still exists"
+        elif ($task.current_state.state // "") | IN("done"; "failed") then
+          "current task state is terminal while backlog remains In flight"
+        else
+          "terminal completion event remains after runtime ownership disappeared"
+        end
+      elif $classification == "stale" then
+        if ($task.paths.worktree.present != true) then
+          "in-flight task has no recorded worktree"
+        else
+          "in-flight task has no live recorded endpoint"
+        end
+      elif $classification == "unreconciled" then
+        if $row == null then "task metadata has no structured backlog record"
+        elif ($task.endpoint.exists == true) and ($task.paths.worktree.present != true) then
+          "endpoint exists but recorded worktree is absent"
+        elif ($task.endpoint.exists == null) then
+          "endpoint liveness is unknown"
+        elif $task.current_state.state == "unknown" then
+          "runtime has no authoritative current-state result"
+        else "backlog, metadata, and runtime evidence disagree" end
+      else null end;
+    def action($task; $row; $classification):
+      if $classification == "completed-awaiting-cleanup" then
+        "verify landed work and decision inventory, then run tasks-axi done and bin/fm-teardown.sh " + $task.id
+      elif $classification == "stale" then
+        "inspect endpoint ownership and preserve the isolated copy; use guarded lifecycle commands only"
+      elif $classification == "unreconciled" then
+        "inspect durable records and runtime ownership; do not delete state or use force cleanup"
+      elif $classification == "queued" then
+        null
+      else null end;
+    [ $tasks[]
+      | . as $task
+      | backlog_by_id($task.id) as $row
+      | classification($task; $row) as $classification
+      | $task + {backlog:$row,
+          integrity:{classification:$classification,
+            reason:reason($task; $row; $classification),
+            action:action($task; $row; $classification),
+            endpoint_present:($task.endpoint.exists == true),
+            worktree_present:($task.paths.worktree.present == true),
+            terminal_signal:terminal_signal,
+            requires_guarded_reconciliation:($classification == "completed-awaiting-cleanup" or $classification == "stale" or $classification == "unreconciled")}}
+    ]'
+}
+
 # Project one home's canonical structured inventory into the bounded shape a
 # validated parent read needs.
 # This mode never reads parent events or terminal text and never aggregates
@@ -804,14 +892,14 @@ registry_secondmates_json() {
   local reg="$DATA/secondmates.md" out rc reason mode script parse_filter output_filter
   if [ ! -f "$reg" ]; then
     jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" \
-      '{present:false,available:true,complete:true,reason:null,provenance:"registered-table",path:$path,freshness:{status:"fresh",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
+      '{present:false,available:true,complete:true,reason:null,provenance:"registered-table",path:$path,freshness:{status:"fresh",observed_at:$observed},records:[],routing_ambiguities:[],input_truncated:false,records_truncated:false,reasons:[],lines_in_window:0,records_in_window:0}'
     return 0
   fi
   mode=$(file_mode_octal "$reg")
   if [ -z "$mode" ] || [ $((8#$mode & 0444)) -eq 0 ]; then
     jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" \
       --arg reason "registered secondmate table is unreadable" \
-      '{present:true,available:false,complete:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
+      '{present:true,available:false,complete:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],routing_ambiguities:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
     return 0
   fi
   script=$(cat <<'BASH'
@@ -869,28 +957,64 @@ BASH
         | select(startswith("- "))
         | (capture("^- (?<id>[^[:space:]]+)")?) as $id
         | select($id != null)
-        | ([capture("^.*\\(host:[[:space:]]*(?<host>[^;)]*);[[:space:]]*root:[[:space:]]*(?<root>[^;)]*);[[:space:]]*home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*.*;[[:space:]]*projects:[[:space:]]*[^;)]*;[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $remote
-        | ([capture("^.*\\(home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*.*;[[:space:]]*projects:[[:space:]]*[^;)]*;[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $local
+        | ([capture("^.*\\(host:[[:space:]]*(?<host>[^;)]*);[[:space:]]*root:[[:space:]]*(?<root>[^;)]*);[[:space:]]*home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*(?<scope>.*);[[:space:]]*projects:[[:space:]]*(?<projects>[^;)]*);[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $remote
+        | ([capture("^.*\\(home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*(?<scope>.*);[[:space:]]*projects:[[:space:]]*(?<projects>[^;)]*);[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $local
         | ($local // $remote) as $route
         | (($local == null) and ($remote != null)) as $is_remote
         | {id:$id.id,home:($route.home // null),host:(if $is_remote then $remote.host else null end),root:(if $is_remote then $remote.root else null end),
-           remote:$is_remote,registered:true,
+           scope:($route.scope // null),projects:($route.projects // ""),remote:$is_remote,registered:true,
            registry_error:(if $route == null or ($route.home | length) == 0 then "registry entry has no home" else null end)} ]
       | group_by(.id)
       | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry"} else .[0] end)
 JQ
   )
   output_filter=$(cat <<'JQ'
-      {present:true,available:true,reason:null,provenance:"registered-table",path:$path,
-       freshness:{status:"fresh",observed_at:$observed},
-       records:(if length > $max_records then .[:$max_records] else . end),
-       input_truncated:($byte_truncated or $line_truncated),records_truncated:$records_truncated,
-       complete:(($byte_truncated or $line_truncated or $records_truncated) | not),
-       reasons:[
-         (if $byte_truncated then "byte_limit" else empty end),
-         (if $line_truncated then "line_limit" else empty end),
-         (if $records_truncated then "record_limit" else empty end)
-       ],lines_in_window:$lines_in_window,records_in_window:$records_in_window}
+      def scope_key:
+        (. // "")
+        | ascii_downcase
+        | gsub("[^a-z0-9]+"; " ")
+        | gsub("^[[:space:]]+|[[:space:]]+$"; "")
+        | gsub("[[:space:]]+"; " ");
+      def project_names:
+        [(. // "" | split(",")[] | gsub("^[[:space:]]+|[[:space:]]+$"; "")
+          | ascii_downcase | select(length > 0))];
+      . as $all
+      | ([ $all[] as $a
+          | $all[] as $b
+          | select($a.id < $b.id)
+          | (($a.scope | scope_key) == ($b.scope | scope_key)) as $same_scope
+          | ((($a.projects | project_names) + ($b.projects | project_names)) | unique) as $projects
+          | [($a.projects | project_names)[] as $project
+             | select(($b.projects | project_names) | index($project) != null)
+             | $project] | unique as $shared_projects
+          | select($same_scope and ($shared_projects | length) > 0)
+          | {ids:[$a.id,$b.id],scope:(($a.scope // "") | gsub("^[[:space:]]+|[[:space:]]+$"; "")),projects:$shared_projects}
+        ]) as $ambiguities
+      | ($all
+         | map(. as $route
+             | (($ambiguities
+                 | map(select((.ids | index($route.id)) != null))) // []) as $matches
+             | . + {
+                 scope_key:($route.scope | scope_key),
+                 project_names:($route.projects | project_names),
+                 routing_ambiguities:$matches,
+                 routing_error:(if ($matches | length) > 0
+                   then "ambiguous persistent route: equivalent scope overlaps project " +
+                     ($matches[0].projects | join(", ")) + " with " +
+                     (($matches[0].ids | map(select(. != $route.id))) | join(", "))
+                   else null end)
+               })) as $annotated
+      | {present:true,available:true,reason:null,provenance:"registered-table",path:$path,
+         freshness:{status:"fresh",observed_at:$observed},
+         records:(if ($annotated | length) > $max_records then $annotated[:$max_records] else $annotated end),
+         routing_ambiguities:$ambiguities,
+         input_truncated:($byte_truncated or $line_truncated),records_truncated:$records_truncated,
+         complete:(($byte_truncated or $line_truncated or $records_truncated) | not),
+         reasons:[
+           (if $byte_truncated then "byte_limit" else empty end),
+           (if $line_truncated then "line_limit" else empty end),
+           (if $records_truncated then "record_limit" else empty end)
+         ],lines_in_window:$lines_in_window,records_in_window:$records_in_window}
 JQ
   )
   out=$(fm_run_timed "$FM_SNAPSHOT_REGISTRY_TIMEOUT" bash -c "$script" \
@@ -907,7 +1031,7 @@ JQ
   [ "$rc" -eq 124 ] && reason="registered secondmate table read timed out" \
     || reason="registered secondmate table is unreadable"
   jq -n --arg path "$reg" --arg observed "$SNAPSHOT_NOW" --arg reason "$reason" \
-    '{present:true,available:false,complete:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
+    '{present:true,available:false,complete:false,reason:$reason,provenance:"registered-table",path:$path,freshness:{status:"unavailable",observed_at:$observed},records:[],routing_ambiguities:[],input_truncated:false,records_truncated:false,reasons:[$reason],lines_in_window:0,records_in_window:0}'
 }
 
 bounded_parent_activities_json() {  # <status-file>
@@ -1112,10 +1236,26 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
-  local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
+  local row id home host remote registered registry_error route_error task status_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary summary_rc summary_bytes summary_valid summary_reason summary_invalidity state current_reason terminal terminal_contradiction contradiction
   local records='[]' seen_homes=''
   registry=$(registry_secondmates_json) || return 1
+  if [ "${FM_SNAPSHOT_LOCAL_ONLY:-0}" = 1 ]; then
+    jq -n --argjson registry "$registry" '
+      {registry:$registry,
+       records:[$registry.records[]
+         | {id,home,host,remote,registered,
+            current:{state:"unknown",reason:(.registry_error // .routing_error // "cross-home state read skipped in local-only mode")},
+            invalidity:null,
+            provenance:{selected:"registered-table-local-only",structured_home:null,parent_event_role:"not-collected"},
+            freshness:{status:"not-collected",observed_at:null,age_seconds:null},
+            active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
+            counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
+            parent_event:{raw:"",note:"",age_seconds:null,open_activities:[],open_decisions:[],activity_scan:{records:[],available:false}},
+            terminal_evidence:null,contradiction:false,
+            routing_error:(.routing_error // null)}]}'
+    return 0
+  fi
   union=$(jq -n --argjson registry "$registry" --argjson tasks "$tasks" '
     ($registry.records // []) as $registered
     | (($registered | map(.id)) // []) as $registered_ids
@@ -1145,6 +1285,7 @@ secondmate_current_json() {  # <parent-tasks-json>
     remote=$(printf '%s' "$row" | jq -r '.remote // false')
     registered=$(printf '%s' "$row" | jq -r '.registered')
     registry_error=$(printf '%s' "$row" | jq -r '.registry_error // ""')
+    route_error=$(printf '%s' "$row" | jq -r '.routing_error // ""')
     task=$(printf '%s' "$row" | jq -c '.parent_task // {}')
     status_file=$(printf '%s' "$task" | jq -r '.paths.status_log.path // ""')
     event_raw=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.raw // ""')
@@ -1237,7 +1378,6 @@ secondmate_current_json() {  # <parent-tasks-json>
         fi
       fi
     fi
-
     if [ -z "$reason" ]; then
       state=$(printf '%s' "$summary" | jq -r '.state')
       current_reason=
@@ -1260,9 +1400,10 @@ secondmate_current_json() {  # <parent-tasks-json>
         --argjson registered "$registered" --argjson summary "$summary" --argjson summary_valid "$summary_valid" --argjson decisions "$decisions" \
         --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson reconciliation "$reconciliation" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
-        --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
+        --arg route_error "$route_error" --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
         {id:$id,home:$home,host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          current:{state:$state,reason:($current_reason | if . == "" then null else . end)},invalidity:$summary.invalidity,
+         routing:{status:(if $route_error == "" then "authoritative" else "ambiguous" end),error:($route_error | if . == "" then null else . end)},
          provenance:{selected:"structured-home",structured_home:$home,summary_valid:$summary_valid,
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
          freshness:{status:"fresh",observed_at:$observed,age_seconds:0},
@@ -1287,11 +1428,12 @@ secondmate_current_json() {  # <parent-tasks-json>
       fi
       record=$(jq -n \
         --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
-        --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
+        --arg provenance "$provenance" --arg freshness "$freshness" --arg route_error "$route_error" --arg event_raw "$event_raw" --arg event_note "$event_note" \
         --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson decisions "$decisions" --argjson terminal "$terminal" '
         {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          current:{state:"unknown",reason:$reason},invalidity:null,
+         routing:{status:(if $route_error == "" then "authoritative" else "ambiguous" end),error:($route_error | if . == "" then null else . end)},
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
          active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
@@ -1330,6 +1472,58 @@ secondmate_landed_from_current_json() {  # <secondmate-current-json>
     | .records |= sort_by([(.completion.date // ""), .id]) | .records |= reverse'
 }
 
+fleet_integrity_json() {  # <backlog-json> <tasks-json> <secondmate-current-json>
+  jq -n \
+    --argjson backlog "$1" \
+    --argjson tasks "$2" \
+    --argjson secondmates "$3" '
+    def task_failure($task):
+      {kind:"task-integrity",id:$task.id,
+       classification:$task.integrity.classification,
+       reason:$task.integrity.reason,action:$task.integrity.action};
+    ([ $backlog.records[]?
+       | select(.state == "in_flight" and .structured and .requires_child_metadata)
+       | select(.id as $id | [$tasks[].id] | index($id) | not)
+       | {kind:"backlog-missing-metadata",id:.id,classification:"unreconciled",
+          reason:"in-flight backlog item has no task metadata",
+          action:"preserve the backlog item and reconcile it through its guarded lifecycle command"} ]) as $orphan_failures
+    | ([ $backlog.records[]?
+        | select((.state == "in_flight" or .state == "queued") and (.structured | not))
+        | {kind:"unstructured-backlog",id:null,classification:"unreconciled",
+           reason:"current backlog row is not structured for reconciliation",
+           action:"rewrite the row with tasks-axi before dispatch or cleanup"} ]) as $unstructured_failures
+    | ([ $tasks[] | select(.integrity.requires_guarded_reconciliation) | task_failure(.) ]) as $task_failures
+    | ([ $secondmates.registry.routing_ambiguities[]?
+        | {kind:"ambiguous-persistent-route",id:(.ids | join(",")),classification:"unreconciled",
+           reason:("equivalent persistent scopes overlap for project " + (.projects | join(", ")) + ": " + (.scope // "")),
+           action:"name one authoritative route or retire one route through the guarded lifecycle"} ]) as $route_failures
+    | ([ $secondmates.registry.records[]?
+        | select((.registry_error // "") != "")
+        | {kind:"route-registry",id,classification:"unreconciled",reason:.registry_error,
+           action:"repair the exact route record before choosing or retiring a persistent home"} ]) as $record_failures
+    | ([ $secondmates.records[]?
+        | select(.current.state == "unknown")
+        | select((.current.reason // "") != "cross-home state read skipped in local-only mode")
+        | select((.current.reason // "") != "")
+        | select((.current.reason // "") | startswith("ambiguous persistent route") | not)
+        | {kind:"secondmate-home",id,classification:"unreconciled",reason:.current.reason,
+           action:"preserve the route and reconcile the registered home on its owning host"} ]) as $home_failures
+    | ([if $secondmates.registry.available != true then
+          {kind:"route-registry",id:null,classification:"unreconciled",
+           reason:($secondmates.registry.reason // "registered secondmate route table is unavailable"),
+           action:"restore readable route records before dispatch or retirement"}
+        elif $secondmates.registry.complete != true then
+          {kind:"route-registry",id:null,classification:"unreconciled",
+           reason:"registered secondmate route table is incomplete",
+           action:"inspect the full route table before choosing or retiring a route"}
+        else empty end]) as $registry_failures
+    | ($orphan_failures + $unstructured_failures + $task_failures + $route_failures + $home_failures + $registry_failures + $record_failures) as $failures
+    | ([ $tasks[].integrity.classification ] | sort | group_by(.) | map({key:.[0],value:length}) | from_entries) as $task_counts
+    | {schema:"fm-fleet-integrity.v1",valid:($failures | length == 0),failures:$failures,
+       counts:{tasks:$task_counts,issues:($failures | length)},
+       provenance:{backlog:"tasks-axi-compatible structured rows",tasks:"state metadata plus current-state and endpoint reads",routes:"registered secondmate scope and project fields"}}'
+}
+
 scout_report_lines() {
   local report id
   if [ ! -d "$DATA" ]; then
@@ -1346,7 +1540,9 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
-TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+TASKS_RAW_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+TASKS_JSON=$(task_integrity_json "$BACKLOG_JSON" "$TASKS_RAW_JSON") \
+  || { echo "fm-fleet-snapshot: task integrity projection failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
   secondmate_home_summary_json "$BACKLOG_JSON" "$TASKS_JSON" \
@@ -1362,6 +1558,9 @@ SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
 
+INTEGRITY_JSON=$(fleet_integrity_json "$BACKLOG_JSON" "$TASKS_JSON" "$SECONDMATE_CURRENT_JSON") \
+  || { echo "fm-fleet-snapshot: fleet integrity projection failed" >&2; exit 1; }
+
 jq -n \
   --arg generated "$SNAPSHOT_NOW" \
   --arg fm_home "$FM_HOME" \
@@ -1376,6 +1575,7 @@ jq -n \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
   --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
   --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
+  --argjson integrity "$INTEGRITY_JSON" \
   'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
@@ -1387,6 +1587,7 @@ jq -n \
      backlog:$backlog,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,
+     integrity:$integrity,
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,

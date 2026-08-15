@@ -830,6 +830,9 @@ for status in "$STATE"/*.status; do
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
+subsection "Fleet integrity"
+"$SCRIPT_DIR/fm-fleet-integrity.sh" --compact || printf 'integrity inspection unavailable; preserve durable records and inspect the structured fleet snapshot.\n'
+
 subsection "AFK"
 if [ -e "$STATE/.afk" ]; then
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'

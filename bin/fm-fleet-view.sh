@@ -51,7 +51,9 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     if $t.kind == "secondmate" then "\($t.actions.send) - \($t.actions.watch)"
     else $t.actions.watch end;
   def task_row($t):
-    "| \($t.id) | \($t.current_state.state) / \($t.current_state.source) | \($t.kind) | \(dash($t.backlog.repo // $t.project)) | \($t.backend) | \(endpoint_of($t)) | \(artifact($t)) | \(path_of($t)) | \(action_of($t)) |";
+    "| \($t.id) | \($t.current_state.state) / \($t.current_state.source) | \($t.kind) | \(dash($t.backlog.repo // $t.project)) | \($t.backend) | \(endpoint_of($t)) | \(artifact($t)) | \(path_of($t)) | \(action_of($t)) | \($t.integrity.classification // "unknown") |";
+  def integrity_row($r):
+    "| \($r.kind) | \(dash($r.id)) | \($r.classification) | \($r.reason) | \($r.action) |";
   def blocker($r):
     if ($r.blocked_by // "") == "" then "-"
     elif ($r.blocked_reason // "") == "" then $r.blocked_by
@@ -64,12 +66,21 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   "Schema: \(.schema)",
   "Home: \(.fm_home)",
   "",
+  "## Integrity",
+  (if .integrity.valid then
+    "No integrity issues detected."
+   else
+    "| Kind | ID / Route | Classification | Finding | Action |",
+    "| --- | --- | --- | --- | --- |",
+    (.integrity.failures[] | integrity_row(.))
+   end),
+  "",
   "## Under Way",
   (if (.tasks | length) == 0 then
     "No live task metadata found."
    else
-    "| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    "| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel | Integrity |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     (.tasks[] | task_row(.))
    end),
   "",

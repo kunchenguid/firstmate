@@ -526,6 +526,8 @@ SEED_PARENT_REG_EXISTED=0
 SEED_PARENT_BRIEF=
 SEED_PARENT_BRIEF_CREATED=0
 SEED_PARENT_BRIEF_DIR_CREATED=0
+SEED_RECEIPT=
+SEED_RECEIPT_EXISTED=0
 SEED_SUB_REG_EXISTED=0
 SEED_CHARTER_EXISTED=0
 SEED_MARKER_EXISTED=0
@@ -651,6 +653,7 @@ seed_rollback() {
         restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
         restore_seed_file "$SEED_PARENT_MARKER_EXISTED" "$SEED_BACKUP_DIR/parent-marker" "$SEED_HOME/$SUB_HOME_PARENT_MARKER"
         restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
+        restore_seed_file "$SEED_RECEIPT_EXISTED" "$SEED_BACKUP_DIR/seed-receipt" "$SEED_RECEIPT"
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
       fi
     fi
@@ -742,6 +745,26 @@ write_registry() {
   fi
   printf -- '- %s - %s (home: %s; scope: %s; projects: %s; added %s)\n' "$id" "$summary" "$home" "$scope" "$projects_csv" "$today" >> "$tmp"
   mv "$tmp" "$REG"
+}
+
+write_seed_receipt() {  # <id> <home> <projects-csv> <brief>
+  local id=$1 home=$2 projects_csv=$3 brief=$4 scope receipt tmp digest
+  scope=$(registry_scope_for_brief "$brief")
+  receipt="$DATA/$id/seed-receipt"
+  digest=$(printf 'id=%s\nhome=%s\nprojects=%s\nscope=%s\n' \
+    "$id" "$home" "$projects_csv" "$scope" | shasum -a 256 | awk '{print $1}') || return 1
+  mkdir -p "$(dirname "$receipt")" || return 1
+  tmp="$receipt.tmp.$$"
+  {
+    printf 'schema=fm-secondmate-seed.v1\n'
+    printf 'id=%s\n' "$id"
+    printf 'home=%s\n' "$home"
+    printf 'projects=%s\n' "$projects_csv"
+    printf 'scope=%s\n' "$scope"
+    printf 'identity_digest=%s\n' "$digest"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$receipt"
 }
 
 refuse_populated_projectless_home() {
@@ -848,12 +871,18 @@ seed_home() {
   SEED_PARENT_BRIEF="$DATA/$id/brief.md"
   SEED_PARENT_BRIEF_CREATED=0
   SEED_PARENT_BRIEF_DIR_CREATED=0
+  SEED_RECEIPT="$DATA/$id/seed-receipt"
+  SEED_RECEIPT_EXISTED=0
   SEED_SUB_REG_EXISTED=0
   SEED_CHARTER_EXISTED=0
   SEED_MARKER_EXISTED=0
   if [ -f "$REG" ]; then
     SEED_PARENT_REG_EXISTED=1
     cp "$REG" "$SEED_BACKUP_DIR/parent-secondmates.md"
+  fi
+  if [ -f "$SEED_RECEIPT" ] && [ ! -L "$SEED_RECEIPT" ]; then
+    SEED_RECEIPT_EXISTED=1
+    cp "$SEED_RECEIPT" "$SEED_BACKUP_DIR/seed-receipt"
   fi
 
   if [ "$requested_home" = "-" ]; then
@@ -961,6 +990,10 @@ seed_home() {
   mv -f -- "$home/$SUB_HOME_MARKER.tmp.$$" "$home/$SUB_HOME_MARKER"
   write_registry "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF"
   validate_registry
+  write_seed_receipt "$id" "$home" "$projects_csv" "$SEED_PARENT_BRIEF" || {
+    echo "error: could not publish the durable secondmate seed receipt" >&2
+    return 1
+  }
   SEED_COMMITTED=1
   seed_registry_lock_release
   trap - EXIT

@@ -51,6 +51,10 @@ In that status-log fallback, a declared external wait reports the distinct `paus
 The semantic branch reports working only on an exact busy verdict and names the source that produced it; an unknown verdict never becomes working, never permits the status-log fallback, and never becomes a silent idle.
 For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, current crew state, endpoint probes, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
+Each task also carries a read-only integrity classification that separates real working, deliberate holds, completion awaiting guarded cleanup, stale endpoint or worktree records, and unreconciled evidence.
+`bin/fm-fleet-integrity.sh` exposes the bounded local-only integrity report used by startup and operators, and `bin/fm-fleet-reconcile.sh` delegates the returned-secondmate recovery to `fm-teardown.sh`.
+The recovery requires the exact seed receipt, an empty returned home shape, an absent runtime endpoint, an absent Treehouse lease, and a uniquely matching route before retiring parent metadata and the route.
+It preserves every ambiguous, dirty, unresolved, inaccessible, or uncertain record and never supplies discard authority.
 The script header owns the exact JSON schema.
 
 ### Registered secondmate current state
@@ -210,6 +214,8 @@ If returning the lease fails during teardown, firstmate leaves the route and hom
 Seeding is transactional: if validation, cloning, initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
 `local-only` projects stay with the main first mate because they merge into the main local checkout instead of a remote-backed PR path.
 The same project may appear in multiple secondmate homes when their scopes differ, such as issue triage versus feature development.
+The route validator and fleet snapshot normalize scope text and project lists to detect equivalent scopes sharing a project, while preserving non-exclusive clone lists for genuinely different scopes.
+An ambiguous equivalent route is surfaced as an integrity failure and is not an authoritative routing choice; an operator must name one route or retire one through the guarded lifecycle.
 Secondmates are idle by default: after startup recovery reconciles only work already in their own home, an empty queue waits silently for routed tasks, and they never self-initiate surveys or audits.
 When called with `FM_HOME=<this-firstmate-home>` or when `FM_HOME` is already set to the active firstmate home, metadata-routed `fm-send.sh` requests to a live `kind=secondmate` use the live-charter-compatible `from-firstmate` carrier owned by `bin/fm-operational-input.sh`, so the secondmate returns terse answers through status lines and detailed answers through docs plus status pointers instead of replying only in its own chat.
 The parent guards every marked request against a missing correlated report without reading the secondmate conversation; `bin/fm-pending-reply-lib.sh` owns the correlation, recovery, escalation, and retention contract.

@@ -75,6 +75,26 @@ secondmate_registry_parse_line() {
   return 0
 }
 
+secondmate_registry_scope_key() {  # <natural-language-scope>
+  printf '%s\n' "$1" \
+    | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+    | LC_ALL=C sed 's/[^[:alnum:]]/ /g; s/[[:space:]][[:space:]]*/ /g; s/^ *//; s/ *$//'
+}
+
+secondmate_registry_project_key() {  # <comma-separated-projects>
+  printf '%s\n' "$1" \
+    | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+    | awk -F ',' '{
+        out="";
+        for (i=1; i<=NF; i++) {
+          value=$i;
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", value);
+          if (value != "") out=out (out == "" ? "" : ",") value;
+        }
+        print out;
+      }'
+}
+
 secondmate_registry_line_for_id() {
   local reg=$1 id=$2 line count=0
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
@@ -117,7 +137,7 @@ secondmate_registry_path_key() {
 
 secondmate_registry_validate_bindings() {
   local reg=$1 resolver=$2 expected_id=${3:-} expected_home=${4:-}
-  local tmp snapshot bindings line id host root home home_key duplicate_homes duplicate_ids overlaps expected_home_key
+  local tmp snapshot bindings line id host root home home_key scope_key project_key duplicate_homes duplicate_ids overlaps ambiguous_routes expected_home_key
   SECONDMATE_REGISTRY_MATCH_HOST=
   SECONDMATE_REGISTRY_MATCH_ROOT=
   SECONDMATE_REGISTRY_MATCH_HOME=
@@ -161,7 +181,7 @@ secondmate_registry_validate_bindings() {
             return 1
             ;;
         esac
-        case "$home$host$root" in
+        case "$home$host$root$SECONDMATE_REGISTRY_SCOPE$SECONDMATE_REGISTRY_PROJECTS" in
           *$'\t'*|*$'\n'*|*$'\r'*)
             rm -rf -- "$tmp"
             SECONDMATE_REGISTRY_ERROR="unsafe secondmate route for $id"
@@ -226,7 +246,9 @@ secondmate_registry_validate_bindings() {
           fi
           home_key="local:$home_key"
         fi
-        printf '%s\t%s\n' "$home_key" "$id" >> "$bindings"
+        scope_key=$(secondmate_registry_scope_key "$SECONDMATE_REGISTRY_SCOPE")
+        project_key=$(secondmate_registry_project_key "$SECONDMATE_REGISTRY_PROJECTS")
+        printf '%s\t%s\t%s\t%s\n' "$home_key" "$id" "$scope_key" "$project_key" >> "$bindings"
         if [ -n "$expected_id" ] && [ "$id" = "$expected_id" ]; then
           SECONDMATE_REGISTRY_MATCH_HOST=$host
           SECONDMATE_REGISTRY_MATCH_ROOT=$root
@@ -288,6 +310,30 @@ secondmate_registry_validate_bindings() {
   ' "$bindings" 2>/dev/null) || {
     rm -rf -- "$tmp"
     SECONDMATE_REGISTRY_ERROR="overlapping secondmate home assignment: $overlaps"
+    return 1
+  }
+  ambiguous_routes=$(awk -F '\t' '
+    function shares(a, b,    na, nb, aa, bb, i, j) {
+      na=split(a, aa, ","); nb=split(b, bb, ",")
+      for (i=1; i<=na; i++) for (j=1; j<=nb; j++) if (aa[i] == bb[j] && aa[i] != "") return 1
+      return 0
+    }
+    {
+      for (i = 1; i <= count; i++) {
+        if ($3 == scope[i] && shares($4, projects[i])) {
+          print id[i] " and " $2 " have equivalent scopes for shared project(s)"
+          bad=1
+        }
+      }
+      count++
+      scope[count]=$3
+      projects[count]=$4
+      id[count]=$2
+    }
+    END { exit bad ? 1 : 0 }
+  ' "$bindings" 2>/dev/null) || {
+    rm -rf -- "$tmp"
+    SECONDMATE_REGISTRY_ERROR="ambiguous persistent route: $ambiguous_routes"
     return 1
   }
   rm -rf -- "$tmp"
