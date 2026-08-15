@@ -87,11 +87,12 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 | Verdict | What was observed | What relaunch does |
 | --- | --- | --- |
 | **strong missing** | A runtime **answered**: tmux read the session inventory and the recorded window is not in it, or tmux replied `can't find session` - which only a live server can say. Herdr's classifier reaches `missing` only from a successful pane read, so its missing is always strong. | Recreates the endpoint automatically in the recorded worktree. Nothing can be running at an address a reachable runtime says is empty. |
-| **ambiguous missing** | The runtime itself could **not be reached** - tmux answered `no server running on <socket>` or `error connecting to <socket>`. | Stops and asks. Nothing is created, stopped, or written. |
+| **ambiguous missing** | Nothing positively accounted for the recorded window. The runtime itself could **not be reached** - tmux answered `no server running on <socket>` or `error connecting to <socket>` - or the grade's own read no longer showed the window absent. | Stops and asks. Nothing is created, stopped, or written. |
 | **alive** | A verified harness agent is running. | Never recreates an endpoint. The ordinary relaunch replaces the agent in the endpoint it already has. |
 
 An unreachable socket says only that *this process* cannot see a runtime there.
 It cannot distinguish a wiped runtime from a server behind a different `TMUX_TMPDIR`, socket name, or user - and on the second reading, recreating the endpoint would start a second agent in a worktree the first one is still working in.
+The liveness verdict and the grade are two separate reads of the runtime, so the grade is taken from what its own read saw rather than from the earlier `missing`: an inventory that now lists the window grades ambiguous rather than quoting tmux as authority for the absence of a window that is sitting right there.
 
 So an ambiguous verdict is surfaced as a decision rather than a dead end - a wiped runtime is exactly the case that needs recovery, and a human can see what a socket probe cannot.
 The refusal names the exact socket consulted and the backend's own response, states that the durable record, progress note, and worktree are untouched, and names the continuation: confirm no runtime anywhere holds that endpoint and no agent is still working in the worktree, then re-run with `--confirm-endpoint-gone`.
@@ -106,6 +107,7 @@ Passing `--confirm-endpoint-gone` at an alive or agent-free endpoint applies not
 - A preflight refusal **before** the progress note is recorded leaves the durable record and the instructions byte-identical.
 - A launch failure **after** the agent is stopped restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
 - A missing-endpoint recreation failure before publication likewise keeps the prior durable record and progress note, with the existing worktree untouched.
+  An endpoint the recovery already created is kept too, not cleaned up on the way out, because this plane closes no endpoint even one it opened moments earlier.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
 
@@ -150,5 +152,6 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and the missing-endpoint decision - strong recovery into the recorded worktree with its uncommitted work intact, the ambiguous decision that changes nothing before and after `--confirm-endpoint-gone`, a confirmation that still refuses a live endpoint, a secondmate recovering into its validated home, and repeat recovery that never creates a duplicate endpoint.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
+- `tests/fm-backend-tmux-smoke.test.sh` - the missing grade and endpoint recreation against a real tmux server on a private socket, which is where the answers quoted in the decision table above come from.
