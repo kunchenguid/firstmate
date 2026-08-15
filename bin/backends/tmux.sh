@@ -86,13 +86,19 @@ fm_backend_tmux_container_ensure() {
 #     treehouse cd's into the worktree, which would break name-based targeting.
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
+#
+# The session is targeted as "=<name>": tmux's bare -t <session> falls back to
+# prefix and then fnmatch resolution, so a recorded session name that no longer
+# exists would silently resolve to an unrelated live session whose name merely
+# starts with it, and the duplicate check would then be answered by - and the
+# window created in - that other session.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
   local ses=$1 wname=$2 proj_abs=$3 wid
-  if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
+  if tmux list-windows -t "=$ses" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
-  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
+  wid=$(tmux new-window -dP -F '#{window_id}' -t "=$ses:" -n "$wname" -c "$proj_abs") || return 1
   tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
   tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
   printf '%s\n' "$wid"
@@ -100,7 +106,10 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
 
 # Recreate an authoritatively missing task endpoint at its recorded address.
 # The caller retains the existing worktree and task record; this function only
-# creates the shell endpoint that can host the replacement agent.
+# creates the shell endpoint that can host the replacement agent. The recorded
+# session is looked up as "=<name>" so an unrelated live session that merely
+# shares its prefix can never absorb the replacement window; when the recorded
+# session is genuinely gone, a session of exactly that name is started instead.
 fm_backend_tmux_recreate_task() {  # <session:window> <worktree> -> prints window id
   local target=$1 worktree=$2 session window state wid
   case "$target" in
@@ -125,7 +134,7 @@ fm_backend_tmux_recreate_task() {  # <session:window> <worktree> -> prints windo
     echo "error: tmux task endpoint '$target' reads '$state', not missing; refusing to create a duplicate endpoint" >&2
     return 1
   }
-  if tmux has-session -t "$session" 2>/dev/null; then
+  if tmux has-session -t "=$session" 2>/dev/null; then
     fm_backend_tmux_create_task "$session" "$window" "$worktree"
     return
   fi
@@ -291,7 +300,10 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # successful session inventory before its foreground command can be trusted.
 # An omitted window or a definitive missing-session/server response is
 # `missing`; any other inventory or pane read failure is `unreadable`, so a
-# transient tmux problem never licenses a duplicate.
+# transient tmux problem never licenses a duplicate. The session is targeted as
+# "=<name>" for the same reason: a bare -t <session> resolves by prefix and then
+# fnmatch, so an unrelated live session sharing the recorded name's prefix would
+# otherwise answer the inventory in its place.
 #
 # The verdict combines two independent name sources rather than trusting either
 # alone. Either source naming a verified harness is enough for `alive`, because
@@ -309,7 +321,7 @@ fm_backend_tmux_agent_state() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+  if windows=$(LC_ALL=C tmux list-windows -t "=$session" -F '#{window_name}' 2>&1); then
     inventory_status=0
   else
     inventory_status=$?
@@ -398,7 +410,9 @@ EOF
 #
 # Sets FM_BACKEND_TMUX_MISSING_GRADE, plus the socket tmux itself named and the
 # response it gave, so a caller can put the concrete evidence in front of a
-# human instead of a bare verdict.
+# human instead of a bare verdict. The inventory is read from "=<session>" so
+# the evidence always describes the recorded session itself, never an unrelated
+# live session that tmux's prefix/fnmatch fallback would otherwise substitute.
 FM_BACKEND_TMUX_MISSING_GRADE=
 FM_BACKEND_TMUX_MISSING_SOCKET=
 FM_BACKEND_TMUX_MISSING_RESPONSE=
@@ -413,7 +427,7 @@ fm_backend_tmux_missing_grade() {  # <target>
     *) FM_BACKEND_TMUX_MISSING_RESPONSE="endpoint '$target' is malformed"; return 0 ;;
   esac
   session=${target%%:*}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+  if windows=$(LC_ALL=C tmux list-windows -t "=$session" -F '#{window_name}' 2>&1); then
     inventory_status=0
   else
     inventory_status=$?

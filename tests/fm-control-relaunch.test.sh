@@ -21,7 +21,8 @@
 #      the recorded worktree; a missing verdict from an UNREACHABLE runtime
 #      surfaces a decision that changes nothing until it is confirmed, and that
 #      confirmation never reaches a live endpoint; ambiguous agent state refuses
-#      unchanged, and repeat recovery never creates a duplicate endpoint.
+#      unchanged, a secondmate recovers into its own validated home, and repeat
+#      recovery never creates a duplicate endpoint.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -137,15 +138,23 @@ case "${1:-}" in
     printf 'new-session\n' >> "$D/lifecycle"
     session=
     window=
+    start_dir=
     while [ $# -gt 0 ]; do
       case "$1" in
         -s) shift; session=$1 ;;
         -n) shift; window=$1 ;;
+        -c) shift; start_dir=$1 ;;
       esac
       shift
     done
     printf '%s\n' "$session" > "$D/sessions"
     printf '%s\n' "$window" > "$D/windows"
+    # -c is where the endpoint's shell actually opens, so it becomes the pane's
+    # reported cwd from here on.
+    if [ -n "$start_dir" ]; then
+      printf '%s' "$start_dir" > "$D/created-cwd"
+      printf '%s' "$start_dir" > "$D/cwd"
+    fi
     printf '@replacement\n'
     exit 0 ;;
   set-window-option) exit 0 ;;
@@ -154,6 +163,7 @@ case "${1:-}" in
     while [ $# -gt 0 ]; do
       case "$1" in
         -n) shift; printf '%s\n' "$1" > "$D/windows" ;;
+        -c) shift; printf '%s' "$1" > "$D/created-cwd"; printf '%s' "$1" > "$D/cwd" ;;
       esac
       shift
     done
@@ -178,6 +188,7 @@ new_case() {
   : > "$dir/fake/keys"
   : > "$dir/fake/lifecycle"
   : > "$dir/fake/sessions"
+  : > "$dir/fake/created-cwd"
   printf '/tmp/fm-fake-tmux/default\n' > "$dir/fake/socket"
   printf 'claude' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
@@ -1386,7 +1397,64 @@ test_missing_endpoint_relaunch_creates_a_fresh_endpoint_without_touching_work() 
     || fail "relaunch must preserve tracked changes exactly"
   [ "$(cat "$dir/wt/uncommitted.txt")" = "preserve exactly" ] \
     || fail "relaunch must preserve untracked file contents exactly"
+  [ "$(cat "$dir/fake/created-cwd")" = "$dir/wt" ] \
+    || fail "the fresh endpoint must open in the recorded worktree, got '$(cat "$dir/fake/created-cwd")'"
   pass "fm-control relaunch: a missing endpoint is recreated without touching work"
+}
+
+# A secondmate's worktree is its own firstmate home, and that home is resolved
+# and validated on its own - the same validation a fresh secondmate spawn uses -
+# rather than adopted verbatim from the recorded worktree= value. Recreation
+# must honor that carve-out, so the recorded path here reaches the home through
+# a symlink: the raw value must reach neither the endpoint the replacement opens
+# in nor the record the recovery publishes.
+test_secondmate_missing_endpoint_recreation_uses_its_validated_home() {
+  local dir home out rc validated_home
+  dir=$(new_case sm-missing-endpoint sm8)
+  home="$dir/home"
+  mkdir -p "$home/config"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm8\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# charter\n' > "$dir/smhome/data/charter.md"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  printf 'uncommitted secondmate work\n' > "$dir/smhome/in-progress.txt"
+  ln -s "$dir/smhome" "$dir/smlink"
+  validated_home=$(cd "$dir/smhome" && pwd -P)
+  {
+    echo "window=fmses:fm-sm8"
+    echo "endpoint_task_id=sm8"
+    echo "worktree=$dir/smlink"
+    echo "project=$dir/smlink"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smlink"
+    echo "projects="
+  } > "$home/state/sm8.meta"
+  # An empty window inventory from a runtime that answered: the endpoint is
+  # authoritatively gone, so recovery recreates it.
+  : > "$dir/fake/windows"
+  printf '%s' "$dir/smlink" > "$dir/fake/cwd"
+
+  out=$(run_control "$dir" sm8 relaunch); rc=$?
+
+  expect_code 0 "$rc" "a secondmate's missing endpoint should be recreated"$'\n'"$out"
+  assert_contains "$out" "endpoint-recreated previous-endpoint=fmses:fm-sm8" \
+    "the outcome should distinguish the recreated secondmate endpoint"
+  [ "$(cat "$dir/fake/created-cwd")" = "$validated_home" ] \
+    || fail "the recreated endpoint must open in the validated secondmate home, got '$(cat "$dir/fake/created-cwd")'"
+  [ "$(meta_field "$dir" sm8 worktree)" = "$validated_home" ] \
+    || fail "the published record must name the validated home, got '$(meta_field "$dir" sm8 worktree)'"
+  [ "$(cat "$dir/smhome/in-progress.txt")" = "uncommitted secondmate work" ] \
+    || fail "recovery must preserve the secondmate home's uncommitted work exactly"
+  [ "$(cat "$dir/smhome/data/charter.md")" = "# charter" ] \
+    || fail "recovery must never rewrite a secondmate's standing charter"
+  pass "fm-control relaunch: recreating a secondmate's endpoint honors its validated home over the raw recorded worktree"
 }
 
 test_spawn_recreate_endpoint_requires_the_control_transaction() {
@@ -1548,6 +1616,7 @@ test_missing_endpoint_relaunch_is_repeat_safe() {
 test_ambiguous_endpoint_state_refuses_without_changing_the_record
 test_spawn_recreate_endpoint_requires_the_control_transaction
 test_missing_endpoint_relaunch_creates_a_fresh_endpoint_without_touching_work
+test_secondmate_missing_endpoint_recreation_uses_its_validated_home
 test_unreachable_runtime_surfaces_a_decision_instead_of_recreating
 test_confirmed_unreachable_runtime_recovers_the_same_task
 test_confirmation_never_recreates_an_endpoint_that_reads_alive

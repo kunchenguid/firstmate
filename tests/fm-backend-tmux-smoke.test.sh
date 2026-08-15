@@ -223,5 +223,43 @@ if fm_backend_tmux_recreate_task "$TARGET" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: a missing task endpoint is recreated once at its recorded address and worktree"
 
+# --- a recorded session name is never resolved to a look-alike ---------------
+#
+# tmux resolves a bare `-t <session>` by exact match, then prefix, then fnmatch.
+# "smok" is a prefix of the live "smoke" session, so a bare lookup would report
+# smoke's inventory as if it were smok's and graft the replacement window into
+# smoke - recovering the task into a session that was never its address.
+
+PREFIX_SESSION="smok"
+PREFIX_WINDOW="fm-smoke2"
+PREFIX_TARGET="$PREFIX_SESSION:$PREFIX_WINDOW"
+
+tmux has-session -t "=$PREFIX_SESSION" 2>/dev/null \
+  && fail "the look-alike fixture requires '$PREFIX_SESSION' to be absent"
+
+state=$(fm_backend_agent_state tmux "$PREFIX_TARGET")
+[ "$state" = missing ] \
+  || fail "an absent session with a live prefix-sibling should classify missing, got '$state'"
+fm_backend_tmux_missing_grade "$PREFIX_TARGET"
+case "$FM_BACKEND_TMUX_MISSING_RESPONSE" in
+  *"does not list"*)
+    fail "the missing evidence claims a session inventory that only the look-alike '$SESSION' could have answered: $FM_BACKEND_TMUX_MISSING_RESPONSE"
+    ;;
+esac
+
+recreated_id=$(fm_backend_tmux_recreate_task "$PREFIX_TARGET" "$HOME") \
+  || fail "fm_backend_tmux_recreate_task failed for a session that no longer exists"
+tmux has-session -t "=$PREFIX_SESSION" 2>/dev/null \
+  || fail "recreating an endpoint whose session is gone should start a session named exactly '$PREFIX_SESSION'"
+tmux list-windows -t "=$PREFIX_SESSION" -F '#{window_name}' | grep -qx "$PREFIX_WINDOW" \
+  || fail "the replacement window is not in its recorded session"
+if tmux list-windows -t "=$SESSION" -F '#{window_name}' | grep -qx "$PREFIX_WINDOW"; then
+  fail "the replacement window was grafted into the look-alike session '$SESSION'"
+fi
+[ "$(tmux display-message -p -t "$recreated_id" '#{pane_current_path}')" = "$HOME" ] \
+  || fail "the replacement endpoint did not start in the requested worktree"
+tmux kill-session -t "=$PREFIX_SESSION" >/dev/null 2>&1 || true
+pass "real tmux: a recorded session is matched exactly, so a prefix look-alike never answers for it or absorbs its endpoint"
+
 cleanup_all
 trap - EXIT
