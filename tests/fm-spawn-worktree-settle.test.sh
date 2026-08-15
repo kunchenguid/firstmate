@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# loop after `treehouse get`.
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
@@ -31,6 +31,10 @@ make_settle_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
+  *"#{pane_pid}"*)
+    printf '%s\n' "${FM_FAKE_PANE_PID:-}"
+    exit 0
+    ;;
   *"#{pane_current_path}"*)
     countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
     n=0
@@ -141,7 +145,82 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+# The opposite failure to the two above: the pane cwd is not stale, it simply never
+# moves. `treehouse get` leaves the pane's own shell in the project and runs its
+# worktree subshell as a grandchild, so a detector that reads only the pane shell's
+# cwd waits out its whole budget while the worktree is ready and idle. Raising the
+# budget cannot fix that; a second, independent signal can. Here the fake tmux reports
+# the PROJECT forever, and a real descendant process sits in the real worktree, so the
+# only way to pass is to read the descendant's cwd from the kernel.
+test_pane_cwd_never_moves_is_detected_via_descendant() {
+  local rec id out status root_pid child_pid unrelated_pid child_pid_file
+  if [ ! -d /proc ]; then
+    printf 'ok - # SKIP descendant-cwd signal needs /proc (absent on this platform)\n'
+    return 0
+  fi
+  id=settle-never-moves-z3
+  rec=$(make_settle_case settle-never-moves "$id" 0)
+  read_settle_record "$rec"
+
+  child_pid_file="$HOME_DIR/descendant.pid"
+  bash -c '
+    cd "$1" || exit
+    bash -c '\''cd "$1" && exec sleep 30'\'' _ "$2" &
+    unrelated=$!
+    bash -c '\''cd "$1" && exec sleep 30'\'' _ "$3" &
+    child=$!
+    printf "%s|%s\n" "$unrelated" "$child" > "$4"
+    wait "$unrelated" "$child"
+  ' _ "$PROJ_DIR" "$STALE_DIR" "$WT_DIR" "$child_pid_file" &
+  root_pid=$!
+  while [ ! -s "$child_pid_file" ]; do
+    kill -0 "$root_pid" 2>/dev/null || fail "pane process exited before creating its descendant"
+  done
+  IFS='|' read -r unrelated_pid child_pid < "$child_pid_file"
+  [ "$(readlink "/proc/$root_pid/cwd")" = "$PROJ_DIR" ] ||
+    fail "pane process did not remain in the project"
+  [ "$(readlink "/proc/$unrelated_pid/cwd")" = "$STALE_DIR" ] ||
+    fail "unrelated descendant did not enter its checkout"
+  [ "$(readlink "/proc/$child_pid/cwd")" = "$WT_DIR" ] ||
+    fail "pane descendant did not enter the worktree"
+
+  out=$(FM_FAKE_PANE_PID="$root_pid" run_settle_spawn_never_moving "$id")
+  status=$?
+  kill "$unrelated_pid" 2>/dev/null
+  kill "$child_pid" 2>/dev/null
+  kill "$root_pid" 2>/dev/null
+  wait "$unrelated_pid" 2>/dev/null
+  wait "$child_pid" 2>/dev/null
+  wait "$root_pid" 2>/dev/null
+
+  expect_code 0 "$status" "spawn should succeed via the descendant-cwd signal"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the worktree found through the descendant process"
+  assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta recorded an unrelated descendant checkout as the worktree"
+  pass "a pane whose cwd never moves is still detected through its descendant's cwd"
+}
+
+# Same invocation as run_settle_spawn, except the pane reports the PROJECT on every
+# read, so the pane-cwd signal can never fire. The short wait budget keeps the failure
+# mode fast: without the descendant signal this times out instead of hanging for 60s.
+run_settle_spawn_never_moving() {
+  local id=$1
+  FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_SPAWN_WORKTREE_WAIT_SECS=8 \
+    FM_FAKE_PANE_PATH="$PROJ_DIR" FM_FAKE_PANE_STALE="$PROJ_DIR" \
+    FM_FAKE_PANE_STALE_READS=0 FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_PANE_PID="${FM_FAKE_PANE_PID:-}" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_pane_cwd_never_moves_is_detected_via_descendant
 
 echo "# all fm-spawn-worktree-settle tests passed"
