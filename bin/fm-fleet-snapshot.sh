@@ -448,7 +448,11 @@ task_json_lines() {
       pr_source=absent
     fi
 
-    current_json=$(crew_state_json "$id")
+    if [ -n "$remote_host" ] && [ "${FM_SNAPSHOT_LOCAL_ONLY:-0}" = 1 ]; then
+      current_json=$(jq -n '{state:"unknown",source:"none",detail:"remote state read skipped in local-only mode",raw:"state: unknown · source: none · remote state read skipped in local-only mode"}')
+    else
+      current_json=$(crew_state_json "$id")
+    fi
     event_json=$(status_event_json "$status_log")
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
@@ -488,24 +492,28 @@ task_json_lines() {
     endpoint_exists=null
     agent_alive=not_checked
     if [ -n "$remote_host" ]; then
-      if remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
-        "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
-        remote_rc=0
-      else
-        remote_rc=$?
-      fi
-      if [ "$remote_rc" -eq 0 ]; then
-        remote_home_present=true
-        remote_state=$(printf '%s\n' "$remote_state" | tail -1)
-        case "$remote_state" in
-          alive) endpoint_exists=true; agent_alive=alive ;;
-          dead) endpoint_exists=true; agent_alive=dead ;;
-          missing) endpoint_exists=false; agent_alive=dead ;;
-          *) endpoint_exists=null; agent_alive=unknown ;;
-        esac
-      else
-        endpoint_exists=null
+      if [ "${FM_SNAPSHOT_LOCAL_ONLY:-0}" = 1 ]; then
         agent_alive=unknown
+      else
+        if remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
+          "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
+          remote_rc=0
+        else
+          remote_rc=$?
+        fi
+        if [ "$remote_rc" -eq 0 ]; then
+          remote_home_present=true
+          remote_state=$(printf '%s\n' "$remote_state" | tail -1)
+          case "$remote_state" in
+            alive) endpoint_exists=true; agent_alive=alive ;;
+            dead) endpoint_exists=true; agent_alive=dead ;;
+            missing) endpoint_exists=false; agent_alive=dead ;;
+            *) endpoint_exists=null; agent_alive=unknown ;;
+          esac
+        else
+          endpoint_exists=null
+          agent_alive=unknown
+        fi
       fi
     else
       if [ -n "$target" ]; then

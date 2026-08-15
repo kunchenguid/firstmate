@@ -37,6 +37,19 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+make_remote_probe() {
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+: "${FM_REMOTE_PROBE_LOG:?}"
+printf 'contacted\n' >> "$FM_REMOTE_PROBE_LOG"
+exit 1
+SH
+  chmod +x "$fakebin/ssh"
+  printf '%s\n' "$fakebin"
+}
+
 write_backlog() {
   local home=$1
   cat > "$home/data/backlog.md" <<'EOF'
@@ -135,6 +148,33 @@ EOF
         .id == "arena-mate" and .reason == "persistent secondmate home or worktree is absent")
   ' >/dev/null || fail "current runtime truth did not override historical or missing-home evidence: $snapshot"
   pass 'Arena fixture keeps current working truth and missing persistent homes visible'
+}
+
+test_local_only_integrity_skips_remote_metadata_probes() {
+  local home fakebin probe integrity
+  home="$TMP_ROOT/remote-local-only"
+  mkdir -p "$home"/{state,data,config,projects}
+  fm_write_meta "$home/state/remote-mate.meta" \
+    'window=remote-session:remote-pane' 'endpoint_task_id=remote-mate' \
+    'worktree=/srv/firstmate-home' 'home=/srv/firstmate-home' \
+    'project=/srv/firstmate-home' 'harness=codex' 'kind=secondmate' \
+    'mode=secondmate' 'projects=alpha' 'remote_host=remote-fixture' \
+    'remote_root=/srv/firstmate' 'remote_backend=herdr' \
+    'remote_target=remote-session:remote-pane'
+  printf -- '- remote-mate - remote domain (host: remote-fixture; root: /srv/firstmate; home: /srv/firstmate-home; scope: remote operations; projects: alpha; added 2026-08-15)\n' \
+    > "$home/data/secondmates.md"
+  fakebin=$(make_remote_probe "$TMP_ROOT/remote-local-only-fake")
+  probe="$TMP_ROOT/remote-local-only-contact.log"
+  integrity=$(PATH="$fakebin:$PATH" FM_SSH_BIN="$fakebin/ssh" \
+    FM_REMOTE_PROBE_LOG="$probe" FM_HOME="$home" "$INTEGRITY" --json) \
+    || fail 'local-only integrity inspection failed for remote metadata'
+  assert_absent "$probe" 'local-only integrity inspection contacted a remote secondmate'
+  printf '%s' "$integrity" | jq -e '
+    .valid == false
+      and any(.failures[];
+        .id == "remote-mate" and .classification == "unreconciled")
+  ' >/dev/null || fail "remote metadata was not preserved as unknown local-only evidence: $integrity"
+  pass 'local-only integrity preserves remote metadata without contacting its host'
 }
 
 write_seed_receipt() {
@@ -398,6 +438,7 @@ test_returned_recovery_preserves_fallible_cleanup_and_unsafe_shapes() {
 
 test_snapshot_and_read_surfaces_reconcile_stale_shape
 test_historical_terminal_event_and_missing_secondmate_home_stay_truthful
+test_local_only_integrity_skips_remote_metadata_probes
 test_returned_secondmate_recovery_is_identity_bound
 test_legacy_returned_secondmate_recovery_uses_charter_identity
 test_legacy_returned_secondmate_recovery_rejects_identity_drift
