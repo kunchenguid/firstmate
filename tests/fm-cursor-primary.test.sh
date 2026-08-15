@@ -10,8 +10,9 @@
 #                 is what keeps a Cursor primary from running every covered
 #                 event twice.
 #   PARK        - bin/fm-turnend-guard-cursor.sh, the stop-hook park: its
-#                 follow-up sources, its double loop bound, its bounded repair
-#                 nag, and its post-claim supersession contract.
+#                 follow-up sources, its one-slot watcher offer, its double loop
+#                 bound, its bounded repair nag, and its post-claim supersession
+#                 contract.
 #   SESSION     - bin/fm-sessionstart-cursor.sh, which injects the digest at
 #                 sessionStart.
 #
@@ -132,6 +133,21 @@ SH
       ;;
   esac
   chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
+# Seed one durable unacked wake whose generation the one-slot offer binds to.
+write_unacked_wake() {  # <dir> [seq] [key]
+  local dir=$1 seq=${2:-1} key=${3:-fixture-win}
+  printf '1700000000\t%s\tstale\t%s\tstale: %s needs a look\n' "$seq" "$key" "$key" \
+    >> "$dir/state/.wake-queue"
+  [ -f "$dir/state/.watcher-down" ] || printf 'pending:downtime:offer-gen-1\n' > "$dir/state/.watcher-down"
+}
+
+# Consume offered records the same way a successful --ack-through does: the
+# durable queue identity changes, so the outstanding follow-up slot can free.
+simulate_ack() {  # <dir>
+  : > "$1/state/.wake-queue"
+  printf 'acked:downtime:offer-gen-1\n' > "$1/state/.watcher-down"
 }
 
 # The park's child body: claim the home lock as this fake harness process, then
@@ -287,6 +303,51 @@ test_park_delivers_actionable_wake_as_followup() {
   case "$body" in *'stale: fixture-win needs a look'*) ;; *) fail "the wake reason was not carried into the follow-up: $body" ;; esac
   case "$body" in *'fm-wake-drain.sh'*) ;; *) fail "the follow-up must tell the session to drain first: $body" ;; esac
   pass "cursor park: an actionable close is delivered as one watcher-kind follow-up"
+}
+
+test_park_watcher_followup_is_one_slot() {
+  local dir first second third arms
+  dir=$(make_primary_dir "$TMP_ROOT/park-one-slot")
+  : > "$dir/state/task1.meta"
+  write_unacked_wake "$dir"
+  write_arm_fixture "$dir" actionable
+  first=$(run_park "$dir")
+  [ "$(kind_of_followup "$first")" = watcher ] \
+    || fail "the first actionable park must emit one watcher follow-up, got: $first"
+  arms=$(wc -l < "$dir/state/arm-ran" | tr -d '[:space:]')
+  [ "$arms" = 1 ] || fail "the first park must arm once, saw $arms"
+
+  second=$(run_park "$dir")
+  [ -z "$second" ] || fail "the same unacked generation must not emit a second follow-up, got: $second"
+  arms=$(wc -l < "$dir/state/arm-ran" | tr -d '[:space:]')
+  [ "$arms" = 2 ] || fail "the occupied slot must still park and arm, saw $arms arms"
+
+  simulate_ack "$dir"
+  write_unacked_wake "$dir" 2 later-win
+  third=$(run_park "$dir")
+  [ "$(kind_of_followup "$third")" = watcher ] \
+    || fail "after ack a later distinct wake may emit one follow-up, got: $third"
+  pass "cursor park: watcher follow-ups occupy one slot until ack"
+}
+
+test_park_one_slot_does_not_stack_a_new_distinct_wake() {
+  local dir first second third
+  dir=$(make_primary_dir "$TMP_ROOT/park-one-slot-distinct")
+  : > "$dir/state/task1.meta"
+  write_unacked_wake "$dir"
+  write_arm_fixture "$dir" actionable
+  first=$(run_park "$dir")
+  [ "$(kind_of_followup "$first")" = watcher ] \
+    || fail "the first park must emit, got: $first"
+  write_unacked_wake "$dir" 2 later-win
+  second=$(run_park "$dir")
+  [ -z "$second" ] || fail "a new distinct unacked wake must not become a second follow-up, got: $second"
+  simulate_ack "$dir"
+  write_unacked_wake "$dir" 3 after-ack
+  third=$(run_park "$dir")
+  [ "$(kind_of_followup "$third")" = watcher ] \
+    || fail "after ack the held distinct wake may emit once, got: $third"
+  pass "cursor park: a new distinct wake waits for the outstanding slot instead of stacking"
 }
 
 test_park_never_exits_two() {
@@ -644,6 +705,8 @@ test_pretool_guards_deduplicate_and_render_cursor_deny
 test_cd_guard_renders_cursor_deny
 test_park_silent_when_nothing_in_flight
 test_park_delivers_actionable_wake_as_followup
+test_park_watcher_followup_is_one_slot
+test_park_one_slot_does_not_stack_a_new_distinct_wake
 test_park_never_exits_two
 test_park_repair_nag_is_bounded
 test_park_repair_nag_requires_a_persisted_budget

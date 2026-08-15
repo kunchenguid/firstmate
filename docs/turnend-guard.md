@@ -114,9 +114,10 @@ The follow-up loop is bounded TWICE, because either bound alone is insufficient.
 
 A captain message typed while the hook is parked is accepted and runs its turn immediately, and Cursor does NOT terminate the parked hook.
 The older park remains the recorded owner until that captain turn ends and the next `stop` hook claims the baton, so an actionable watcher close in that window can still be delivered by the older park as one follow-up.
-That delivery is bounded and safe: only one park exists before the next `stop` claim, so it is a real wake and never a stale duplicate of another park's wake, while the durable wake queue makes handling idempotent.
+That delivery stays inside one outstanding watcher follow-up slot bound to the durable-queue identity in `state/.cursor-followup-offer`, because Cursor queues each follow-up ahead of typed text and a duplicate of the same unacked wake is not safe for the captain even though handling is idempotent.
+The watcher park still runs while that slot is occupied; `bin/fm-turnend-guard-cursor.sh` owns the emit contract.
 Each invocation publishes its sequence in `state/.cursor-park-owner` under the short publication and commit lock `state/.cursor-park-owner.lock`.
-The same bounded critical section covers the final owner and away-mode checks, follow-up output, and repair-budget commit, so the next `stop` claim makes an older park that is still running stand down without emitting or changing shared state.
+The same bounded critical section covers the final owner and away-mode checks, follow-up output, one-slot offer commit, and repair-budget commit, so the next `stop` claim makes an older park that is still running stand down without emitting or changing shared state.
 The lock is never held while the arm is sleeping, while the hook is polling, or while output is prepared.
 The park revalidates session ownership while polling and again inside the final commit section, but it deliberately does not hold the fleet session lock across output because an awaited hook must not block home-wide session acquisition; the remaining microsecond takeover window can produce at most one harmless wake that drains the durable queue.
 Without those records an older park still running after the next `stop` could leak one process and one stale duplicate wake.

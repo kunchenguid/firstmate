@@ -5,6 +5,8 @@
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
+# A successful --ack-through also clears state/.cursor-followup-offer, the
+# Cursor park's one outstanding watcher follow-up slot.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -263,6 +265,8 @@ if [ -n "$ACK_THROUGH" ]; then
     exit 1
   fi
   DRAIN_TMP=
+  # Cursor park one-slot offer; bin/fm-turnend-guard-cursor.sh is the owner.
+  rm -f "$STATE/.cursor-followup-offer" 2>/dev/null || true
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   if [ "$RECOVERY_ACK_MOVED" = true ]; then

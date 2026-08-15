@@ -23,9 +23,17 @@
 # to blocking, which is the same primitive OpenCode's session.idle and Pi's
 # agent_settled adapters use.
 #
-# Follow-up sources, in priority order, at most one per invocation:
-#   1. an actionable watcher wake from the park;
+# Follow-up sources, in priority order, at most one object per invocation:
+#   1. an actionable watcher wake from the park, and only when
+#      state/.cursor-followup-offer does not already hold this durable-queue
+#      generation and its still-unacked records;
 #   2. the bounded repair instruction when supervision could not be established.
+# Across invocations there is at most one outstanding watcher follow-up slot.
+# The park and watcher timer still run while that slot is occupied; only the
+# Cursor follow-up is suppressed. Do not re-inject the same unacked generation.
+# A new distinct wake must not become a second queued follow-up; it waits until
+# the slot clears. bin/fm-wake-drain.sh --ack-through clears the slot, and the
+# park also frees it when every offered sequence has left the durable queue.
 #
 # LOOP BOUNDING IS DOUBLE, because either bound alone is insufficient:
 #   - `loop_limit` in .cursor/hooks.json is Cursor's own ceiling. Once
@@ -45,10 +53,13 @@
 # and runs its turn immediately, and Cursor does NOT terminate the parked hook
 # (verified live). Until that turn ends and the next stop claims the baton, an
 # actionable close can still produce one real, durable-queue-backed follow-up
-# from the sole existing park. Each invocation publishes itself as the current
-# park owner in state/.cursor-park-owner, and once a newer stop has published its
-# claim, an older park still running stands down without emitting. Newest stop
-# wins; the arm's own singleton keeps the overlap from starting a second watcher.
+# from the sole existing park. Cursor queues each follow-up ahead of typed
+# text, so that delivery stays inside the one-slot offer: never a stack, even
+# when the next stop parks on the same unacked generation. Each invocation
+# publishes itself as the current park owner in state/.cursor-park-owner, and
+# once a newer stop has published its claim, an older park still running stands
+# down without emitting. Newest stop wins; the arm's own singleton keeps the
+# overlap from starting a second watcher.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,6 +72,7 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 OWNER="$STATE/.cursor-park-owner"
 OWNER_LOCK="$STATE/.cursor-park-owner.lock"
 BUDGET_FILE="$STATE/.turnend-cursor-blocks"
+OFFER_FILE="$STATE/.cursor-followup-offer"
 
 LOOP_CEILING=${FM_CURSOR_TURNEND_LOOP_CEILING:-180}
 BLOCK_BUDGET=${FM_CURSOR_TURNEND_BLOCK_BUDGET:-3}
@@ -115,6 +127,8 @@ lock_acquire_bounded() {  # <lock>
 
 # Emit exactly one follow-up object and stop. jq owns the JSON escaping so an
 # embedded quote, newline, or the U+2063 prefix cannot corrupt the response.
+# A watcher follow-up also claims the one outstanding offer slot under the same
+# lock; a duplicate of the same unacked durable-queue identity prints nothing.
 emit_followup() {  # <kind> <body> [reset-budget]
   local kind=$1 body=$2 reset_budget=${3-} encoded response
   fm_operational_input_encode "$kind" "$body" encoded || exit 0
@@ -123,6 +137,16 @@ emit_followup() {  # <kind> <body> [reset-budget]
   if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
     fm_lock_release "$OWNER_LOCK"
     exit 0
+  fi
+  if [ "$kind" = watcher ]; then
+    if offer_still_outstanding; then
+      fm_lock_release "$OWNER_LOCK"
+      exit 0
+    fi
+    if ! offer_commit; then
+      fm_lock_release "$OWNER_LOCK"
+      exit 0
+    fi
   fi
   if [ "$reset_budget" = reset-budget ] && ! budget_reset; then
     fm_lock_release "$OWNER_LOCK"
@@ -169,6 +193,74 @@ budget_reset_if_ours() {
     exit 0
   }
   fm_lock_release "$OWNER_LOCK"
+}
+
+# One outstanding watcher follow-up slot, bound to durable-queue identity.
+# session= this Cursor session
+# generation= recovery-generation token from state/.watcher-down, or empty
+# seqs= comma-separated unacked wake-queue sequences offered, or empty
+offer_queue_seqs() {
+  awk -F '\t' '$2 ~ /^[0-9]+$/ { print $2 }' "${FM_WAKE_QUEUE:-$STATE/.wake-queue}" 2>/dev/null \
+    | sort -n | uniq \
+    | awk '{ s = s sep $0; sep="," } END { printf "%s", s }'
+}
+
+offer_generation() {
+  local saved=$FM_RECOVERY_MARKER_TOKEN gen=
+  if fm_recovery_marker_read "$STATE/.watcher-down"; then
+    gen=${FM_RECOVERY_MARKER_TOKEN##*:}
+    case "$gen" in ''|*[!A-Za-z0-9._-]*) gen= ;; esac
+  fi
+  FM_RECOVERY_MARKER_TOKEN=$saved
+  printf '%s' "$gen"
+}
+
+offer_read() {
+  local session seqs
+  OFFER_SEQS=
+  [ -f "$OFFER_FILE" ] || return 1
+  session=$(sed -n '1s/^session=//p' "$OFFER_FILE" 2>/dev/null || true)
+  seqs=$(sed -n '3s/^seqs=//p' "$OFFER_FILE" 2>/dev/null || true)
+  [ "$session" = "$SESSION_ID" ] || return 1
+  OFFER_SEQS=$seqs
+  return 0
+}
+
+offer_commit() {
+  local tmp="$OFFER_FILE.tmp.$$" status=0 gen seqs
+  [ ! -d "$OFFER_FILE" ] || return 1
+  gen=$(offer_generation)
+  seqs=$(offer_queue_seqs)
+  printf 'session=%s\ngeneration=%s\nseqs=%s\n' "$SESSION_ID" "$gen" "$seqs" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$OFFER_FILE" 2>/dev/null \
+    || status=1
+  rm -f "$tmp" 2>/dev/null || true
+  return "$status"
+}
+
+# True when this session already offered a watcher follow-up for identity that
+# is still unacked. Empty offered seqs stay occupied until --ack-through
+# removes the file. Offered sequences that have left the queue free the slot
+# so a later distinct ring can emit once.
+offer_still_outstanding() {
+  local seq rest
+  offer_read || return 1
+  if [ -z "$OFFER_SEQS" ]; then
+    return 0
+  fi
+  rest=$OFFER_SEQS
+  while [ -n "$rest" ]; do
+    seq=${rest%%,*}
+    if [ "$seq" = "$rest" ]; then
+      rest=
+    else
+      rest=${rest#*,}
+    fi
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    awk -F '\t' -v s="$seq" '$2 == s { found=1 } END { exit found ? 0 : 1 }' \
+      "${FM_WAKE_QUEUE:-$STATE/.wake-queue}" 2>/dev/null && return 0
+  done
+  return 1
 }
 
 emit_repair_followup() {  # <reason> <arm-tail> <attempt>

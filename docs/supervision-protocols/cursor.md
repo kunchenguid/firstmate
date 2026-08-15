@@ -12,7 +12,10 @@ When this session owns supervision and away mode is not active:
 4. The captain keeps control while the hook is parked.
    A message typed into a parked Cursor pane is accepted and runs its turn immediately, but the older park remains the recorded owner until that turn ends and the next `stop` hook claims the baton.
    An actionable watcher close in that window can still be delivered by the older park as one follow-up.
-   This is bounded and safe: only one park exists in that window, so the event is a real wake rather than a stale duplicate of another park's wake, the durable wake queue makes handling idempotent, and the next `stop` claim makes an older park that is still running stand down without emitting.
+   Cursor queues each follow-up ahead of typed text, so a second `followup_message` for the same unacked wake is not safe even though durable-queue handling is idempotent.
+   Across invocations the park keeps at most one outstanding watcher follow-up bound to the durable-queue generation and unacked records in `state/.cursor-followup-offer`.
+   The watcher park still runs while that slot is occupied, and a successful `--ack-through` clears it so a later distinct ring can emit once.
+   Newest `stop` still wins: the next claim makes an older park that is still running stand down without emitting.
    The private supersession records are `state/.cursor-park-owner` and its short publication and commit lock `state/.cursor-park-owner.lock`.
 5. On a `turn-end-guard` follow-up, the park could not establish a live cycle.
    Inspect the watcher startup path rather than turning the notice into a repeating manual-arm loop; the nag is bounded by `FM_CURSOR_TURNEND_BLOCK_BUDGET` (default 3) and then stops on its own.
