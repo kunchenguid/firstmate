@@ -2625,6 +2625,64 @@ SPAWN_DISPATCHED_AT=
 if [ "$RELAUNCH" -eq 0 ]; then
   SPAWN_DISPATCHED_AT=$(LC_ALL=C date -u '+%Y-%m-%dT%H:%M:%SZ') || exit 1
 fi
+
+# The runtime FIRSTMATE ITSELF is on, captured here because this process is a
+# child of the orchestrator that decided to dispatch. The captain switches the
+# orchestrator between providers as well as the worker, so a row that records
+# only harness= hides half of the comparison. bin/fm-harness.sh stays the single
+# detection owner; FM_ORCHESTRATOR_OVERRIDE is the test/caller seam, matching
+# fm_supervision_model's shape in bin/fm-wake-lib.sh.
+#
+# An undetectable orchestrator writes NO line, so the metrics row reports null
+# rather than a default that would read as a real provider. On relaunch the
+# original dispatching value is preserved untouched (it is not in the
+# spawn-owned key set below) and a differing relauncher is appended to
+# orchestrator_handoffs, because a provider handoff mid-task is exactly the event
+# the comparison needs to see.
+spawn_detect_orchestrator() {
+  local detected
+  if [ -n "${FM_ORCHESTRATOR_OVERRIDE:-}" ]; then
+    detected=$FM_ORCHESTRATOR_OVERRIDE
+  else
+    detected=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || true)
+  fi
+  case "$detected" in
+    ''|unknown) return 0 ;;
+    *[!a-z0-9-]*) return 0 ;;
+  esac
+  printf '%s\n' "$detected"
+}
+
+# Print the handoff chain for this relaunch: the prior chain, plus the current
+# orchestrator when it differs from the last determinate entry. An undetectable
+# relauncher appends the explicit "unknown" token so a handoff is never
+# invisible; fm-task-metrics.sh maps that token to a null chain element.
+spawn_relaunch_handoffs() {  # <current-orchestrator>
+  local current=$1 origin='' prior='' last
+  origin=$(fm_meta_get "$RELAUNCH_META" orchestrator)
+  prior=$(fm_meta_get "$RELAUNCH_META" orchestrator_handoffs)
+  [ -n "$current" ] || current=unknown
+  last=${prior##*,}
+  [ -n "$last" ] || last=$origin
+  if [ -z "$origin" ] && [ -z "$prior" ] && [ "$current" = unknown ]; then
+    return 0
+  fi
+  if [ "$current" = "$last" ]; then
+    printf '%s\n' "$prior"
+    return 0
+  fi
+  if [ -n "$prior" ]; then
+    printf '%s,%s\n' "$prior" "$current"
+  else
+    printf '%s\n' "$current"
+  fi
+}
+
+SPAWN_ORCHESTRATOR=$(spawn_detect_orchestrator)
+SPAWN_ORCHESTRATOR_HANDOFFS=
+if [ "$RELAUNCH" -eq 1 ]; then
+  SPAWN_ORCHESTRATOR_HANDOFFS=$(spawn_relaunch_handoffs "$SPAWN_ORCHESTRATOR")
+fi
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -2636,7 +2694,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort orchestrator_handoffs busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2658,6 +2716,13 @@ SPAWN_META_WRITE_STATUS=0
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   [ -z "$SPAWN_DISPATCHED_AT" ] || echo "dispatched_at=$SPAWN_DISPATCHED_AT"
+  # Written on the dispatching spawn only; a relaunch preserves the original
+  # through preserve_relaunch_meta and records itself in the handoff chain.
+  if [ "$RELAUNCH" -eq 0 ]; then
+    [ -z "$SPAWN_ORCHESTRATOR" ] || echo "orchestrator=$SPAWN_ORCHESTRATOR"
+  else
+    [ -z "$SPAWN_ORCHESTRATOR_HANDOFFS" ] || echo "orchestrator_handoffs=$SPAWN_ORCHESTRATOR_HANDOFFS"
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -2855,6 +2920,17 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
       echo "CONFIG_REREAD: secondmate $ID: cleanup failed; pre-relaunch generations were force-cleared where possible (destination=$PROJ_ABS source=$FM_HOME)" >&2
     fi
   fi
+fi
+
+# Record the dispatch so a completed task that never produced a metrics row is
+# discoverable instead of silently absent (bin/fm-task-metrics.sh audit). Spawn is
+# the one chokepoint every task passes through, so the ledger is the honest
+# denominator for emitted rows. Best effort with a loud warning: a launched task
+# must not be failed over its bookkeeping, and the audit reports what is missing.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-task-metrics.sh" dispatch "$ID" >/dev/null \
+    || echo "warn: task $ID was dispatched but its metrics dispatch record was not written" >&2
 fi
 
 SPAWN_DELIVERY=

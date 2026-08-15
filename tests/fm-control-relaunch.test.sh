@@ -300,6 +300,73 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
+# A provider handoff mid-task - firstmate itself moving to another runtime while
+# the task continues - is exactly the event the per-task comparison needs to see,
+# so the original dispatching runtime must survive and the relauncher must be
+# recorded beside it rather than over it (docs/task-metrics.md).
+test_relaunch_on_another_provider_records_the_handoff_without_losing_the_original() {
+  local dir out rc
+  dir=$(new_case orchestrator-handoff rl40)
+  add_ship_task "$dir" rl40 claude
+  printf 'orchestrator=claude\n' >> "$dir/home/state/rl40.meta"
+
+  out=$(FM_ORCHESTRATOR_OVERRIDE=codex \
+    run_control "$dir" rl40 relaunch --note "continuing after the switch"); rc=$?
+  expect_code 0 "$rc" "a relaunch from another provider should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl40 orchestrator)" = claude ] \
+    || fail "the original dispatching runtime was overwritten by the relauncher"
+  [ "$(meta_field "$dir" rl40 orchestrator_handoffs)" = codex ] \
+    || fail "the relaunching runtime was not recorded as a handoff"
+  pass "fm-control relaunch: a relaunch from another provider records the handoff and preserves the original dispatcher"
+}
+
+test_relaunch_on_the_same_provider_records_no_handoff() {
+  local dir out rc
+  dir=$(new_case orchestrator-same rl41)
+  add_ship_task "$dir" rl41 claude
+  printf 'orchestrator=claude\n' >> "$dir/home/state/rl41.meta"
+
+  out=$(FM_ORCHESTRATOR_OVERRIDE=claude \
+    run_control "$dir" rl41 relaunch --note "continuing on the same runtime"); rc=$?
+  expect_code 0 "$rc" "a same-provider relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl41 orchestrator)" = claude ] \
+    || fail "the original dispatching runtime must survive an ordinary relaunch"
+  [ -z "$(meta_field "$dir" rl41 orchestrator_handoffs)" ] \
+    || fail "a relaunch on the same runtime invented a handoff"
+  pass "fm-control relaunch: a relaunch on the same provider records no handoff"
+}
+
+test_an_undetectable_relauncher_still_shows_that_the_provider_changed() {
+  local dir out rc
+  dir=$(new_case orchestrator-unknown rl42)
+  add_ship_task "$dir" rl42 claude
+  printf 'orchestrator=claude\n' >> "$dir/home/state/rl42.meta"
+
+  out=$(FM_ORCHESTRATOR_OVERRIDE=unknown \
+    run_control "$dir" rl42 relaunch --note "continuing from an unnamed runtime"); rc=$?
+  expect_code 0 "$rc" "a relaunch from an undetectable runtime should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl42 orchestrator)" = claude ] \
+    || fail "the original dispatching runtime must survive"
+  [ "$(meta_field "$dir" rl42 orchestrator_handoffs)" = unknown ] \
+    || fail "an unnamed relauncher hid the fact that the runtime changed"
+  pass "fm-control relaunch: a relaunch from an undetectable runtime still records that the provider changed"
+}
+
+test_repeated_handoffs_accumulate_in_order() {
+  local dir out rc
+  dir=$(new_case orchestrator-chain rl43)
+  add_ship_task "$dir" rl43 claude
+  printf '%s\n' 'orchestrator=claude' 'orchestrator_handoffs=codex' \
+    >> "$dir/home/state/rl43.meta"
+
+  out=$(FM_ORCHESTRATOR_OVERRIDE=cursor \
+    run_control "$dir" rl43 relaunch --note "third runtime"); rc=$?
+  expect_code 0 "$rc" "a further relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl43 orchestrator_handoffs)" = codex,cursor ] \
+    || fail "the handoff chain did not keep every runtime in order"
+  pass "fm-control relaunch: repeated provider handoffs accumulate in the order they happened"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare ready exported release
   dir=$(new_case metadata-race rl28)
@@ -1317,6 +1384,10 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_on_another_provider_records_the_handoff_without_losing_the_original
+test_relaunch_on_the_same_provider_records_no_handoff
+test_an_undetectable_relauncher_still_shows_that_the_provider_changed
+test_repeated_handoffs_accumulate_in_order
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

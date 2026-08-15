@@ -2555,7 +2555,7 @@ if [ "$KIND" != secondmate ]; then
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     "$SCRIPT_DIR/fm-task-metrics.sh" commit "$ID" >/dev/null
 fi
-rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" "$STATE/$ID.terminal-at" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \

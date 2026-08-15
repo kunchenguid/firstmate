@@ -108,7 +108,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
-| `fm-task-metrics.sh`     | Prepare and commit one durable-only per-task metrics row during guarded teardown |
+| `fm-task-metrics.sh`     | Record a dispatch, prepare and commit one durable-only per-task metrics row, and audit for a missing row |
+| `fm-token-usage.sh`      | Attribute a worker's token burn to one task from the harness's own durable per-session records |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared Relay config, relay, and reply-threading helpers                              |

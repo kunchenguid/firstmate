@@ -214,6 +214,12 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Backstop for the durable terminal observation the metrics obligation needs
+# (bin/fm-classify-lib.sh, "durable terminal observation"). The watcher captures
+# it every poll; this covers a home whose watcher was down when a task finished,
+# because every wake-handling and session-start turn runs this drain.
+status_terminal_capture_scan "$STATE" || true
+
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=true
 

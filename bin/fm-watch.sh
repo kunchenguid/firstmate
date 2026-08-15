@@ -841,6 +841,11 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # Durable terminal observation for per-task metrics: a crewmate's done:/failed:
+  # append carries no time of its own, so this is where completion time becomes a
+  # durable record. Bounded by status size, silent, and never a wake source.
+  status_terminal_capture_scan "$STATE" || true
+
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.

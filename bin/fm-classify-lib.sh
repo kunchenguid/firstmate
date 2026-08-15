@@ -13,7 +13,7 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are two documented exceptions. The absorb classification
+# There are three documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -23,7 +23,9 @@
 # open-decisions fold" below) also writes: it persists a per-status-file byte
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time.
+# log every time. status_terminal_capture (see "durable terminal observation"
+# below) writes the third: the durable time supervision first observed a task's
+# terminal report, which nothing else in the fleet records.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -1194,6 +1196,99 @@ scan_captain_relevant_statuses() {  # <state>
     status_is_captain_relevant "$last" || continue
     task=$(basename "$f"); task="${task%.status}"
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
+  done
+  return 0
+}
+
+# --- durable terminal observation -------------------------------------------
+#
+# A crewmate appends "done:"/"failed:" with a bare echo, so the status stream
+# carries no time of its own and nothing else in the fleet records when a task
+# actually finished. This is the third documented exception to the pure-read
+# rule (after crew_absorb_class and status_open_decisions_incremental): it
+# WRITES state/<id>.terminal-at, the durable record of when supervision first
+# observed a task's terminal report. bin/fm-task-metrics.sh derives completion
+# time and wall clock from it, and bin/fm-teardown.sh retires it with the task's
+# other durable records.
+#
+# The recorded time is an OBSERVATION, not the append itself: it lags the
+# crewmate's echo by at most one supervision poll. That is why the record names
+# its own source, so a consumer can state the precision it has instead of
+# implying an exact completion instant. A file mtime is never used as the value.
+#
+# The scan is bounded by the status file's byte size: an append-only log that has
+# not grown cannot hold a new terminal event, so quiet fleets pay one size read
+# per task per poll. Only a grown log is re-counted, and only a NEW terminal
+# event takes a fresh timestamp, so a later unrelated append never restamps a
+# completion that was already observed.
+_fm_terminal_capture_path() {  # <state> <task-id>
+  printf '%s/%s.terminal-at' "$1" "$2"
+}
+
+# Print the count of done/failed events already observed, or 0 when no valid
+# record exists.
+_fm_terminal_capture_count() {  # <record>
+  local f=$1 line value=0
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { printf '0\n'; return 0; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      events=*) value=${line#events=} ;;
+    esac
+  done < "$f"
+  case "$value" in ''|*[!0-9]*) value=0 ;; esac
+  printf '%s\n' "$value"
+}
+
+# Record a task's terminal observation when its status log has grown and holds
+# more done/failed events than the last record. Silent no-op otherwise.
+status_terminal_capture() {  # <state> <task-id>
+  local state=$1 id=$2 f record size recorded_size='' events=0 verb='' line tmp
+  f="$state/$id.status"
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
+  record=$(_fm_terminal_capture_path "$state" "$id")
+  size=$(_fm_status_file_size "$f") || return 0
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  if [ -f "$record" ] && [ -r "$record" ] && [ ! -L "$record" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        status_size=*) recorded_size=${line#status_size=} ;;
+      esac
+    done < "$record"
+    [ "$recorded_size" != "$size" ] || return 0
+  fi
+  local line_verb
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_verb=$(status_line_verb "$line")
+    case "$line_verb" in
+      done|failed) events=$((events + 1)); verb=$line_verb ;;
+    esac
+  done < "$f"
+  if [ "$events" -le "$(_fm_terminal_capture_count "$record")" ]; then
+    return 0
+  fi
+  tmp="$record.tmp.$$"
+  {
+    printf 'observed_at=%s\n' "$(LC_ALL=C date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'verb=%s\n' "$verb"
+    printf 'events=%s\n' "$events"
+    printf 'status_size=%s\n' "$size"
+    printf 'source=supervision-observation\n'
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 0; }
+  mv -f "$tmp" "$record" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 0; }
+  return 0
+}
+
+# Run status_terminal_capture over every task in a home. Called once per
+# supervision poll (bin/fm-watch.sh, which the away-mode daemon also runs) and
+# once per durable wake drain (bin/fm-wake-drain.sh) as the backstop for a home
+# whose watcher was down when the task finished.
+status_terminal_capture_scan() {  # <state>
+  local state=$1 f task
+  for f in "$state"/*.status; do
+    [ -e "$f" ] || continue
+    task=$(basename "$f"); task="${task%.status}"
+    status_terminal_capture "$state" "$task" || true
   done
   return 0
 }
