@@ -156,6 +156,8 @@ assert "code: recover_custody" in guest
 assert guest.count('cd "$3" && exec "$2" axi status') == 2
 assert "FM_AZURE_VALIDATION_BRANCH" in guest and "FM_AZURE_VALIDATION_BRANCH" in bridge
 assert "awaiting[_ -]approval" in guest
+assert "grep -Eq '^gate:' \"$RUN_LOG\"" in guest
+assert guest.index("gate:") < guest.index('"$STATUS_RC" -eq 0 ] && grep -Eiq')
 assert "credential disk content binding mismatch (expected {} observed {})" in guest
 assert "cell worktree is detached and no declared branch identity is present" in bridge
 assert '"$NM_BIN" axi sync --recover' in guest

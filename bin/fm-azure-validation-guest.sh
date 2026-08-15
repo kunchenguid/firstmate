@@ -663,7 +663,14 @@ mv "$tmp" "$IDENTITY"
 # The durable no-mistakes database view, not free-form run output or intent,
 # owns terminal outcome classification.
 OUTCOME=failed
-if [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'needs[-_ ]decision|awaiting[_ -]user|awaiting[_ -]approval|ask-user' "$STATUS_LOG"; then
+# A run that parked at a gate is a decision, not a failure, and the unit
+# teardown kills the in-unit daemon before the status read, so the aborted
+# post-mortem status can never say so. The run log's structured gate block
+# is authoritative for gate detection; the status read stays authoritative
+# for completed outcomes.
+if grep -Eq '^gate:' "$RUN_LOG" && grep -Eiq 'status:[[:space:]]*awaiting[_ -](approval|user)' "$RUN_LOG"; then
+  OUTCOME=needs-decision
+elif [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'needs[-_ ]decision|awaiting[_ -]user|awaiting[_ -]approval|ask-user' "$STATUS_LOG"; then
   OUTCOME=needs-decision
 elif [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*(passed|checks-passed)|checks[- ]passed|checks green' "$STATUS_LOG"; then
   OUTCOME=checks-passed
