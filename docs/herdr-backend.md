@@ -215,12 +215,13 @@ Text is typed once; only Enter is retried.
 On an idle or done native baseline, submit confirmation waits for `working` or `blocked` across a bounded polling window.
 Pi is the narrow exception: if Herdr still reports the native Pi agent idle, the adapter requires the same Pi identity and a post-Enter structurally empty composer before confirming delivery.
 A pending or unreadable Pi composer remains unconfirmed and retains the buffer, while non-Pi native confirmation is unchanged.
-On an already active or unreadable baseline, it falls back to conservative composer clearance.
+On a non-idle or unreadable baseline, conservative composer clearance remains sufficient.
+If the composer stays pending and the raw native state was not already working, an idle-to-busy rendered-footer transition anchored by a pre-Enter read can also confirm delivery.
 A fully unreadable target stops retrying and reports unknown.
 
-Some harnesses never present a legibly idle native baseline at all, so the composer fallback is their only path.
+Some harnesses never present a legibly idle native baseline at all, so these fallback signals are their only path.
 Herdr reports a Cursor pane `blocked` in every state, and Cursor's mid-turn composer renders its placeholder beside a right-aligned busy token, which is composer content and therefore `pending` on a composer that holds no user text.
-That fallback alone reported every delivered steer as unconfirmed, so it is paired with a rendered-footer transition: the pane's verified busy footer is read once before the first Enter, and an idle-to-busy transition across that Enter confirms the submit.
+The composer verdict alone therefore reported every delivered steer as unconfirmed, while the rendered-footer transition confirms the submit.
 It is the same semantic signal the native path uses and the same one the tmux submit core reads, so a pane already mid-turn before the text was typed still reports `pending` rather than borrowing another turn as proof of this delivery.
 The composer verdict itself is deliberately unchanged: a right-aligned status token on the composer row stays content for every other caller, including the away-mode pre-injection guard.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed transition can cause only a redundant Enter on an empty composer, never duplicate message text.

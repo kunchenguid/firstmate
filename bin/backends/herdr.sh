@@ -2702,8 +2702,8 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
-# (Enter only, never retyped) until Herdr's native agent-state confirms a real
-# turn started or the Pi-specific idle composer acknowledgement succeeds.
+# (Enter only, never retyped) until the native-state, rendered-footer, or
+# Pi-specific structural-composer confirmation path succeeds.
 # Verified hazard (herdr-verification-p2.md
 # "slash/$ autocomplete popup"): a `/`- or `$`-prefixed send opens a
 # completion popup within ~0.1s, exactly like tmux's claude/codex popups, so
