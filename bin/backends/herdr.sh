@@ -2075,9 +2075,13 @@ fm_backend_herdr_relaunch_claim_remove() {  # <path> <task-id>
   rm -f "$path"
 }
 
-fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <home> <task-label> [<journal> <old-tab> <old-pane>]
-  local session=$1 workspace=$2 id=$3 home=$4 label=$5 journal=${6:-} old_tab=${7:-} old_pane=${8:-}
+fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <home> <task-label> [<journal> <old-tab> <old-pane> <mode>]
+  local session=$1 workspace=$2 id=$3 home=$4 label=$5 journal=${6:-} old_tab=${7:-} old_pane=${8:-} mode=${9:-recover}
   local state path tab pane tab_info pane_info endpoint_label agent_state list matches canonical_home journal_state journal_tab journal_pane claim_bound=0
+  case "$mode" in
+    recover|preflight) ;;
+    *) return 1 ;;
+  esac
   state="$home/state"
   path=$(fm_backend_herdr_relaunch_claim_path "$state" "$id") || return 1
   [ ! -e "$path" ] && [ ! -L "$path" ] && return 0
@@ -2168,10 +2172,11 @@ fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <
   esac
   agent_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
   [ "$agent_state" = no-agent ] || return 1
-  if [ "$claim_bound" = 0 ]; then
+  if [ "$mode" = recover ] && [ "$claim_bound" = 0 ]; then
     fm_backend_herdr_relaunch_claim_bind_endpoint "$path" "$id" "$tab" "$pane" || return 1
   fi
-  return 1
+  printf '%s %s %s %s' "$tab" "$pane" "$path" "$journal_state"
+  return 3
 }
 
 fm_backend_herdr_relaunch_claim_reclaim() {  # <session> <claim-path> <task-id> <tab> <pane>
@@ -2496,15 +2501,29 @@ fm_backend_herdr_relaunch_missing_pane_context_validate() {  # <session> <worksp
 
 fm_backend_herdr_relaunch_missing_pane_preflight() {  # <session> <workspace> <old-tab> <old-pane> <label> [<journal> <task-id> <home>]
   local session=$1 workspace=$2 old_tab=$3 old_pane=$4 label=$5 journal=${6:-} id=${7:-} home=${8:-}
-  local canonical_home claim_path
-  fm_backend_herdr_relaunch_missing_pane_context_validate "$session" "$workspace" "$old_tab" "$old_pane" "$label" 1 || return 1
+  local canonical_home claim_path claim_tab claim_status
   if [ -n "$id" ] && [ -n "$home" ]; then
     claim_path=$(fm_backend_herdr_relaunch_claim_path "$home/state" "$id") || return 1
     if [ -e "$claim_path" ] || [ -L "$claim_path" ]; then
-      echo "error: herdr missing-pane relaunch has an unresolved replacement claim for $id" >&2
-      return 1
+      fm_backend_herdr_relaunch_claim_snapshot "$claim_path" "$id" || return 1
+      [ "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_SESSION" = "$session" ] \
+        && [ "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_WORKSPACE" = "$workspace" ] \
+        && [ "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_TASK_LABEL" = "$label" ] || return 1
+      claim_tab=$FM_BACKEND_HERDR_RELAUNCH_CLAIM_TAB
+      if { [ -n "$claim_tab" ] && [ -z "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_PANE" ]; } \
+         || { [ -z "$claim_tab" ] && [ -n "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_PANE" ]; }; then
+        return 1
+      fi
+      fm_backend_herdr_relaunch_missing_pane_context_validate \
+        "$session" "$workspace" "$old_tab" "$old_pane" "$label" 1 "$claim_tab" || return 1
+      fm_backend_herdr_relaunch_claim_recover \
+        "$session" "$workspace" "$id" "$home" "$label" "$journal" "$old_tab" "$old_pane" preflight >/dev/null
+      claim_status=$?
+      [ "$claim_status" = 3 ] || return 1
+      return 0
     fi
   fi
+  fm_backend_herdr_relaunch_missing_pane_context_validate "$session" "$workspace" "$old_tab" "$old_pane" "$label" 1 || return 1
   if [ -n "$journal" ]; then
     canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || {
       echo "error: herdr missing-pane relaunch cannot verify the presentation home for $id" >&2
@@ -2526,7 +2545,7 @@ fm_backend_herdr_relaunch_missing_pane_preflight() {  # <session> <workspace> <o
 
 fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <old-pane> <label> <cwd> [<journal> <task-id> <home>]
   local session=$1 workspace=$2 old_tab=$3 old_pane=$4 label=$5 cwd=$6 journal=${7:-} id=${8:-} home=${9:-}
-  local replacement claim_status claim_path claim_tab
+  local replacement claim_recovery claim_status claim_path claim_tab
   if [ -n "$id" ] && [ -n "$home" ]; then
     claim_path=$(fm_backend_herdr_relaunch_claim_path "$home/state" "$id") || return 1
     if [ -e "$claim_path" ] || [ -L "$claim_path" ]; then
@@ -2541,11 +2560,14 @@ fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <o
       fi
       fm_backend_herdr_relaunch_missing_pane_context_validate \
         "$session" "$workspace" "$old_tab" "$old_pane" "$label" 1 "$claim_tab" || return 1
-      fm_backend_herdr_relaunch_claim_recover \
-        "$session" "$workspace" "$id" "$home" "$label" "$journal" "$old_tab" "$old_pane"
+      claim_recovery=$(fm_backend_herdr_relaunch_claim_recover \
+        "$session" "$workspace" "$id" "$home" "$label" "$journal" "$old_tab" "$old_pane")
       claim_status=$?
       case "$claim_status" in
         0) ;;
+        3)
+          replacement=$claim_recovery
+          ;;
         2)
           echo "error: herdr missing-pane relaunch reclaimed an interrupted replacement for $id; retry the relaunch" >&2
           return 1
@@ -2556,9 +2578,11 @@ fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <o
           ;;
       esac
     fi
-    fm_backend_herdr_relaunch_missing_pane_preflight \
-      "$session" "$workspace" "$old_tab" "$old_pane" "$label" "$journal" "$id" "$home" || return 1
-    replacement=$(fm_backend_herdr_create_task "$session:$workspace" "$label" "$cwd" "" strict "$id" "$home" "$old_tab" "$old_pane") || return 1
+    if [ -z "$replacement" ]; then
+      fm_backend_herdr_relaunch_missing_pane_preflight \
+        "$session" "$workspace" "$old_tab" "$old_pane" "$label" "$journal" "$id" "$home" || return 1
+      replacement=$(fm_backend_herdr_create_task "$session:$workspace" "$label" "$cwd" "" strict "$id" "$home" "$old_tab" "$old_pane") || return 1
+    fi
   else
     fm_backend_herdr_relaunch_missing_pane_preflight \
       "$session" "$workspace" "$old_tab" "$old_pane" "$label" "$journal" "$id" "$home" || return 1

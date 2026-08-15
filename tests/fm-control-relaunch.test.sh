@@ -249,7 +249,11 @@ case "${args[0]:-} ${args[1]:-}" in
       if [ -e "$dir/herdr-new-pane-closed" ]; then
         printf '%s\n' '{"error":{"code":"pane_not_found"}}'
       else
-        printf '{"result":{"pane":{"pane_id":"w1:p3","tab_id":"w1:t3","workspace_id":"w1","foreground_cwd":"%s"}}}\n' "$case_root/wt"
+        if [ "$case_name" = postcreate-cwd-mismatch ]; then
+          printf '{"result":{"pane":{"pane_id":"w1:p3","tab_id":"w1:t3","workspace_id":"w1","foreground_cwd":"%s"}}}\n' "$case_root/proj"
+        else
+          printf '{"result":{"pane":{"pane_id":"w1:p3","tab_id":"w1:t3","workspace_id":"w1","foreground_cwd":"%s"}}}\n' "$case_root/wt"
+        fi
       fi
       exit 0
     fi
@@ -2015,23 +2019,17 @@ test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable() {
     || fail "an unbound create response must retain its durable recovery claim"
   creates_before=$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')
   out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
-  expect_code 1 "$rc" "a recovered unbound claim should require an explicit retry"
-  assert_contains "$out" "has an unresolved replacement claim" \
-    "the unbound create response retry should retain its exact claimed endpoint"
-  cmp -s "$before" "$dir/home/state/hr1.meta" \
-    || fail "the unbound create response recovery changed the task's serialized metadata"
+  expect_code 0 "$rc" "a recovered unbound claim should resume the relaunch"
   mutations=$(cat "$dir/fake/herdr-mutations")
   [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = "$creates_before" ] \
-    || fail "the unbound create response retry created another endpoint before resolving its claim"
+    || fail "the unbound create response retry created another endpoint before reconciling its claim"
   assert_not_contains "$mutations" 'pane close w1:p3' \
-    "the unbound create response retry must retain its verified agent-free endpoint"
-  [ -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
-    || fail "the unbound create response recovery must retain its durable claim"
-  assert_contains "$(cat "$dir/home/state/.hr1.herdr-relaunch-claim")" 'tab_id=w1:t3' \
-    "the unbound create response recovery must bind its verified replacement tab"
-  assert_contains "$(cat "$dir/home/state/.hr1.herdr-relaunch-claim")" 'pane_id=w1:p3' \
-    "the unbound create response recovery must bind its verified replacement pane"
-  pass "fm-spawn --relaunch: unbound Herdr creation retains exact recovery"
+    "the unbound create response retry must not close its verified agent-free endpoint"
+  [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+    || fail "the unbound create response recovery must finalize its durable claim"
+  [ "$(meta_field "$dir" hr1 herdr_pane_id)" = w1:p3 ] \
+    || fail "the unbound create response recovery did not publish its verified replacement pane"
+  pass "fm-spawn --relaunch: unbound Herdr creation reconciles exact recovery"
 }
 
 test_spawn_relaunch_preserves_unbound_claim_for_live_agent() {
@@ -2118,20 +2116,18 @@ test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
         || fail "a repeated zero-match read created another endpoint"
     fi
     out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
-    expect_code 1 "$rc" "a recovered $case_name claim should require an explicit retry"
-    assert_contains "$out" "has an unresolved replacement claim" \
-      "the $case_name retry should retain its exact claimed endpoint"
-    cmp -s "$before" "$dir/home/state/hr1.meta" \
-      || fail "the $case_name recovery changed the task's serialized metadata"
+    expect_code 0 "$rc" "a recovered $case_name claim should resume the relaunch"
     mutations=$(cat "$dir/fake/herdr-mutations")
     [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = "$creates_before" ] \
-      || fail "the $case_name retry created another endpoint before resolving its claim"
+      || fail "the $case_name retry created another endpoint before reconciling its claim"
     assert_not_contains "$mutations" 'pane close w1:p3' \
-      "the $case_name retry must retain its verified agent-free endpoint"
-    [ -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
-      || fail "the $case_name recovery must retain its durable claim"
+      "the $case_name retry must not close its verified agent-free endpoint"
+    [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+      || fail "the $case_name recovery must finalize its durable claim"
+    [ "$(meta_field "$dir" hr1 herdr_pane_id)" = w1:p3 ] \
+      || fail "the $case_name recovery did not publish its verified replacement pane"
   done
-  pass "fm-spawn --relaunch: post-create failures retain exact claims without duplicates"
+  pass "fm-spawn --relaunch: post-create failures reconcile exact claims without duplicates"
 }
 
 test_spawn_relaunch_rechecks_recorded_herdr_identity_before_create() {
@@ -2204,15 +2200,46 @@ test_spawn_relaunch_handles_definite_and_ambiguous_herdr_create_failures() {
   [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = "$attempts_before" ] \
     || fail "an unresolved ambiguous create failure launched a second endpoint"
   out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
-  expect_code 1 "$rc" "a reconciled ambiguous Herdr create failure should require an explicit retry"
-  assert_contains "$out" "has an unresolved replacement claim" \
-    "the ambiguous create recovery should retain its exact claimed endpoint"
+  expect_code 0 "$rc" "a reconciled ambiguous Herdr create failure should resume the relaunch"
   mutations=$(cat "$dir/fake/herdr-mutations")
   [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = "$attempts_before" ] \
     || fail "ambiguous create reconciliation launched another endpoint"
-  [ -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
-    || fail "ambiguous create reconciliation did not retain its recovered claim"
+  [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+    || fail "ambiguous create reconciliation did not finalize its recovered claim"
   pass "fm-spawn --relaunch: Herdr create failures preserve safe retry boundaries"
+}
+
+test_spawn_relaunch_retains_prepublication_herdr_claims() {
+  local dir out rc before mutations creates_before
+  dir=$(new_case herdr-prepublication-retain hr1)
+  add_herdr_missing_pane_task "$dir" hr1
+  make_herdr_missing_pane_stub "$dir" postcreate-cwd-mismatch
+  before="$dir/meta-before"
+  cp "$dir/home/state/hr1.meta" "$before"
+  out=$(FM_FAKE_HERDR_CASE=postcreate-cwd-mismatch run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a replacement outside the recorded worktree must refuse"
+  cmp -s "$before" "$dir/home/state/hr1.meta" \
+    || fail "a prepublication Herdr refusal changed serialized metadata"
+  [ -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+    || fail "a prepublication Herdr refusal must retain its recovery claim"
+  assert_contains "$(cat "$dir/home/state/.hr1.herdr-relaunch-claim")" 'tab_id=w1:t3' \
+    "a prepublication Herdr refusal must retain its verified replacement tab"
+  assert_contains "$(cat "$dir/home/state/.hr1.herdr-relaunch-claim")" 'pane_id=w1:p3' \
+    "a prepublication Herdr refusal must retain its verified replacement pane"
+  mutations=$(cat "$dir/fake/herdr-mutations")
+  assert_not_contains "$mutations" 'pane close w1:p3' \
+    "a prepublication Herdr refusal must not close its verified replacement pane"
+  creates_before=$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')
+  out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "a retained prepublication Herdr claim should resume the relaunch"
+  mutations=$(cat "$dir/fake/herdr-mutations")
+  [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = "$creates_before" ] \
+    || fail "a retained prepublication Herdr claim created another endpoint"
+  [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+    || fail "a resumed prepublication Herdr claim was not finalized"
+  [ "$(meta_field "$dir" hr1 herdr_pane_id)" = w1:p3 ] \
+    || fail "a resumed prepublication Herdr claim did not publish its replacement endpoint"
+  pass "fm-spawn --relaunch: prepublication Herdr claims retain and resume"
 }
 
 test_spawn_relaunch_holds_herdr_session_lock_through_submission() {
@@ -2318,3 +2345,4 @@ test_spawn_relaunch_rechecks_recorded_herdr_identity_before_create
 test_spawn_relaunch_handles_definite_and_ambiguous_herdr_create_failures
 test_spawn_relaunch_preserves_an_interrupted_claim_on_conflict
 test_spawn_relaunch_holds_herdr_session_lock_through_submission
+test_spawn_relaunch_retains_prepublication_herdr_claims
