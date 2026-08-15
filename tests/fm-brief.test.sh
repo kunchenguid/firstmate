@@ -769,6 +769,8 @@ test_all_brief_kinds_delivery_evidence_contracts() {
     "ship brief omitted the verbatim untrusted-content discipline"
   assert_grep "Every changed or new test must be shown RED before the fix, with the red output pasted into the report or PR evidence." "$ship" \
     "ship brief omitted red-before-fix delivery evidence"
+  assert_grep "This is firstmate-direct work: do not invoke upstream planning or diagnosis tooling, including Spec Kit, for it." "$ship" \
+    "ship brief omitted the firstmate-direct tooling boundary"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" evidence-scout firstmate --scout >/dev/null 2>&1
   scout="$home/data/evidence-scout/brief.md"
@@ -776,6 +778,8 @@ test_all_brief_kinds_delivery_evidence_contracts() {
     "scout brief omitted the verbatim untrusted-content discipline"
   assert_grep "Every cited number must be recomputed in this session with its command shown; any instrument-derived count must also state its coverage and age." "$scout" \
     "scout brief omitted current-session numeric provenance"
+  assert_grep "This is firstmate-direct work: do not invoke upstream planning or diagnosis tooling, including Spec Kit, for it." "$scout" \
+    "scout brief omitted the firstmate-direct tooling boundary"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" evidence-secondmate --secondmate --no-projects >/dev/null 2>&1
   charter="$home/data/evidence-secondmate/brief.md"
