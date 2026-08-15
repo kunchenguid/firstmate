@@ -261,5 +261,35 @@ fi
 tmux kill-session -t "=$PREFIX_SESSION" >/dev/null 2>&1 || true
 pass "real tmux: a recorded session is matched exactly, so a prefix look-alike never answers for it or absorbs its endpoint"
 
+# --- the container probe and the windows created in it agree ----------------
+#
+# Whatever fm_backend_tmux_container_ensure hands back is immediately targeted
+# exactly by fm_backend_tmux_create_task, so its own existence probe has to be
+# exact too. A live "firstmate-lab" that merely prefix-matches must not be
+# mistaken for the dedicated session: the name would then address nothing and
+# every spawn into it would fail.
+
+tmux new-session -d -s firstmate-lab || fail "could not stage the look-alike container session"
+tmux has-session -t "=firstmate" 2>/dev/null \
+  && fail "the container fixture requires no session named exactly 'firstmate'"
+(
+  # container-ensure only reaches the dedicated-session branch outside tmux.
+  unset TMUX
+  container=$(fm_backend_tmux_container_ensure) \
+    || fail "fm_backend_tmux_container_ensure failed while a look-alike session was live"
+  [ "$container" = firstmate ] \
+    || fail "fm_backend_tmux_container_ensure resolved '$container', expected the dedicated 'firstmate'"
+  tmux has-session -t "=$container" 2>/dev/null \
+    || fail "fm_backend_tmux_container_ensure returned '$container' without ensuring that session exists"
+  fm_backend_tmux_create_task "$container" fm-container1 "$HOME" >/dev/null \
+    || fail "a task window could not be created in the container container-ensure resolved"
+  tmux list-windows -t "=firstmate" -F '#{window_name}' | grep -qx fm-container1 \
+    || fail "the task window is not in the dedicated container session"
+  if tmux list-windows -t "=firstmate-lab" -F '#{window_name}' | grep -qx fm-container1; then
+    fail "the task window was created in the look-alike session 'firstmate-lab'"
+  fi
+) || exit 1
+pass "real tmux: container-ensure creates and returns the dedicated session a live look-alike would otherwise stand in for"
+
 cleanup_all
 trap - EXIT

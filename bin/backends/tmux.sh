@@ -62,11 +62,16 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
 # prints the resolved session name.
+#
+# The probe asks for "=firstmate" - the same exact form every consumer of the
+# returned name then targets. A bare -t falls back to prefix and then fnmatch,
+# so a live look-alike (firstmate-lab, firstmate2) would answer for a session
+# that does not exist, and the name handed back would address nothing.
 fm_backend_tmux_container_ensure() {
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else
-    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
+    tmux has-session -t "=firstmate" 2>/dev/null || tmux new-session -d -s firstmate
     printf 'firstmate'
   fi
 }
