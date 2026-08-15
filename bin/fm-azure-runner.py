@@ -325,7 +325,13 @@ def public_origin_proof(
             "source_head": selected_head,
             "source_ancestors": ancestors,
         }
-        if expected is not None and expected != proof_identity:
+        # Only the source lineage binds the code under test. The default-branch
+        # tip is operator-mutable global state: holding it equal would refuse
+        # every in-flight run whenever an unrelated PR merges.
+        binding_keys = ("remote", "source_ref", "source_head", "source_ancestors")
+        if expected is not None and any(
+            expected.get(key) != proof_identity[key] for key in binding_keys
+        ):
             raise RunnerError("public origin/source identity changed after request preparation")
         if object_git(object_repo, "cat-file", "-t", candidate_commit).stdout.strip() != "commit":
             raise RunnerError("candidate source object is not an exact commit")

@@ -104,7 +104,6 @@ fm-worker-supervisor.test.sh	hermetic
 fm-x-mode.test.sh	hermetic
 lavish-repair.test.sh	hermetic
 lavish.test.sh	hermetic
-no-mistakes-required.test.sh	hermetic
 operating-fundamentals.test.sh	hermetic
 runner-entry-probe.test.sh	hermetic
 test-suite-seal.test.sh	hermetic

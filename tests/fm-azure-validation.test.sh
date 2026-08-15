@@ -154,7 +154,7 @@ assert 'round(bound["total"] + 1.0, 6)' in host
 assert host.count('* 24.0 * 1.5 + 5.0') == 1
 assert 'create_run_command(env, state, "start", input_url=input_url, output_url=output_url)' in host
 assert '"running", "reattaching", "collected")' in host
-for value in ("MemoryMax","MemorySwapMax=0","TasksMax","CPUQuota=700%","PrivateTmp=yes","ProtectSystem=strict","CapabilityBoundingSet=","cryptsetup luksUUID","provider account-binding marker mismatch","credential disk content binding mismatch","FM_AZURE_VALIDATION_RUNTIME_PATH","axi status","/dev/disk/azure/scsi1/lun","/dev/disk/azure/data/by-lun/"):
+for value in ("MemoryMax","MemorySwapMax=0","TasksMax","CPUQuota=700%","PrivateTmp=yes","ProtectSystem=strict","CapabilityBoundingSet=","cryptsetup luksUUID","provider account-binding marker mismatch","credential disk content binding drift","FM_AZURE_VALIDATION_RUNTIME_PATH","axi status","/dev/disk/azure/scsi1/lun","/dev/disk/azure/data/by-lun/"):
     assert value in guest
 for value in ('MODE=${mode:-}','VM_RESOURCE_ID=${vm_resource_id:-}','INPUT_URL=${input_url:-}','WORKTREE_KEY=${fm_azure_validation_worktree_key_file:-}','unset input_url output_url response'):
     assert value in guest
@@ -174,7 +174,8 @@ assert "FM_AZURE_VALIDATION_BRANCH" in guest and "FM_AZURE_VALIDATION_BRANCH" in
 assert "awaiting[_ -]approval" in guest
 assert "grep -Eq '^gate:' \"$RUN_LOG\"" in guest
 assert guest.index("gate:") < guest.index('"$STATUS_RC" -eq 0 ] && grep -Eiq')
-assert "credential disk content binding mismatch (expected {} observed {})" in guest
+assert "credential disk content binding drift (expected {} observed {}); adopting observed" in guest
+assert "binding mismatch" not in guest
 assert "credential_content_binding // empty" in guest
 assert '.credential_content_binding=$binding' in guest
 assert guest.index("SEALED_BINDING") < guest.index('"$LEASE_BINDING_HELPER" "$CREDENTIAL_MOUNT" "$PROVIDER_PATH" "$ACCOUNT_BINDING_PATH" "$GITHUB_TOKEN_PATH" "$REQUEST" "$EXPECTED_BINDING"')

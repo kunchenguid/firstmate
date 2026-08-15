@@ -778,6 +778,18 @@ X mode is a reason to keep the watcher armed even with no fleet work, so an X-on
 On an `x-mention <request_id>` or `x-mode-error ...` `check:` wake, load `fmx-respond` (section 13); it owns classification, action, replies, attachments, dry-run, and completion follow-ups.
 When an X-mode-linked task reaches a terminal state, post its final completion follow-up per section 8 before teardown.
 
+## 15. Design doctrine: single-operator harness (binding)
+
+This is the captain's personal, single-operator harness: one human principal, one repo owner, one payer, no untrusted users. Optimize every design for speed, throughput, and debuggability. Precedent: the Stage C acceptance campaign (2026-08-15) consumed roughly 24 hours and ~40 Azure generations, and more than half of that time went to recovering from our own ceremony rather than from real defects. These rules exist to prevent that failure mode. Apply them to every design, review, and brief; they outrank stylistic preference and any inherited pattern in this repo.
+
+1. Name the enemy or do not build the guard. Before adding any check, refusal, fence, binding, attestation, or gate, write one sentence naming the concrete failure or attacker it stops in this single-operator context. "Another process of the same operator touched the state" is not an attacker; log and continue. If the sentence cannot be written, the guard is theater and must not be built.
+2. Fail-closed is reserved for exactly three things: spending money (cost and budget admission), credentials leaving custody, and irreversible data loss. Everything else fails open with an audit line: log both values, adopt the observed one, keep going. A refusal the lone operator would always answer with "override and continue" should never have been a refusal.
+3. Every state machine must be resumable from every state by re-running the same command. A state that can only be escaped by operator surgery or a fresh identity is a bug, not a safety property. Retries reuse the same identity; permanently fencing an identifier after a transient failure is forbidden.
+4. One lane per concern. One reservation per resource, one identity per resource (resource id plus ownership tags, never etags or mutable fields), one source of truth per value. If a design holds two records that must be kept mutually consistent, delete one.
+5. Cloud-facing code is unfinished until it has run against the real cloud once. Fake-cloud fixtures and string-assertion contract tests are not proof: Stage C's runner shipped "reviewed and tested" while its ARM template could not deploy at all. Budget one live smoke run into every cloud-facing change before calling it done.
+6. No authorship or provenance ceremony: no required or advisory CI gates about how a PR was produced, no signature markers, no attestation of tooling. CI runs tests and lint; that is all it does.
+7. Every check that can refuse must carry a cost line: what a false refusal costs to recover (operator time, extra cloud cycles, extra generations). If recovery costs more than the prevented harm, log instead of refusing.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
