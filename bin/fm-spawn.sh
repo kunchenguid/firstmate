@@ -140,10 +140,13 @@
 #   local default branch when it is ahead of or diverged from origin, and uses
 #   origin when the local branch is behind it. A local-only project without an
 #   origin resolves its local default from repository-local init.defaultBranch,
-#   then main, then master, and refuses when none names an existing branch. An
-#   unreachable origin for a remote-backed task, an unresolved default branch,
-#   or a non-clean worktree refuses the spawn rather than risking work based on
-#   stale history.
+#   then main, then master, and refuses when none names an existing branch.
+#   Global and system init.defaultBranch values are intentionally ignored, so a
+#   project without origin should declare its default in repository-local
+#   init.defaultBranch for Firstmate to identify a non-main, non-master default.
+#   An unreachable origin for a remote-backed task, an unresolved default
+#   branch, or a non-clean worktree refuses the spawn rather than risking work
+#   based on stale history.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
