@@ -67,6 +67,13 @@
 #   outside herdr has no workspace to inherit and uses this home's own labeled
 #   workspace, which must then match exactly one. --secondmate is the deliberate
 #   exception: it stands up that secondmate home's own workspace.
+#   A home can opt into per-project grouping with config/herdr-project-spaces.
+#   That path binds the canonical project directory and registered basename to
+#   one exact workspace id in state/.herdr-project-space-<project-name>, validates
+#   that id live before every use, and never adopts by label. It wins over the
+#   presentation projection for project-resolvable crewmate and scout spawns.
+#   Any ambiguous grouping placement warns and falls back to the ordinary flat
+#   layout. --secondmate placement is unchanged.
 #   Herdr additionally uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
@@ -1638,6 +1645,7 @@ if [ "$KIND" = secondmate ]; then
   fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  PROJ_NAME=$(basename "$PROJ_ABS")
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
@@ -1657,7 +1665,6 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
-  PROJ_NAME=$(basename "$PROJ_ABS")
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_MODE" ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
@@ -1898,7 +1905,12 @@ case "$BACKEND" in
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
-    if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
+    HERDR_PROJECT_GROUPING=0
+    if [ "$KIND" != secondmate ] && fm_backend_herdr_project_spaces_enabled "$CONFIG"; then
+      HERDR_PROJECT_GROUPING=1
+    fi
+    if [ "$KIND" != secondmate ] && [ "$HERDR_PROJECT_GROUPING" -ne 1 ] \
+      && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
@@ -2016,7 +2028,29 @@ case "$BACKEND" in
       fi
     fi
     if [ "$HERDR_PROJECTED" -ne 1 ]; then
-      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
+      HERDR_CONTAINER_RAW=""
+      if [ "$HERDR_PROJECT_GROUPING" -eq 1 ]; then
+        HERDR_SES=$(fm_backend_herdr_session)
+        if fm_backend_herdr_version_check \
+          && fm_backend_herdr_server_ensure "$HERDR_SES" \
+          && spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
+          set +e
+          FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_project_workspace_ensure \
+            "$HERDR_SES" "$PROJ_ABS_REAL" "$STATE" "$PROJ_NAME"
+          HERDR_PROJECT_STATUS=$?
+          set -e
+          spawn_herdr_presentation_order_lock_release
+          if [ "$HERDR_PROJECT_STATUS" -eq 0 ]; then
+            HERDR_CONTAINER_RAW="$HERDR_SES:$FM_BACKEND_HERDR_PROJECT_WS_ID"$'\t'"$FM_BACKEND_HERDR_PROJECT_WS_SEEDED_TAB_ID"
+          fi
+        else
+          echo "warning: herdr project-space placement could not acquire an exact named-session placement context; using the ordinary flat layout" >&2
+          spawn_herdr_presentation_order_lock_release
+        fi
+      fi
+      if [ -z "$HERDR_CONTAINER_RAW" ]; then
+        HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
+      fi
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace
       # rather than creating a fresh one). Split on the guaranteed single tab

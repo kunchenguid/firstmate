@@ -949,10 +949,10 @@ printf 'alpha\n' > "$SECOND_HOME_A/.fm-secondmate-home"
 printf 'bravo\n' > "$SECOND_HOME_B/.fm-secondmate-home"
 touch "$SECOND_HOME_A/state/.last-watcher-beat" "$SECOND_HOME_B/state/.last-watcher-beat"
 # Ensure the secondmate homes look like gitignored firstmate homes so inheritance
-# may write config/herdr-presentation-spaces.
+# may write the inherited Herdr layout settings.
 git -C "$SECOND_HOME_A" init -q
 git -C "$SECOND_HOME_B" init -q
-printf 'config/herdr-presentation-spaces\nconfig/crew-harness\nconfig/crew-dispatch.json\nconfig/backlog-backend\nconfig/backend\nconfig/startup-memory-budget\n' \
+printf 'config/herdr-project-spaces\nconfig/herdr-presentation-spaces\nconfig/crew-harness\nconfig/crew-dispatch.json\nconfig/backlog-backend\nconfig/backend\nconfig/startup-memory-budget\n' \
   > "$SECOND_HOME_A/.gitignore"
 cp "$SECOND_HOME_A/.gitignore" "$SECOND_HOME_B/.gitignore"
 git -C "$SECOND_HOME_A" add .gitignore

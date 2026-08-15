@@ -15,9 +15,10 @@
 # herdr-verification-p2.md "Task container shape", refined by
 # docs/herdr-backend.md "Default task container shape"): ONE herdr workspace PER
 # FIRSTMATE HOME (the primary, and each secondmate, gets its own), ONE herdr TAB
-# per task inside its home's workspace. The default-on presentation projection
-# creates a disposable workspace for a clean fresh task instead unless the home
-# opts out. That
+# per task inside its home's workspace. An opt-in project-space layout instead
+# groups each project's task tabs in one exact-id-bound workspace. The
+# default-on presentation projection creates a disposable workspace for a clean
+# fresh task unless project grouping wins or the home opts out. That
 # workspace is a non-authoritative visual projection containing only the normal
 # task pane. Its random token and mutable label never authorize lookup,
 # adoption, reuse, closure, deletion, task ownership, or endpoint selection.
@@ -145,6 +146,28 @@ FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 # The config item a home writes to opt out of, or explicitly in to, the
 # projection.
 FM_BACKEND_HERDR_PRESENTATION_CONFIG="herdr-presentation-spaces"
+FM_BACKEND_HERDR_PROJECT_SPACES_CONFIG="herdr-project-spaces"
+FM_BACKEND_HERDR_PROJECT_BINDING_PREFIX=".herdr-project-space-"
+
+# fm_backend_herdr_project_spaces_enabled <config-dir>: presence-compatible
+# opt-in parsing for project workspaces. An empty file or "on" enables the
+# layout, "off" and absence disable it, and an unrecognized value warns and
+# disables it so a visual preference never fails dispatch.
+fm_backend_herdr_project_spaces_enabled() {  # <config-dir>
+  local config_dir=${1:-} file value
+  [ -n "$config_dir" ] || return 1
+  file="$config_dir/$FM_BACKEND_HERDR_PROJECT_SPACES_CONFIG"
+  [ -f "$file" ] || return 1
+  value=$(tr -d '[:space:]' < "$file" 2>/dev/null | tr '[:upper:]' '[:lower:]') || value=""
+  case "$value" in
+    ''|on) return 0 ;;
+    off) return 1 ;;
+    *)
+      echo "warning: $file: unrecognized value \"$value\"; herdr project spaces stay disabled (write \"on\" or leave the file empty to opt in)" >&2
+      return 1
+      ;;
+  esac
+}
 
 # fm_backend_herdr_presentation_preference <config-dir>: the single owner of
 # config/herdr-presentation-spaces parsing. Echoes exactly one of "off", "on"
@@ -1620,6 +1643,148 @@ fm_backend_herdr_launcher_identity() {  # <session>
   # shellcheck disable=SC2034  # callers consume the verified binding's parts
   FM_BACKEND_HERDR_LAUNCHER_TAB_ID=$tab
   FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID=$workspace
+  return 0
+}
+
+# fm_backend_herdr_project_binding_path <state-dir> <project-name>: resolve the
+# home-local exact-id binding record for one registered project name. Project
+# names become filenames, so only the registry's safe identifier shape is
+# accepted; an unsafe name makes project placement fall back flat.
+fm_backend_herdr_project_binding_path() {  # <state-dir> <project-name>
+  local state=$1 project_name=$2
+  case "$project_name" in
+    ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  printf '%s/%s%s' "$state" "$FM_BACKEND_HERDR_PROJECT_BINDING_PREFIX" "$project_name"
+}
+
+# Read one complete binding and reject malformed, duplicate, cross-project, or
+# cross-session fields. The record is placement authority only for the exact
+# workspace id it carries; its label is an expected cosmetic property, never a
+# discovery key.
+fm_backend_herdr_project_binding_snapshot() {  # <file> <project-dir> <project-name> <session>
+  local file=$1 project_dir=$2 project_name=$3 session=$4 parsed
+  FM_BACKEND_HERDR_PROJECT_BOUND_WORKSPACE_ID=""
+  [ ! -L "$file" ] || return 1
+  if [ -e "$file" ] && [ ! -f "$file" ]; then
+    return 1
+  fi
+  [ -f "$file" ] || return 2
+  parsed=$(awk -F= '
+    BEGIN { required["version"]; required["project_dir"]; required["project_name"]; required["session"]; required["workspace_id"] }
+    !($1 in required) || seen[$1]++ { bad=1; next }
+    { value[$1]=substr($0, index($0, "=") + 1) }
+    END {
+      for (key in required) if (!(key in seen)) bad=1
+      if (NR != 5 || bad) exit 1
+      printf "%s\034%s\034%s\034%s\034%s", value["version"], value["project_dir"], value["project_name"], value["session"], value["workspace_id"]
+    }
+  ' "$file" 2>/dev/null) || return 1
+  IFS=$'\034' read -r binding_version binding_dir binding_name binding_session binding_workspace <<EOF
+$parsed
+EOF
+  [ "$binding_version" = 1 ] || return 1
+  [ "$binding_dir" = "$project_dir" ] || return 2
+  [ "$binding_name" = "$project_name" ] || return 2
+  [ "$binding_session" = "$session" ] || return 2
+  [ -n "$binding_workspace" ] || return 1
+  FM_BACKEND_HERDR_PROJECT_BOUND_WORKSPACE_ID=$binding_workspace
+  return 0
+}
+
+# Validate the bound id live in the named session on every use. A missing or
+# renamed workspace is stale (2). An unreadable or duplicate response is
+# ambiguous (1) and grants neither adoption nor creation authority.
+fm_backend_herdr_project_binding_live() {  # <session> <workspace-id> <expected-label>
+  local session=$1 workspace_id=$2 expected_label=$3 out match_count actual_label
+  out=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  match_count=$(printf '%s' "$out" | jq -r --arg workspace "$workspace_id" '
+    select((.result.workspaces | type) == "array")
+    | [.result.workspaces[] | select(.workspace_id == $workspace)] | length
+  ' 2>/dev/null) || return 1
+  case "$match_count" in
+    0) return 2 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+  actual_label=$(printf '%s' "$out" | jq -r --arg workspace "$workspace_id" '
+    .result.workspaces[] | select(.workspace_id == $workspace) | .label // empty
+  ' 2>/dev/null) || return 1
+  [ "$actual_label" = "$expected_label" ] || return 2
+  return 0
+}
+
+# Atomically publish one exact create-response id. A binding is never derived
+# from a label search, and an existing symlink is never replaced.
+fm_backend_herdr_project_binding_publish() {  # <file> <project-dir> <project-name> <session> <workspace-id>
+  local file=$1 project_dir=$2 project_name=$3 session=$4 workspace_id=$5 dir tmp
+  dir=${file%/*}
+  mkdir -p "$dir" || return 1
+  [ ! -L "$file" ] || return 1
+  tmp=$(umask 077; mktemp "$dir/.herdr-project-space.XXXXXX" 2>/dev/null) || return 1
+  {
+    printf 'version=1\n'
+    printf 'project_dir=%s\n' "$project_dir"
+    printf 'project_name=%s\n' "$project_name"
+    printf 'session=%s\n' "$session"
+    printf 'workspace_id=%s\n' "$workspace_id"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+}
+
+# Resolve or create the project workspace while the caller holds the named
+# session lock. Existing bindings are used only after exact live-id and label
+# validation. Stale bindings create a fresh workspace from the create response;
+# malformed or unreadable bindings fall back flat without guessing.
+fm_backend_herdr_project_workspace_ensure() {  # <session> <project-dir> <state-dir> <project-name>
+  local session=$1 project_dir=$2 state=$3 project_name=$4 binding status out wsid seeded
+  FM_BACKEND_HERDR_PROJECT_WS_ID=""
+  FM_BACKEND_HERDR_PROJECT_WS_SEEDED_TAB_ID=""
+  case "$project_dir$session" in
+    *$'\n'*|*$'\r'*|*$'\034'*)
+      echo "warning: herdr project-space placement cannot encode the exact project or session identity; using the ordinary flat layout" >&2
+      return 1
+      ;;
+  esac
+  binding=$(fm_backend_herdr_project_binding_path "$state" "$project_name") || {
+    echo "warning: herdr project-space placement cannot represent project name '$project_name'; using the ordinary flat layout" >&2
+    return 1
+  }
+  fm_backend_herdr_project_binding_snapshot "$binding" "$project_dir" "$project_name" "$session" && status=0 || status=$?
+  if [ "$status" -eq 0 ]; then
+    fm_backend_herdr_project_binding_live "$session" "$FM_BACKEND_HERDR_PROJECT_BOUND_WORKSPACE_ID" "$project_name" && status=0 || status=$?
+    case "$status" in
+      0)
+        FM_BACKEND_HERDR_PROJECT_WS_ID=$FM_BACKEND_HERDR_PROJECT_BOUND_WORKSPACE_ID
+        return 0
+        ;;
+      2) ;;
+      *)
+        echo "warning: herdr project-space binding for '$project_name' is ambiguous or unreadable; using the ordinary flat layout" >&2
+        return 1
+        ;;
+    esac
+  elif [ "$status" -eq 1 ]; then
+    echo "warning: herdr project-space binding for '$project_name' is malformed or unreadable; using the ordinary flat layout" >&2
+    return 1
+  fi
+  out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$project_dir" --label "$project_name" --no-focus 2>/dev/null) || {
+    echo "warning: herdr could not create a project workspace for '$project_name'; using the ordinary flat layout" >&2
+    return 1
+  }
+  wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
+  seeded=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  if [ -z "$wsid" ] || [ -z "$seeded" ] \
+    || [[ "$wsid$seeded" == *$'\n'* || "$wsid$seeded" == *$'\r'* || "$wsid$seeded" == *$'\034'* ]]; then
+    echo "warning: herdr project workspace create for '$project_name' returned incomplete exact ids; using the ordinary flat layout" >&2
+    return 1
+  fi
+  fm_backend_herdr_project_binding_publish "$binding" "$project_dir" "$project_name" "$session" "$wsid" || {
+    echo "warning: herdr could not publish the exact project-space binding for '$project_name'; using the ordinary flat layout" >&2
+    return 1
+  }
+  FM_BACKEND_HERDR_PROJECT_WS_ID=$wsid
+  FM_BACKEND_HERDR_PROJECT_WS_SEEDED_TAB_ID=$seeded
   return 0
 }
 
