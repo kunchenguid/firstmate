@@ -199,6 +199,69 @@ the stalled fold above.
   separately and never infers one from the other, and why cline is the one
   verified adapter recorded with an exit **key** rather than an exit command.
 
+## Process identity: a bare `node` is not attributable (3.0.55)
+
+cline runs as a bundled Node script, so the pane reports a generic name while
+`ps -o comm=` carries the install path — the same shape cursor-agent has:
+
+```
+$ tmux display -p '#{pane_current_command}'
+node
+$ ps -t <tty> -o comm=
+.../lib/node_modules/cline/bin/.cline
+```
+
+Until `cline` joined the shared exact-executable-name list, a live cline pane
+classified `ambiguous`, and every lifecycle verb refused it — a SECOND refusal,
+separate from the missing control mechanics:
+
+```
+error: task <id>'s endpoint reads 'ambiguous' rather than a positively
+classified state; refusing to send a lifecycle key into an unattributed endpoint
+```
+
+With the path rule matching an exact `cline` path COMPONENT, `fm-control.sh`
+was verified end to end against a real 3.0.55 worker:
+
+```
+$ bin/fm-control.sh <id> interrupt
+interrupt-delivered <id> harness=cline backend=tmux verified=agent-alive cancel=unconfirmed
+$ bin/fm-control.sh <id> exit
+stopped <id> harness=cline backend=tmux endpoint=<target> worktree=<path>
+```
+
+The composer after `interrupt` read `❯ Ask anything...`, and the pane after
+`exit` read `zsh`.
+
+## Known limitation: the idle composer reads `pending`
+
+cline draws its composer as two full-width horizontal rules with **no side
+borders**, so the shared screen classifier does not recognise a bordered box and
+takes the bare-row path. That path deliberately does not trust an idle
+placeholder (it passes position 0 to `fm_composer_classify_content`), so a
+genuinely idle cline composer classifies `pending`:
+
+```
+$ fm_tmux_composer_state <target>      # composer row is "❯ Ask anything..."
+pending
+```
+
+Verified pre-existing — the same read on the unmodified baseline also returns
+`pending`. Two further facts bound the impact:
+
+- cline's screen first resolves to `need-identity` (it matches the pi separated
+  composer shape), then falls through `probe-absent` to the bare-row path, so
+  the Cursor-style cursorless reclassification does **not** transfer here.
+- A submit that starts a turn is still confirmed, because the submit core's
+  busy fallback rescues it. Measured: `fm_backend_send_text_submit` returned
+  `empty` (delivered) against a live cline pane.
+
+So the reported "delivery unconfirmed for a message that arrived" is expected to
+bite when a submitted message does **not** start a turn — most plausibly a
+ClinePass refusal, which returns the pane to idle instantly. Fixing it means
+changing the one fleet-wide classifier's conservatism for every harness and
+every backend, so it is recorded here rather than changed under this task.
+
 ## Launch (mechanics half)
 
 `cline -i --tui "<prompt>"` **seeds and auto-runs** the positional prompt — at
