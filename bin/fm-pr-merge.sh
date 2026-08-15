@@ -2,12 +2,12 @@
 # Merge a task's PR after recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
 # The full canonical GitHub PR URL is parsed by bin/fm-pr-lib.sh and the derived
-# owner/repository and PR number are passed to gh-axi as separate arguments.
+# owner/repository and PR number are passed to gh as separate arguments.
 #
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh pr merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,6 +47,39 @@ caller_has_merge_method() {
     esac
   done
   return 1
+}
+
+normalize_merge_args() {
+  local method
+  NORMALIZED_MERGE_ARGS=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --method)
+        if [ "$#" -lt 2 ]; then
+          echo "error: --method requires merge, squash, or rebase" >&2
+          return 1
+        fi
+        method=$2
+        shift 2
+        ;;
+      --method=*)
+        method=${1#--method=}
+        shift
+        ;;
+      *)
+        NORMALIZED_MERGE_ARGS+=("$1")
+        shift
+        continue
+        ;;
+    esac
+    case "$method" in
+      merge|squash|rebase) NORMALIZED_MERGE_ARGS+=("--$method") ;;
+      *)
+        echo "error: --method must be merge, squash, or rebase" >&2
+        return 1
+        ;;
+    esac
+  done
 }
 
 reject_repo_overrides() {
@@ -135,5 +168,7 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 [ -z "$EXPECTED_HEAD" ] || merge_args+=(--match-head-commit "$EXPECTED_HEAD")
+normalize_merge_args "$@" || exit 1
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" \
+  "${NORMALIZED_MERGE_ARGS[@]+"${NORMALIZED_MERGE_ARGS[@]}"}"

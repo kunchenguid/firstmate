@@ -25,13 +25,12 @@ write_forge_mocks() {  # <directory> <head>
   mkdir -p "$directory"
   cat > "$directory/gh" <<EOF
 #!/usr/bin/env bash
-printf '%s\\n' '$head'
+case "\${1:-} \${2:-}" in
+  "pr view") printf '%s\\n' '$head' ;;
+  "pr merge") printf '%s\\n' "\$*" >> "\$FM_TEST_GH_LOG" ;;
+esac
 EOF
-  cat > "$directory/gh-axi" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
-EOF
-  chmod +x "$directory/gh" "$directory/gh-axi"
+  chmod +x "$directory/gh"
 }
 
 test_verify_accepts_current_done_run_step_with_pr() {
@@ -114,17 +113,17 @@ test_merge_binds_verified_head_to_forge_merge() {
     > "$home/state/$id.status"
   reader=$(write_crew_state_reader "$home/fakebin" 'state: done · source: run-step · checks green')
   write_forge_mocks "$home/fakebin" "$head"
-  : > "$home/gh-axi.log"
+  : > "$home/gh.log"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_CREW_STATE_BIN="$reader" \
     "$ROUTINE" verify "$id" >/dev/null \
     || fail "verify did not record routine completion evidence"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_CREW_STATE_BIN="$reader" \
-    FM_TEST_GH_AXI_LOG="$home/gh-axi.log" PATH="$home/fakebin:$PATH" \
+    FM_TEST_GH_LOG="$home/gh.log" PATH="$home/fakebin:$PATH" \
     "$ROUTINE" merge "$id" >/dev/null \
     || fail "merge rejected a routine task with its verified PR head"
-  grep -qxF "pr merge 4 --repo example/sample --squash --match-head-commit $head" "$home/gh-axi.log" \
-    || fail "routine merge did not bind the forge merge to the verified PR head"
-  pass "routine merge passes its verified PR head to the forge merge"
+  grep -qxF "pr merge 4 --repo example/sample --squash --match-head-commit $head" "$home/gh.log" \
+    || fail "routine merge did not bind the GitHub merge to the verified PR head"
+  pass "routine merge passes its verified PR head to the GitHub merge"
 }
 
 test_merge_refuses_without_prior_completion_evidence() {
@@ -142,15 +141,15 @@ test_merge_refuses_without_prior_completion_evidence() {
     > "$home/state/$id.status"
   reader=$(write_crew_state_reader "$home/fakebin" 'state: done · source: run-step · checks green')
   write_forge_mocks "$home/fakebin" "$head"
-  : > "$home/gh-axi.log"
+  : > "$home/gh.log"
   set +e
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_CREW_STATE_BIN="$reader" \
-    FM_TEST_GH_AXI_LOG="$home/gh-axi.log" PATH="$home/fakebin:$PATH" \
+    FM_TEST_GH_LOG="$home/gh.log" PATH="$home/fakebin:$PATH" \
     "$ROUTINE" merge "$id" >/dev/null 2>&1
   rc=$?
   set -u
   [ "$rc" -ne 0 ] || fail "merge accepted a task without prior completion evidence"
-  [ ! -s "$home/gh-axi.log" ] || fail "merge reached the forge without prior completion evidence"
+  [ ! -s "$home/gh.log" ] || fail "merge reached the forge without prior completion evidence"
   pass "routine merge requires prior routine completion evidence"
 }
 
@@ -172,15 +171,15 @@ test_merge_refuses_pr_identity_changed_after_verify() {
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_CREW_STATE_BIN="$reader" \
     "$ROUTINE" verify "$id" >/dev/null || fail "verify did not record completion evidence"
   perl -0pi -e 's#pr=https://github\.com/example/sample/pull/6#pr=https://github.com/example/other/pull/6#' "$home/state/$id.meta"
-  : > "$home/gh-axi.log"
+  : > "$home/gh.log"
   set +e
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_CREW_STATE_BIN="$reader" \
-    FM_TEST_GH_AXI_LOG="$home/gh-axi.log" PATH="$home/fakebin:$PATH" \
+    FM_TEST_GH_LOG="$home/gh.log" PATH="$home/fakebin:$PATH" \
     "$ROUTINE" merge "$id" >/dev/null 2>&1
   rc=$?
   set -u
   [ "$rc" -ne 0 ] || fail "merge accepted a PR changed after verification"
-  [ ! -s "$home/gh-axi.log" ] || fail "merge reached the forge for a changed PR"
+  [ ! -s "$home/gh.log" ] || fail "merge reached the forge for a changed PR"
   pass "routine merge refuses a PR changed after verification"
 }
 
