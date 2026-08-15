@@ -1223,6 +1223,58 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
 done
 pass "real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence"
 
+# A pending journal keeps its duplicate-agent recovery guard when the home has
+# since opted into project grouping and turned presentation explicitly off:
+# a live journal-bound endpoint refuses duplicate launch, and a safely
+# agent-free one proceeds through the existing exact recovery contract.
+GUARD_OFF_ID=guard-off-r1
+mkdir -p "$HOME_DIR/data/$GUARD_OFF_ID"
+printf 'Presentation-off recovery guard fixture.\n' > "$HOME_DIR/data/$GUARD_OFF_ID/brief.md"
+spawn_task "$GUARD_OFF_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/guard-off-first.out" 2> "$TMP_ROOT/guard-off-first.err" \
+  || fail "presentation-off guard fixture's projected spawn failed: $(cat "$TMP_ROOT/guard-off-first.err")"
+GUARD_OFF_META="$HOME_DIR/state/$GUARD_OFF_ID.meta"
+GUARD_OFF_OLD_WT=$(remember_meta_worktree "$GUARD_OFF_META")
+GUARD_OFF_WSID=$(grep '^herdr_workspace_id=' "$GUARD_OFF_META" | cut -d= -f2-)
+GUARD_OFF_OLD_PANE=$(grep '^herdr_pane_id=' "$GUARD_OFF_META" | cut -d= -f2-)
+GUARD_OFF_JOURNAL="$HOME_DIR/state/$GUARD_OFF_ID.herdr-presentation"
+[ -f "$GUARD_OFF_JOURNAL" ] || fail "presentation-off guard fixture published no journal"
+printf 'off\n' > "$HOME_DIR/config/herdr-presentation-spaces"
+: > "$HOME_DIR/config/herdr-project-spaces"
+GUARD_OFF_START=$(log_line_count)
+if spawn_task "$GUARD_OFF_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/guard-off-live.out" 2> "$TMP_ROOT/guard-off-live.err"; then
+  fail "a live journal-bound endpoint admitted a duplicate launch under presentation-off grouping"
+fi
+grep -F "refusing duplicate launch" "$TMP_ROOT/guard-off-live.err" >/dev/null 2>&1 \
+  || fail "presentation-off refusal did not come from the journal recovery guard: $(cat "$TMP_ROOT/guard-off-live.err")"
+if sed -n "$((GUARD_OFF_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -E $'^(workspace\tcreate|tab\tcreate)' >/dev/null 2>&1; then
+  fail "presentation-off live refusal still created a workspace or tab"
+fi
+lab pane get "$GUARD_OFF_OLD_PANE" >/dev/null 2>&1 \
+  || fail "presentation-off live refusal disturbed the journal-bound pane"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+  || fail "could not stop the isolated session for the presentation-off guard"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+  || fail "could not reprovision the isolated session for the presentation-off guard"
+spawn_task "$GUARD_OFF_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/guard-off-husk.out" 2> "$TMP_ROOT/guard-off-husk.err" \
+  || fail "agent-free journal recovery failed under presentation-off grouping: $(cat "$TMP_ROOT/guard-off-husk.err")"
+GUARD_OFF_NEW_WT=$(remember_meta_worktree "$GUARD_OFF_META")
+GUARD_OFF_NEW_PANE=$(grep '^herdr_pane_id=' "$GUARD_OFF_META" | cut -d= -f2-)
+[ "$(grep '^herdr_workspace_id=' "$GUARD_OFF_META" | cut -d= -f2-)" = "$GUARD_OFF_WSID" ] \
+  || fail "presentation-off recovery flattened into a different workspace instead of the exact reclaim"
+[ "$GUARD_OFF_NEW_PANE" != "$GUARD_OFF_OLD_PANE" ] \
+  || fail "presentation-off recovery reused the old husk pane"
+[ "$(grep '^pane_id=' "$GUARD_OFF_JOURNAL" | cut -d= -f2-)" = "$GUARD_OFF_NEW_PANE" ] \
+  || fail "presentation-off recovery did not advance the exact journal binding"
+teardown_task "$GUARD_OFF_ID" "$HOME_DIR" > "$TMP_ROOT/guard-off-teardown.out" 2> "$TMP_ROOT/guard-off-teardown.err" \
+  || fail "presentation-off recovery teardown failed: $(cat "$TMP_ROOT/guard-off-teardown.err")"
+[ ! -e "$GUARD_OFF_JOURNAL" ] \
+  || fail "presentation-off reclaimed teardown did not retire its journal"
+rm -f "$HOME_DIR/config/herdr-project-spaces"
+: > "$HOME_DIR/config/herdr-presentation-spaces"
+"$REAL_TREEHOUSE" return --force "$GUARD_OFF_OLD_WT" >/dev/null 2>&1 || true
+"$REAL_TREEHOUSE" return --force "$GUARD_OFF_NEW_WT" >/dev/null 2>&1 || true
+pass "real Herdr lab: a pending journal runs the recovery guard under presentation-off project grouping - live refuses, agent-free reclaims exactly"
+
 # A secondmate child binds and reclaims only inside its own home and parent.
 CROSS_RESTART_ID=wheel-child-resume
 mkdir -p "$SECOND_HOME_A/data/$CROSS_RESTART_ID"

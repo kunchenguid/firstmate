@@ -79,7 +79,7 @@ When enabled, each project-resolvable crewmate or scout spawn uses the canonical
 The workspace carries that project name as its cosmetic label and contains the ordinary `fm-<id>` task tabs for that project.
 Two tasks for one project therefore share one workspace as separate tabs, while different projects receive different workspaces.
 When both Herdr layout flags are enabled, `config/herdr-project-spaces` wins for project-resolvable crewmate and scout spawns, so no new disposable presentation workspace is created for those tasks.
-A task that still has a pending presentation journal from an earlier projected spawn runs the full journal recovery guard first, exactly as without grouping: a live projected pane is reclaimed in place, a dead one is retired, and an ambiguous one refuses the spawn, so a stale journal never admits a duplicate agent into a project workspace.
+A task that still has a pending presentation journal from an earlier projected spawn runs the full journal recovery guard first, with or without grouping and whatever the current `config/herdr-presentation-spaces` value: a positively dead or agent-free projected endpoint proceeds under the existing recovery contract (exact bound reclaim when its metadata still binds it, ordinary placement otherwise), while a live or ambiguous one refuses the spawn, so a stale journal never admits a duplicate agent into a project workspace.
 A `--secondmate` spawn keeps its existing dedicated-home workspace behavior unchanged.
 
 Placement authority is the durable home-local `state/.herdr-project-space-<project-name>-<dir-hash>` binding, which records the canonical project directory, registered project name, named session, and exact workspace id.

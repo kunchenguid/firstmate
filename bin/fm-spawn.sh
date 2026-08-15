@@ -1913,7 +1913,9 @@ case "$BACKEND" in
     if [ "$KIND" != secondmate ] && fm_backend_herdr_project_spaces_enabled "$CONFIG"; then
       HERDR_PROJECT_GROUPING=1
     fi
-    if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
+    if [ "$KIND" != secondmate ] \
+      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ] \
+        || fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; }; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
