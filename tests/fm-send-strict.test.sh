@@ -53,11 +53,15 @@ case "${1:-}" in
     if [ -n "${FM_FAKE_TMUX_DEAD_TARGET:-}" ] && [ "$target" = "$FM_FAKE_TMUX_DEAD_TARGET" ]; then
       exit 1
     fi
-    [ "$cursor" = 1 ] && { printf '1\n'; exit 0; }
+    [ "$cursor" = 1 ] && { printf '%s\n' "${FM_FAKE_TMUX_CURSOR:-1}"; exit 0; }
     printf '%%1\n'
     exit 0 ;;
   capture-pane)
-    printf '╭────╮\n│    │\n╰────╯\n'
+    if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
+      printf '%s\n' "$FM_FAKE_TMUX_CAPTURE"
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
     exit 0 ;;
   list-windows)
     printf 'foreign:%s\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
@@ -197,6 +201,48 @@ test_healthy_fm_id_send_still_works() {
   pass "fm-send strict: healthy fm-<id> sends still type once and submit"
 }
 
+test_pending_composer_refuses_before_typing() {
+  local dir fb home err log rc got
+  dir="$TMP_ROOT/pending-composer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home pendingcomposer); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/pending.meta" "window=sess:fm-pending" "kind=ship" "harness=codex"
+
+  rc=0
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE=$'╭──────╮\n│ › stale │\n╰──────╯' FM_SEND_SETTLE=0 \
+    "$SEND" pending "fresh order" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "pending composer accepted a second instruction"
+  got=$(cat "$log")
+  assert_not_contains "$got" 'literal=1 arg=fresh order' \
+    "fm-send typed the fresh order into a composer that already held stale text"
+  assert_not_contains "$got" 'literal=0 arg=Enter' \
+    "fm-send submitted the stale composer while attempting the fresh order"
+  assert_contains "$(cat "$err")" 'composer is not affirmatively empty' \
+    "pending-composer refusal did not explain the delivery gap"
+  pass "fm-send strict: pending composer text refuses before any typing or Enter"
+}
+
+test_unknown_composer_refuses_before_typing() {
+  local dir fb home err log rc got
+  dir="$TMP_ROOT/unknown-composer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home unknowncomposer); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/unknown.meta" "window=sess:fm-unknown" "kind=ship" "harness=codex"
+
+  rc=0
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CURSOR=unreadable FM_SEND_SETTLE=0 \
+    "$SEND" unknown "fresh order" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "unknown composer verdict accepted a new instruction"
+  got=$(cat "$log")
+  assert_not_contains "$got" 'literal=1 arg=fresh order' \
+    "fm-send typed after the composer classifier returned unknown"
+  assert_not_contains "$got" 'literal=0 arg=Enter' \
+    "fm-send submitted after the composer classifier returned unknown"
+  assert_contains "$(cat "$err")" 'verdict=unknown' \
+    "unknown-composer refusal did not preserve the classifier verdict"
+  pass "fm-send strict: unknown composer state refuses before any typing or Enter"
+}
+
 # A --key send is how firstmate interrupts a worker, so its exit status is the
 # only signal that the interrupt actually landed.
 # Reporting success for a key that was never delivered would leave supervision
@@ -227,6 +273,8 @@ test_key_send_exit_status_follows_delivery() {
 
 test_exact_lane_id_send_still_works
 test_key_send_exit_status_follows_delivery
+test_pending_composer_refuses_before_typing
+test_unknown_composer_refuses_before_typing
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback
 test_prefixless_herdr_pane_id_fails

@@ -10,7 +10,10 @@
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
-# Text submission is verified: the line is typed ONCE, then Enter is sent and
+# Text submission first requires an affirmatively empty composer. Pending or
+# unreadable input fails before typing, because appending to a parked stale order
+# can execute the wrong work while a later empty-composer verdict falsely appears
+# to confirm the new order. The line is then typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the target backend confirms a
 # submit or reports an inconclusive send. If a swallowed Enter is positively
 # confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
@@ -433,6 +436,13 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
+  if [ "$TARGET_BACKEND" != remote ]; then
+    composer_state=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL")
+    if [ "$composer_state" != empty ]; then
+      echo "error: text not sent to $T because its composer is not affirmatively empty (verdict=${composer_state:-unknown}; backend=$TARGET_BACKEND; tried $RESOLUTION_TRIED). Preserve the pane and reconcile its pending input before retrying." >&2
+      exit 1
+    fi
+  fi
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE

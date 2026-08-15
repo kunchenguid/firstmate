@@ -12,10 +12,13 @@
 # tab's only pane closes the tab, and agent get reports agent_not_found for a
 # pane no agent has registered on.
 #
-# Beyond that it models the pane IO a real launch performs. A pane reports a
-# registered agent once anything has been typed into it, and submitting starts
-# one turn: the next agent read reports working and the pane settles back to
-# idle, which is the native transition the adapter confirms a submit with.
+# Beyond that it models the pane IO a real launch performs. Each pane renders a
+# bare Codex composer (`› <draft>`), send-text fills that draft, and Enter clears
+# it while starting one turn. A pane reports a registered agent once anything
+# has been typed into it; the next agent read then reports working before the
+# pane settles back to idle, which is the native transition the adapter confirms
+# a submit with. Tests may set composer_readable=false in the state file to model
+# a genuine read failure; that must remain distinct from an empty composer.
 #
 # Usage:
 #   . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
@@ -89,14 +92,22 @@ case "${1:-} ${2:-}" in
     jq_state --arg p "${3:-}" \
       '.tabs |= [.[]|select(.pane_id != $p)]
        | .typed |= with_entries(select(.key != $p))
-       | .working |= with_entries(select(.key != $p))' | save ;;
+       | .working |= with_entries(select(.key != $p))
+       | .composer |= with_entries(select(.key != $p))' | save ;;
   "pane send-text")
     [ ! -f "$SEND_FAIL" ] || exit 1
-    jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;
+    jq_state --arg p "${3:-}" --arg text "${4:-}" \
+      '.typed[$p] = true | .composer[$p] = $text' | save ;;
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
-    jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
-  "pane read") printf '\n' ;;
+    jq_state --arg p "${3:-}" \
+      '.typed[$p] = true | .working[$p] = true | .composer[$p] = ""' | save ;;
+  "pane read")
+    [ "$(jq_state -r 'if has("composer_readable") then .composer_readable else true end')" = true ] || exit 1
+    pane=${3:-}
+    draft=$(jq_state -r --arg p "$pane" '.composer[$p] // ""')
+    printf '› %s\n' "$draft"
+    ;;
   "pane process-info") printf '{"result":{"process":{"name":"codex"}}}\n' ;;
   "agent get")
     pane=${3:-}
@@ -121,5 +132,5 @@ SH
 # reset_remote_herdr_fixture <state>: return the fake host to "no workspaces,
 # tabs, or panes", which is what a test means by "the previous endpoint is gone".
 reset_remote_herdr_fixture() { # <state>
-  printf '{"next":1,"workspaces":[],"tabs":[],"typed":{},"working":{}}\n' > "$1"
+  printf '{"next":1,"workspaces":[],"tabs":[],"typed":{},"working":{},"composer":{},"composer_readable":true}\n' > "$1"
 }
