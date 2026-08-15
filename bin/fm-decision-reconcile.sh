@@ -2,8 +2,8 @@
 # fm-decision-reconcile.sh - deterministic mechanics for policy-to-task reconciliation.
 #
 # Semantic policy is owned by .agents/skills/decision-reconciliation/SKILL.md.
-# Community-safe policy ids live in docs/operating-policies.toml.
-# Bounded package ownership lives in docs/implementation-packages.toml.
+# Community-safe policy ids live in policies/operating-policies.toml.
+# Bounded package ownership lives in policies/implementation-packages.toml.
 #
 # Usage:
 #   fm-decision-reconcile.sh policy-list

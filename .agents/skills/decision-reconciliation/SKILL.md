@@ -29,8 +29,8 @@ Those categories remain real captain questions even when a duplicate backlog hol
 
 Classify every queued item exactly once:
 
-1. **Resolved by policy** - link the hold or task to a policy id in `docs/operating-policies.toml`, close the duplicate captain question with `bin/fm-decision-reconcile.sh resolve-hold`, and do not ask it again.
-2. **Implementation package** - group related tasks that share policy and code surface into one bounded package in `docs/implementation-packages.toml` with one owner task.
+1. **Resolved by policy** - link the hold or task to a policy id in `policies/operating-policies.toml`, close the duplicate captain question with `bin/fm-decision-reconcile.sh resolve-hold`, and do not ask it again.
+2. **Implementation package** - group related tasks that share policy and code surface into one bounded package in `policies/implementation-packages.toml` with one owner task.
 3. **Retired** - archive inactive work, including all Job Tracker and career items, with `bin/fm-decision-reconcile.sh retire`.
 4. **Genuine exception** - surface only a decision the policy record cannot answer; record it in the private task report with impact and recommendation.
 

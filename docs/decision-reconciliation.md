@@ -13,7 +13,7 @@ The reconciliation layer closes that gap with community-safe policy ids, bounded
 `policies/operating-policies.toml` is the single owner of community-safe policy ids and summaries.
 `policies/implementation-packages.toml` is the single owner of bounded package ownership.
 `bin/fm-decision-reconcile.sh` applies policy links, resolves duplicate captain holds through the existing `bin/fm-decision-hold.sh decline` path, and retires inactive work.
-`bin/fm-routine-complete.sh` verifies that a ship task reported checks green, recorded a PR, and has no open keyed status decisions before calling `bin/fm-pr-merge.sh`.
+`bin/fm-routine-complete.sh` verifies that a ship task's current-code-matched run step is done, its PR is recorded, and it has no open keyed status decisions before calling `bin/fm-pr-merge.sh`.
 
 Policy resolution never substitutes for captain escalation categories named in the policy registry.
 Security, spending, privacy, destructive, irreversible, product-direction, and high-impact-release boundaries remain captain authority.

@@ -14,6 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
@@ -40,17 +41,16 @@ meta_value() {
 }
 
 routine_verify() {  # <task-id>
-  local id=$1 meta="$STATE/$id.meta" status="$STATE/$id.status" last pr_url kind
+  local id=$1 meta="$STATE/$id.meta" status="$STATE/$id.status" current_state pr_url kind
   [ -f "$meta" ] && [ ! -L "$meta" ] || fail "$id has no task metadata"
   kind=$(meta_value "$meta" kind)
   [ "$kind" = ship ] || fail "$id is not kind ship (kind=${kind:-unknown})"
-  last=$(last_status_line "$status")
-  [ -n "$last" ] || fail "$id has no status history"
-  case "$last" in
-    *checks\ green*|*PR\ ready*) : ;;
-    *)
-      fail "$id is not verification-complete (last status: $last)"
-      ;;
+  if ! current_state=$("$CREW_STATE_BIN" "$id"); then
+    fail "could not read current verification state for $id"
+  fi
+  case "$current_state" in
+    "state: done · source: run-step"*) : ;;
+    *) fail "$id is not verification-complete (current state: $current_state)" ;;
   esac
   pr_url=$(meta_value "$meta" pr)
   [ -n "$pr_url" ] || fail "$id has no recorded pr= metadata"
