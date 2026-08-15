@@ -1754,7 +1754,10 @@ freshen_spawn_worktree_base() {  # <worktree>
   if [ "$has_origin" -eq 1 ]; then
     default=$(default_branch "$worktree") || default=
   else
-    default=$(default_branch "$PROJ_ABS") || default=
+    default=$(git -C "$PROJ_ABS" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if [ -z "$default" ]; then
+      default=$(default_branch "$PROJ_ABS") || default=
+    fi
   fi
   [ -n "$default" ] || {
     echo "error: could not determine the project's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
