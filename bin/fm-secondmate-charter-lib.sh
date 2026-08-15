@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Shared extraction of secondmate registry summary and scope from a charter.
+# Shared extraction of secondmate registry summary, routing scope, and project
+# clones from a charter.
 # Source only. FM_SECONDMATE_CHARTER and FM_SECONDMATE_SCOPE remain explicit
 # caller overrides; otherwise the named sections in the filled brief are used.
 

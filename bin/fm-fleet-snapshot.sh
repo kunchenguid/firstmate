@@ -23,6 +23,9 @@
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
+#     With FM_SNAPSHOT_LOCAL_ONLY=1, remote secondmate current_state is
+#     synthesized as unknown and remote endpoint/home presence probes are
+#     skipped, leaving endpoint.exists and paths.home.present null.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
