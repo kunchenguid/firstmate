@@ -107,6 +107,8 @@ test_stale_pool_base_refreshes_before_branching() {
   id='pool-current-base-repeat-r1'
   mkdir -p "$HOME_DIR/data/$id"
   printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  POOL_DIR="$CASE_DIR/pool-current"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$POOL_DIR" "$current"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "repeating the base refresh should be idempotent"
