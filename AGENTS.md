@@ -324,6 +324,7 @@ Before deciding any ask-user finding, load `ask-user-authority`; the implementat
 Never merge a red PR.
 Without a current explicit captain instruction that states the concrete merge, that default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
+`bin/fm-pr-merge.sh` also refuses a merge while an inline review comment's thread is unresolved or a review still requests changes, and it prints that feedback in full; clearing it is a human decision, recorded by rerunning with `--review-comments-override <reason>`, and standing `yolo` never authorizes that override.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 ### Validate

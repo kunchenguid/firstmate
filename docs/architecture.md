@@ -248,6 +248,10 @@ For target project repos shipped through their own no-mistakes pipeline, commits
 The firstmate repo itself is the exception: its `.no-mistakes/` directory is local state, stays gitignored, and is rejected by CI if tracked.
 PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
 The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state; a well-formed GitLab merge request URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) is refused too, explicitly, rather than sent to the wrong forge.
+Between recording metadata and merging it enforces a review-feedback gate whose blocking surface is deliberately narrow: inline diff review comments from `/pulls/<n>/comments` whose GraphQL review thread is neither resolved nor outdated, and every review `/pulls/<n>/reviews` still returns as `CHANGES_REQUESTED`.
+Whole-PR conversation comments from the distinct `/issues/<n>/comments` surface are printed in full so a human sees them but never block, because that surface is dominated by automated notices and blocking on it would train humans to override reflexively.
+Feedback from bots counts exactly as feedback from people, severity badges in a body are never authority, and any API failure or missing thread-resolution evidence fails closed.
+A blocked merge proceeds only when a human reruns it with `--review-comments-override <reason>`, which is never inferred, never forwarded to the forge, and is recorded as a `note:` line in the task status before the merge runs.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
 
