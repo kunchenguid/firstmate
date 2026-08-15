@@ -82,6 +82,37 @@ fm_record_contradiction_last_status_verb() {  # <status>
   esac
 }
 
+fm_record_contradiction_default_branch() {  # <worktree>
+  local worktree=$1 ref branch
+  ref=$(git -C "$worktree" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [ -n "$ref" ]; then
+    printf '%s\n' "${ref#origin/}"
+    return 0
+  fi
+  for branch in main master; do
+    if git -C "$worktree" show-ref --verify --quiet "refs/heads/$branch"; then
+      printf '%s\n' "$branch"
+      return 0
+    fi
+  done
+  return 1
+}
+
+fm_record_contradiction_worktree_risk() {  # <worktree>
+  local worktree=$1 default dirty_files dirty unlanded
+  [ -d "$worktree" ] || { printf 'tracked-dirty=unknown,unlanded=unknown'; return 0; }
+  git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || { printf 'tracked-dirty=unknown,unlanded=unknown'; return 0; }
+  dirty_files=$(git -C "$worktree" diff --name-only HEAD 2>/dev/null) \
+    || { printf 'tracked-dirty=unknown,unlanded=unknown'; return 0; }
+  dirty=$(printf '%s\n' "$dirty_files" | awk 'NF { count++ } END { print count + 0 }')
+  default=$(fm_record_contradiction_default_branch "$worktree") \
+    || { printf 'tracked-dirty=%s,unlanded=unknown' "$dirty"; return 0; }
+  unlanded=$(git -C "$worktree" rev-list --count "$default..HEAD" 2>/dev/null) \
+    || { printf 'tracked-dirty=%s,unlanded=unknown' "$dirty"; return 0; }
+  printf 'tracked-dirty=%s,unlanded=%s' "$dirty" "$unlanded"
+}
+
 fm_record_contradiction_gh_bounded() {  # <seconds> <gh-axi args...>
   local seconds=$1
   shift
@@ -203,14 +234,18 @@ fm_record_contradiction_append() {  # <kind> <entry>
 }
 
 fm_record_contradictions_observe_meta() {  # <meta> <id> <endpoint> <state-dir>
-  local meta=$1 id=$2 endpoint=$3 state_dir=$4 kind backlog_state status verb pr pr_remaining query_timeout result pr_state mergeable
+  local meta=$1 id=$2 endpoint=$3 state_dir=$4 kind backlog_state status verb pr pr_remaining query_timeout result pr_state mergeable worktree risk
   case "$id" in ''|.*|*[!A-Za-z0-9._-]*) return 0 ;; esac
   kind=$(fm_meta_get "$meta" kind)
   if [ "$kind" != secondmate ]; then
     backlog_state=$(fm_record_contradiction_backlog_state "$FM_RECORD_CONTRADICTION_ROWS" "$id") || backlog_state=absent
     case "$backlog_state" in
       complete) fm_record_contradiction_append complete "$id" ;;
-      absent) fm_record_contradiction_append meta "$id" ;;
+      absent)
+        worktree=$(fm_meta_get "$meta" worktree)
+        risk=$(fm_record_contradiction_worktree_risk "$worktree")
+        fm_record_contradiction_append meta "$id($risk)"
+        ;;
     esac
   fi
 
