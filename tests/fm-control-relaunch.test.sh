@@ -577,7 +577,7 @@ case "${args[0]:-} ${args[1]:-}" in
     ;;
   'pane run'|'pane send-text'|'pane send-keys')
     printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
-    if [ "${args[0]:-} ${args[1]:-} ${args[2]:-} ${args[3]:-}" = 'pane send-keys w1:p3 Enter' ]; then
+    if [ "${args[0]:-} ${args[1]:-} ${args[2]:-} ${args[3]:-}" = 'pane send-keys w1:p3 enter' ]; then
       for lock in /tmp/firstmate-herdr-presentation/order-*.lock; do
         [ -d "$lock" ] || continue
         lock_pid=$(cat "$lock/pid" 2>/dev/null || true)
@@ -1522,7 +1522,11 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
     "$X_LINK" rl30 request-30 --carry-count 2 --carry-ts 1700000000 \
       --carry-platform x --carry-max 280 2>&1); rc=$?
   expect_code 0 "$rc" "concurrent durable metadata publication should succeed"$'\n'"$link_out"
-  wait "$control_pid"; rc=$?
+  if wait "$control_pid"; then
+    rc=0
+  else
+    rc=$?
+  fi
   expect_code 1 "$rc" "the staged pre-publication launch failure should fail closed"
   [ "$(meta_field "$dir" rl30 x_request)" = request-30 ] \
     || fail "rollback erased the concurrent X request"
@@ -2249,7 +2253,7 @@ test_spawn_relaunch_holds_herdr_session_lock_through_submission() {
   make_herdr_missing_pane_stub "$dir" normal
   out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
   expect_code 0 "$rc" "a normal missing Herdr pane relaunch should succeed"
-  [ -e "$dir/herdr-launch-lock-observed" ] \
+  [ -e "$dir/fake/herdr-launch-lock-observed" ] \
     || fail "the Herdr session lock was not held while the worker launch was submitted"
   [ "$(meta_field "$dir" hr1 herdr_pane_id)" = w1:p3 ] \
     || fail "the lock-held relaunch did not publish the replacement endpoint"

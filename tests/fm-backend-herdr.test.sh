@@ -51,7 +51,8 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
   exit 0
 fi
-if [ "${1:-} ${2:-}" = 'tab get' ] && [ -f "$RESP/created-tab-id" ] \
+if [ "${FM_HERDR_COUNT_CREATED_GET:-0}" != 1 ] \
+   && [ "${1:-} ${2:-}" = 'tab get' ] && [ -f "$RESP/created-tab-id" ] \
    && [ "${3:-}" = "$(cat "$RESP/created-tab-id")" ]; then
   if [ -f "$RESP/created-tab-get.out" ]; then
     cat "$RESP/created-tab-get.out"
@@ -63,7 +64,8 @@ if [ "${1:-} ${2:-}" = 'tab get' ] && [ -f "$RESP/created-tab-id" ] \
   fi
   exit 0
 fi
-if [ "${1:-} ${2:-}" = 'pane get' ] && [ -f "$RESP/created-pane-id" ] \
+if [ "${FM_HERDR_COUNT_CREATED_GET:-0}" != 1 ] \
+   && [ "${1:-} ${2:-}" = 'pane get' ] && [ -f "$RESP/created-pane-id" ] \
    && [ "${3:-}" = "$(cat "$RESP/created-pane-id")" ]; then
   if [ -f "$RESP/created-pane-get.out" ]; then
     cat "$RESP/created-pane-get.out"
@@ -895,8 +897,8 @@ test_create_task_retains_replacement_when_postclose_read_is_malformed() {
   status=$?
   [ "$status" -ne 0 ] || fail "a malformed post-close tab list must refuse replacement publication"
   [ ! -e "$dir/reclaimed" ] || fail "a post-close read failure must retain the last replacement pane"
-  assert_contains "$out" "retaining the unlaunched replacement" \
-    "the post-close parse failure did not report the retained replacement"
+  assert_contains "$out" "could not parse herdr tab list output" \
+    "the post-close parse failure did not report the unreadable tab list"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close'$'\x1f''w1:p1' \
     "the fixture did not prune the seeded tab before its post-close read failure"
   pass "fm_backend_herdr_create_task: a malformed post-close read retains the unlaunched replacement"
@@ -2856,6 +2858,7 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p3","tab_id":"w2:t3"}]}}' > "$resp/28.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_HERDR_COUNT_CREATED_GET=1 \
     bash -c '
       . "$0/bin/backends/herdr.sh"
       fm_backend_herdr_projection_reclaim_task \
