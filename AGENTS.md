@@ -80,9 +80,8 @@ tools/               independently versioned provider-neutral components, commit
 config/crew-harness  crewmate harness override; LOCAL, gitignored; absent or "default" = same as firstmate. Inherited as the literal file: a concrete primary adapter value also controls a secondmate home's own crewmates (section 4)
 config/claude-crew-model  Claude crewmate/scout model anchor; LOCAL, gitignored, inherited, and absent = `claude-opus-5`. An unreadable, empty, or `default` value fails closed instead of inheriting Claude CLI state (section 4)
 config/crew-dispatch.json  optional crewmate dispatch profiles; LOCAL, gitignored; firstmate-maintained but human-editable natural-language rules that choose a per-task harness/model/effort profile (section 4). Inherited by secondmate homes
-config/crosscheck-reviewer.json  independent PR-crosscheck reviewer identity; LOCAL, gitignored; docs/crosscheck.md
-config/crosscheck-same-model  optional `on|off` same-model relaxation; LOCAL, gitignored, absent = off, account separation still required; docs/crosscheck.md
-config/crosscheck-legacy-author-admissions.json  optional exact-head last-resort admission for unre-authored pre-snapshot Pi work with unproven historical author; LOCAL, gitignored, absent = none; docs/crosscheck.md
+config/crosscheck-reviewer.json  policy-grade independent reviewer pool for the PR crosscheck merge gate; LOCAL, gitignored; see docs/crosscheck.md
+config/crosscheck-same-model  optional `on|off` same-model reviewer relaxation; LOCAL, gitignored, absent = off; see docs/crosscheck.md
 config/checkout-refresh  optional extra checkout and shallow scan-root directives for this home's safe checkout refresher; LOCAL, gitignored; see docs/configuration.md "Checkout refresh"
 config/worktree-provision  task-worktree dependency provisioning switch; LOCAL, gitignored; absent or "on" provisions each acquired worktree's declared project dependencies before launch, "off" disables it for this home; see docs/configuration.md "Worktree provisioning"
 config/secondmate-harness  PRIMARY launch `<harness> [<model>] [<effort>]`; LOCAL, gitignored, fallback config/crew-harness then firstmate, not inherited (section 4)

@@ -103,33 +103,23 @@ The gate does not reproduce CI's concurrent shard fan-out because it does not se
 
 ## Crosscheck reviewer
 
-`config/crosscheck-reviewer.json` selects the local independent identity for the PR merge-gate reviewer.
-It is gitignored and is not inferred from the author account or ambient Codex configuration.
+`config/crosscheck-reviewer.json` selects the local dedicated account pool for the PR merge-gate reviewer.
+It is gitignored and is not inferred from lane metadata or ambient provider configuration.
 The current schema has one nonempty `reviewers` array, whose entries require exactly `harness`, `model`, `effort`, and `account_home`.
+The accepted policy profiles are Codex `gpt-5.6-sol` at `xhigh` effort and Pi `gpt-5.6-sol` at `xhigh` effort; Claude is never an eligible Crosscheck reviewer.
+Every reviewer `account_home` must be an existing absolute directory.
+
+[`crosscheck.md`](crosscheck.md) owns the reviewer-independence policy, including the removal of author-identity checks and the legacy admission workaround.
+
 The optional local, gitignored `config/crosscheck-same-model` file contains exactly `on` or `off`, defaults to `off` when absent, and is read fresh for every reviewer selection.
-`on` relaxes model separation only; proven upstream-account separation remains mandatory, and same-account or unreadable identities stay refused.
+`on` relaxes only the default model-separation screen and makes the weaker mode explicit in the prompt and durable evidence.
 Invalid values and unsafe file shapes fail closed.
-The optional local, gitignored `config/crosscheck-legacy-author-admissions.json` file is a last resort for one exact PR head from a pre-snapshot account-less Pi lane that genuinely cannot be replaced under a new bound author lane.
-It requires explicit pre-snapshot provenance and replacement-unavailable attestations, never claims that the historical author account is known or separate from the reviewer, has no global switch, cannot replace modern identity metadata or the snapshot-era launch marker, and defaults to no admissions when absent.
-Its exact schema, reviewer binding, prompt warning, and durable evidence label are owned by [`crosscheck.md`](crosscheck.md).
-The accepted policy profiles are Codex `gpt-5.6-sol` at `xhigh` effort, Claude `claude-opus-5` at `xhigh` effort, and Pi `gpt-5.6-sol` at `xhigh` effort.
-Every `account_home` must be an existing absolute directory.
-Crosscheck resolves each configured account home and keeps every entry whose account is provably separate and whose model satisfies the default cross-model policy or the explicit same-model relaxation, then runs them in configured order, advancing to the next only when a reviewer could not reach its provider.
-The conditional prompt and durable evidence distinction are owned by [`crosscheck.md`](crosscheck.md).
-List more than one entry per provider so a single unavailable account cannot block the gate.
-Codex binds both `CODEX_HOME` and `HOME` to that path and sets `project_doc_max_bytes=0` so reviewed-repository `AGENTS.md` files cannot supply reviewer instructions.
-Claude creates a disposable private `HOME` whose `.claude` resolves to that path, binds both `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` to it, maps the current user's Keychain directory into that private `HOME` on macOS so the account's scoped credential is reachable at all, verifies the exact scoped-Keychain or OAuth-file credential source before launch, and uses `--safe-mode` so reviewed-repository `CLAUDE.md` files cannot supply reviewer instructions.
-Pi creates a disposable private `HOME` whose `.pi/agent` resolves to that path, binds `PI_CODING_AGENT_DIR` to it, requires an `openai-codex` OAuth credential in its `auth.json` before launch, resolves an npm-installed Pi entrypoint with its sibling Node runtime before reviewer `PATH` can substitute another interpreter, and uses `--no-context-files` so reviewed-repository context files cannot supply reviewer instructions.
-The verdict and its Bash-created receipt must report the executing selector and private `HOME`, so a configured label cannot establish separation from a different executing account.
-Codex and Pi authenticate against the same upstream OpenAI accounts, so one account often exists behind several `account_home` directories and two distinct paths can execute as one account.
-When the author and the reviewer are both OpenAI-backed, selection therefore compares the executing OpenAI account recorded in each credential rather than the configured path, and the bound credential proves it again before launch.
-Pi adds an independent client and a reviewer separate from a Claude author by construction; it does not add capacity, because an OpenAI account at its usage limit is equally unavailable through Codex and through Pi.
-A lane recording no `account_home` is supported rather than exceptional: a different supported provider proves account separation by namespace, while an opted-in Pi author can prove same-provider separation through the exact provider slot recorded in its model metadata and the `author_account_identity` snapshot recorded by `fm-spawn.sh` at initial launch.
-The spawn boundary creates a restrictive task-private copy of the selected Pi credential and configuration directory, derives the identity from that copy, and binds the actual Pi command to the same path through `PI_CODING_AGENT_DIR` on every backend.
-Recovery retains the recorded identity only when the newly launch-bound copy proves the same account, so copy failures, changed accounts, unreadable Pi identities, and account-less same-provider pairs fail closed unless an exact pre-snapshot admission explicitly records that author-account independence is unproven.
-Crosscheck never substitutes the mutable ambient Pi credential at review time.
-Account routing is off by design for harnesses outside Codex and Claude, so this is the normal shape of a Pi lane rather than a misconfiguration.
-An absent or invalid file is an unavailable reviewer and therefore blocks crosscheck and merge.
+Crosscheck runs eligible entries in configured order, advancing to the next only when a reviewer could not reach its provider.
+List more than one entry per supported client so a single unavailable account cannot block the gate.
+Codex binds both `CODEX_HOME` and `HOME` to the selected reviewer path and sets `project_doc_max_bytes=0` so reviewed-repository `AGENTS.md` files cannot supply reviewer instructions.
+Pi creates a disposable private `HOME` whose `.pi/agent` resolves to the selected reviewer path, binds `PI_CODING_AGENT_DIR` to it, requires an `openai-codex` OAuth credential in its `auth.json` before launch, resolves an npm-installed Pi entrypoint with its sibling Node runtime before reviewer `PATH` can substitute another interpreter, and uses `--no-context-files` so reviewed-repository context files cannot supply reviewer instructions.
+The verdict and its Bash-created receipt must report the executing reviewer selector and private `HOME`.
+An absent or invalid reviewer file blocks Crosscheck and merge.
 See [`crosscheck.md`](crosscheck.md) for the example file, reviewer capture control, evidence rules, and operator flow.
 
 ## Captain preferences (data/captain.md)

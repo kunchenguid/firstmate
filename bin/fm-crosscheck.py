@@ -14,7 +14,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import pwd
 import re
 import shutil
 import stat
@@ -23,7 +22,6 @@ import sys
 import tempfile
 import time
 from typing import Any, NoReturn
-import unicodedata
 from urllib.parse import unquote, urlsplit
 
 
@@ -53,11 +51,6 @@ MAX_LEDGER_BYTES = 16 * 1024 * 1024
 REVIEW_STATUS_MAX_BYTES = 4 * 1024 * 1024
 MAX_REVIEWER_CONFIG_BYTES = 64 * 1024
 MAX_SAME_MODEL_CONFIG_BYTES = 16
-MAX_LEGACY_AUTHOR_ADMISSION_CONFIG_BYTES = 64 * 1024
-MAX_LEGACY_AUTHOR_ADMISSIONS = 128
-LEGACY_AUTHOR_ADMISSION_MODE = "unproven-legacy-admission"
-PI_AUTHOR_IDENTITY_SNAPSHOT_EPOCH = "launch-bound-v1"
-LEGACY_AUTHOR_PROVENANCE = "pre-snapshot-pi"
 MAX_LEDGER_PROMPT_BYTES = 64_000
 MAX_PROJECTED_FINDINGS = 512
 MAX_PROJECTED_EVENTS = 8
@@ -243,308 +236,6 @@ def same_model_review_enabled(home: Path) -> bool:
     return value == "on"
 
 
-def legacy_author_admission(
-    home: Path,
-    task_id: str,
-    url: str,
-    head_sha: str,
-    meta: dict[str, str],
-) -> dict[str, str] | None:
-    """Return one exact-head legacy admission without inventing author identity.
-
-    The file is a last-resort policy record for a pre-snapshot Pi lane after
-    replacement under a newly bound author lane was declared unavailable. It
-    never supplies an account id and never changes modern author-account checks.
-    """
-
-    path = home / "config" / "crosscheck-legacy-author-admissions.json"
-    if not path.exists() and not path.is_symlink():
-        return None
-    value = read_json(
-        path,
-        "legacy author admission configuration",
-        maximum_bytes=MAX_LEGACY_AUTHOR_ADMISSION_CONFIG_BYTES,
-        maximum_items=4096,
-    )
-    require(isinstance(value, dict), "legacy author admission configuration must be an object")
-    require_exact_keys(value, {"admissions"}, "legacy author admission configuration")
-    admissions = value.get("admissions")
-    require(
-        isinstance(admissions, list) and admissions,
-        "legacy author admission configuration.admissions must be a nonempty array",
-    )
-    require(
-        len(admissions) <= MAX_LEGACY_AUTHOR_ADMISSIONS,
-        "legacy author admission configuration has too many admissions",
-    )
-
-    normalized_url = url.rstrip("/")
-    seen: set[tuple[str, str, str]] = set()
-    scoped: list[dict[str, Any]] = []
-    exact: list[dict[str, Any]] = []
-    required_fields = {
-        "task_id",
-        "pull_request",
-        "head_sha",
-        "author_harness",
-        "author_model",
-        "approved_at",
-        "legacy_author_provenance",
-        "replacement_unavailable",
-        "replacement_unavailable_reason",
-        "admit_unproven_author_account",
-    }
-    for index, admission in enumerate(admissions):
-        label = f"legacy author admission configuration.admissions[{index}]"
-        require(isinstance(admission, dict), f"{label} must be an object")
-        require_exact_keys(admission, required_fields, label)
-        configured_task = require_string(admission.get("task_id"), f"{label}.task_id")
-        require(ID_RE.fullmatch(configured_task) is not None, f"{label}.task_id is invalid")
-        pull_request = require_string(
-            admission.get("pull_request"), f"{label}.pull_request"
-        )
-        parsed = urlsplit(pull_request)
-        path_parts = parsed.path.strip("/").split("/")
-        require(
-            parsed.scheme == "https"
-            and parsed.netloc == "github.com"
-            and not parsed.query
-            and not parsed.fragment
-            and len(path_parts) == 4
-            and path_parts[2] == "pull"
-            and path_parts[3].isdigit()
-            and int(path_parts[3]) > 0
-            and all(unquote(part) == part and part for part in path_parts)
-            and pull_request == pull_request.rstrip("/"),
-            f"{label}.pull_request must be a canonical https://github.com/OWNER/REPO/pull/NUMBER URL",
-        )
-        configured_head = require_string(admission.get("head_sha"), f"{label}.head_sha")
-        require(SHA_RE.fullmatch(configured_head) is not None, f"{label}.head_sha is invalid")
-        author_harness = require_string(
-            admission.get("author_harness"), f"{label}.author_harness"
-        )
-        require(author_harness == "pi", f"{label}.author_harness must equal pi")
-        author_model = require_string(
-            admission.get("author_model"), f"{label}.author_model"
-        )
-        provider_slot, separator, _model = author_model.partition("/")
-        require(
-            bool(separator)
-            and PI_OPENAI_PROVIDER_SLOT_RE.fullmatch(provider_slot) is not None,
-            f"{label}.author_model must name a routed Pi OpenAI provider slot and model",
-        )
-        approved_at = require_string(admission.get("approved_at"), f"{label}.approved_at")
-        try:
-            dt.datetime.strptime(approved_at, "%Y-%m-%dT%H:%M:%SZ")
-        except ValueError:
-            fail(f"{label}.approved_at must be an exact UTC timestamp like 2026-08-10T12:00:00Z")
-        require(
-            admission.get("legacy_author_provenance") == LEGACY_AUTHOR_PROVENANCE,
-            f"{label}.legacy_author_provenance must equal {LEGACY_AUTHOR_PROVENANCE}",
-        )
-        require(
-            admission.get("replacement_unavailable") is True,
-            f"{label}.replacement_unavailable must equal true",
-        )
-        replacement_reason = require_string(
-            admission.get("replacement_unavailable_reason"),
-            f"{label}.replacement_unavailable_reason",
-        )
-        require(
-            replacement_reason == replacement_reason.strip()
-            and "\n" not in replacement_reason
-            and "\r" not in replacement_reason
-            and all(character >= " " for character in replacement_reason),
-            f"{label}.replacement_unavailable_reason must be one trimmed printable line",
-        )
-        require(
-            len(replacement_reason.encode("utf-8")) <= 1000,
-            f"{label}.replacement_unavailable_reason must be at most 1000 UTF-8 bytes",
-        )
-        require(
-            admission.get("admit_unproven_author_account") is True,
-            f"{label}.admit_unproven_author_account must equal true",
-        )
-        scope = (configured_task, pull_request, configured_head)
-        require(scope not in seen, f"legacy author admission configuration duplicates {scope}")
-        seen.add(scope)
-        if configured_task == task_id and pull_request == normalized_url:
-            scoped.append(admission)
-            if configured_head == head_sha:
-                exact.append(admission)
-
-    if not scoped:
-        return None
-    require(
-        len(exact) == 1,
-        "legacy author admission exists for this task and pull request but not "
-        f"for live head {head_sha}; renew the explicit admission for the exact head",
-    )
-    admission = exact[0]
-    require(
-        meta.get("harness") == "pi"
-        and "account_home" not in meta
-        and "author_account_identity" not in meta
-        and "author_identity_snapshot_epoch" not in meta,
-        "legacy author admission applies only to a pre-snapshot account-less Pi lane; "
-        "it cannot downgrade a modern or routed author identity",
-    )
-    require(
-        admission["author_harness"] == meta["harness"]
-        and admission["author_model"] == meta["model"],
-        "legacy author admission author harness/model does not match task metadata",
-    )
-    digest_material = json.dumps(admission, sort_keys=True, separators=(",", ":"))
-    return {
-        "author_account_independence": LEGACY_AUTHOR_ADMISSION_MODE,
-        "legacy_admission_sha256": hashlib.sha256(
-            digest_material.encode("utf-8")
-        ).hexdigest(),
-        "legacy_admission_approved_at": admission["approved_at"],
-        "legacy_replacement_unavailable": "true",
-        "legacy_replacement_unavailable_reason": admission[
-            "replacement_unavailable_reason"
-        ],
-        "legacy_author_provenance": admission["legacy_author_provenance"],
-        "legacy_author_harness": admission["author_harness"],
-        "legacy_author_model": admission["author_model"],
-    }
-
-
-def claude_scoped_keychain_service(account_home: Path) -> str:
-    """Return Claude's non-secret Keychain service for one config directory."""
-
-    normalized = unicodedata.normalize("NFC", str(account_home.resolve()))
-    suffix = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
-    return f"Claude Code-credentials-{suffix}"
-
-
-def current_passwd_identity() -> tuple[str, Path]:
-    """Resolve the current Unix identity independently of ambient HOME."""
-
-    try:
-        record = pwd.getpwuid(os.getuid())
-    except KeyError:
-        tool_fail("Claude executing-account inspection cannot resolve the current user")
-    home = Path(record.pw_dir)
-    if not record.pw_name or not home.is_absolute() or not home.is_dir():
-        tool_fail(
-            "Claude executing-account inspection found an invalid passwd identity"
-        )
-    return record.pw_name, home.resolve()
-
-
-def prepare_claude_execution_home(
-    protocol_dir: Path, account_home: Path
-) -> tuple[Path, str, str]:
-    """Create a private HOME bound to one Claude config and credential source."""
-
-    account_home = account_home.resolve()
-    execution_home = protocol_dir / "claude-home"
-    try:
-        execution_home.mkdir(mode=0o700)
-        (execution_home / ".claude").symlink_to(
-            account_home, target_is_directory=True
-        )
-        (execution_home / ".claude.json").symlink_to(
-            account_home / ".claude.json"
-        )
-    except OSError as exc:
-        tool_fail(
-            "Claude execution-HOME preparation failed while binding "
-            f"{execution_home} to reviewer account {account_home}: {exc}"
-        )
-
-    credential_file = account_home / ".credentials.json"
-    # The Keychain directory is bound whenever the platform has one, never only
-    # when `.credentials.json` happens to be absent.
-    #
-    # The two credential sources are not alternatives in practice. A real
-    # account directory routinely holds both a scoped Keychain item and a
-    # leftover `.credentials.json`, and the Keychain item is the live one that
-    # Claude refreshes. Because the reviewer runs under a private HOME, an
-    # unbound Keychain directory is simply not reachable from inside it, so
-    # Claude fell back to the stale file and died before its first request with
-    # "Failed to authenticate: OAuth session expired and could not be refreshed"
-    # -- one turn, zero tokens, no API time. Every Claude reviewer in this fleet
-    # took that branch, which is why the Anthropic half of the gate produced no
-    # verdicts at all while each account worked perfectly outside the gate.
-    keychain_identity: tuple[str, str] | None = None
-    if sys.platform == "darwin":
-        account_name, passwd_home = current_passwd_identity()
-        keychains = passwd_home / "Library" / "Keychains"
-        if keychains.is_dir():
-            try:
-                library = execution_home / "Library"
-                library.mkdir(mode=0o700)
-                (library / "Keychains").symlink_to(
-                    keychains, target_is_directory=True
-                )
-            except OSError as exc:
-                tool_fail(
-                    "Claude execution-HOME preparation could not bind the current "
-                    f"user's Keychain directory: {exc}"
-                )
-            service = claude_scoped_keychain_service(account_home)
-            security = Path("/usr/bin/security")
-            if not security.is_file() or not os.access(security, os.X_OK):
-                tool_fail(
-                    "Claude executing-account credential inspection found no "
-                    "runnable /usr/bin/security"
-                )
-            environment = os.environ.copy()
-            environment.update(
-                {
-                    "HOME": str(execution_home.resolve()),
-                    "CLAUDE_CONFIG_DIR": str(account_home),
-                    "CLAUDE_SECURESTORAGE_CONFIG_DIR": str(account_home),
-                }
-            )
-            inspected = run_command(
-                [
-                    str(security),
-                    "find-generic-password",
-                    "-a",
-                    account_name,
-                    "-s",
-                    service,
-                ],
-                cwd=execution_home,
-                env=environment,
-                timeout=10,
-                description="Claude scoped Keychain credential inspection",
-            )
-            if inspected.returncode == 0:
-                keychain_identity = ("scoped-keychain", f"{service}:{account_name}")
-
-    # The scoped Keychain item wins when it exists, because that is the
-    # credential the launched reviewer will actually execute as; recording the
-    # stale file beside it would name a credential nothing used.
-    if keychain_identity is not None:
-        return execution_home, *keychain_identity
-
-    if credential_file.exists() or credential_file.is_symlink():
-        try:
-            metadata = credential_file.lstat()
-        except OSError as exc:
-            tool_fail(
-                "Claude executing-account credential inspection failed at "
-                f"{credential_file}: {exc}"
-            )
-        if not stat.S_ISREG(metadata.st_mode) or credential_file.is_symlink():
-            tool_fail(
-                "Claude executing-account credential inspection requires a regular "
-                f"non-symlink file at {credential_file}"
-            )
-        return execution_home, "oauth-file", str(credential_file)
-
-    tool_fail(
-        "Claude executing-account credential inspection found neither a scoped "
-        f"Keychain item nor an OAuth file at {credential_file} for config home "
-        f"{account_home}"
-    )
-
-
 def prepare_pi_execution_home(protocol_dir: Path, account_home: Path) -> Path:
     account_home = account_home.resolve()
     execution_home = protocol_dir / "pi-home"
@@ -648,13 +339,6 @@ def inspect_pi_credential(account_home: Path) -> tuple[str, str]:
     return "pi-openai-codex-oauth-file", str(credential_file)
 
 
-# The upstream account namespace each harness authenticates against. Codex and
-# Pi are two clients onto one OpenAI namespace, so a different harness is not
-# by itself a different account namespace. A harness absent from this mapping
-# has no known namespace and can never establish separation.
-HARNESS_PROVIDERS = {"codex": "openai", "pi": "openai", "claude": "anthropic"}
-
-
 def model_identity(model: str) -> str:
     """Return the model a task ran on, without its provider-slot prefix.
 
@@ -668,111 +352,6 @@ def model_identity(model: str) -> str:
 
     return model.rsplit("/", 1)[-1].strip()
 
-
-PI_OPENAI_PROVIDER_SLOT_RE = re.compile(r"^openai-codex(?:-[1-9][0-9]*)?$")
-
-
-OPENAI_BACKED_HARNESSES = {
-    harness for harness, provider in HARNESS_PROVIDERS.items() if provider == "openai"
-}
-
-
-def openai_account_identity(harness: str, account_home: Path) -> str | None:
-    """Return the upstream OpenAI account one account home executes as.
-
-    Codex and Pi both authenticate against OpenAI accounts, and one account
-    is routinely present in several directories at once: a Codex home and a
-    Pi auth slot can carry the same credential, and two Codex homes can be
-    copies of one account. Directory inequality therefore cannot establish
-    account separation between OpenAI-backed identities, so the independence
-    gate compares this executing identity instead. Returns None when the
-    identity is not readable, which callers must treat as unproven rather
-    than as separate.
-    """
-
-    if harness not in OPENAI_BACKED_HARNESSES:
-        return None
-    credential_file = account_home / "auth.json"
-    try:
-        credentials = read_bounded_json(
-            credential_file,
-            maximum_bytes=1024 * 1024,
-            maximum_items=256,
-            maximum_string_bytes=1024 * 1024,
-        )
-    except BoundedIOError:
-        return None
-    if not isinstance(credentials, dict):
-        return None
-    if harness == "pi":
-        entry = credentials.get("openai-codex")
-        identity = entry.get("accountId") if isinstance(entry, dict) else None
-    else:
-        tokens = credentials.get("tokens")
-        identity = tokens.get("account_id") if isinstance(tokens, dict) else None
-    if isinstance(identity, str) and identity.strip():
-        return identity.strip()
-    return None
-
-
-def anthropic_account_identity(account_home: Path) -> str | None:
-    """Return the upstream Anthropic account one Claude config home executes as.
-
-    A Claude config home names its account in `.claude.json` under
-    `oauthAccount.accountUuid`. A home that carries no such record - notably a
-    bare `~/.claude` that borrows whatever credential the environment supplies
-    - has no identity of its own, so it cannot establish separation from
-    anything. Returns None when the identity is not readable, which callers
-    must treat as unproven rather than as separate.
-    """
-
-    configuration_file = account_home / ".claude.json"
-    try:
-        configuration = read_bounded_json(
-            configuration_file,
-            maximum_bytes=8 * 1024 * 1024,
-            maximum_items=65_536,
-            maximum_string_bytes=1024 * 1024,
-        )
-    except BoundedIOError:
-        return None
-    if not isinstance(configuration, dict):
-        return None
-    account = configuration.get("oauthAccount")
-    identity = account.get("accountUuid") if isinstance(account, dict) else None
-    if isinstance(identity, str) and identity.strip():
-        return identity.strip()
-    return None
-
-
-def author_account_identity(
-    meta: dict[str, str], account_home: Path | None
-) -> str | None:
-    """Return the author's upstream account without inventing missing proof."""
-
-    if meta["harness"] == "pi" and account_home is None:
-        return meta.get("author_account_identity")
-    if account_home is None:
-        return None
-    return account_identity(meta["harness"], account_home)
-
-
-def account_identity(harness: str, account_home: Path) -> str | None:
-    """Return the upstream account one account home executes as, by provider.
-
-    Every provider needs this because directory inequality never establishes
-    account separation: one upstream account routinely sits behind several
-    directories, and a home that borrows an ambient credential has no identity
-    at all. Resolution is keyed on the provider rather than the harness so a
-    future client on an existing provider cannot reopen that hole.
-    """
-
-    provider = HARNESS_PROVIDERS.get(harness)
-    if provider == "openai":
-        return openai_account_identity(harness, account_home)
-    if provider == "anthropic":
-        return anthropic_account_identity(account_home)
-    return None
 
 
 def require(condition: bool, message: str) -> None:
@@ -1008,14 +587,7 @@ def parse_meta(path: Path) -> dict[str, str]:
         if not line or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        if key in {
-            "harness",
-            "model",
-            "account_home",
-            "author_account_identity",
-            "author_identity_snapshot_epoch",
-            "account_routing_emergency_bypass",
-        }:
+        if key in {"harness", "model"}:
             require(
                 key not in result,
                 f"task metadata at {path} duplicates {key} at line {line_number}",
@@ -1026,47 +598,6 @@ def parse_meta(path: Path) -> dict[str, str]:
             result.get(key, "") != "",
             f"task metadata at {path} is missing {key}",
         )
-    if "account_home" in result:
-        require(
-            result["account_home"] != "",
-            f"task metadata at {path} has an empty account_home",
-        )
-    if "author_account_identity" in result:
-        require(
-            result["author_account_identity"] != "",
-            f"task metadata at {path} has an empty author_account_identity",
-        )
-        require(
-            result["harness"] == "pi"
-            and PI_OPENAI_PROVIDER_SLOT_RE.fullmatch(
-                result["model"].partition("/")[0]
-            )
-            is not None
-            and "/" in result["model"],
-            f"task metadata at {path} records author_account_identity without "
-            "a routed Pi OpenAI provider slot",
-        )
-    if "author_identity_snapshot_epoch" in result:
-        require(
-            result["author_identity_snapshot_epoch"]
-            == PI_AUTHOR_IDENTITY_SNAPSHOT_EPOCH
-            and result["harness"] == "pi",
-            f"task metadata at {path} has an invalid author identity snapshot epoch",
-        )
-    if "account_routing_emergency_bypass" in result:
-        require(
-            result["account_routing_emergency_bypass"] == "1",
-            f"task metadata at {path} has an invalid "
-            "account_routing_emergency_bypass marker",
-        )
-    require(
-        not (
-            "account_home" in result
-            and "account_routing_emergency_bypass" in result
-        ),
-        f"task metadata at {path} records both account_home and the "
-        "unrouted-account marker",
-    )
     return result
 
 
@@ -2868,73 +2399,6 @@ def validate_ledger(value: Any, task_id: str, url: str) -> dict[str, Any]:
                 reviewer.get("model_independence") in {None, "same-model"},
                 f"{label}.reviewer.model_independence is invalid",
             )
-            author_account_mode = reviewer.get("author_account_independence")
-            require(
-                author_account_mode in {None, LEGACY_AUTHOR_ADMISSION_MODE},
-                f"{label}.reviewer.author_account_independence is invalid",
-            )
-            legacy_fields = {
-                "legacy_admission_sha256",
-                "legacy_admission_approved_at",
-                "legacy_replacement_unavailable",
-                "legacy_replacement_unavailable_reason",
-                "legacy_author_provenance",
-                "legacy_author_harness",
-                "legacy_author_model",
-                "reviewer_account_identity_sha256",
-            }
-            if author_account_mode == LEGACY_AUTHOR_ADMISSION_MODE:
-                for field in legacy_fields:
-                    require_string(reviewer.get(field), f"{label}.reviewer.{field}")
-                require(
-                    re.fullmatch(r"[0-9a-f]{64}", reviewer["legacy_admission_sha256"])
-                    is not None,
-                    f"{label}.reviewer.legacy_admission_sha256 is invalid",
-                )
-                require(
-                    re.fullmatch(
-                        r"[0-9a-f]{64}",
-                        reviewer["reviewer_account_identity_sha256"],
-                    )
-                    is not None,
-                    f"{label}.reviewer.reviewer_account_identity_sha256 is invalid",
-                )
-                require(
-                    reviewer["legacy_replacement_unavailable"] == "true",
-                    f"{label}.reviewer.legacy_replacement_unavailable must equal true",
-                )
-                require(
-                    reviewer["legacy_author_harness"] == "pi",
-                    f"{label}.reviewer.legacy_author_harness must equal pi",
-                )
-                require(
-                    reviewer["legacy_author_provenance"]
-                    == LEGACY_AUTHOR_PROVENANCE,
-                    f"{label}.reviewer.legacy_author_provenance is invalid",
-                )
-                provider_slot, separator, _model = reviewer[
-                    "legacy_author_model"
-                ].partition("/")
-                require(
-                    bool(separator)
-                    and PI_OPENAI_PROVIDER_SLOT_RE.fullmatch(provider_slot)
-                    is not None,
-                    f"{label}.reviewer.legacy_author_model is invalid",
-                )
-                try:
-                    dt.datetime.strptime(
-                        reviewer["legacy_admission_approved_at"],
-                        "%Y-%m-%dT%H:%M:%SZ",
-                    )
-                except ValueError:
-                    fail(
-                        f"{label}.reviewer.legacy_admission_approved_at is invalid"
-                    )
-            else:
-                require(
-                    not legacy_fields.intersection(reviewer),
-                    f"{label}.reviewer carries legacy admission evidence without its mode",
-                )
         if (
             isinstance(reviewer, dict)
             and reviewer.get("execution_mode") == "azure-compartment-v1"
@@ -3088,57 +2552,13 @@ def load_ledger(path: Path, task_id: str, url: str) -> dict[str, Any]:
 def reviewer_candidates(
     home: Path,
     meta: dict[str, str],
-    legacy_admission: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
-    """Return every eligible reviewer for this author, in configured order.
+    """Return every policy-eligible reviewer in configured order.
 
-    Selection screens the whole roster instead of stopping at the first match.
-    Ordinary entries still prove account separation. A narrowly scoped,
-    replacement-unavailable legacy admission can instead acknowledge that a
-    pre-snapshot Pi author's account is unknowable; it never synthesizes an
-    identity, and `run_reviewer` binds
-    the exact readable reviewer identity selected here before launch.
+    Reviewer independence is structural: reviewer homes come from the dedicated
+    Crosscheck account pool, and model separation is screened here. Author
+    account identity is deliberately outside this gate.
     """
-
-    require(
-        not (
-            meta.get("harness") == "pi"
-            and meta.get("author_identity_snapshot_epoch")
-            == PI_AUTHOR_IDENTITY_SNAPSHOT_EPOCH
-            and "author_account_identity" not in meta
-        ),
-        "AUTHOR IDENTITY CAPTURE FAILED: modern Pi task metadata records the "
-        "launch-bound identity snapshot epoch without author_account_identity; "
-        "failed modern capture is inadmissible",
-    )
-
-    if legacy_admission is not None:
-        expected_admission_keys = {
-            "author_account_independence",
-            "legacy_admission_sha256",
-            "legacy_admission_approved_at",
-            "legacy_replacement_unavailable",
-            "legacy_replacement_unavailable_reason",
-            "legacy_author_provenance",
-            "legacy_author_harness",
-            "legacy_author_model",
-        }
-        require_exact_keys(
-            legacy_admission, expected_admission_keys, "legacy author admission"
-        )
-        require(
-            legacy_admission.get("author_account_independence")
-            == LEGACY_AUTHOR_ADMISSION_MODE
-            and meta.get("harness") == "pi"
-            and "account_home" not in meta
-            and "author_account_identity" not in meta
-            and "author_identity_snapshot_epoch" not in meta
-            and legacy_admission.get("legacy_author_provenance")
-            == LEGACY_AUTHOR_PROVENANCE
-            and legacy_admission.get("legacy_author_harness") == meta.get("harness")
-            and legacy_admission.get("legacy_author_model") == meta.get("model"),
-            "legacy author admission cannot downgrade or mismatch task author metadata",
-        )
 
     allow_same_model = same_model_review_enabled(home)
     config_path = Path(
@@ -3162,37 +2582,12 @@ def reviewer_candidates(
     )
     allowed_profiles = {
         ("codex", "gpt-5.6-sol", "xhigh"),
-        ("claude", "claude-opus-5", "xhigh"),
         ("pi", "gpt-5.6-sol", "xhigh"),
     }
     allowed_profiles_message = " or ".join(
         f"{harness} {model} {effort}"
         for harness, model, effort in sorted(allowed_profiles)
     )
-    author_home_value = meta.get("account_home")
-    # A lane with no account_home is an ordinary, supported author identity, not
-    # an emergency. Account routing is off by design for any harness outside
-    # claude and codex, so a pi lane structurally cannot record an account_home;
-    # demanding one, or an `account_routing_emergency_bypass=1` marker in its
-    # place, made every pi-launched lane permanently unmergeable through this
-    # gate. A bypass that has to be set on the majority of lanes is not a gate.
-    #
-    # What the identity check is actually for is proving the reviewer is not the
-    # author. For an account-bearing lane that is proved on the executing
-    # account. For an account-less lane a different provider proves separation
-    # structurally. Pi also records its exact provider slot in model metadata,
-    # so its current account id can prove a same-provider pair; an unreadable
-    # slot remains unproven exactly like an unreadable account_home.
-    require(
-        author_home_value is not None or meta["harness"] in HARNESS_PROVIDERS,
-        "author identity inspection found no account_home and no known provider "
-        f"namespace for harness={meta['harness']!r}, so no reviewer can be "
-        "proved independent of this author",
-    )
-    author_home = Path(author_home_value) if author_home_value is not None else None
-    if author_home is not None:
-        require(author_home.is_absolute(), "author account_home must be absolute")
-        author_home = author_home.resolve()
     validated: list[dict[str, str]] = []
     for index, reviewer in enumerate(reviewers):
         label = f"reviewer configuration.reviewers[{index}]"
@@ -3222,144 +2617,19 @@ def reviewer_candidates(
                 "account_home": str(account_home.resolve()),
             }
         )
-    author_identity = author_account_identity(meta, author_home)
-    author_provider_for_pairs = HARNESS_PROVIDERS.get(meta["harness"])
     author_model = model_identity(meta["model"])
     eligible: list[dict[str, str]] = []
     for reviewer in validated:
         model_is_separate = model_identity(reviewer["model"]) != author_model
-        model_is_eligible = model_is_separate or allow_same_model
-        if author_home is not None:
-            account_is_eligible = Path(reviewer["account_home"]) != author_home
-            if account_is_eligible and (
-                author_provider_for_pairs is not None
-                and author_provider_for_pairs
-                == HARNESS_PROVIDERS.get(reviewer["harness"])
-            ):
-                # Two distinct directories can still execute as one upstream
-                # account, so a same-provider pair must prove separation on the
-                # executing credential rather than on the path. This is the
-                # selection screen; run_reviewer repeats it against the
-                # credential it actually binds, which is authoritative.
-                reviewer_identity = account_identity(
-                    reviewer["harness"], Path(reviewer["account_home"])
-                )
-                if author_identity is None or reviewer_identity is None:
-                    # An unresolvable identity on either side is never
-                    # separation: a home that names no account cannot be shown
-                    # distinct from the author's, and path inequality is
-                    # exactly the proof this branch exists to replace.
-                    account_is_eligible = False
-                else:
-                    account_is_eligible = author_identity != reviewer_identity
-        else:
-            # Without account_home, a different provider proves separation by
-            # namespace. A Pi lane additionally records its provider slot in
-            # model metadata, so a same-provider reviewer can be compared to
-            # that slot's readable account id. Every other same-provider pair,
-            # and an unreadable Pi slot on either side, remains unproven.
-            author_provider = HARNESS_PROVIDERS.get(meta["harness"])
-            reviewer_provider = HARNESS_PROVIDERS.get(reviewer["harness"])
-            if (
-                author_provider is not None
-                and reviewer_provider is not None
-                and author_provider != reviewer_provider
-            ):
-                account_is_eligible = True
-            elif (
-                allow_same_model
-                and author_identity is not None
-                and reviewer_provider == author_provider
-            ):
-                reviewer_identity = account_identity(
-                    reviewer["harness"], Path(reviewer["account_home"])
-                )
-                account_is_eligible = (
-                    reviewer_identity is not None
-                    and reviewer_identity != author_identity
-                )
-            elif (
-                legacy_admission is not None
-                and reviewer_provider == author_provider
-            ):
-                # This is admission, not proof of separation. The author account
-                # remains unknown. A readable reviewer identity is still bound
-                # now so the ledger can prove which account performed the review
-                # without claiming it differed from the historical author.
-                reviewer_identity = account_identity(
-                    reviewer["harness"], Path(reviewer["account_home"])
-                )
-                account_is_eligible = reviewer_identity is not None
-                if reviewer_identity is not None:
-                    reviewer.update(legacy_admission)
-                    reviewer["reviewer_account_identity_sha256"] = hashlib.sha256(
-                        reviewer_identity.encode("utf-8")
-                    ).hexdigest()
-            else:
-                account_is_eligible = False
-        if model_is_eligible and account_is_eligible:
-            if author_identity is not None and author_provider_for_pairs == (
-                HARNESS_PROVIDERS.get(reviewer["harness"])
-            ):
-                # Carried so the executing credential, not the configured
-                # path, has the final word on account separation.
-                reviewer["author_account_identity"] = author_identity
+        if model_is_separate or allow_same_model:
             if not model_is_separate:
                 reviewer["model_independence"] = "same-model"
             eligible.append(reviewer)
     if eligible:
         return eligible
-    if legacy_admission is not None:
-        fail(
-            "explicit legacy author admission found no eligible reviewer with "
-            "a readable executing account identity and permitted model; the "
-            "author account remains unproven and was not synthesized"
-        )
-    if (
-        allow_same_model
-        and meta["harness"] == "pi"
-        and author_home is None
-        and author_identity is None
-    ):
-        fail(
-            "AUTHOR IDENTITY UNKNOWABLE: same-model review for a structurally "
-            "unrouted Pi author requires launch-bound author_account_identity "
-            "metadata; this missing launch-bound metadata is an author-proof "
-            "failure, not a reviewer-roster failure"
-        )
-    if author_home is not None:
-        required_independence = (
-            "a proven-separate account from the author"
-            if allow_same_model
-            else "both a different model and a proven-separate account from the author"
-        )
-        fail(
-            "independence inspection found no configured reviewer with "
-            f"{required_independence} "
-            f"(model={meta['model']!r}, account_home={str(author_home)!r}); "
-            "a same-provider reviewer must also resolve a different executing "
-            "account than the author, because two directories can carry one "
-            "upstream account and a home that names no account proves nothing"
-        )
-    if allow_same_model:
-        if author_identity is not None:
-            fail(
-                "independence inspection found no configured reviewer with a "
-                "proven-separate account from the structurally unrouted author "
-                f"(harness={meta['harness']!r}, model={meta['model']!r})"
-            )
-        fail(
-            "independence inspection found no configured reviewer on a different "
-            "provider from the structurally unrouted author "
-            f"(harness={meta['harness']!r}, model={meta['model']!r}); same-provider "
-            "account separation cannot be proved without account_home or a readable "
-            "Pi provider-slot identity"
-        )
     fail(
-        "independence inspection found no configured reviewer with both a "
-        "different model and a different provider from the structurally "
-        f"unrouted author (harness={meta['harness']!r}, model={meta['model']!r}); "
-        "same-provider account separation cannot be proved without account_home"
+        "reviewer model policy found no configured reviewer on a different model "
+        f"from {meta['model']!r}"
     )
 
 
@@ -3574,19 +2844,8 @@ SAME-MODEL REVIEW - REDUCED MODEL INDEPENDENCE:
 You are using the same model as the author and may share the author's blind spots and priors.
 Compensate explicitly: attack the change adversarially, try to falsify the author's claims rather than confirm them, and default to reporting a finding when uncertain.
 """
-    legacy_author_warning = ""
-    reviewer_role = "independent merge-gate reviewer"
-    if config.get("author_account_independence") == LEGACY_AUTHOR_ADMISSION_MODE:
-        reviewer_role = "exact-head merge-gate reviewer"
-        legacy_author_warning = f"""
-LEGACY AUTHOR ACCOUNT UNPROVEN - EXPLICIT LOCAL ADMISSION:
-This pre-snapshot Pi lane has no durable upstream author-account proof. The local admission does not synthesize one, so you may be executing under the same upstream account as the author and must not claim account independence.
-Admission digest: {config['legacy_admission_sha256']}.
-Replacement was declared unavailable because: {config['legacy_replacement_unavailable_reason']}.
-Compensate explicitly: challenge the change as if the author's assumptions are hostile, seek disconfirming evidence, and report uncertainty rather than converting it into clearance.
-"""
-    return f"""You are the {reviewer_role} for a pull request.
-{legacy_author_warning}{same_model_warning}Review exact head {snapshot_value['head_sha']} against exact base {snapshot_value['base_sha']}.
+    return f"""You are the independent merge-gate reviewer for a pull request.
+{same_model_warning}Review exact head {snapshot_value['head_sha']} against exact base {snapshot_value['base_sha']}.
 Perform a rigorous release-readiness review of the full diff and the PR's own claims.
 Do not trust the PR description or a previous clean run.
 Do not change tracked files.
@@ -3744,82 +3003,6 @@ def pi_reviewer_command() -> list[str]:
     return [str(resolved_entrypoint)]
 
 
-def claude_envelope_report(stdout: str, stderr: str) -> tuple[str, bool]:
-    """Explain a Claude reviewer failure and say whether the model was reached.
-
-    Claude reports its own failures inside the result envelope, and the reason
-    lives in `result` -- past the point where a raw 500-character excerpt of the
-    envelope stops. Truncating the envelope produced the fleet's least
-    actionable banner: a wall of zeroed usage counters with the sentence that
-    explains them cut off. This reads the fields that carry the explanation.
-
-    The boolean reports whether any model work happened. An envelope with no API
-    duration, no token usage, and no per-model usage means the request never
-    reached the provider, which is an account, credential, quota, or launch
-    fault rather than anything learned about the code under review.
-    """
-
-    stderr_tail = stderr.strip()[-500:]
-    try:
-        envelope = json.loads(stdout)
-    except (json.JSONDecodeError, ValueError):
-        excerpt = stdout.strip()[:500] or "no stdout"
-        detail = f"reviewer emitted no decodable result envelope: {excerpt}"
-        if stderr_tail:
-            detail += f"; stderr: {stderr_tail}"
-        return detail, False
-    if not isinstance(envelope, dict):
-        return "reviewer result envelope was not an object", False
-
-    usage = envelope.get("usage")
-    usage = usage if isinstance(usage, dict) else {}
-    token_fields = (
-        "input_tokens",
-        "output_tokens",
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-    )
-    tokens = sum(
-        value
-        for field in token_fields
-        if isinstance(value := usage.get(field), int)
-        and not isinstance(value, bool)
-    )
-    api_ms = envelope.get("duration_api_ms")
-    api_ms = api_ms if isinstance(api_ms, (int, float)) else 0
-    model_usage = envelope.get("modelUsage")
-    reached_model = bool(api_ms) or tokens > 0 or bool(model_usage)
-
-    parts = []
-    for field in (
-        "subtype",
-        "terminal_reason",
-        "stop_reason",
-        "num_turns",
-        "api_error_status",
-    ):
-        if envelope.get(field) not in (None, ""):
-            parts.append(f"{field}={envelope[field]!r}")
-    denials = envelope.get("permission_denials")
-    if isinstance(denials, list) and denials:
-        parts.append(f"permission_denials={json.dumps(denials)[:300]}")
-    reason = envelope.get("result")
-    if isinstance(reason, str) and reason.strip():
-        parts.append(f"reported reason: {reason.strip()[:600]}")
-    elif isinstance(envelope.get("error"), str) and envelope["error"].strip():
-        parts.append(f"reported error: {envelope['error'].strip()[:600]}")
-    else:
-        parts.append("the envelope carried no reason text")
-    if not reached_model:
-        parts.append(
-            "no model work occurred (no API duration, tokens, or model usage), "
-            "so the reviewer account never reached the provider"
-        )
-    if stderr_tail:
-        parts.append(f"stderr: {stderr_tail}")
-    return "; ".join(parts), reached_model
-
-
 def pi_review_result(output: str) -> tuple[dict[str, Any], int]:
     turn_count = 0
     agent_ended = False
@@ -3904,7 +3087,6 @@ def run_reviewer(
     snapshot_value: dict[str, Any],
     ledger: dict[str, Any],
     config: dict[str, str],
-    author_account_identity: str,
 ) -> Any:
     pi_command = (
         pi_reviewer_command()
@@ -3921,8 +3103,6 @@ def run_reviewer(
         "CODEX_ACCESS_TOKEN",
         "CODEX_REFRESH_TOKEN",
         "CODEX_REVOKE_TOKEN",
-        "CLAUDE_CONFIG_DIR",
-        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
         "PI_CODING_AGENT_DIR",
         "PI_CODING_AGENT_SESSION_DIR",
         "PI_PROVIDER",
@@ -3932,12 +3112,7 @@ def run_reviewer(
         environment.pop(provider_variable, None)
     account_home = Path(config["account_home"])
     config["executing_account_home"] = str(account_home)
-    if config["harness"] == "claude":
-        execution_home, credential_source, credential_identifier = (
-            prepare_claude_execution_home(protocol_dir, account_home)
-        )
-        config["account_selector"] = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
-    elif config["harness"] == "codex":
+    if config["harness"] == "codex":
         execution_home = account_home
         credential_source, credential_identifier = inspect_codex_credential(
             account_home
@@ -3952,41 +3127,6 @@ def run_reviewer(
     config["execution_home"] = str(execution_home.resolve())
     config["credential_source"] = credential_source
     config["credential_identifier"] = credential_identifier
-    if author_account_identity:
-        # The credential preflights above have already accepted this account
-        # home, so this is the authoritative separation proof: it reads the
-        # identity of the credential actually bound for execution rather than
-        # trusting the configured directory to name a distinct account.
-        executing_account = account_identity(config["harness"], account_home)
-        if executing_account is None:
-            tool_fail(
-                "executing-account separation is unprovable: reviewer "
-                f"{config['harness']} credential at {credential_identifier} "
-                "exposes no account identity to compare against the author's"
-            )
-        if executing_account == author_account_identity:
-            tool_fail(
-                "executing-account separation failed: reviewer "
-                f"{config['harness']} account home {account_home} executes as "
-                "the same upstream account as the author, so this reviewer is "
-                "not independent despite a different configured path"
-            )
-    elif config.get("author_account_independence") == LEGACY_AUTHOR_ADMISSION_MODE:
-        # The admission deliberately makes no author-account claim. It still
-        # binds the exact readable reviewer identity selected during preflight,
-        # so credential drift cannot silently change who performed the review.
-        executing_account = account_identity(config["harness"], account_home)
-        if executing_account is None:
-            tool_fail(
-                "legacy-admitted reviewer executing account became unreadable "
-                f"at {credential_identifier}; the author account remains unproven"
-            )
-        executing_digest = hashlib.sha256(executing_account.encode("utf-8")).hexdigest()
-        if executing_digest != config.get("reviewer_account_identity_sha256"):
-            tool_fail(
-                "legacy-admitted reviewer executing account changed after "
-                "selection; refusing rather than changing the audited reviewer identity"
-            )
     schema_path = protocol_dir / "review-schema.json"
     schema_value = review_output_schema(
         config["executing_account_home"], config["execution_home"]
@@ -4121,87 +3261,7 @@ def run_reviewer(
         config["reviewer_turn_count"] = str(turn_count)
         return verdict
 
-    claude = reviewer_binary(
-        "FM_CROSSCHECK_CLAUDE_BIN", "claude", "Claude reviewer"
-    )
-    environment["CLAUDE_CONFIG_DIR"] = config["account_home"]
-    environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = config["account_home"]
-    claude_tmp = protocol_dir / "claude-tmp"
-    claude_tmp.mkdir(mode=0o700)
-    environment["CLAUDE_CODE_TMPDIR"] = str(claude_tmp)
-    sandbox_path = protocol_dir / "claude-sandbox.sb"
-    arguments = [
-        claude,
-        "-p",
-        "--safe-mode",
-        "--model",
-        config["model"],
-        "--effort",
-        config["effort"],
-        "--dangerously-skip-permissions",
-        "--tools",
-        "Bash,Read,Glob,Grep",
-        "--no-session-persistence",
-        "--output-format",
-        "json",
-        "--json-schema",
-        json.dumps(schema_value, separators=(",", ":")),
-        prompt,
-    ]
-    result = run_sandboxed(
-        arguments,
-        cwd=review_dir,
-        profile_path=sandbox_path,
-        allow_network=True,
-        additional_writable_roots=(
-            Path(config["account_home"]),
-        ),
-        env=environment,
-        timeout=reviewer_timeout(),
-        description="Claude reviewer",
-        maximum_output_bytes=reviewer_max_capture(),
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        detail, reached_model = claude_envelope_report(result.stdout, result.stderr)
-        message = (
-            f"Claude reviewer at {config['account_home']} exited "
-            f"{result.returncode} without a verdict artifact: {detail}"
-        )
-        # A reviewer that never reached the provider taught the gate nothing
-        # about the code. Recording that as `unreviewed` also manufactures a
-        # suspicion, which reads in the ledger like the reviewer raised a
-        # concern; it is a tool failure so the banner is honest and the run can
-        # fail over to another independent account.
-        if reached_model:
-            fail(message)
-        tool_fail(message)
-    try:
-        envelope = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        fail(f"reviewer returned a malformed result envelope: {exc.msg}")
-    require(isinstance(envelope, dict), "reviewer result envelope must be an object")
-    if envelope.get("is_error") is not False:
-        detail, reached_model = claude_envelope_report(result.stdout, result.stderr)
-        message = (
-            f"Claude reviewer at {config['account_home']} reported an error "
-            f"envelope: {detail}"
-        )
-        if reached_model:
-            fail(message)
-        tool_fail(message)
-    for field, expected, label in (
-        ("subtype", "success", "reviewer result did not complete successfully"),
-        ("terminal_reason", "completed", "reviewer stopped before completion"),
-    ):
-        if envelope.get(field) != expected:
-            detail, _ = claude_envelope_report(result.stdout, result.stderr)
-            fail(f"{label}: {detail}")
-    require(
-        isinstance(envelope.get("structured_output"), dict),
-        "reviewer stopped without structured output: "
-        f"{claude_envelope_report(result.stdout, result.stderr)[0]}",
-    )
-    return envelope["structured_output"]
+    fail(f"unsupported reviewer harness after policy validation: {config['harness']}")
 
 
 def validate_review_shape(
@@ -4664,35 +3724,6 @@ def render_report(ledger: dict[str, Any], run: dict[str, Any]) -> str:
         "",
     ]
     reviewer = run.get("reviewer")
-    legacy_author_admitted = (
-        isinstance(reviewer, dict)
-        and reviewer.get("author_account_independence")
-        == LEGACY_AUTHOR_ADMISSION_MODE
-    )
-    if legacy_author_admitted:
-        lines.extend(
-            [
-                "Review mode: **LEGACY AUTHOR ACCOUNT UNPROVEN** (explicit local admission; the reviewer may share the author's upstream account).",
-                "",
-                f"Admission digest: `{reviewer['legacy_admission_sha256']}`",
-                "",
-                f"Admission approved at: `{reviewer['legacy_admission_approved_at']}`",
-                "",
-                "Historical author provenance: "
-                f"`{reviewer['legacy_author_provenance']}`",
-                "",
-                f"Historical author harness: `{reviewer['legacy_author_harness']}`",
-                "",
-                f"Historical author model: `{reviewer['legacy_author_model']}`",
-                "",
-                "Reviewer account identity digest: "
-                f"`{reviewer['reviewer_account_identity_sha256']}`",
-                "",
-                "Replacement unavailable: "
-                f"{reviewer['legacy_replacement_unavailable_reason']}",
-                "",
-            ]
-        )
     if isinstance(reviewer, dict) and reviewer.get("execution_mode") == "azure-compartment-v1":
         identity = reviewer.get("azure_identity") or {}
         lines.extend(
@@ -4717,14 +3748,9 @@ def render_report(ledger: dict[str, Any], run: dict[str, Any]) -> str:
             ]
         )
     if isinstance(reviewer, dict) and reviewer.get("model_independence") == "same-model":
-        account_note = (
-            "author-account independence is also unproven under the legacy admission"
-            if legacy_author_admitted
-            else "account separation remained mandatory"
-        )
         lines.extend(
             [
-                f"Review mode: **SAME-MODEL** (reduced model independence; {account_note}).",
+                "Review mode: **SAME-MODEL** (reduced model independence).",
                 "",
             ]
         )
@@ -4997,14 +4023,9 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
             pass
         tool_fail(reason)
     config: dict[str, str] | None = None
-    author_account_identity = ""
-
     try:
         try:
-            admission = legacy_author_admission(
-                home, task_id, url, snapshot_value["head_sha"], meta
-            )
-            candidates = reviewer_candidates(home, meta, admission)
+            candidates = reviewer_candidates(home, meta)
         except CrosscheckError as exc:
             tool_fail(f"reviewer preflight failed: {exc}")
         with tempfile.TemporaryDirectory(prefix=f".{task_id}.crosscheck.", dir=state) as temporary:
@@ -5027,10 +4048,6 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
             fetched_source: Path | None = None
             for position, candidate in enumerate(candidates):
                 config = candidate
-                # Detached before anything can fail: the author's account id is
-                # proof material for the launch check, not part of the reviewer
-                # identity the ledger records for a failed run.
-                author_account_identity = config.pop("author_account_identity", "")
                 remaining = len(candidates) - position - 1
                 review_dir = temp_root / f"review-{position}"
                 try:
@@ -5068,7 +4085,6 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                             snapshot_value=snapshot_value,
                             ledger=ledger,
                             config=config,
-                            author_account_identity=author_account_identity,
                         )
                     else:
                         raw_review = run_reviewer(
@@ -5076,7 +4092,6 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                             snapshot_value,
                             ledger,
                             config,
-                            author_account_identity,
                         )
                 except CrosscheckToolError as exc:
                     if not remaining:

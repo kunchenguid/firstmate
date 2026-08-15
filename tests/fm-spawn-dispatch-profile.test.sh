@@ -538,7 +538,7 @@ test_pi_secondmate_approves_without_excluding_tools() {
 }
 
 test_pi_author_account_snapshot_binds_launch_and_recovery() {
-  local rec id source out status launch meta tasktmp private count absent_marker failed_id
+  local rec id source out status launch meta tasktmp private absent_marker failed_id
   id=profile-pi-author-snapshot-z23
   rec=$(make_spawn_case profile-pi-author-snapshot pi "$id")
   read_case_record "$rec"
@@ -556,10 +556,8 @@ test_pi_author_account_snapshot_binds_launch_and_recovery() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "PI_CODING_AGENT_DIR='$private' pi --approve" \
     "Pi launch did not bind the task-private author account"
-  assert_grep 'author_account_identity=account-A' "$meta" \
-    "Pi launch did not record the identity derived from its private snapshot"
-  assert_grep 'author_identity_snapshot_epoch=launch-bound-v1' "$meta" \
-    "Pi launch did not record the immutable snapshot-era marker"
+  assert_no_grep 'author_account_identity=' "$meta" \
+    "Pi launch retained obsolete author identity metadata"
   python3 - "$private" account-A <<'PY' \
     || fail "Pi task-private snapshot contents or permissions are invalid"
 import json
@@ -584,14 +582,8 @@ PY
       "$id" "$PROJ_DIR" --model openai-codex-5/gpt-5.6-sol --effort xhigh)
   status=$?
   expect_code 0 "$status" "Pi author snapshot recovery should succeed: $out"
-  count=$(grep -c '^author_account_identity=' "$meta" || true)
-  [ "$count" -eq 1 ] \
-    || fail "Pi metadata recovery did not preserve exactly one owned author identity"
-  assert_grep 'author_account_identity=account-A' "$meta" \
-    "Pi metadata recovery changed its launch-bound author identity"
-  count=$(grep -c '^author_identity_snapshot_epoch=' "$meta" || true)
-  [ "$count" -eq 1 ] \
-    || fail "Pi metadata recovery did not preserve exactly one snapshot-era marker"
+  assert_no_grep 'author_account_identity=' "$meta" \
+    "Pi metadata recovery restored obsolete author identity metadata"
 
   make_pi_account_source "$source" account-B
   : > "$absent_marker"
@@ -599,46 +591,34 @@ PY
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" "$PROJ_DIR" --model openai-codex-5/gpt-5.6-sol --effort xhigh)
   status=$?
-  expect_code 0 "$status" "Pi account-change recovery should remain cross-provider-only: $out"
+  expect_code 0 "$status" "Pi account-change recovery should refresh its private snapshot: $out"
   assert_no_grep 'author_account_identity=' "$meta" \
-    "a task spanning two Pi accounts retained same-provider eligibility"
-  assert_grep 'author_identity_snapshot_epoch=launch-bound-v1' "$meta" \
-    "Pi account-change recovery lost the modern snapshot-era marker"
+    "Pi account-change recovery restored obsolete author identity metadata"
   tasktmp=$(sed -n 's/^tasktmp=//p' "$meta")
   private="$tasktmp/pi-author-agent"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "PI_CODING_AGENT_DIR='$private' pi --approve" \
     "Pi account-change recovery launched outside its private snapshot"
 
-  sed -i.bak '/^author_identity_snapshot_epoch=/d' "$meta"
-  rm "$meta.bak"
-  : > "$absent_marker"
-  out=$(FM_FAKE_ENDPOINT_ABSENT_ONCE="$absent_marker" PI_CODING_AGENT_DIR="$source" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-      "$id" "$PROJ_DIR" --model openai-codex-5/gpt-5.6-sol --effort xhigh)
-  status=$?
-  expect_code 0 "$status" "legacy Pi recovery should not mint snapshot provenance: $out"
-  assert_no_grep 'author_account_identity=' "$meta" \
-    "legacy Pi recovery treated current credentials as historical identity"
-  assert_no_grep 'author_identity_snapshot_epoch=' "$meta" \
-    "legacy Pi recovery minted a modern snapshot-era marker"
-
   failed_id=profile-pi-author-snapshot-failed-z24
   rec=$(make_spawn_case profile-pi-author-snapshot-failed pi "$failed_id")
   read_case_record "$rec"
   source="$CASE_DIR/pi-source"
-  mkdir -p "$source"
+  mkdir -p "$source/extensions"
   out=$(PI_CODING_AGENT_DIR="$source" \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$failed_id" "$PROJ_DIR" --model openai-codex-5/gpt-5.6-sol --effort xhigh)
   status=$?
-  expect_code 0 "$status" "Pi failed-snapshot spawn should remain cross-provider-only: $out"
+  expect_code 0 "$status" "missing Pi author identity must not refuse the spawn: $out"
   meta="$HOME_DIR/state/$failed_id.meta"
   assert_no_grep 'author_account_identity=' "$meta" \
     "a failed Pi snapshot invented an author identity"
-  assert_grep 'author_identity_snapshot_epoch=launch-bound-v1' "$meta" \
-    "a failed modern Pi snapshot lost the snapshot-era marker"
-  pass "Pi snapshot epochs distinguish new launches from legacy recovery"
+  tasktmp=$(sed -n 's/^tasktmp=//p' "$meta")
+  private="$tasktmp/pi-author-agent"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "PI_CODING_AGENT_DIR='$private' pi --approve" \
+    "Pi launch still made author identity a snapshot precondition"
+  pass "Pi snapshots remain bound without recording or requiring author identity"
 }
 
 test_batch_forwards_shared_profile_flags() {

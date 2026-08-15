@@ -113,7 +113,6 @@ JSON
 EOF
   install_gh_axi_fake "$case_dir"
   install_codex_fake "$case_dir"
-  install_claude_fake "$case_dir"
   install_pi_fake "$case_dir"
   install_sandbox_fake "$case_dir"
   install_pytest_fake "$case_dir"
@@ -367,98 +366,6 @@ fi
 python3 "$FM_TEST_REVIEW_DRIVER" "$workdir" "$output" "$FM_TEST_REVIEW_SCENARIO" "$FM_TEST_HEAD"
 SH
   chmod +x "$case_dir/fakebin/codex"
-}
-
-install_claude_fake() {
-  local case_dir=$1
-  cat > "$case_dir/fakebin/claude" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FM_TEST_CLAUDE_LOG"
-[ "${CLAUDE_CONFIG_DIR:-}" = "$FM_TEST_REVIEWER_HOME" ] || exit 80
-[ "${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}" = "$FM_TEST_REVIEWER_HOME" ] || exit 73
-case "${HOME:-}" in
-  "$PWD"/.crosscheck/claude-home) ;;
-  *) exit 74 ;;
-esac
-[ "$(cd "$HOME/.claude" 2>/dev/null && pwd -P)" = "$FM_TEST_REVIEWER_HOME" ] \
-  || exit 72
-case "${CLAUDE_CODE_TMPDIR:-}" in
-  "$PWD"/.crosscheck/claude-tmp) ;;
-  *) exit 76 ;;
-esac
-mkdir -p "$CLAUDE_CODE_TMPDIR/bash-runtime" || exit 75
-mkdir -p "$HOME/.claude/session-env" || exit 77
-printf 'reviewer runtime state\n' > "$HOME/.claude/session-env/crosscheck-runtime" \
-  || exit 78
-[ "${1:-}" = -p ] || exit 81
-shift
-model=
-effort=
-autonomous=no
-safe_mode=no
-format=
-schema=
-prompt=
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --safe-mode) safe_mode=yes; shift ;;
-    --model) model=$2; shift 2 ;;
-    --effort) effort=$2; shift 2 ;;
-    --dangerously-skip-permissions) autonomous=yes; shift ;;
-    --tools) [ "$2" = Bash,Read,Glob,Grep ] || exit 89; shift 2 ;;
-    --no-session-persistence) shift ;;
-    --output-format) format=$2; shift 2 ;;
-    --json-schema) schema=$2; shift 2 ;;
-    *) prompt=$1; shift ;;
-  esac
-done
-[ "$safe_mode" = yes ] || {
-  [ ! -f "$PWD/CLAUDE.md" ] || cat "$PWD/CLAUDE.md" > "$FM_TEST_CONTEXT_LOG"
-  exit 90
-}
-[ "$model" = claude-opus-5 ] || exit 82
-[ "$effort" = xhigh ] || exit 83
-[ "$autonomous" = yes ] || exit 84
-[ "$format" = json ] || exit 85
-[ -n "$schema" ] && [ -n "$prompt" ] || exit 86
-if [ "${FM_TEST_CLAUDE_ZERO_TURN:-}" = 1 ]; then
-  # The observed shape of a Claude reviewer that never reached the provider:
-  # one turn, no API duration, no usage, and the only explanation in `result`.
-  printf '%s\n' '{"is_error":true,"duration_api_ms":0,"num_turns":1,"stop_reason":"stop_sequence","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"modelUsage":{},"permission_denials":[],"terminal_reason":"error","subtype":"error_during_execution","api_error_status":null,"result":"Claude AI usage limit reached|1786000000","type":"result"}'
-  exit 1
-fi
-if [ "$FM_TEST_REVIEW_SCENARIO" != reading-only-suspicion ]; then
-  if ! git -C "$PWD" diff "${FM_TEST_REVIEWED_BASE:-$FM_TEST_BASE}..$FM_TEST_HEAD" -- app.txt \
-    > "$HOME/.claude/session-env/crosscheck-git-diff" \
-    2> "$HOME/.claude/session-env/crosscheck-git-diff.err"; then
-    cat "$HOME/.claude/session-env/crosscheck-git-diff.err" >&2
-    exit 79
-  fi
-fi
-if [ "$FM_TEST_REVIEW_SCENARIO" = execution-home-drift ]; then
-  CLAUDE_SECURESTORAGE_CONFIG_DIR=$FM_TEST_AUTHOR_HOME
-  export CLAUDE_SECURESTORAGE_CONFIG_DIR
-fi
-temporary=$(mktemp "${TMPDIR:-/tmp}/fm-crosscheck-claude.XXXXXX") || exit 87
-python3 "$FM_TEST_REVIEW_DRIVER" "$PWD" "$temporary" "$FM_TEST_REVIEW_SCENARIO" "$FM_TEST_HEAD" || exit 88
-python3 - "$temporary" <<'PY'
-import json
-import os
-import sys
-structured = json.load(open(sys.argv[1]))
-envelope = {
-    "is_error": False,
-    "subtype": "success",
-    "terminal_reason": "completed",
-    "structured_output": structured,
-}
-if os.environ["FM_TEST_REVIEW_SCENARIO"] == "noisy-reviewer":
-    envelope["transcript"] = "R" * 210000
-print(json.dumps(envelope))
-PY
-rm -f "$temporary"
-SH
-  chmod +x "$case_dir/fakebin/claude"
 }
 
 install_pi_fake() {
@@ -995,14 +902,12 @@ run_case() {
   FM_DATA_OVERRIDE="${FM_TEST_DATA_OVERRIDE-$case_dir/data}" \
   FM_GH_AXI_BIN="$case_dir/fakebin/gh-axi" \
   FM_CROSSCHECK_CODEX_BIN="$case_dir/fakebin/codex" \
-  FM_CROSSCHECK_CLAUDE_BIN="$case_dir/fakebin/claude" \
   FM_CROSSCHECK_PI_BIN="${FM_TEST_PI_BIN-$case_dir/fakebin/pi}" \
   FM_CROSSCHECK_SANDBOX_BIN="$case_dir/fakebin/sandbox-exec" \
   FM_CROSSCHECK_FETCH_REMOTE="${FM_TEST_FETCH_REMOTE-$case_dir/repo}" \
   FM_CROSSCHECK_REVIEWER_CONFIG="$case_dir/reviewer.json" \
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_CODEX_LOG="$case_dir/codex.log" \
-  FM_TEST_CLAUDE_LOG="$case_dir/claude.log" \
   FM_TEST_PI_LOG="$case_dir/pi.log" \
   FM_TEST_CONTEXT_LOG="$case_dir/reviewer-context.log" \
   FM_TEST_PROMPT_LOG="$case_dir/prompt.log" \
@@ -1119,18 +1024,6 @@ seed_argument_proof_ledger() {
 JSON
 }
 
-select_claude_reviewer() {
-  local case_dir=$1
-  sed -i.bak 's/model=gpt-5.5/model=gpt-5.6-sol/' "$case_dir/state/task-x1.meta"
-  rm "$case_dir/state/task-x1.meta.bak"
-  cat > "$case_dir/reviewer.json" <<EOF
-{"reviewers":[
-  {"harness":"codex","model":"gpt-5.6-sol","effort":"xhigh","account_home":"$case_dir/author-home"},
-  {"harness":"claude","model":"claude-opus-5","effort":"xhigh","account_home":"$case_dir/reviewer-home"}
-]}
-EOF
-}
-
 select_pi_reviewer() {
   local case_dir=$1
   sed -i.bak \
@@ -1140,7 +1033,6 @@ select_pi_reviewer() {
   rm "$case_dir/state/task-x1.meta.bak"
   cat > "$case_dir/reviewer.json" <<EOF
 {"reviewers":[
-  {"harness":"claude","model":"claude-opus-5","effort":"xhigh","account_home":"$case_dir/reviewer-home"},
   {"harness":"pi","model":"gpt-5.6-sol","effort":"xhigh","account_home":"$case_dir/pi-home"}
 ]}
 EOF
@@ -1173,7 +1065,6 @@ os.environ["FM_CROSSCHECK_REVIEWER_CONFIG"] = str(config_path)
 
 profiles = [
     ("codex", "gpt-5.6-sol", "xhigh", "codex-home"),
-    ("claude", "claude-opus-5", "xhigh", "claude-home"),
     ("pi", "gpt-5.6-sol", "xhigh", "pi-home"),
 ]
 
@@ -1225,7 +1116,6 @@ write_config(
 )
 unlisted = expect_refused(validation_author, "must be")
 for accepted in (
-    "claude claude-opus-5 xhigh",
     "codex gpt-5.6-sol xhigh",
     "pi gpt-5.6-sol xhigh",
 ):
@@ -1237,22 +1127,17 @@ claude_author = {
     "model": "claude-opus-5",
     "account_home": str(homes["author-home"]),
 }
-write_config(
-    [
-        reviewer("claude", "claude-opus-5", "xhigh", "claude-home"),
-        reviewer("pi", "gpt-5.6-sol", "xhigh", "pi-home"),
-    ]
-)
+write_config([reviewer("claude", "claude-opus-5", "xhigh", "claude-home")])
+claude_refusal = expect_refused(claude_author, "must be")
+assert "codex gpt-5.6-sol xhigh" in claude_refusal, claude_refusal
+assert "pi gpt-5.6-sol xhigh" in claude_refusal, claude_refusal
+assert "claude claude-opus-5 xhigh" not in claude_refusal, claude_refusal
+print(f"REFUSED Claude reviewer: {claude_refusal}")
+
+write_config([reviewer("pi", "gpt-5.6-sol", "xhigh", "pi-home")])
 selected = module.reviewer_candidates(root, claude_author)[0]
-assert selected["harness"] == "pi"
-assert selected["model"] == "gpt-5.6-sol"
-assert selected["effort"] == "xhigh"
-assert selected["account_home"] == str(homes["pi-home"].resolve())
-print(
-    "SELECTED "
-    f"harness={selected['harness']} model={selected['model']} "
-    f"effort={selected['effort']} account_home={selected['account_home']}"
-)
+assert selected["harness"] == "pi", selected
+print(f"SELECTED supported reviewer after Claude author: {selected['harness']}")
 
 same_model_author = {
     "harness": "codex",
@@ -1273,15 +1158,17 @@ write_config(
         }
     ]
 )
-same_account = expect_refused(claude_author, "proven-separate account")
-print(f"REFUSED shared-account: {same_account}")
+selected = module.reviewer_candidates(root, claude_author)[0]
+assert selected["account_home"] == str(homes["author-home"].resolve()), selected
+assert set(selected) == {"harness", "model", "effort", "account_home"}, selected
+print("SELECTED without author account comparison")
 PY
-  pass "all reviewer profiles validate while model and account independence still fail closed"
+  pass "supported profiles enforce the model policy, exclude Claude, and ignore author identity"
 }
 
-test_same_model_relaxation_requires_proven_separate_account() {
+test_same_model_relaxation_does_not_require_author_identity() {
   "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
-    || fail "same-model relaxation weakened account separation or its safe default"
+    || fail "same-model relaxation depended on author identity or weakened its safe default"
 import importlib.util
 import json
 import os
@@ -1337,8 +1224,7 @@ distinct = codex_home("codex-distinct-account", "openai-account-B")
 opaque = codex_home("codex-unreadable-account", None)
 meta = {
     "harness": "pi",
-    "model": "openai-codex-5/gpt-5.5",
-    "author_account_identity": "openai-account-A",
+    "model": "openai-codex-5/gpt-5.6-sol",
 }
 os.environ["PI_CODING_AGENT_DIR"] = str(author)
 mode_path = home / "config" / "crosscheck-same-model"
@@ -1389,567 +1275,19 @@ expect_refused(distinct, "different model", "same-model-default-off")
 mode_path.write_text("off\n", encoding="utf-8")
 expect_refused(distinct, "different model", "same-model-explicit-off")
 
-meta["model"] = "openai-codex-5/gpt-5.6-sol"
 mode_path.write_text("on\n", encoding="utf-8")
-expect_refused(aliased, "proven-separate account", "same-upstream-account")
-expect_refused(opaque, "proven-separate account", "unreadable-reviewer-account")
-
-recorded_identity = meta.pop("author_account_identity")
-expect_refused_exact(
-    distinct,
-    "AUTHOR IDENTITY UNKNOWABLE: same-model review for a structurally unrouted "
-    "Pi author requires launch-bound author_account_identity metadata; this "
-    "missing launch-bound metadata is an author-proof failure, not a "
-    "reviewer-roster failure",
-    "missing-launch-identity",
-)
-meta["author_account_identity"] = recorded_identity
-
-write_reviewer(distinct)
-selected = module.reviewer_candidates(home, meta)[0]
-assert selected["account_home"] == str(distinct.resolve()), selected
-assert selected["author_account_identity"] == "openai-account-A", selected
-assert selected["model_independence"] == "same-model", selected
-print("SELECTED same-model-distinct-account")
+for account_home in (aliased, opaque, distinct):
+    write_reviewer(account_home)
+    selected = module.reviewer_candidates(home, meta)[0]
+    assert selected["account_home"] == str(account_home.resolve()), selected
+    assert selected["model_independence"] == "same-model", selected
+    assert "author_account_identity" not in selected, selected
+print("SELECTED same-model reviewers without author identity")
 
 mode_path.write_text("enabled\n", encoding="utf-8")
 expect_refused(distinct, "must contain exactly 'on' or 'off'", "invalid-mode")
 PY
-  pass "same-model opt-in preserves mandatory executing-account separation"
-}
-
-test_legacy_author_admission_is_exact_and_explicit() {
-  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
-    || fail "legacy author admission was not exact, explicit, and fail closed"
-import importlib.util
-import json
-import os
-from pathlib import Path
-import sys
-
-spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(module)
-
-home = Path(sys.argv[2]) / "legacy-author-admission-policy"
-(home / "config").mkdir(parents=True)
-reviewer_home = home / "reviewer-home"
-reviewer_home.mkdir()
-(reviewer_home / "auth.json").write_text(
-    json.dumps({"tokens": {"account_id": "reviewer-account-A"}}),
-    encoding="utf-8",
-)
-reviewer_config = home / "reviewer.json"
-reviewer_config.write_text(
-    json.dumps(
-        {
-            "reviewers": [
-                {
-                    "harness": "codex",
-                    "model": "gpt-5.6-sol",
-                    "effort": "xhigh",
-                    "account_home": str(reviewer_home),
-                }
-            ]
-        }
-    ),
-    encoding="utf-8",
-)
-os.environ["FM_CROSSCHECK_REVIEWER_CONFIG"] = str(reviewer_config)
-(home / "config" / "crosscheck-same-model").write_text("on\n", encoding="utf-8")
-
-meta = {"harness": "pi", "model": "openai-codex-5/gpt-5.6-sol"}
-task_id = "legacy-task"
-url = "https://github.com/ruby-dlee/firstmate/pull/116"
-head = "a" * 40
-next_head = "b" * 40
-admission_path = home / "config" / "crosscheck-legacy-author-admissions.json"
-
-assert module.legacy_author_admission(home, task_id, url, head, meta) is None
-try:
-    module.reviewer_candidates(home, meta)
-except module.CrosscheckError as exc:
-    assert "AUTHOR IDENTITY UNKNOWABLE" in str(exc), str(exc)
-else:
-    raise AssertionError("pre-fix lane was admitted without an explicit record")
-
-entry = {
-    "task_id": task_id,
-    "pull_request": url,
-    "head_sha": head,
-    "author_harness": "pi",
-    "author_model": meta["model"],
-    "approved_at": "2026-08-10T12:00:00Z",
-    "legacy_author_provenance": "pre-snapshot-pi",
-    "replacement_unavailable": True,
-    "replacement_unavailable_reason": "PR branch is not writable by this fleet; exact-head replacement cannot be published.",
-    "admit_unproven_author_account": True,
-}
-admission_path.write_text(json.dumps({"admissions": [entry]}), encoding="utf-8")
-
-try:
-    module.legacy_author_admission(home, task_id, url, next_head, meta)
-except module.CrosscheckError as exc:
-    assert "renew the explicit admission for the exact head" in str(exc), str(exc)
-else:
-    raise AssertionError("legacy admission floated to a different PR head")
-
-admission = module.legacy_author_admission(home, task_id, url, head, meta)
-assert admission is not None, admission
-selected = module.reviewer_candidates(home, meta, admission)[0]
-assert selected["author_account_independence"] == "unproven-legacy-admission", selected
-assert "author_account_identity" not in selected, selected
-assert selected["legacy_author_model"] == meta["model"], selected
-assert len(selected["legacy_admission_sha256"]) == 64, selected
-assert len(selected["reviewer_account_identity_sha256"]) == 64, selected
-
-# The admission never downgrades a modern identity, even when that identity
-# proves the configured reviewer is the author's own upstream account.
-modern_meta = dict(meta, author_account_identity="reviewer-account-A")
-try:
-    module.legacy_author_admission(home, task_id, url, head, modern_meta)
-except module.CrosscheckError as exc:
-    assert "cannot downgrade a modern or routed author identity" in str(exc), str(exc)
-else:
-    raise AssertionError("legacy admission replaced a modern author snapshot")
-
-modern_failed_snapshot_meta = dict(
-    meta, author_identity_snapshot_epoch="launch-bound-v1"
-)
-try:
-    module.legacy_author_admission(
-        home, task_id, url, head, modern_failed_snapshot_meta
-    )
-except module.CrosscheckError as exc:
-    assert "cannot downgrade a modern or routed author identity" in str(exc), str(exc)
-else:
-    raise AssertionError("legacy admission replaced a modern failed snapshot")
-try:
-    module.reviewer_candidates(home, modern_failed_snapshot_meta)
-except module.CrosscheckError as exc:
-    assert "AUTHOR IDENTITY CAPTURE FAILED" in str(exc), str(exc)
-    assert "failed modern capture is inadmissible" in str(exc), str(exc)
-else:
-    raise AssertionError("cross-provider review admitted a failed modern snapshot")
-try:
-    module.reviewer_candidates(home, modern_meta, admission)
-except module.CrosscheckError as exc:
-    assert "cannot downgrade or mismatch" in str(exc), str(exc)
-else:
-    raise AssertionError("direct legacy admission bypassed modern same-account refusal")
-try:
-    module.reviewer_candidates(home, modern_failed_snapshot_meta, admission)
-except module.CrosscheckError as exc:
-    assert "AUTHOR IDENTITY CAPTURE FAILED" in str(exc), str(exc)
-else:
-    raise AssertionError("direct legacy admission bypassed the modern snapshot epoch")
-
-# Even an admitted lane needs a readable, launch-bound reviewer account.
-(reviewer_home / "auth.json").write_text("{}\n", encoding="utf-8")
-try:
-    module.reviewer_candidates(home, meta, admission)
-except module.CrosscheckError as exc:
-    assert "readable executing account identity" in str(exc), str(exc)
-else:
-    raise AssertionError("legacy admission accepted an unreadable reviewer account")
-
-# Admission is a last resort, never the ordinary pre-fix recovery path.
-not_last_resort = dict(entry, replacement_unavailable=False)
-admission_path.write_text(
-    json.dumps({"admissions": [not_last_resort]}), encoding="utf-8"
-)
-try:
-    module.legacy_author_admission(home, task_id, url, head, meta)
-except module.CrosscheckError as exc:
-    assert "replacement_unavailable must equal true" in str(exc), str(exc)
-else:
-    raise AssertionError("legacy admission did not require failed replacement attestation")
-
-# The whole local file is validated, not only a matching record.
-malformed = dict(entry, unexpected=True)
-admission_path.write_text(json.dumps({"admissions": [malformed]}), encoding="utf-8")
-try:
-    module.legacy_author_admission(home, task_id, url, head, meta)
-except module.CrosscheckError as exc:
-    assert "unknown fields: unexpected" in str(exc), str(exc)
-else:
-    raise AssertionError("malformed legacy admission configuration was accepted")
-
-print("LEGACY ADMISSION exact-head explicit-unproven")
-PY
-  pass "legacy admission is exact-head, cannot downgrade modern proof, and never synthesizes author identity"
-}
-
-test_openai_backed_reviewer_proves_account_separation() {
-  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
-    || fail "OpenAI-backed account separation regressed to a path comparison"
-import importlib.util
-import json
-import os
-from pathlib import Path
-import sys
-
-spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(module)
-
-root = Path(sys.argv[2]) / "openai-account-separation"
-root.mkdir()
-config_path = root / "reviewer.json"
-os.environ["FM_CROSSCHECK_REVIEWER_CONFIG"] = str(config_path)
-
-
-def codex_home(name, account_id):
-    home = root / name
-    home.mkdir()
-    if account_id is not None:
-        (home / "auth.json").write_text(
-            json.dumps({"tokens": {"account_id": account_id}}), encoding="utf-8"
-        )
-    return home
-
-
-def pi_home(name, account_id):
-    home = root / name
-    home.mkdir()
-    if account_id is not None:
-        (home / "auth.json").write_text(
-            json.dumps(
-                {
-                    "openai-codex": {
-                        "type": "oauth",
-                        "access": "a",
-                        "refresh": "r",
-                        "accountId": account_id,
-                        "expires": 1,
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-    return home
-
-
-author = codex_home("codex-author", "openai-account-A")
-aliased = pi_home("pi-aliased", "openai-account-A")
-distinct = pi_home("pi-distinct", "openai-account-B")
-opaque = pi_home("pi-unreadable", None)
-
-
-def write_config(home):
-    config_path.write_text(
-        json.dumps(
-            {
-                "reviewers": [
-                    {
-                        "harness": "pi",
-                        "model": "gpt-5.6-sol",
-                        "effort": "xhigh",
-                        "account_home": str(home),
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-meta = {
-    "harness": "codex",
-    "model": "claude-opus-5",
-    "account_home": str(author),
-}
-
-
-def expect_refused(home, label):
-    write_config(home)
-    try:
-        module.reviewer_candidates(root, meta)
-    except module.CrosscheckError as exc:
-        message = str(exc)
-        assert "proven-separate account" in message, message
-        print(f"REFUSED {label}: {message[:120]}")
-        return
-    raise AssertionError(f"{label} was accepted as an independent reviewer")
-
-
-# One OpenAI account behind two different directories is not separation.
-expect_refused(aliased, "same-openai-account-different-path")
-
-write_config(distinct)
-selected = module.reviewer_candidates(root, meta)[0]
-assert selected["account_home"] == str(distinct.resolve()), selected
-assert selected["author_account_identity"] == "openai-account-A", selected
-print(f"SELECTED distinct-openai-account: {selected['account_home']}")
-
-# An unreadable reviewer identity is refused at selection rather than carried
-# forward: an identity that cannot be resolved is never separation, and
-# skipping the entry lets a genuinely provable reviewer later in the list win.
-expect_refused(opaque, "unreadable-reviewer-identity")
-
-# An unreadable author identity can never become provable separation,
-# because nothing downstream re-inspects the author.
-unreadable_author = {
-    "harness": "codex",
-    "model": "claude-opus-5",
-    "account_home": str(codex_home("codex-author-opaque", None)),
-}
-write_config(distinct)
-try:
-    module.reviewer_candidates(root, unreadable_author)
-except module.CrosscheckError as exc:
-    assert "proven-separate account" in str(exc), str(exc)
-    print("REFUSED unreadable-author-identity")
-else:
-    raise AssertionError("unreadable author identity was accepted as separate")
-
-# A cross-provider pair is unaffected: there is no shared account namespace to
-# collide in, so path separation still governs.
-claude_meta = {
-    "harness": "claude",
-    "model": "claude-opus-5",
-    "account_home": str(codex_home("claude-author", None)),
-}
-write_config(aliased)
-selected = module.reviewer_candidates(root, claude_meta)[0]
-assert selected["account_home"] == str(aliased.resolve()), selected
-print("SELECTED claude-author-unaffected")
-PY
-  pass "OpenAI-backed reviewers prove account separation on the executing credential"
-}
-
-test_anthropic_backed_reviewer_proves_account_separation() {
-  # Anthropic pairs must prove separation on the account each home executes as,
-  # exactly as OpenAI pairs do. Path inequality is not proof: a Claude home that
-  # names no account borrows whatever credential the environment supplies, which
-  # is how a "different" reviewer can be the author's own account.
-  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
-    || fail "Anthropic independence regressed to a path comparison"
-import importlib.util
-import json
-import os
-from pathlib import Path
-import sys
-
-spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(module)
-
-root = Path(sys.argv[2]) / "anthropic-account-separation"
-root.mkdir()
-config_path = root / "reviewer.json"
-os.environ["FM_CROSSCHECK_REVIEWER_CONFIG"] = str(config_path)
-
-
-def claude_home(name, account_uuid):
-    home = root / name
-    home.mkdir()
-    payload = {} if account_uuid is None else {
-        "oauthAccount": {"accountUuid": account_uuid}
-    }
-    (home / ".claude.json").write_text(json.dumps(payload), encoding="utf-8")
-    return home
-
-
-author = claude_home("claude-author", "anthropic-account-A")
-aliased = claude_home("claude-aliased", "anthropic-account-A")
-distinct = claude_home("claude-distinct", "anthropic-account-B")
-opaque = claude_home("claude-borrowed", None)
-
-
-def write_config(home, harness="claude", model="claude-opus-5"):
-    config_path.write_text(
-        json.dumps(
-            {
-                "reviewers": [
-                    {
-                        "harness": harness,
-                        "model": model,
-                        "effort": "xhigh",
-                        "account_home": str(home),
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-meta = {
-    "harness": "claude",
-    "model": "gpt-5.6-sol",
-    "account_home": str(author),
-}
-
-
-def expect_refused(home, label):
-    write_config(home)
-    try:
-        module.reviewer_candidates(root, meta)
-    except module.CrosscheckError as exc:
-        message = str(exc)
-        assert "proven-separate account" in message, message
-        print(f"REFUSED {label}")
-        return
-    raise AssertionError(f"{label} was accepted as an independent reviewer")
-
-
-# One Anthropic account behind two different directories is not separation.
-expect_refused(aliased, "same-anthropic-account-different-path")
-
-# A home that names no account cannot be shown distinct from the author.
-expect_refused(opaque, "borrowed-credential-reviewer-identity")
-
-# An unreadable author identity can never become provable separation.
-borrowed_author = {
-    "harness": "claude",
-    "model": "gpt-5.6-sol",
-    "account_home": str(opaque),
-}
-write_config(distinct)
-try:
-    module.reviewer_candidates(root, borrowed_author)
-except module.CrosscheckError as exc:
-    assert "proven-separate account" in str(exc), str(exc)
-    print("REFUSED unreadable-anthropic-author-identity")
-else:
-    raise AssertionError("unreadable author identity was accepted as separate")
-
-# Two genuinely distinct Anthropic accounts are independent.
-write_config(distinct)
-selected = module.reviewer_candidates(root, meta)[0]
-assert selected["account_home"] == str(distinct.resolve()), selected
-assert selected["author_account_identity"] == "anthropic-account-A", selected
-print("SELECTED distinct-anthropic-account")
-
-# A cross-provider reviewer is unaffected by Anthropic identity comparison.
-write_config(aliased, harness="codex", model="gpt-5.6-sol")
-cross = module.reviewer_candidates(root, {
-    "harness": "claude",
-    "model": "claude-opus-5",
-    "account_home": str(author),
-})[0]
-assert cross["harness"] == "codex", cross
-assert "author_account_identity" not in cross, cross
-print("SELECTED cross-provider-unaffected")
-PY
-  pass "Anthropic-backed reviewers prove account separation on the executing account"
-}
-
-test_unrouted_lane_compares_provider_not_harness() {
-  # With no author account_home there is no credential to compare, so the only
-  # separation left is the provider namespace. Harness inequality is not that:
-  # Pi reaches the same OpenAI accounts a Codex author uses.
-  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$TMP_ROOT" <<'PY' \
-    || fail "unrouted independence regressed to a harness-name comparison"
-import importlib.util
-import json
-import os
-from pathlib import Path
-import sys
-
-spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(module)
-
-root = Path(sys.argv[2]) / "unrouted-provider-separation"
-root.mkdir()
-homes = {name: root / name for name in ("codex-home", "claude-home", "pi-home")}
-for account_home in homes.values():
-    account_home.mkdir()
-config_path = root / "reviewer.json"
-os.environ["FM_CROSSCHECK_REVIEWER_CONFIG"] = str(config_path)
-
-reviewers = {
-    "codex": ("codex", "gpt-5.6-sol", "codex-home"),
-    "claude": ("claude", "claude-opus-5", "claude-home"),
-    "pi": ("pi", "gpt-5.6-sol", "pi-home"),
-}
-
-
-def write_config(name):
-    harness, model, home_name = reviewers[name]
-    config_path.write_text(
-        json.dumps(
-            {
-                "reviewers": [
-                    {
-                        "harness": harness,
-                        "model": model,
-                        "effort": "xhigh",
-                        "account_home": str(homes[home_name]),
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-def unrouted(harness, model):
-    return {
-        "harness": harness,
-        "model": model,
-        "account_routing_emergency_bypass": "1",
-    }
-
-
-def expect_selected(author, name, label):
-    write_config(name)
-    selected = module.reviewer_candidates(root, author)[0]
-    assert selected["harness"] == reviewers[name][0], selected
-    assert "author_account_identity" not in selected, selected
-    print(f"SELECTED {label}: {selected['harness']}")
-
-
-def expect_refused(author, name, expected, label):
-    write_config(name)
-    try:
-        module.reviewer_candidates(root, author)
-    except module.CrosscheckError as exc:
-        message = str(exc)
-        assert expected in message, message
-        print(f"REFUSED {label}: {message[:120]}")
-        return
-    raise AssertionError(f"{label} was accepted as an independent reviewer")
-
-
-codex_author = unrouted("codex", "gpt-5.5")
-claude_author = unrouted("claude", "claude-opus-5")
-
-expect_refused(
-    codex_author, "pi", "different provider", "unrouted-codex-author-pi-reviewer"
-)
-expect_refused(
-    codex_author, "codex", "different provider", "unrouted-codex-author-codex-reviewer"
-)
-expect_selected(codex_author, "claude", "unrouted-codex-author-claude-reviewer")
-expect_selected(claude_author, "pi", "unrouted-claude-author-pi-reviewer")
-expect_selected(claude_author, "codex", "unrouted-claude-author-codex-reviewer")
-
-# A harness with no known provider namespace can never prove separation.
-expect_refused(
-    unrouted("unknown-harness", "gpt-5.5"),
-    "claude",
-    "no known provider namespace",
-    "unrouted-unmapped-author-harness",
-)
-
-assert module.HARNESS_PROVIDERS["codex"] == module.HARNESS_PROVIDERS["pi"], (
-    module.HARNESS_PROVIDERS
-)
-assert module.HARNESS_PROVIDERS["claude"] != module.HARNESS_PROVIDERS["codex"], (
-    module.HARNESS_PROVIDERS
-)
-assert module.OPENAI_BACKED_HARNESSES == {"codex", "pi"}, (
-    module.OPENAI_BACKED_HARNESSES
-)
-PY
-  pass "the unrouted lane proves independence on provider, not on harness name"
+  pass "same-model opt-in is explicit and does not consult author identity"
 }
 
 test_reviewer_binary_never_resolves_from_working_directory() {
@@ -1994,30 +1332,6 @@ assert resolved == decoy, resolved
 print(f"RESOLVED explicit path: {resolved}")
 PY
   pass "a bare reviewer command resolves through PATH and never from the working directory"
-}
-
-test_api_key_reviewer_cannot_prove_openai_separation() {
-  # An API-key Codex credential passes credential preflight but names no
-  # OpenAI account, so it can never prove separation from an OpenAI author.
-  local record case_dir base head rc
-  record=$(make_case api-key-openai-separation)
-  IFS=$'\t' read -r case_dir base head <<< "$record"
-  printf '{"OPENAI_API_KEY":"test-api-key"}\n' > "$case_dir/reviewer-home/auth.json"
-  set +e
-  run_case "$case_dir" "$base" "$head" clear run \
-    > "$case_dir/api-key.out" 2> "$case_dir/api-key.err"
-  rc=$?
-  set -e
-  expect_code 1 "$rc" "api-key reviewer without a provable OpenAI account"
-  # Refused at selection now that an unresolvable identity is never separation;
-  # run_reviewer's launch-time re-check remains as defense in depth for a
-  # credential that resolves differently than the configured directory did.
-  assert_grep 'proven-separate account' \
-    "$case_dir/api-key.err" \
-    "an API-key reviewer was allowed to stand in for a proven-separate account"
-  assert_no_grep 'crosscheck clear' "$case_dir/api-key.out" \
-    "an unprovable executing account earned a clear review"
-  pass "an API-key reviewer cannot substitute for proven OpenAI account separation"
 }
 
 test_gate_refuses_an_unsupported_interpreter() {
@@ -2241,7 +1555,6 @@ assert sys.argv[4] in reviewer["execution_proof"]["command"]
     "$case_dir/pi-home" "$base" "$head" \
     || fail "Pi review did not record its bound account, nonzero turn, and executed command"
   assert_absent "$case_dir/codex.log" "Codex launched instead of the selected Pi reviewer"
-  assert_absent "$case_dir/claude.log" "Claude launched instead of the selected Pi reviewer"
   pass "Pi reviewer executes a bound nonzero-turn exact-head review"
 }
 
@@ -2333,23 +1646,67 @@ test_clear_review_uses_policy_contract() {
   pass "clear review uses the observed policy-grade Codex invocation"
 }
 
+test_missing_author_identity_reaches_normal_verdict() {
+  local record case_dir base head output
+  record=$(make_case missing-author-identity-normal-verdict)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  sed -i.bak \
+    -e 's/harness=codex/harness=pi/' \
+    -e 's#model=gpt-5.5#model=openai-codex-5/gpt-5.5#' \
+    -e '/^account_home=/d' \
+    "$case_dir/state/task-x1.meta"
+  rm "$case_dir/state/task-x1.meta.bak"
+  run_case "$case_dir" "$base" "$head" clear run \
+    > "$case_dir/out" 2> "$case_dir/err" \
+    || fail "metadata without author_account_identity did not reach a normal verdict"
+  output=$(cat "$case_dir/out")
+  assert_contains "$output" 'crosscheck clear' \
+    "missing author identity prevented a clear review"
+  assert_no_grep 'AUTHOR IDENTITY' "$case_dir/err" \
+    "Crosscheck emitted an author-identity refusal"
+  "$CROSSCHECK_PYTHON" - "$case_dir/data/task-x1/crosscheck-ledger.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+run = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["runs"][-1]
+assert run["state"] == "clear", run
+assert "author_account_identity" not in run["reviewer"], run["reviewer"]
+PY
+  pass "missing author identity reaches a normal Crosscheck verdict"
+}
+
+test_claude_reviewer_is_never_selected() {
+  local record case_dir base head rc
+  record=$(make_case claude-reviewer-ineligible)
+  IFS=$'\t' read -r case_dir base head <<< "$record"
+  cat > "$case_dir/reviewer.json" <<EOF
+{"reviewers":[{"harness":"claude","model":"claude-opus-5","effort":"xhigh","account_home":"$case_dir/reviewer-home"}]}
+EOF
+  set +e
+  run_case "$case_dir" "$base" "$head" clear run \
+    > "$case_dir/out" 2> "$case_dir/err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "Claude reviewer profile"
+  assert_grep 'must be codex gpt-5.6-sol xhigh or pi gpt-5.6-sol xhigh' \
+    "$case_dir/err" "Claude reviewer profile was not rejected"
+  assert_absent "$case_dir/fakebin/claude" "Claude reviewer machinery was installed by the fixture"
+  pass "Claude is never selected as a Crosscheck reviewer"
+}
+
 test_same_model_review_is_adversarial_and_durable() {
   local record case_dir base head output
   record=$(make_case same-model-adversarial-evidence)
   IFS=$'\t' read -r case_dir base head <<< "$record"
   mkdir -p "$case_dir/home/config"
   printf 'on\n' > "$case_dir/home/config/crosscheck-same-model"
-  printf '%s\n' \
-    '{"openai-codex-5":{"type":"oauth","access":"test-access","refresh":"test-refresh","expires":4102444800000,"accountId":"test-author-account"}}' \
-    > "$case_dir/author-home/auth.json"
   sed -i.bak \
     -e 's/harness=codex/harness=pi/' \
     -e 's#model=gpt-5.5#model=openai-codex-5/gpt-5.6-sol#' \
     -e '/^account_home=/d' \
     "$case_dir/state/task-x1.meta"
   rm "$case_dir/state/task-x1.meta.bak"
-  printf 'author_account_identity=test-author-account\n' \
-    >> "$case_dir/state/task-x1.meta"
 
   printf '%s\n' \
     '{"openai-codex-5":{"type":"oauth","access":"test-access","refresh":"test-refresh","expires":4102444800000,"accountId":"test-reviewer-account"}}' \
@@ -2386,83 +1743,10 @@ assert run["reviewer"]["model"] == "gpt-5.6-sol", run["reviewer"]
 assert run["reviewer"]["model_independence"] == "same-model", run["reviewer"]
 report = Path(sys.argv[2]).read_text(encoding="utf-8")
 assert "Review mode: **SAME-MODEL**" in report, report
-assert "account separation remained mandatory" in report, report
+assert "reduced model independence" in report, report
+assert "account separation" not in report, report
 PY
-  pass "same-model review uses an adversarial prompt and records reduced independence"
-}
-
-test_legacy_author_admission_is_visible_in_prompt_and_evidence() {
-  local record case_dir base head output verified
-  record=$(make_case legacy-author-admission-evidence)
-  IFS=$'\t' read -r case_dir base head <<< "$record"
-  mkdir -p "$case_dir/home/config"
-  printf 'on\n' > "$case_dir/home/config/crosscheck-same-model"
-  sed -i.bak \
-    -e 's/harness=codex/harness=pi/' \
-    -e 's#model=gpt-5.5#model=openai-codex-5/gpt-5.6-sol#' \
-    -e '/^account_home=/d' \
-    "$case_dir/state/task-x1.meta"
-  rm "$case_dir/state/task-x1.meta.bak"
-  cat > "$case_dir/home/config/crosscheck-legacy-author-admissions.json" <<EOF
-{"admissions":[{"task_id":"task-x1","pull_request":"$PR_URL","head_sha":"$head","author_harness":"pi","author_model":"openai-codex-5/gpt-5.6-sol","approved_at":"2026-08-10T12:00:00Z","legacy_author_provenance":"pre-snapshot-pi","replacement_unavailable":true,"replacement_unavailable_reason":"PR branch is not writable by this fleet; exact-head replacement cannot be published.","admit_unproven_author_account":true}]}
-EOF
-
-  output=$(run_case "$case_dir" "$base" "$head" clear run) \
-    || fail "explicit legacy author admission did not complete"
-  assert_contains "$output" 'crosscheck clear' \
-    "legacy-admitted reviewer did not produce a verdict"
-  assert_grep 'LEGACY AUTHOR ACCOUNT UNPROVEN - EXPLICIT LOCAL ADMISSION' \
-    "$case_dir/prompt.log" \
-    "legacy admission was not visible in the reviewer prompt"
-  assert_grep 'may be executing under the same upstream account as the author' \
-    "$case_dir/prompt.log" \
-    "legacy prompt pretended historical account separation"
-  assert_grep 'must not claim account independence' "$case_dir/prompt.log" \
-    "legacy prompt did not prohibit a false independence claim"
-  assert_no_grep 'You are the independent merge-gate reviewer' "$case_dir/prompt.log" \
-    "legacy prompt still introduced the reviewer as account-independent"
-  verified=$(run_case "$case_dir" "$base" "$head" clear verify) \
-    || fail "verify rejected the durable legacy-admission evidence"
-  [ "$verified" = "$head" ] \
-    || fail "legacy-admission verify did not return the reviewed exact head"
-  "$CROSSCHECK_PYTHON" - \
-    "$case_dir/data/task-x1/crosscheck-ledger.json" \
-    "$case_dir/data/task-x1/crosscheck.md" <<'PY' \
-    || fail "legacy admission was not durable in both evidence surfaces"
-import hashlib
-import json
-from pathlib import Path
-import sys
-
-ledger = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-run = ledger["runs"][-1]
-reviewer = run["reviewer"]
-assert run["state"] == "clear", run
-assert reviewer["author_account_independence"] == "unproven-legacy-admission", reviewer
-assert reviewer["legacy_author_harness"] == "pi", reviewer
-assert reviewer["legacy_author_model"] == "openai-codex-5/gpt-5.6-sol", reviewer
-assert reviewer["legacy_author_provenance"] == "pre-snapshot-pi", reviewer
-assert reviewer["legacy_admission_approved_at"] == "2026-08-10T12:00:00Z", reviewer
-assert reviewer["legacy_replacement_unavailable"] == "true", reviewer
-assert "PR branch is not writable" in reviewer[
-    "legacy_replacement_unavailable_reason"
-], reviewer
-assert reviewer["reviewer_account_identity_sha256"] == hashlib.sha256(
-    b"test-reviewer-account"
-).hexdigest(), reviewer
-assert "author_account_identity" not in reviewer, reviewer
-report = Path(sys.argv[2]).read_text(encoding="utf-8")
-assert "Review mode: **LEGACY AUTHOR ACCOUNT UNPROVEN**" in report, report
-assert "the reviewer may share the author's upstream account" in report, report
-assert "Replacement unavailable: PR branch is not writable" in report, report
-assert "Historical author provenance: `pre-snapshot-pi`" in report, report
-assert "Historical author harness: `pi`" in report, report
-assert "Historical author model: `openai-codex-5/gpt-5.6-sol`" in report, report
-assert f"Reviewer account identity digest: `{reviewer['reviewer_account_identity_sha256']}`" in report, report
-assert "account separation remained mandatory" not in report, report
-assert "author-account independence is also unproven" in report, report
-PY
-  pass "legacy admission is explicit in the prompt, ledger, and readable report"
+  pass "same-model review uses an adversarial prompt without consulting author identity"
 }
 
 test_empty_runtime_overrides_use_home_defaults() {
@@ -2639,46 +1923,6 @@ assert set(run["reviewer"]) == {"harness", "model", "effort", "account_home"}, \
   pass "an absent remote PR head ref fails closed before review"
 }
 
-test_claude_reviewer_provides_model_separation_for_codex_author() {
-  local record case_dir base head output
-  record=$(make_case claude-reviewer)
-  IFS=$'\t' read -r case_dir base head <<< "$record"
-  select_claude_reviewer "$case_dir"
-  output=$(run_case "$case_dir" "$base" "$head" clear run) \
-    || fail "Claude reviewer did not complete"
-  assert_contains "$output" 'crosscheck clear' "Claude reviewer did not earn a clear result"
-  assert_grep '--model claude-opus-5 --effort xhigh --dangerously-skip-permissions --tools Bash,Read,Glob,Grep' "$case_dir/claude.log" \
-    "Claude reviewer was not pinned to the observed policy-grade invocation"
-  assert_grep '--safe-mode' "$case_dir/claude.log" \
-    "Claude reviewer did not disable untrusted repository instructions"
-  assert_absent "$case_dir/reviewer-context.log" \
-    "Claude reviewer loaded untrusted repository instructions"
-  assert_present "$case_dir/reviewer-home/session-env/crosscheck-runtime" \
-    "Claude reviewer could not write runtime state beneath its bound HOME"
-  assert_grep '+fixed' "$case_dir/reviewer-home/session-env/crosscheck-git-diff" \
-    "Claude reviewer did not execute git diff between the exact base and head"
-  assert_absent "$HOME/.claude/session-env/crosscheck-runtime" \
-    "Claude reviewer wrote runtime state beneath the ambient operator HOME"
-  python3 -c '
-import json, sys
-value = json.load(open(sys.argv[1]))
-reviewer = value["runs"][-1]["reviewer"]
-assert reviewer["account_home"] == sys.argv[2]
-assert reviewer["executing_account_home"] == sys.argv[2]
-assert reviewer["execution_home"].endswith("/.crosscheck/claude-home")
-assert reviewer["credential_source"] == "oauth-file"
-assert reviewer["account_selector"] == "CLAUDE_SECURESTORAGE_CONFIG_DIR"
-assert reviewer["execution_proof"]["actual_exit"] == 0
-assert reviewer["execution_proof"]["reviewer_receipt"]["sha256"]
-assert sys.argv[3] in reviewer["execution_proof"]["command"]
-assert sys.argv[4] in reviewer["execution_proof"]["command"]
-' "$case_dir/data/task-x1/crosscheck-ledger.json" \
-    "$case_dir/reviewer-home" "$base" "$head" \
-    || fail "Claude verdict did not record the bound executing account and exact-SHA command proof"
-  assert_absent "$case_dir/codex.log" "Codex reviewer launched without model separation"
-  pass "Claude Opus xhigh binds HOME, account independence, sandbox writes, and exact-SHA execution evidence"
-}
-
 test_codex_reviewer_requires_bound_auth_and_clears_ambient_credentials() {
   local record case_dir base head rc output
   record=$(make_case codex-bound-auth)
@@ -2731,157 +1975,6 @@ assert reviewer["credential_identifier"] == sys.argv[2]
     "$case_dir/unusable-auth.err" \
     "unusable Codex auth was not classified as a tool failure"
   pass "Codex reviewer requires bound auth and rejects ambient credential selectors"
-}
-
-test_reviewer_execution_home_drift_fails_closed() {
-  local record case_dir base head rc
-  record=$(make_case reviewer-execution-home-drift)
-  IFS=$'\t' read -r case_dir base head <<< "$record"
-  sed -i.bak 's/model=gpt-5.5/model=gpt-5.6-sol/' "$case_dir/state/task-x1.meta"
-  rm "$case_dir/state/task-x1.meta.bak"
-  cat > "$case_dir/reviewer.json" <<EOF
-{"reviewers":[{"harness":"claude","model":"claude-opus-5","effort":"xhigh","account_home":"$case_dir/reviewer-home"}]}
-EOF
-  set +e
-  run_case "$case_dir" "$base" "$head" execution-home-drift run \
-    > "$case_dir/out" 2> "$case_dir/err"
-  rc=$?
-  set -e
-  expect_code 1 "$rc" "reviewer execution-home drift"
-  assert_grep 'CROSSCHECK TOOL-FAILURE:' "$case_dir/err" \
-    "execution-account drift was not classified as a tool failure"
-  assert_grep 'reviewer executing-account inspection found a provider account selector' "$case_dir/err" \
-    "execution-account drift did not name the identity actually inspected"
-  assert_no_grep 'CROSSCHECK BLOCKING' "$case_dir/err" \
-    "a configured reviewer label overrode the executing account identity"
-  assert_no_grep 'crosscheck clear' "$case_dir/out" \
-    "a reviewer running under the author HOME earned a clear result"
-  python3 -c '
-import json, sys
-value = json.load(open(sys.argv[1]))
-assert value["runs"][-1]["state"] == "tool-failure"
-' "$case_dir/data/task-x1/crosscheck-ledger.json" \
-    || fail "execution-account drift was not durably classified as a tool failure"
-  pass "reviewer independence is bound to the executing credential selector, not its configured label"
-}
-
-test_unrouted_author_uses_cross_provider_independence() {
-  local record case_dir base head output
-  record=$(make_case unrouted-cross-provider)
-  IFS=$'\t' read -r case_dir base head <<< "$record"
-  sed -i.bak '/^account_home=/d' "$case_dir/state/task-x1.meta"
-  rm "$case_dir/state/task-x1.meta.bak"
-  printf 'account_routing_emergency_bypass=1\n' >> "$case_dir/state/task-x1.meta"
-  cat > "$case_dir/reviewer.json" <<EOF
-{"reviewers":[{"harness":"claude","model":"claude-opus-5","effort":"xhigh","account_home":"$case_dir/reviewer-home"}]}
-EOF
-  output=$(run_case "$case_dir" "$base" "$head" clear run) \
-    || fail "cross-provider reviewer did not establish independence for an unrouted author"
-  assert_contains "$output" 'crosscheck clear' \
-    "structurally unrouted task did not earn a cross-provider clear result"
-  assert_grep '--model claude-opus-5' "$case_dir/claude.log" \
-    "the independent provider reviewer was not launched"
-  assert_absent "$case_dir/codex.log" \
-    "same-provider reviewer launched for an author with no account identity"
-  pass "a structurally unrouted author can prove both model and account independence across providers"
-}
-
-test_unrouted_author_without_account_proof_fails_closed() {
-  local record case_dir base head rc ledger
-  record=$(make_case unrouted-same-provider)
-  IFS=$'\t' read -r case_dir base head <<< "$record"
-  sed -i.bak '/^account_home=/d' "$case_dir/state/task-x1.meta"
-  rm "$case_dir/state/task-x1.meta.bak"
-  printf 'account_routing_emergency_bypass=1\n' >> "$case_dir/state/task-x1.meta"
-  set +e
-  run_case "$case_dir" "$base" "$head" clear run \
-    > "$case_dir/out" 2> "$case_dir/err"
-  rc=$?
-  set -e
-  expect_code 1 "$rc" "same-provider reviewer for an unrouted author"
-  assert_grep 'CROSSCHECK TOOL-FAILURE: reviewer preflight failed: independence inspection found no configured reviewer' \
-    "$case_dir/err" \
-    "unprovable account independence did not fail as a reviewer preflight fault: $(tr '\n' ' ' < "$case_dir/err")"
-  assert_grep 'same-provider account separation cannot be proved without account_home' \
-    "$case_dir/err" "failure did not name the unavailable author-account proof"
-  assert_no_grep 'CROSSCHECK UNREVIEWED' "$case_dir/err" \
-    "unprovable pre-review identity was mislabeled as a review outcome"
-  assert_absent "$case_dir/codex.log" \
-    "same-provider reviewer launched without author-account proof"
-  ledger="$case_dir/data/task-x1/crosscheck-ledger.json"
-  python3 -c '
-import json, sys
-value = json.load(open(sys.argv[1]))
-assert value["runs"][-1]["state"] == "tool-failure"
-assert value["runs"][-1]["reviewer"] is None
-' "$ledger" || fail "unprovable independence was not recorded as a tool failure"
-  pass "an unrouted same-provider lane fails closed when account independence cannot be established"
-}
-
-test_missing_author_identity_is_a_named_tool_failure() {
-  # An account-less lane is refused only when nothing is left to prove
-  # separation with, which means an unrecognized provider namespace. A lane
-  # whose harness maps to a known provider is a supported author identity; see
-  # test_account_less_known_provider_lane_is_reviewable.
-  local record case_dir base head rc
-  record=$(make_case missing-author-identity)
-  IFS=$'\t' read -r case_dir base head <<< "$record"
-  sed -i.bak '/^account_home=/d;s/^harness=.*/harness=unmapped-harness/' \
-    "$case_dir/state/task-x1.meta"
-  rm "$case_dir/state/task-x1.meta.bak"
-  set +e
-  run_case "$case_dir" "$base" "$head" clear run \
-    > "$case_dir/out" 2> "$case_dir/err"
-  rc=$?
-  set -e
-  expect_code 1 "$rc" "task metadata with no provable author identity"
-  assert_grep 'no account_home and no known provider namespace' \
-    "$case_dir/err" "metadata failure did not name what it inspected"
-  assert_grep 'CROSSCHECK TOOL-FAILURE:' "$case_dir/err" \
-    "metadata preflight failure did not use the tool-failure outcome: $(tr '\n' ' ' < "$case_dir/err")"
-  assert_no_grep 'CROSSCHECK UNREVIEWED' "$case_dir/err" \
-    "metadata preflight failure was mislabeled as a review outcome"
-  pass "an unprovable author identity is a named metadata tool failure"
-}
-
-test_account_less_known_provider_lane_is_reviewable() {
-  # Account routing is off by design for any harness outside claude and codex,
-  # so a pi lane structurally cannot record an account_home. Demanding one, or
-  # an emergency-bypass marker in its place, made every pi-launched lane
-  # permanently unmergeable. Separation for such a lane rests on the provider
-  # namespace, and a same-provider reviewer must still be refused.
-  local record case_dir base head rc
-  record=$(make_case account-less-pi-lane)
-  IFS=$'\t' read -r case_dir base head <<< "$record"
-  # A real pi lane: no account_home, and a model string carrying its provider
-  # slot rather than a bare model name.
-  sed -i.bak '/^account_home=/d;s/^harness=.*/harness=pi/;s|^model=.*|model=openai-codex-2/gpt-5.6-sol|' \
-    "$case_dir/state/task-x1.meta"
-  rm "$case_dir/state/task-x1.meta.bak"
-
-  # A same-provider (Codex) reviewer cannot prove separation from this author,
-  # and the slot-qualified model must not read as a different model either.
-  cat > "$case_dir/reviewer.json" <<EOF
-{"reviewers":[{"harness":"codex","model":"gpt-5.6-sol","effort":"xhigh","account_home":"$case_dir/reviewer-home"}]}
-EOF
-  set +e
-  run_case "$case_dir" "$base" "$head" clear run > "$case_dir/same.out" 2> "$case_dir/same.err"
-  rc=$?
-  set -e
-  expect_code 1 "$rc" "same-provider reviewer for an account-less lane"
-  assert_absent "$case_dir/codex.log" \
-    "a same-provider reviewer launched for an account-less author"
-
-  # A cross-provider (Claude) reviewer establishes both account and model
-  # separation structurally, so the lane reviews normally.
-  cat > "$case_dir/reviewer.json" <<EOF
-{"reviewers":[{"harness":"claude","model":"claude-opus-5","effort":"xhigh","account_home":"$case_dir/reviewer-home"}]}
-EOF
-  run_case "$case_dir" "$base" "$head" clear run > "$case_dir/cross.out" 2> "$case_dir/cross.err" \
-    || fail "an account-less pi lane could not be reviewed cross-provider: $(tr '\n' ' ' < "$case_dir/cross.err")"
-  assert_grep 'crosscheck clear' "$case_dir/cross.out" \
-    "the cross-provider reviewer did not clear an account-less pi lane"
-  pass "an account-less known-provider lane reviews cross-provider and refuses same-provider"
 }
 
 test_new_finding_requires_executed_reproduction() {
@@ -3910,134 +3003,6 @@ PY
   pass "generated sandbox confines proof writes; installed enforcement denies shared private tmp when available"
 }
 
-test_real_claude_sandbox_executes_exact_sha_git_diff() {
-  local repo base head nonce profile output event claude_bin sandbox_bin reviewer_home execution_home
-  if [ "${FM_TEST_REAL_CLAUDE_SANDBOX_GIT_DIFF:-0}" != 1 ]; then
-    printf 'SKIP: real Claude sandbox exact-SHA git-diff proof; set FM_TEST_REAL_CLAUDE_SANDBOX_GIT_DIFF=1 and FM_TEST_REAL_CLAUDE_CONFIG_DIR\n'
-    return
-  fi
-  reviewer_home=${FM_TEST_REAL_CLAUDE_CONFIG_DIR:-}
-  [ -n "$reviewer_home" ] \
-    || fail "FM_TEST_REAL_CLAUDE_CONFIG_DIR is required for the real Claude sandbox proof"
-  claude_bin=${FM_TEST_REAL_CLAUDE_BIN:-$(command -v claude || true)}
-  sandbox_bin=${FM_TEST_INSTALLED_SANDBOX_BIN:-/usr/bin/sandbox-exec}
-  [ -x "$claude_bin" ] || fail "real Claude binary is unavailable"
-  [ -x "$sandbox_bin" ] || fail "installed sandbox-exec is unavailable"
-  repo="$TMP_ROOT/real-claude-sandbox-git-diff/repo"
-  mkdir -p "$repo/.crosscheck/claude-tmp"
-  git -C "$repo" init -q -b main
-  printf 'base\n' > "$repo/runtime-proof.txt"
-  git -C "$repo" add runtime-proof.txt
-  git -C "$repo" commit -qm base
-  base=$(git -C "$repo" rev-parse HEAD)
-  nonce="real-claude-git-diff-$RANDOM-$$"
-  printf '%s\n' "$nonce" > "$repo/runtime-proof.txt"
-  git -C "$repo" add runtime-proof.txt
-  git -C "$repo" commit -qm head
-  head=$(git -C "$repo" rev-parse HEAD)
-  profile="$repo/.crosscheck/real-claude-sandbox.sb"
-  output="$repo/.crosscheck/real-claude-output.json"
-  event="$repo/.crosscheck/observed-bash-event"
-  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$profile" "$repo" "$reviewer_home" <<'PY' \
-    || fail "real Claude sandbox profile did not retain the narrow write contract"
-import importlib.util
-import json
-from pathlib import Path
-import sys
-
-spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(module)
-profile = Path(sys.argv[2])
-repo = Path(sys.argv[3])
-reviewer_home = Path(sys.argv[4]).resolve()
-ambient_home = Path.home().resolve()
-shared_session_env = ambient_home / ".claude" / "session-env"
-reviewer_session_env = reviewer_home / "session-env"
-try:
-    reviewer_home.relative_to(ambient_home / ".claude")
-except ValueError:
-    pass
-else:
-    raise AssertionError("reviewer home must be independent of shared ~/.claude")
-execution_home, credential_source, credential_identifier = (
-    module.prepare_claude_execution_home(repo / ".crosscheck", reviewer_home)
-)
-module.write_sandbox_profile(
-    profile,
-    repo,
-    allow_network=True,
-    additional_writable_roots=(reviewer_home,),
-)
-text = profile.read_text()
-assert f"  (subpath {json.dumps(str(reviewer_home))})" in text
-assert f"  (subpath {json.dumps(str(shared_session_env))})" not in text
-assert reviewer_session_env.is_relative_to(reviewer_home)
-assert execution_home == repo / ".crosscheck" / "claude-home"
-assert execution_home.joinpath(".claude").resolve() == reviewer_home
-assert credential_source in {"oauth-file", "scoped-keychain"}
-assert credential_identifier
-assert f"  (subpath {json.dumps(str(repo.resolve() / '.crosscheck' / 'claude-tmp'))})" not in text
-PY
-  execution_home="$repo/.crosscheck/claude-home"
-  (
-    cd "$repo" || exit 1
-    HOME="$execution_home" \
-    CLAUDE_CONFIG_DIR="$reviewer_home" \
-    CLAUDE_SECURESTORAGE_CONFIG_DIR="$reviewer_home" \
-    CLAUDE_CODE_TMPDIR="$repo/.crosscheck/claude-tmp" \
-    "$sandbox_bin" -f "$profile" "$claude_bin" -p \
-      --model claude-opus-5 \
-      --effort xhigh \
-      --dangerously-skip-permissions \
-      --tools Bash \
-      --no-session-persistence \
-      --output-format json \
-      --json-schema '{"type":"object","properties":{"base":{"type":"string"},"head":{"type":"string"},"cwd":{"type":"string"},"home":{"type":"string"},"config":{"type":"string"},"secure_config":{"type":"string"},"diff":{"type":"string"},"claude_code_tmpdir":{"type":"string"}},"required":["base","head","cwd","home","config","secure_config","diff","claude_code_tmpdir"],"additionalProperties":false}' \
-      "Use Bash in the current repository to run git diff $base $head -- runtime-proof.txt. Save an execution record containing those exact SHAs, pwd, HOME, CLAUDE_CONFIG_DIR, CLAUDE_SECURESTORAGE_CONFIG_DIR, CLAUDE_CODE_TMPDIR, and the exact diff output to .crosscheck/observed-bash-event. Return all of those exact values. This is the real sandboxed Claude Bash exact-SHA git-diff proof."
-  ) > "$output" 2> "$repo/.crosscheck/real-claude-stderr.log" \
-    || {
-      tail -c 4000 "$output" 2>/dev/null || true
-      tail -c 4000 "$repo/.crosscheck/real-claude-stderr.log" 2>/dev/null || true
-      fail "real installed Claude could not execute git diff under the generated sandbox"
-    }
-  assert_present "$event" \
-    "real Claude Bash did not create the exact-repository execution event"
-  assert_grep "$nonce" "$event" \
-    "real Claude Bash event did not contain the temporary repository's exact-SHA diff"
-  assert_grep "$base" "$event" \
-    "real Claude Bash event was not bound to the temporary repository's base SHA"
-  assert_grep "$head" "$event" \
-    "real Claude Bash event was not bound to the temporary repository's head SHA"
-  assert_grep "$repo" "$event" \
-    "real Claude Bash event was not bound to the temporary repository cwd"
-  assert_grep "$repo/.crosscheck/claude-tmp" "$event" \
-    "real Claude Bash event did not observe the isolated CLAUDE_CODE_TMPDIR"
-  python3 - "$output" "$base" "$head" "$nonce" "$repo" "$execution_home" "$reviewer_home" "$repo/.crosscheck/claude-tmp" <<'PY' \
-    || fail "real Claude output did not prove exact-SHA git diff with isolated scratch"
-import json
-import sys
-
-envelope = json.load(open(sys.argv[1]))
-assert envelope["is_error"] is False
-assert envelope["subtype"] == "success"
-assert envelope["terminal_reason"] == "completed"
-proof = envelope["structured_output"]
-assert proof["base"] == sys.argv[2]
-assert proof["head"] == sys.argv[3]
-assert sys.argv[4] in proof["diff"]
-assert proof["cwd"] == sys.argv[5]
-assert proof["home"] == sys.argv[6]
-assert proof["config"] == sys.argv[7]
-assert proof["secure_config"] == sys.argv[7]
-assert proof["claude_code_tmpdir"] == sys.argv[8]
-PY
-  printf 'REAL CLAUDE PROOF: reviewer=claude-opus-5/xhigh account_home=%s command=git diff %s %s -- runtime-proof.txt verdict=completed\n' \
-    "$reviewer_home" "$base" "$head"
-  pass "real sandboxed Claude Bash executed exact-SHA git diff with scoped account credentials, private HOME, and isolated scratch"
-}
-
 test_symlinked_named_test_cannot_hide_test_mutation() {
   local record case_dir base head rc
   record=$(make_case symlink-forgery)
@@ -4179,15 +3144,6 @@ test_reviewer_output_uses_separate_capture_limit() {
     || fail "valid Codex review failed on incidental transcript volume"
   assert_grep 'crosscheck clear' "$case_dir/out" \
     "large Codex transcript did not reach its authoritative verdict"
-
-  record=$(make_case noisy-claude-reviewer)
-  IFS=$'\t' read -r case_dir base head <<< "$record"
-  select_claude_reviewer "$case_dir"
-  run_case "$case_dir" "$base" "$head" noisy-reviewer run \
-    > "$case_dir/out" 2> "$case_dir/err" \
-    || fail "valid Claude review failed on its larger result envelope"
-  assert_grep 'crosscheck clear' "$case_dir/out" \
-    "large Claude envelope did not reach its structured verdict"
 
   record=$(make_case noisy-reviewer-no-result)
   IFS=$'\t' read -r case_dir base head <<< "$record"
@@ -4511,7 +3467,7 @@ test_claims_lookup_error_never_reaches_reviewer() {
 
 test_reviewer_configuration_failures_are_tool_failures() {
   local mode record case_dir base head rc
-  for mode in absent same-model same-account; do
+  for mode in absent same-model; do
     record=$(make_case "reviewer-$mode")
     IFS=$'\t' read -r case_dir base head <<< "$record"
     case "$mode" in
@@ -4519,11 +3475,6 @@ test_reviewer_configuration_failures_are_tool_failures() {
       same-model)
         sed -i.bak 's/model=gpt-5.5/model=gpt-5.6-sol/' "$case_dir/state/task-x1.meta"
         rm "$case_dir/state/task-x1.meta.bak"
-        ;;
-      same-account)
-        sed "s#${case_dir}/reviewer-home#${case_dir}/author-home#" "$case_dir/reviewer.json" \
-          > "$case_dir/reviewer-same.json"
-        mv "$case_dir/reviewer-same.json" "$case_dir/reviewer.json"
         ;;
     esac
     set +e
@@ -4539,7 +3490,7 @@ test_reviewer_configuration_failures_are_tool_failures() {
       "$mode reviewer configuration collapsed into a blocking verdict"
     assert_absent "$case_dir/codex.log" "$mode reviewer still launched"
   done
-  pass "absent reviewer, same model, and same account are tool failures that fail closed"
+  pass "absent reviewer configuration and default same-model review fail closed"
 }
 
 test_stopped_reviewer_and_wrong_head_are_unreviewed() {
@@ -4599,11 +3550,6 @@ test_reading_only_suspicion_is_a_tool_failure() {
   local record case_dir base head rc
   record=$(make_case reading-only-suspicion)
   IFS=$'\t' read -r case_dir base head <<< "$record"
-  sed -i.bak 's/model=gpt-5.5/model=gpt-5.6-sol/' "$case_dir/state/task-x1.meta"
-  rm "$case_dir/state/task-x1.meta.bak"
-  cat > "$case_dir/reviewer.json" <<EOF
-{"reviewers":[{"harness":"claude","model":"claude-opus-5","effort":"xhigh","account_home":"$case_dir/reviewer-home"}]}
-EOF
   set +e
   run_case "$case_dir" "$base" "$head" reading-only-suspicion run \
     > "$case_dir/out" 2> "$case_dir/err"
@@ -4618,8 +3564,6 @@ EOF
     "a reading-only concern was accepted as blocking code evidence"
   assert_no_grep 'CROSSCHECK UNREVIEWED' "$case_dir/err" \
     "a reviewer runtime failure collapsed into a generic review outcome"
-  assert_absent "$case_dir/reviewer-home/session-env/crosscheck-git-diff" \
-    "the dead-Bash fixture unexpectedly executed git diff"
   python3 -c '
 import json, sys
 value = json.load(open(sys.argv[1]))
@@ -4766,56 +3710,6 @@ PY
   pass "the pytest runner name resolves through a uv-aware invocation ladder"
 }
 
-test_claude_execution_home_always_binds_the_keychain() {
-  # The reviewer runs under a private HOME, and macOS resolves a Keychain
-  # search through $HOME/Library/Keychains. Binding that directory only when
-  # `.credentials.json` was absent meant every account that carried both a
-  # scoped Keychain item and a stale OAuth file authenticated against the stale
-  # file and died before its first request: one turn, zero tokens, no API time,
-  # "OAuth session expired and could not be refreshed". The bind is the
-  # reviewer's only route to its own credential and must not be conditional.
-  local case_dir
-  case_dir="$TMP_ROOT/claude-keychain-bind"
-  mkdir -p "$case_dir/account" "$case_dir/protocol"
-  printf '{}\n' > "$case_dir/account/.credentials.json"
-  printf '{}\n' > "$case_dir/account/.claude.json"
-
-  "$CROSSCHECK_PYTHON" - "$CROSSCHECK_PY" "$case_dir" <<'PY' \
-    || fail "the Claude execution HOME did not bind the Keychain beside an OAuth file"
-import importlib.util
-import sys
-from pathlib import Path
-
-spec = importlib.util.spec_from_file_location("fm_crosscheck", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-sys.modules["fm_crosscheck"] = module
-spec.loader.exec_module(module)
-
-case_dir = Path(sys.argv[2])
-execution_home, source, identifier = module.prepare_claude_execution_home(
-    case_dir / "protocol", case_dir / "account"
-)
-assert (execution_home / ".claude").resolve() == (case_dir / "account").resolve(), (
-    "the private HOME is not bound to the selected account directory"
-)
-if sys.platform == "darwin":
-    bound = execution_home / "Library" / "Keychains"
-    assert bound.is_symlink(), (
-        "the private HOME did not bind Library/Keychains beside a .credentials.json, "
-        "so the reviewer cannot reach its own scoped Keychain credential"
-    )
-    assert bound.resolve() == (Path.home() / "Library" / "Keychains").resolve(), (
-        f"Library/Keychains resolved to {bound.resolve()}"
-    )
-# No scoped item exists for this synthetic directory, so the OAuth file remains
-# the recorded source; the bind must be present regardless of which one wins.
-assert source in {"oauth-file", "scoped-keychain"}, source
-assert identifier, "no credential identifier was recorded"
-print(f"BOUND source={source}")
-PY
-  pass "the Claude reviewer HOME binds the Keychain even when an OAuth file exists"
-}
-
 test_moved_default_branch_stays_reviewable() {
   local record case_dir base head moved reviewed
   record=$(make_case moved-default-branch)
@@ -4865,11 +3759,11 @@ test_unavailable_reviewer_fails_over_to_the_next_account() {
   # provider, so the gate must reach the second rather than refuse the merge.
   cat > "$case_dir/reviewer.json" <<EOF
 {"reviewers":[
-  {"harness":"claude","model":"claude-opus-5","effort":"xhigh","account_home":"$case_dir/reviewer-home"},
+  {"harness":"pi","model":"gpt-5.6-sol","effort":"xhigh","account_home":"$case_dir/pi-home"},
   {"harness":"codex","model":"gpt-5.6-sol","effort":"xhigh","account_home":"$case_dir/reviewer-home"}
 ]}
 EOF
-  FM_TEST_CLAUDE_ZERO_TURN=1 run_case "$case_dir" "$base" "$head" clear run \
+  FM_TEST_PI_EXIT=42 run_case "$case_dir" "$base" "$head" clear run \
     > "$case_dir/out" 2> "$case_dir/err" \
     || fail "an unreachable leading reviewer refused the whole gate"
 
@@ -4883,12 +3777,9 @@ print(" ".join(run["state"] for run in ledger["runs"]))
   [ "$states" = "tool-failure clear" ] \
     || fail "ledger recorded runs '$states', expected 'tool-failure clear'"
 
-  # The abandoned attempt must name why it was abandoned, not a truncated
-  # envelope: the reason lives past the point a raw excerpt stops.
-  assert_grep 'Claude AI usage limit reached' "$case_dir/data/task-x1/crosscheck-ledger.json" \
+  assert_grep 'Pi reviewer exited 42 without an earned verdict' \
+    "$case_dir/data/task-x1/crosscheck-ledger.json" \
     "the abandoned reviewer did not record its reported reason"
-  assert_grep 'never reached the provider' "$case_dir/data/task-x1/crosscheck-ledger.json" \
-    "the abandoned reviewer was not identified as an environment fault"
   pass "an unreachable reviewer fails over to the next policy-screened account"
 }
 
@@ -4940,34 +3831,24 @@ test_verify_rechecks_live_head_and_claims() {
 if [ -n "${FM_TEST_CASE:-}" ]; then
   case "$FM_TEST_CASE" in
     test_reviewer_policy_profiles_and_independence|\
-    test_same_model_relaxation_requires_proven_separate_account|\
-    test_legacy_author_admission_is_exact_and_explicit|\
-    test_openai_backed_reviewer_proves_account_separation|\
-    test_anthropic_backed_reviewer_proves_account_separation|\
-    test_unrouted_lane_compares_provider_not_harness|\
+    test_same_model_relaxation_does_not_require_author_identity|\
     test_reviewer_binary_never_resolves_from_working_directory|\
-    test_api_key_reviewer_cannot_prove_openai_separation|\
     test_gate_refuses_an_unsupported_interpreter|\
     test_pi_reviewer_accepts_only_successful_terminal_turn|\
     test_pi_reviewer_pins_sibling_node_before_path|\
     test_pi_reviewer_executes_bound_policy_profile|\
     test_pi_reviewer_failures_are_tool_failures|\
     test_clear_review_uses_policy_contract|\
+    test_missing_author_identity_reaches_normal_verdict|\
+    test_claude_reviewer_is_never_selected|\
     test_same_model_review_is_adversarial_and_durable|\
-    test_legacy_author_admission_is_visible_in_prompt_and_evidence|\
     test_empty_runtime_overrides_use_home_defaults|\
     test_empty_environment_fallback_is_generic|\
     test_set_runtime_overrides_remain_authoritative|\
     test_bad_state_override_is_a_named_tool_failure|\
     test_review_fetches_exact_pr_head_when_author_worktree_is_behind|\
     test_missing_pr_head_ref_fails_closed|\
-    test_claude_reviewer_provides_model_separation_for_codex_author|\
     test_codex_reviewer_requires_bound_auth_and_clears_ambient_credentials|\
-    test_reviewer_execution_home_drift_fails_closed|\
-    test_unrouted_author_uses_cross_provider_independence|\
-    test_unrouted_author_without_account_proof_fails_closed|\
-    test_account_less_known_provider_lane_is_reviewable|\
-    test_missing_author_identity_is_a_named_tool_failure|\
     test_launcher_requires_supported_python|\
     test_completed_reviewer_suspicion_is_blocking|\
     test_reading_only_suspicion_is_a_tool_failure|\
@@ -4988,7 +3869,6 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_ordinary_output_paths_remain_bounded|\
     test_final_wait_and_residual_processes_are_bounded|\
     test_installed_sandbox_denies_shared_private_tmp|\
-    test_real_claude_sandbox_executes_exact_sha_git_diff|\
     test_symlinked_named_test_cannot_hide_test_mutation|\
     test_evidence_batch_item_limit_precedes_execution|\
     test_node_id_selector_clears_a_passing_named_test|\
@@ -5024,10 +3904,10 @@ if [ "${FM_TEST_FOCUSED:-}" = review-safety-findings ]; then
     || fail "Pi launch identity capture introduced invalid spawn syntax"
   FM_TEST_FOCUSED=pi-author-snapshot "$ROOT/tests/fm-spawn-dispatch-profile.test.sh" \
     || fail "Pi launch identity snapshot regressions failed"
-  test_same_model_relaxation_requires_proven_separate_account
-  test_legacy_author_admission_is_exact_and_explicit
+  test_same_model_relaxation_does_not_require_author_identity
+  test_missing_author_identity_reaches_normal_verdict
+  test_claude_reviewer_is_never_selected
   test_same_model_review_is_adversarial_and_durable
-  test_legacy_author_admission_is_visible_in_prompt_and_evidence
   test_typescript_jest_mutation_proof_can_clear
   test_preexisting_jest_runner_cannot_certify
   test_local_fake_jest_package_cannot_certify
@@ -5057,34 +3937,24 @@ fi
 
 test_launcher_requires_supported_python
 test_reviewer_policy_profiles_and_independence
-test_same_model_relaxation_requires_proven_separate_account
-test_legacy_author_admission_is_exact_and_explicit
-test_openai_backed_reviewer_proves_account_separation
-test_anthropic_backed_reviewer_proves_account_separation
-test_unrouted_lane_compares_provider_not_harness
+test_same_model_relaxation_does_not_require_author_identity
 test_reviewer_binary_never_resolves_from_working_directory
-test_api_key_reviewer_cannot_prove_openai_separation
 test_gate_refuses_an_unsupported_interpreter
 test_pi_reviewer_accepts_only_successful_terminal_turn
 test_pi_reviewer_pins_sibling_node_before_path
 test_pi_reviewer_executes_bound_policy_profile
 test_pi_reviewer_failures_are_tool_failures
 test_clear_review_uses_policy_contract
+test_missing_author_identity_reaches_normal_verdict
+test_claude_reviewer_is_never_selected
 test_same_model_review_is_adversarial_and_durable
-test_legacy_author_admission_is_visible_in_prompt_and_evidence
 test_empty_runtime_overrides_use_home_defaults
 test_empty_environment_fallback_is_generic
 test_set_runtime_overrides_remain_authoritative
 test_bad_state_override_is_a_named_tool_failure
 test_review_fetches_exact_pr_head_when_author_worktree_is_behind
 test_missing_pr_head_ref_fails_closed
-test_claude_reviewer_provides_model_separation_for_codex_author
 test_codex_reviewer_requires_bound_auth_and_clears_ambient_credentials
-test_reviewer_execution_home_drift_fails_closed
-test_unrouted_author_uses_cross_provider_independence
-test_unrouted_author_without_account_proof_fails_closed
-test_missing_author_identity_is_a_named_tool_failure
-test_account_less_known_provider_lane_is_reviewable
 test_new_finding_requires_executed_reproduction
 test_silence_never_closes_prior_finding
 test_verified_fix_executes_mutation_proof
@@ -5120,7 +3990,6 @@ test_baseline_readable_state_is_destroyed_before_mutation
 test_mutation_is_bound_to_cited_non_test_implementation
 test_final_wait_and_residual_processes_are_bounded
 test_installed_sandbox_denies_shared_private_tmp
-test_real_claude_sandbox_executes_exact_sha_git_diff
 test_symlinked_named_test_cannot_hide_test_mutation
 test_evidence_batch_item_limit_precedes_execution
 test_evidence_batch_has_aggregate_deadline
@@ -5140,7 +4009,6 @@ test_stopped_reviewer_and_wrong_head_are_unreviewed
 test_completed_reviewer_suspicion_is_blocking
 test_reading_only_suspicion_is_a_tool_failure
 test_pytest_runner_resolves_through_a_uv_aware_ladder
-test_claude_execution_home_always_binds_the_keychain
 test_moved_default_branch_stays_reviewable
 test_unavailable_reviewer_fails_over_to_the_next_account
 test_verify_rechecks_live_head_and_claims

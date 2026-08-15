@@ -3505,9 +3505,7 @@ finally:
   BRIEF=$CONTINUATION_PACKET
 fi
 
-PI_AUTHOR_ACCOUNT_IDENTITY=
 PI_AUTHOR_ACCOUNT_HOME=
-PI_AUTHOR_IDENTITY_SNAPSHOT_EPOCH=
 
 # prepare_launch_environment: every step the launch-command construction below
 # The PATH a crewmate's tool commands run with. A harness executes tool commands
@@ -3591,36 +3589,15 @@ persist_worktree_acquisition_phases || {
   echo "error: cannot durably record task temp creation for $ID" >&2
   exit 1
 }
-if [ "$HARNESS" = pi ]; then
-  if [ "$SPAWN_META_PRESENT" = 1 ]; then
-    PI_AUTHOR_IDENTITY_SNAPSHOT_EPOCH=$(spawn_preflight_meta_value author_identity_snapshot_epoch)
-    [ -z "$PI_AUTHOR_IDENTITY_SNAPSHOT_EPOCH" ] \
-      || [ "$PI_AUTHOR_IDENTITY_SNAPSHOT_EPOCH" = launch-bound-v1 ] \
-      || { echo "error: Pi recovery metadata has an invalid author identity snapshot epoch for $ID" >&2; exit 1; }
-  else
-    PI_AUTHOR_IDENTITY_SNAPSHOT_EPOCH=launch-bound-v1
-  fi
-fi
 if [ "$HARNESS" = pi ] && [ "$RAW_LAUNCH" != 1 ]; then
   PI_AUTHOR_SOURCE_HOME=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
   PI_AUTHOR_ACCOUNT_HOME="$TASK_TMP/pi-author-agent"
-  if PI_CAPTURED_ACCOUNT_IDENTITY=$(
-    "$SCRIPT_DIR/fm-pi-author-snapshot.py" \
-      "${MODEL:-default}" "$PI_AUTHOR_SOURCE_HOME" "$PI_AUTHOR_ACCOUNT_HOME"
-  ); then
-    if [ "$SPAWN_META_PRESENT" = 1 ]; then
-      PI_RECORDED_ACCOUNT_IDENTITY=$(spawn_preflight_meta_value author_account_identity)
-      if [ -n "$PI_RECORDED_ACCOUNT_IDENTITY" ] \
-        && [ "$PI_RECORDED_ACCOUNT_IDENTITY" = "$PI_CAPTURED_ACCOUNT_IDENTITY" ]; then
-        PI_AUTHOR_ACCOUNT_IDENTITY=$PI_CAPTURED_ACCOUNT_IDENTITY
-      fi
-    else
-      PI_AUTHOR_ACCOUNT_IDENTITY=$PI_CAPTURED_ACCOUNT_IDENTITY
-    fi
+  if "$SCRIPT_DIR/fm-pi-author-snapshot.py" \
+    "$PI_AUTHOR_SOURCE_HOME" "$PI_AUTHOR_ACCOUNT_HOME"; then
+    :
   else
     PI_AUTHOR_ACCOUNT_HOME=
-    PI_AUTHOR_ACCOUNT_IDENTITY=
-    echo "WARNING: Pi author identity could not be bound to a task-private account; same-provider Crosscheck review will remain ineligible for $ID" >&2
+    echo "WARNING: Pi task-private account capture failed; launching $ID without the captured account snapshot" >&2
   fi
 fi
 # herdr sets GOTMPDIR natively at agent start. Every other backend exports it into
@@ -4204,8 +4181,6 @@ META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   echo "generation_id=$SPAWN_GENERATION_ID"
-  [ -z "$PI_AUTHOR_ACCOUNT_IDENTITY" ] || echo "author_account_identity=$PI_AUTHOR_ACCOUNT_IDENTITY"
-  [ -z "$PI_AUTHOR_IDENTITY_SNAPSHOT_EPOCH" ] || echo "author_identity_snapshot_epoch=$PI_AUTHOR_IDENTITY_SNAPSHOT_EPOCH"
   [ -z "${PROVISION_SUMMARY:-}" ] || echo "provision=$PROVISION_SUMMARY"
   [ "$NO_ACCOUNT_ROUTING" != 1 ] || echo "account_routing_emergency_bypass=1"
   [ -z "$BACKLOG_ROW_EXEMPTION" ] || echo "backlog_row_exemption=$BACKLOG_ROW_EXEMPTION"

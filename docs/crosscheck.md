@@ -6,8 +6,8 @@ No-mistakes remains the owner of that validation pipeline.
 
 By default, the review portion is intentionally close to "no-mistakes review with a fresh, different model."
 Most of its review-quality value comes from that cross-model independence.
-A home can explicitly accept reduced model independence for a proven-separate reviewer account, but the evidence always identifies that weaker mode.
-For exact pre-snapshot Pi work that genuinely cannot be replaced under a newly bound author lane, a last-resort local admission can acknowledge that historical author-account independence is unproven; it never turns current credentials into invented historical proof, and the evidence labels that weaker mode too.
+Review independence is structural: Crosscheck and no-mistakes use different models from separate account pools, and Crosscheck runs separately from the lane that authored the work.
+The gate does not read, infer, compare, warn on, or require author-account identity metadata because that bookkeeping only restated the architecture and turned failed capture into a false merge blocker.
 The separate mechanism earns its keep only through four contracts that no-mistakes does not currently own: durable finding lifecycle across runs, gate-executed reproduction evidence, gate-executed mutation proof for fixes, and an exact reviewed SHA passed atomically to GitHub at merge.
 If those contracts move into no-mistakes, the separate reviewer runner should be removed rather than defended as a parallel product.
 
@@ -26,12 +26,6 @@ The file is local and gitignored at `config/crosscheck-reviewer.json`.
       "account_home": "/absolute/path/to/an/independent/codex/home"
     },
     {
-      "harness": "claude",
-      "model": "claude-opus-5",
-      "effort": "xhigh",
-      "account_home": "/absolute/path/to/an/independent/claude/home"
-    },
-    {
       "harness": "pi",
       "model": "gpt-5.6-sol",
       "effort": "xhigh",
@@ -41,63 +35,22 @@ The file is local and gitignored at `config/crosscheck-reviewer.json`.
 }
 ```
 
-Crosscheck resolves each configured account home and keeps every entry that satisfies the home's model policy and either proves account separation or carries an exact legacy-author admission, in configured order.
+Crosscheck resolves configured reviewer homes in order and keeps entries that satisfy its reviewer-profile and model policies.
+Claude is never an eligible Crosscheck reviewer; supported reviewer profiles are the configured Codex and Pi policy-grade profiles.
 Model separation is mandatory by default.
-The optional local `config/crosscheck-same-model` file relaxes only that screen when it contains exactly `on`; an absent file or exactly `off` preserves the default, and any other value or unsafe file shape is refused.
+The optional local `config/crosscheck-same-model` file relaxes only that model screen when it contains exactly `on`; an absent file or exactly `off` preserves the default, and any other value or unsafe file shape is refused.
 This setting is local and gitignored, is read fresh for each reviewer selection, and is not inferred from the reviewer roster or environment.
-It does not weaken account separation: the same upstream account and an unreadable identity remain ineligible even when the setting is on.
 A selected same-model reviewer receives a visible reduced-independence prompt that directs it to attack the change adversarially, falsify the author's claims instead of confirming them, and report a finding when uncertain.
-Its ledger reviewer record carries `model_independence: same-model`, and the readable report labels the run `SAME-MODEL` so the reduced independence cannot be mistaken for a cross-model review.
+Its ledger reviewer record carries `model_independence: same-model`, and the readable report labels the run `SAME-MODEL` so the reduced model independence cannot be mistaken for a cross-model review.
 
-The primary recovery for Pi work created before launch-bound identity snapshots is **replacement under a newly bound author lane**, not admission.
-Create a normal new Pi ship lane after the snapshot support landed, require its metadata to carry the launch-bound `author_account_identity`, have that lane inspect and take ownership of the complete intended change on a fresh base, revalidate it, and publish a replacement commit to the existing writable PR branch.
-Run Crosscheck for the replacement head with the new lane's task id.
-That gives the gate real author-account proof and keeps the ordinary separation rule intact.
-Copying an account id into old metadata is never part of this path, and merely relabeling the old task is not re-authorship.
-The old lane or worktree being gone is not by itself a reason for admission when the PR branch can still accept a replacement.
+The reviewer `account_home` remains mandatory because it binds the reviewer launch to the dedicated Crosscheck account pool.
+It is not compared with task metadata and does not establish an author-account identity claim.
+Missing or failed Pi author-account capture therefore has no effect on reviewer selection, review admissibility, the durable verdict, or merge verification.
+The former `config/crosscheck-legacy-author-admissions.json` path existed only to work around the removed author-identity refusal and is no longer read.
 
-`config/crosscheck-legacy-author-admissions.json` is the last-resort relaxation for a pre-snapshot Pi head that genuinely cannot be replaced under a newly bound lane, such as a PR branch the fleet cannot write or a head whose required provenance cannot be rewritten.
-It is local, gitignored, read fresh at reviewer preflight, and absent means no admission.
-There is no global on switch.
-Each entry admits exactly one task, canonical PR URL, and live head SHA, and must repeat the Pi harness and provider-slot-prefixed model recorded in task metadata.
-It also requires an exact UTC approval time, literal `legacy_author_provenance: pre-snapshot-pi`, literal `replacement_unavailable: true`, one printable-line `replacement_unavailable_reason`, and literal `admit_unproven_author_account: true` acknowledgement.
-The whole file is validated and unsafe shapes fail closed.
-
-```json
-{
-  "admissions": [
-    {
-      "task_id": "pause-vs-orphan-run-p6",
-      "pull_request": "https://github.com/ruby-dlee/firstmate/pull/116",
-      "head_sha": "0123456789abcdef0123456789abcdef01234567",
-      "author_harness": "pi",
-      "author_model": "openai-codex-5/gpt-5.6-sol",
-      "approved_at": "2026-08-10T12:00:00Z",
-      "legacy_author_provenance": "pre-snapshot-pi",
-      "replacement_unavailable": true,
-      "replacement_unavailable_reason": "PR branch is not writable by this fleet; exact-head replacement cannot be published.",
-      "admit_unproven_author_account": true
-    }
-  ]
-}
-```
-
-A matching entry is accepted only when task metadata still names an account-less Pi lane with no `author_account_identity` and no modern `author_identity_snapshot_epoch` marker.
-Every new Pi launch under snapshot-aware code records `author_identity_snapshot_epoch: launch-bound-v1` even when credential capture fails.
-Recovery preserves that marker only when the prior metadata already carried it, including after a later capture failure or account change, and never mints it for a legacy lane.
-The admission contributes the positive `pre-snapshot-pi` provenance assertion.
-It cannot downgrade routed work or a modern Pi snapshot, and a head change requires an explicitly renewed entry.
-The rule never populates metadata and never derives the old author from today's mutable provider-slot credential.
-It requires the selected reviewer to expose a readable executing account, hashes that identity at selection, and rechecks the hash against the launch-bound credential immediately before review.
-That binds who reviewed without pretending that reviewer differs from the unknowable historical author.
-The prompt says plainly that the reviewer may use the author's upstream account, removes the ordinary claim that the reviewer is account-independent, and demands disconfirming evidence.
-The ledger records `author_account_independence: unproven-legacy-admission`, the admission digest, approval time, pre-snapshot provenance, replacement-unavailable attestation and reason, historical harness/model, and reviewer-account digest.
-The readable report labels `LEGACY AUTHOR ACCOUNT UNPROVEN` and repeats the admission digest, time, provenance, historical harness/model, reviewer identity digest, and replacement-unavailable reason.
-When the same-model option also applies, both warnings and both evidence labels remain visible.
-
-Crosscheck then binds the provider's executing credential selector to that exact path and requires the verdict plus a Bash-created receipt to report the selector and actual private `HOME`.
-Account separation therefore depends on the executing credential source rather than a configuration label.
-Every reviewer disables reviewed-repository instruction discovery at launch: Codex sets `project_doc_max_bytes=0`, Claude uses `--safe-mode`, and Pi uses `--no-context-files`.
+Crosscheck then binds the provider's executing credential selector to that exact reviewer path and requires the verdict plus a Bash-created receipt to report the selector and actual private `HOME`.
+That proves which dedicated reviewer home executed the review without comparing it to an author account.
+Every reviewer disables reviewed-repository instruction discovery at launch: Codex sets `project_doc_max_bytes=0`, and Pi uses `--no-context-files`.
 Pi is launched through the resolved installed executable with `openai-codex/gpt-5.6-sol` at `xhigh`, JSON event output, an ephemeral session, and only the read and Bash-capable review tools.
 For the installed npm entrypoint, Crosscheck also resolves Pi's sibling Node runtime before launch instead of allowing the reviewer environment's `PATH` to substitute another interpreter.
 That pin recognizes every `env`-based Node shebang, including `#!/usr/bin/env -S node --flag`, and preserves the flags; an `env` shebang naming no interpreter fails closed rather than silently falling back to `PATH`.
@@ -113,32 +66,12 @@ Failover is limited to faults that prevented a verdict: a launch failure, an unu
 A reviewer that reached the model and then declined clearance, returned no valid artifact, or returned a malformed one ends the run on the spot, because that is the reviewer's own conclusion and a second account must not be used to shop for a friendlier one.
 Each abandoned attempt is recorded as its own `tool-failure` run, so the ledger names every account that was tried and why it was left, and each attempt gets its own pristine exact-head checkout so no reviewer inherits an earlier reviewer's helpers or scratch state.
 Selection therefore makes the gate as available as the roster rather than as available as its first entry.
-Every candidate passed the configured model policy and either the ordinary mandatory account-separation screen or an exact legacy admission.
-`run_reviewer` re-proves ordinary account separation against the credential it actually binds, while a legacy-admitted run re-proves only the selected reviewer's identity and preserves the explicit unproven-author label.
-
-One upstream account routinely exists behind several directories at once, so two different `account_home` paths can execute as the same account.
-Codex and Pi both authenticate against OpenAI, and a Claude config home that records no account of its own borrows whatever credential the environment supplies.
-Path inequality therefore cannot establish account separation on either provider.
-When the author and the reviewer resolve to the same provider, Crosscheck compares the account each home executes as and refuses a reviewer that resolves to the author's account, an unreadable identity on either side, or a credential such as an API key that names no account at all.
-An identity that cannot be resolved is never separation, and the refusal happens at selection so a genuinely provable reviewer later in the list can still be chosen.
-The account is read from `tokens.account_id` for Codex, `openai-codex.accountId` for Pi, and `oauthAccount.accountUuid` in `.claude.json` for Claude; `bin/fm-crosscheck.py`'s `account_identity` keys that resolution on the provider so a new client on an existing provider cannot reopen the hole.
-`run_reviewer` repeats the comparison against the credential it actually binds, and that launch-time check is the authoritative one.
-A lane that records no `account_home` is an ordinary supported author identity, not an emergency.
-Account routing is off by design for any harness outside Codex and Claude, so a Pi lane structurally cannot record an `account_home`.
-Requiring one, or an `account_routing_emergency_bypass=1` marker in its place, made every Pi-launched lane permanently unmergeable through this gate, and a bypass that has to be set on the majority of lanes is not a gate.
-A different supported provider proves account separation by namespace for any account-less author.
-A Pi author additionally records the exact selected provider slot in its model prefix, and `fm-spawn.sh` copies the selected Pi credential and configuration directory into restrictive task-private storage before launch.
-It derives the slot's `accountId` from that private copy, records it in task metadata, and binds the actual Pi launch to the same directory through `PI_CODING_AGENT_DIR` on every spawn backend.
-Same-provider eligibility requires that launch-bound recorded identity and never re-reads ambient Pi credentials as author proof; a missing snapshot fails closed unless the exact task, PR, and head carry the explicit legacy admission above.
-Recovery takes a new private copy and preserves eligibility only when its identity matches the previously recorded identity exactly, while a changed account drops the recorded field instead of migrating the task's author identity.
-That identity lets a same-provider reviewer prove it executes as another OpenAI account without inventing an `account_home` for the author.
-A missing directory, unsafe or failed copy, malformed auth file, absent slot, or unreadable `accountId` proves nothing and leaves every same-provider reviewer ineligible.
-Other account-less same-provider pairs remain ineligible because no account comparison is available.
-Model identity compares the model itself, not the recorded string: Pi records `<provider-slot>/<model>`, so `openai-codex-2/gpt-5.6-sol` is the same model as a Codex reviewer's `gpt-5.6-sol`.
+Every candidate passed the configured reviewer-profile and model policy.
+Reviewer credential inspection still proves that the selected reviewer home can execute its configured client, but it makes no claim about the author.
+Model identity compares the model itself, not the recorded string: Pi records `<provider-slot>/<model>`, so `openai-codex-2/gpt-5.6-sol` is the same model as a Codex reviewer's plain `gpt-5.6-sol`.
 That canonical identity is screened out by default and is what marks a selected review as same-model when the explicit relaxation is on.
-Provider is what the namespace fallback compares, not harness: Codex and Pi are both the OpenAI provider, while Anthropic is separate.
-The accepted profiles are Codex `gpt-5.6-sol` xhigh, Claude `claude-opus-5` xhigh, and Pi `gpt-5.6-sol` xhigh; no allowlist change is needed to enable the existing Codex profile.
-Absent reviewer configuration, unavailable credentials, model-policy mismatch, and unprovable account separation without an exact legacy admission all produce `CROSSCHECK TOOL-FAILURE` and a nonzero exit before reviewer launch.
+The accepted profiles are Codex `gpt-5.6-sol` xhigh and Pi `gpt-5.6-sol` xhigh.
+Absent reviewer configuration, unavailable reviewer credentials, or model-policy mismatch produces `CROSSCHECK TOOL-FAILURE` and a nonzero exit before reviewer launch.
 
 Crosscheck requires Python 3.11 or newer and refuses to run on anything older.
 This is a safety floor rather than a style preference: the bounded-read layer rejects hostile JSON integers by relying on CPython's integer/string conversion limit, which first exists in 3.11, and on an older interpreter that rejection silently stops happening while every banner the gate prints reads exactly the same.
@@ -203,10 +136,9 @@ A `verified-fixed` lifecycle remains durable, but its proof clears only the exac
 
 Each run has one outcome class.
 A run that used the local same-model relaxation records `reviewer.model_independence` as `same-model`; older and ordinary cross-model runs omit that field.
-A legacy-admitted run separately records `reviewer.author_account_independence` as `unproven-legacy-admission` plus the exact admission and reviewer-identity digests.
-The readable report renders both distinctions before its summary.
+The readable report renders that distinction before its summary.
 
-- `tool-failure` means environment, task metadata, reviewer configuration, exact-head fetch, executing-account binding, or required command-execution proof prevented a trustworthy verdict.
+- `tool-failure` means environment, task metadata, reviewer configuration, exact-head fetch, reviewer credential binding, or required command-execution proof prevented a trustworthy verdict.
 - `cannot-certify` means a reviewer completed but the changed implementation's own test system had no trustworthy mutation-certification route the gate could execute.
 - `unreviewed` means a reviewer ran but no valid exact-head verdict artifact exists.
 - `blocking` means a completed reviewer with successful command-execution evidence declined clearance through a suspicion, admitted finding, or a named test that stayed green under its implementation mutation.
@@ -301,31 +233,19 @@ Until that lands, the pytest exit-status inference remains this gate's weakest l
 
 ## Refusal and liveness
 
-The reviewer is a synchronous Codex or Claude agent invocation with a bounded timeout and a JSON output schema.
+The reviewer is a synchronous Codex or Pi agent invocation with a bounded timeout and a JSON output schema.
 Normal runs take minutes and callers should budget them as remote agent work rather than a cheap local preflight.
 PR claims are delimited as untrusted data, and the reviewer is directed to ignore embedded instructions and use focused evidence rather than duplicate no-mistakes' broad suite.
 Later reviewers receive only a bounded projection of finding IDs, lifecycle state, severity, exact-head clearance, and proof digests.
 Finding prose, reproduction output, test output, and lifecycle notes remain durable in the ledger but are never reinjected into a later reviewer prompt.
 The Codex path pins `gpt-5.6-sol`, xhigh reasoning, noninteractive approval, an independent `CODEX_HOME`, the same account-bound `HOME`, and the exact review checkout.
-The Claude path pins `claude-opus-5`, xhigh effort, the installed unattended `--dangerously-skip-permissions` mode, a Bash-required bounded tool list, no session persistence, an independent `CLAUDE_CONFIG_DIR`, the same `CLAUDE_SECURESTORAGE_CONFIG_DIR`, a disposable private `HOME`, and structured JSON output.
-That private `HOME` maps `.claude` and `.claude.json` to the selected reviewer account directory, so Claude's hard-coded `~/.claude/session-env` writes land in per-account state rather than shared operator state.
-It also maps the current user's Keychain directory, derives Claude's exact scoped service from the selected account directory, and verifies the non-secret service metadata before reviewer launch.
-That mapping is unconditional on macOS, not a fallback for accounts that lack an OAuth file.
-macOS resolves a Keychain search through `$HOME/Library/Keychains`, so under a private `HOME` an unmapped Keychain is simply unreachable, and a real account directory routinely holds both a live scoped Keychain item and a stale `.credentials.json` left beside it.
-Mapping the Keychain only when `.credentials.json` was absent therefore sent every such reviewer to the stale file, where it failed with `Failed to authenticate: OAuth session expired and could not be refreshed` in one turn, with no tokens and no API time, while the same account worked normally outside the gate.
-The scoped Keychain item is preferred when it exists, because it is the credential the launched reviewer actually executes as; a regular non-symlink `.credentials.json` remains the recorded source only when no scoped item is present.
-This is a binding inside the reviewer's own private `HOME`, not a sandbox grant: the generated profile is unchanged, and reads of the operator's Keychain directory were already permitted by it.
-Because Claude's unattended mode disables its own permission prompts, Crosscheck places the process under the installed macOS `sandbox-exec` contract: reads, process execution, and provider network access remain available, while writes are limited to the disposable review checkout, the selected per-account reviewer directory, and `/dev/null`.
-The profile never grants the ambient operator `~/.claude` tree or its session scratch subtree.
-Claude's Bash engine otherwise creates workspace scratch under shared `/tmp/claude-<uid>` independently of ordinary `TMPDIR`.
-Crosscheck sets the supported `CLAUDE_CODE_TMPDIR` to a private directory inside the disposable checkout, keeping that scratch under the existing checkout write boundary instead of widening the sandbox to shared `/tmp`.
-It does not grant write access to the author worktree or the wider filesystem.
-An unavailable reviewer binary, sandbox, author-identity proof, executing-account binding, verdict-level execution proof, or exact remote PR head records a `tool-failure` attempt when the live head is already known, and otherwise emits the same tool-failure class without fabricating a ledger run.
+The Pi path pins `gpt-5.6-sol`, xhigh reasoning, an independent `PI_CODING_AGENT_DIR`, a disposable private `HOME`, extension and context isolation, and JSON event output.
+An unavailable reviewer binary, sandbox, reviewer credential binding, verdict-level execution proof, or exact remote PR head records a `tool-failure` attempt when the live head is already known, and otherwise emits the same tool-failure class without fabricating a ledger run.
 A ledger that cannot be read is the one stop that cannot record itself: appending a run to a file that failed to parse would risk destroying the durable findings it still holds, so the ledger is left exactly as it is and only the readable `crosscheck.md` report is rewritten, naming the parse failure so the cause is on disk rather than only in the exit status of a run nobody kept.
 A reviewer that never reached its provider is also a `tool-failure` rather than an `unreviewed` attempt, and is the case that fails over.
-The two are distinguished by evidence of model work: a Claude result envelope with no API duration, no token usage, and no per-model usage, or a Codex exit that wrote no result artifact at all, means the account never spoke and the gate learned nothing about the code.
+The two are distinguished by evidence of model work: a Codex exit that wrote no result artifact or a Pi launch that never completed a turn means the account never spoke and the gate learned nothing about the code.
 Recording that as `unreviewed` also manufactured a suspicion in the ledger, which reads like the reviewer raised a concern about the change when it had not started.
-Failure banners quote what the reviewer actually reported - for Claude the envelope's `result`, `subtype`, `terminal_reason`, `api_error_status`, and any permission denials, plus captured stderr - rather than a fixed-length excerpt of the raw envelope, because the sentence that explains a failure sits past the point such an excerpt stops.
+Failure banners quote what the reviewer actually reported rather than replacing it with a generic refusal.
 A timeout, or a reviewer that reached the model and then produced a missing, empty, malformed, or wrong-head artifact, records an `unreviewed` attempt and exits nonzero.
 A completed review whose changed implementation has no executable mutation-certification route records `cannot-certify`, names the exact missing route, and exits nonzero without fabricating either a code verdict or a pass.
 An unresolved suspicion comes from a completed reviewer and records a `blocking` attempt instead of being conflated with an invalid review artifact.
@@ -334,10 +254,10 @@ This includes provider refusals that surface only as a stopped or silent agent.
 That fail-closed banner keeps an interpreter defect from reading as a clear review; interpreter discovery order and the `FM_CROSSCHECK_PYTHON` override are owned by [configuration.md](configuration.md#toolchain).
 Reviewer stdout plus stderr use a separate 16 MiB capture ceiling because a full agent transcript routinely exceeds the ordinary command budget.
 `FM_CROSSCHECK_REVIEWER_MAX_CAPTURE_BYTES` can override that ceiling between 200,000 bytes and 64 MiB, and an invalid value fails closed before reviewer launch.
-This remains a hard bound rather than truncation: Claude returns its structured verdict in the captured JSON envelope, while Codex must still provide its separate authoritative result artifact.
+This remains a hard bound rather than truncation: Codex must still provide its separate authoritative result artifact, and Pi must complete its structured event stream.
 Crossing the reviewer ceiling terminates the owned process tree and records a loud `unreviewed` attempt, and captured output alone never substitutes for a valid verdict.
 Evidence and every other ordinary command retain the 200,000-byte aggregate stdout-plus-stderr ceiling, except the post-review checkout integrity inspection described above, which carries its own 4 MiB budget.
-The final wait and identity-pinned descendant cleanup remain inside the same absolute deadline.
+The final wait and process-pinned descendant cleanup remain inside the same absolute deadline.
 Structured verdict artifacts are stable regular files bounded by the ordinary 200,000-byte ceiling before JSON decoding.
 The durable ledger is bounded separately and fails closed when absent, symlinked, malformed, non-finite, or oversized.
 The platform-specific containment limits and empirical mutation evidence are recorded in [crosscheck-bounded-io.md](crosscheck-bounded-io.md).
@@ -346,7 +266,7 @@ Reviewer result arrays are capped at 32 entries, at most 32 evidence executions 
 ## Installed external contracts
 
 The external surface was observed on 2026-08-02 before implementation, rechecked on 2026-08-03 for nonempty TOON arrays, re-run against installed `gh-axi 0.1.25` on 2026-08-04, and extended with read-only merge-queue checks on 2026-08-08.
-The 2026-08-04 recheck observed `gh-axi 0.1.25`, `codex-cli 0.146.0-alpha.9.2`, and Claude Code 2.1.221; the original Claude contract was first exercised on 2.1.220.
+The 2026-08-04 recheck observed `gh-axi 0.1.25` and `codex-cli 0.146.0-alpha.9.2`.
 
 `gh-axi pr view` supports `--full` but does not support raw-gh `--json` or `-q` flags.
 The production adapter therefore uses these exact forms.
@@ -370,7 +290,6 @@ The merge form with optional `commit_title` and `commit_message` fields was sepa
 The read adapter exposes no merge subcommand; only the gate-refused `fm-crosscheck.sh merge` boundary can reach its private exact-SHA merge or enqueue primitives, and that boundary freshly verifies the ledger before issuing the request.
 
 The installed reviewer invocation was exercised successfully with `--output-schema`, `--output-last-message`, `--model gpt-5.6-sol`, and `model_reasoning_effort="xhigh"` before production code used those flags.
-The installed Claude invocation was exercised successfully with a private `HOME`, selected-account `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`, `--model claude-opus-5`, `--effort xhigh`, `--dangerously-skip-permissions`, `--tools Bash,Read,Glob,Grep`, `--no-session-persistence`, `--output-format json`, and `--json-schema` before production code used those flags.
 The installed `/usr/bin/sandbox-exec` was also exercised with the generated profile: a write inside the allowed review directory succeeded, while sibling and `/private/tmp` writes failed with `Operation not permitted`.
 On 2026-08-09 the Jest mutation route was exercised at relvino PR 1049 head `5649c234b0f258cde4d62870759e353fade5ff3d` in a fresh exact-head clone.
 The gate selected Node 20.20.2 for the package's `20.x` declaration, used npm 10.8.2 and the tracked package lock to materialize Jest 29.7.0 offline with lifecycle scripts disabled, and ran the fixed `--runInBand --runTestsByPath --ci --no-cache --json` protocol under the no-network sandbox.
@@ -380,25 +299,21 @@ The tracked `V3PreviewPane.test.tsx` reported 33 executed and zero failed tests 
 
 `tests/fm-github-pr.test.sh` is hermetic coverage using checked-in TOON shapes.
 The versioned fixtures it uses were observed from installed `gh-axi 0.1.25`.
-Most of `tests/fm-crosscheck.test.sh` is hermetic coverage using observed-shape GitHub, Codex, Claude, and sandbox fakes.
+Most of `tests/fm-crosscheck.test.sh` is hermetic coverage using observed-shape GitHub, Codex, Pi, and sandbox fakes.
 Its `test_installed_sandbox_denies_shared_private_tmp` case is the exception: it invokes the real installed `/usr/bin/sandbox-exec` and verifies the generated proof profile denies shared host temporary state.
-Its tracked `test_real_claude_sandbox_executes_exact_sha_git_diff` case is an opt-in real-runtime guard: with `FM_TEST_REAL_CLAUDE_SANDBOX_GIT_DIFF=1` and `FM_TEST_REAL_CLAUDE_CONFIG_DIR` set to a credentialed independent Claude home, it creates the same private execution `HOME`, verifies the selected OAuth-file or scoped-Keychain source, launches installed Claude under the generated installed sandbox, requires Bash to execute `git diff` between two real exact SHAs, checks the selected config paths and isolated `CLAUDE_CODE_TMPDIR`, and rejects any profile grant for the ambient operator `~/.claude/session-env`.
-Ordinary CI prints a named skip for this network- and credential-dependent guard instead of substituting fake-only coverage.
-The retained live runtime proof is the change receipt for this patch; the opt-in test is the repeatable regression guard for future environments.
 Its `test_pytest_runner_resolves_through_a_uv_aware_ladder` case is the named regression for runner-name resolution: it pins monorepo uv-project discovery, the skipped uv rung outside a project, the unchanged absent-runner refusal, and pytest's retained node-id support.
-Its `test_account_less_known_provider_lane_is_reviewable` case is the named regression for an account-less Pi lane whose provider-slot identity is unreadable: it requires a cross-provider reviewer to clear it and a same-provider reviewer to remain refused.
-Its `test_same_model_relaxation_requires_proven_separate_account` case provides a launch-recorded routed Pi identity and proves that default and explicit-off policy reject same-provider review, opt-in still rejects missing, same, or unreadable account proof, ambient credential drift cannot replace the snapshot, and only a recorded-distinct OpenAI account becomes eligible.
-Its `test_legacy_author_admission_is_exact_and_explicit` case proves that absent and stale admissions fail closed, replacement-unavailable acknowledgement is mandatory, a matching entry never synthesizes author identity, a modern snapshot cannot be downgraded, and an admitted reviewer still needs a readable executing account.
-Its `test_legacy_author_admission_is_visible_in_prompt_and_evidence` case proves that the weaker mode is explicit in the adversarial prompt, ledger, and readable report, including both same-model and unproven-author labels.
+Its `test_missing_author_identity_reaches_normal_verdict` case is the named regression for a Pi lane without a captured account identity: the review reaches an ordinary clear verdict without an identity warning or downgrade.
+Its `test_claude_reviewer_is_never_selected` case proves the separate standing rule that Claude is not an accepted reviewer profile and never launches.
+Its `test_same_model_relaxation_does_not_require_author_identity` case proves the explicit model-policy relaxation does not revive an author-account precondition.
+`tests/fm-spawn-dispatch-profile.test.sh` separately proves a failed Pi identity capture remains nonfatal and the lane still launches.
 Its `test_typescript_jest_mutation_proof_can_clear` and `test_inadequate_typescript_jest_coverage_stays_blocking` cases prove that package-governed Jest coverage can certify a TypeScript fix while a named Jest test that stays green under mutation keeps the finding blocking.
 Its `test_preexisting_jest_runner_cannot_certify` case proves that a committed Jest-shaped output script is refused before package-manager materialization, and `test_local_fake_jest_package_cannot_certify` proves a lockfile-routed local fake package cannot substitute for official registry provenance.
 Its `test_local_transitive_jest_package_cannot_certify` case keeps top-level Jest registry-authenticated while substituting a local `jest-cli`, and proves that every transitive runtime package must remain inside the authenticated closure.
 Its `test_jest_runs_under_declared_node_major` case proves the selected Node path governs installation and both proof executions.
 Its `test_typescript_without_usable_route_is_cannot_certify` case proves that an unsupported package-governed route writes and reports `CANNOT-CERTIFY` rather than silently clearing or manufacturing a code verdict.
 Its `test_python_mutation_proof_is_byte_exact` case compares the complete normalized Python proof record to the pre-Jest shape so the new language route cannot drift existing pytest evidence.
-Its `test_claude_execution_home_always_binds_the_keychain` case is the named regression for the private-`HOME` Keychain bind, and it fails if the bind is made conditional on `.credentials.json` again.
 Its `test_moved_default_branch_stays_reviewable` case is the named regression for base drift: it advances the fake default branch past the PR's branch point, then requires the run to review against the merge base, record it, and still verify.
-Its `test_unavailable_reviewer_fails_over_to_the_next_account` case covers reviewer failover using the observed zero-turn Claude error envelope, and asserts the ledger records the abandoned attempt with the reason the reviewer reported rather than a truncated envelope.
+Its `test_unavailable_reviewer_fails_over_to_the_next_account` case covers a failed Pi reviewer followed by a healthy Codex reviewer and asserts both attempts remain durable.
 Its `test_forged_git_diff_mutation_command_is_rejected` case is the named regression that fails if a free-form `git diff --quiet # tests/regression.test.sh` can replace real mutation verification.
 Its `test_baseline_readable_state_is_destroyed_before_mutation` and `test_mutation_is_bound_to_cited_non_test_implementation` cases cover the two mutation-causality bypasses found in the final review round.
 Its `test_mutated_non_execution_cannot_clear_a_finding` case covers the third bypass of that class: a mutation that only broke test collection exits nonzero and previously read as a caught regression, so the gate could certify a fix on a test that never ran.
@@ -430,5 +345,5 @@ Any reproduction against a repository requiring 3.10 or newer then died on an un
 Approved mutation-proof runners are resolved from the gate's own `PATH` and were never affected.
 
 Reviewer-generated commands execute in disposable exact-head clones with bounded timeouts.
-Codex uses its installed workspace-write sandbox, and Claude uses the explicit macOS profile described above.
+Codex uses its installed workspace-write sandbox, and Pi uses the explicit macOS profile described above.
 Both permit test processes and provider network access, so this is containment for accidental or prompt-directed file mutation, not a guarantee that hostile repository code is safe to execute.

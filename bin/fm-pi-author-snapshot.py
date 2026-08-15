@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
-import re
 import shutil
 import stat
 import sys
@@ -13,7 +11,6 @@ import sys
 MAX_FILES = 20_000
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_FILE_BYTES = 16 * 1024 * 1024
-SLOT_RE = re.compile(r"openai-codex(?:-[1-9][0-9]*)?")
 
 
 class SnapshotError(RuntimeError):
@@ -101,37 +98,11 @@ def copy_tree(source: Path, destination: Path) -> None:
     (destination / "sessions").mkdir(mode=0o700)
 
 
-def account_identity(model: str, snapshot: Path) -> str:
-    slot, separator, _ = model.partition("/")
-    if separator == "" or SLOT_RE.fullmatch(slot) is None:
-        raise SnapshotError("model does not name a routed Pi OpenAI provider slot")
-    auth_path = snapshot / "auth.json"
-    metadata = auth_path.lstat()
-    if not stat.S_ISREG(metadata.st_mode) or auth_path.is_symlink():
-        raise SnapshotError("Pi snapshot has no safe auth.json")
-    with auth_path.open("rb") as stream:
-        raw = stream.read(1024 * 1024 + 1)
-    if len(raw) > 1024 * 1024:
-        raise SnapshotError("Pi snapshot auth.json exceeds the identity bound")
-    value = json.loads(raw)
-    credential = value.get(slot) if isinstance(value, dict) else None
-    identity = credential.get("accountId") if isinstance(credential, dict) else None
-    if not (
-        isinstance(credential, dict)
-        and credential.get("type") == "oauth"
-        and isinstance(identity, str)
-        and identity.strip()
-        and not any(character in identity for character in "\0\r\n")
-    ):
-        raise SnapshotError("Pi snapshot has no readable OAuth account identity")
-    return identity.strip()
-
-
 def main() -> int:
-    if len(sys.argv) != 4:
-        print("usage: fm-pi-author-snapshot.py MODEL SOURCE DESTINATION", file=sys.stderr)
+    if len(sys.argv) != 3:
+        print("usage: fm-pi-author-snapshot.py SOURCE DESTINATION", file=sys.stderr)
         return 2
-    model, source_value, destination_value = sys.argv[1:]
+    source_value, destination_value = sys.argv[1:]
     source = Path(source_value)
     destination = Path(destination_value)
     if not source.is_absolute() or not destination.is_absolute():
@@ -142,12 +113,10 @@ def main() -> int:
         return 1
     try:
         copy_tree(source, destination)
-        identity = account_identity(model, destination)
-    except (OSError, ValueError, UnicodeError, json.JSONDecodeError, SnapshotError) as exc:
+    except (OSError, ValueError, UnicodeError, SnapshotError) as exc:
         shutil.rmtree(destination, ignore_errors=True)
         print(f"Pi author snapshot failed: {exc}", file=sys.stderr)
         return 1
-    print(identity)
     return 0
 
 
