@@ -113,7 +113,8 @@ Firstmate replaces every `<slug>` only with a shell-quoted form of the already-v
 The command must leave its terminal shell in the prepared worktree when it succeeds.
 Firstmate still requires two consecutive identical working-directory observations, a genuine isolated Git worktree root, a clean base refreshed to the fetched remote default tip, and the existing bounded acquisition timeout before it launches the worker.
 A nonzero command result is reported promptly and preserves any existing or partly-created target for inspection instead of deleting it.
-Successful custom acquisition is recorded so normal cleanup applies the same dirty-work and landed-work protections, verifies the exact worktree remains registered to the exact project, and removes it through Git's worktree interface rather than asking Treehouse to manage a worktree it did not create.
+Successful custom acquisition records `worktree_provider=project-command` in the task's metadata, so normal cleanup applies the same dirty-work and landed-work protections, verifies the exact worktree remains registered to the exact project, and removes it through Git's worktree interface rather than asking Treehouse to manage a worktree it did not create.
+An absent `worktree_provider=` means the default Treehouse acquisition and return path.
 The setting never runs for a control-plane relaunch, which reuses the recorded worktree, or for a secondmate launch, which uses its seeded home.
 It is also ignored for Orca because Orca owns both acquisition and cleanup.
 These project-specific command files are not inherited into secondmate homes because their filesystem assumptions are home-local; configure the corresponding file in a secondmate home separately when that home's project clone needs it.
