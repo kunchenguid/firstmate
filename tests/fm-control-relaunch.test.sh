@@ -1892,15 +1892,15 @@ test_spawn_relaunch_refuses_an_unbound_herdr_create_response() {
   mutations=$(cat "$dir/fake/herdr-mutations")
   assert_contains "$mutations" 'tab create' \
     "the unbound create response fixture did not cross the create boundary"
-  assert_contains "$mutations" 'pane close w1:p3' \
-    "an unbound create response must reclaim its claim-bound pane"
+  assert_not_contains "$mutations" 'pane close' \
+    "an unbound create response must not close an unverified pane"
   assert_not_contains "$mutations" 'tab close' \
     "an unbound create response must not close the recorded vanished tab"
   [ -z "$(cat "$dir/fake/literal")" ] \
     || fail "an unbound create response must not deliver a second worker launch"
   [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
     || fail "an unbound create response must clear its replacement claim"
-  pass "fm-spawn --relaunch: unbound Herdr creation reclaims its claim-bound endpoint"
+  pass "fm-spawn --relaunch: unbound Herdr creation refuses without endpoint cleanup"
 }
 
 test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
@@ -1920,12 +1920,22 @@ test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
       "the post-create $case_name fixture did not cross the replacement-create boundary"
     [ -z "$(cat "$dir/fake/literal")" ] \
       || fail "a post-create $case_name read must not deliver a second worker launch"
-    assert_contains "$mutations" 'pane close w1:p3' \
-      "an unreadable $case_name response must reclaim its claim-bound endpoint"
-    [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
-      || fail "the $case_name refusal must clear its durable claim"
+    case "$case_name" in
+      postclose-tabs-unavailable|postclose-tabs-malformed)
+        assert_not_contains "$mutations" 'pane close' \
+          "a $case_name refusal must not close without a fresh agent-state proof"
+        [ -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+          || fail "the $case_name refusal must retain its verified recovery claim"
+        ;;
+      *)
+        assert_not_contains "$mutations" 'pane close' \
+          "an unreadable $case_name response must not close an unverified endpoint"
+        [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+          || fail "the $case_name refusal must discard its unverified claim"
+        ;;
+    esac
   done
-  pass "fm-spawn --relaunch: post-create Herdr read failures reclaim only task-owned endpoints"
+  pass "fm-spawn --relaunch: post-create failures clean only verified endpoints"
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
