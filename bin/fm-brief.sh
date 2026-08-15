@@ -317,6 +317,11 @@ The report is the only thing that survives, so anything worth keeping must be in
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   Open a PR against the repository this worktree's default branch actually TRACKS, and pass
+   it explicitly with \`-R <owner>/<repo>\`. Check with \`git rev-parse --abbrev-ref main@{upstream}\`
+   rather than assuming: gh defaults to \`origin\`, and \`origin\` is not always where this fleet
+   ships - a fork can be the source of truth while \`origin\` still points at an upstream that
+   will not take the change.
    Keep every working file that is NOT part of the deliverable OUTSIDE the repository, and
    remove it when done. That covers a PR body you pass to gh-axi, a note to yourself, and any
    helper or migration script you write to perform your own edits - if it is scaffolding rather
@@ -443,6 +448,11 @@ If the top-level path is the primary checkout or not the worktree you were launc
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+   Open a PR against the repository this worktree's default branch actually TRACKS, and pass
+   it explicitly with \`-R <owner>/<repo>\`. Check with \`git rev-parse --abbrev-ref main@{upstream}\`
+   rather than assuming: gh defaults to \`origin\`, and \`origin\` is not always where this fleet
+   ships - a fork can be the source of truth while \`origin\` still points at an upstream that
+   will not take the change.
    Keep every working file that is NOT part of the deliverable OUTSIDE the repository, and
    remove it when done. That covers a PR body you pass to gh-axi, a note to yourself, and any
    helper or migration script you write to perform your own edits - if it is scaffolding rather
