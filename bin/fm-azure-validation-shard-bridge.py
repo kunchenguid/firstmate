@@ -186,19 +186,24 @@ def submit_requests(environment, kind, count, command):
     round_dir = environment["exchange"] / round_id
     round_dir.mkdir(mode=0o700)
     bundle = round_dir / "snapshot.bundle"
-    # The gate snapshot is detached: the recorded head (with the pipeline's
-    # rebase and fix commits) exists only at HEAD, and the branch ref, when
-    # present at all, still points at the pre-pipeline commit. Bundle HEAD
-    # always so the host can materialize the exact requested head, and carry
-    # the branch ref alongside when the snapshot has one.
-    refs = ["HEAD"]
-    branch_probe = run(
-        ["git", "-C", str(repo), "show-ref", "--verify", "--quiet", "refs/heads/" + branch],
-        check=False,
-    )
-    if branch_probe.returncode == 0:
-        refs.append("refs/heads/" + branch)
-    run(["git", "-C", str(repo), "bundle", "create", str(bundle)] + refs)
+    # The runner admits only a single bundle head named for the source ref at
+    # the snapshot's exact HEAD commit. The gate snapshot is detached with its
+    # branch ref lagging HEAD by the pipeline's own commits, so advance the
+    # ref forward-only to HEAD before bundling; a HEAD that does not descend
+    # from the ref refuses rather than rewriting history.
+    ref = "refs/heads/" + branch
+    on_branch = run(["git", "-C", str(repo), "symbolic-ref", "--quiet", "HEAD"], check=False)
+    if on_branch.returncode != 0:
+        ref_probe = run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet", ref], check=False)
+        if ref_probe.returncode == 0:
+            ancestry = run(
+                ["git", "-C", str(repo), "merge-base", "--is-ancestor", ref, "HEAD"],
+                check=False,
+            )
+            if ancestry.returncode != 0:
+                raise BridgeError("snapshot HEAD does not descend from the branch ref; refusing to move it")
+        run(["git", "-C", str(repo), "branch", "-f", branch, "HEAD"])
+    run(["git", "-C", str(repo), "bundle", "create", str(bundle), ref])
     run(["git", "bundle", "verify", str(bundle)])
     snapshot_digest = digest_file(bundle)
     requests = []
