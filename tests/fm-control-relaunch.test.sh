@@ -1826,6 +1826,31 @@ test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything() {
   pass "fm-spawn --relaunch: missing Herdr pane ambiguity refuses without endpoint or metadata mutation"
 }
 
+test_control_relaunch_preflights_missing_herdr_pane_before_recording_note() {
+  local dir out rc meta_before brief_before
+  dir=$(new_case herdr-control-preflight hr1)
+  add_herdr_missing_pane_task "$dir" hr1
+  make_herdr_missing_pane_stub "$dir" conflicting-agentfree-pane
+  meta_before="$dir/meta-before"
+  brief_before="$dir/brief-before"
+  cp "$dir/home/state/hr1.meta" "$meta_before"
+  cp "$dir/home/data/hr1/brief.md" "$brief_before"
+  out=$(FM_FAKE_HERDR_CASE=conflicting-agentfree-pane \
+    run_control "$dir" hr1 relaunch --note "must not persist"); rc=$?
+  expect_code 1 "$rc" "a conflicting missing Herdr pane must refuse before control records a note"
+  assert_contains "$out" "failed recovery preflight" \
+    "the control refusal should identify the missing-pane preflight"
+  cmp -s "$meta_before" "$dir/home/state/hr1.meta" \
+    || fail "the missing-pane control refusal changed serialized metadata"
+  cmp -s "$brief_before" "$dir/home/data/hr1/brief.md" \
+    || fail "the missing-pane control refusal appended a progress note"
+  [ ! -e "$dir/home/state/hr1.control-relaunch" ] \
+    || fail "the missing-pane control refusal created a transaction journal"
+  [ ! -e "$dir/fake/herdr-mutations" ] \
+    || fail "the missing-pane control refusal mutated Herdr"
+  pass "fm-control relaunch: missing Herdr refusal preserves brief and transaction state"
+}
+
 test_spawn_relaunch_reclaims_a_postcreate_herdr_conflict() {
   local dir out rc before mutations
   dir=$(new_case herdr-postcreate-conflict hr1)
@@ -1963,6 +1988,7 @@ test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything
+test_control_relaunch_preflights_missing_herdr_pane_before_recording_note
 test_spawn_relaunch_reclaims_a_postcreate_herdr_conflict
 test_spawn_relaunch_refuses_an_unbound_herdr_create_response
 test_spawn_relaunch_handles_postcreate_herdr_read_failures

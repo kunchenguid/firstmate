@@ -346,6 +346,26 @@ refresh_published_relaunch_endpoint() {
   T=$FM_BACKEND_VALIDATED_TARGET
 }
 
+preflight_missing_herdr_relaunch() {
+  local state session pane workspace tab journal
+  [ "$BACKEND" = herdr ] || return 0
+  state=$(agent_state)
+  [ "$state" = missing ] || return 0
+  session=${T%%:*}
+  pane=${T#*:}
+  workspace=$(fm_meta_get "$META" herdr_workspace_id)
+  tab=$(fm_meta_get "$META" herdr_tab_id)
+  [ -n "$workspace" ] && [ -n "$tab" ] || die "task $ID has incomplete Herdr endpoint metadata; refusing to relaunch a missing pane"
+  journal=
+  if [ -e "$STATE/$ID.herdr-presentation" ] || [ -L "$STATE/$ID.herdr-presentation" ]; then
+    journal="$STATE/$ID.herdr-presentation"
+  fi
+  fm_backend_source herdr || die "could not load the Herdr backend preflight for $ID"
+  fm_backend_herdr_relaunch_missing_pane_preflight \
+    "$session" "$workspace" "$tab" "$pane" "$LABEL" "$journal" "$ID" "$FM_HOME" \
+    || die "task $ID's missing Herdr pane failed recovery preflight; no relaunch record or instructions were changed"
+}
+
 # send_interrupt_keys: deliver the harness's interrupt key the verified number
 # of times, then the composer-clear key when the adapter needs one. Refuses
 # before sending anything when the backend cannot deliver either key, because
@@ -801,6 +821,7 @@ do_relaunch() {
       ;;
   esac
 
+  preflight_missing_herdr_relaunch
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"
   else

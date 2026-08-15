@@ -2798,18 +2798,17 @@ preserve_relaunch_meta() {
   fi
 } > "$SPAWN_META_PATH"
 if [ "$RELAUNCH" -eq 1 ]; then
-  if [ -n "$HERDR_MISSING_PANE_REPLACEMENT_CLAIM" ] \
-     && ! fm_backend_herdr_relaunch_claim_remove \
-       "$HERDR_MISSING_PANE_REPLACEMENT_CLAIM" "$ID"; then
-    echo "error: could not finalize Herdr missing-pane replacement claim for $ID" >&2
-    exit 1
-  fi
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
   RELAUNCH_REPLACEMENT_PENDING=0
   HERDR_MISSING_PANE_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
+  if [ -n "$HERDR_MISSING_PANE_REPLACEMENT_CLAIM" ] \
+     && ! fm_backend_herdr_relaunch_claim_remove \
+       "$HERDR_MISSING_PANE_REPLACEMENT_CLAIM" "$ID"; then
+    echo "warning: could not finalize Herdr missing-pane replacement claim for $ID; its published endpoint remains recoverable" >&2
+  fi
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
 fi

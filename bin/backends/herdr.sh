@@ -2075,8 +2075,9 @@ fm_backend_herdr_relaunch_claim_remove() {  # <path> <task-id>
   rm -f "$path"
 }
 
-fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <home> <task-label>
-  local session=$1 workspace=$2 id=$3 home=$4 label=$5 state path tab pane tab_info pane_info endpoint_label agent_state list matches
+fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <home> <task-label> [<journal> <old-tab> <old-pane>]
+  local session=$1 workspace=$2 id=$3 home=$4 label=$5 journal=${6:-} old_tab=${7:-} old_pane=${8:-}
+  local state path tab pane tab_info pane_info endpoint_label agent_state list matches canonical_home journal_state journal_tab journal_pane
   state="$home/state"
   path=$(fm_backend_herdr_relaunch_claim_path "$state" "$id") || return 1
   [ ! -e "$path" ] && [ ! -L "$path" ] && return 0
@@ -2086,6 +2087,29 @@ fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <
     && [ "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_TASK_LABEL" = "$label" ] || return 1
   tab=$FM_BACKEND_HERDR_RELAUNCH_CLAIM_TAB
   pane=$FM_BACKEND_HERDR_RELAUNCH_CLAIM_PANE
+  journal_state=old
+  if [ -n "$journal" ]; then
+    canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || return 1
+    fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+    [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
+      && [ "$FM_BACKEND_HERDR_JOURNAL_HOME" = "$canonical_home" ] \
+      && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] \
+      && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$workspace" ] \
+      && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$label" ] || return 1
+    journal_tab=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
+    journal_pane=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
+    if [ "$journal_tab:$journal_pane" = "$old_tab:$old_pane" ]; then
+      :
+    elif [ -n "$tab" ] && [ -n "$pane" ] && [ "$journal_tab:$journal_pane" = "$tab:$pane" ]; then
+      if [ "$old_tab:$old_pane" = "$tab:$pane" ]; then
+        fm_backend_herdr_relaunch_claim_remove "$path" "$id" || return 1
+        return 0
+      fi
+      journal_state=new
+    else
+      return 1
+    fi
+  fi
   if [ -z "$tab" ] || [ -z "$pane" ]; then
     list=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
     printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
@@ -2117,6 +2141,10 @@ fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <
     ' >/dev/null 2>&1; then
       return 1
     fi
+    if [ "$journal_state" = new ]; then
+      fm_backend_herdr_projection_journal_replace_endpoint \
+        "$journal" "$id" "$tab" "$pane" "$old_tab" "$old_pane" || return 1
+    fi
     fm_backend_herdr_relaunch_claim_remove "$path" "$id" || return 1
     return 2
   }
@@ -2141,6 +2169,10 @@ fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <
   esac
   agent_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
   [ "$agent_state" = no-agent ] || return 1
+  if [ "$journal_state" = new ]; then
+    fm_backend_herdr_projection_journal_replace_endpoint \
+      "$journal" "$id" "$tab" "$pane" "$old_tab" "$old_pane" || return 1
+  fi
   fm_backend_herdr_projection_reclaim_rollback "$session" "$pane" || return 1
   fm_backend_herdr_relaunch_claim_remove "$path" "$id" || return 1
   return 2
@@ -2389,31 +2421,13 @@ EOF
 # creation, and the recorded workspace/tab relation must not have changed.
 # After that preflight it delegates duplicate-label handling to create_task, the
 # existing create-before-close husk-replacement boundary. Echoes "<tab> <pane>".
-fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <old-pane> <label> <cwd> [<journal> <task-id> <home>]
-  local session=$1 workspace=$2 old_tab=$3 old_pane=$4 label=$5 cwd=$6 journal=${7:-} id=${8:-} home=${9:-}
-  local info tabs old_count old_pane_now state canonical_home replacement claim_status
+fm_backend_herdr_relaunch_missing_pane_context_validate() {  # <session> <workspace> <old-tab> <old-pane> <label> [strict]
+  local session=$1 workspace=$2 old_tab=$3 old_pane=$4 label=$5 strict=${6:-} info tabs old_count state old_label old_pane_now
   state=$(fm_backend_herdr_pane_agent_state "$session" "$old_pane")
   [ "$state" = dead ] || {
     echo "error: herdr missing-pane relaunch requires the recorded pane to remain gone, got $state" >&2
     return 1
   }
-  if [ -n "$journal" ]; then
-    canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || {
-      echo "error: herdr missing-pane relaunch cannot verify the presentation home for $id" >&2
-      return 1
-    }
-    if ! fm_backend_herdr_projection_journal_snapshot "$journal" "$id" \
-       || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ] \
-       || [ "$FM_BACKEND_HERDR_JOURNAL_HOME" != "$canonical_home" ] \
-       || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ] \
-       || [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" != "$workspace" ] \
-       || [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" != "$old_tab" ] \
-       || [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" != "$old_pane" ] \
-       || [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" != "$label" ]; then
-      echo "error: herdr missing-pane relaunch presentation binding for $id is ambiguous or changed" >&2
-      return 1
-    fi
-  fi
   info=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || {
     echo "error: herdr missing-pane relaunch cannot verify recorded workspace $workspace" >&2
     return 1
@@ -2438,42 +2452,91 @@ fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <o
   case "$old_count" in
     0) ;;
     1)
-      if ! printf '%s' "$tabs" | jq -e --arg tab "$old_tab" --arg workspace "$workspace" --arg label "$label" '
-        [.result.tabs[]? | select(.tab_id == $tab)]
-        | length == 1
-        and .[0].workspace_id == $workspace
-        and .[0].label == $label
-      ' >/dev/null 2>&1; then
+      old_label=$(printf '%s' "$tabs" | jq -r --arg tab "$old_tab" '
+        .result.tabs[]? | select(.tab_id == $tab) | .label // empty
+      ' 2>/dev/null) || old_label=
+      [ "$old_label" = "$label" ] || {
         echo "error: herdr missing-pane relaunch recorded tab $old_tab changed identity" >&2
         return 1
-      fi
+      }
       old_pane_now=$(fm_backend_herdr_pane_for_tab "$session" "$workspace" "$old_tab")
       [ "$old_pane_now" = "$old_pane" ] || {
         echo "error: herdr missing-pane relaunch recorded tab $old_tab no longer owns recorded pane $old_pane" >&2
         return 1
       }
+      echo "error: herdr missing-pane relaunch recorded tab $old_tab is still readable" >&2
+      return 1
       ;;
     *)
       echo "error: herdr missing-pane relaunch recorded tab $old_tab is ambiguous" >&2
       return 1
       ;;
   esac
+  if [ "$strict" = 1 ] \
+     && printf '%s' "$tabs" | jq -e --arg label "$label" 'any(.result.tabs[]?; .label == $label)' >/dev/null 2>&1; then
+    echo "error: herdr tab '$label' already exists in workspace $workspace (session $session)" >&2
+    return 1
+  fi
+}
+
+fm_backend_herdr_relaunch_missing_pane_preflight() {  # <session> <workspace> <old-tab> <old-pane> <label> [<journal> <task-id> <home>]
+  local session=$1 workspace=$2 old_tab=$3 old_pane=$4 label=$5 journal=${6:-} id=${7:-} home=${8:-}
+  local canonical_home claim_path
+  fm_backend_herdr_relaunch_missing_pane_context_validate "$session" "$workspace" "$old_tab" "$old_pane" "$label" 1 || return 1
   if [ -n "$id" ] && [ -n "$home" ]; then
-    fm_backend_herdr_relaunch_claim_recover "$session" "$workspace" "$id" "$home" "$label"
-    claim_status=$?
-    case "$claim_status" in
-      0) ;;
-      2)
-        echo "error: herdr missing-pane relaunch reclaimed an interrupted replacement for $id; retry the relaunch" >&2
-        return 1
-        ;;
-      *)
-        echo "error: herdr missing-pane relaunch has an unresolved replacement claim for $id" >&2
-        return 1
-        ;;
-    esac
+    claim_path=$(fm_backend_herdr_relaunch_claim_path "$home/state" "$id") || return 1
+    if [ -e "$claim_path" ] || [ -L "$claim_path" ]; then
+      echo "error: herdr missing-pane relaunch has an unresolved replacement claim for $id" >&2
+      return 1
+    fi
+  fi
+  if [ -n "$journal" ]; then
+    canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || {
+      echo "error: herdr missing-pane relaunch cannot verify the presentation home for $id" >&2
+      return 1
+    }
+    if ! fm_backend_herdr_projection_journal_snapshot "$journal" "$id" \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ] \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_HOME" != "$canonical_home" ] \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ] \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" != "$workspace" ] \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" != "$old_tab" ] \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" != "$old_pane" ] \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" != "$label" ]; then
+      echo "error: herdr missing-pane relaunch presentation binding for $id is ambiguous or changed" >&2
+      return 1
+    fi
+  fi
+}
+
+fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <old-pane> <label> <cwd> [<journal> <task-id> <home>]
+  local session=$1 workspace=$2 old_tab=$3 old_pane=$4 label=$5 cwd=$6 journal=${7:-} id=${8:-} home=${9:-}
+  local replacement claim_status claim_path
+  if [ -n "$id" ] && [ -n "$home" ]; then
+    claim_path=$(fm_backend_herdr_relaunch_claim_path "$home/state" "$id") || return 1
+    if [ -e "$claim_path" ] || [ -L "$claim_path" ]; then
+      fm_backend_herdr_relaunch_missing_pane_context_validate "$session" "$workspace" "$old_tab" "$old_pane" "$label" || return 1
+      fm_backend_herdr_relaunch_claim_recover \
+        "$session" "$workspace" "$id" "$home" "$label" "$journal" "$old_tab" "$old_pane"
+      claim_status=$?
+      case "$claim_status" in
+        0) ;;
+        2)
+          echo "error: herdr missing-pane relaunch reclaimed an interrupted replacement for $id; retry the relaunch" >&2
+          return 1
+          ;;
+        *)
+          echo "error: herdr missing-pane relaunch has an unresolved replacement claim for $id" >&2
+          return 1
+          ;;
+      esac
+    fi
+    fm_backend_herdr_relaunch_missing_pane_preflight \
+      "$session" "$workspace" "$old_tab" "$old_pane" "$label" "$journal" "$id" "$home" || return 1
     replacement=$(fm_backend_herdr_create_task "$session:$workspace" "$label" "$cwd" "" strict "$id" "$home") || return 1
   else
+    fm_backend_herdr_relaunch_missing_pane_preflight \
+      "$session" "$workspace" "$old_tab" "$old_pane" "$label" "$journal" "$id" "$home" || return 1
     replacement=$(fm_backend_herdr_create_task "$session:$workspace" "$label" "$cwd") || return 1
   fi
   printf '%s' "$replacement"
