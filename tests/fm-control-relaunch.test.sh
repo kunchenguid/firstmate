@@ -1904,7 +1904,7 @@ test_spawn_relaunch_refuses_an_unbound_herdr_create_response() {
 }
 
 test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
-  local case_name dir out rc before mutations
+  local case_name dir out rc before mutations creates_before
   for case_name in postcreate-tab-unreadable postcreate-pane-unreadable postcreate-tabs-unavailable postcreate-tabs-malformed postclose-tabs-unavailable postclose-tabs-malformed; do
     dir=$(new_case "herdr-$case_name" hr1)
     add_herdr_missing_pane_task "$dir" hr1
@@ -1920,22 +1920,26 @@ test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
       "the post-create $case_name fixture did not cross the replacement-create boundary"
     [ -z "$(cat "$dir/fake/literal")" ] \
       || fail "a post-create $case_name read must not deliver a second worker launch"
-    case "$case_name" in
-      postclose-tabs-unavailable|postclose-tabs-malformed)
-        assert_not_contains "$mutations" 'pane close' \
-          "a $case_name refusal must not close without a fresh agent-state proof"
-        [ -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
-          || fail "the $case_name refusal must retain its verified recovery claim"
-        ;;
-      *)
-        assert_not_contains "$mutations" 'pane close' \
-          "an unreadable $case_name response must not close an unverified endpoint"
-        [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
-          || fail "the $case_name refusal must discard its unverified claim"
-        ;;
-    esac
+    assert_not_contains "$mutations" 'pane close' \
+      "an unreadable $case_name response must not close an unverified endpoint"
+    [ -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+      || fail "the $case_name refusal must retain its durable recovery claim"
+    creates_before=$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')
+    out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+    expect_code 1 "$rc" "a recovered $case_name claim should require an explicit retry"
+    assert_contains "$out" "reclaimed an interrupted replacement" \
+      "the $case_name retry should recover its exact claimed endpoint"
+    cmp -s "$before" "$dir/home/state/hr1.meta" \
+      || fail "the $case_name recovery changed the task's serialized metadata"
+    mutations=$(cat "$dir/fake/herdr-mutations")
+    [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = "$creates_before" ] \
+      || fail "the $case_name retry created another endpoint before resolving its claim"
+    assert_contains "$mutations" 'pane close w1:p3' \
+      "the $case_name retry must reclaim its verified agent-free endpoint"
+    [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+      || fail "the $case_name recovery must clear its durable claim"
   done
-  pass "fm-spawn --relaunch: post-create failures clean only verified endpoints"
+  pass "fm-spawn --relaunch: post-create failures recover exact claims without duplicates"
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint

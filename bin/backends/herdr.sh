@@ -2077,7 +2077,7 @@ fm_backend_herdr_relaunch_claim_remove() {  # <path> <task-id>
 
 fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <home> <task-label> [<journal> <old-tab> <old-pane>]
   local session=$1 workspace=$2 id=$3 home=$4 label=$5 journal=${6:-} old_tab=${7:-} old_pane=${8:-}
-  local state path tab pane tab_info pane_info endpoint_label agent_state list matches canonical_home journal_state journal_tab journal_pane
+  local state path tab pane tab_info pane_info endpoint_label agent_state list matches canonical_home journal_state journal_tab journal_pane claim_bound=0
   state="$home/state"
   path=$(fm_backend_herdr_relaunch_claim_path "$state" "$id") || return 1
   [ ! -e "$path" ] && [ ! -L "$path" ] && return 0
@@ -2087,6 +2087,9 @@ fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <
     && [ "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_TASK_LABEL" = "$label" ] || return 1
   tab=$FM_BACKEND_HERDR_RELAUNCH_CLAIM_TAB
   pane=$FM_BACKEND_HERDR_RELAUNCH_CLAIM_PANE
+  if [ -n "$tab" ] && [ -n "$pane" ]; then
+    claim_bound=1
+  fi
   journal_state=old
   if [ -n "$journal" ]; then
     canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || return 1
@@ -2130,7 +2133,6 @@ fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <
     [ -n "$tab" ] || return 1
     pane=$(fm_backend_herdr_pane_for_tab "$session" "$workspace" "$tab")
     [ -n "$pane" ] || return 1
-    fm_backend_herdr_relaunch_claim_bind_endpoint "$path" "$id" "$tab" "$pane" || return 1
   fi
   tab_info=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || {
     [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" = dead ] || return 1
@@ -2167,6 +2169,9 @@ fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <
     "$FM_BACKEND_HERDR_RELAUNCH_CLAIM_LABEL"|"$label") ;;
     *) return 1 ;;
   esac
+  if [ "$claim_bound" = 0 ]; then
+    fm_backend_herdr_relaunch_claim_bind_endpoint "$path" "$id" "$tab" "$pane" || return 1
+  fi
   agent_state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
   [ "$agent_state" = no-agent ] || return 1
   if [ "$journal_state" = new ]; then
@@ -2253,9 +2258,9 @@ EOF
   out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "${strict_claim_label:-$label}" --no-focus 2>/dev/null) || return 1
   if [ "$strict_mode" = strict ]; then
     list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
-      fm_backend_herdr_relaunch_claim_remove "$strict_claim_path" "$strict_id" || true
       return 1
     }
+    printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
     tab_id=$(printf '%s' "$list" | jq -r --arg claim "$strict_claim_label" '
       [.result.tabs[]? | select(.label == $claim)]
       | if length == 1 then .[0].tab_id else empty end
@@ -2266,7 +2271,6 @@ EOF
     fi
     pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id")
     if [ -z "$pane_id" ]; then
-      fm_backend_herdr_relaunch_claim_remove "$strict_claim_path" "$strict_id" || true
       return 1
     fi
   else
@@ -2278,8 +2282,6 @@ EOF
     fi
   fi
   created_tab=$(fm_backend_herdr_cli "$session" tab get "$tab_id" 2>/dev/null) || {
-    [ "$strict_mode" != strict ] \
-      || fm_backend_herdr_relaunch_claim_remove "$strict_claim_path" "$strict_id" || return 1
     echo "error: could not verify herdr tab create response for replacement tab $tab_id in workspace $wsid (session $session)" >&2
     return 1
   }
@@ -2294,8 +2296,6 @@ EOF
     return 1
   fi
   created_pane=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || {
-    [ "$strict_mode" != strict ] \
-      || fm_backend_herdr_relaunch_claim_remove "$strict_claim_path" "$strict_id" || return 1
     echo "error: could not verify herdr tab create response for replacement pane $pane_id in workspace $wsid (session $session)" >&2
     return 1
   }
@@ -2304,8 +2304,6 @@ EOF
       and .result.pane.tab_id == $tab
       and .result.pane.workspace_id == $workspace
   ' >/dev/null 2>&1; then
-    [ "$strict_mode" != strict ] \
-      || fm_backend_herdr_relaunch_claim_remove "$strict_claim_path" "$strict_id" || return 1
     echo "error: herdr tab create response does not bind replacement tab $tab_id and pane $pane_id to label '$label' in workspace $wsid (session $session)" >&2
     return 1
   fi
