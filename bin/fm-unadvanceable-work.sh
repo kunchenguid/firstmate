@@ -6,12 +6,11 @@
 #
 #   state=in_flight; live_worker=no; hold=no; blocked_by=no
 #
-# Missing task metadata means there is no recorded worker. When metadata exists,
-# this script delegates current-state classification to fm-crew-state.sh. Only a
-# terminal done/failed result proves there is no live worker; unknown, malformed,
-# or failed liveness reads count as live and suppress the finding. This makes the
-# detector deliberately blind to crashed or unreachable workers whose metadata
-# remains but whose liveness cannot be resolved.
+# fm-crew-state.sh is the sole owner of worker-mechanism liveness, including
+# structural metadata absence. Only its explicit `liveness: absent` verdict
+# proves there is no live worker; live, unknown, malformed, or failed reads all
+# suppress the finding. This makes the detector deliberately blind to crashed
+# or unreachable workers whose liveness cannot be resolved.
 #
 # Usage: fm-unadvanceable-work.sh
 set -u
@@ -20,7 +19,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 BACKLOG="$DATA/backlog.md"
 CREW_STATE="${FM_CREW_STATE_OVERRIDE:-$SCRIPT_DIR/fm-crew-state.sh}"
 
@@ -56,16 +54,12 @@ while IFS= read -r line; do
           ;;
       esac
       [ "$blocked_by" = none ] || continue
-      if [ -e "$STATE/$id.meta" ]; then
-        crew_line=$("$CREW_STATE" "$id" 2>/dev/null) || crew_line='state: unknown · source: none'
-        case "$crew_line" in
-          "state: done"*|"state: failed"*)
-            ;;
-          *)
-            continue
-            ;;
-        esac
-      fi
+      crew_line=$("$CREW_STATE" --worker-liveness "$id" 2>/dev/null) \
+        || crew_line='liveness: unknown · source: none'
+      case "$crew_line" in
+        "liveness: absent"*) ;;
+        *) continue ;;
+      esac
       printf '%s: state=in_flight; live_worker=no; hold=no; blocked_by=no\n' "$id"
       ;;
     *)

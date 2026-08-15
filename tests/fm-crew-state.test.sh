@@ -143,6 +143,10 @@ run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
 }
 
+run_worker_liveness() {  # <case-dir> <id>
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" --worker-liveness "$2"
+}
+
 new_case() {  # <name> -> echoes case dir with an empty state/
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/state"
@@ -481,6 +485,25 @@ EOF
   assert_contains "$out" "checks green" "green ci-monitor detail mentions checks green"
   assert_not_contains "$out" "state: working" "green ci-monitor must not read as still validating"
   pass "ci-monitoring run with checks already green surfaces done"
+}
+
+test_ci_monitoring_checks_green_is_live_mechanism() {
+  reset_fakes
+  local d out
+  d=$(new_case ci-green-worker-liveness)
+  make_repo_on_branch "$d/wt" fm/feat-cigreen-live
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cigreen-live.meta" \
+    "window=fm:fm-feat-cigreen-live" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cigreen-live)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+
+  out=$(run_worker_liveness "$d" feat-cigreen-live)
+  assert_contains "$out" "liveness: live" "green merge-monitor run remains an advancing mechanism"
+  assert_contains "$out" "source: run-step" "merge-monitor mechanism is owned by the run-step"
+  assert_contains "$out" "checks green: PR ready for review (still monitoring for merge/close)" \
+    "merge-monitor liveness preserves the exact reviewer shape"
+  pass "completed run-step is live while its mechanism still monitors merge or close"
 }
 
 test_top_level_ci_checks_green_surfaces_done() {
@@ -1162,6 +1185,23 @@ test_missing_meta() {
   pass "missing meta is handled gracefully"
 }
 
+test_worker_liveness_structural_absence() {
+  reset_fakes
+  local d out
+  d=$(new_case worker-liveness-absent)
+  make_fakebin "$d" >/dev/null
+
+  out=$(run_worker_liveness "$d" ghost-z)
+  assert_contains "$out" "liveness: absent" "missing metadata -> absent worker mechanism"
+  assert_contains "$out" "source: metadata" "missing metadata owns the absence finding"
+
+  : > "$d/state/empty-z.meta"
+  out=$(run_worker_liveness "$d" empty-z)
+  assert_contains "$out" "liveness: absent" "empty metadata -> absent worker mechanism"
+  assert_contains "$out" "worktree gone" "empty metadata explains structural absence"
+  pass "worker-liveness mode reports structural absence through the state owner"
+}
+
 # (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
 # canned fake verdict, unlike tests/fm-watch-triage.test.sh's classifier
 # coverage). This is the direct regression pair for the 2026-07-02 herdr
@@ -1317,6 +1357,7 @@ test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
+test_ci_monitoring_checks_green_is_live_mechanism
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
 test_ci_monitoring_green_then_rearm_stays_working
@@ -1351,6 +1392,7 @@ test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
+test_worker_liveness_structural_absence
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
 test_usage_error
