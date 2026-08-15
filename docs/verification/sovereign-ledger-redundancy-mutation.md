@@ -119,5 +119,5 @@ PUBLISH MATRIX SUMMARY mechanisms=14 written_boundaries=13 natural_boundaries=1 
 
 The denominator covers the validator call, exclusive creation, every destination and scope guard reached by the fixtures, and the separately classified natural unresolved-parent failure.
 Every mutant records exactly one substitution and every one of its twelve fixture cells independently.
-Every survived cell printed by the command names the actual remaining boundary that refused publication.
+Every survived cell in the [committed complete matrix](sovereign-ledger-evidence-publication-matrix.md) names the actual remaining boundary that refused publication.
 The `resolved-outside` fixture passes the component precheck as a real directory, swaps it to a scoped fake-outside link, and remains safe through final structural containment when the earlier canonical containment clause is neutralized.
