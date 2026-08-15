@@ -20,7 +20,7 @@ make_fake_curl() {
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/curl" <<'SH'
 #!/usr/bin/env bash
-ofile="" url="" data=""
+ofile="" url="" data="" thread_ts=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) ofile=$2; shift 2 ;;
@@ -32,6 +32,9 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+case "$data" in
+  *thread_ts=*) thread_ts=${data##*thread_ts=} ;;
+esac
 if [ -n "${FM_SLACK_CURL_LOG:-}" ]; then
   printf 'url=%s\ndata=%s\n' "$url" "$data" >> "$FM_SLACK_CURL_LOG"
 fi
@@ -46,7 +49,9 @@ case "$url" in
     body="${FAKE_SLACK_REPLIES:-{\"ok\":true,\"messages\":[]}}"
     ;;
   */chat.postMessage)
-    if [ -n "${FAKE_SLACK_POST:-}" ]; then
+    if [ -n "${FAKE_SLACK_JOIN_TS:-}" ] && [ "$thread_ts" = "$FAKE_SLACK_JOIN_TS" ]; then
+      body='{"ok":false,"error":"cannot_reply_to_message"}'
+    elif [ -n "${FAKE_SLACK_POST:-}" ]; then
       body=$FAKE_SLACK_POST
     else
       body=$(printf '{"ok":true,"ts":"1786735224.690829","channel":"%s"}' "${FAKE_SLACK_CHANNEL:-C0BQ9K1TJKG}")
@@ -369,6 +374,33 @@ if rg -q -- "$argv_token" "$argvlog" 2>/dev/null; then
   fail "poll must keep the bot token out of curl argv"
 fi
 pass "fm-slack-poll keeps the bot token out of curl argv"
+
+# --- channel_join is never a captain message -------------------------------
+
+home="$TMP_ROOT/channel-join"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-join")
+join_ts=1786735228.100000
+captain_ts=1786735229.100000
+control="$home/fake-control.json"
+FAKE_SLACK_JOIN_TS=$join_ts "$fakebin/curl" -o "$control" \
+  --data "thread_ts=$join_ts" https://slack.test/api/chat.postMessage
+[ "$(jq -r '.error // empty' "$control")" = "cannot_reply_to_message" ] \
+  || fail "fake Slack transport must reject threaded ack on channel_join"
+pass "fake Slack transport models channel_join ack rejection"
+export FAKE_SLACK_JOIN_TS=$join_ts
+unset FAKE_SLACK_POST
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FAKE_SLACK_HISTORY='{"ok":true,"messages":[
+  {"type":"message","subtype":"channel_join","user":"'"$CAPTAIN_USER"'","text":"<@U_CAPTAIN1> has joined the channel","ts":"'"$join_ts"'"},
+  {"type":"message","user":"'"$CAPTAIN_USER"'","text":"new captain request","ts":"'"$captain_ts"'"}
+]}'
+out=$(run_poll "$home" "$fakebin"); rc=$?
+printf -v expected 'slack-captain-message %s\t%s' "$captain_ts" "new captain request"
+[ "$rc" -eq 0 ] && [ "$out" = "$expected" ] \
+  || fail "poll must skip oldest channel_join and select the genuine captain message (rc=$rc output=$out)"
+pass "fm-slack-poll never selects channel_join as a captain message"
+unset FAKE_SLACK_JOIN_TS
 
 # --- API allowlist ----------------------------------------------------------
 

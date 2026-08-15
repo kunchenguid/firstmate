@@ -177,11 +177,11 @@ fms_message_ts_valid() {
   esac
 }
 
-fms_is_bot_message() {
+fms_is_non_captain_message() {
   local file=$1 bot_user=$2
   jq -e --arg bot "$bot_user" '
     (.subtype? // "") as $sub |
-    ($sub == "bot_message") or (.bot_id? != null) or
+    ($sub != "") or (.bot_id? != null) or
     ((.user? // "") != "" and (.user == $bot))
   ' "$file" >/dev/null 2>&1
 }

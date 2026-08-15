@@ -73,7 +73,7 @@ collect_messages() {
   jq -c '.messages[]?' "$BODY_FILE" 2>/dev/null | while IFS= read -r row; do
     [ -n "$row" ] || continue
     printf '%s\n' "$row" > "$MSG_FILE"
-    fms_is_bot_message "$MSG_FILE" "$FMS_BOT_USER_ID" && continue
+    fms_is_non_captain_message "$MSG_FILE" "$FMS_BOT_USER_ID" && continue
     fms_message_has_text "$MSG_FILE" || continue
     ts=$(jq -r '.ts // empty' "$MSG_FILE" 2>/dev/null) || continue
     fms_message_ts_valid "$ts" || continue
