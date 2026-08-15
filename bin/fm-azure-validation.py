@@ -2319,23 +2319,7 @@ def shard_plan_entry(state, shard):
     raise ValidationError("shard {} has no pre-reserved shape constituent".format(shard))
 
 
-def prepare_shard_runner(env, state, blob, request, extracted, plan):
-    sku = plan["sku"]
-    key = request["request_digest"]
-    existing = state.setdefault("shard_runs", {}).get(key)
-    if existing:
-        expected = {
-            "blob": blob,
-            "sku": sku,
-            "invocation": plan["invocation"],
-            "round": request["round"],
-            "shard": request["shard"],
-            "head": request["repository"]["head"],
-            "command_digest": request["command_digest"],
-        }
-        if any(existing.get(name) != value for name, value in expected.items()):
-            raise ValidationError("recorded shard runner identity differs from the exact request")
-        return existing
+def materialize_shard_repo(request, extracted):
     repo = extracted / "repo"
     git_bundle = extracted / "snapshot.bundle"
     run(["git", "clone", "--no-local", str(git_bundle), str(repo)])
@@ -2346,6 +2330,32 @@ def prepare_shard_runner(env, state, blob, request, extracted, plan):
         raise ValidationError("materialized shard tree mismatch")
     public_remote = "https://github.com/{}.git".format(request["repository"]["slug"])
     git(repo, "remote", "set-url", "origin", public_remote)
+    return repo
+
+
+def prepare_shard_runner(env, state, blob, request, extracted, plan):
+    sku = plan["sku"]
+    key = request["request_digest"]
+    existing = state.setdefault("shard_runs", {}).get(key)
+    if existing:
+        expected = {
+            "blob": blob,
+            "sku": sku,
+            "round": request["round"],
+            "shard": request["shard"],
+            "head": request["repository"]["head"],
+            "command_digest": request["command_digest"],
+        }
+        if any(existing.get(name) != value for name, value in expected.items()):
+            raise ValidationError("recorded shard runner identity differs from the exact request")
+        # Every pass re-downloads a still-pending request into a clean
+        # extraction, which drops the previously materialized clone; the
+        # retry and resume paths both need the exact repo back at its
+        # recorded path.
+        if not Path(existing["repo"]).is_dir():
+            materialize_shard_repo(request, extracted)
+        return existing
+    repo = materialize_shard_repo(request, extracted)
     invocation = plan["invocation"]
     record = {
         "blob": blob,
@@ -2357,7 +2367,7 @@ def prepare_shard_runner(env, state, blob, request, extracted, plan):
         "head": request["repository"]["head"],
         "command_digest": request["command_digest"],
         "repo": str(repo),
-        "snapshot_bundle": str(git_bundle),
+        "snapshot_bundle": str(extracted / "snapshot.bundle"),
         "source_ref": "refs/heads/" + request["repository"]["branch"],
         "task": "{}-s{}".format(state["cell"], request["shard"]),
         "generation": request["round"],
@@ -2371,9 +2381,45 @@ def prepare_shard_runner(env, state, blob, request, extracted, plan):
     return record
 
 
+def follow_shard_lineage(env, record):
+    """Rebind the record to the newest retry descendant of its invocation.
+
+    A runner retry after proven absence creates a fresh invocation whose
+    parent_invocation points at the fenced one; the shard record must follow
+    that chain or every later resume and response collection would keep
+    addressing the permanently fenced ancestor.
+    """
+    directory = runner_state_dir(env)
+    current = record["invocation"]
+    while True:
+        advanced = None
+        for path in directory.glob("azr-*.json"):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if (
+                value.get("parent_invocation") == current
+                and (value.get("request") or {}).get("command_digest") == record["command_digest"]
+            ):
+                advanced = value["invocation"]
+                break
+        if advanced is None:
+            return current
+        current = advanced
+
+
 def run_shard_invocations(env, state, records):
     processes = []
     runner = ROOT / "bin" / "fm-azure-runner.sh"
+    rebound = False
+    for record in records:
+        followed = follow_shard_lineage(env, record)
+        if followed != record["invocation"]:
+            record["invocation"] = followed
+            rebound = True
+    if rebound:
+        save_state(env, state)
     for record in records:
         runner_state = runner_state_dir(env) / (record["invocation"] + ".json")
         operation = [str(runner), "resume", "--invocation", record["invocation"]]
@@ -2384,6 +2430,16 @@ def run_shard_invocations(env, state, records):
                 raise ValidationError("recorded shard runner state is unreadable: {}".format(exc))
             if value.get("phase") == "complete":
                 continue
+            if value.get("phase") == "absent-fenced" and value.get("old_lease_absent") is True:
+                # The fenced invocation can never rerun; the runner's retry
+                # lane reproves absence and creates the lineage descendant
+                # that the next pass rebinds to.
+                operation = [
+                    str(runner), "retry",
+                    "--invocation", record["invocation"],
+                    "--confirm-run",
+                    "--confirm-subscription", env["subscription"],
+                ]
         else:
             operation = [
                 str(runner), "run", "--confirm-run",
@@ -2415,8 +2471,17 @@ def run_shard_invocations(env, state, records):
         stdout, stderr = process.communicate()
         record["runner_stdout_tail"] = stdout[-2000:]
         record["runner_stderr_tail"] = stderr[-2000:]
+        # A retry that completed inside this pass created a lineage
+        # descendant; rebind before response collection addresses the record.
+        followed = follow_shard_lineage(env, record)
+        if followed != record["invocation"]:
+            record["invocation"] = followed
+            rebound = True
         if process.returncode == 125 or process.returncode < 0:
             failures.append("{} rc={}".format(record["invocation"], process.returncode))
+    # The tails and any rebind must survive the failure raise below, or a
+    # refused transport leaves no durable ground truth for the operator.
+    save_state(env, state)
     if failures:
         raise ValidationError("one or more shard transports retained ambiguous state: " + ", ".join(failures))
 
