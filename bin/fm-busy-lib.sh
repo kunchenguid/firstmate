@@ -40,8 +40,9 @@
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, native-stale, grok-regex, muse-session-log,
-#   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
-#   kimi-unverified, codex-unverified, capture-failed, no-target
+#   cursor-transcript, cline-session, cline-session-stalled, missing, malformed,
+#   gen-mismatch, source-mismatch, kimi-unverified, codex-unverified,
+#   capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
@@ -50,9 +51,9 @@
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
-#      muse session-log and cursor transcript pull sources, then the Grok-only
-#      temporary regex fallback classifies a grok task from its rendered tail,
-#      then unknown missing
+#      muse session-log, cursor transcript, and cline session-record pull
+#      sources, then the Grok-only temporary regex fallback classifies a grok
+#      task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
 # The Grok arm is the ONLY rendered-text classification that survives the
 # redesign, because Grok's structured lifecycle was not credited-live-verified
@@ -822,6 +823,136 @@ fm_busy_cursor_turn_state() {  # <transcript>
   '
 }
 
+# cline pull source.
+#
+# cline installs no firstmate-visible turn hook either, but it does persist its
+# own per-session record under <data-dir>/sessions/<session-id>/, and that
+# record is structural rather than rendered: it carries a `status` lifecycle
+# field, the `workspace_root` the pane was launched in, and a `messages_path`
+# pointing at the turn log. Folding it replaces the rendered `esc to cancel`
+# footer, which stayed a delivery signal in bin/fm-composer-lib.sh and is
+# deliberately not a worker state source here.
+#
+# Two independent signals are read, so no single vendor string is load-bearing.
+# `status` alone cannot separate a finished turn from a turn that was accepted
+# and never ran: cline leaves BOTH at `idle`, verified live on 3.0.55 when a
+# ClinePass limit refused the turn. The second signal is the turn log's last
+# message role, which separates them - an `assistant` close is a completed turn,
+# while a trailing `user` message is a turn that was queued and never processed.
+# That second state is reported as its own source token because it is exactly
+# the wedge that reads healthy from the pane: no spinner, an ordinary idle
+# composer, and a frozen token counter.
+#
+# The record's `pid` field is deliberately NOT used for binding. It is the
+# shared cline hub daemon's pid, not the pane's - verified live, one hub pid
+# covering every session on the machine - so binding on it would attach every
+# task to every other task's turns.
+#
+# jq is required. Without it the fold reports unknown rather than reaching for
+# a formatting-dependent text extraction, because the whole point of a
+# structural source is that it does not depend on how the vendor pretty-prints.
+
+fm_busy_cline_binding_path() {  # <state-dir> <id>
+  printf '%s/%s.cline-session' "$1" "$2"
+}
+
+fm_busy_cline_binding_field() {  # <state-dir> <id> <key>
+  local path value
+  path=$(fm_busy_cline_binding_path "$1" "$2")
+  [ -f "$path" ] || return 1
+  value=$(LC_ALL=C awk -F= -v k="$3" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$path")
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+# fm_busy_cline_session_workspace: the workspace_root <record> declares, or
+# failure when the record is unreadable or does not declare one.
+fm_busy_cline_session_workspace() {  # <record>
+  local value
+  [ -f "$1" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  value=$(LC_ALL=C jq -r 'if type == "object" then (.workspace_root // empty) else empty end' "$1" 2>/dev/null) || return 1
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+# fm_busy_cline_matching_sessions: every session record under <sessions-root>
+# whose declared workspace_root is exactly <workspace-root>, newest last. Shared
+# with bin/fm-spawn.sh so the pre-existing set recorded at launch and the set
+# resolved at classification time are produced by one owner and cannot drift.
+# Exact-match only: a prefix comparison would bind a nested worktree to its
+# parent.
+fm_busy_cline_matching_sessions() {  # <sessions-root> <workspace-root>
+  local root=$1 want=$2 dir sid rec
+  [ -d "$root" ] || return 0
+  for dir in "$root"/*/; do
+    [ -d "$dir" ] || continue
+    sid=$(basename -- "${dir%/}")
+    rec="$dir$sid.json"
+    [ -f "$rec" ] || continue
+    [ "$(fm_busy_cline_session_workspace "$rec" 2>/dev/null)" = "$want" ] || continue
+    printf '%s\n' "$rec"
+  done
+}
+
+# fm_busy_cline_session_record: the ONE session record this pane owns, or
+# failure. A record listed as prior_session predates this pane and is excluded,
+# so a relaunch into a reused worktree folds its own turn rather than its
+# predecessor's. Requiring a UNIQUE remaining record is what keeps the binding
+# honest: zero means no session has been written yet and several means the pane
+# cannot be told apart, and neither proves anything about the current turn.
+fm_busy_cline_session_record() {  # <state-dir> <id>
+  local root workspace rec found='' count=0 prior
+  root=$(fm_busy_cline_binding_field "$1" "$2" sessions_root) || return 1
+  workspace=$(fm_busy_cline_binding_field "$1" "$2" workspace_root) || return 1
+  prior=$(LC_ALL=C awk -F= '$1 == "prior_session" { sub(/^[^=]*=/, ""); print }' \
+    "$(fm_busy_cline_binding_path "$1" "$2")" 2>/dev/null)
+  while IFS= read -r rec; do
+    [ -n "$rec" ] || continue
+    printf '%s\n' "$prior" | grep -Fqx "$rec" && continue
+    found=$rec
+    count=$((count + 1))
+  done <<EOF
+$(fm_busy_cline_matching_sessions "$root" "$workspace" || true)
+EOF
+  [ "$count" = 1 ] && [ -n "$found" ] || return 1
+  printf '%s' "$found"
+}
+
+# fm_busy_cline_session_state: fold one session record into
+# busy | settled | stalled | none.
+fm_busy_cline_session_state() {  # <record>
+  local rec=$1 status msgs role
+  [ -f "$rec" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  # A record that exists but does not parse is inconclusive, not unreadable: it
+  # folds to none (which the classifier reports as unknown) rather than failing
+  # the way a missing file or a missing jq does.
+  status=$(LC_ALL=C jq -r 'if type == "object" then (.status // empty) else empty end' "$rec" 2>/dev/null) \
+    || { printf 'none'; return 0; }
+  case "$status" in
+    running) printf 'busy'; return 0 ;;
+    completed|failed) printf 'settled'; return 0 ;;
+    idle) ;;
+    *) printf 'none'; return 0 ;;
+  esac
+  # `idle` is where the two signals diverge, so consult the turn log.
+  msgs=$(LC_ALL=C jq -r 'if type == "object" then (.messages_path // empty) else empty end' "$rec" 2>/dev/null || true)
+  if [ -z "$msgs" ] || [ ! -f "$msgs" ]; then
+    msgs="${rec%.json}.messages.json"
+  fi
+  [ -f "$msgs" ] || { printf 'none'; return 0; }
+  role=$(LC_ALL=C jq -r '
+    if type == "object" and (.messages | type) == "array" and (.messages | length) > 0
+    then (.messages[-1].role // empty)
+    else empty end' "$msgs" 2>/dev/null || true)
+  case "$role" in
+    assistant) printf 'settled' ;;
+    user) printf 'stalled' ;;
+    *) printf 'none' ;;
+  esac
+}
+
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
 # FM_BUSY_REGEX still globally overrides the signature, mirroring the
@@ -961,6 +1092,28 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         busy) printf 'busy muse-session-log' ;;
         settled) printf 'idle muse-session-log' ;;
         *) printf 'unknown muse-session-log' ;;
+      esac
+      return 0
+      ;;
+    cline*)
+      # Semantic, on demand: fold this task's bound session record. This arm sits
+      # AFTER the herdr native arm on purpose, so a native busy verdict and this
+      # structural fold are two independent signals either of which can carry a
+      # positive busy verdict, and losing one does not blind the classifier.
+      # Every unresolvable outcome - no sidecar, no unique record, no jq, an
+      # unreadable or status-free record - is unknown, never idle.
+      if ! log=$(fm_busy_cline_session_record "$state" "$id"); then
+        printf 'unknown cline-session'
+        return 0
+      fi
+      case "$(fm_busy_cline_session_state "$log" 2>/dev/null)" in
+        busy) printf 'busy cline-session' ;;
+        settled) printf 'idle cline-session' ;;
+        # No turn is running, so the verdict is idle, but the source names the
+        # reason: a submitted message the agent never processed. Supervision
+        # needs that distinction because the pane renders identically either way.
+        stalled) printf 'idle cline-session-stalled' ;;
+        *) printf 'unknown cline-session' ;;
       esac
       return 0
       ;;

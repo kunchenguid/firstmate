@@ -382,9 +382,16 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # rotating quoted suggestion, hence the unanchored tail). cursor-agent renders
 # two, both anchored: `Plan, search, build anything` in a fresh session and
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
-# 2026.08.11-e8db854). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
-# matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^What can I do for you\?$|^Ask anything\.\.\.|^Plan, search, build anything$|^Add a follow-up$'
+# 2026.08.11-e8db854). cline renders `What can I do for you?` on first ready and
+# `Ask anything...` thereafter, plus `Plan something...` whenever it is in plan
+# mode rather than act (verified live on cline 3.0.55). firstmate forces act mode
+# at launch, so a crewmate should never show the plan placeholder - it is listed
+# because the classifier must still read an operator's own plan-mode pane as an
+# EMPTY composer, and because a plan-mode pane misread as pending input would
+# make away-mode supervision refuse to deliver into it.
+# FM_COMPOSER_IDLE_RE overrides for an unverified harness; matching is
+# case-insensitive.
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^What can I do for you\?$|^Ask anything\.\.\.|^Plan, search, build anything$|^Add a follow-up$|^Plan something\.\.\.$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed

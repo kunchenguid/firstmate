@@ -137,6 +137,8 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+#     __CLINESETTINGS__ absolute path to state/<task-id>.cline-settings.json, the
+#                  firstmate-owned settings copy that forces cline's act mode
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -152,6 +154,14 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
+# cline installs no per-task hook either: it writes state/<id>.cline-session to
+# bind the pane to cline's own session record (sessions root, the workspace root
+# cline records in every session, and the sessions that already existed for that
+# workspace), plus state/<id>.cline-settings.json, a firstmate-owned settings
+# copy the launch points CLINE_GLOBAL_SETTINGS_PATH at so the crewmate starts in
+# act mode instead of inheriting the operator's persisted plan mode. Neither
+# file is cline's own managed config; ~/.cline is never written. cline is
+# crewmate/scout only and is refused for --secondmate.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -1014,7 +1024,12 @@ launch_template() {
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
     agy) printf '%s' 'agy --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    cline) printf '%s' 'cline -i --tui --auto-approve true __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # CLINE_GLOBAL_SETTINGS_PATH redirects only cline's start-mode/preferences
+    # file, so a crewmate starts in act mode deterministically while its
+    # credentials and provider config still resolve from the operator's own
+    # store. cline has no --act flag, and its persisted planActMode outranks the
+    # documented act-by-default, so this redirect is the whole mechanism.
+    cline) printf '%s' 'CLINE_GLOBAL_SETTINGS_PATH=__CLINESETTINGS__ cline -i --tui --auto-approve true __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     copilot) printf '%s' 'copilot --allow-all --no-ask-user __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
@@ -2401,6 +2416,51 @@ EOF
         fi
       } > "$STATE/$ID.cursor-session"
       ;;
+    cline*)
+      # cline needs two firstmate-owned files, and neither is cline's own
+      # managed config: the operator's ~/.cline is left byte-identical.
+      #
+      # 1. The start-mode settings file. cline's TUI start mode is NOT the
+      #    documented "default to act": it follows whatever `planActMode` the
+      #    operator's global settings file records, so a crewmate silently
+      #    inherits Plan mode whenever the captain last worked in Plan, and then
+      #    analyses forever without editing anything. There is no --act flag to
+      #    counter it (only -p/--plan sets Plan), so the launch points
+      #    CLINE_GLOBAL_SETTINGS_PATH at a firstmate-owned copy that forces act.
+      #    The operator's other settings are carried over rather than dropped,
+      #    because that file also holds their telemetry and auto-update choices
+      #    and a crewmate must not silently re-opt them in.
+      # 2. The session sidecar. cline's turn lifecycle is neither a hook nor a
+      #    launch flag: it persists its own session record and firstmate folds
+      #    that (bin/fm-busy-lib.sh owns the fold). Like muse and cursor that is
+      #    a PULL source with no writer, so nothing is armed and no record is
+      #    seeded. The sidecar pins the sessions root, the workspace root cline
+      #    records in every session, and every matching session that predates
+      #    this pane, so a relaunch into a reused worktree folds its own turn.
+      CLINE_DATA_ROOT="${CLINE_DATA_DIR:-$HOME/.cline/data}"
+      CLINE_SESSIONS_ROOT="$CLINE_DATA_ROOT/sessions"
+      CLINE_OPERATOR_SETTINGS="$CLINE_DATA_ROOT/settings/global-settings.json"
+      CLINE_SETTINGS="$STATE/$ID.cline-settings.json"
+      if [ -f "$CLINE_OPERATOR_SETTINGS" ]; then
+        command -v jq >/dev/null 2>&1 \
+          || die "cline records operator settings at $CLINE_OPERATOR_SETTINGS, and forcing act mode means carrying those settings onto a firstmate-owned copy, which needs jq; refusing to launch rather than dropping the operator's own telemetry and auto-update choices"
+        LC_ALL=C jq '.planActMode = "act"' "$CLINE_OPERATOR_SETTINGS" > "$CLINE_SETTINGS" \
+          || die "could not build the firstmate-owned cline settings file from $CLINE_OPERATOR_SETTINGS; refusing to launch a crewmate that would silently start in plan mode"
+      else
+        # Nothing of the operator's to carry over, so the minimal forced-act
+        # file is complete rather than lossy.
+        printf '{\n  "planActMode": "act"\n}\n' > "$CLINE_SETTINGS"
+      fi
+      {
+        printf 'sessions_root=%s\n' "$CLINE_SESSIONS_ROOT"
+        printf 'workspace_root=%s\n' "$WT"
+        while IFS= read -r CLINE_PRIOR_SESSION; do
+          [ -n "$CLINE_PRIOR_SESSION" ] && printf 'prior_session=%s\n' "$CLINE_PRIOR_SESSION"
+        done <<EOF
+$(fm_busy_cline_matching_sessions "$CLINE_SESSIONS_ROOT" "$WT" || true)
+EOF
+      } > "$STATE/$ID.cline-session"
+      ;;
     kimi*)
       # Kimi's Stop hook is global, but it is inert unless cwd contains this
       # task's token pointer and the token resolves through Firstmate's private
@@ -2556,6 +2616,7 @@ LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+  cline) LAUNCH=${LAUNCH//__CLINESETTINGS__/"$(shell_quote "$STATE/$ID.cline-settings.json")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
