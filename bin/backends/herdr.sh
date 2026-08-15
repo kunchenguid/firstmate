@@ -2206,8 +2206,8 @@ fm_backend_herdr_relaunch_claim_reclaim() {  # <session> <claim-path> <task-id> 
   fm_backend_herdr_relaunch_claim_remove "$path" "$id"
 }
 
-fm_backend_herdr_create_task() {  # <container> <label> <cwd> [<seeded-default-tab> [strict <task-id> <home>]]
-  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} strict_mode=${5:-} strict_id=${6:-} strict_home=${7:-}
+fm_backend_herdr_create_task() {  # <container> <label> <cwd> [<seeded-default-tab> [strict <task-id> <home> <old-tab> <old-pane>]]
+  local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} strict_mode=${5:-} strict_id=${6:-} strict_home=${7:-} strict_old_tab=${8:-} strict_old_pane=${9:-}
   local session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id created_tab created_pane post_create_dup_tabs concurrent_dup_tabs remaining_dup_tabs strict_state strict_claim strict_claim_path strict_claim_label strict_claim_matches
   case "$strict_mode" in
     ''|strict) ;;
@@ -2251,6 +2251,12 @@ EOF
     read -r strict_claim_path strict_claim_label <<EOF
 $strict_claim
 EOF
+    if [ -n "$strict_old_tab" ] && [ -n "$strict_old_pane" ] \
+       && ! fm_backend_herdr_relaunch_missing_pane_context_validate \
+         "$session" "$wsid" "$strict_old_tab" "$strict_old_pane" "$label" 1; then
+      fm_backend_herdr_relaunch_claim_remove "$strict_claim_path" "$strict_id" || return 1
+      return 1
+    fi
   fi
   if ! out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "${strict_claim_label:-$label}" --no-focus 2>/dev/null); then
     if [ "$strict_mode" = strict ] \
@@ -2395,14 +2401,10 @@ $dup_tab_ids
 EOF
   fi
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
-    [ "$strict_mode" != strict ] \
-      || fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id" || return 1
     echo "error: could not verify herdr task tab uniqueness for label '$label' in workspace $wsid (session $session)" >&2
     return 1
   }
   if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
-    [ "$strict_mode" != strict ] \
-      || fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id" || return 1
     echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
     return 1
   fi
@@ -2574,7 +2576,7 @@ fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <o
     fi
     fm_backend_herdr_relaunch_missing_pane_preflight \
       "$session" "$workspace" "$old_tab" "$old_pane" "$label" "$journal" "$id" "$home" || return 1
-    replacement=$(fm_backend_herdr_create_task "$session:$workspace" "$label" "$cwd" "" strict "$id" "$home") || return 1
+    replacement=$(fm_backend_herdr_create_task "$session:$workspace" "$label" "$cwd" "" strict "$id" "$home" "$old_tab" "$old_pane") || return 1
   else
     fm_backend_herdr_relaunch_missing_pane_preflight \
       "$session" "$workspace" "$old_tab" "$old_pane" "$label" "$journal" "$id" "$home" || return 1

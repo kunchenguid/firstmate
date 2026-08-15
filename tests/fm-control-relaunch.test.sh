@@ -300,10 +300,10 @@ case "${args[0]:-} ${args[1]:-}" in
         reads=$((reads + 1))
         printf '%s\n' "$reads" > "$reads_file"
         case "$reads" in
-          1|2)
+          1|2|3)
             printf '%s\n' '{"result":{"tabs":[]}}'
             ;;
-          3)
+          4)
             printf '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"%s"},{"tab_id":"w1:t4","workspace_id":"w1","label":"fm-hr1"}]}}\n' "$created_tab_label"
             ;;
           *)
@@ -339,7 +339,7 @@ case "${args[0]:-} ${args[1]:-}" in
         [ -f "$reads_file" ] && reads=$(cat "$reads_file")
         reads=$((reads + 1))
         printf '%s\n' "$reads" > "$reads_file"
-        if [ "$reads" -le 2 ]; then
+        if [ "$reads" -le 3 ]; then
           printf '%s\n' '{"result":{"tabs":[]}}'
         elif [ "$case_name" = postcreate-tabs-unavailable ]; then
           exit 1
@@ -355,8 +355,8 @@ case "${args[0]:-} ${args[1]:-}" in
         reads=$((reads + 1))
         printf '%s\n' "$reads" > "$reads_file"
         case "$reads" in
-          1|2) printf '%s\n' '{"result":{"tabs":[]}}' ;;
-          3) printf '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"%s"}]}}\n' "$created_tab_label" ;;
+          1|2|3) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+          4) printf '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"%s"}]}}\n' "$created_tab_label" ;;
           *)
             if [ "$case_name" = postbind-tabs-unavailable ]; then exit 1; fi
             printf '%s\n' '{}'
@@ -387,10 +387,10 @@ case "${args[0]:-} ${args[1]:-}" in
         reads=$((reads + 1))
         printf '%s\n' "$reads" > "$reads_file"
         case "$reads" in
-          1|2)
+          1|2|3)
             printf '%s\n' '{"result":{"tabs":[]}}'
             ;;
-          3|4)
+          4|5)
             printf '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"%s"}]}}\n' "$created_tab_label"
             ;;
           *)
@@ -398,6 +398,36 @@ case "${args[0]:-} ${args[1]:-}" in
             printf '%s\n' '{}'
             ;;
         esac
+        exit 0
+        ;;
+      final-tabs-unavailable|final-tabs-malformed)
+        reads_file="$dir/herdr-tab-list-reads"
+        reads=0
+        [ -f "$reads_file" ] && reads=$(cat "$reads_file")
+        reads=$((reads + 1))
+        printf '%s\n' "$reads" > "$reads_file"
+        case "$reads" in
+          1|2|3) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+          4|5) printf '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"%s"}]}}\n' "$created_tab_label" ;;
+          6) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t3","workspace_id":"w1","label":"fm-hr1"}]}}' ;;
+          *)
+            if [ "$case_name" = final-tabs-unavailable ]; then exit 1; fi
+            printf '%s\n' '{}'
+            ;;
+        esac
+        exit 0
+        ;;
+      recorded-identity-race)
+        reads_file="$dir/herdr-tab-list-reads"
+        reads=0
+        [ -f "$reads_file" ] && reads=$(cat "$reads_file")
+        reads=$((reads + 1))
+        printf '%s\n' "$reads" > "$reads_file"
+        if [ "$reads" = 1 ]; then
+          printf '%s\n' '{"result":{"tabs":[]}}'
+        else
+          printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1","label":"foreign"}]}}'
+        fi
         exit 0
         ;;
       tabs-unavailable) exit 1 ;;
@@ -1970,7 +2000,7 @@ test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable() {
 
 test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
   local case_name dir out rc before claim_before mutations creates_before
-  for case_name in postcreate-tab-unreadable postcreate-pane-unreadable postcreate-tabs-unavailable postcreate-tabs-malformed postbind-tabs-unavailable postbind-tabs-malformed postcreate-zero-match postclose-tabs-unavailable postclose-tabs-malformed; do
+  for case_name in postcreate-tab-unreadable postcreate-pane-unreadable postcreate-tabs-unavailable postcreate-tabs-malformed postbind-tabs-unavailable postbind-tabs-malformed postcreate-zero-match postclose-tabs-unavailable postclose-tabs-malformed final-tabs-unavailable final-tabs-malformed; do
     dir=$(new_case "herdr-$case_name" hr1)
     add_herdr_missing_pane_task "$dir" hr1
     make_herdr_missing_pane_stub "$dir" "$case_name"
@@ -1995,7 +2025,9 @@ test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
         "a bound $case_name check must refuse before renaming its verified replacement"
     fi
     if [ "$case_name" = postclose-tabs-unavailable ] \
-       || [ "$case_name" = postclose-tabs-malformed ]; then
+       || [ "$case_name" = postclose-tabs-malformed ] \
+       || [ "$case_name" = final-tabs-unavailable ] \
+       || [ "$case_name" = final-tabs-malformed ]; then
       assert_contains "$mutations" 'tab rename w1:t3 fm-hr1' \
         "a final $case_name check must run after the verified replacement is renamed"
       assert_not_contains "$mutations" 'tab close w1:t3' \
@@ -2030,6 +2062,28 @@ test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
       || fail "the $case_name recovery must clear its durable claim"
   done
   pass "fm-spawn --relaunch: post-create failures recover exact claims without duplicates"
+}
+
+test_spawn_relaunch_rechecks_recorded_herdr_identity_before_create() {
+  local dir out rc before
+  dir=$(new_case herdr-recorded-identity-race hr1)
+  add_herdr_missing_pane_task "$dir" hr1
+  make_herdr_missing_pane_stub "$dir" recorded-identity-race
+  before="$dir/meta-before"
+  cp "$dir/home/state/hr1.meta" "$before"
+  out=$(FM_FAKE_HERDR_CASE=recorded-identity-race run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a recorded Herdr identity change before create must refuse"
+  assert_contains "$out" 'recorded tab w1:t2 changed identity' \
+    "the final pre-create identity check must name the changed recorded tab"
+  cmp -s "$before" "$dir/home/state/hr1.meta" \
+    || fail "a recorded Herdr identity change before create changed task metadata"
+  [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+    || fail "a recorded Herdr identity change before create retained a claim"
+  [ ! -e "$dir/fake/herdr-mutations" ] \
+    || fail "a recorded Herdr identity change before create mutated Herdr"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "a recorded Herdr identity change before create delivered a worker launch"
+  pass "fm-spawn --relaunch: rechecks recorded Herdr identity before create"
 }
 
 test_spawn_relaunch_handles_definite_and_ambiguous_herdr_create_failures() {
@@ -2175,5 +2229,6 @@ test_control_relaunch_preflights_missing_herdr_pane_before_recording_note
 test_spawn_relaunch_reclaims_a_postcreate_herdr_conflict
 test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable
 test_spawn_relaunch_handles_postcreate_herdr_read_failures
+test_spawn_relaunch_rechecks_recorded_herdr_identity_before_create
 test_spawn_relaunch_handles_definite_and_ambiguous_herdr_create_failures
 test_spawn_relaunch_preserves_an_interrupted_claim_on_conflict
