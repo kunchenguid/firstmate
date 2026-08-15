@@ -345,6 +345,14 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
   assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
     "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
+  assert_grep "Once the run reaches checks-passed or completed, branch custody is yours." "$brief" \
+    "no-mistakes DOD must transfer branch custody after the rail run"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`git pull --ff-only` and `git push origin <branch>`' "$brief" \
+    "no-mistakes DOD must direct post-rail follow-up commits through plain git"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`no-mistakes axi sync` only for custody recovery during an active run' "$brief" \
+    "no-mistakes DOD must reserve axi sync for active-run custody recovery"
   # The apostrophe in "firstmate's authority check" is now structurally safe
   # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
   # being reworded or escaped away. test_no_heredoc_in_command_substitution
