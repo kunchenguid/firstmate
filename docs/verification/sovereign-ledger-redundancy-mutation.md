@@ -97,10 +97,37 @@ The publication chokepoint was verified with scoped temporary fixtures on 2026-0
 tests/fm-sovereign-ledger-evidence-publish.mutation.sh
 ```
 
-Observed bounded output:
+Observed bounded summary:
 
 ```text
 CONTAINMENT FIXTURES passed=10 failed=0
-PUBLISH MUTANT P001 KILLED substitutions=1
-PUBLISH MUTATION SUMMARY enforcing_lines=1 killed=1 survived=0 void=0 denominator=1
+PUBLISH MUTANT P001 anchor=resolved-path-validator-call substitutions=1 killed=5 survived=4 void=0
+PUBLISH MUTANT P002 anchor=exclusive-create-flag substitutions=1 killed=0 survived=9 void=0
+PUBLISH MATRIX SUMMARY mechanisms=3 written_boundaries=2 natural_boundaries=1 mutants=2 fixtures=9 cells=18 killed=5 survived=13 void=0
 ```
+
+The three independent mechanisms are the resolved-path validator, exclusive `O_EXCL` creation, and the natural unresolved-parent failure from `sysopen`.
+The natural boundary has no written clause to substitute, so the written-mutant denominator is two while the enforcing-mechanism denominator is three.
+A survived cell means the named different boundary still refused that fixture; zero substitutions make every cell for that mutant void.
+The symlinked leaf, hard-link, and existing-leaf fixtures are defended only by `O_EXCL` when the validator call is neutralized.
+
+| Mutant | Stable exact boundary anchor | Substitutions | Fixture | Outcome | Different surviving boundary |
+| --- | --- | ---: | --- | --- | --- |
+| `P001` | `resolved-path-validator-call` | 1 | `absolute` | KILLED | - |
+| `P001` | `resolved-path-validator-call` | 1 | `traversal` | KILLED | - |
+| `P001` | `resolved-path-validator-call` | 1 | `symlink-leaf-data` | SURVIVED | `exclusive-create-O_EXCL` |
+| `P001` | `resolved-path-validator-call` | 1 | `symlink-parent` | KILLED | - |
+| `P001` | `resolved-path-validator-call` | 1 | `symlink-parent-state` | KILLED | - |
+| `P001` | `resolved-path-validator-call` | 1 | `resolved-outside` | KILLED | - |
+| `P001` | `resolved-path-validator-call` | 1 | `hard-link` | SURVIVED | `exclusive-create-O_EXCL` |
+| `P001` | `resolved-path-validator-call` | 1 | `unresolved-parent` | SURVIVED | `natural-unresolved-parent` |
+| `P001` | `resolved-path-validator-call` | 1 | `existing` | SURVIVED | `exclusive-create-O_EXCL` |
+| `P002` | `exclusive-create-flag` | 1 | `absolute` | SURVIVED | `resolved-path-validator` |
+| `P002` | `exclusive-create-flag` | 1 | `traversal` | SURVIVED | `resolved-path-validator` |
+| `P002` | `exclusive-create-flag` | 1 | `symlink-leaf-data` | SURVIVED | `resolved-path-validator` |
+| `P002` | `exclusive-create-flag` | 1 | `symlink-parent` | SURVIVED | `resolved-path-validator` |
+| `P002` | `exclusive-create-flag` | 1 | `symlink-parent-state` | SURVIVED | `resolved-path-validator` |
+| `P002` | `exclusive-create-flag` | 1 | `resolved-outside` | SURVIVED | `resolved-path-validator` |
+| `P002` | `exclusive-create-flag` | 1 | `hard-link` | SURVIVED | `resolved-path-validator` |
+| `P002` | `exclusive-create-flag` | 1 | `unresolved-parent` | SURVIVED | `resolved-path-validator` |
+| `P002` | `exclusive-create-flag` | 1 | `existing` | SURVIVED | `resolved-path-validator` |
