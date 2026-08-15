@@ -326,7 +326,7 @@ OMP is the `@oh-my-pi/pi-coding-agent` CLI selected through the exact `omp` exec
 | Fact | Value |
 |---|---|
 | Busy state | OMP's existing Pi-compatible per-task extension emits `agent_start`, `agent_settled` with `ctx.isIdle()`, and `turn_end`, exactly as verified by the OMP adapter report. |
-| Rendered busy footer | The interactive TUI shows `Working… [esc]` with U+2026, while print mode uses ASCII dots. The OMP-only matcher structurally requires the `Working` punctuation plus `[esc]` footer rather than a literal ellipsis. |
+| Rendered busy footer | The interactive TUI shows a single spinner plus `Working… [esc]` with U+2026, while print mode uses ASCII dots. The OMP-only matcher structurally requires the spinner position, `Working` punctuation, and `[esc]` footer rather than literal glyphs. |
 | Exit command | `/quit` |
 | Interrupt | single Escape |
 | Launch | `--advisor`, one positional brief argument, and the same `-e` extension wiring as Pi for the applicable task kind. |

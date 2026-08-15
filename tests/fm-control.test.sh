@@ -149,7 +149,7 @@ if [ -n "${FM_FAKE_OMP_PROCESS:-}" ]; then
       exit 0
       ;;
     *'-p 101 '*'-o args='*)
-      printf 'bun /Users/test/.bun/bin/omp --advisor\n'
+      printf 'bun /Users/test/.bun/bin/omp --advisor --model claude-sonnet-5 --thinking low Reply with exactly the word PONG and nothing else.\n'
       exit 0
       ;;
   esac
