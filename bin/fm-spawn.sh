@@ -1781,6 +1781,31 @@ local_default_branch_without_origin() {
   return 1
 }
 
+remote_default_branch() {
+  local dir=$1 ref branch probe_status
+  if ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null); then
+    case "$ref" in
+      origin/?*)
+        branch=${ref#origin/}
+        printf '%s\n' "$branch"
+        return 0
+        ;;
+      *)
+        echo "error: origin/HEAD in '$dir' points outside refs/remotes/origin; the remote default could not be determined; repair the remote HEAD reference and retry" >&2
+        return 1
+        ;;
+    esac
+  else
+    probe_status=$?
+  fi
+  if [ "$probe_status" -eq 1 ]; then
+    echo "error: origin/HEAD is absent in '$dir'; the remote default could not be determined; verify origin advertises an existing default branch and retry" >&2
+  else
+    echo "error: could not inspect origin/HEAD in '$dir'; the remote default could not be determined; repair the repository remote references and retry" >&2
+  fi
+  return 1
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status local_ref local_sha remote_sha ancestry_status
   local remotes remote_name probe_status has_origin=0
@@ -1816,7 +1841,7 @@ EOF
   fi
 
   if [ "$has_origin" -eq 1 ]; then
-    default=$(default_branch "$worktree") || default=
+    default=$(remote_default_branch "$worktree") || return 1
   else
     default=$(local_default_branch_without_origin "$PROJ_ABS") || return 1
   fi

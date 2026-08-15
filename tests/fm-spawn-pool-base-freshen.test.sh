@@ -51,6 +51,26 @@ case "${FM_FAKE_GIT_FAILURE:-}" in
       exit 2
     fi
     ;;
+  remote-head-absence)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_POOL_DIR:-}" ] \
+      && [ "${3:-}" = symbolic-ref ] \
+      && [ "${4:-}" = --quiet ] \
+      && [ "${5:-}" = --short ] \
+      && [ "${6:-}" = refs/remotes/origin/HEAD ]; then
+      exit 1
+    fi
+    ;;
+  remote-head-inspection)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_POOL_DIR:-}" ] \
+      && [ "${3:-}" = symbolic-ref ] \
+      && [ "${4:-}" = --quiet ] \
+      && [ "${5:-}" = --short ] \
+      && [ "${6:-}" = refs/remotes/origin/HEAD ]; then
+      exit 2
+    fi
+    ;;
   local-config)
     if [ "${1:-}" = -C ] \
       && [ "${2:-}" = "${FM_FAKE_PROJECT_DIR:-}" ] \
@@ -332,6 +352,46 @@ test_local_only_refuses_failed_repository_inspection() {
   pass "failed remote, config, and ref probes refuse the pooled worktree"
 }
 
+test_origin_head_absence_refuses_remote_fallback() {
+  local rec id out status before after
+  id='pool-origin-head-absence-r1'
+  rec=$(make_case origin-head-absence "$id" main behind)
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(FM_FAKE_GIT_FAILURE=remote-head-absence run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only spawn fell back to a local branch when origin/HEAD was absent"
+  assert_contains "$out" "origin/HEAD is absent" \
+    "spawn did not distinguish an absent origin/HEAD"
+  assert_contains "$out" "verify origin advertises an existing default branch and retry" \
+    "spawn did not provide remediation for an absent origin/HEAD"
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn moved the pool after origin/HEAD was absent"
+  pass "an absent origin/HEAD refuses fallback to a local branch"
+}
+
+test_origin_head_inspection_failure_refuses_remote_fallback() {
+  local rec id out status before after
+  id='pool-origin-head-inspection-r1'
+  rec=$(make_case origin-head-inspection "$id" main behind)
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(FM_FAKE_GIT_FAILURE=remote-head-inspection run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only spawn fell back to a local branch after origin/HEAD inspection failed"
+  assert_contains "$out" "could not inspect origin/HEAD" \
+    "spawn did not distinguish a failed origin/HEAD inspection"
+  assert_contains "$out" "remote default could not be determined" \
+    "spawn did not identify the unresolved remote default"
+  assert_contains "$out" "repair the repository remote references and retry" \
+    "spawn did not provide remediation for failed origin/HEAD inspection"
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn moved the pool after origin/HEAD inspection failed"
+  pass "a failed origin/HEAD inspection refuses fallback to a local branch"
+}
+
 test_local_only_resets_to_frozen_selected_commit() {
   local rec id out status selected remote_head
   id='pool-local-only-frozen-base-r1'
@@ -546,6 +606,8 @@ test_local_only_prefers_diverged_local_base
 test_local_only_refuses_failed_ancestry_inspection
 test_local_only_refuses_failed_local_ref_resolution
 test_local_only_refuses_failed_repository_inspection
+test_origin_head_absence_refuses_remote_fallback
+test_origin_head_inspection_failure_refuses_remote_fallback
 test_local_only_resets_to_frozen_selected_commit
 test_remote_backed_mode_uses_origin_when_local_is_ahead
 test_local_only_without_origin_uses_local_base
