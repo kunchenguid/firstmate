@@ -4,7 +4,7 @@
 # timing markers, and the complete-regression coverage guard.
 #
 # Selection modes (exactly one of: --all, --family, --changed, --lane,
-# --proven-isolated, or script paths):
+# --proven-isolated, --compare-commits, or script paths):
 #   fm-test-run.sh --all
 #   fm-test-run.sh --family <name>
 #   fm-test-run.sh --changed [--base <git-ref>]
