@@ -710,6 +710,115 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Regression test for the bug fixed in PR 8 (commit a9c8212): the Herdr
+# NOT-ENABLED section contained a literal {TASK} token in its prose, which
+# tripped the spawn guard added in PR 5.
+# The spawn guard (bin/fm-spawn.sh) refuses to launch when any {[A-Z_]+} token
+# remains in the brief file.  Firstmate fills the real placeholder by replacing
+# the text, so a SECOND occurrence of the same token in scaffold prose survives
+# the fill and blocks dispatch.
+# This test generates every scaffold variant and asserts that the number of
+# guard-matching token occurrences in the brief file matches the expected count
+# per variant, not just the unique set.  An extra occurrence of an expected token
+# (the exact original bug) is caught, along with any novel token.
+# It reads the guard's own regex from bin/fm-spawn.sh so the test cannot drift
+# from the pattern it protects.
+test_scaffold_tokens_match_spawn_guard_expectations() {
+  local home guard_regex
+  home="$TMP_ROOT/placeholder-guard-home"
+  mkdir -p "$home/data"
+
+  # Extract the guard regex from bin/fm-spawn.sh rather than restating it.
+  # The guard line is: UNFILLED=$(grep -oE '\{[A-Z_]+\}' "$BRIEF" ...)
+  # We extract just the pattern between the single quotes after -oE.
+  guard_regex=$(sed -n "s/^UNFILLED=.*grep -oE '\\([^']*\\)'.*/\\1/p" "$ROOT/bin/fm-spawn.sh")
+  [ -n "$guard_regex" ] || fail "could not extract the spawn guard regex from bin/fm-spawn.sh"
+
+  # assert_token_counts <brief-file> <label> [TOKEN:COUNT ...]
+  # Asserts: (1) every listed TOKEN appears exactly COUNT times, and
+  # (2) no other guard-matching token appears at all.
+  # When called with no TOKEN:COUNT pairs, asserts zero guard-matching tokens.
+  assert_token_counts() {
+    local brief=$1 label=$2
+    shift 2
+    local all_actual tok_count_pair tok expected_count actual_count seen_tokens=""
+    all_actual=$(grep -oE "$guard_regex" "$brief" 2>/dev/null || true)
+
+    # Check each expected token has the right count.
+    for tok_count_pair in "$@"; do
+      tok=${tok_count_pair%%:*}
+      expected_count=${tok_count_pair##*:}
+      actual_count=$(printf '%s\n' "$all_actual" | grep -cF "$tok" 2>/dev/null || true)
+      if [ "$actual_count" != "$expected_count" ]; then
+        fail "$label: $tok appears $actual_count time(s), expected $expected_count"
+      fi
+      seen_tokens="${seen_tokens:+$seen_tokens|}$(printf '%s' "$tok" | sed 's/[[\\.^$*+?(){}|]/\\&/g')"
+    done
+
+    # Check no unexpected tokens remain.
+    local unexpected
+    if [ -n "$seen_tokens" ]; then
+      unexpected=$(printf '%s\n' "$all_actual" | grep -vE "^($seen_tokens)$" || true)
+    else
+      unexpected=$all_actual
+    fi
+    if [ -n "$unexpected" ]; then
+      fail "$label: unexpected token(s): $(echo "$unexpected" | sort -u | tr '\n' ' ')"
+    fi
+  }
+
+  local id brief
+
+  # Ship briefs: three modes, each with and without --herdr-lab.
+  # Ship scaffolds contain {TASK} (once, in # Task) and {DONE_CHECK} (once,
+  # in ## Done-check).
+  for mode in no-mistakes direct-PR local-only; do
+    for herdr_flag in "" "--herdr-lab"; do
+      id="placeholder-ship-${mode}${herdr_flag:+-herdr}"
+      # shellcheck disable=SC2086  # herdr_flag is an intentional word-split arg (may be empty)
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" $herdr_flag >/dev/null 2>&1 \
+        || fail "scaffold failed for ship $mode ${herdr_flag:-no-herdr}"
+      brief="$home/data/$id/brief.md"
+      assert_present "$brief" "ship $mode ${herdr_flag:-no-herdr}: brief not created"
+      assert_token_counts "$brief" "ship $mode ${herdr_flag:-no-herdr}" "{TASK}:1" "{DONE_CHECK}:1"
+    done
+  done
+
+  # Scout: with and without --herdr-lab.
+  # Scout scaffolds contain {TASK} (once, in # Task) and no {DONE_CHECK}.
+  for herdr_flag in "" "--herdr-lab"; do
+    id="placeholder-scout${herdr_flag:+-herdr}"
+    # shellcheck disable=SC2086  # herdr_flag is an intentional word-split arg (may be empty)
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout $herdr_flag >/dev/null 2>&1 \
+      || fail "scaffold failed for scout ${herdr_flag:-no-herdr}"
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "scout ${herdr_flag:-no-herdr}: brief not created"
+    assert_token_counts "$brief" "scout ${herdr_flag:-no-herdr}" "{TASK}:1"
+  done
+
+  # Secondmate with project list (FM_SECONDMATE_CHARTER set, so {TASK} is
+  # replaced by the charter text and should not appear).
+  # --herdr-lab is rejected on secondmate, so only the no-herdr variant.
+  id="placeholder-secondmate-projects"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Test charter.' \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate alpha >/dev/null 2>&1 \
+    || fail "scaffold failed for secondmate with projects"
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "secondmate with projects: brief not created"
+  assert_token_counts "$brief" "secondmate with projects"
+
+  # Secondmate --no-projects (FM_SECONDMATE_CHARTER set).
+  id="placeholder-secondmate-noprojects"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Test charter.' \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "scaffold failed for secondmate --no-projects"
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "secondmate --no-projects: brief not created"
+  assert_token_counts "$brief" "secondmate --no-projects"
+
+  pass "fm-brief.sh: no scaffold variant emits uppercase brace tokens beyond its expected placeholders (spawn-guard regression)"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -730,3 +839,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_scaffold_tokens_match_spawn_guard_expectations
