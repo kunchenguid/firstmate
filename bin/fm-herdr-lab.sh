@@ -7,6 +7,7 @@
 #   fm-herdr-lab.sh prepare <session>
 #   fm-herdr-lab.sh provision <session>
 #   fm-herdr-lab.sh run <session> <herdr arguments...>
+#   fm-herdr-lab.sh inspect-default <sessions|workspaces|tabs|panes> [workspace-id]
 #   fm-herdr-lab.sh stop <session>
 #   fm-herdr-lab.sh teardown <session>
 #
@@ -151,6 +152,30 @@ fm_herdr_lab_cli() { # <session> <herdr arguments...>
       ;;
   esac
   fm_herdr_lab_raw "$name" "$@"
+}
+
+fm_herdr_lab_default_inspect() { # <sessions|workspaces|tabs|panes> [workspace-id]
+  local view=${1:-} workspace=${2:-}
+  case "$view:$#" in
+    sessions:1)
+      fm_herdr_lab_raw default session list --json
+      ;;
+    workspaces:1)
+      fm_herdr_lab_raw default workspace list
+      ;;
+    tabs:2)
+      case "$workspace" in ''|-*|*$'\n'*|*$'\r'*) return 1 ;; esac
+      fm_herdr_lab_raw default tab list --workspace "$workspace"
+      ;;
+    panes:2)
+      case "$workspace" in ''|-*|*$'\n'*|*$'\r'*) return 1 ;; esac
+      fm_herdr_lab_raw default pane list --workspace "$workspace"
+      ;;
+    *)
+      fm_herdr_lab_error "inspect-default accepts only sessions, workspaces, tabs <workspace-id>, or panes <workspace-id>"
+      return 1
+      ;;
+  esac
 }
 
 fm_herdr_lab_cancel_provision() { # <pid>
@@ -321,6 +346,10 @@ fm_herdr_lab_main() {
       [ "$#" -ge 3 ] || { fm_herdr_lab_usage >&2; return 2; }
       shift
       fm_herdr_lab_cli "$@"
+      ;;
+    inspect-default)
+      shift
+      fm_herdr_lab_default_inspect "$@"
       ;;
     stop)
       [ "$#" -eq 2 ] || { fm_herdr_lab_usage >&2; return 2; }

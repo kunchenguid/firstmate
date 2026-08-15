@@ -103,17 +103,18 @@ run_control() {
     "$ROOT/bin/fm-control.sh" "$@" 2>&1
 }
 
-snapshot_session_layout() {
-  local session=$1 workspaces workspace_id tabs panes
+snapshot_default_session_layout() {
+  local sessions workspaces workspace_id tabs panes
   printf 'session='
-  "$ROOT/bin/fm-herdr-lab.sh" run "$session" session list --json | jq -cS --arg session "$session" '[.sessions[]? | select(.name == $session)]' \
+  sessions=$("$ROOT/bin/fm-herdr-lab.sh" inspect-default sessions) || return 1
+  printf '%s' "$sessions" | jq -cS '[.sessions[]? | select(.default == true and .name == "default")]' \
     || return 1
-  workspaces=$("$ROOT/bin/fm-herdr-lab.sh" run "$session" workspace list) || return 1
+  workspaces=$("$ROOT/bin/fm-herdr-lab.sh" inspect-default workspaces) || return 1
   printf 'workspaces=%s\n' "$(printf '%s' "$workspaces" | jq -cS .)"
   while IFS= read -r workspace_id; do
     [ -n "$workspace_id" ] || continue
-    tabs=$("$ROOT/bin/fm-herdr-lab.sh" run "$session" tab list --workspace "$workspace_id") || return 1
-    panes=$("$ROOT/bin/fm-herdr-lab.sh" run "$session" pane list --workspace "$workspace_id") || return 1
+    tabs=$("$ROOT/bin/fm-herdr-lab.sh" inspect-default tabs "$workspace_id") || return 1
+    panes=$("$ROOT/bin/fm-herdr-lab.sh" inspect-default panes "$workspace_id") || return 1
     printf 'tabs[%s]=%s\n' "$workspace_id" "$(printf '%s' "$tabs" | jq -cS .)"
     printf 'panes[%s]=%s\n' "$workspace_id" "$(printf '%s' "$panes" | jq -cS .)"
   done < <(printf '%s' "$workspaces" | jq -r '.result.workspaces[]?.workspace_id' | LC_ALL=C sort)
@@ -228,10 +229,7 @@ MISSING_JOURNAL="$HOME_DIR/state/$MISSING_ID.herdr-presentation"
   echo "no_mistakes_run=active-fixture"
 } > "$HOME_DIR/state/$MISSING_ID.meta"
 printf 'preserved\n' > "$WT/uncommitted-missing-pane.txt"
-DEFAULT_SESSION=$("$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" session list --json \
-  | jq -er '[.sessions[]? | select(.default == true)] | if length == 1 then .[0].name else empty end') \
-  || fail "could not identify exactly one default Herdr session"
-DEFAULT_BEFORE=$(snapshot_session_layout "$DEFAULT_SESSION") \
+DEFAULT_BEFORE=$(snapshot_default_session_layout) \
   || fail "could not snapshot the default Herdr session layout"
 "$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" pane close "$MISSING_PANE" >/dev/null \
   || fail "could not remove the vanished-pane fixture"
@@ -260,7 +258,7 @@ grep -qx 'pr=https://example.invalid/firstmate/pull/1' "$HOME_DIR/state/$MISSING
   || fail "vanished-pane relaunch lost PR custody"
 grep -qx 'no_mistakes_run=active-fixture' "$HOME_DIR/state/$MISSING_ID.meta" \
   || fail "vanished-pane relaunch lost active no-mistakes custody"
-DEFAULT_AFTER=$(snapshot_session_layout "$DEFAULT_SESSION") \
+DEFAULT_AFTER=$(snapshot_default_session_layout) \
   || fail "could not resnapshot the default Herdr session layout"
 [ "$DEFAULT_AFTER" = "$DEFAULT_BEFORE" ] \
   || fail "vanished-pane relaunch changed the default Herdr session layout"

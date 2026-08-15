@@ -100,6 +100,32 @@ test_refuses_unsafe_names() {
   pass "fm-herdr-lab: names fail closed and require the lab prefix"
 }
 
+test_default_inspection_is_read_only_and_explicit() {
+  local status=0 before after
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_default_inspect sessions >/dev/null \
+    || fail "default session inspection failed"
+  run_with_fake fm_herdr_lab_default_inspect workspaces >/dev/null \
+    || fail "default workspace inspection failed"
+  run_with_fake fm_herdr_lab_default_inspect tabs w-default >/dev/null \
+    || fail "default tab inspection failed"
+  run_with_fake fm_herdr_lab_default_inspect panes w-default >/dev/null \
+    || fail "default pane inspection failed"
+  before=$(wc -l < "$FAKE_LOG")
+  run_with_fake fm_herdr_lab_default_inspect server >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "default inspection must refuse lifecycle commands"
+  after=$(wc -l < "$FAKE_LOG")
+  [ "$before" = "$after" ] \
+    || fail "refused default inspection reached Herdr"
+  while IFS= read -r line; do
+    case "$line" in
+      'session list --json --session default'|'workspace list --session default'|'tab list --workspace w-default --session default'|'pane list --workspace w-default --session default') ;;
+      *) fail "default inspection permitted a non-read-only Herdr command: $line" ;;
+    esac
+  done < "$FAKE_LOG"
+  pass "fm-herdr-lab: default inspection is explicit and read-only"
+}
+
 test_provision_run_and_guarded_teardown() {
   local name='' line_count status=0 stop_line delete_line
   name="fm-lab-behavior-$$"
@@ -235,6 +261,7 @@ SH
 }
 
 test_refuses_unsafe_names
+test_default_inspection_is_read_only_and_explicit
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
