@@ -14,6 +14,7 @@
 #   (f) malformed PR URL fails fast without calling gh
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) requirement-bypass args fail fast before the forge is contacted
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -325,6 +326,31 @@ test_repo_override_args_refuse_before_recording() {
   pass "fm-pr-merge refuses repo override args before recording state"
 }
 
+test_admin_bypass_arg_refuses_before_recording() {
+  local case_dir rc
+  case_dir=$(make_case admin-bypass)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  : > "$case_dir/gh.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/right/repo/pull/6 -- --admin \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "admin-bypass: fm-pr-merge should refuse requirement bypasses"
+  assert_grep 'extra merge arguments must not bypass required PR checks' "$case_dir/stderr" \
+    "admin-bypass: refusal did not explain the requirement bypass"
+  assert_no_grep 'pr=https://github.com/right/repo/pull/6' "$case_dir/state/task-x1.meta" \
+    "admin-bypass: PR URL was recorded before rejecting the bypass"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "admin-bypass: bypass argument armed a merge poll"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "admin-bypass: gh pr merge was invoked despite the bypass"
+  pass "fm-pr-merge refuses requirement-bypass merge arguments"
+}
+
 test_explicit_merge_method_not_overridden() {
   local case_dir
   case_dir=$(make_case explicit-merge-method)
@@ -395,6 +421,7 @@ test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge
 test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
+test_admin_bypass_arg_refuses_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_method_value_merge_method_is_translated

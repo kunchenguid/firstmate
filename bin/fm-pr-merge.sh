@@ -6,7 +6,8 @@
 #
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
-# must not include --repo or -R because the repository comes only from the URL.
+# must not include --repo, -R, or --admin because the repository and checks
+# must not be overridden by the caller.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh pr merge args>]
 set -eu
 
@@ -109,6 +110,20 @@ reject_head_overrides() {
 }
 
 reject_head_overrides "$@" || exit 1
+
+reject_requirement_bypasses() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --admin|--admin=*)
+        echo "error: extra merge arguments must not bypass required PR checks" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
+reject_requirement_bypasses "$@" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
