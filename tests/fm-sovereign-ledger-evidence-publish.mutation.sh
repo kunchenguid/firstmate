@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUBJECT="$ROOT/tests/fm-sovereign-ledger-redundancy.mutation.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
-fixtures='absolute traversal symlink-leaf-data symlink-parent symlink-parent-state resolved-outside hard-link unresolved-parent existing'
+fixtures='absolute traversal symlink-leaf-data symlink-parent symlink-parent-state resolved-outside hard-link unresolved-parent existing scope-symlink scope-unresolved unsafe-leaf'
 killed=0
 survived=0
 void=0
@@ -16,29 +16,51 @@ cells=0
 "$SUBJECT" --self-test-evidence-containment
 
 surviving_defender() {
-  case "$1:$2" in
+  local mutant=$1 fixture=$2
+  case "$mutant:$fixture" in
     P001:symlink-leaf-data|P001:hard-link|P001:existing)
       printf '%s\n' exclusive-create-O_EXCL ;;
     P001:unresolved-parent)
       printf '%s\n' natural-unresolved-parent ;;
+    P001:scope-unresolved)
+      printf '%s\n' natural-unresolved-parent ;;
+    P001:unsafe-leaf)
+      printf '%s\n' exclusive-create-O_EXCL ;;
     P002:*)
       printf '%s\n' resolved-path-validator ;;
-    P003:absolute|P004:absolute)
-      printf '%s\n' absolute-path-validator ;;
-    P003:traversal|P004:traversal)
-      printf '%s\n' path-component-validator ;;
-    P003:symlink-leaf-data|P004:symlink-leaf-data)
-      printf '%s\n' symlink-leaf-validator ;;
     P003:symlink-parent-state|P003:resolved-outside)
       printf '%s\n' canonical-structural-containment ;;
-    P004:symlink-parent|P004:symlink-parent-state)
-      printf '%s\n' symlink-component-precheck ;;
-    P003:hard-link|P003:existing|P004:hard-link|P004:existing)
-      printf '%s\n' existing-leaf-validator ;;
-    P003:unresolved-parent|P004:unresolved-parent)
+    P004:resolved-outside)
+      printf '%s\n' final-structural-containment ;;
+    P005:absolute)
+      printf '%s\n' unsafe-component-guard ;;
+    P006:traversal)
+      printf '%s\n' canonical-structural-containment ;;
+    P007:symlink-leaf-data)
+      printf '%s\n' exclusive-create-O_EXCL ;;
+    P008:hard-link|P008:existing)
+      printf '%s\n' exclusive-create-O_EXCL ;;
+    P009:unresolved-parent)
+      printf '%s\n' natural-unresolved-parent ;;
+    P011:scope-symlink)
+      printf '%s\n' canonical-scope-resolution ;;
+    P012:scope-unresolved)
       printf '%s\n' canonical-parent-resolution ;;
+    P013:unsafe-leaf)
+      printf '%s\n' existing-leaf-guard ;;
     *)
-      printf '%s\n' - ;;
+      case "$fixture" in
+        absolute) printf '%s\n' absolute-path-guard ;;
+        traversal) printf '%s\n' unsafe-component-guard ;;
+        symlink-leaf-data) printf '%s\n' symlink-leaf-guard ;;
+        symlink-parent|symlink-parent-state) printf '%s\n' symlink-component-precheck ;;
+        resolved-outside) printf '%s\n' canonical-structural-containment ;;
+        hard-link|existing) printf '%s\n' existing-leaf-guard ;;
+        unresolved-parent) printf '%s\n' canonical-parent-resolution ;;
+        scope-symlink) printf '%s\n' scope-symlink-guard ;;
+        scope-unresolved) printf '%s\n' canonical-scope-resolution ;;
+        unsafe-leaf) printf '%s\n' unsafe-leaf-guard ;;
+      esac ;;
   esac
 }
 
@@ -105,11 +127,38 @@ publish_mutant P003 symlink-component-precheck \
 publish_mutant P004 canonical-structural-containment \
   'case "$resolved/" in "$scope/"*) ;; *) evidence_refuse "evidence destination resolves outside its scope: $relative"; return 1 ;; esac' \
   ':'
+publish_mutant P005 absolute-path-guard \
+  'case "$relative" in /*) evidence_refuse "absolute evidence destination is forbidden: $relative"; return 1 ;; esac' \
+  ':'
+publish_mutant P006 unsafe-component-guard \
+  "case \"\$component\" in ''|.|..) evidence_refuse \"unsafe evidence destination component: \$relative\"; return 1 ;; esac" \
+  ':'
+publish_mutant P007 symlink-leaf-guard \
+  '[ ! -L "$cursor/$leaf" ]' \
+  'true'
+publish_mutant P008 existing-leaf-guard \
+  '[ ! -e "$cursor/$leaf" ]' \
+  'true'
+publish_mutant P009 canonical-parent-resolution \
+  '|| { evidence_refuse "evidence destination parent is unresolved: $relative"; return 1; }' \
+  '|| resolved="$cursor/$component"'
+publish_mutant P010 final-structural-containment \
+  'case "$cursor/$leaf" in "$scope/"*) ;; *) evidence_refuse "evidence destination is outside its scope: $relative"; return 1 ;; esac' \
+  ':'
+publish_mutant P011 scope-symlink-guard \
+  '[ ! -L "$scope_input" ]' \
+  'true'
+publish_mutant P012 canonical-scope-resolution \
+  '|| { evidence_refuse "evidence scope is unresolved: $scope_input"; return 1; }' \
+  '|| scope=$scope_input'
+publish_mutant P013 unsafe-leaf-guard \
+  "case \"\$leaf\" in ''|.|..) evidence_refuse \"unsafe evidence destination leaf: \$relative\"; return 1 ;; esac" \
+  ':'
 "$SUBJECT" --self-test-evidence-containment >/dev/null
-printf 'PUBLISH MATRIX SUMMARY mechanisms=5 written_boundaries=4 natural_boundaries=1 mutants=%s fixtures=9 cells=%s killed=%s survived=%s void=%s\n' \
+printf 'PUBLISH MATRIX SUMMARY mechanisms=14 written_boundaries=13 natural_boundaries=1 mutants=%s fixtures=12 cells=%s killed=%s survived=%s void=%s\n' \
   "$mutants" "$cells" "$killed" "$survived" "$void"
-[ "$mutants" -eq 4 ]
-[ "$cells" -eq 36 ]
+[ "$mutants" -eq 13 ]
+[ "$cells" -eq 156 ]
 [ "$killed" -eq 7 ]
-[ "$survived" -eq 29 ]
+[ "$survived" -eq 149 ]
 [ "$void" -eq 0 ]

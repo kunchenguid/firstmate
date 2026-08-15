@@ -100,55 +100,24 @@ tests/fm-sovereign-ledger-evidence-publish.mutation.sh
 Observed bounded summary:
 
 ```text
-CONTAINMENT FIXTURES passed=10 failed=0
-PUBLISH MUTANT P001 anchor=resolved-path-validator-call substitutions=1 killed=5 survived=4 void=0
-PUBLISH MUTANT P002 anchor=exclusive-create-flag substitutions=1 killed=0 survived=9 void=0
-PUBLISH MUTANT P003 anchor=symlink-component-precheck substitutions=1 killed=1 survived=8 void=0
-PUBLISH MUTANT P004 anchor=canonical-structural-containment substitutions=1 killed=1 survived=8 void=0
-PUBLISH MATRIX SUMMARY mechanisms=5 written_boundaries=4 natural_boundaries=1 mutants=4 fixtures=9 cells=36 killed=7 survived=29 void=0
+CONTAINMENT FIXTURES passed=13 failed=0
+PUBLISH MUTANT P001 anchor=resolved-path-validator-call substitutions=1 killed=6 survived=6 void=0
+PUBLISH MUTANT P002 anchor=exclusive-create-flag substitutions=1 killed=0 survived=12 void=0
+PUBLISH MUTANT P003 anchor=symlink-component-precheck substitutions=1 killed=1 survived=11 void=0
+PUBLISH MUTANT P004 anchor=canonical-structural-containment substitutions=1 killed=0 survived=12 void=0
+PUBLISH MUTANT P005 anchor=absolute-path-guard substitutions=1 killed=0 survived=12 void=0
+PUBLISH MUTANT P006 anchor=unsafe-component-guard substitutions=1 killed=0 survived=12 void=0
+PUBLISH MUTANT P007 anchor=symlink-leaf-guard substitutions=1 killed=0 survived=12 void=0
+PUBLISH MUTANT P008 anchor=existing-leaf-guard substitutions=1 killed=0 survived=12 void=0
+PUBLISH MUTANT P009 anchor=canonical-parent-resolution substitutions=1 killed=0 survived=12 void=0
+PUBLISH MUTANT P010 anchor=final-structural-containment substitutions=1 killed=0 survived=12 void=0
+PUBLISH MUTANT P011 anchor=scope-symlink-guard substitutions=1 killed=0 survived=12 void=0
+PUBLISH MUTANT P012 anchor=canonical-scope-resolution substitutions=1 killed=0 survived=12 void=0
+PUBLISH MUTANT P013 anchor=unsafe-leaf-guard substitutions=1 killed=0 survived=12 void=0
+PUBLISH MATRIX SUMMARY mechanisms=14 written_boundaries=13 natural_boundaries=1 mutants=13 fixtures=12 cells=156 killed=7 survived=149 void=0
 ```
 
-The five measured mechanisms are the resolved-path validator call, exclusive `O_EXCL` creation, the symlink-component precheck, canonical structural containment, and the natural unresolved-parent failure from `sysopen`.
-The natural boundary has no written clause to substitute, so the written-mutant denominator is four while the measured enforcing-boundary denominator is five.
-The `resolved-outside` fixture passes the component precheck as a real directory, swaps that directory to a scoped fake-outside link, and requires the canonical structural-containment refusal.
-A survived cell means the named different boundary still refused that fixture; zero substitutions make every cell for that mutant void.
-The symlinked leaf, hard-link, and existing-leaf fixtures are defended only by `O_EXCL` when the validator call is neutralized.
-
-| Mutant | Stable exact boundary anchor | Substitutions | Fixture | Outcome | Different surviving boundary |
-| --- | --- | ---: | --- | --- | --- |
-| `P001` | `resolved-path-validator-call` | 1 | `absolute` | KILLED | - |
-| `P001` | `resolved-path-validator-call` | 1 | `traversal` | KILLED | - |
-| `P001` | `resolved-path-validator-call` | 1 | `symlink-leaf-data` | SURVIVED | `exclusive-create-O_EXCL` |
-| `P001` | `resolved-path-validator-call` | 1 | `symlink-parent` | KILLED | - |
-| `P001` | `resolved-path-validator-call` | 1 | `symlink-parent-state` | KILLED | - |
-| `P001` | `resolved-path-validator-call` | 1 | `resolved-outside` | KILLED | - |
-| `P001` | `resolved-path-validator-call` | 1 | `hard-link` | SURVIVED | `exclusive-create-O_EXCL` |
-| `P001` | `resolved-path-validator-call` | 1 | `unresolved-parent` | SURVIVED | `natural-unresolved-parent` |
-| `P001` | `resolved-path-validator-call` | 1 | `existing` | SURVIVED | `exclusive-create-O_EXCL` |
-| `P002` | `exclusive-create-flag` | 1 | `absolute` | SURVIVED | `resolved-path-validator` |
-| `P002` | `exclusive-create-flag` | 1 | `traversal` | SURVIVED | `resolved-path-validator` |
-| `P002` | `exclusive-create-flag` | 1 | `symlink-leaf-data` | SURVIVED | `resolved-path-validator` |
-| `P002` | `exclusive-create-flag` | 1 | `symlink-parent` | SURVIVED | `resolved-path-validator` |
-| `P002` | `exclusive-create-flag` | 1 | `symlink-parent-state` | SURVIVED | `resolved-path-validator` |
-| `P002` | `exclusive-create-flag` | 1 | `resolved-outside` | SURVIVED | `resolved-path-validator` |
-| `P002` | `exclusive-create-flag` | 1 | `hard-link` | SURVIVED | `resolved-path-validator` |
-| `P002` | `exclusive-create-flag` | 1 | `unresolved-parent` | SURVIVED | `resolved-path-validator` |
-| `P002` | `exclusive-create-flag` | 1 | `existing` | SURVIVED | `resolved-path-validator` |
-| `P003` | `symlink-component-precheck` | 1 | `absolute` | SURVIVED | `absolute-path-validator` |
-| `P003` | `symlink-component-precheck` | 1 | `traversal` | SURVIVED | `path-component-validator` |
-| `P003` | `symlink-component-precheck` | 1 | `symlink-leaf-data` | SURVIVED | `symlink-leaf-validator` |
-| `P003` | `symlink-component-precheck` | 1 | `symlink-parent` | KILLED | - |
-| `P003` | `symlink-component-precheck` | 1 | `symlink-parent-state` | SURVIVED | `canonical-structural-containment` |
-| `P003` | `symlink-component-precheck` | 1 | `resolved-outside` | SURVIVED | `canonical-structural-containment` |
-| `P003` | `symlink-component-precheck` | 1 | `hard-link` | SURVIVED | `existing-leaf-validator` |
-| `P003` | `symlink-component-precheck` | 1 | `unresolved-parent` | SURVIVED | `canonical-parent-resolution` |
-| `P003` | `symlink-component-precheck` | 1 | `existing` | SURVIVED | `existing-leaf-validator` |
-| `P004` | `canonical-structural-containment` | 1 | `absolute` | SURVIVED | `absolute-path-validator` |
-| `P004` | `canonical-structural-containment` | 1 | `traversal` | SURVIVED | `path-component-validator` |
-| `P004` | `canonical-structural-containment` | 1 | `symlink-leaf-data` | SURVIVED | `symlink-leaf-validator` |
-| `P004` | `canonical-structural-containment` | 1 | `symlink-parent` | SURVIVED | `symlink-component-precheck` |
-| `P004` | `canonical-structural-containment` | 1 | `symlink-parent-state` | SURVIVED | `symlink-component-precheck` |
-| `P004` | `canonical-structural-containment` | 1 | `resolved-outside` | KILLED | - |
-| `P004` | `canonical-structural-containment` | 1 | `hard-link` | SURVIVED | `existing-leaf-validator` |
-| `P004` | `canonical-structural-containment` | 1 | `unresolved-parent` | SURVIVED | `canonical-parent-resolution` |
-| `P004` | `canonical-structural-containment` | 1 | `existing` | SURVIVED | `existing-leaf-validator` |
+The denominator covers the validator call, exclusive creation, every destination and scope guard reached by the fixtures, and the separately classified natural unresolved-parent failure.
+Every mutant records exactly one substitution and every one of its twelve fixture cells independently.
+Every survived cell printed by the command names the actual remaining boundary that refused publication.
+The `resolved-outside` fixture passes the component precheck as a real directory, swaps it to a scoped fake-outside link, and remains safe through final structural containment when the earlier canonical containment clause is neutralized.
