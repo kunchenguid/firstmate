@@ -31,9 +31,10 @@
 #      invalidates attribution. When the worktree CANNOT read the run head,
 #      the run's own lifecycle decides: a live run holds custody of this exact
 #      branch and its gate-fix commits are simply unpublished, so it matches,
-#      while a terminal run is unbindable history and does not. The coarse
-#      fallback only ever considers the branch's newest run, because an older
-#      one has already been superseded. bin/fm-nm-run-lib.sh owns both rules.
+#      while a terminal run is unbindable history and does not.
+#      bin/fm-nm-run-lib.sh owns that match rule and the live-status predicate
+#      it turns on; the coarse fallback here only ever considers the branch's
+#      newest run, because an older one has already been superseded.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -337,9 +338,11 @@ nm_ci_checks_state() {
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# is a run for THIS branch active right now. Echoes the status word of the
+# branch's newest matching row only - a live word such as running, or a
+# terminal completed/cancelled/failed - and empty both when the branch has no
+# run within FM_CREW_STATE_RUNS_LIMIT rows and when that newest row does not
+# bind to this worktree.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
