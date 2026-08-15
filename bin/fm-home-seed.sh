@@ -752,22 +752,10 @@ write_registry() {
 }
 
 write_seed_receipt() {  # <id> <home> <projects-csv> <brief>
-  local id=$1 home=$2 projects_csv=$3 brief=$4 scope receipt tmp digest
+  local id=$1 home=$2 projects_csv=$3 brief=$4 scope receipt
   scope=$(registry_scope_for_brief "$brief")
   receipt="$DATA/$id/seed-receipt"
-  digest=$(secondmate_seed_identity_digest "$id" "$home" "$projects_csv" "$scope") || return 1
-  mkdir -p "$(dirname "$receipt")" || return 1
-  tmp="$receipt.tmp.$$"
-  {
-    printf 'schema=fm-secondmate-seed.v1\n'
-    printf 'id=%s\n' "$id"
-    printf 'home=%s\n' "$home"
-    printf 'projects=%s\n' "$projects_csv"
-    printf 'scope=%s\n' "$scope"
-    printf 'identity_digest=%s\n' "$digest"
-  } > "$tmp" || { rm -f "$tmp"; return 1; }
-  chmod 600 "$tmp" 2>/dev/null || true
-  mv -f -- "$tmp" "$receipt"
+  secondmate_seed_receipt_write "$receipt" "$id" "$home" "$projects_csv" "$scope"
 }
 
 refuse_populated_projectless_home() {

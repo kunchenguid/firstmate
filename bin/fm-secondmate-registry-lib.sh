@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034 # parsed fields are output globals for sourcing callers.
 # Shared parser for data/secondmates.md records and owner of the canonical
-# secondmate seed-identity serialization and digest.
+# secondmate seed-receipt format, parser, writer, and identity digest.
 #
 # A generated local record ends with this explicit structured suffix:
 #   (home: ...; scope: ...; projects: ...; added YYYY-MM-DD)
@@ -28,6 +28,14 @@ SECONDMATE_REGISTRY_MATCH_HOME_KEY=
 SECONDMATE_REGISTRY_MATCH_PROJECTS=
 SECONDMATE_REGISTRY_MATCH_REMOTE=0
 SECONDMATE_REGISTRY_ERROR=
+SECONDMATE_SEED_RECEIPT_SCHEMA_ID=fm-secondmate-seed.v1
+SECONDMATE_SEED_RECEIPT_SCHEMA=
+SECONDMATE_SEED_RECEIPT_ID=
+SECONDMATE_SEED_RECEIPT_HOME=
+SECONDMATE_SEED_RECEIPT_PROJECTS=
+SECONDMATE_SEED_RECEIPT_SCOPE=
+SECONDMATE_SEED_RECEIPT_IDENTITY_DIGEST=
+SECONDMATE_SEED_RECEIPT_ERROR=
 
 secondmate_registry_lock_path() { printf '%s/.secondmate-registry.lock\n' "$1"; }
 secondmate_reply_lifecycle_lock_path() { printf '%s/.remote-reply-lifecycle-%s.lock\n' "$1" "$2"; }
@@ -35,6 +43,91 @@ secondmate_reply_lifecycle_lock_path() { printf '%s/.remote-reply-lifecycle-%s.l
 secondmate_seed_identity_digest() {
   printf 'id=%s\nhome=%s\nprojects=%s\nscope=%s\n' "$1" "$2" "$3" "$4" \
     | shasum -a 256 | awk '{print $1}'
+}
+
+secondmate_seed_receipt_write() {  # <receipt-path> <id> <home> <projects-csv> <scope>
+  local receipt=$1 id=$2 home=$3 projects=$4 scope=$5 digest tmp
+  [ -n "$receipt" ] && [ -n "$id" ] && [ -n "$home" ] && [ -n "$scope" ] || return 1
+  case "$id$home$projects$scope" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  digest=$(secondmate_seed_identity_digest "$id" "$home" "$projects" "$scope") || return 1
+  [ -n "$digest" ] || return 1
+  mkdir -p "$(dirname "$receipt")" || return 1
+  tmp="$receipt.tmp.$$"
+  {
+    printf 'schema=%s\n' "$SECONDMATE_SEED_RECEIPT_SCHEMA_ID"
+    printf 'id=%s\n' "$id"
+    printf 'home=%s\n' "$home"
+    printf 'projects=%s\n' "$projects"
+    printf 'scope=%s\n' "$scope"
+    printf 'identity_digest=%s\n' "$digest"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$receipt"
+}
+
+secondmate_seed_receipt_parse() {  # <receipt-path>
+  local receipt=$1 line index=0 expected_digest
+  SECONDMATE_SEED_RECEIPT_SCHEMA=
+  SECONDMATE_SEED_RECEIPT_ID=
+  SECONDMATE_SEED_RECEIPT_HOME=
+  SECONDMATE_SEED_RECEIPT_PROJECTS=
+  SECONDMATE_SEED_RECEIPT_SCOPE=
+  SECONDMATE_SEED_RECEIPT_IDENTITY_DIGEST=
+  SECONDMATE_SEED_RECEIPT_ERROR=
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || {
+    SECONDMATE_SEED_RECEIPT_ERROR=unsafe-file
+    return 1
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    index=$((index + 1))
+    case "$index" in
+      1)
+        [ "$line" = "schema=$SECONDMATE_SEED_RECEIPT_SCHEMA_ID" ] || {
+          SECONDMATE_SEED_RECEIPT_ERROR=unsupported-schema
+          return 1
+        }
+        SECONDMATE_SEED_RECEIPT_SCHEMA=${line#schema=}
+        ;;
+      2)
+        case "$line" in id=*) SECONDMATE_SEED_RECEIPT_ID=${line#id=} ;; *) SECONDMATE_SEED_RECEIPT_ERROR=malformed; return 1 ;; esac
+        ;;
+      3)
+        case "$line" in home=*) SECONDMATE_SEED_RECEIPT_HOME=${line#home=} ;; *) SECONDMATE_SEED_RECEIPT_ERROR=malformed; return 1 ;; esac
+        ;;
+      4)
+        case "$line" in projects=*) SECONDMATE_SEED_RECEIPT_PROJECTS=${line#projects=} ;; *) SECONDMATE_SEED_RECEIPT_ERROR=malformed; return 1 ;; esac
+        ;;
+      5)
+        case "$line" in scope=*) SECONDMATE_SEED_RECEIPT_SCOPE=${line#scope=} ;; *) SECONDMATE_SEED_RECEIPT_ERROR=malformed; return 1 ;; esac
+        ;;
+      6)
+        case "$line" in identity_digest=*) SECONDMATE_SEED_RECEIPT_IDENTITY_DIGEST=${line#identity_digest=} ;; *) SECONDMATE_SEED_RECEIPT_ERROR=malformed; return 1 ;; esac
+        ;;
+      *)
+        SECONDMATE_SEED_RECEIPT_ERROR=malformed
+        return 1
+        ;;
+    esac
+  done < "$receipt"
+  [ "$index" -eq 6 ] \
+    && [ -n "$SECONDMATE_SEED_RECEIPT_ID" ] \
+    && [ -n "$SECONDMATE_SEED_RECEIPT_HOME" ] \
+    && [ -n "$SECONDMATE_SEED_RECEIPT_SCOPE" ] \
+    && [ -n "$SECONDMATE_SEED_RECEIPT_IDENTITY_DIGEST" ] || {
+      SECONDMATE_SEED_RECEIPT_ERROR=malformed
+      return 1
+    }
+  expected_digest=$(secondmate_seed_identity_digest \
+    "$SECONDMATE_SEED_RECEIPT_ID" "$SECONDMATE_SEED_RECEIPT_HOME" \
+    "$SECONDMATE_SEED_RECEIPT_PROJECTS" "$SECONDMATE_SEED_RECEIPT_SCOPE") || {
+      SECONDMATE_SEED_RECEIPT_ERROR=invalid-digest
+      return 1
+    }
+  [ -n "$expected_digest" ] \
+    && [ "$expected_digest" = "$SECONDMATE_SEED_RECEIPT_IDENTITY_DIGEST" ] || {
+      SECONDMATE_SEED_RECEIPT_ERROR=invalid-digest
+      return 1
+    }
 }
 
 secondmate_registry_parse_line() {

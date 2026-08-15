@@ -2293,40 +2293,34 @@ remove_secondmate_registry_entry() {
 }
 
 recover_returned_secondmate() {
-  local receipt receipt_id receipt_home receipt_projects receipt_scope receipt_digest
-  local expected_digest route_home route_projects route_scope home_key entry treehouse_status state_entries
+  local receipt receipt_id receipt_home receipt_projects receipt_scope
+  local route_home route_projects route_scope home_key entry treehouse_status state_entries
   local identity_source seed_brief receipt_summary route_summary meta_projects retiring_meta
   [ "$KIND" = secondmate ] || {
     echo "REFUSED: returned-home recovery is only for kind=secondmate metadata" >&2
     return 1
   }
   receipt="$DATA/$ID/seed-receipt"
-  receipt_field() {
-    grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
-  }
   if [ -f "$receipt" ] && [ ! -L "$receipt" ]; then
     identity_source=seed-receipt
-    [ "$(receipt_field "$receipt" schema)" = fm-secondmate-seed.v1 ] || {
-      echo "REFUSED: secondmate seed receipt has an unsupported schema; preserving records" >&2
+    if ! secondmate_seed_receipt_parse "$receipt"; then
+      if [ "$SECONDMATE_SEED_RECEIPT_ERROR" = unsupported-schema ]; then
+        echo "REFUSED: secondmate seed receipt has an unsupported schema; preserving records" >&2
+      else
+        echo "REFUSED: secondmate seed receipt is malformed or invalid; preserving records" >&2
+      fi
       return 1
-    }
-    receipt_id=$(receipt_field "$receipt" id)
-    receipt_home=$(receipt_field "$receipt" home)
-    receipt_projects=$(receipt_field "$receipt" projects)
-    receipt_scope=$(receipt_field "$receipt" scope)
-    receipt_digest=$(receipt_field "$receipt" identity_digest)
+    fi
+    receipt_id=$SECONDMATE_SEED_RECEIPT_ID
+    receipt_home=$SECONDMATE_SEED_RECEIPT_HOME
+    receipt_projects=$SECONDMATE_SEED_RECEIPT_PROJECTS
+    receipt_scope=$SECONDMATE_SEED_RECEIPT_SCOPE
     [ "$receipt_id" = "$ID" ] || {
       echo "REFUSED: secondmate seed receipt identity does not match $ID; preserving records" >&2
       return 1
     }
     [ "$receipt_home" = "$HOME_PATH" ] || {
       echo "REFUSED: secondmate seed receipt home does not match parent metadata; preserving records" >&2
-      return 1
-    }
-    expected_digest=$(secondmate_seed_identity_digest \
-      "$receipt_id" "$receipt_home" "$receipt_projects" "$receipt_scope")
-    [ -n "$expected_digest" ] && [ "$expected_digest" = "$receipt_digest" ] || {
-      echo "REFUSED: secondmate seed receipt identity digest is invalid; preserving records" >&2
       return 1
     }
   else
@@ -2352,7 +2346,6 @@ recover_returned_secondmate() {
       echo "REFUSED: legacy charter projects do not match parent metadata; preserving records" >&2
       return 1
     }
-    receipt_digest=
   fi
   [ -d "$HOME_PATH" ] && [ ! -L "$HOME_PATH" ] || {
     echo "REFUSED: returned secondmate home is missing or unsafe; preserving records" >&2

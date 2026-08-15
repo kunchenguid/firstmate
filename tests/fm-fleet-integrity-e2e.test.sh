@@ -180,17 +180,9 @@ test_local_only_integrity_skips_remote_metadata_probes() {
 }
 
 write_seed_receipt() {
-  local home=$1 id=$2 returned=$3 projects=$4 scope=$5 digest
-  digest=$(secondmate_seed_identity_digest "$id" "$returned" "$projects" "$scope")
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/seed-receipt" <<EOF
-schema=fm-secondmate-seed.v1
-id=$id
-home=$returned
-projects=$projects
-scope=$scope
-identity_digest=$digest
-EOF
+  local home=$1 id=$2 returned=$3 projects=$4 scope=$5
+  secondmate_seed_receipt_write "$home/data/$id/seed-receipt" \
+    "$id" "$returned" "$projects" "$scope"
 }
 
 make_returned_secondmate() {
