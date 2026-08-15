@@ -109,7 +109,7 @@ printf '{"planActMode": "act"}\n' > "$LAB/act-settings.json"
 
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n control -c "$WORKSPACE" -x 200 -y 50 \
   || fail "could not start the isolated tmux server"
-"$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n cline -c "$WORKSPACE" -x 200 -y 50 \
+"$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n cline -c "$WORKSPACE" \
   || fail "could not create the isolated cline window"
 
 # --- the gap itself: a persisted plan mode wins over the documented default ---

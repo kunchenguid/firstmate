@@ -205,6 +205,37 @@ JSON
   pass "existing explicit wrapper-provider and native Grok routes remain selectable"
 }
 
+# grok's real quota surface reports NO windows at all: quota-axi tries its web
+# and pi:xai sources, resolves nothing, and reports status=error with
+# authStatus=usable. That combination is the trap - auth is fine, so a selector
+# that only checked auth would price grok as if it had headroom. Usable auth is
+# not capacity evidence, and unavailable evidence makes only that provider
+# ineligible while a healthy candidate still wins.
+test_grok_without_a_resolvable_quota_window_is_not_priced() {
+  local home fakebin quota out rc=0
+  home=$(make_home grok-no-window)
+  fakebin=$(make_fakebin grok-no-window)
+  quota="$home/quota.json"
+  cat > "$quota" <<JSON
+{"schemaVersion":3,"generatedAt":"$STAMP","providers":[
+  {"provider":"claude","state":{"status":"fresh","stale":false},"windows":[{"id":"all","percentRemaining":80}]},
+  {"provider":"grok","source":"unavailable","windows":[],"state":{"status":"error","stale":false,"error":"Grok quota unavailable","authStatus":"usable"}}
+]}
+JSON
+  # Against a healthy candidate, the one with no resolvable window must not win.
+  out=$(run_select "$home" "$fakebin" "$quota" mixed.json \
+    '[{"harness":"claude","model":"sonnet"},{"harness":"grok"}]' 2>/dev/null)
+  [ "$(printf '%s\n' "$out" | jq -r .harness)" = claude ] \
+    || fail "grok with no resolvable quota window was priced against a healthy candidate: $out"
+
+  # Alone, it must fail as an inspectable refusal rather than silently dispatch
+  # on capacity nobody measured.
+  out=$(run_select "$home" "$fakebin" "$quota" alone.json '[{"harness":"grok"},{"harness":"grok"}]' 2>&1) || rc=$?
+  [ "$rc" != 0 ] \
+    || fail "a grok-only array with no resolvable quota window should not report a priced selection: $out"
+  pass "fm-dispatch-select: usable grok auth with no quota window is not treated as capacity"
+}
+
 test_new_verified_adapters_with_providers_are_selectable() {
   local home fakebin quota out harness provider
   home=$(make_home new-adapters)
@@ -349,6 +380,7 @@ test_a_declared_window_absent_from_telemetry_fails_closed
 test_verified_failure_creates_cooldown_and_failover
 test_invalid_profiles_and_settings_are_actionable
 test_existing_wrapper_and_grok_routes_remain_selectable
+test_grok_without_a_resolvable_quota_window_is_not_priced
 test_new_verified_adapters_with_providers_are_selectable
 
 echo "# all fm-dispatch-select tests passed"

@@ -1234,11 +1234,12 @@ effort_flag_for_harness() {
       ;;
     grok)
       # grok exposes both --effort and --reasoning-effort; firstmate's profile
-      # axis is the reasoning knob. As of grok 0.2.99, --reasoning-effort accepts
-      # only low|medium|high and rejects both xhigh and max, so omit those rather
-      # than passing a known-bad value.
+      # axis is the reasoning knob. The ceiling moved: grok 0.2.99 rejected both
+      # xhigh and max, while grok 1.0.4 accepts xhigh (its refusal names
+      # `xhigh, high, medium, low`). max is still rejected, so it stays omitted
+      # rather than passed as a known-bad value.
       case "$effort" in
-        low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+        low|medium|high|xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
       esac
       ;;
     pi|pi-signed)

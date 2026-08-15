@@ -30,6 +30,7 @@ The per-task mechanics, including launch command, autonomy flag, and any enabled
 Agent lifecycle mechanics - which key interrupts a turn, how many times it must be sent, whether the composer needs clearing afterwards, which command exits the agent, and which task kinds the adapter can run - are owned by the executable control plane in `bin/fm-control-lib.sh` and delivered by `bin/fm-control.sh <task-id> interrupt|exit|relaunch`.
 Never hand-type an interrupt key or exit command through `fm-send`: a routing-marked lifecycle command becomes chat the agent reasons about instead of executing, which is the defect the control plane exists to remove ([`docs/agent-control.md`](../../../docs/agent-control.md)).
 The per-adapter `Exit command` and `Interrupt` rows below remain the verification record for those values; the executable owner is what firstmate actually runs, so a newly verified adapter is not reachable by the control plane until its rows land in that owner.
+An adapter with no composer exit command at all - cline is the only verified one - records an exit KEY instead, and the two are separate tables there precisely because one adapter's exit key is another's interrupt key.
 The primary-session "no turn ends blind" guard contract and harness hook installation paths live in `docs/turnend-guard.md`.
 The primary-session watcher wake protocols are rendered from `docs/supervision-protocols/` by `bin/fm-supervision-instructions.sh`.
 The supervision knowledge lives here: busy state, exit command, interrupt, dialogs, resume behavior, skill invocation, and quirks.
@@ -124,11 +125,11 @@ The supported launch-profile flags below are verified locally; each row records 
 |---|---|---|---|
 | claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
 | codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
-| grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
+| grok | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>` | Re-verified on grok 1.0.4 (2026-08-16). `--effort` is an alias, but firstmate's profile axis is reasoning effort. The ceiling MOVED: 0.2.99 rejected `xhigh` and `max` alike with `use one of: high, medium, low`, while 1.0.4's refusal names `xhigh, high, medium, low` and a real `--reasoning-effort xhigh -p` turn answers cleanly. `max` is still rejected, so firstmate omits only that. Read the vocabulary from grok's own refusal rather than from this row; `tests/fm-grok-signals-live-e2e.test.sh` is what refreshes it. |
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
-| cline | `--model <id>` | `--thinking <low\|medium\|high\|xhigh>` | Verified 2026-07-27 on Cline CLI 3.0.46. `max` is omitted. |
+| cline | `--model <id>` | `--thinking <low\|medium\|high\|xhigh>` | Re-verified 2026-08-16 on Cline CLI 3.0.55. `max` is omitted. |
 | cursor-agent | `--model <id>` | none | Verified 2026-07-27 on Cursor CLI 2026.07; effort is not a firstmate launch flag for this adapter. |
 | cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. The reasoning class travels in the model id itself, and which ids exist drifts: validate against `cursor-agent --list-models` for the current account, never against a remembered family. The Cursor row below owns that catalog fact. |
 | copilot | `--model <id>` | `--reasoning-effort <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-28 on GitHub Copilot CLI 1.0.75; firstmate's shared effort vocabulary is a supported subset. |
@@ -340,6 +341,12 @@ Reproduced live: the herdr adapter's submit-verification at the time treated ANY
 The current tmux and Herdr adapters pass their captures and capability descriptors to `bin/fm-composer-lib.sh`, whose shared structural classifier sees placeholder-filled text on any proven content row as still pending, so the retry loop sends the needed second Enter.
 See `docs/herdr-backend.md` "Composer and injection safety" for Herdr's current boundary and `tests/fm-backend-herdr.test.sh` for regression coverage.
 
+The launch-profile, headless, no-pty, and capacity facts above are refreshed by:
+
+```bash
+FM_GROK_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-grok-signals-live-e2e.test.sh
+```
+
 Startup dialog: the "Run Grok Build in a project directory?" project picker appears ONLY when grok is launched from a non-project directory (home, Desktop, Downloads, `/tmp`).
 `fm-spawn` launches inside the treehouse worktree (a git repo root), so the picker never appears and grok treats the worktree as a trusted project automatically - no post-launch keystroke is needed.
 Pin `[hints] project_picker_disabled = true` in `~/.grok/config.toml` if a non-project launch ever needs to skip it.
@@ -485,29 +492,48 @@ Each Kimi crew worktree receives a gitignored `.fm-kimi-turnend` token pointer, 
 A guarded silent hook cannot be verified from absence of effect, so prove invocation with an unguarded probe before concluding that the hook did not fire.
 The guarded turn-end signal remains a wake notification; standalone Kimi has no busy-state source until one is live-verified.
 
-## cline (VERIFIED 2026-07-27, Cline CLI 3.0.46)
+## cline (VERIFIED 2026-07-27 on 3.0.46; act mode, control mechanics, and busy state added 2026-08-16 on 3.0.55)
 
 Cline runs as an interactive TUI crewmate. Unlike Kimi, a positional prompt seeds AND auto-runs the first turn, so the brief rides the launch command like claude/codex/grok.
+
+**Start mode is the operator's, not the documented default.**
+`cline --help` says a positional prompt defaults "to start in act mode with auto-approve enabled", and that is not what the TUI does: the start mode follows the `planActMode` recorded in cline's global settings file, so a crewmate silently inherits whatever mode the operator last worked in.
+A crewmate that starts in Plan mode reads and reasons without ever editing anything - measured at 47,000 tokens of analysis with no line written.
+There is no `--act` flag to counter it; `-p/--plan` only selects Plan.
+`fm-spawn` therefore launches every cline worker with `CLINE_GLOBAL_SETTINGS_PATH` pointed at `state/<id>.cline-settings.json`, a firstmate-owned copy that forces `planActMode: act` and carries the operator's other keys (telemetry, auto-update) across.
+That variable redirects ONLY that one file, so credentials and provider configuration still resolve from the operator's own store and the operator's `~/.cline` is never written.
+The rendered footer shows the live mode as `● Plan ○ Act (Tab)` / `○ Plan ● Act (Tab)`, and the plan-mode composer placeholder is `Plan something...`; neither is the authority.
+The structural proof is cline's own session record, which stores `metadata.mode`.
+The legacy `mode` key in `<data-dir>/globalState.json` is NOT the authority on 3.0.55 - a machine carrying `mode: plan` there and `planActMode: act` in the settings file starts in act - so read the settings file, not globalState.
 
 | Fact | Value |
 |---|---|
 | Binary | `cline` from `PATH` (`~/.local/bin/cline`, a Node script). Detection matches `cline` in the process argv like opencode (ancestry command name may be `node`). |
 | Launch | `cline -i --tui --auto-approve true [--model <id>] [--thinking <effort>] "<brief>"`. `-i --tui` opens the persistent interactive TUI; the positional brief seeds and auto-runs the first turn (verified via tmux capture). |
 | Models | Provider/model shown in the status bar (e.g. `ClinePass: Kimi K3`); `--model`/`-m` selects within the active provider. Default provider is `cline` (ClinePass). |
-| Busy-pane signature | A braille spinner plus `Thinking... (esc to cancel)`; `esc to cancel` is the stable token and clears the instant the turn ends. Deliberately distinct from claude/codex `esc to interrupt`. |
-| Exit command | Single `Ctrl+C` exits the TUI cleanly (rc 0). There is no `/exit` slash exit. |
-| Interrupt | `Esc` cancels the current turn (the footer shows `esc to cancel`). Ctrl+C would EXIT, not interrupt — do not use it to interrupt. |
+| Busy state | Its own per-session record under `<data-dir>/sessions/<session-id>/`, folded on demand by `bin/fm-busy-lib.sh` (source `cline-session`), bound to the pane by the `state/<id>.cline-session` sidecar. Structural, not rendered. TWO signals: the record's `status` (`running` -> busy, `completed`/`failed` -> idle) and, for the ambiguous `idle`, the turn log's last message role. Nothing is armed and no record is ever seeded, the same reason muse and cursor are pull sources. Requires `jq`; without it the fold reports unknown rather than reaching for a formatting-dependent text read. |
+| Queued-but-unprocessed | `status: idle` with a trailing `role: user` message and no assistant reply. This is the wedge that renders as a perfectly healthy pane - no spinner, ordinary idle composer, frozen token counter - and it is what a ClinePass refusal also leaves behind. The classifier reports it as `idle cline-session-stalled` so supervision can tell it from a completed turn. |
+| Session record caveat | Its `pid` field is the SHARED cline hub daemon's pid (`--cline-hub-daemon`), not the pane's: one pid covers every session on the machine. Binding is on `workspace_root` plus the sidecar's pre-existing-session exclusion, never on pid. A clean exit also leaves `status: idle` with a null `exit_code`, so the record never proves the agent stopped; that stays the backend's `fm_backend_agent_state` job. |
+| Busy-pane signature | A braille spinner plus `Thinking... (esc to cancel)`; `esc to cancel` is the stable token and clears the instant the turn ends. Deliberately distinct from claude/codex `esc to interrupt`. This is the DELIVERY signal in `bin/fm-composer-lib.sh` and the herdr native arm's secondary signal, not the worker state source. |
+| Exit command | NONE. cline is the one verified adapter with no composer exit command at all: a single `Ctrl+C` exits the TUI cleanly, returning the pane to its shell and printing `Continue  cline --id <session-id>` (re-verified on 3.0.55). `bin/fm-control-lib.sh` tables that as an exit KEY beside the existing exit-command table. |
+| Interrupt | `Esc` cancels the current turn (the footer shows `esc to cancel`). Ctrl+C would EXIT, not interrupt - do not use it to interrupt. cline is the exact inverse of grok, which interrupts on Ctrl+C, which is why the interrupt and exit axes are tabled separately and never inferred from each other. `Esc` on an IDLE composer does not clear typed text; `C-u` does. |
+| Quota exhaustion | A ClinePass 5-hour limit refuses the turn with a boxed `ClinePass limit reached` / `The limit resets in <N>m` panel and then returns the pane to its ordinary idle composer, so a quota-blocked worker is rendered IDENTICALLY to one that finished a turn. `quota-axi` has no cline provider at all, so there is no capacity surface to consult either; cline is correctly absent from `bin/fm-dispatch-select.mjs`'s routable providers for the same reason. The only structural tell is the stalled fold above. |
 | Autonomy | `--auto-approve true` (on by default; passed explicitly for version robustness); the status bar reads `Auto-approve all enabled`. |
 | Trust dialog | None on a clean launch with a pre-authed provider (ClinePass). |
 | Submission | Typing then Enter submits; a seeded positional prompt auto-submits on launch. |
 | Environment marker | None verified; detection relies on process ancestry (`cline` in argv). |
-| Composer | Bordered box with a bare `❯` (U+276F) agent glyph — already a verified empty-composer glyph. The idle placeholder (`What can I do for you?` on first ready, `Ask anything...` thereafter) is muted grey (truecolor `38;2;131;137;140`, luma ~136) and also drawn bold, so it survives the dim/faint ghost stripper and would misread as pending; the shared idle-placeholder default (`FM_COMPOSER_IDLE_RE_DEFAULT` in `fm-composer-lib.sh`, consumed by the tmux classifier and the herdr/cmux/orca backends) lists both placeholders so an empty cline composer reads empty on every backend. The composer row has no side borders, so cmux/orca reach it through the bare agent-glyph promotion (`❯`). |
+| Composer | Bordered box with a bare `❯` (U+276F) agent glyph — already a verified empty-composer glyph. In PLAN mode the placeholder is `Plan something...` instead, which is also listed in the shared idle default so an operator's own plan-mode pane still reads empty rather than as pending input away-mode supervision would refuse to deliver into. The idle placeholder (`What can I do for you?` on first ready, `Ask anything...` thereafter) is muted grey (truecolor `38;2;131;137;140`, luma ~136) and also drawn bold, so it survives the dim/faint ghost stripper and would misread as pending; the shared idle-placeholder default (`FM_COMPOSER_IDLE_RE_DEFAULT` in `fm-composer-lib.sh`, consumed by the tmux classifier and the herdr/cmux/orca backends) lists both placeholders so an empty cline composer reads empty on every backend. The composer row has no side borders, so cmux/orca reach it through the bare agent-glyph promotion (`❯`). |
 | Effort | Maps to `--thinking none|low|medium|high|xhigh` (no `max`; omit rather than pass an unsupported value). A live `--thinking high` launch showed `(high)` in the status bar. |
 | TTY | Even `cline config` refuses without a TTY; supervise only through a pty/pane, never a bare pipe. |
 
-Turn-end is observed from the pane, not a hook: the `esc to cancel` spinner clears and the composer returns to its idle placeholder. cline exposes `--hooks-dir` and a `hook` subcommand, which is the path for a future primary-session turn-end guard (only needed when firstmate ITSELF runs on cline); a cline CREWMATE needs no launch-side turn-end placeholder. cline is not wired for secondmate launches, so no `backends/tmux.sh` agent-process liveness entry is required yet.
+Turn-end is observed from cline's own session record rather than a hook or the pane; the `esc to cancel` spinner clearing is the delivery signal, not the state source. cline exposes `--hooks-dir` and a `hook` subcommand, which is the path for a future primary-session turn-end guard (only needed when firstmate ITSELF runs on cline); a cline CREWMATE needs no launch-side turn-end placeholder. cline is not wired for secondmate launches, so no `backends/tmux.sh` agent-process liveness entry is required yet, and `bin/fm-control-lib.sh` refuses a cline secondmate for the same reason it refuses a muse one.
 
 Full empirical capture evidence: [`docs/verification/cline-adapter.md`](../../../docs/verification/cline-adapter.md).
+The drift guard that refreshes it is:
+
+```bash
+FM_CLINE_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-cline-signals-live-e2e.test.sh
+```
 
 ## cursor-agent (VERIFIED 2026-07-27, Cursor CLI 2026.07.16 / 2026.07.23)
 
