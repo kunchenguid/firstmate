@@ -1737,16 +1737,40 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 local_default_branch_without_origin() {
-  local dir=$1 configured branch
-  configured=$(git -C "$dir" config --local --get init.defaultBranch 2>/dev/null || true)
-  if [ -n "$configured" ] && git -C "$dir" show-ref --verify --quiet "refs/heads/$configured"; then
-    printf '%s\n' "$configured"
-    return 0
+  local dir=$1 configured branch probe_status
+  if configured=$(git -C "$dir" config --local --get init.defaultBranch 2>/dev/null); then
+    :
+  else
+    probe_status=$?
+    if [ "$probe_status" -eq 1 ]; then
+      configured=
+    else
+      echo "error: could not inspect repository-local init.defaultBranch in '$dir'; repair the repository configuration and retry" >&2
+      return 1
+    fi
+  fi
+  if [ -n "$configured" ]; then
+    if git -C "$dir" show-ref --verify --quiet "refs/heads/$configured"; then
+      printf '%s\n' "$configured"
+      return 0
+    else
+      probe_status=$?
+      if [ "$probe_status" -ne 1 ]; then
+        echo "error: could not inspect local reference 'refs/heads/$configured' in '$dir'; repair the repository references and retry" >&2
+        return 1
+      fi
+    fi
   fi
   for branch in main master; do
     if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
       printf '%s\n' "$branch"
       return 0
+    else
+      probe_status=$?
+      if [ "$probe_status" -ne 1 ]; then
+        echo "error: could not inspect local reference 'refs/heads/$branch' in '$dir'; repair the repository references and retry" >&2
+        return 1
+      fi
     fi
   done
   if [ -n "$configured" ]; then
@@ -1759,9 +1783,23 @@ local_default_branch_without_origin() {
 
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status local_ref local_sha remote_sha ancestry_status
-  local has_origin=0
-  if git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
-    has_origin=1
+  local remotes remote_name probe_status has_origin=0
+  if remotes=$(git -C "$worktree" remote 2>/dev/null); then
+    while IFS= read -r remote_name; do
+      if [ "$remote_name" = origin ]; then
+        has_origin=1
+        break
+      fi
+    done <<EOF
+$remotes
+EOF
+  else
+    echo "error: could not inspect remotes for pooled worktree '$worktree'; repair the repository configuration and retry" >&2
+    return 1
+  fi
+  if [ "$has_origin" -eq 1 ] && ! git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
+    echo "error: configured origin for pooled worktree '$worktree' has no readable URL; repair remote.origin.url and retry" >&2
+    return 1
   fi
   if [ "$has_origin" -eq 1 ]; then
     if ! git -C "$worktree" fetch --quiet origin; then
@@ -1797,10 +1835,14 @@ freshen_spawn_worktree_base() {  # <worktree>
       echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
       return 1
     }
+    expected=$remote_sha
     if [ "$MODE" = local-only ]; then
       local_ref="refs/heads/$default"
-      local_sha=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$local_ref^{commit}" 2>/dev/null || true)
-      if [ -n "$local_sha" ]; then
+      if git -C "$PROJ_ABS" show-ref --verify --quiet "$local_ref"; then
+        local_sha=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$local_ref^{commit}" 2>/dev/null) || {
+          echo "error: existing local default '$local_ref' in '$PROJ_ABS' does not resolve to a readable commit; repair the repository object graph and retry" >&2
+          return 1
+        }
         if git -C "$PROJ_ABS" merge-base --is-ancestor "$local_sha" "$remote_sha"; then
           ancestry_status=0
         else
@@ -1808,19 +1850,29 @@ freshen_spawn_worktree_base() {  # <worktree>
         fi
         case "$ancestry_status" in
           0) ;;
-          1) target="$local_ref" ;;
+          1)
+            target="$local_ref"
+            expected=$local_sha
+            ;;
           *)
             echo "error: could not compare local default '$local_ref' ('$local_sha') with remote default 'origin/$default' ('$remote_sha') for project '$PROJ_ABS'; inspect the repository object graph and retry" >&2
             return 1
             ;;
         esac
+      else
+        probe_status=$?
+        if [ "$probe_status" -ne 1 ]; then
+          echo "error: could not inspect local default '$local_ref' in '$PROJ_ABS'; repair the repository references and retry" >&2
+          return 1
+        fi
       fi
     fi
+  else
+    expected=$(git -C "$PROJ_ABS" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+      echo "error: local default '$target' in '$PROJ_ABS' does not resolve to a readable commit; repair the repository object graph and retry" >&2
+      return 1
+    }
   fi
-  expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
-    echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
   status=$(git -C "$worktree" status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -1829,8 +1881,8 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
     return 1
   fi
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
-    echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
+  if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
+    echo "error: could not reset pooled worktree '$worktree' to validated '$target' commit '$expected'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)

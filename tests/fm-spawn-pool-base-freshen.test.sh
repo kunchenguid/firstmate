@@ -31,16 +31,65 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  cat > "$fakebin/git" <<'SH'
+cat > "$fakebin/git" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ "${FM_FAKE_MERGE_BASE_FAILURE:-0}" = 1 ] \
-  && [ "${1:-}" = -C ] \
-  && [ "${2:-}" = "${FM_FAKE_MERGE_BASE_DIR:-}" ] \
-  && [ "${3:-}" = merge-base ] \
-  && [ "${4:-}" = --is-ancestor ]; then
-  exit 2
-fi
+case "${FM_FAKE_GIT_FAILURE:-}" in
+  merge-base)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_PROJECT_DIR:-}" ] \
+      && [ "${3:-}" = merge-base ] \
+      && [ "${4:-}" = --is-ancestor ]; then
+      exit 2
+    fi
+    ;;
+  origin-inspection)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_POOL_DIR:-}" ] \
+      && [ "${3:-}" = remote ] \
+      && [ "$#" -eq 3 ]; then
+      exit 2
+    fi
+    ;;
+  local-config)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_PROJECT_DIR:-}" ] \
+      && [ "${3:-}" = config ] \
+      && [ "${4:-}" = --local ] \
+      && [ "${5:-}" = --get ] \
+      && [ "${6:-}" = init.defaultBranch ]; then
+      exit 2
+    fi
+    ;;
+  local-ref-probe)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_PROJECT_DIR:-}" ] \
+      && [ "${3:-}" = show-ref ] \
+      && [ "${4:-}" = --verify ] \
+      && [ "${5:-}" = --quiet ]; then
+      exit 2
+    fi
+    ;;
+  local-ref-resolution)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_PROJECT_DIR:-}" ] \
+      && [ "${3:-}" = rev-parse ] \
+      && [ "${4:-}" = --verify ] \
+      && [ "${5:-}" = --quiet ] \
+      && [ "${6:-}" = "refs/heads/${FM_FAKE_DEFAULT_BRANCH:-main}^{commit}" ]; then
+      exit 2
+    fi
+    ;;
+  move-local-before-reset)
+    if [ "${1:-}" = -C ] \
+      && [ "${2:-}" = "${FM_FAKE_POOL_DIR:-}" ] \
+      && [ "${3:-}" = reset ] \
+      && [ "${4:-}" = --hard ]; then
+      "${FM_REAL_GIT:?}" -C "${FM_FAKE_PROJECT_DIR:?}" update-ref \
+        "refs/heads/${FM_FAKE_DEFAULT_BRANCH:?}" "${FM_FAKE_MOVE_TARGET:?}" || exit $?
+    fi
+    ;;
+esac
 exec "${FM_REAL_GIT:?}" "$@"
 SH
   chmod +x "$fakebin/git"
@@ -103,7 +152,8 @@ run_spawn() {
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
-    FM_REAL_GIT="$REAL_GIT" FM_FAKE_MERGE_BASE_DIR="$PROJECT_DIR" \
+    FM_REAL_GIT="$REAL_GIT" FM_FAKE_PROJECT_DIR="$PROJECT_DIR" \
+    FM_FAKE_POOL_DIR="$POOL_DIR" FM_FAKE_DEFAULT_BRANCH="$DEFAULT_BRANCH" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
 }
@@ -230,7 +280,7 @@ test_local_only_refuses_failed_ancestry_inspection() {
   read_case_record "$rec"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
-  out=$(FM_FAKE_MERGE_BASE_FAILURE=1 run_spawn "$id" --mode local-only --yolo off)
+  out=$(FM_FAKE_GIT_FAILURE=merge-base run_spawn "$id" --mode local-only --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "local-only spawn continued after ancestry inspection failed"
   assert_contains "$out" "could not compare local default 'refs/heads/main'" \
@@ -240,6 +290,65 @@ test_local_only_refuses_failed_ancestry_inspection() {
   after=$(git -C "$POOL_DIR" rev-parse HEAD)
   [ "$after" = "$before" ] || fail "spawn moved the pool after ancestry inspection failed"
   pass "a failed local-only ancestry inspection refuses the pooled worktree"
+}
+
+test_local_only_refuses_failed_local_ref_resolution() {
+  local rec id out status before after
+  id='pool-local-only-local-ref-resolution-r1'
+  rec=$(make_case local-only-local-ref-resolution "$id" main ahead)
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(FM_FAKE_GIT_FAILURE=local-ref-resolution run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only spawn continued after local ref resolution failed"
+  assert_contains "$out" "does not resolve to a readable commit" \
+    "spawn did not identify the unreadable local default commit"
+  after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$after" = "$before" ] || fail "spawn moved the pool after local ref resolution failed"
+  pass "an unreadable existing local default refuses the pooled worktree"
+}
+
+test_local_only_refuses_failed_repository_inspection() {
+  local failure rec id out status before after
+  for failure in origin-inspection local-config local-ref-probe; do
+    id="pool-local-only-${failure}-r1"
+    rec=$(make_case "local-only-${failure}" "$id" trunk behind)
+    read_case_record "$rec"
+    if [ "$failure" != origin-inspection ]; then
+      git -C "$PROJECT_DIR" remote remove origin
+      git -C "$PROJECT_DIR" config --local init.defaultBranch trunk
+    fi
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+    out=$(FM_FAKE_GIT_FAILURE="$failure" run_spawn "$id" --mode local-only --yolo off)
+    status=$?
+    [ "$status" -ne 0 ] || fail "local-only spawn continued after $failure failed"
+    assert_contains "$out" "could not inspect" \
+      "spawn did not identify the failed $failure probe"
+    after=$(git -C "$POOL_DIR" rev-parse HEAD)
+    [ "$after" = "$before" ] || fail "spawn moved the pool after $failure failed"
+  done
+  pass "failed remote, config, and ref probes refuse the pooled worktree"
+}
+
+test_local_only_resets_to_frozen_selected_commit() {
+  local rec id out status selected remote_head
+  id='pool-local-only-frozen-base-r1'
+  rec=$(make_case local-only-frozen-base "$id" main ahead)
+  read_case_record "$rec"
+  selected=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+  remote_head=$(git -C "$POOL_DIR" rev-parse origin/main)
+
+  out=$(FM_FAKE_GIT_FAILURE=move-local-before-reset FM_FAKE_MOVE_TARGET="$remote_head" \
+    run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "local-only spawn should reset to the validated commit"
+  [ "$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)" = "$remote_head" ] \
+    || fail "fixture did not move the local ref before reset"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$selected" ] \
+    || fail "spawn followed a local ref that moved after ancestry validation"
+  pass "a local-only spawn resets to the frozen validated commit"
 }
 
 test_remote_backed_mode_uses_origin_when_local_is_ahead() {
@@ -435,6 +544,9 @@ test_local_only_prefers_ahead_local_base
 test_local_only_uses_remote_when_local_is_behind
 test_local_only_prefers_diverged_local_base
 test_local_only_refuses_failed_ancestry_inspection
+test_local_only_refuses_failed_local_ref_resolution
+test_local_only_refuses_failed_repository_inspection
+test_local_only_resets_to_frozen_selected_commit
 test_remote_backed_mode_uses_origin_when_local_is_ahead
 test_local_only_without_origin_uses_local_base
 test_local_only_without_resolvable_default_refuses_detached_checkout
