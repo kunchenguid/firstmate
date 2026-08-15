@@ -877,6 +877,64 @@ PY
   pass "a first-only failure is rechecked and recorded as flaky, not introduced"
 }
 
+test_compare_commits_refuses_an_inconclusive_retry() {
+  local tmp repo marker base head rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-inconclusive.XXXXXX")
+  repo="$tmp/repo"
+  marker="$tmp/head-failed-once"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/aa-inconclusive.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - stable base"
+SH
+  chmod +x "$repo/tests/aa-inconclusive.test.sh"
+  git -C "$repo" init -q
+  git -C "$repo" add bin tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm base
+  base=$(git -C "$repo" rev-parse HEAD)
+  cat >"$repo/tests/aa-inconclusive.test.sh" <<SH
+#!/usr/bin/env bash
+if [ ! -e "$marker" ]; then
+  : >"$marker"
+  echo "not ok - first head failure"
+  exit 1
+fi
+trap '' TERM
+sleep 30
+SH
+  chmod +x "$repo/tests/aa-inconclusive.test.sh"
+  git -C "$repo" add tests
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm head
+  head=$(git -C "$repo" rev-parse HEAD)
+
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --compare-commits "$base" "$head" \
+    --script-timeout 1 --output-dir "$tmp/result" >"$tmp/out" 2>"$tmp/err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || { rm -rf "$tmp"; fail "inconclusive retry must exit 1 (got $rc)"; }
+  python3 - "$tmp/result/partition.json" <<'PY' || {
+import json, sys
+partition = json.load(open(sys.argv[1], encoding="utf-8"))
+assert partition["head_introduced_failures"] == [], partition
+assert partition["flaky_transitions"] == [], partition
+assert partition["regressed"] == [{
+    "base_observations": ["passed", "passed"],
+    "base_outcome": "passed",
+    "head_observations": ["failed", "timed_out"],
+    "head_outcome": "failed",
+    "path": "tests/aa-inconclusive.test.sh",
+}], partition
+PY
+    rm -rf "$tmp"
+    fail "inconclusive retry was not retained as a refusing regression"
+  }
+  rm -rf "$tmp"
+  pass "an inconclusive retry remains a regression"
+}
+
 test_compare_commits_reports_timeout_to_failure_as_regressed() {
   local tmp repo base head rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-compare-regressed.XXXXXX")
@@ -1301,6 +1359,7 @@ test_aggregate_json
 test_compare_commits_partitions_and_bounds_every_script
 test_compare_commits_accounts_for_script_lost_after_discovery
 test_compare_commits_rechecks_a_first_only_failure
+test_compare_commits_refuses_an_inconclusive_retry
 test_compare_commits_reports_timeout_to_failure_as_regressed
 test_compare_commits_never_calls_deleted_or_skipped_tests_fixed
 test_compare_commits_refuses_an_independent_enumeration_mismatch

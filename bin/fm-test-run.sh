@@ -1640,13 +1640,14 @@ def make_partition(base, head):
         elif base_outcome != "absent" and head_outcome in {"failed", "timed_out", "errored"}:
             candidate_bucket = regressed
         if candidate_bucket is not None:
-            if confirmation is not None and "running" in (
-                confirmation["base"] + confirmation["head"]
-            ):
-                candidate_bucket.append(entry)
-            elif confirmation is not None and (
-                len(set(confirmation["base"])) != 1
-                or len(set(confirmation["head"])) != 1
+            retry_outcomes = [] if confirmation is None else (
+                confirmation["base"][1:] + confirmation["head"][1:]
+            )
+            if (
+                confirmation is not None
+                and confirmation["head"][-1] == "passed"
+                and not any(outcome in {"errored", "running", "skipped", "timed_out"}
+                            for outcome in retry_outcomes)
             ):
                 flaky.append(entry)
             else:
