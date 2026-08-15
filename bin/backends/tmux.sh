@@ -297,32 +297,39 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
-# fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
-# recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
-# shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
-# the empirical basis. Tmux silently falls back to the active window when a
-# named target is absent, so the exact recorded window must appear in a
-# successful session inventory before its foreground command can be trusted.
-# An omitted window or a definitive missing-session/server response is
-# `missing`; any other inventory or pane read failure is `unreadable`, so a
-# transient tmux problem never licenses a duplicate. The session is targeted as
-# "=<name>" for the same reason: a bare -t <session> resolves by prefix and then
-# fnmatch, so an unrelated live session sharing the recorded name's prefix would
-# otherwise answer the inventory in its place.
+# fm_backend_tmux_inspect_endpoint: the one owner of how a recorded
+# "<session>:<window>" endpoint is looked up - the target-shape parse, the
+# exact-session inventory read, and the reading of tmux's own refusals. The
+# liveness verdict and the recovery grade below are both derived from this
+# single observation, so they cannot drift into disagreeing about what was
+# asked of tmux or what tmux answered.
 #
-# The verdict combines two independent name sources rather than trusting either
-# alone. Either source naming a verified harness is enough for `alive`, because
-# a false `dead` is the one outcome that can launch a duplicate agent onto a
-# live worktree, while the foreground process group - when it is readable - is
-# authoritative for the negative verdicts, since it is the only source that can
-# distinguish a truly idle pane from a rewritten process title.
-fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
-  local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
+# The session is targeted as "=<name>": a bare -t <session> resolves by exact
+# match, then prefix, then fnmatch, so an unrelated live session sharing the
+# recorded name's prefix would otherwise answer in its place.
+#
+# Sets FM_BACKEND_TMUX_INSPECT_RESULT to one of:
+#   malformed       the target is not a single <session>:<window> pair
+#   listed          a reachable server's session inventory names the window
+#   window-absent   a reachable server's session inventory omits the window
+#   session-absent  a reachable server reports the recorded session is gone
+#   unreachable     no server could be reached on the socket at all
+#   unreadable      tmux failed for some other reason
+# plus FM_BACKEND_TMUX_INSPECT_SOCKET (the socket tmux itself named, whenever it
+# named one) and FM_BACKEND_TMUX_INSPECT_RESPONSE (tmux's own first line, or a
+# description of what the inventory showed).
+FM_BACKEND_TMUX_INSPECT_RESULT=
+FM_BACKEND_TMUX_INSPECT_SOCKET=
+FM_BACKEND_TMUX_INSPECT_RESPONSE=
+fm_backend_tmux_inspect_endpoint() {  # <target>
+  local target=$1 session window windows inventory_status rest
+  FM_BACKEND_TMUX_INSPECT_RESULT=malformed
+  FM_BACKEND_TMUX_INSPECT_SOCKET=
+  FM_BACKEND_TMUX_INSPECT_RESPONSE=
   case "$target" in
-    *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
+    *:*:*|'':*|*:'') FM_BACKEND_TMUX_INSPECT_RESPONSE="endpoint '$target' is malformed"; return 0 ;;
     *:*) ;;
-    *) printf 'unreadable'; return 0 ;;
+    *) FM_BACKEND_TMUX_INSPECT_RESPONSE="endpoint '$target' is malformed"; return 0 ;;
   esac
   session=${target%%:*}
   window=${target#*:}
@@ -331,21 +338,74 @@ fm_backend_tmux_agent_state() {  # <target>
   else
     inventory_status=$?
   fi
-  if [ "$inventory_status" -ne 0 ]; then
-    case "$windows" in
-      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
-        printf 'missing'
-        ;;
-      *)
-        printf 'unreadable'
-        ;;
-    esac
+  if [ "$inventory_status" -eq 0 ]; then
+    FM_BACKEND_TMUX_INSPECT_SOCKET=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || true
+    if printf '%s\n' "$windows" | grep -Fqx "$window"; then
+      FM_BACKEND_TMUX_INSPECT_RESULT=listed
+      FM_BACKEND_TMUX_INSPECT_RESPONSE="session inventory read; it lists $window, so the endpoint is present"
+    else
+      FM_BACKEND_TMUX_INSPECT_RESULT=window-absent
+      FM_BACKEND_TMUX_INSPECT_RESPONSE="session inventory read; it does not list $window"
+    fi
     return 0
   fi
-  if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
-    printf 'missing'
-    return 0
-  fi
+  FM_BACKEND_TMUX_INSPECT_RESPONSE=$(printf '%s\n' "$windows" | head -n 1)
+  [ -n "$FM_BACKEND_TMUX_INSPECT_RESPONSE" ] \
+    || FM_BACKEND_TMUX_INSPECT_RESPONSE="tmux list-windows exited $inventory_status with no message"
+  case "$windows" in
+    *"can't find session:"*)
+      FM_BACKEND_TMUX_INSPECT_RESULT=session-absent
+      FM_BACKEND_TMUX_INSPECT_SOCKET=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || true
+      ;;
+    *"no server running on "*)
+      FM_BACKEND_TMUX_INSPECT_RESULT=unreachable
+      rest=${windows#*"no server running on "}
+      FM_BACKEND_TMUX_INSPECT_SOCKET=${rest%%$'\n'*}
+      ;;
+    *"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+      FM_BACKEND_TMUX_INSPECT_RESULT=unreachable
+      rest=${windows#*"error connecting to "}
+      rest=${rest%%$'\n'*}
+      FM_BACKEND_TMUX_INSPECT_SOCKET=${rest% (*}
+      ;;
+    *"error connecting to "*)
+      FM_BACKEND_TMUX_INSPECT_RESULT=unreadable
+      rest=${windows#*"error connecting to "}
+      rest=${rest%%$'\n'*}
+      FM_BACKEND_TMUX_INSPECT_SOCKET=${rest% (*}
+      ;;
+    *)
+      FM_BACKEND_TMUX_INSPECT_RESULT=unreadable
+      ;;
+  esac
+  return 0
+}
+
+# fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
+# recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
+# shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
+# the empirical basis. Tmux silently falls back to the active window when a
+# named target is absent, so the exact recorded window must appear in a
+# successful session inventory before its foreground command can be trusted.
+# An omitted window or a definitive missing-session/server response is
+# `missing`; any other inventory or pane read failure is `unreadable`, so a
+# transient tmux problem never licenses a duplicate.
+#
+# The verdict combines two independent name sources rather than trusting either
+# alone. Either source naming a verified harness is enough for `alive`, because
+# a false `dead` is the one outcome that can launch a duplicate agent onto a
+# live worktree, while the foreground process group - when it is readable - is
+# authoritative for the negative verdicts, since it is the only source that can
+# distinguish a truly idle pane from a rewritten process title.
+fm_backend_tmux_agent_state() {  # <target>
+  local target=$1 comm
+  local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
+  fm_backend_tmux_inspect_endpoint "$target"
+  case "$FM_BACKEND_TMUX_INSPECT_RESULT" in
+    listed) ;;
+    window-absent|session-absent|unreachable) printf 'missing'; return 0 ;;
+    *) printf 'unreadable'; return 0 ;;
+  esac
 
   foreground=$(fm_backend_tmux_foreground_comms "$target")
   while IFS= read -r name; do
@@ -404,62 +464,34 @@ EOF
 # See bin/fm-backend.sh's fm_backend_missing_grade for the shared grade
 # vocabulary. Two very different observations both read `missing` above:
 #
-#   strong     a REACHABLE server answered - either a successful inventory that
-#              omits the recorded window, or "can't find session", which only a
-#              live server can say. The window is gone from the server that
-#              would host it, so nothing can still be running there.
-#   ambiguous  the server or its socket could not be reached at all. That says
-#              this process cannot see a tmux server on that socket; it cannot
-#              distinguish a wiped runtime from a server this process is simply
-#              not looking at (a different TMUX_TMPDIR, socket name, or user).
+#   strong     a REACHABLE server answered about the recorded session - either a
+#              successful inventory that omits the recorded window, or "can't
+#              find session", which only a live server can say. The window is
+#              gone from the server that would host it, so nothing can still be
+#              running there.
+#   ambiguous  anything else. The server or its socket could not be reached at
+#              all, which cannot distinguish a wiped runtime from a server this
+#              process is simply not looking at (a different TMUX_TMPDIR, socket
+#              name, or user) - or the inventory came back and DOES list the
+#              window, which contradicts the missing verdict outright, since the
+#              two are separate reads and the endpoint can be restored between
+#              them.
 #
-# Sets FM_BACKEND_TMUX_MISSING_GRADE, plus the socket tmux itself named and the
-# response it gave, so a caller can put the concrete evidence in front of a
-# human instead of a bare verdict. The inventory is read from "=<session>" so
-# the evidence always describes the recorded session itself, never an unrelated
-# live session that tmux's prefix/fnmatch fallback would otherwise substitute.
+# Strong is therefore reachable only from an observation that positively
+# accounts for the exact recorded window, never from a read that merely
+# succeeded. Sets FM_BACKEND_TMUX_MISSING_GRADE, plus the socket tmux itself
+# named and the response it gave, so a caller can put the concrete evidence in
+# front of a human instead of a bare verdict.
 FM_BACKEND_TMUX_MISSING_GRADE=
 FM_BACKEND_TMUX_MISSING_SOCKET=
 FM_BACKEND_TMUX_MISSING_RESPONSE=
 fm_backend_tmux_missing_grade() {  # <target>
-  local target=$1 session windows inventory_status rest
-  FM_BACKEND_TMUX_MISSING_GRADE=ambiguous
-  FM_BACKEND_TMUX_MISSING_SOCKET=
-  FM_BACKEND_TMUX_MISSING_RESPONSE=
-  case "$target" in
-    *:*:*|'':*|*:'') FM_BACKEND_TMUX_MISSING_RESPONSE="endpoint '$target' is malformed"; return 0 ;;
-    *:*) ;;
-    *) FM_BACKEND_TMUX_MISSING_RESPONSE="endpoint '$target' is malformed"; return 0 ;;
-  esac
-  session=${target%%:*}
-  if windows=$(LC_ALL=C tmux list-windows -t "=$session" -F '#{window_name}' 2>&1); then
-    inventory_status=0
-  else
-    inventory_status=$?
-  fi
-  if [ "$inventory_status" -eq 0 ]; then
-    FM_BACKEND_TMUX_MISSING_GRADE=strong
-    FM_BACKEND_TMUX_MISSING_RESPONSE="session inventory read; it does not list ${target#*:}"
-    FM_BACKEND_TMUX_MISSING_SOCKET=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || true
-    return 0
-  fi
-  FM_BACKEND_TMUX_MISSING_RESPONSE=$(printf '%s\n' "$windows" | head -n 1)
-  [ -n "$FM_BACKEND_TMUX_MISSING_RESPONSE" ] \
-    || FM_BACKEND_TMUX_MISSING_RESPONSE="tmux list-windows exited $inventory_status with no message"
-  case "$windows" in
-    *"can't find session:"*)
-      FM_BACKEND_TMUX_MISSING_GRADE=strong
-      FM_BACKEND_TMUX_MISSING_SOCKET=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || true
-      ;;
-    *"no server running on "*)
-      rest=${windows#*"no server running on "}
-      FM_BACKEND_TMUX_MISSING_SOCKET=${rest%%$'\n'*}
-      ;;
-    *"error connecting to "*)
-      rest=${windows#*"error connecting to "}
-      rest=${rest%%$'\n'*}
-      FM_BACKEND_TMUX_MISSING_SOCKET=${rest% (*}
-      ;;
+  fm_backend_tmux_inspect_endpoint "$1"
+  FM_BACKEND_TMUX_MISSING_SOCKET=$FM_BACKEND_TMUX_INSPECT_SOCKET
+  FM_BACKEND_TMUX_MISSING_RESPONSE=$FM_BACKEND_TMUX_INSPECT_RESPONSE
+  case "$FM_BACKEND_TMUX_INSPECT_RESULT" in
+    window-absent|session-absent) FM_BACKEND_TMUX_MISSING_GRADE=strong ;;
+    *) FM_BACKEND_TMUX_MISSING_GRADE=ambiguous ;;
   esac
   return 0
 }

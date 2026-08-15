@@ -223,6 +223,26 @@ if fm_backend_tmux_recreate_task "$TARGET" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: a missing task endpoint is recreated once at its recorded address and worktree"
 
+# --- a read that merely SUCCEEDED never grades strong ------------------------
+#
+# The liveness verdict and the grade are two separate tmux reads, so the window
+# can come back between them (an operator restoring it by hand). The grade must
+# account for the exact window in the inventory it read, not treat a successful
+# read as proof of absence - otherwise it hands a human an authoritative quote
+# about a window that is sitting right there.
+
+fm_backend_tmux_missing_grade "$TARGET"
+[ "$FM_BACKEND_TMUX_MISSING_GRADE" != strong ] \
+  || fail "an inventory that LISTS the recorded window must never grade strong"
+case "$FM_BACKEND_TMUX_MISSING_RESPONSE" in
+  *"does not list"*)
+    fail "the grade quotes tmux as not listing a window the same inventory does list: $FM_BACKEND_TMUX_MISSING_RESPONSE"
+    ;;
+esac
+[ -n "$FM_BACKEND_TMUX_MISSING_RESPONSE" ] \
+  || fail "a non-strong grade should still carry the response it read"
+pass "real tmux: a successful inventory that lists the recorded window is not strong evidence of its absence"
+
 # --- a recorded session name is never resolved to a look-alike ---------------
 #
 # tmux resolves a bare `-t <session>` by exact match, then prefix, then fnmatch.
@@ -246,6 +266,12 @@ case "$FM_BACKEND_TMUX_MISSING_RESPONSE" in
     fail "the missing evidence claims a session inventory that only the look-alike '$SESSION' could have answered: $FM_BACKEND_TMUX_MISSING_RESPONSE"
     ;;
 esac
+# A live server that reports the recorded session gone is the ordinary
+# killed-session recovery, and the contract recreates it without asking a human.
+[ "$FM_BACKEND_TMUX_MISSING_GRADE" = strong ] \
+  || fail "a live server reporting the recorded session absent should grade strong, got '$FM_BACKEND_TMUX_MISSING_GRADE'"
+[ -n "$FM_BACKEND_TMUX_MISSING_SOCKET" ] \
+  || fail "a strong grade from a live server should name the socket it consulted"
 
 recreated_id=$(fm_backend_tmux_recreate_task "$PREFIX_TARGET" "$HOME") \
   || fail "fm_backend_tmux_recreate_task failed for a session that no longer exists"
