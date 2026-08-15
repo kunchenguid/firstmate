@@ -1349,6 +1349,30 @@ EOF
   pass "unpublished pipeline head does not fall through to an older failed run"
 }
 
+# Every status word the attribution rule accepts as live has to report working
+# on the coarse path too. A queued run whose head is unpublished is attributed
+# there, so reporting it as unknown would suppress the fallback that would
+# otherwise have read the lane correctly.
+test_coarse_pending_run_reports_working() {
+  reset_fakes
+  local d out
+  d=$(new_case coarse-pending)
+  make_repo_on_branch "$d/wt" fm/feat-queued
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/queued.meta" "window=fm:fm-queued" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa1  2026-08-15 09:40
+  pending    fm/feat-queued ${UNPUBLISHED_SHA}  2026-08-15 09:39
+EOF
+)"
+  out=$(run_crew_state "$d" queued)
+  assert_contains "$out" "state: working" "a queued live run is working, not unknown"
+  assert_contains "$out" "source: run-step" "the queued run is attributed"
+  assert_not_contains "$out" "state: unknown" "a word the rule accepts as live must not read as unknown"
+  pass "coarse pending run reports working"
+}
+
 test_unpublished_pipeline_head_attributed_on_own_branch() {
   reset_fakes
   local d out
@@ -1490,6 +1514,7 @@ test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
 test_unpublished_pipeline_head_beats_older_failed_run
+test_coarse_pending_run_reports_working
 test_unpublished_pipeline_head_attributed_on_own_branch
 test_unreadable_terminal_run_head_not_attributed
 test_superseded_older_run_never_answers_for_the_branch

@@ -440,13 +440,25 @@ if [ "$HAVE_RUN" = 1 ]; then
     # needs-decision/blocked status-log append (a captain-relevant VERB) is
     # surfaced through signal_reason_is_actionable regardless of this
     # coarse-vs-full distinction, so a real gate is never silently missed.
-    case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
-      failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-      cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
-      *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
-    esac
+    # Live is decided by fm_nm_run_status_is_live, the same predicate that
+    # attributed this row above, so the two halves of the rule cannot drift
+    # apart into "attributed as live, then reported as unknown". Terminal words
+    # are spelled out, and a genuinely unrecognized word still degrades loudly
+    # rather than being read as a healthy run on no evidence.
+    if fm_nm_run_status_is_live "$COARSE_STATUS"; then
+      RUN_STATE=working
+      case "$COARSE_STATUS" in
+        running) RUN_DETAIL="validating (background run)" ;;
+        *)       RUN_DETAIL="validating (background run: $COARSE_STATUS)" ;;
+      esac
+    else
+      case "$COARSE_STATUS" in
+        completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
+        failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
+        cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+        *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
+      esac
+    fi
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status

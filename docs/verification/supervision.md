@@ -213,7 +213,7 @@ They rest on where the pipeline keeps a run's commits, verified on 2026-08-15 ag
 A run under way commits its gate fixes into a private per-repository gate clone under `~/.no-mistakes/repos/<id>.git` and publishes nothing to the crew's checkout, so the run head reported by `no-mistakes runs` and `axi status` is normally a commit the crew's worktree cannot read at all.
 
 ```sh
-git --git-dir=~/.no-mistakes/repos/754af6f91a5d.git log --oneline -3 259cfbbd
+git --git-dir="$HOME/.no-mistakes/repos/754af6f91a5d.git" log --oneline -3 259cfbbd
 ```
 
 ```
