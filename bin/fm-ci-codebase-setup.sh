@@ -20,6 +20,9 @@
 #     [[:space:]] patterns in bin/fm-backlog-handoff.sh never match and its
 #     malformed-continuation refusal silently passes. gawk takes over the
 #     alternative; Ubuntu's mawk 1.3.4 and macOS awk both handle it.
+#   - Ruby is absent, while tests/fm-test-run.test.sh parses the GitHub workflow
+#     as YAML to prove the Herdr family step keeps its tighter timeout without
+#     mistaking nested artifact keys for the step contract.
 #   - node is 20, but tests/fm-pi-watch-extension.test.sh imports the .ts
 #     extension directly, which needs native type stripping (default-on from
 #     22.18). Node 22 goes in its own prefix: unpacking over /usr/local would
@@ -48,11 +51,12 @@ case "${1:-}" in
     ;;
 esac
 
-echo "--- apt: tmux and gawk"
+echo "--- apt: tmux, gawk, and ruby"
 apt-get update
-apt-get install -y --no-install-recommends tmux gawk
+apt-get install -y --no-install-recommends tmux gawk ruby
 tmux -V
 awk --version | head -1
+ruby --version
 # The POSIX class the backlog-handoff refusal depends on must actually work.
 printf '\tx\n' | awk '/^[[:space:]]/ { found = 1 } END { exit found ? 0 : 1 }'
 
