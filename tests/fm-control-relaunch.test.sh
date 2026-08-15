@@ -573,6 +573,16 @@ case "${args[0]:-} ${args[1]:-}" in
     ;;
   'pane run'|'pane send-text'|'pane send-keys')
     printf '%s\n' "${args[*]}" >> "$dir/herdr-mutations"
+    if [ "${args[0]:-} ${args[1]:-} ${args[2]:-} ${args[3]:-}" = 'pane send-keys w1:p3 Enter' ]; then
+      for lock in /tmp/firstmate-herdr-presentation/order-*.lock; do
+        [ -d "$lock" ] || continue
+        lock_pid=$(cat "$lock/pid" 2>/dev/null || true)
+        if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+          : > "$dir/herdr-launch-lock-observed"
+          break
+        fi
+      done
+    fi
     exit 0
     ;;
   'tab close'|'pane close')
@@ -1948,8 +1958,8 @@ test_control_relaunch_preflights_missing_herdr_pane_before_recording_note() {
   pass "fm-control relaunch: missing Herdr refusal preserves brief and transaction state"
 }
 
-test_spawn_relaunch_reclaims_a_postcreate_herdr_conflict() {
-  local dir out rc before mutations
+test_spawn_relaunch_preserves_a_postcreate_herdr_conflict_claim() {
+  local dir out rc before claim_before mutations
   dir=$(new_case herdr-postcreate-conflict hr1)
   add_herdr_missing_pane_task "$dir" hr1
   make_herdr_missing_pane_stub "$dir" postcreate-conflicting-pane
@@ -1964,13 +1974,21 @@ test_spawn_relaunch_reclaims_a_postcreate_herdr_conflict() {
   mutations=$(cat "$dir/fake/herdr-mutations")
   assert_contains "$mutations" 'tab create' \
     "the post-create conflict fixture did not cross the replacement-create boundary"
-  assert_contains "$mutations" 'pane close w1:p3' \
-    "the post-create conflict did not reclaim its unlaunched replacement pane"
+  assert_not_contains "$mutations" 'pane close w1:p3' \
+    "the post-create conflict must retain its exact claimed replacement pane"
   assert_not_contains "$mutations" 'tab close w1:t2' \
     "the post-create conflict must not close the recorded vanished tab"
+  [ -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+    || fail "the post-create conflict must retain its durable recovery claim"
+  claim_before="$dir/claim-before"
+  cp "$dir/home/state/.hr1.herdr-relaunch-claim" "$claim_before"
+  assert_contains "$(cat "$claim_before")" 'tab_id=w1:t3' \
+    "the post-create conflict claim must name its verified replacement tab"
+  assert_contains "$(cat "$claim_before")" 'pane_id=w1:p3' \
+    "the post-create conflict claim must name its verified replacement pane"
   [ -z "$(cat "$dir/fake/literal")" ] \
     || fail "a post-create conflict must not deliver a second worker launch"
-  pass "fm-spawn --relaunch: a post-create Herdr conflict reclaims the unlaunched replacement"
+  pass "fm-spawn --relaunch: a post-create Herdr conflict retains its exact claim"
 }
 
 test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable() {
@@ -1998,18 +2016,22 @@ test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable() {
   creates_before=$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')
   out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
   expect_code 1 "$rc" "a recovered unbound claim should require an explicit retry"
-  assert_contains "$out" "reclaimed an interrupted replacement" \
-    "the unbound create response retry should recover its exact claimed endpoint"
+  assert_contains "$out" "has an unresolved replacement claim" \
+    "the unbound create response retry should retain its exact claimed endpoint"
   cmp -s "$before" "$dir/home/state/hr1.meta" \
     || fail "the unbound create response recovery changed the task's serialized metadata"
   mutations=$(cat "$dir/fake/herdr-mutations")
   [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = "$creates_before" ] \
     || fail "the unbound create response retry created another endpoint before resolving its claim"
-  assert_contains "$mutations" 'pane close w1:p3' \
-    "the unbound create response retry must reclaim its verified agent-free endpoint"
-  [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
-    || fail "the unbound create response recovery must clear its durable claim"
-  pass "fm-spawn --relaunch: unbound Herdr creation preserves exact recovery"
+  assert_not_contains "$mutations" 'pane close w1:p3' \
+    "the unbound create response retry must retain its verified agent-free endpoint"
+  [ -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+    || fail "the unbound create response recovery must retain its durable claim"
+  assert_contains "$(cat "$dir/home/state/.hr1.herdr-relaunch-claim")" 'tab_id=w1:t3' \
+    "the unbound create response recovery must bind its verified replacement tab"
+  assert_contains "$(cat "$dir/home/state/.hr1.herdr-relaunch-claim")" 'pane_id=w1:p3' \
+    "the unbound create response recovery must bind its verified replacement pane"
+  pass "fm-spawn --relaunch: unbound Herdr creation retains exact recovery"
 }
 
 test_spawn_relaunch_preserves_unbound_claim_for_live_agent() {
@@ -2097,19 +2119,19 @@ test_spawn_relaunch_handles_postcreate_herdr_read_failures() {
     fi
     out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
     expect_code 1 "$rc" "a recovered $case_name claim should require an explicit retry"
-    assert_contains "$out" "reclaimed an interrupted replacement" \
-      "the $case_name retry should recover its exact claimed endpoint"
+    assert_contains "$out" "has an unresolved replacement claim" \
+      "the $case_name retry should retain its exact claimed endpoint"
     cmp -s "$before" "$dir/home/state/hr1.meta" \
       || fail "the $case_name recovery changed the task's serialized metadata"
     mutations=$(cat "$dir/fake/herdr-mutations")
     [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = "$creates_before" ] \
       || fail "the $case_name retry created another endpoint before resolving its claim"
-    assert_contains "$mutations" 'pane close w1:p3' \
-      "the $case_name retry must reclaim its verified agent-free endpoint"
-    [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
-      || fail "the $case_name recovery must clear its durable claim"
+    assert_not_contains "$mutations" 'pane close w1:p3' \
+      "the $case_name retry must retain its verified agent-free endpoint"
+    [ -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+      || fail "the $case_name recovery must retain its durable claim"
   done
-  pass "fm-spawn --relaunch: post-create failures recover exact claims without duplicates"
+  pass "fm-spawn --relaunch: post-create failures retain exact claims without duplicates"
 }
 
 test_spawn_relaunch_rechecks_recorded_herdr_identity_before_create() {
@@ -2183,14 +2205,28 @@ test_spawn_relaunch_handles_definite_and_ambiguous_herdr_create_failures() {
     || fail "an unresolved ambiguous create failure launched a second endpoint"
   out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
   expect_code 1 "$rc" "a reconciled ambiguous Herdr create failure should require an explicit retry"
-  assert_contains "$out" "reclaimed an interrupted replacement" \
-    "the ambiguous create recovery should reconcile its exact claimed endpoint"
+  assert_contains "$out" "has an unresolved replacement claim" \
+    "the ambiguous create recovery should retain its exact claimed endpoint"
   mutations=$(cat "$dir/fake/herdr-mutations")
   [ "$(printf '%s\n' "$mutations" | awk '/^tab create / { count += 1 } END { print count + 0 }')" = "$attempts_before" ] \
     || fail "ambiguous create reconciliation launched another endpoint"
-  [ ! -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
-    || fail "ambiguous create reconciliation did not clear its recovered claim"
+  [ -e "$dir/home/state/.hr1.herdr-relaunch-claim" ] \
+    || fail "ambiguous create reconciliation did not retain its recovered claim"
   pass "fm-spawn --relaunch: Herdr create failures preserve safe retry boundaries"
+}
+
+test_spawn_relaunch_holds_herdr_session_lock_through_submission() {
+  local dir out rc
+  dir=$(new_case herdr-launch-lock hr1)
+  add_herdr_missing_pane_task "$dir" hr1
+  make_herdr_missing_pane_stub "$dir" normal
+  out=$(FM_FAKE_HERDR_CASE=normal run_spawn "$dir" hr1 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "a normal missing Herdr pane relaunch should succeed"
+  [ -e "$dir/herdr-launch-lock-observed" ] \
+    || fail "the Herdr session lock was not held while the worker launch was submitted"
+  [ "$(meta_field "$dir" hr1 herdr_pane_id)" = w1:p3 ] \
+    || fail "the lock-held relaunch did not publish the replacement endpoint"
+  pass "fm-spawn --relaunch: holds the Herdr session lock through worker submission"
 }
 
 test_spawn_relaunch_preserves_an_interrupted_claim_on_conflict() {
@@ -2274,10 +2310,11 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_spawn_relaunch_missing_herdr_pane_refusals_preserve_everything
 test_control_relaunch_preflights_missing_herdr_pane_before_recording_note
-test_spawn_relaunch_reclaims_a_postcreate_herdr_conflict
+test_spawn_relaunch_preserves_a_postcreate_herdr_conflict_claim
 test_spawn_relaunch_keeps_an_unbound_herdr_create_claim_recoverable
 test_spawn_relaunch_preserves_unbound_claim_for_live_agent
 test_spawn_relaunch_handles_postcreate_herdr_read_failures
 test_spawn_relaunch_rechecks_recorded_herdr_identity_before_create
 test_spawn_relaunch_handles_definite_and_ambiguous_herdr_create_failures
 test_spawn_relaunch_preserves_an_interrupted_claim_on_conflict
+test_spawn_relaunch_holds_herdr_session_lock_through_submission

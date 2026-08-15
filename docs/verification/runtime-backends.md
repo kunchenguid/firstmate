@@ -598,6 +598,9 @@ The 2026-08-14 missing-pane recovery change was inspected across every supported
 | cursor | shared launch construction after backend endpoint publication | Herdr claim handling completes before the Cursor command is delivered. |
 | muse | shared launch construction after backend endpoint publication | Herdr claim handling completes before the Muse command is delivered; its secondmate refusal is an independent harness constraint. |
 
+Firstmate holds the named-session lock from the final duplicate check through worker submission, which serializes Firstmate-managed recovery writers.
+An unrelated Herdr client is outside that client-side lock, so it cannot be globally serialized after the final observable duplicate check.
+
 ### Away-mode transport
 
 The Pi/Herdr return and injection path was reverified on Herdr 0.7.3 and Pi 0.80.7:

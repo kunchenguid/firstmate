@@ -2171,13 +2171,7 @@ fm_backend_herdr_relaunch_claim_recover() {  # <session> <workspace> <task-id> <
   if [ "$claim_bound" = 0 ]; then
     fm_backend_herdr_relaunch_claim_bind_endpoint "$path" "$id" "$tab" "$pane" || return 1
   fi
-  if [ "$journal_state" = new ]; then
-    fm_backend_herdr_projection_journal_replace_endpoint \
-      "$journal" "$id" "$tab" "$pane" "$old_tab" "$old_pane" || return 1
-  fi
-  fm_backend_herdr_projection_reclaim_rollback "$session" "$pane" || return 1
-  fm_backend_herdr_relaunch_claim_remove "$path" "$id" || return 1
-  return 2
+  return 1
 }
 
 fm_backend_herdr_relaunch_claim_reclaim() {  # <session> <claim-path> <task-id> <tab> <pane>
@@ -2325,12 +2319,10 @@ EOF
     list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
     printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
     if printf '%s' "$list" | jq -e --arg label "$label" 'any(.result.tabs[]?; .label == $label)' >/dev/null 2>&1; then
-      fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id" || return 1
       echo "error: herdr tab appeared during replacement for label '$label' in workspace $wsid (session $session)" >&2
       return 1
     fi
     fm_backend_herdr_cli "$session" tab rename "$tab_id" "$label" >/dev/null 2>&1 || {
-      fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id" || return 1
       return 1
     }
   fi
@@ -2378,14 +2370,10 @@ $post_create_dup_tabs
 EOF
   concurrent_dup_tabs=${concurrent_dup_tabs//$'\n'/ }
   if [ -n "$concurrent_dup_tabs" ]; then
-    if [ "$strict_mode" = strict ]; then
-      fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id"
-    else
-      fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id"
-    fi || {
+    if [ "$strict_mode" != strict ] && ! fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id"; then
       echo "error: could not reclaim replacement herdr pane $pane_id after concurrent tab(s) $concurrent_dup_tabs appeared for label '$label' in workspace $wsid (session $session)" >&2
       return 1
-    }
+    fi
     echo "error: herdr tab(s) $concurrent_dup_tabs appeared during replacement for label '$label' in workspace $wsid (session $session)" >&2
     return 1
   fi
@@ -2422,14 +2410,10 @@ $remaining_dup_tabs
 EOF
     concurrent_dup_tabs=${concurrent_dup_tabs//$'\n'/ }
     if [ -n "$concurrent_dup_tabs" ]; then
-      if [ "$strict_mode" = strict ]; then
-        fm_backend_herdr_relaunch_claim_reclaim "$session" "$strict_claim_path" "$strict_id" "$tab_id" "$pane_id"
-      else
-        fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id"
-      fi || {
+      if [ "$strict_mode" != strict ] && ! fm_backend_herdr_projection_reclaim_rollback "$session" "$pane_id"; then
         echo "error: could not reclaim replacement herdr pane $pane_id after concurrent tab(s) $concurrent_dup_tabs appeared for label '$label' in workspace $wsid (session $session)" >&2
         return 1
-      }
+      fi
       echo "error: herdr tab(s) $concurrent_dup_tabs appeared during replacement for label '$label' in workspace $wsid (session $session)" >&2
       return 1
     fi
