@@ -171,6 +171,19 @@ assert '"$NM_BIN" axi sync --recover' in guest
 assert 'cp "$STATUS_LOG" "$EVIDENCE/attempt-$ATTEMPT/status.log"' in guest
 assert '"reattaching", "collected")' in host
 assert "retain-failure owns only failed outcomes" in host
+assert '"$NM_BIN" axi respond <"$RESPONSE_FILE"' not in guest
+assert '"$NM_BIN" axi respond "$@"' in guest
+respond_block=guest[guest.index("    respond)"):guest.index('*) exit 125 ;;')]
+assert respond_block.index('"$NM_BIN" axi run') < respond_block.index('axi respond "$@"')
+assert '|| true' in respond_block
+assert "adjudicate_gates() {" in guest
+assert "fetch_gate_response() {" in guest
+assert "control/gate-response-a" in guest
+assert guest.index("esac") < guest.index("  adjudicate_gates")
+assert '"$gates" -gt "$responded"' in guest
+assert "FM_AZURE_VALIDATION_GATE_WAIT_SECONDS" in guest
+assert 'while IFS= read -r respond_arg || [ -n "$respond_arg" ]; do' in guest
+assert guest.index("set --") < guest.index('"$NM_BIN" axi respond "$@"')
 assert '"$NM_BIN" init >"$RUN_LOG" 2>&1' in guest
 assert guest.index('"$NM_BIN" init >"$RUN_LOG"') < guest.index('start) "$NM_BIN" axi run')
 assert 'runuser -u fmvalidate -- git -C "$REPO" config credential.helper "$GIT_HELPER"' in guest

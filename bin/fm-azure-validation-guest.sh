@@ -555,6 +555,50 @@ set +a
 export PATH="$FM_AZURE_VALIDATION_RUNTIME_PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export GH_TOKEN="$(cat "$GH_TOKEN_FILE")"
 cd "$REPO"
+
+ATTEMPT_NUMBER=$(basename "$RESPONSE_FILE" | sed -n 's/^response-a\([0-9][0-9]*\)\.txt$/\1/p')
+[ -n "$ATTEMPT_NUMBER" ] || ATTEMPT_NUMBER=1
+
+fetch_gate_response() {
+  gate_index=$1
+  destination=$2
+  gate_token=$(curl --fail --silent --noproxy '*' --connect-timeout 5 --max-time 15 -H Metadata:true \
+    "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F&client_id=$FM_AZURE_VALIDATION_IDENTITY_CLIENT_ID" \
+    | jq -er .access_token) || return 1
+  curl --fail --silent --noproxy '*' --connect-timeout 10 --max-time 60 \
+    -H "Authorization: Bearer $gate_token" -H 'x-ms-version: 2023-11-03' \
+    --output "$destination" \
+    "https://${FM_AZURE_VALIDATION_STORAGE_ACCOUNT}.blob.core.windows.net/${FM_AZURE_VALIDATION_STORAGE_CONTAINER}/control/gate-response-a${ATTEMPT_NUMBER}-${gate_index}.txt"
+}
+
+adjudicate_gates() {
+  # Runs are daemon-scoped: a parked gate can only be answered while this
+  # unit's daemon owns it, so the operator's decision arrives through the
+  # cell exchange and is applied here in place. Each parking prints exactly
+  # one structured gate block, so an unanswered gate is a gate count above
+  # the responses applied. Without a response inside the patience window
+  # the attempt still ends needs-decision for the operator.
+  responded=0
+  gate_deadline=$((SECONDS + ${FM_AZURE_VALIDATION_GATE_WAIT_SECONDS:-5400}))
+  while :; do
+    gates=$(grep -c '^gate:' "$RUN_LOG" 2>/dev/null || printf 0)
+    [ "$gates" -gt "$responded" ] || break
+    [ "$SECONDS" -lt "$gate_deadline" ] || break
+    next_response=$RESPONSE_FILE.gate$((responded + 1))
+    if fetch_gate_response "$((responded + 1))" "$next_response"; then
+      set --
+      while IFS= read -r respond_arg || [ -n "$respond_arg" ]; do
+        set -- "$@" "$respond_arg"
+      done <"$next_response"
+      "$NM_BIN" axi respond "$@" >>"$RUN_LOG" 2>&1 && "$NM_BIN" axi run >>"$RUN_LOG" 2>&1
+      rc=$?
+      responded=$((responded + 1))
+    else
+      sleep 30
+    fi
+  done
+}
+
 set +e
 # A fresh cell clone carries the in-tree gate config but not the local gate
 # state (bare gate repo, hook, no-mistakes remote, database record), so every
@@ -567,7 +611,20 @@ if [ "$rc" -eq 0 ]; then
     start) "$NM_BIN" axi run --intent "$(cat "$INTENT_FILE")" >>"$RUN_LOG" 2>&1 ;;
     reattach) "$NM_BIN" axi run >>"$RUN_LOG" 2>&1 ;;
     respond)
-      "$NM_BIN" axi respond <"$RESPONSE_FILE" >>"$RUN_LOG" 2>&1
+      # The gated run was owned by the previous attempt's daemon, which died
+      # with that attempt's unit; a reattaching axi run resurfaces the parked
+      # gate for this fresh daemon before any respond can address it. The
+      # reattach stops at the gate, so its exit status is not consulted.
+      "$NM_BIN" axi run >>"$RUN_LOG" 2>&1 || true
+      # axi respond takes its decision as required argv flags and reads
+      # nothing from stdin, so the response file carries one argument per
+      # line (e.g. "--action" / "fix" / "--findings" / "review-1"); values
+      # must not contain newlines.
+      set --
+      while IFS= read -r respond_arg || [ -n "$respond_arg" ]; do
+        set -- "$@" "$respond_arg"
+      done <"$RESPONSE_FILE"
+      "$NM_BIN" axi respond "$@" >>"$RUN_LOG" 2>&1
       response_rc=$?
       if [ "$response_rc" -eq 0 ]; then
         "$NM_BIN" axi run >>"$RUN_LOG" 2>&1
@@ -578,6 +635,7 @@ if [ "$rc" -eq 0 ]; then
     *) exit 125 ;;
   esac
   rc=$?
+  adjudicate_gates
 fi
 if [ "$rc" -ne 0 ] && grep -q 'code: recover_custody' "$RUN_LOG"; then
   # A terminal run can complete with outcome passed while preserving
