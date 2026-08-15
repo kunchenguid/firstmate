@@ -2,7 +2,7 @@
 # Link a spawned task to the X-mode mention that triggered it, so firstmate can
 # post up to THREE completion follow-ups when the task lands (within a 7-day window).
 #
-# Usage: fm-x-link.sh <task-id> <request_id> [--carry-count <n> --carry-ts <epoch> [--carry-platform <x|discord>] [--carry-max <n>]]
+# Usage: fm-x-link.sh <task-id> <request_id> [--carry-count <n> --carry-ts <epoch> [--carry-platform <x|discord>] [--carry-max <n>] [--carry-audience <public|private-trusted>]]
 #
 # Records link lines in state/<task-id>.meta (replacing any prior link,
 # preserving every other meta line):
@@ -11,6 +11,7 @@
 #   x_followups=<n>            follow-ups already posted against this binding
 #   x_platform=<platform>      target platform, when known
 #   x_reply_max_chars=<n>      target split budget, when known
+#   x_reply_audience=<mode>    durable disclosure mode, defaulting to public
 #
 # A fresh link always starts x_followups at 0 and uses the current time for
 # x_request_ts. --carry-count <n> and --carry-ts <epoch> are a required pair for
@@ -20,7 +21,7 @@
 # so the new task does not get a fresh follow-up budget, a refreshed local
 # window, or a dropped reply-platform context against a binding the relay
 # already knows about. Pass --carry-platform and --carry-max from the prior
-# task's x_platform and x_reply_max_chars when the original inbox file is gone.
+# task's x_platform, x_reply_max_chars, and x_reply_audience when the original inbox file is gone.
 #
 # Fresh-link context resolution fills platform and explicit budget independently
 # through the durable per-request registry, inbox payload, then authoritative
@@ -49,7 +50,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
 usage() {
-  echo "usage: fm-x-link.sh <task-id> <request_id> [--carry-count <n> --carry-ts <epoch> [--carry-platform <x|discord>] [--carry-max <n>]]" >&2
+  echo "usage: fm-x-link.sh <task-id> <request_id> [--carry-count <n> --carry-ts <epoch> [--carry-platform <x|discord>] [--carry-max <n>] [--carry-audience <public|private-trusted>]]" >&2
 }
 
 ID=${1:-}
@@ -64,6 +65,7 @@ CARRY_COUNT=
 CARRY_TS=
 CARRY_PLATFORM=
 CARRY_MAX=
+CARRY_AUDIENCE=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --carry-count)
@@ -97,6 +99,14 @@ while [ "$#" -gt 0 ]; do
         *) [ "$CARRY_MAX" -ge 50 ] 2>/dev/null || { echo "fm-x-link: --carry-max needs an integer of at least 50" >&2; exit 2; } ;;
       esac
       ;;
+    --carry-audience)
+      shift
+      CARRY_AUDIENCE=${1:-}
+      case "$CARRY_AUDIENCE" in
+        public|private-trusted) ;;
+        *) echo "fm-x-link: --carry-audience needs public or private-trusted" >&2; exit 2 ;;
+      esac
+      ;;
     *) usage; exit 2 ;;
   esac
   shift
@@ -109,8 +119,8 @@ if [ -n "$CARRY_TS" ] && [ -z "$CARRY_COUNT" ]; then
   echo "fm-x-link: --carry-ts requires --carry-count to preserve the consumed follow-up count" >&2
   exit 2
 fi
-if { [ -n "$CARRY_PLATFORM" ] || [ -n "$CARRY_MAX" ]; } && { [ -z "$CARRY_COUNT" ] || [ -z "$CARRY_TS" ]; }; then
-  echo "fm-x-link: --carry-platform and --carry-max require --carry-count and --carry-ts" >&2
+if { [ -n "$CARRY_PLATFORM" ] || [ -n "$CARRY_MAX" ] || [ -n "$CARRY_AUDIENCE" ]; } && { [ -z "$CARRY_COUNT" ] || [ -z "$CARRY_TS" ]; }; then
+  echo "fm-x-link: carry context flags require --carry-count and --carry-ts" >&2
   exit 2
 fi
 
@@ -132,11 +142,15 @@ fmx_load_config
 REQ_PLATFORM=
 REQ_EXPLICIT_MAX=
 REQ_REPLY_MAX=
+REQ_AUDIENCE=public
 if [ -n "$CARRY_PLATFORM" ]; then
   REQ_PLATFORM=$CARRY_PLATFORM
 fi
 if [ -n "$CARRY_MAX" ]; then
   REQ_REPLY_MAX=$CARRY_MAX
+fi
+if [ -n "$CARRY_AUDIENCE" ]; then
+  REQ_AUDIENCE=$CARRY_AUDIENCE
 fi
 
 if [ -z "$CARRY_TS" ]; then
@@ -147,6 +161,8 @@ if [ -z "$CARRY_TS" ]; then
   REQ_PLATFORM=$(printf '%s' "$REPLY_CONTEXT" | jq -r '.platform // ""')
   REQ_EXPLICIT_MAX=$(printf '%s' "$REPLY_CONTEXT" | jq -r '.reply_max_chars // ""')
   REQ_REPLY_MAX=$REQ_EXPLICIT_MAX
+  REQ_AUDIENCE=$(printf '%s' "$REPLY_CONTEXT" | jq -r '.reply_audience // "public"')
+  case "$REQ_AUDIENCE" in private-trusted) ;; *) REQ_AUDIENCE=public ;; esac
 fi
 
 if [ -n "$CARRY_TS" ] && { [ -z "$REQ_PLATFORM" ] || [ -z "$REQ_REPLY_MAX" ]; }; then
@@ -170,7 +186,7 @@ else
   esac
 fi
 
-if ! fmx_meta_link_set "$META" "$RID" "$LINK_TS" "$FOLLOWUPS" "$REQ_PLATFORM" "$REQ_REPLY_MAX"; then
+if ! fmx_meta_link_set "$META" "$RID" "$LINK_TS" "$FOLLOWUPS" "$REQ_PLATFORM" "$REQ_REPLY_MAX" "$REQ_AUDIENCE"; then
   echo "fm-x-link: failed to record the link in state/$ID.meta" >&2
   exit 1
 fi
