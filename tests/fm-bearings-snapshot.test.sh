@@ -1734,9 +1734,12 @@ EOF
       and .landed == []
       and .endpoints == []
   ' >/dev/null || fail "an unowned unknown child received partial structured projection: $canonical"
-  sed '/## In flight/a\
-- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)' \
-    "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
+  awk '
+    { print }
+    $0 == "## In flight" {
+      print "- [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)"
+    }
+  ' "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
 
   fm_write_meta "$wheel/state/production-observation.meta" \
