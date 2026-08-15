@@ -3,7 +3,7 @@ name: updatefirstmate
 description: >-
   Self-update a running firstmate and its secondmates to the latest from origin.
   Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate").
-  Fast-forwards this firstmate repo's default branch and every local or remote secondmate through its guarded update path (never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate to do the same, so the whole tree runs the latest bin/ and instructions.
+  Fast-forwards this firstmate repo's default branch and every local or remote secondmate through its guarded update path (never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate with surface-appropriate wording - a re-read nudge when instructions changed, a tooling-only notice when only bin/ moved, so the whole tree runs the latest bin/ and instructions.
 user-invocable: true
 metadata:
   internal: true
@@ -29,20 +29,41 @@ This touches only the firstmate repo and its own worktrees, never anything under
    bin/fm-update.sh
    ```
    It fast-forwards this firstmate repo's default branch from origin, then updates every registered local or remote secondmate home through its placement-specific guarded path.
-   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
+   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
+   - `firstmate-changed-surface: <comma-list>|none`
    - `nudge-secondmates: fm-<id>...|none`
+   - `nudge-surface fm-<id>: <comma-list>|unknown` (one per nudge target)
 
 2. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) just advanced under you.
    **Read `AGENTS.md` now** (CLAUDE.md is a symlink to it) to refresh your operating instructions before doing anything else, so you are acting on the new instructions rather than the stale ones you were started with.
    When it printed `reread-firstmate: no`, nothing changed for you - skip the re-read.
 
-3. **Nudge each updated live secondmate.**
-   For every target listed on the `nudge-secondmates:` line (do nothing when it says `none`), send a one-line re-read nudge so that secondmate picks up its new instructions too:
-   ```sh
-   FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
-   ```
+3. **Nudge each updated live secondmate with surface-appropriate wording.**
+   For every target listed on the `nudge-secondmates:` line (do nothing when it says `none`), read its matching `nudge-surface fm-<id>:` line to determine what changed.
+   The surface is a comma-separated list drawn from `AGENTS.md`, `bin`, and `.agents/skills`.
+
+   **Choose the nudge wording based on the surface:**
+
+   - **Instructions changed** - the surface includes `AGENTS.md` or `.agents/skills` (with or without `bin`).
+     Send the re-read nudge:
+     ```sh
+     FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> 'firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
+     ```
+
+   - **Tooling only** - the surface is exactly `bin` with no instruction paths.
+     Send a tooling nudge that does NOT ask for an instruction re-read:
+     ```sh
+     FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> 'firstmate tooling (bin/) was updated to the latest. Your operating instructions did not change - no need to re-read AGENTS.md.'
+     ```
+
+   - **Indeterminate** - the surface is `unknown` (the changed paths could not be determined).
+     Prefer the re-read as a fail-safe:
+     ```sh
+     FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> 'firstmate was updated to the latest but the changed surface could not be determined - please re-read your AGENTS.md to be safe.'
+     ```
+
    Include `FM_HOME=<this-firstmate-home>` unless `FM_HOME` is already set to the active firstmate home.
    This is a gentle steer, not an interruption: the secondmate already got a safe tracked-files fast-forward, and the nudge never forces, tears down, or discards its work.
    A secondmate that was skipped, already current, or has no live metadata is not on the list and needs no nudge.

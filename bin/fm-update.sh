@@ -25,7 +25,9 @@
 # plus a parseable summary telling the caller what to do next:
 #   - one status line per target (updated/already current/skipped)
 #   - reread-firstmate: yes|no    (did the running firstmate's instructions change)
+#   - firstmate-changed-surface: <comma-list>|none   (which watched paths changed)
 #   - nudge-secondmates: fm-<id>...|none   (updated live secondmates to nudge)
+#   - nudge-surface fm-<id>: <comma-list>|unknown   (per-target changed paths)
 #
 # Usage: fm-update.sh [--help]
 set -eu
@@ -51,9 +53,13 @@ fi
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
+firstmate_surface="none"
 ff_target "$FM_ROOT" "firstmate" upstream no no
-if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
-  reread_firstmate="yes"
+if [ "$FF_STATUS" = "updated" ]; then
+  firstmate_surface=$(printf '%s' "${FF_INSTR:-none}" | tr -d ' ')
+  if [ -n "$FF_INSTR" ]; then
+    reread_firstmate="yes"
+  fi
 fi
 
 # --- secondmates -----------------------------------------------------------
@@ -62,6 +68,7 @@ fi
 # same condition it has always used.
 
 FF_NUDGE_WINDOWS=""
+FF_NUDGE_SURFACES=""
 FF_SEEN_HOMES=""
 
 # Live direct reports first: state/<id>.meta with kind=secondmate carries the
@@ -90,6 +97,7 @@ if [ -f "$SECONDMATES_MD" ]; then
             echo "remote secondmate $id: updated on $SECONDMATE_REGISTRY_HOST (${remote_result#synced: })"
             if [ -f "$STATE/$id.meta" ] && grep -qx 'kind=secondmate' "$STATE/$id.meta"; then
               FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
+              FF_NUDGE_SURFACES="$FF_NUDGE_SURFACES fm-$id=unknown"
             fi
             ;;
           current:*) echo "remote secondmate $id: already current on $SECONDMATE_REGISTRY_HOST (${remote_result#current: })" ;;
@@ -107,4 +115,10 @@ fi
 # --- caller action summary -------------------------------------------------
 
 echo "reread-firstmate: $reread_firstmate"
+echo "firstmate-changed-surface: $firstmate_surface"
 echo "nudge-secondmates:${FF_NUDGE_WINDOWS:- none}"
+for _pair in $FF_NUDGE_SURFACES; do
+  _target="${_pair%%=*}"
+  _surface="${_pair#*=}"
+  echo "nudge-surface ${_target}: ${_surface}"
+done

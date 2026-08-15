@@ -382,9 +382,10 @@ ff_target() {
   return 0
 }
 
-# Sweep accumulators. The caller resets both before a sweep and reads
-# FF_NUDGE_WINDOWS after.
+# Sweep accumulators. The caller resets all three before a sweep and reads
+# FF_NUDGE_WINDOWS and FF_NUDGE_SURFACES after.
 FF_NUDGE_WINDOWS=""
+FF_NUDGE_SURFACES=""
 FF_SEEN_HOMES=""
 
 # Validate and fast-forward one secondmate home, accumulating its stable
@@ -420,6 +421,9 @@ process_secondmate() {
       return 0
     fi
     FF_NUDGE_WINDOWS="$FF_NUDGE_WINDOWS fm-$id"
+    local _ff_surface
+    _ff_surface=$(printf '%s' "${FF_INSTR:-unknown}" | tr -d ' ')
+    FF_NUDGE_SURFACES="$FF_NUDGE_SURFACES fm-$id=${_ff_surface}"
     if [ "$nudge_requires_instr" = yes ] && [ -n "$FF_INSTR" ] \
       && type fm_ff_after_instruction_update >/dev/null 2>&1; then
       fm_ff_after_instruction_update "$id" "$home_real" "$window" "$FF_INSTR"
@@ -430,7 +434,8 @@ process_secondmate() {
 # Sweep this home's LIVE secondmate direct reports - state/<id>.meta files with
 # kind=secondmate - fast-forwarding each to base_mode. Passes base_mode and
 # nudge_requires_instr through to process_secondmate. Accumulates into
-# FF_NUDGE_WINDOWS / FF_SEEN_HOMES, which the caller resets before and reads after.
+# FF_NUDGE_WINDOWS / FF_NUDGE_SURFACES / FF_SEEN_HOMES, which the caller resets
+# before and reads after.
 # The registry argument is only for home= fallback on older or incomplete meta records.
 sweep_live_secondmate_metas() {
   local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta
