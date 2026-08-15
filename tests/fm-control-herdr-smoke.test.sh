@@ -111,7 +111,9 @@ snapshot_default_session_layout() {
   while IFS= read -r workspace_id; do
     [ -n "$workspace_id" ] || continue
     "$ROOT/bin/fm-herdr-lab.sh" inspect-default tabs "$workspace_id" > "$snapshot/tabs-$index" || return 1
-    "$ROOT/bin/fm-herdr-lab.sh" inspect-default panes "$workspace_id" > "$snapshot/panes-$index" || return 1
+    "$ROOT/bin/fm-herdr-lab.sh" inspect-default panes "$workspace_id" \
+      | jq -S -e '{id, result: {panes: [.result.panes[]? | {pane_id, workspace_id, tab_id, terminal_id, cwd, foreground_cwd}]}}' \
+      > "$snapshot/panes-$index" || return 1
     index=$((index + 1))
   done < <(jq -r '.result.workspaces[]?.workspace_id' "$snapshot/workspaces" | LC_ALL=C sort)
 }
@@ -175,6 +177,7 @@ pass "real herdr: an agent that does not stop fails closed instead of being repo
 MISSING_ID=hmissing
 MISSING_TOKEN=0123456789ABCDEFGHIJKL
 MISSING_SPACE_LABEL="└ $MISSING_ID · p:$MISSING_TOKEN"
+MISSING_HOME_ID=$(cd "$HOME_DIR" && pwd -P) || fail "could not resolve the vanished-pane home"
 mkdir -p "$HOME_DIR/data/$MISSING_ID"
 printf '# brief\n\nDelivery contract: mode=no-mistakes\n' > "$HOME_DIR/data/$MISSING_ID/brief.md"
 MISSING_SPACE=$("$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" workspace create \
@@ -194,7 +197,7 @@ MISSING_JOURNAL="$HOME_DIR/state/$MISSING_ID.herdr-presentation"
   echo 'version=2'
   echo "task_id=$MISSING_ID"
   echo "projection_id=$MISSING_TOKEN"
-  echo "home=$HOME_DIR"
+  echo "home=$MISSING_HOME_ID"
   echo "session=$SESSION"
   echo "workspace_id=$MISSING_WORKSPACE_ID"
   echo "tab_id=$MISSING_TAB"

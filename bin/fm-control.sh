@@ -342,12 +342,14 @@ require_state_verified_backend() {  # <verb>
 }
 
 refresh_published_relaunch_endpoint() {
-  local published_backend published_worktree
+  local published_backend published_worktree canonical_published_worktree canonical_worktree
   fm_backend_validate_task_endpoint "$META" "$ID" || return 1
   published_backend=$FM_BACKEND_VALIDATED_BACKEND
   published_worktree=$(fm_meta_get "$META" worktree)
+  canonical_published_worktree=$(CDPATH='' cd -- "$published_worktree" && pwd -P) || return 1
+  canonical_worktree=$(CDPATH='' cd -- "$WT" && pwd -P) || return 1
   [ "$published_backend" = "$BACKEND" ] \
-    && [ "$published_worktree" = "$WT" ] \
+    && [ "$canonical_published_worktree" = "$canonical_worktree" ] \
     && [ "$(fm_meta_get "$META" control_relaunch_tx)" = "$RELAUNCH_TX" ] || return 1
   T=$FM_BACKEND_VALIDATED_TARGET
 }
