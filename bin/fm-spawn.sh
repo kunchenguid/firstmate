@@ -1716,6 +1716,21 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
   esac
 }
 
+# An unfilled scaffold placeholder means the brief was never completed. A worker
+# launched on one is told to do something the text never says - "run the check
+# above" where the check is the literal word {DONE_CHECK}. Firstmate fills these in
+# by habit, so a placeholder ADDED to the scaffold later is exactly the one that
+# gets missed: the habit covers the placeholder that already existed. Refuse rather
+# than rely on remembering, and name every unfilled one so a second is not
+# discovered on the next attempt.
+UNFILLED=$(grep -oE '\{[A-Z_]+\}' "$BRIEF" 2>/dev/null | sort -u | tr '\n' ' ')
+if [ -n "$UNFILLED" ]; then
+  echo "error: $BRIEF still contains unfilled scaffold placeholder(s): ${UNFILLED% }" >&2
+  echo "       fill every placeholder before dispatch - a worker cannot act on one, and the" >&2
+  echo "       instruction referring to it becomes a sentence about nothing" >&2
+  exit 1
+fi
+
 # Brief/spawn delivery agreement, checked before any endpoint exists.
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
 # line. A spawn that disagrees would launch a worker whose instructions and whose
