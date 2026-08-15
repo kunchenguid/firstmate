@@ -816,11 +816,12 @@ registry_secondmates_json() {
   fi
   # The embedded worker scripts and jq filters below are read with `read -r -d ''`
   # rather than `$(cat <<'X' ... X)`. Stock macOS Bash 3.2 scans a command
-  # substitution for its closing paren without honoring an enclosed here-document,
-  # so an unbalanced `)` anywhere in the body - a `case` pattern like `*y*)`, or a
-  # bare `)` in a string - silently ends the substitution early. Reading the
-  # here-document into the variable keeps the body outside that scan entirely, so
-  # these bodies stay free to use any paren. ShellCheck does not flag the old shape.
+  # substitution for its closing paren textually and tracks quote state through
+  # the body, without honoring an enclosed here-document, so an apostrophe, an
+  # unbalanced quote, or an unbalanced paren anywhere in the body breaks parsing
+  # of the rest of the script. Reading the here-document into the variable keeps
+  # the body outside that scan entirely, so these bodies stay free to use any
+  # paren or quote. See CONTRIBUTING.md; ShellCheck does not flag the old shape.
   IFS= read -r -d '' script <<'BASH' || true
     f=$1
     max_lines=$2
