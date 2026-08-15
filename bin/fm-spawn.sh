@@ -410,7 +410,7 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort tier backend out rc meta tmp
-  local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
+  local remote_backend remote_target remote_harness remote_herdr_session remote_tier registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
   id=${POS[0]:-}
@@ -503,6 +503,9 @@ spawn_remote_secondmate() {
       return 1
       ;;
   esac
+  if [ "$TIER_SET" -eq 1 ] && [ "$harness" != codex ]; then
+    echo "warning: harness '$harness' has no verified serving-tier flag; recording tier=$tier and omitting it from launch" >&2
+  fi
   meta="$STATE/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if [ ! -f "$meta" ] || [ -L "$meta" ] \
@@ -601,6 +604,7 @@ spawn_remote_secondmate() {
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
+  remote_tier=$(printf '%s\n' "$out" | sed -n 's/^tier=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -620,6 +624,23 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
+    return 1
+  fi
+  case "$remote_tier" in
+    standard|fast) ;;
+    *)
+      fm_lock_release "$remote_lock" || true
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote launch returned tier '${remote_tier:-missing}', expected standard or fast; preserving the remote route for reconciliation" >&2
+      return 1
+      ;;
+  esac
+  if [ "$remote_tier" != "$tier" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch returned tier '$remote_tier', expected '$tier'; preserving the remote route for reconciliation" >&2
     return 1
   fi
   # Record what the remote endpoint ACTUALLY carries, read back from its own
@@ -643,7 +664,7 @@ spawn_remote_secondmate() {
     echo "tasktmp="
     echo "model=${model#-}"
     echo "effort=${effort#-}"
-    echo "tier=$tier"
+    echo "tier=$remote_tier"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
     echo "remote_host=$host"
@@ -914,6 +935,20 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = secondmate ] && [ "$TIER_SET" -eq 0 ]; then
+  existing_secondmate_meta="$STATE/$ID.meta"
+  if [ -f "$existing_secondmate_meta" ] && [ ! -L "$existing_secondmate_meta" ] \
+     && [ "$(fm_meta_get "$existing_secondmate_meta" kind)" = secondmate ]; then
+    recorded_secondmate_tier=$(fm_meta_get "$existing_secondmate_meta" tier)
+    [ -n "$recorded_secondmate_tier" ] || recorded_secondmate_tier=standard
+    case "$recorded_secondmate_tier" in
+      standard|fast) ;;
+      *) echo "error: secondmate $ID has invalid recorded tier '$recorded_secondmate_tier'; refusing recovery" >&2; exit 1 ;;
+    esac
+    TIER=$recorded_secondmate_tier
+    TIER_SET=1
+  fi
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)

@@ -714,6 +714,10 @@ assert_grep 'herdr_session=fm-remote' "$REMOTE_HOME/state/parent-route/ios.meta"
 assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the fm-remote session"
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"
+assert_grep 'tier=standard' "$PARENT/state/ios.meta" "parent metadata omitted the remote serving tier"
+assert_grep 'tier=standard' "$REMOTE_HOME/state/parent-route/ios.meta" "remote endpoint metadata omitted its serving tier"
+assert_grep 'tier=standard' <(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios) \
+  "remote route did not report its actual serving tier"
 assert_present "$PARENT/state/procevent/remote-reply-ios.source" "remote spawn did not arm its reply source"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
@@ -723,6 +727,42 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = idle ] \
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
+
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-tier-mismatch.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-tier-mismatch.meta"
+sed 's/^tier=standard$/tier=fast/' "$TMP_ROOT/remote-ios-before-tier-mismatch.meta" > "$remote_route_meta"
+if tier_mismatch_out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1); then
+  fail "parent accepted a live remote endpoint on a different serving tier"
+fi
+assert_contains "$tier_mismatch_out" "remote launch returned tier 'fast', expected 'standard'" \
+  "remote tier mismatch refusal did not name the actual and requested tiers"
+cmp -s "$TMP_ROOT/parent-ios-before-tier-mismatch.meta" "$PARENT/state/ios.meta" \
+  || fail "remote tier mismatch rewrote the parent endpoint metadata"
+assert_grep 'tier=fast' "$remote_route_meta" "remote tier mismatch rewrote the live endpoint tier"
+mv -f "$TMP_ROOT/remote-ios-before-tier-mismatch.meta" "$remote_route_meta"
+
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-invalid-tier.meta"
+sed 's/^tier=standard$/tier=burst/' "$TMP_ROOT/remote-ios-before-invalid-tier.meta" > "$remote_route_meta"
+if invalid_tier_out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1); then
+  fail "remote control accepted invalid endpoint tier metadata"
+fi
+assert_contains "$invalid_tier_out" "records invalid tier 'burst'" \
+  "remote invalid-tier refusal did not name the invalid value"
+mv -f "$TMP_ROOT/remote-ios-before-invalid-tier.meta" "$remote_route_meta"
+pass "remote endpoint serving tiers are returned, validated, and matched before parent publication"
+
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-tier-warning.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-tier-warning.meta"
+sed 's/^harness=codex$/harness=claude/' "$TMP_ROOT/remote-ios-before-tier-warning.meta" > "$remote_route_meta"
+sed 's/^harness=codex$/harness=claude/' "$TMP_ROOT/parent-ios-before-tier-warning.meta" > "$PARENT/state/ios.meta"
+tier_warning_out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness claude --tier standard 2>&1) \
+  || fail "remote non-Codex standard-tier reuse failed"$'\n'"$tier_warning_out"
+assert_contains "$tier_warning_out" "harness 'claude' has no verified serving-tier flag" \
+  "remote parent path suppressed the unsupported-tier warning"
+mv -f "$TMP_ROOT/remote-ios-before-tier-warning.meta" "$remote_route_meta"
+mv -f "$TMP_ROOT/parent-ios-before-tier-warning.meta" "$PARENT/state/ios.meta"
+pass "remote parent surfaces unsupported serving-tier warnings"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"

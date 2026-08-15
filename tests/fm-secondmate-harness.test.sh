@@ -681,6 +681,19 @@ spawn_secondmate_capture() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "$@" --secondmate
 }
 
+respawn_secondmate_capture() {
+  local world=$1 id=$2 launchlog=$3 fakebin
+  shift 3
+  fakebin=$(make_launch_capturing_tmux "$world/tmux-$id-respawn")
+  : > "$launchlog"
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$@" --secondmate
+}
+
 test_spawn_backend_precedence_over_inherited_config() {
   local w sm meta launchlog out status
   w="$TMP_ROOT/spawn-backend-env-precedence"
@@ -887,6 +900,28 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
   assert_not_contains "$launch" "model_reasoning_effort=\"high\"" \
     "explicit-harness-explicit-axes: launch leaked the file's effort token"
   pass "C8 spawn: an explicit --harness still honors explicit model/effort flags"
+}
+
+test_secondmate_recovery_preserves_recorded_tier() {
+  local w sm meta launchlog launch out status
+  w="$TMP_ROOT/spawn-recovery-tier"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --tier fast >/dev/null 2>&1
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" tier)" = fast ] || fail "recovery-tier: initial fast tier was not recorded"
+
+  out=$(respawn_secondmate_capture "$w" sm "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "secondmate recovery should preserve its recorded tier"$'\n'"$out"
+  [ "$(meta_field "$meta" tier)" = fast ] || fail "recovery-tier: respawn replaced fast with standard"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "-c 'service_tier=\"priority\"'" \
+    "recovery-tier: respawn did not launch Codex on the recorded fast tier"
+  pass "C9 spawn: secondmate recovery preserves its recorded serving tier"
 }
 
 test_spawned_secondmate_uses_its_harness_supervision_model() {
@@ -2541,6 +2576,7 @@ test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
+test_secondmate_recovery_preserves_recorded_tier
 test_spawned_secondmate_uses_its_harness_supervision_model
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges

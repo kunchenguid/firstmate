@@ -83,6 +83,15 @@ remote_endpoint_load() {
     REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint is recorded in Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'; refusing access until it is explicitly migrated"
     return 1
   fi
+  REMOTE_ENDPOINT_TIER=$(fm_meta_get "$REMOTE_ENDPOINT_META" tier)
+  [ -n "$REMOTE_ENDPOINT_TIER" ] || REMOTE_ENDPOINT_TIER=standard
+  case "$REMOTE_ENDPOINT_TIER" in
+    standard|fast) ;;
+    *)
+      REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint records invalid tier '$REMOTE_ENDPOINT_TIER'; refusing access until it is explicitly migrated"
+      return 1
+      ;;
+  esac
   case "$REMOTE_ENDPOINT_TARGET" in
     "$REMOTE_HERDR_SESSION":?*) ;;
     *)
@@ -118,6 +127,7 @@ print_route() { # <id>
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
+  printf 'tier=%s\n' "$REMOTE_ENDPOINT_TIER"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 

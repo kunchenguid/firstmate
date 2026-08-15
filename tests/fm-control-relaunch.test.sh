@@ -521,6 +521,41 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
 }
 
+test_explicit_standard_tier_overrides_recorded_fast() {
+  local dir out rc
+  dir=$(new_case tier-override rl36)
+  add_ship_task "$dir" rl36 claude
+  sed 's/^tier=standard$/tier=fast/' "$dir/home/state/rl36.meta" > "$dir/home/state/rl36.meta.tmp"
+  mv "$dir/home/state/rl36.meta.tmp" "$dir/home/state/rl36.meta"
+  out=$(run_control "$dir" rl36 relaunch --tier standard --note "return to standard tier"); rc=$?
+  expect_code 0 "$rc" "an explicit standard tier should override the recorded fast tier"$'\n'"$out"
+  [ "$(meta_field "$dir" rl36 tier)" = standard ] \
+    || fail "the replacement metadata should record the explicit standard tier"
+  [ "$(journal_field "$dir" rl36 to_tier)" = standard ] \
+    || fail "the relaunch journal should agree with the replacement tier"
+  pass "fm-control relaunch: explicit standard tier overrides a recorded fast tier"
+}
+
+test_invalid_recorded_tier_refuses_before_stop() {
+  local dir out rc
+  dir=$(new_case invalid-tier rl37)
+  add_ship_task "$dir" rl37 claude
+  sed 's/^tier=standard$/tier=burst/' "$dir/home/state/rl37.meta" > "$dir/home/state/rl37.meta.tmp"
+  mv "$dir/home/state/rl37.meta.tmp" "$dir/home/state/rl37.meta"
+  cp "$dir/home/state/rl37.meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl37 relaunch --tier standard --note "keep running"); rc=$?
+  expect_code 1 "$rc" "an invalid recorded tier should refuse before lifecycle mutation"
+  assert_contains "$out" "invalid recorded tier 'burst'" \
+    "the refusal should name the invalid durable tier"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "an invalid recorded tier must not stop the running agent"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "an invalid recorded tier must send no lifecycle input"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl37.meta" \
+    || fail "an invalid recorded tier refusal must preserve metadata byte-identical"
+  pass "fm-control relaunch: invalid recorded tiers fail closed before stop"
+}
+
 test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
@@ -1325,6 +1360,8 @@ test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
+test_explicit_standard_tier_overrides_recorded_fast
+test_invalid_recorded_tier_refuses_before_stop
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared

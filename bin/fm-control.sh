@@ -620,6 +620,10 @@ resolve_relaunch_profile() {
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
   [ -n "$PRIOR_TIER" ] || PRIOR_TIER=standard
+  case "$PRIOR_TIER" in
+    standard|fast) ;;
+    *) die "task $ID has invalid recorded tier '$PRIOR_TIER'; refusing relaunch before stopping its agent" ;;
+  esac
   if [ "$HARNESS_SET" = 0 ] \
      && [ "$PRIOR_RECORDED_HARNESS" != "$PRIOR_HARNESS" ]; then
     die "task $ID records harness '$PRIOR_RECORDED_HARNESS', whose original launch command cannot be reconstructed from its recorded basename; relaunching without --harness would substitute the canonical adapter '$PRIOR_HARNESS' for the command actually running. Pass an explicit --harness to choose the replacement runtime deliberately"
@@ -691,6 +695,10 @@ resolve_relaunch_profile() {
   else
     TARGET_TIER=standard
   fi
+  case "$TARGET_TIER" in
+    standard|fast) ;;
+    *) die "task $ID resolved invalid target tier '$TARGET_TIER'; refusing relaunch before stopping its agent" ;;
+  esac
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
@@ -837,7 +845,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
-  [ "$TARGET_TIER" = standard ] || spawn_args+=(--tier "$TARGET_TIER")
+  spawn_args+=(--tier "$TARGET_TIER")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
