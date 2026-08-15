@@ -17,9 +17,11 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
-#   7. An authoritatively missing endpoint is recreated in the recorded
-#      worktree, while ambiguous state refuses unchanged and repeat recovery
-#      never creates a duplicate endpoint.
+#   7. A missing endpoint reported by a runtime that ANSWERED is recreated in
+#      the recorded worktree; a missing verdict from an UNREACHABLE runtime
+#      surfaces a decision that changes nothing until it is confirmed, and that
+#      confirmation never reaches a live endpoint; ambiguous agent state refuses
+#      unchanged, and repeat recovery never creates a duplicate endpoint.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -99,8 +101,13 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
+    if [ -f "$D/unreachable" ]; then
+      printf 'no server running on %s\n' "$(cat "$D/socket")" >&2
+      exit 1
+    fi
     for a in "$@"; do
       case "$a" in
+        *socket_path*) cat "$D/socket"; exit 0 ;;
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*)
@@ -113,9 +120,20 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
-  has-session) [ -s "$D/sessions" ]; exit $? ;;
+  list-windows)
+    # $D/unreachable models a tmux server this process cannot reach at all -
+    # the socket is not there, so tmux answers about the SOCKET, never about
+    # the window. Creating a session below starts a server again.
+    if [ -f "$D/unreachable" ]; then
+      printf 'no server running on %s\n' "$(cat "$D/socket")" >&2
+      exit 1
+    fi
+    [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  has-session)
+    [ ! -f "$D/unreachable" ] || exit 1
+    [ -s "$D/sessions" ]; exit $? ;;
   new-session)
+    rm -f "$D/unreachable"
     printf 'new-session\n' >> "$D/lifecycle"
     session=
     window=
@@ -160,6 +178,7 @@ new_case() {
   : > "$dir/fake/keys"
   : > "$dir/fake/lifecycle"
   : > "$dir/fake/sessions"
+  printf '/tmp/fm-fake-tmux/default\n' > "$dir/fake/socket"
   printf 'claude' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
@@ -1409,6 +1428,103 @@ test_ambiguous_endpoint_state_refuses_without_changing_the_record() {
   pass "fm-control relaunch: ambiguous endpoint state fails closed without changing the task"
 }
 
+# A `missing` verdict that came from an UNREACHABLE runtime proves only that
+# this process cannot see a server on that socket. Recreating on that evidence
+# would put a second agent into a worktree the first one may still be working
+# in, so it is a decision for a human rather than an automatic recovery - and
+# equally, not a dead end, because a wiped runtime is exactly what needs
+# recovering. These three pin both halves of that, plus the guarantee that the
+# confirmation can never reach a live endpoint.
+test_unreachable_runtime_surfaces_a_decision_instead_of_recreating() {
+  local dir out rc before_meta before_brief before_status
+  dir=$(new_case unreachable-endpoint rl40)
+  add_ship_task "$dir" rl40 claude
+  printf 'uncommitted work\n' > "$dir/wt/in-progress.txt"
+  : > "$dir/fake/unreachable"
+  before_meta=$(cat "$dir/home/state/rl40.meta")
+  before_brief=$(cat "$dir/home/data/rl40/brief.md")
+  before_status=$(git -C "$dir/wt" status --porcelain=v1 --untracked-files=all)
+
+  out=$(run_control "$dir" rl40 relaunch --note "the runtime host rebooted"); rc=$?
+
+  expect_code 1 "$rc" "an unreachable runtime must not recreate the endpoint on its own"$'\n'"$out"
+  assert_contains "$out" "/tmp/fm-fake-tmux/default" \
+    "the decision should name the exact socket that was consulted"
+  assert_contains "$out" "no server running on" \
+    "the decision should quote the backend's own response"
+  assert_contains "$out" "--confirm-endpoint-gone" \
+    "the decision should name the explicit human-confirmed continuation"
+  [ "$(cat "$dir/home/state/rl40.meta")" = "$before_meta" ] \
+    || fail "the decision must preserve the durable record byte-for-byte"
+  [ "$(cat "$dir/home/data/rl40/brief.md")" = "$before_brief" ] \
+    || fail "the decision must preserve the instructions byte-for-byte"
+  [ "$(git -C "$dir/wt" status --porcelain=v1 --untracked-files=all)" = "$before_status" ] \
+    || fail "the decision must preserve the worktree exactly"
+  [ -z "$(cat "$dir/fake/lifecycle")" ] \
+    || fail "no endpoint may be created before the decision is made"
+  [ -z "$(cat "$dir/fake/literal")" ] && [ -z "$(cat "$dir/fake/keys")" ] \
+    || fail "no lifecycle input may be delivered before the decision is made"
+  [ ! -e "$dir/home/state/rl40.control-relaunch" ] \
+    || fail "an undecided relaunch must not open a durable transaction journal"
+  pass "fm-control relaunch: an unreachable runtime surfaces a decision that recreates nothing and changes nothing"
+}
+
+test_confirmed_unreachable_runtime_recovers_the_same_task() {
+  local dir out rc before_status before_diff
+  dir=$(new_case confirm-unreachable rl41)
+  add_ship_task "$dir" rl41 claude
+  printf 'tracked work in progress\n' >> "$dir/wt/README.md"
+  printf 'preserve exactly\n' > "$dir/wt/uncommitted.txt"
+  before_status=$(git -C "$dir/wt" status --porcelain=v1 --untracked-files=all)
+  before_diff=$(git -C "$dir/wt" diff --binary)
+  : > "$dir/fake/unreachable"
+
+  out=$(run_control "$dir" rl41 relaunch --note "runtime is gone"); rc=$?
+  expect_code 1 "$rc" "the undecided run should stop for a decision"$'\n'"$out"
+  [ -z "$(cat "$dir/fake/lifecycle")" ] || fail "the undecided run must create nothing"
+
+  # Nothing was reconciled in between: the same command, plus the confirmation,
+  # is the whole continuation. That is what makes the refusal a decision rather
+  # than a terminal state.
+  out=$(run_control "$dir" rl41 relaunch --note "runtime is gone" --confirm-endpoint-gone); rc=$?
+
+  expect_code 0 "$rc" "a confirmed unreachable runtime should recover the task"$'\n'"$out"
+  assert_contains "$out" "endpoint-recreated previous-endpoint=fmses:fm-rl41" \
+    "the outcome should distinguish the recreated endpoint"
+  [ "$(cat "$dir/fake/lifecycle")" = "new-session" ] \
+    || fail "confirmed recovery should create exactly one fresh endpoint"
+  [ "$(meta_field "$dir" rl41 window)" = "fmses:fm-rl41" ] \
+    || fail "the durable record should name the recovered endpoint"
+  [ "$(git -C "$dir/wt" status --porcelain=v1 --untracked-files=all)" = "$before_status" ] \
+    || fail "confirmed recovery must preserve the worktree status exactly"
+  [ "$(git -C "$dir/wt" diff --binary)" = "$before_diff" ] \
+    || fail "confirmed recovery must preserve tracked changes exactly"
+  [ "$(cat "$dir/wt/uncommitted.txt")" = "preserve exactly" ] \
+    || fail "confirmed recovery must preserve untracked file contents exactly"
+  pass "fm-control relaunch: confirming a gone runtime recovers the task without touching its work"
+}
+
+test_confirmation_never_recreates_an_endpoint_that_reads_alive() {
+  local dir out rc
+  dir=$(new_case confirm-alive rl42)
+  add_ship_task "$dir" rl42 claude
+
+  out=$(run_control "$dir" rl42 relaunch --note "carry on" --confirm-endpoint-gone); rc=$?
+
+  expect_code 0 "$rc" "an alive endpoint should still relaunch in place"$'\n'"$out"
+  assert_contains "$out" "not applied" \
+    "the confirmation should be reported as not applied at a live endpoint"
+  assert_not_contains "$out" "endpoint-recreated" \
+    "a live endpoint must never be reported as recreated"
+  [ -z "$(cat "$dir/fake/lifecycle")" ] \
+    || fail "a confirmation must never create an endpoint beside a live agent"
+  [ "$(meta_field "$dir" rl42 window)" = "fmses:fm-rl42" ] \
+    || fail "the live endpoint must be reused, not replaced"
+  assert_grep "/exit" "$dir/fake/literal" \
+    "the live agent must still be stopped by the ordinary relaunch path"
+  pass "fm-control relaunch: a human confirmation cannot recreate an endpoint that reads alive"
+}
+
 test_missing_endpoint_relaunch_is_repeat_safe() {
   local dir first second rc
   dir=$(new_case repeat-missing-endpoint rl38)
@@ -1432,6 +1548,9 @@ test_missing_endpoint_relaunch_is_repeat_safe() {
 test_ambiguous_endpoint_state_refuses_without_changing_the_record
 test_spawn_recreate_endpoint_requires_the_control_transaction
 test_missing_endpoint_relaunch_creates_a_fresh_endpoint_without_touching_work
+test_unreachable_runtime_surfaces_a_decision_instead_of_recreating
+test_confirmed_unreachable_runtime_recovers_the_same_task
+test_confirmation_never_recreates_an_endpoint_that_reads_alive
 test_missing_endpoint_relaunch_is_repeat_safe
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata

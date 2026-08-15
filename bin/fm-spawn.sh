@@ -1721,7 +1721,11 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 ENDPOINT_CWD=$PROJ_ABS
 if [ "$RECREATE_ENDPOINT" -eq 1 ]; then
-  WT=$RELAUNCH_WT
+  # Same carve-out as the endpoint-adopting relaunch path below: a secondmate's
+  # home already resolved WT through validate_firstmate_home_for_spawn, the same
+  # validation a fresh secondmate spawn uses, so it must not be overwritten with
+  # the raw recorded value. Every other kind takes the recorded worktree.
+  [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
   ENDPOINT_CWD=$WT
   if [ "$BACKEND" = herdr ]; then
     HERDR_SES=$RELAUNCH_HERDR_SESSION

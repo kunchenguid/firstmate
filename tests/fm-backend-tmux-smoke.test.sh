@@ -169,6 +169,43 @@ state=$(fm_backend_agent_state tmux "$TARGET")
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
 
+# --- how much that missing verdict actually proves --------------------------
+#
+# The same `missing` word covers a reachable server that answered and an
+# unreachable socket that could not. Only the first proves nothing is running
+# at the address, and only the first may recreate the endpoint automatically.
+
+fm_backend_tmux_missing_grade "$TARGET"
+[ "$FM_BACKEND_TMUX_MISSING_GRADE" = strong ] \
+  || fail "a missing window in a REACHABLE session should grade strong, got '$FM_BACKEND_TMUX_MISSING_GRADE'"
+[ -n "$FM_BACKEND_TMUX_MISSING_SOCKET" ] \
+  || fail "a strong missing grade should still name the socket it consulted"
+
+# A private TMUX_TMPDIR with no server on it is the real unreachable case: tmux
+# answers about the socket, never about the window.
+unreachable_tmpdir=$(mktemp -d) || fail "could not stage an empty tmux socket dir"
+# tmux reports the physically resolved socket path, and the OS temp dir reaches
+# it through a symlink on macOS.
+unreachable_real=$(cd "$unreachable_tmpdir" && pwd -P)
+(
+  export TMUX_TMPDIR="$unreachable_tmpdir"
+  unset TMUX
+  fm_backend_tmux_missing_grade "$TARGET"
+  [ "$FM_BACKEND_TMUX_MISSING_GRADE" = ambiguous ] \
+    || fail "an unreachable tmux socket should grade ambiguous, got '$FM_BACKEND_TMUX_MISSING_GRADE'"
+  case "$FM_BACKEND_TMUX_MISSING_SOCKET" in
+    "$unreachable_real"/*) : ;;
+    *) fail "the ambiguous grade should name the exact socket consulted, got '$FM_BACKEND_TMUX_MISSING_SOCKET'" ;;
+  esac
+  [ -n "$FM_BACKEND_TMUX_MISSING_RESPONSE" ] \
+    || fail "the ambiguous grade should carry the backend's own response"
+  state=$(fm_backend_agent_state tmux "$TARGET")
+  [ "$state" = missing ] \
+    || fail "an unreachable socket still classifies missing (that is what the grade exists to qualify), got '$state'"
+) || exit 1
+rm -rf "$unreachable_tmpdir"
+pass "real tmux: a missing verdict grades strong only when a reachable server answered, and ambiguous when the socket could not be reached"
+
 # --- recreate the exact missing endpoint ------------------------------------
 
 recreated_id=$(fm_backend_tmux_recreate_task "$TARGET" "$HOME") \

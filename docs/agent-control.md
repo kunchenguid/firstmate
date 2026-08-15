@@ -32,7 +32,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
-| `relaunch` | Replace the running agent with a new one in the same worktree, normally reusing its endpoint and recreating it before launch only when the backend authoritatively reports it missing, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the validated replacement endpoint, and the durable record names both that endpoint and the harness that is actually running. |
+| `relaunch` | Replace the running agent with a new one in the same worktree, normally reusing its endpoint and recreating it before launch only when a runtime that answered reports it missing, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the validated replacement endpoint, and the durable record names both that endpoint and the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -70,14 +70,36 @@ It is not deterministic across the verified adapters: codex and grok resume only
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Classify and stop the old agent.**
    An alive or agent-free endpoint follows the ordinary `exit` postcondition.
-   An authoritatively missing endpoint has no agent to stop, so the transaction records that fact and proceeds without sending lifecycle input.
+   A missing endpoint has no agent to stop, so the transaction records that fact and proceeds without sending lifecycle input - subject to the missing-endpoint decision below.
    Ambiguous, unreadable, and unverified states refuse before the progress note or durable record changes.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`.
    The ordinary path adopts the recorded endpoint and worktree.
    Missing-endpoint recovery asks the launch owner to recheck that the endpoint is still missing, recreate only the shell endpoint in the recorded worktree, and publish the validated replacement identity.
+   A `kind=secondmate` recovery keeps the home that `validate_firstmate_home_for_spawn` resolved rather than the raw recorded worktree, exactly as the endpoint-adopting path does.
    Both paths clear the previous harness's per-task wiring and arm a fresh busy generation.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
+
+### The missing-endpoint decision
+
+`missing` is not one observation. It is two, and only one of them proves that nothing can still be running at the recorded address.
+
+| Verdict | What was observed | What relaunch does |
+| --- | --- | --- |
+| **strong missing** | A runtime **answered**: tmux read the session inventory and the recorded window is not in it, or tmux replied `can't find session` - which only a live server can say. Herdr's classifier reaches `missing` only from a successful pane read, so its missing is always strong. | Recreates the endpoint automatically in the recorded worktree. Nothing can be running at an address a reachable runtime says is empty. |
+| **ambiguous missing** | The runtime itself could **not be reached** - tmux answered `no server running on <socket>` or `error connecting to <socket>`. | Stops and asks. Nothing is created, stopped, or written. |
+| **alive** | A verified harness agent is running. | Never recreates an endpoint. The ordinary relaunch replaces the agent in the endpoint it already has. |
+
+An unreachable socket says only that *this process* cannot see a runtime there.
+It cannot distinguish a wiped runtime from a server behind a different `TMUX_TMPDIR`, socket name, or user - and on the second reading, recreating the endpoint would start a second agent in a worktree the first one is still working in.
+
+So an ambiguous verdict is surfaced as a decision rather than a dead end - a wiped runtime is exactly the case that needs recovery, and a human can see what a socket probe cannot.
+The refusal names the exact socket consulted and the backend's own response, states that the durable record, progress note, and worktree are untouched, and names the continuation: confirm no runtime anywhere holds that endpoint and no agent is still working in the worktree, then re-run with `--confirm-endpoint-gone`.
+
+That confirmation grants no standing authority.
+It is consumed by the one invocation that carries it, and only while the endpoint still classifies missing.
+`fm-spawn --relaunch` re-reads the state under the lifecycle locks and refuses anything but `missing`, and the backend's create step classifies the address once more before creating anything, so a runtime that has come back - or an endpoint that reads alive - still refuses.
+Passing `--confirm-endpoint-gone` at an alive or agent-free endpoint applies nothing: it is reported as not applied, and the relaunch proceeds as the ordinary in-place replacement.
 
 ### Failure and rollback
 
@@ -105,6 +127,8 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   zellij, orca, and cmux are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
+- Creating a replacement endpoint requires a `missing` verdict from a runtime that **answered**.
+  An unreachable runtime cannot prove that no agent holds the worktree, so it becomes a human decision (`--confirm-endpoint-gone`) rather than an automatic recovery.
 - `fm-spawn --relaunch` independently requires either a positively agent-free recorded endpoint or an explicit missing-endpoint recovery whose `missing` verdict it rechecks under the lifecycle locks.
   It verifies the adopted or recreated shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
 

@@ -383,6 +383,68 @@ EOF
   esac
 }
 
+# fm_backend_tmux_missing_grade: how much a `missing` verdict actually proves.
+# See bin/fm-backend.sh's fm_backend_missing_grade for the shared grade
+# vocabulary. Two very different observations both read `missing` above:
+#
+#   strong     a REACHABLE server answered - either a successful inventory that
+#              omits the recorded window, or "can't find session", which only a
+#              live server can say. The window is gone from the server that
+#              would host it, so nothing can still be running there.
+#   ambiguous  the server or its socket could not be reached at all. That says
+#              this process cannot see a tmux server on that socket; it cannot
+#              distinguish a wiped runtime from a server this process is simply
+#              not looking at (a different TMUX_TMPDIR, socket name, or user).
+#
+# Sets FM_BACKEND_TMUX_MISSING_GRADE, plus the socket tmux itself named and the
+# response it gave, so a caller can put the concrete evidence in front of a
+# human instead of a bare verdict.
+FM_BACKEND_TMUX_MISSING_GRADE=
+FM_BACKEND_TMUX_MISSING_SOCKET=
+FM_BACKEND_TMUX_MISSING_RESPONSE=
+fm_backend_tmux_missing_grade() {  # <target>
+  local target=$1 session windows inventory_status rest
+  FM_BACKEND_TMUX_MISSING_GRADE=ambiguous
+  FM_BACKEND_TMUX_MISSING_SOCKET=
+  FM_BACKEND_TMUX_MISSING_RESPONSE=
+  case "$target" in
+    *:*:*|'':*|*:'') FM_BACKEND_TMUX_MISSING_RESPONSE="endpoint '$target' is malformed"; return 0 ;;
+    *:*) ;;
+    *) FM_BACKEND_TMUX_MISSING_RESPONSE="endpoint '$target' is malformed"; return 0 ;;
+  esac
+  session=${target%%:*}
+  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+    inventory_status=0
+  else
+    inventory_status=$?
+  fi
+  if [ "$inventory_status" -eq 0 ]; then
+    FM_BACKEND_TMUX_MISSING_GRADE=strong
+    FM_BACKEND_TMUX_MISSING_RESPONSE="session inventory read; it does not list ${target#*:}"
+    FM_BACKEND_TMUX_MISSING_SOCKET=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || true
+    return 0
+  fi
+  FM_BACKEND_TMUX_MISSING_RESPONSE=$(printf '%s\n' "$windows" | head -n 1)
+  [ -n "$FM_BACKEND_TMUX_MISSING_RESPONSE" ] \
+    || FM_BACKEND_TMUX_MISSING_RESPONSE="tmux list-windows exited $inventory_status with no message"
+  case "$windows" in
+    *"can't find session:"*)
+      FM_BACKEND_TMUX_MISSING_GRADE=strong
+      FM_BACKEND_TMUX_MISSING_SOCKET=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || true
+      ;;
+    *"no server running on "*)
+      rest=${windows#*"no server running on "}
+      FM_BACKEND_TMUX_MISSING_SOCKET=${rest%%$'\n'*}
+      ;;
+    *"error connecting to "*)
+      rest=${windows#*"error connecting to "}
+      rest=${rest%%$'\n'*}
+      FM_BACKEND_TMUX_MISSING_SOCKET=${rest% (*}
+      ;;
+  esac
+  return 0
+}
+
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
 fm_backend_tmux_agent_alive() {  # <target>
