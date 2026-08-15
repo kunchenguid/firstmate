@@ -1997,7 +1997,7 @@ fm_backend_herdr_relaunch_claim_path() {  # <state> <task-id>
 fm_backend_herdr_relaunch_claim_create() {  # <state> <task-id> <session> <workspace> <task-label>
   local state=$1 id=$2 session=$3 workspace=$4 label=$5 path token claim_label tmp
   case "$id:$session:$workspace:$label" in
-    ''|*$'\n'*|*'\r'*|:::*) return 1 ;;
+    *$'\n'*|*'\r'*|:::*) return 1 ;;
   esac
   [ -d "$state" ] || return 1
   mkdir -p "$state" || return 1
@@ -2582,7 +2582,7 @@ fm_backend_herdr_relaunch_missing_pane_preflight() {  # <session> <workspace> <o
 
 fm_backend_herdr_relaunch_missing_pane() {  # <session> <workspace> <old-tab> <old-pane> <label> <cwd> [<journal> <task-id> <home>]
   local session=$1 workspace=$2 old_tab=$3 old_pane=$4 label=$5 cwd=$6 journal=${7:-} id=${8:-} home=${9:-}
-  local replacement= claim_recovery claim_status claim_path claim_tab
+  local replacement='' claim_recovery claim_status claim_path claim_tab
   if [ -n "$id" ] && [ -n "$home" ]; then
     claim_path=$(fm_backend_herdr_relaunch_claim_path "$home/state" "$id") || return 1
     if [ -e "$claim_path" ] || [ -L "$claim_path" ]; then

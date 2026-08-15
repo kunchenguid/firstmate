@@ -250,9 +250,10 @@ NEW_MISSING_TAB=$(grep '^herdr_tab_id=' "$HOME_DIR/state/$MISSING_ID.meta" | cut
   || fail "vanished-pane relaunch did not publish a distinct replacement endpoint: $OUT"
 "$ROOT/bin/fm-herdr-lab.sh" run "$SESSION" pane get "$NEW_MISSING_PANE" >/dev/null \
   || fail "vanished-pane relaunch did not create its recorded replacement pane"
-grep -qx "tab_id=$NEW_MISSING_TAB" "$MISSING_JOURNAL" \
-  && grep -qx "pane_id=$NEW_MISSING_PANE" "$MISSING_JOURNAL" \
-  || fail "vanished-pane relaunch did not advance its presentation binding"
+if ! grep -qx "tab_id=$NEW_MISSING_TAB" "$MISSING_JOURNAL" \
+   || ! grep -qx "pane_id=$NEW_MISSING_PANE" "$MISSING_JOURNAL"; then
+  fail "vanished-pane relaunch did not advance its presentation binding"
+fi
 [ -f "$WT/uncommitted-missing-pane.txt" ] \
   || fail "vanished-pane relaunch lost an uncommitted worktree file"
 grep -qx 'pr=https://example.invalid/firstmate/pull/1' "$HOME_DIR/state/$MISSING_ID.meta" \
