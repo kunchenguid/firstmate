@@ -55,6 +55,10 @@
       "target": "docs/documentation-audiences.json"
     },
     {
+      "source": ".agents/skills/decision-reconciliation/SKILL.md",
+      "target": "docs/decision-reconciliation.md"
+    },
+    {
       "source": "docs/calm.md",
       "target": "docs/calm-mode-feasibility.md"
     },
@@ -130,6 +134,10 @@
     },
     {
       "path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/decision-reconciliation/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -242,6 +250,10 @@
     },
     {
       "path": "docs/decision-hold-lifecycle.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/decision-reconciliation.md",
       "audience": "maintainer-architecture"
     },
     {
