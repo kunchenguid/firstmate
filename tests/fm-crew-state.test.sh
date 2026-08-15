@@ -291,6 +291,24 @@ outcome: failed
 EOF
 }
 
+# A run aborted while parked: the terminal `outcome` is set while `status` still
+# reads like the in-flight step it was parked at.
+run_cancelled_while_parked() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 6m40s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[1]{id,severity,file,line,action,description}:
+    r1,error,b.go,,ask-user,changes product behavior
+gate: review
+outcome: cancelled
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -1413,6 +1431,27 @@ test_unreadable_terminal_run_head_not_attributed() {
   pass "terminal run whose head the worktree cannot read is not attributed"
 }
 
+# `outcome` outranks `status`: a run aborted while parked keeps a live-looking
+# status word, so reading status alone would send a dead run through the live
+# whitelist and report the crew as parked at a gate nobody will ever answer.
+test_cancelled_while_parked_run_not_attributed() {
+  reset_fakes
+  local d out
+  d=$(new_case cancelled-while-parked)
+  make_repo_on_branch "$d/wt" fm/feat-aborted
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/aborted.meta" "window=fm:fm-aborted" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: reworking after the abort\n' > "$d/state/aborted.status"
+  FM_FAKE_RUN_HEAD="$UNPUBLISHED_SHA"
+  FM_FAKE_AXI_STATUS="$(run_cancelled_while_parked fm/feat-aborted)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" aborted
+  out=$(run_crew_state "$d" aborted)
+  assert_not_contains "$out" "state: parked" "a cancelled run must not park the crew at its abandoned gate"
+  assert_contains "$out" "state: working" "the crew's own current-state sources answer instead"
+  pass "run cancelled while parked is judged by outcome, not by its stale status word"
+}
+
 # Supersession: once the branch's newest run is unbindable, the scan must stop
 # rather than reaching back to an older row that still matches this worktree.
 test_superseded_older_run_never_answers_for_the_branch() {
@@ -1517,6 +1556,7 @@ test_unpublished_pipeline_head_beats_older_failed_run
 test_coarse_pending_run_reports_working
 test_unpublished_pipeline_head_attributed_on_own_branch
 test_unreadable_terminal_run_head_not_attributed
+test_cancelled_while_parked_run_not_attributed
 test_superseded_older_run_never_answers_for_the_branch
 test_other_branch_live_run_with_unreadable_head_ignored
 
