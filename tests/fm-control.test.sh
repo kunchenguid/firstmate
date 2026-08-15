@@ -5,7 +5,9 @@
 # stubbed session provider, no real agent - through the executable interface
 # firstmate actually calls:
 #   1. Adapter contract: every verified harness gets its own verified exit
-#      command and interrupt key, delivered as bytes to the endpoint.
+#      mechanism - a composer command, or an exit KEY for an adapter that has
+#      no command - and its own interrupt key, delivered as bytes to the
+#      endpoint.
 #   2. Backend capability: a backend that cannot deliver the harness's
 #      interrupt key, and a backend with no recovery-grade agent-state
 #      classifier, both refuse instead of acting blind.
@@ -35,23 +37,31 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse cline"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
 # clear that must FOLLOW the interrupt key, empty for every adapter that leaves
-# its composer empty on cancel.
-verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repeat, clear key
+# its composer empty on cancel. The fifth is the exit KEY, and exactly one of
+# the two exit fields carries a value: cline has no composer exit command at all
+# and is stopped by Ctrl+C, which is the same key grok uses to INTERRUPT - so an
+# adapter's two axes must never be inferred from one another.
+#
+# The separator is `|` rather than a tab because a tab is IFS whitespace, which
+# `read` collapses - an empty field in any position would silently shift every
+# field after it, and two of the five are legitimately empty.
+verified_adapter_contract() {  # <harness> -> exit command|interrupt key|repeat|clear key|exit key
   case "$1" in
-    claude) printf '/exit\tEscape\t1\t\n' ;;
-    codex) printf '/quit\tEscape\t1\t\n' ;;
-    opencode) printf '/exit\tEscape\t2\t\n' ;;
-    pi) printf '/quit\tEscape\t1\t\n' ;;
-    pi-signed) printf '/quit\tEscape\t1\t\n' ;;
-    grok) printf '/exit\tC-c\t1\t\n' ;;
-    kimi) printf '/exit\tEscape\t1\t\n' ;;
-    cursor) printf '/exit\tEscape\t1\t\n' ;;
-    muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    claude) printf '/exit|Escape|1||\n' ;;
+    codex) printf '/quit|Escape|1||\n' ;;
+    opencode) printf '/exit|Escape|2||\n' ;;
+    pi) printf '/quit|Escape|1||\n' ;;
+    pi-signed) printf '/quit|Escape|1||\n' ;;
+    grok) printf '/exit|C-c|1||\n' ;;
+    kimi) printf '/exit|Escape|1||\n' ;;
+    cursor) printf '/exit|Escape|1||\n' ;;
+    muse) printf '/exit|Escape|1|C-u|\n' ;;
+    cline) printf '|Escape|1||C-c\n' ;;
     *) return 1 ;;
   esac
 }
@@ -71,7 +81,10 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
 # that is the harness's exit command flips `command` to a shell (the agent
 # stopped), and a literal carrying a launch brief flips it to the value in
 # `becomes` (a new agent came up). FM_FAKE_NEVER_DIES suppresses the first, so
-# a stubborn agent can be tested too.
+# a stubborn agent can be tested too. FM_FAKE_EXIT_KEY names the one KEY that
+# stops this agent, for an adapter that exits on a key rather than a command;
+# it is per-case rather than global because the key that stops one adapter only
+# interrupts another.
 make_tmux_stub() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -102,6 +115,10 @@ case "${1:-}" in
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
+      if [ -z "${FM_FAKE_NEVER_DIES:-}" ] && [ -n "${FM_FAKE_EXIT_KEY:-}" ] \
+         && [ "$payload" = "$FM_FAKE_EXIT_KEY" ]; then
+        printf 'zsh' > "$D/command"
+      fi
       if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
@@ -197,6 +214,7 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_EXIT_KEY="${FM_FAKE_EXIT_KEY:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -217,7 +235,7 @@ keys_sent() {  # <case-dir>
 # --- 1. adapter contract across every verified harness -----------------------
 
 test_exit_types_each_harness_verified_command() {
-  local dir out rc harness expected key repeat clear
+  local dir out rc harness expected key repeat clear exit_key
   for harness in $VERIFIED_HARNESSES; do
     dir=$(new_case "exit-$harness")
     add_task "$dir" t1 "$harness"
@@ -226,18 +244,31 @@ test_exit_types_each_harness_verified_command() {
     else
       alive_as "$dir" "$harness"
     fi
-    out=$(run_control "$dir" t1 exit); rc=$?
+    IFS='|' read -r expected key repeat clear exit_key \
+      <<< "$(verified_adapter_contract "$harness")"
+    out=$(FM_FAKE_EXIT_KEY=$exit_key run_control "$dir" t1 exit); rc=$?
     expect_code 0 "$rc" "exit on $harness should succeed"$'\n'"$out"
-    IFS=$'\t' read -r expected key repeat clear <<< "$(verified_adapter_contract "$harness")"
-    [ "$(literals "$dir")" = "$expected" ] \
-      || fail "exit on $harness should type exactly '$expected', got: $(literals "$dir")"
+    if [ -n "$exit_key" ]; then
+      # An adapter with no composer exit command is stopped by its exit KEY, and
+      # nothing may be typed at it: text sent to a composer that has no exit
+      # command is just a prompt the agent would answer instead of stopping.
+      [ "$(keys_sent "$dir")" = "$exit_key" ] \
+        || fail "exit on $harness should send exactly the key $exit_key, got: $(keys_sent "$dir")"
+      [ -z "$(literals "$dir")" ] \
+        || fail "exit on $harness must type no text, got: $(literals "$dir")"
+    else
+      [ "$(literals "$dir")" = "$expected" ] \
+        || fail "exit on $harness should type exactly '$expected', got: $(literals "$dir")"
+      [ -z "$(keys_sent "$dir")" ] \
+        || fail "exit on $harness must send no control key, got: $(keys_sent "$dir")"
+    fi
     assert_contains "$out" "stopped t1 harness=$harness" "exit should report the stop for $harness"
   done
-  pass "fm-control exit: every verified harness gets its own verified exit command"
+  pass "fm-control exit: every verified harness gets its own verified exit command or exit key"
 }
 
 test_interrupt_sends_each_harness_verified_key() {
-  local dir out rc harness expected key repeat clear got want
+  local dir out rc harness expected key repeat clear exit_key got want
   for harness in $VERIFIED_HARNESSES; do
     dir=$(new_case "int-$harness")
     add_task "$dir" t1 "$harness"
@@ -248,7 +279,8 @@ test_interrupt_sends_each_harness_verified_key() {
     fi
     out=$(run_control "$dir" t1 interrupt); rc=$?
     expect_code 0 "$rc" "interrupt on $harness should succeed"$'\n'"$out"
-    IFS=$'\t' read -r expected key repeat clear <<< "$(verified_adapter_contract "$harness")"
+    IFS='|' read -r expected key repeat clear exit_key \
+      <<< "$(verified_adapter_contract "$harness")"
     want=$(for _ in $(seq 1 "$repeat"); do printf '%s\n' "$key"; done)
     [ -z "$clear" ] || want="$want"$'\n'"$clear"
     got=$(keys_sent "$dir")
@@ -800,6 +832,28 @@ test_agent_that_does_not_stop_fails_closed() {
   pass "fm-control exit: a stubborn agent reports delivered input and an unconfirmed exit"
 }
 
+# The same unconfirmed-exit line for an adapter stopped by a KEY. This is the
+# one status line an operator or supervisor parses to decide what happened, so
+# the field naming the delivered mechanism has to stay a single well-formed
+# key=value token on both exit paths, not just the command one.
+test_stubborn_key_exit_agent_names_the_key_mechanism() {
+  local dir out rc
+  dir=$(new_case stubborn-key)
+  add_task "$dir" t1 cline
+  alive_as "$dir" cline
+  out=$(env FM_FAKE_NEVER_DIES=1 FM_FAKE_EXIT_KEY=C-c PATH="$dir/fakebin:$PATH" \
+    FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" FM_CONTROL_POLL=0.01 \
+    FM_CONTROL_EXIT_WAIT=0.05 "$CONTROL" t1 exit 2>&1); rc=$?
+  expect_code 1 "$rc" "an agent that ignores its exit key should fail closed"
+  assert_contains "$out" "exit-delivered t1 interrupt=not-needed exit-key=delivered agent-state=alive exit=unconfirmed" \
+    "the failure should name the exit KEY as the delivered mechanism"
+  [ "$(keys_sent "$dir")" = C-c ] \
+    || fail "a stubborn key-exit agent should receive its exit key, got: $(keys_sent "$dir")"
+  [ -z "$(literals "$dir")" ] \
+    || fail "a stubborn key-exit agent must be typed nothing, got: $(literals "$dir")"
+  pass "fm-control exit: an unconfirmed key exit names the key mechanism in one parseable field"
+}
+
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed() {
   local dir out rc
   dir=$(new_case nosettle)
@@ -901,6 +955,7 @@ test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
+test_stubborn_key_exit_agent_names_the_key_mechanism
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker

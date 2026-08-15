@@ -55,16 +55,23 @@ case "$REFUSAL" in
   *) fail "grok no longer names its accepted effort levels when refusing one; re-verify the mapping in bin/fm-spawn.sh (got: $REFUSAL)" ;;
 esac
 
+# The refusal renders its vocabulary as a delimited list, so each tier is matched
+# as a whole word. An unanchored substring would defeat the guard in both
+# directions: `high` occurs inside `xhigh`, so dropping the plain tier would go
+# unnoticed, and a refusal saying `maximum` would be misread as offering `max`.
+# `grep -w` rather than a hand-rolled boundary group: BSD grep does not honour
+# `^` inside an alternation, so `(^|[^a-z])` silently matches nothing there.
+tier_offered() {  # <tier>
+  printf '%s' "$REFUSAL" | grep -qw "$1"
+}
+
 # firstmate maps exactly what the binary accepts and omits what it rejects.
 for tier in low medium high xhigh; do
-  case "$REFUSAL" in
-    *"$tier"*) ;;
-    *) fail "grok no longer accepts effort '$tier', which bin/fm-spawn.sh still passes; correct the mapping" ;;
-  esac
+  tier_offered "$tier" \
+    || fail "grok no longer accepts effort '$tier', which bin/fm-spawn.sh still passes; correct the mapping"
 done
-case "$REFUSAL" in
-  *max*) fail "grok now accepts effort 'max', which bin/fm-spawn.sh still omits; correct the mapping" ;;
-esac
+! tier_offered max \
+  || fail "grok now accepts effort 'max', which bin/fm-spawn.sh still omits; correct the mapping"
 pass "grok's accepted effort vocabulary is still low|medium|high|xhigh with no max"
 
 # The highest tier firstmate passes must actually work, not merely parse. A
