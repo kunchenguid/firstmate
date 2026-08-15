@@ -6,15 +6,18 @@
 # Subcommands:
 #
 #   arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
+#       [--deadline-secs N]
 #       Mint a fresh incarnation gen token, write the gen sidecar, and seed
 #       the record at seq=1 (default: busy, source fm-spawn, event
 #       launch-brief - the launch prompt IS a submitted turn). Prints the
 #       minted gen on stdout so the caller can embed it into adapter wiring.
 #       Arming again replaces the previous incarnation: late events carrying
 #       the old gen are rejected as stale from then on.
+#       --deadline-secs is valid only for a busy record and stores the absolute
+#       deadline alongside that open turn.
 #
 #   apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen)
-#         --source S --event E
+#         --source S --event E [--deadline-secs N]
 #       Append one lifecycle event: validate the gen against the armed
 #       sidecar, advance seq under the lock, atomically replace the record.
 #       Adapter wiring passes the exact --gen embedded at arm time, so a
@@ -22,6 +25,8 @@
 #       Claude fm-send --key Escape path (fm-interrupt) and firstmate recovery
 #       paths (fm-recovery) may pass --current-gen to bind to the incarnation
 #       armed right now.
+#       A Codex Stop arriving after its prior open deadline records unknown
+#       deadline-expired instead of rewriting the timed-out turn as idle.
 #
 #   retire <state-dir> <id> (--gen G | --current-gen)
 #       Remove one incarnation's sidecar and record while holding the same
@@ -37,8 +42,8 @@ set -u
 usage() {
   cat >&2 <<'EOF'
 usage:
-  fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
-  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
+  fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E] [--deadline-secs N]
+  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E [--deadline-secs N]
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
 See the header comment for the full contract.
 EOF
@@ -67,6 +72,8 @@ GEN=
 USE_CURRENT_GEN=0
 SOURCE=
 EVENT=
+DEADLINE_SECS=
+DEADLINE=none
 if [ "$CMD" = apply ]; then
   NEW_STATE=${1:-}
   case "$NEW_STATE" in busy|idle|unknown) shift ;; *) usage ;; esac
@@ -82,6 +89,7 @@ while [ $# -gt 0 ]; do
     --current-gen) USE_CURRENT_GEN=1; shift ;;
     --source) SOURCE=${2:-}; shift 2 || usage ;;
     --event) EVENT=${2:-}; shift 2 || usage ;;
+    --deadline-secs) DEADLINE_SECS=${2:-}; shift 2 || usage ;;
     *) usage ;;
   esac
 done
@@ -89,6 +97,11 @@ if [ "$CMD" != retire ]; then
   case "$NEW_STATE" in busy|idle|unknown) : ;; *) usage ;; esac
   fm_busy_token_valid "$SOURCE" || { echo "error: invalid --source" >&2; exit 1; }
   fm_busy_token_valid "$EVENT" || { echo "error: invalid --event" >&2; exit 1; }
+fi
+if [ -n "$DEADLINE_SECS" ]; then
+  case "$DEADLINE_SECS" in ''|0|0*|*[!0-9]*) usage ;; esac
+  [ "$NEW_STATE" = busy ] || usage
+  DEADLINE=$(( $(date +%s) + DEADLINE_SECS ))
 fi
 
 REC=$(fm_busy_record_path "$STATE" "$ID")
@@ -121,8 +134,8 @@ lock_release() { rmdir "$LOCK" 2>/dev/null || true; }
 write_record() {  # <gen> <seq>
   local tmp
   tmp="$REC.tmp.$$"
-  printf 'v1 gen=%s seq=%s state=%s source=%s event=%s ts=%s\n' \
-    "$1" "$2" "$NEW_STATE" "$SOURCE" "$EVENT" "$(date +%s)" > "$tmp" || return 1
+  printf 'v1 gen=%s seq=%s state=%s source=%s event=%s ts=%s deadline=%s\n' \
+    "$1" "$2" "$NEW_STATE" "$SOURCE" "$EVENT" "$(date +%s)" "$DEADLINE" > "$tmp" || return 1
   mv -f "$tmp" "$REC"
 }
 
@@ -193,6 +206,7 @@ if [ "$CMD" = retire ]; then
   exit 0
 fi
 OLD_SEQ=0
+old_line=
 if [ -f "$REC" ]; then
   old_line=$(head -n 1 "$REC" 2>/dev/null || true)
   case "$old_line" in
@@ -202,6 +216,29 @@ if [ -f "$REC" ]; then
       case "$old_seq_field" in
         ''|*[!0-9]*) OLD_SEQ=0 ;;
         *) OLD_SEQ=$old_seq_field ;;
+      esac
+      ;;
+  esac
+fi
+if [ "$NEW_STATE" = idle ] && [ "$SOURCE" = codex-hook ]; then
+  case "$old_line" in
+    *' state=busy '*deadline=none)
+      NEW_STATE=unknown
+      EVENT=deadline-missing
+      ;;
+    *' state=busy '*deadline=*)
+      old_deadline=${old_line##* deadline=}
+      case "$old_deadline" in
+        ''|*[!0-9]*)
+          NEW_STATE=unknown
+          EVENT=deadline-missing
+          ;;
+        *)
+          if [ "$(date +%s)" -ge "$old_deadline" ]; then
+            NEW_STATE=unknown
+            EVENT=deadline-expired
+          fi
+          ;;
       esac
       ;;
   esac
