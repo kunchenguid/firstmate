@@ -21,6 +21,11 @@ HARNESS="$ROOT/bin/fm-harness.sh"
 . "$ROOT/bin/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$ROOT/bin/fm-control-lib.sh"
+# The tmux backend adapter owns the process-name classification the control
+# plane depends on; it needs its lib dir declared before sourcing.
+FM_BACKEND_LIB_DIR="$ROOT/bin"
+# shellcheck source=bin/backends/tmux.sh
+. "$ROOT/bin/backends/tmux.sh"
 
 TMP_ROOT=$(fm_test_tmproot cline-harness)
 
@@ -461,6 +466,38 @@ test_cline_source_cannot_classify_another_adapter() {
   pass "fm_busy_classify: the cline source never classifies another adapter"
 }
 
+# --- gap 2: the pane's agent must be attributable, not just tabled ----------
+#
+# Registering control mechanics is necessary but not sufficient. Every lifecycle
+# verb refuses unless the backend can PROVE an agent is running, and cline runs
+# as a bundled Node script whose reported command name is a bare `node`. Its
+# identity comes from its install path instead, exactly like cursor-agent's.
+# Without that, fm-control refuses a live cline worker a second time - for an
+# unattributable endpoint rather than for unverified mechanics.
+
+test_cline_install_path_classifies_as_an_agent() {
+  local real=/Users/x/.local/share/fnm/node-versions/v22/installation/lib/node_modules/cline/bin/.cline
+  [ "$(fm_backend_tmux_classify_process_name "$real")" = agent ] \
+    || fail "cline's real install path must classify as an agent, or its pane reads ambiguous"
+  # argv[0] carries it on the platforms where ps reports argv rather than comm.
+  [ "$(fm_backend_tmux_classify_process_name '' "$real")" = agent ] \
+    || fail "cline's install path must classify as an agent through argv[0] too"
+  pass "fm-backend tmux: a real cline install path classifies as a live agent"
+}
+
+test_an_unrelated_node_process_is_still_not_an_agent() {
+  # The match is an exact `cline` path COMPONENT, never a substring, so a
+  # stranger's node pane stays unattributed rather than being claimed. Callers
+  # fold `other` into ambiguous, never into dead, so this is what stops an
+  # unrelated pane from being reported as agent-free.
+  local h
+  for h in /usr/local/bin/node /Users/x/projects/clinent/bin/server.js /opt/homebrew/bin/declined; do
+    [ "$(fm_backend_tmux_classify_process_name "$h")" != agent ] \
+      || fail "'$h' must not classify as a cline agent"
+  done
+  pass "fm-backend tmux: an unrelated node or cline-like path is never claimed as an agent"
+}
+
 # --- gap 2: the executable control plane ------------------------------------
 
 test_control_plane_knows_cline() {
@@ -558,6 +595,8 @@ test_classify_reports_cline_verdicts_with_their_source
 test_classify_is_unknown_when_the_binding_cannot_be_resolved
 test_prior_session_is_excluded_from_the_binding
 test_cline_source_cannot_classify_another_adapter
+test_cline_install_path_classifies_as_an_agent
+test_an_unrelated_node_process_is_still_not_an_agent
 test_control_plane_knows_cline
 test_control_plane_uses_clines_own_keys
 test_control_plane_exits_cline_by_key_not_command

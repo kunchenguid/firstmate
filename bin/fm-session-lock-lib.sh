@@ -23,7 +23,17 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi)
+#
+# cline is here but NOT in FM_HARNESS_RE, and the split is deliberate. cline
+# runs as a bundled Node script, so its reported command name is a bare `node`
+# that no name regex can own, while `ps -o comm=` carries its install path
+# (.../node_modules/cline/bin/.cline) - the same shape cursor-agent has. The
+# path rule below matches an exact `cline` path COMPONENT rather than a
+# substring, so an unrelated node process still matches nothing and stays
+# unattributed rather than being claimed as an agent. Without this entry the
+# tmux liveness classifier reads a live cline pane as `ambiguous`, and every
+# lifecycle verb that must prove an agent is running refuses it.
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi cline)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.

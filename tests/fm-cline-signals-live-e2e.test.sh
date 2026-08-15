@@ -95,8 +95,18 @@ OPERATOR_BEFORE=
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-cline-signals.XXXXXX") || fail "could not create the isolated cline lab"
 trap cleanup EXIT
-mkdir -p "$LAB/workspace"
+mkdir -p "$LAB/workspace" "$LAB/bin"
 git -C "$LAB/workspace" init -q || fail "could not initialize the isolated cline workspace"
+
+# Route firstmate's own plain `tmux` calls at the isolated lab server, so the
+# liveness read below inspects this pane rather than the operator's session.
+cat > "$LAB/bin/tmux" <<SH
+#!/usr/bin/env bash
+exec "$REAL_TMUX" -L "$SOCKET" "\$@"
+SH
+chmod +x "$LAB/bin/tmux"
+PATH="$LAB/bin:$PATH"
+export PATH
 WORKSPACE=$(cd "$LAB/workspace" && pwd -P) || fail "could not resolve the isolated cline workspace"
 
 printf '{"planActMode": "plan"}\n' > "$LAB/plan-settings.json"
@@ -106,6 +116,8 @@ printf '{"planActMode": "act"}\n' > "$LAB/act-settings.json"
 . "$ROOT/bin/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$ROOT/bin/fm-control-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$ROOT/bin/fm-backend.sh"
 
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n control -c "$WORKSPACE" -x 200 -y 50 \
   || fail "could not start the isolated tmux server"
@@ -143,6 +155,15 @@ launch_cline "$LAB/act-settings.json"
 wait_for_pane 40 '○ Plan ● Act' \
   || fail "the firstmate act-mode settings redirect did not start the real TUI in act mode"
 pass "the act-mode settings redirect starts the real TUI in act mode"
+
+# Every lifecycle verb refuses an endpoint it cannot positively attribute, and
+# cline runs as a bundled Node script reporting a bare `node`. This is the
+# second reason fm-control refused a live cline worker, separate from its
+# missing mechanics, so assert it against the real process rather than a fixture.
+AGENT_STATE=$(fm_backend_agent_state tmux "$TARGET" 2>/dev/null || true)
+[ "$AGENT_STATE" = alive ] \
+  || fail "a live cline pane reads agent state '$AGENT_STATE'; every lifecycle verb refuses anything but a positively classified endpoint"
+pass "a live cline pane is positively attributed as a running agent"
 
 # Bind the pane to its own session record exactly as fm-spawn does.
 STATE="$LAB/state"
