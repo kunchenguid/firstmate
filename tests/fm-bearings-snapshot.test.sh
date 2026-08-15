@@ -40,6 +40,25 @@ SH
 echo "gh $*" >> "$NET_LOG"
 if [ "${FAKE_GH_FAIL:-0}" = 1 ]; then exit 1; fi
 if [ "${FAKE_GH_SLEEP:-0}" = 1 ]; then sleep 30; fi
+if [ -n "${FAKE_GH_ARGMAX_ROWS:-}" ]; then
+  python3 - "$FAKE_GH_ARGMAX_ROWS" "${FAKE_GH_ARGMAX_BYTES:-48000}" <<'PY'
+import json
+import sys
+rows = []
+for number in range(1, int(sys.argv[1]) + 1):
+    rows.append({
+        "number": number,
+        "title": "Synthetic PR",
+        "url": "https://github.com/acme/repo/pull/" + str(number) + "/" + ("x" * int(sys.argv[2])),
+        "headRefName": "fm/pr-" + str(number),
+        "reviewDecision": "APPROVED",
+        "mergeable": "MERGEABLE",
+        "statusCheckRollup": [],
+    })
+json.dump(rows, sys.stdout)
+PY
+  exit 0
+fi
 if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
   cat <<'JSON'
 [{"number":1,"title":"One","url":"https://github.com/acme/repo/pull/1","headRefName":"fm/one","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":2,"title":"Two","url":"https://github.com/acme/repo/pull/2","headRefName":"fm/two","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":3,"title":"Three","url":"https://github.com/acme/repo/pull/3","headRefName":"fm/three","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]}]
@@ -134,6 +153,13 @@ EOF
 run() {  # <home> <fakebin> <args...>
   local home=$1 fakebin=$2; shift 2
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
+}
+
+arg_max_bytes() {
+  local value
+  value=$(getconf ARG_MAX 2>/dev/null || printf '1048576')
+  case "$value" in ''|*[!0-9]*) value=1048576 ;; esac
+  printf '%s\n' "$value"
 }
 
 test_default_is_bounded_and_local_only() {
@@ -239,6 +265,28 @@ test_include_prs_is_the_only_fetch_path() {
     .candidate_prs | any(.[]; .num == "9" and .task == "ship-task" and .checks == "passing" and .review == "APPROVED")
   ' >/dev/null || fail "candidate_prs must carry the fetched PR cross-referenced to its task: $json"
   pass "--include-prs is the only path that fetches, and it enriches correctly"
+}
+
+test_large_candidate_pr_projection_avoids_argv_limit() {
+  local home fakebin json arg_max payload_bytes count rows_bytes
+  home=$(make_home large-pr-projection); write_fixture "$home"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  arg_max=$(arg_max_bytes)
+  payload_bytes=48000
+  count=$((arg_max / payload_bytes + 8))
+  [ "$count" -ge 24 ] || count=24
+
+  json=$(FAKE_GH_ARGMAX_ROWS="$count" FAKE_GH_ARGMAX_BYTES="$payload_bytes" \
+    FM_BEARINGS_PR_LIMIT="$count" run "$home" "$fakebin" --include-prs --json) \
+    || fail "bearings projection failed after candidate PR JSON exceeded ARG_MAX"
+  rows_bytes=$(printf '%s' "$json" | jq -c '.candidate_prs' | wc -c | tr -d '[:space:]')
+  [ "$rows_bytes" -gt "$arg_max" ] \
+    || fail "candidate PR fixture did not exceed ARG_MAX ($rows_bytes <= $arg_max)"
+  printf '%s' "$json" | jq -e --argjson count "$count" '
+    (.candidate_prs | length) == $count
+      and (([.candidate_prs[].num | tonumber] | sort) == [range(1; $count + 1)])
+  ' >/dev/null || fail "bearings projection omitted one or more candidate PR rows"
+  pass "bearings projection keeps every candidate PR after its JSON exceeds ARG_MAX"
 }
 
 test_partial_github_failure_degrades() {
@@ -531,6 +579,7 @@ test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
 test_superseded_queued_item_dropped_by_default
 test_include_prs_is_the_only_fetch_path
+test_large_candidate_pr_projection_avoids_argv_limit
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags

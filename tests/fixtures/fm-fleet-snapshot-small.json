@@ -1,0 +1,150 @@
+{
+  "schema": "fm-fleet-snapshot.v1",
+  "fm_home": "<HOME>",
+  "roots": {
+    "fm_root": "<ROOT>",
+    "state": "<HOME>/state",
+    "data": "<HOME>/data",
+    "config": "<HOME>/config",
+    "projects": "<HOME>/projects"
+  },
+  "backlog": {
+    "path": "<HOME>/data/backlog.md",
+    "present": true,
+    "records": [
+      {
+        "order": 1,
+        "state": "in_flight",
+        "structured": true,
+        "id": "alpha-task",
+        "checked": false,
+        "title": "Alpha task",
+        "repo": "alpha",
+        "kind": "ship",
+        "priority": null,
+        "blocked_by": null,
+        "blocked_reason": null,
+        "since": "2026-08-12",
+        "merged": null,
+        "reported": null,
+        "done": null,
+        "completion": {
+          "verb": null,
+          "date": null
+        },
+        "links": [],
+        "pr_url": null,
+        "report_path": null,
+        "local_note": null,
+        "raw": "- [ ] alpha-task - Alpha task (repo: alpha) (kind: ship) (since 2026-08-12)",
+        "body_lines": [],
+        "body_excerpt": null
+      }
+    ]
+  },
+  "tasks": [
+    {
+      "id": "alpha-task",
+      "kind": "ship",
+      "harness": "codex",
+      "mode": "no-mistakes",
+      "yolo": "off",
+      "project": "alpha",
+      "backend": "tmux",
+      "paths": {
+        "meta": {
+          "path": "<HOME>/state/alpha-task.meta",
+          "present": true
+        },
+        "status_log": {
+          "path": "<HOME>/state/alpha-task.status",
+          "present": true,
+          "kind": "event_history",
+          "last_event": {
+            "state": "working",
+            "note": "implementing fix",
+            "raw": "working: implementing fix"
+          }
+        },
+        "worktree": {
+          "path": "<HOME>/projects/alpha",
+          "present": true
+        },
+        "home": {
+          "path": null,
+          "present": false
+        },
+        "report": {
+          "path": "<HOME>/data/alpha-task/report.md",
+          "present": false
+        }
+      },
+      "secondmate_projects": [],
+      "current_state": {
+        "state": "working",
+        "source": "pane",
+        "detail": "implementing fix",
+        "liveness": null,
+        "raw": "state: working · source: pane · implementing fix"
+      },
+      "endpoint": {
+        "target": null,
+        "exists": null,
+        "agent_alive": "not_checked"
+      },
+      "pr": {
+        "url": null,
+        "source": "absent"
+      },
+      "hints": {
+        "pending_decision": false,
+        "blocked_event": false,
+        "open_decisions": [],
+        "scout_report_present": false,
+        "last_event_text": "working: implementing fix"
+      },
+      "actions": {
+        "watch": "bin/fm-peek.sh fm-alpha-task",
+        "steer": "bin/fm-send.sh fm-alpha-task '<instruction>'",
+        "return_channel_note": null
+      },
+      "backlog": {
+        "order": 1,
+        "state": "in_flight",
+        "structured": true,
+        "id": "alpha-task",
+        "checked": false,
+        "title": "Alpha task",
+        "repo": "alpha",
+        "kind": "ship",
+        "priority": null,
+        "blocked_by": null,
+        "blocked_reason": null,
+        "since": "2026-08-12",
+        "merged": null,
+        "reported": null,
+        "done": null,
+        "completion": {
+          "verb": null,
+          "date": null
+        },
+        "links": [],
+        "pr_url": null,
+        "report_path": null,
+        "local_note": null,
+        "raw": "- [ ] alpha-task - Alpha task (repo: alpha) (kind: ship) (since 2026-08-12)",
+        "body_lines": [],
+        "body_excerpt": null
+      }
+    }
+  ],
+  "scout_reports": [],
+  "secondmate_landed": {
+    "records": [],
+    "truncated": [],
+    "unreadable": []
+  },
+  "secondmate_guidance": {
+    "note": "For kind=secondmate, send marked supervisor requests with fm-send and read the status/doc return channel; do not routinely fm-peek the secondmate chat for answers."
+  }
+}

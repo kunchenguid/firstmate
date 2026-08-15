@@ -58,6 +58,13 @@ SH
   cat > "$fb/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -n "${FM_FAKE_CREW_STATE_BYTES:-}" ]; then
+  python3 - "$FM_FAKE_CREW_STATE_BYTES" <<'PY'
+import sys
+print("state: working · source: pane · " + ("x" * int(sys.argv[1])))
+PY
+  exit 0
+fi
 printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}"
 SH
   chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/fm-crew-state.sh"
@@ -125,6 +132,193 @@ EOF
     "harness=codex" \
     "kind=ship" \
     "mode=ship"
+}
+
+arg_max_bytes() {
+  local value
+  value=$(getconf ARG_MAX 2>/dev/null || printf '1048576')
+  case "$value" in ''|*[!0-9]*) value=1048576 ;; esac
+  printf '%s\n' "$value"
+}
+
+test_small_fleet_snapshot_is_byte_stable() {
+  local home fakebin actual
+  home=$(make_home byte-stable)
+  mkdir -p "$home/projects/alpha"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] alpha-task - Alpha task (repo: alpha) (kind: ship) (since 2026-08-12)
+EOF
+  fm_write_meta "$home/state/alpha-task.meta" \
+    "worktree=$home/projects/alpha" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "yolo=off"
+  printf 'working: implementing fix\n' > "$home/state/alpha-task.status"
+  fakebin=$(make_fakebin "$home")
+  actual="$home/snapshot.normalized.json"
+  PATH="$fakebin:$PATH" \
+    FM_HOME="$home" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · implementing fix' \
+    "$SNAPSHOT" --json \
+    | HOME_PATH="$home" ROOT_PATH="$ROOT" python3 -c '
+import os
+import sys
+text = sys.stdin.read()
+text = text.replace(os.environ["HOME_PATH"], "<HOME>")
+text = text.replace(os.environ["ROOT_PATH"], "<ROOT>")
+sys.stdout.write(text)
+' > "$actual"
+  if ! cmp -s "$ROOT/tests/fixtures/fm-fleet-snapshot-small.json" "$actual"; then
+    diff -u "$ROOT/tests/fixtures/fm-fleet-snapshot-small.json" "$actual" >&2 || true
+    fail "small-fleet snapshot bytes changed"
+  fi
+  pass "small-fleet snapshot remains byte-identical"
+}
+
+test_large_task_fleet_exceeds_argv_limit_without_omissions() {
+  local home fakebin out view arg_max payload_bytes count task_bytes i id rendered
+  home=$(make_home large-task-fleet)
+  fakebin=$(make_fakebin "$home")
+  arg_max=$(arg_max_bytes)
+  payload_bytes=48000
+  count=$((arg_max / (payload_bytes * 2) + 8))
+  [ "$count" -ge 16 ] || count=16
+
+  i=1
+  while [ "$i" -le "$count" ]; do
+    printf -v id 'large-%05d' "$i"
+    fm_write_meta "$home/state/$id.meta" \
+      "project=synthetic" \
+      "harness=codex" \
+      "kind=ship" \
+      "mode=no-mistakes"
+    i=$((i + 1))
+  done
+
+  out=$(PATH="$fakebin:$PATH" \
+    FM_HOME="$home" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE_BYTES="$payload_bytes" \
+    "$SNAPSHOT" --json) || fail "snapshot failed for an argv-sized task fleet"
+  task_bytes=$(printf '%s' "$out" | jq -c '.tasks' | wc -c | tr -d '[:space:]')
+  [ "$task_bytes" -gt "$arg_max" ] \
+    || fail "large-fleet fixture did not exceed ARG_MAX ($task_bytes <= $arg_max)"
+  printf '%s' "$out" | jq -e --argjson count "$count" '
+    def pad5: tostring | ("00000" + .)[-5:];
+    (.tasks | length) == $count
+      and ((.tasks | map(.id) | sort)
+           == ([range(1; $count + 1) | "large-" + pad5] | sort))
+  ' >/dev/null || fail "large-fleet snapshot omitted one or more synthetic tasks"
+
+  view=$(PATH="$fakebin:$PATH" \
+    FM_HOME="$home" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE_BYTES="$payload_bytes" \
+    "$VIEW") || fail "fleet view failed for an argv-sized task fleet"
+  rendered=$(printf '%s\n' "$view" | grep -c '^| large-' || true)
+  [ "$rendered" -eq "$count" ] \
+    || fail "fleet view rendered $rendered of $count synthetic tasks"
+  pass "snapshot and view render every task after their JSON exceeds ARG_MAX"
+}
+
+test_large_open_decision_set_exceeds_argv_limit_without_omissions() {
+  local home fakebin out arg_max payload_bytes count payload decisions_bytes i id
+  home=$(make_home large-open-decisions)
+  fakebin=$(make_fakebin "$home")
+  arg_max=$(arg_max_bytes)
+  payload_bytes=48000
+  count=$((arg_max / payload_bytes + 8))
+  [ "$count" -ge 24 ] || count=24
+  payload=$(python3 - "$payload_bytes" <<'PY'
+import sys
+print("x" * int(sys.argv[1]), end="")
+PY
+)
+
+  fm_write_meta "$home/state/decision-heavy.meta" \
+    "project=synthetic" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  : > "$home/state/decision-heavy.status"
+  i=1
+  while [ "$i" -le "$count" ]; do
+    printf -v id 'q-%05d' "$i"
+    printf 'needs-decision [key=%s]: %s\n' "$id" "$payload" \
+      >> "$home/state/decision-heavy.status"
+    i=$((i + 1))
+  done
+
+  out=$(PATH="$fakebin:$PATH" \
+    FM_HOME="$home" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: parked · source: status-log · awaiting decision' \
+    "$SNAPSHOT" --json) || fail "snapshot failed for an argv-sized open-decision set"
+  decisions_bytes=$(printf '%s' "$out" | jq -c '.tasks[0].hints.open_decisions' | wc -c | tr -d '[:space:]')
+  [ "$decisions_bytes" -gt "$arg_max" ] \
+    || fail "open-decision fixture did not exceed ARG_MAX ($decisions_bytes <= $arg_max)"
+  printf '%s' "$out" | jq -e --argjson count "$count" '
+    def pad5: tostring | ("00000" + .)[-5:];
+    (.tasks | length) == 1
+      and (.tasks[0].hints.pending_decision == true)
+      and (.tasks[0].hints.open_decisions | length) == $count
+      and ((.tasks[0].hints.open_decisions | map(.key) | sort)
+           == ([range(1; $count + 1) | "q-" + pad5] | sort))
+  ' >/dev/null || fail "snapshot omitted one or more open decisions"
+  pass "per-task open-decision JSON stays complete after exceeding ARG_MAX"
+}
+
+test_large_secondmate_rollup_exceeds_argv_limit_without_omissions() {
+  local home mate_home fakebin out arg_max payload_bytes count payload rows_bytes i id
+  home=$(make_home large-secondmate-rollup)
+  mate_home="$home/secondmate-home"
+  mkdir -p "$mate_home/data"
+  fakebin=$(make_fakebin "$home")
+  arg_max=$(arg_max_bytes)
+  payload_bytes=48000
+  count=$((arg_max / payload_bytes + 8))
+  [ "$count" -ge 24 ] || count=24
+  payload=$(python3 - "$payload_bytes" <<'PY'
+import sys
+print("x" * int(sys.argv[1]), end="")
+PY
+)
+
+  fm_write_meta "$home/state/mate.meta" \
+    "kind=secondmate" \
+    "home=$mate_home" \
+    "project=$mate_home" \
+    "harness=codex" \
+    "mode=secondmate"
+  printf '## Done\n' > "$mate_home/data/backlog.md"
+  i=1
+  while [ "$i" -le "$count" ]; do
+    printf -v id 'mate-landed-%05d' "$i"
+    printf -- '- [x] %s - %s (repo: synthetic) (kind: ship) (merged 2026-08-12)\n' \
+      "$id" "$payload" >> "$mate_home/data/backlog.md"
+    i=$((i + 1))
+  done
+
+  out=$(PATH="$fakebin:$PATH" \
+    FM_HOME="$home" \
+    FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 \
+    "$SNAPSHOT" --json) || fail "snapshot failed for an argv-sized secondmate roll-up"
+  rows_bytes=$(printf '%s' "$out" | jq -c '.secondmate_landed.records' | wc -c | tr -d '[:space:]')
+  [ "$rows_bytes" -gt "$arg_max" ] \
+    || fail "secondmate roll-up fixture did not exceed ARG_MAX ($rows_bytes <= $arg_max)"
+  printf '%s' "$out" | jq -e --argjson count "$count" '
+    def pad5: tostring | ("00000" + .)[-5:];
+    (.secondmate_landed.records | length) == $count
+      and ((.secondmate_landed.records | map(.id) | sort)
+           == ([range(1; $count + 1) | "mate-landed-" + pad5] | sort))
+      and (.secondmate_landed.truncated | length) == 0
+      and (.secondmate_landed.unreadable | length) == 0
+  ' >/dev/null || fail "large secondmate roll-up omitted one or more records"
+  pass "secondmate landed roll-up stays complete after its JSON exceeds ARG_MAX"
 }
 
 test_empty_fleet_json() {
@@ -610,6 +804,10 @@ if [ "${FM_TEST_FOCUSED:-}" = liveness-verdicts ]; then
   exit 0
 fi
 
+test_small_fleet_snapshot_is_byte_stable
+test_large_task_fleet_exceeds_argv_limit_without_omissions
+test_large_open_decision_set_exceeds_argv_limit_without_omissions
+test_large_secondmate_rollup_exceeds_argv_limit_without_omissions
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_snapshot_preserves_liveness_and_decision_actionability

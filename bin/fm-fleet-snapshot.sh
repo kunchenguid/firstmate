@@ -276,7 +276,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source current_liveness current_activity_usable pending_decision blocked_event report_present=0 pr_from_status
+  local current_state current_source current_liveness current_activity_usable pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
@@ -308,7 +308,6 @@ task_json_lines() {
 
     current_json=$(crew_state_json "$id")
     event_json=$(status_event_json "$status_log")
-    last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
     current_liveness=$(printf '%s' "$current_json" | jq -r '.liveness // ""')
@@ -372,7 +371,17 @@ task_json_lines() {
     if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
     if [ -n "$home" ]; then home_json=$(path_present_json "$home"); else home_json=$(jq -n '{path:null,present:false}'); fi
 
-    jq -n \
+    # Per-task JSON can itself be large when a status stream has many open
+    # decisions. Keep the structured documents off argv just like the final fleet.
+    {
+      printf '%s\n' "$current_json"
+      printf '%s\n' "$meta_json"
+      printf '%s\n' "$status_json"
+      printf '%s\n' "$report_json"
+      printf '%s\n' "$worktree_json"
+      printf '%s\n' "$home_json"
+      printf '%s\n' "$open_decisions_json"
+    } | jq -s \
       --arg id "$id" \
       --arg kind "$kind" \
       --arg harness "$harness" \
@@ -387,19 +396,18 @@ task_json_lines() {
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
-      --arg last_event_raw "$last_event_raw" \
-      --argjson current_state "$current_json" \
-      --argjson meta_path "$meta_json" \
-      --argjson status_log "$status_json" \
-      --argjson report "$report_json" \
-      --argjson worktree_path "$worktree_json" \
-      --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
-      --argjson open_decisions "$open_decisions_json" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
-      '{
+      '.[0] as $current_state
+       | .[1] as $meta_path
+       | .[2] as $status_log
+       | .[3] as $report
+       | .[4] as $worktree_path
+       | .[5] as $home_path
+       | .[6] as $open_decisions
+       | {
         id:$id,
         kind:$kind,
         harness:($harness // ""),
@@ -423,7 +431,7 @@ task_json_lines() {
           blocked_event:$blocked_event,
           open_decisions:$open_decisions,
           scout_report_present:$report_present,
-          last_event_text:$last_event_raw
+          last_event_text:$status_log.last_event.raw
         },
         actions:(
           if $kind == "secondmate" then
@@ -462,25 +470,34 @@ secondmate_landed_json() {
     backlog="$home/data/backlog.md"
     [ -f "$backlog" ] || continue
     bj=$(backlog_json "$backlog") \
-      || { unreadable=$(jq -n --argjson a "$unreadable" --arg h "$home" '$a + [$h]'); continue; }
+      || { unreadable=$(printf '%s\n' "$unreadable" | jq --arg h "$home" '. + [$h]'); continue; }
     rows=$(printf '%s' "$bj" | jq --arg home "$home" --arg id "$id" '
       [ .records[] | select(.state == "done" and .structured)
         | {id, title, pr_url, report_path, local_note, completion, home:$home, home_id:$id} ]
       | sort_by([(.completion.date // ""), .id]) | reverse') \
-      || { unreadable=$(jq -n --argjson a "$unreadable" --arg h "$home" '$a + [$h]'); continue; }
+      || { unreadable=$(printf '%s\n' "$unreadable" | jq --arg h "$home" '. + [$h]'); continue; }
     n=$(printf '%s' "$rows" | jq 'length')
     if [ "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" -gt 0 ] \
       && [ "$n" -gt "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" ]; then
-      truncated=$(jq -n --argjson a "$truncated" --arg h "$home" '$a + [$h]')
+      truncated=$(printf '%s\n' "$truncated" | jq --arg h "$home" '. + [$h]')
     fi
-    records=$(jq -n --argjson a "$records" --argjson b "$rows" \
-      --argjson cap "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
-      '$a + (if $cap == 0 then $b else $b[:$cap] end)')
+    # These arrays can exceed ARG_MAX when a home has a large Done history.
+    # Pass the accumulated JSON documents on stdin instead of jq's argv.
+    records=$(
+      {
+        printf '%s\n' "$records"
+        printf '%s\n' "$rows"
+      } | jq -s --argjson cap "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
+        '.[0] + (if $cap == 0 then .[1] else .[1][:$cap] end)'
+    )
   done <<EOF
 $(live_secondmate_meta_records "$STATE" "$reg")
 EOF
-  jq -n --argjson records "$records" --argjson truncated "$truncated" --argjson unreadable "$unreadable" \
-    '{records:$records, truncated:$truncated, unreadable:$unreadable}'
+  {
+    printf '%s\n' "$records"
+    printf '%s\n' "$truncated"
+    printf '%s\n' "$unreadable"
+  } | jq -s '{records:.[0], truncated:.[1], unreadable:.[2]}'
 }
 
 scout_report_lines() {
@@ -503,21 +520,28 @@ TASKS_JSON=$(task_json_lines)
 SCOUT_REPORTS_JSON=$(scout_report_lines)
 SECONDMATE_LANDED_JSON=$(secondmate_landed_json)
 
-jq -n \
+# Fleet-sized JSON belongs on stdin. Passing any of these accumulated documents
+# through --argjson makes the snapshot subject to the host's argv size limit.
+{
+  printf '%s\n' "$BACKLOG_JSON"
+  printf '%s\n' "$TASKS_JSON"
+  printf '%s\n' "$SCOUT_REPORTS_JSON"
+  printf '%s\n' "$SECONDMATE_LANDED_JSON"
+} | jq -s \
   --arg fm_home "$FM_HOME" \
   --arg fm_root "$FM_ROOT" \
   --arg state "$STATE" \
   --arg data "$DATA" \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
-  --argjson backlog "$BACKLOG_JSON" \
-  --argjson tasks "$TASKS_JSON" \
-  --argjson scout_reports "$SCOUT_REPORTS_JSON" \
-  --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
-  'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
-   def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
-   def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
-   {
+  '.[0] as $backlog
+   | .[1] as $tasks
+   | .[2] as $scout_reports
+   | .[3] as $secondmate_landed
+   | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
+     def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
+     def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
+     {
      schema:"fm-fleet-snapshot.v1",
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
