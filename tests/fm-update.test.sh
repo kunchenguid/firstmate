@@ -172,10 +172,10 @@ case "${1:-} ${2:-}" in
         case "${FM_TEST_GH_MODE:-fork}" in
           fork-missing-parent) printf 'true\tacme/firstmate\tacme/firstmate\n' ;;
           fork-missing-parent-rest-missing-parent) printf 'true\t\t\n' ;;
-          fork-missing-parent-rest-invalid-source) printf 'true\tacme/firstmate\tnot-a-source\n' ;;
-          fork-missing-parent-rest-contradictory-source) printf 'true\tacme/firstmate\tacme/other\n' ;;
           fork-missing-parent-rest-configured-mismatch) printf 'true\tacme/firstmate\tacme/firstmate\n' ;;
           fork-missing-parent-rest-not-fork) printf 'false\tacme/firstmate\tacme/firstmate\n' ;;
+          fork-missing-parent-rest-distinct-source) printf 'true\tacme/firstmate\tacme/canonical-source\n' ;;
+          fork-missing-parent-rest-self-parent) printf 'true\tACME/FIRSTMATE-FORK\tacme/canonical-source\n' ;;
           *)
             echo "unexpected repository metadata request: $*" >&2
             exit 2
@@ -550,42 +550,6 @@ test_github_fork_missing_graphql_parent_rest_missing_parent_refused() {
   pass "T29 GraphQL-missing fork parent refuses when REST has no valid parent"
 }
 
-test_github_fork_missing_graphql_parent_rest_invalid_or_contradictory_source_refused() {
-  local w out before rc
-  w=$(new_world github-rest-invalid-source)
-  configure_github_world "$w"
-  before=$(git -C "$w/main" rev-parse HEAD)
-
-  out=$(FM_TEST_GH_MODE=fork-missing-parent-rest-invalid-source \
-    run_github_update "$w" 2>&1)
-  rc=$?
-
-  [ "$rc" -ne 0 ] || fail "REST-invalid-source fork update unexpectedly succeeded"
-  assert_contains "$out" \
-    "update refused: GitHub REST fork inspection did not identify a valid source" \
-    "invalid REST source was not refused"
-  assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
-    "fork sync ran despite invalid REST source"
-
-  w=$(new_world github-rest-contradictory-source)
-  configure_github_world "$w"
-  before=$(git -C "$w/main" rev-parse HEAD)
-
-  out=$(FM_TEST_GH_MODE=fork-missing-parent-rest-contradictory-source \
-    run_github_update "$w" 2>&1)
-  rc=$?
-
-  [ "$rc" -ne 0 ] || fail "REST-contradictory-source fork update unexpectedly succeeded"
-  assert_contains "$out" \
-    "update refused: GitHub REST fork inspection returned contradictory parent and source identities" \
-    "contradictory REST parent and source were not refused"
-  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
-    || fail "local checkout moved after contradictory REST source"
-  assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
-    "fork sync ran despite contradictory REST source"
-  pass "T30 GraphQL-missing fork parent refuses invalid or contradictory REST source"
-}
-
 test_github_rest_parent_keeps_configured_upstream_validation() {
   local w out before rc
   w=$(new_world github-rest-upstream-mismatch)
@@ -627,6 +591,48 @@ test_github_fork_missing_graphql_parent_rest_not_fork_refused() {
   assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
     "fork sync ran despite REST fork-state disagreement"
   pass "T32 GraphQL fork and REST direct metadata disagreement refuses"
+}
+
+test_github_fork_missing_graphql_parent_rest_distinct_source_succeeds() {
+  local w out expected rc
+  w=$(new_world github-rest-distinct-source)
+  configure_github_world "$w"
+  bump_upstream "$w" nested-fork-parent
+  expected=$(git --git-dir="$w/upstream.git" rev-parse refs/heads/main)
+
+  out=$(FM_TEST_GH_MODE=fork-missing-parent-rest-distinct-source \
+    run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || fail "distinct REST source fork update failed: $out"
+  assert_contains "$out" "upstream: github acme/firstmate" \
+    "configured upstream was not matched to the REST immediate parent"
+  assert_contains "$out" "fork-sync: updated " \
+    "distinct REST source did not synchronize through the immediate parent"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$expected" ] \
+    || fail "local checkout did not advance through the REST immediate parent"
+  pass "T33 distinct valid REST source preserves nested-fork synchronization"
+}
+
+test_github_fork_missing_graphql_parent_rest_self_parent_refused() {
+  local w out before rc
+  w=$(new_world github-rest-self-parent)
+  configure_github_world "$w"
+  before=$(git -C "$w/main" rev-parse HEAD)
+
+  out=$(FM_TEST_GH_MODE=fork-missing-parent-rest-self-parent \
+    run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "REST self-parent update unexpectedly succeeded"
+  assert_contains "$out" \
+    "update refused: GitHub REST fork inspection returned malformed self-parent identity" \
+    "REST self-parent identity was not refused"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "local checkout moved after REST self-parent identity"
+  assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
+    "fork sync ran despite REST self-parent identity"
+  pass "T34 REST self-parent identity is refused before fork sync"
 }
 
 test_downstream_fork_divergence_requires_reviewed_import() {
@@ -938,9 +944,10 @@ test_github_fork_ahead_sync_and_convergence_order
 test_github_fork_already_current
 test_github_fork_missing_graphql_parent_uses_rest_metadata
 test_github_fork_missing_graphql_parent_rest_missing_parent_refused
-test_github_fork_missing_graphql_parent_rest_invalid_or_contradictory_source_refused
 test_github_rest_parent_keeps_configured_upstream_validation
 test_github_fork_missing_graphql_parent_rest_not_fork_refused
+test_github_fork_missing_graphql_parent_rest_distinct_source_succeeds
+test_github_fork_missing_graphql_parent_rest_self_parent_refused
 test_downstream_fork_divergence_requires_reviewed_import
 test_help_owns_downstream_import_boundary
 test_reviewed_integration_restores_downstream_updates

@@ -193,7 +193,7 @@ preflight_firstmate() {
 sync_github_fork_if_needed() {
   local local_default=$1 origin_slug=$2 upstream_url=$3
   local metadata api_origin is_fork api_default api_parent configured_parent
-  local rest_is_fork rest_parent rest_source
+  local rest_is_fork rest_parent _rest_source
   local before_oid after_oid
 
   command -v gh >/dev/null 2>&1 \
@@ -231,15 +231,14 @@ sync_github_fork_if_needed() {
       2>&1); then
       refuse "GitHub REST fork inspection failed: $(first_line "$metadata")"
     fi
-    IFS=$'\t' read -r rest_is_fork rest_parent rest_source <<< "$metadata"
+    IFS=$'\t' read -r rest_is_fork rest_parent _rest_source <<< "$metadata"
     [ "$rest_is_fork" = true ] \
       || refuse "GitHub REST fork inspection returned invalid fork state: $rest_is_fork"
     github_repo_identity_is_valid "$rest_parent" \
       || refuse "GitHub REST fork inspection did not identify a valid parent"
-    github_repo_identity_is_valid "$rest_source" \
-      || refuse "GitHub REST fork inspection did not identify a valid source"
-    same_repo_identity "$rest_parent" "$rest_source" \
-      || refuse "GitHub REST fork inspection returned contradictory parent and source identities"
+    if same_repo_identity "$rest_parent" "$api_origin"; then
+      refuse "GitHub REST fork inspection returned malformed self-parent identity"
+    fi
     api_parent=$rest_parent
   fi
   if [ -n "$upstream_url" ]; then
