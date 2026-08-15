@@ -108,6 +108,7 @@ EOF
   tasks_axi() { (cd "$home" && tasks-axi "$@"); }
   tasks_axi add "$id" "Choose standard repository flow" --kind captain --repo sample >/dev/null
   tasks_axi hold "$id" --reason "process" --kind captain >/dev/null
+  mkdir -p "$home/tmp"
   real_tasks_axi=$(command -v tasks-axi)
   mkdir -p "$home/fakebin"
   cat > "$home/fakebin/tasks-axi" <<EOF
@@ -117,12 +118,14 @@ exec "$real_tasks_axi" "\$@"
 EOF
   chmod +x "$home/fakebin/tasks-axi"
   set +e
-  PATH="$home/fakebin:$PATH" run_reconcile "$home" resolve-hold "$id" --policy dotfiles-normal-repo >/dev/null 2>&1
+  TMPDIR="$home/tmp" PATH="$home/fakebin:$PATH" run_reconcile "$home" resolve-hold "$id" --policy dotfiles-normal-repo >/dev/null 2>&1
   rc=$?
   set -u
   [ "$rc" -ne 0 ] || fail "resolve-hold closed a hold after its policy link failed"
   show=$(cd "$home" && tasks-axi show "$id" --full)
   assert_contains "$show" "held: yes" "policy-link failure did not leave the hold open"
+  [ -z "$(find "$home/tmp" -type f -name 'fm-policy-decision.*' -print -quit)" ] \
+    || fail "resolve-hold left a temporary decision copy after failure"
   pass "resolve-hold leaves the hold open when policy linking fails"
 }
 

@@ -22,6 +22,9 @@ CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 # shellcheck source=bin/fm-pr-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
   awk '
@@ -40,7 +43,7 @@ meta_value() {
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
-routine_verify() {  # <task-id>
+routine_validate() {  # <task-id>
   local id=$1 meta="$STATE/$id.meta" status="$STATE/$id.status" current_state kind
   [ -f "$meta" ] && [ ! -L "$meta" ] || fail "$id has no task metadata"
   kind=$(meta_value "$meta" kind)
@@ -66,11 +69,74 @@ routine_verify() {  # <task-id>
   printf 'eligible: %s routine completion after verification gate\n' "$id"
 }
 
+record_routine_completion() {  # <task-id>
+  local id=$1 meta="$STATE/$id.meta" lock tmp line
+  lock=$(fm_meta_lock_path "$meta") || fail "could not lock $id metadata"
+  fm_lock_acquire_wait "$lock" || fail "could not lock $id metadata"
+  if ! fm_pr_metadata_identity_parse "$meta" \
+    || [ "$FM_PR_META_URL" != "$ROUTINE_VERIFIED_PR_URL" ] \
+    || [ "$FM_PR_META_HEAD" != "$ROUTINE_VERIFIED_PR_HEAD" ]; then
+    fm_lock_release "$lock" || true
+    fail "$id PR metadata changed before completion was recorded"
+  fi
+  tmp=$(mktemp "$STATE/.fm-routine-complete.XXXXXX") || {
+    fm_lock_release "$lock" || true
+    fail "could not prepare $id completion evidence"
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      routine_complete_pr=*|routine_complete_pr_head=*) ;;
+      *) printf '%s\n' "$line" >> "$tmp" || {
+        rm -f "$tmp"
+        fm_lock_release "$lock" || true
+        fail "could not record $id completion evidence"
+      } ;;
+    esac
+  done < "$meta"
+  {
+    printf 'routine_complete_pr=%s\n' "$ROUTINE_VERIFIED_PR_URL"
+    printf 'routine_complete_pr_head=%s\n' "$ROUTINE_VERIFIED_PR_HEAD"
+  } >> "$tmp" || {
+    rm -f "$tmp"
+    fm_lock_release "$lock" || true
+    fail "could not record $id completion evidence"
+  }
+  chmod 0600 "$tmp" || {
+    rm -f "$tmp"
+    fm_lock_release "$lock" || true
+    fail "could not secure $id completion evidence"
+  }
+  mv -f "$tmp" "$meta" || {
+    rm -f "$tmp"
+    fm_lock_release "$lock" || true
+    fail "could not record $id completion evidence"
+  }
+  fm_lock_release "$lock" || fail "could not unlock $id metadata"
+}
+
+require_routine_completion() {  # <task-id>
+  local id=$1 meta="$STATE/$id.meta" recorded_pr recorded_head
+  recorded_pr=$(meta_value "$meta" routine_complete_pr)
+  recorded_head=$(meta_value "$meta" routine_complete_pr_head)
+  [ -n "$recorded_pr" ] && [ -n "$recorded_head" ] \
+    || fail "$id has no prior routine completion evidence"
+  fm_pr_url_parse "$recorded_pr" \
+    || fail "$id has invalid routine completion PR evidence"
+  [ "$FM_PR_URL" = "$recorded_pr" ] \
+    || fail "$id has non-canonical routine completion PR evidence"
+  fm_pr_head_valid "$recorded_head" \
+    || fail "$id has invalid routine completion head evidence"
+  [ "$recorded_pr" = "$ROUTINE_VERIFIED_PR_URL" ] \
+    && [ "$recorded_head" = "$ROUTINE_VERIFIED_PR_HEAD" ] \
+    || fail "$id PR metadata changed after routine completion"
+}
+
 command_verify() {
   local id=${1:-}
   [ -n "$id" ] || { usage >&2; exit 2; }
   fm_pr_task_id_valid "$id" || fail "invalid task id: $id"
-  routine_verify "$id"
+  routine_validate "$id"
+  record_routine_completion "$id"
 }
 
 command_merge() {
@@ -79,7 +145,8 @@ command_merge() {
   shift
   [ "${1:-}" = "--" ] && shift
   fm_pr_task_id_valid "$id" || fail "invalid task id: $id"
-  routine_verify "$id" >/dev/null
+  routine_validate "$id" >/dev/null
+  require_routine_completion "$id"
   fm_pr_metadata_identity_parse "$STATE/$id.meta" \
     || fail "$id has invalid PR metadata after verification"
   [ "$FM_PR_META_URL" = "$ROUTINE_VERIFIED_PR_URL" ] \

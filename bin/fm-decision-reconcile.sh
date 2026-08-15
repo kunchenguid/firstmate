@@ -39,6 +39,10 @@ fail() {
   exit 1
 }
 
+resolve_tmp_cleanup() {
+  [ -z "${RESOLVE_TMP:-}" ] || rm -f "$RESOLVE_TMP"
+}
+
 require_python_toml() {
   command -v python3 >/dev/null 2>&1 || fail "python3 is required to read policy TOML"
   python3 - <<'PY' >/dev/null 2>&1 || fail "python3 with tomllib is required to read policy TOML"
@@ -249,7 +253,7 @@ command_link_policy() {
 }
 
 command_resolve_hold() {
-  local hold_id=${1:-} policy_id='' decision_file='' tmp=''
+  local hold_id=${1:-} policy_id='' decision_file=''
   [ -n "$hold_id" ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -265,19 +269,23 @@ command_resolve_hold() {
   policy_lookup "$policy_id" summary >/dev/null || fail "unknown policy id: $policy_id"
   require_policy_auto_close "$policy_id"
   parse_hold_id "$hold_id"
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-policy-decision.XXXXXX") || exit 1
+  RESOLVE_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-policy-decision.XXXXXX") || exit 1
+  trap resolve_tmp_cleanup EXIT
+  trap 'resolve_tmp_cleanup; exit 1' HUP INT TERM
   if [ -z "$decision_file" ]; then
-    write_policy_decision "$tmp" "$policy_id"
+    write_policy_decision "$RESOLVE_TMP" "$policy_id"
   else
     {
       printf 'policy=%s\n' "$policy_id"
       cat "$decision_file"
-    } > "$tmp" || { rm -f "$tmp"; fail "could not prepare policy decision for $hold_id"; }
+    } > "$RESOLVE_TMP" || fail "could not prepare policy decision for $hold_id"
   fi
-  decision_file=$tmp
+  decision_file=$RESOLVE_TMP
   "$SCRIPT_DIR/fm-decision-hold.sh" decline "$HOLD_ORIGIN" "$HOLD_KEY" \
-    --decision-file "$decision_file"
-  [ -z "$tmp" ] || rm -f "$tmp"
+    --decision-file "$decision_file" || fail "could not resolve captain hold $hold_id"
+  resolve_tmp_cleanup
+  trap - EXIT HUP INT TERM
+  RESOLVE_TMP=''
   printf 'policy-resolved: %s via %s\n' "$hold_id" "$policy_id"
 }
 
