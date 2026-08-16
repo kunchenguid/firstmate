@@ -154,7 +154,7 @@ fm_record_retire_marker_publish() {  # <state-dir> <task-id> <window> <meta-sha2
   fm_record_retire_marker_valid "$state" "$id"
 }
 
-fm_record_retire_marker_clear_for_spawn() {  # <state-dir> <task-id>
+fm_record_retire_marker_validate_for_spawn() {  # <state-dir> <task-id>
   local marker
   marker=$(fm_record_retire_marker_path "$1" "$2")
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
@@ -162,6 +162,13 @@ fm_record_retire_marker_clear_for_spawn() {  # <state-dir> <task-id>
     printf 'error: invalid record-retirement marker for task %s; refusing spawn\n' "$2" >&2
     return 1
   }
+}
+
+fm_record_retire_marker_clear_for_spawn() {  # <state-dir> <task-id>
+  local marker
+  fm_record_retire_marker_validate_for_spawn "$1" "$2" || return 1
+  marker=$(fm_record_retire_marker_path "$1" "$2")
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
   rm -f -- "$marker"
 }
 

@@ -12,6 +12,9 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
+TEST_REAL_MV=$(command -v mv)
+TEST_REAL_RM=$(command -v rm)
+export FM_TEST_REAL_MV="$TEST_REAL_MV" FM_TEST_REAL_RM="$TEST_REAL_RM"
 
 make_spawn_pi_probe() {
   local fakebin=$1 tool=$2
@@ -74,6 +77,32 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+target=${!#}
+if [ -n "${FM_FAKE_RETIRE_META:-}" ] && [ "$target" = "$FM_FAKE_RETIRE_META" ]; then
+  [ "${FM_FAKE_RETIRE_META_FAIL:-0}" = 0 ] || exit 73
+  "$FM_TEST_REAL_MV" "$@"
+  status=$?
+  [ "$status" -eq 0 ] || exit "$status"
+  [ -z "${FM_FAKE_RETIRE_ORDER_LOG:-}" ] || printf 'publish\n' >> "$FM_FAKE_RETIRE_ORDER_LOG"
+  exit 0
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+for target in "$@"; do
+  if [ -n "${FM_FAKE_RETIRE_MARKER:-}" ] && [ "$target" = "$FM_FAKE_RETIRE_MARKER" ]; then
+    [ -f "${FM_FAKE_RETIRE_META:-}" ] || exit 74
+    [ -z "${FM_FAKE_RETIRE_ORDER_LOG:-}" ] || printf 'clear\n' >> "$FM_FAKE_RETIRE_ORDER_LOG"
+  fi
+done
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+  chmod +x "$fakebin/mv" "$fakebin/rm"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -126,6 +155,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    FM_TEST_REAL_MV="$TEST_REAL_MV" FM_TEST_REAL_RM="$TEST_REAL_RM" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
@@ -832,18 +862,37 @@ write_spawn_retirement_marker() {  # <state> <task-id>
 }
 
 test_spawn_clears_only_a_valid_inherited_retirement_marker() {
-  local rec id out status marker
+  local rec id out status marker order_log
   id=profile-retired-valid-z20
   rec=$(make_spawn_case profile-retired-valid claude "$id")
   read_case_record "$rec"
   marker="$HOME_DIR/state/.record-retired-$id"
+  order_log="$CASE_DIR/retirement-order.log"
   write_spawn_retirement_marker "$HOME_DIR/state" "$id"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  out=$(FM_FAKE_RETIRE_META="$HOME_DIR/state/$id.meta" \
+    FM_FAKE_RETIRE_MARKER="$marker" FM_FAKE_RETIRE_ORDER_LOG="$order_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "spawn with a valid inherited retirement marker should succeed"
   assert_absent "$marker" "fresh spawn left the old retirement marker active"
   assert_present "$HOME_DIR/state/$id.meta" "fresh spawn did not publish canonical metadata"
+  [ "$(cat "$order_log")" = $'publish\nclear' ] \
+    || fail "fresh spawn did not publish metadata before clearing its inherited retirement marker"
+
+  id=profile-retired-publish-failure-z20b
+  rec=$(make_spawn_case profile-retired-publish-failure claude "$id")
+  read_case_record "$rec"
+  marker="$HOME_DIR/state/.record-retired-$id"
+  write_spawn_retirement_marker "$HOME_DIR/state" "$id"
+  out=$(FM_FAKE_RETIRE_META="$HOME_DIR/state/$id.meta" \
+    FM_FAKE_RETIRE_MARKER="$marker" FM_FAKE_RETIRE_META_FAIL=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded after metadata publication failed"
+  assert_present "$marker" "metadata-publication failure removed the inherited retirement marker"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "metadata-publication failure left canonical metadata behind"
 
   id=profile-retired-invalid-z21
   rec=$(make_spawn_case profile-retired-invalid claude "$id")
