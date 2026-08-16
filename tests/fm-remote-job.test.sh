@@ -772,7 +772,11 @@ pass "a transient clock-read failure does not shorten the readiness budget"
 # backwards once, mid-wait. None of the budget was spent by that step, so none
 # of it may be lost to it. The wait therefore has to still be waiting well after
 # the budget it was configured with would otherwise have run out, which is what
-# an outer bound the wait deliberately outlives proves.
+# an outer bound the wait deliberately outlives proves. The step is armed on the
+# reading it lands after rather than on an instant, because the wait's first
+# reading is the one that anchors the deadline: arming on the clock would race
+# that read, and a step that landed first would anchor the deadline in
+# already-stepped time and make the wait end on schedule after all.
 cat > "$CLOCK_SCRIPT" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -780,11 +784,14 @@ set -u
 . "$1/bin/fm-remote-job-lib.sh"
 FM_REMOTE_JOB_PROBE_WAIT_SECONDS=$2
 start=$(command date +%s)
-export FM_STEP_AFTER=$((start + 1))
-date() { # one hour backwards, a second in, and forwards as usual after that
-  local now
+STEP_FILE=$3
+printf '0\n' > "$STEP_FILE"
+date() { # the third reading onwards lands an hour behind the ones before it
+  local reads now
+  reads=$(($(cat "$STEP_FILE") + 1))
+  printf '%s\n' "$reads" > "$STEP_FILE"
   now=$(command date +%s)
-  if [ "$now" -ge "$FM_STEP_AFTER" ]; then now=$((now - 3600)); fi
+  [ "$reads" -lt 3 ] || now=$((now - 3600))
   printf '%s\n' "$now"
 }
 fm_remote_job_probe() { return 1; }
@@ -793,9 +800,12 @@ fm_remote_job_wait_for_probe "$1" "$1" && exit 3
 printf '%s\n' "$(($(command date +%s) - start))"
 SH
 BACKSTEP_STATUS=0
-fm_run_timed 10 bash "$CLOCK_SCRIPT" "$REMOTE_ROOT" 3 >/dev/null 2>&1 || BACKSTEP_STATUS=$?
+fm_run_timed 10 bash "$CLOCK_SCRIPT" "$REMOTE_ROOT" 3 "$TMP_ROOT/clock-backstep" >/dev/null 2>&1 \
+  || BACKSTEP_STATUS=$?
 [ "$BACKSTEP_STATUS" -eq 124 ] \
   || fail "a backwards clock step ended the readiness wait early, exit $BACKSTEP_STATUS against a budget of 3s"
+[ "$(cat "$TMP_ROOT/clock-backstep")" -gt 3 ] \
+  || fail "the readiness wait never read the clock past the backwards step"
 pass "a backwards clock step lengthens the readiness wait instead of collapsing its budget"
 
 # That leniency is only safe because it is not what makes a wait end. A clock
@@ -906,6 +916,31 @@ run_wait_script "$CLOCK_SCRIPT" 40 "the readiness wait with an oscillating clock
   "$REMOTE_ROOT" 3 "$TMP_ROOT/clock-oscillate" 20
 [ "$WAIT_ELAPSED" -le 30 ] || fail "an oscillating clock outran the readiness wait's poll ceiling"
 pass "the readiness wait ends against a clock that never moves forwards on balance"
+
+# The ceiling exists for that pathological clock and must stay out of the way of
+# every legitimate one, or it becomes a second budget and rebuilds the counted
+# loop this change removed. The loaded host is where that would bite, so this
+# drives the wait with a check as expensive as a loaded host makes it. At the
+# shipped fifty polls per second of budget the ceiling here is three hundred
+# polls, and each one costs at least the two seconds the probe sleeps, so the
+# ceiling could not end this wait before ten minutes. Finishing anywhere near
+# the budget therefore proves the deadline ended it.
+cat > "$CLOCK_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_PROBE_WAIT_SECONDS=$2
+start=$(command date +%s)
+fm_remote_job_probe() { sleep 2; return 1; }
+fm_remote_job_worker_identity_matches() { return 1; }
+fm_remote_job_wait_for_probe "$1" "$1" && exit 3
+printf '%s\n' "$(($(command date +%s) - start))"
+SH
+run_wait_script "$CLOCK_SCRIPT" 40 "the readiness wait under a two-second probe" "$REMOTE_ROOT" 6
+[ "$WAIT_ELAPSED" -ge 6 ] || fail "an expensive probe cut the readiness wait short of its budget"
+[ "$WAIT_ELAPSED" -le 20 ] || fail "an expensive probe drove the readiness wait toward its poll ceiling"
+pass "an expensive probe leaves the readiness wait ending on its deadline, nowhere near its poll ceiling"
 
 # The shutdown wait shares the mechanism, so it needs the same guarantee: a
 # worker that never exits plus a clock that cannot be read must still end in a

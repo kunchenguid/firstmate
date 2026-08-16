@@ -60,7 +60,7 @@ FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
 FM_REMOTE_JOB_PROBE_WAIT_SECONDS=${FM_REMOTE_JOB_PROBE_WAIT_SECONDS:-60}
 FM_REMOTE_JOB_STOP_WAIT_SECONDS=${FM_REMOTE_JOB_STOP_WAIT_SECONDS:-15}
 FM_REMOTE_JOB_CLOCK_MAX_STALLS=${FM_REMOTE_JOB_CLOCK_MAX_STALLS:-50}
-FM_REMOTE_JOB_WAIT_MAX_POLLS_PER_SECOND=${FM_REMOTE_JOB_WAIT_MAX_POLLS_PER_SECOND:-1000}
+FM_REMOTE_JOB_WAIT_MAX_POLLS_PER_SECOND=${FM_REMOTE_JOB_WAIT_MAX_POLLS_PER_SECOND:-50}
 FM_REMOTE_JOB_OPERATOR_PATH=
 FM_REMOTE_JOB_CHILD_PATH=
 FM_REMOTE_JOB_STATE=
@@ -140,15 +140,28 @@ fm_remote_job_validate_settings() {
 # That ceiling is a liveness backstop and never a budget, which is the opposite
 # of the counted loop this file replaced. There the count WAS the budget, so a
 # check that grew more expensive under load ate the wait alive and produced the
-# CI flake. This ceiling can only ever fire late: the loop sleeps a tenth of a
-# second per poll, so a healthy wait cannot exceed ten polls per second of
-# budget and the default leaves a hundredfold margin, and an expensive check
-# means fewer polls per second, which moves the ceiling further away rather than
-# closer. It cannot shorten a budget and it cannot be reached in healthy
-# operation, so do not mistake it for a leftover and delete it. Making these
-# waits correct against a clock that is wrong in other ways, a forward step in
-# particular, is deliberately out of scope here and tracked as its own item, so
-# this stays a deadline rather than a clock subsystem.
+# CI flake. Here the count is derived from the budget rather than standing in
+# for it, in two terms. The floor is the most polls a legitimate wait can ever
+# use: the loop sleeps a tenth of a second every time round, so a budget of S
+# seconds admits at most S x 10 polls, and that is an upper bound by
+# construction rather than an estimate, because an expensive check makes each
+# poll take longer and so can only lower the count. The margin is five times
+# that floor, which also absorbs a legitimate backwards correction of up to four
+# times the budget, since such a correction lengthens a wait rather than
+# collapsing it. Ten times five is the fifty polls per second of budget the
+# default sets, and anyone changing the poll sleep or a budget has to redo that
+# arithmetic.
+#
+# So the worst case is bounded in wall time too: fifty polls per second of
+# budget at a tenth of a second each means a clock that never advances fails a
+# wait after about five times its budget, roughly five minutes for the sixty
+# second readiness wait and about seventy five seconds for each leg of the
+# fifteen second shutdown wait. The ceiling cannot shorten a budget and cannot
+# be reached in healthy operation, so do not mistake it for a leftover and
+# delete it. Making these waits correct against a clock that is wrong in other
+# ways, a forward step in particular, is deliberately out of scope here and
+# tracked as its own item, so this stays a deadline rather than a clock
+# subsystem.
 fm_remote_job_clock_now() { # epoch seconds, or nothing when the clock is unreadable
   local now
   now=$(date +%s 2>/dev/null || true)
