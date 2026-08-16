@@ -18,7 +18,15 @@ fm_record_contradiction_positive_int() {  # <value> <fallback>
 }
 
 fm_record_contradiction_file_mtime() {  # <path>
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+  # Keyed on uname, never a BSD-then-GNU fallback chain: GNU stat reads -f as
+  # --file-system and %m as another operand, so `stat -f %m <path>` prints a
+  # whole filesystem report on stdout and the `||` branch then appends the epoch
+  # to it - a value every numeric comparison downstream rejects.
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
 }
 
 fm_record_contradiction_backlog_rows() {  # <backlog>

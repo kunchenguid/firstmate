@@ -809,6 +809,11 @@ make_firstmate_fork_fixture() {
   printf '%s\n' manual > "$repo/config/backlog-backend"
   fm_git_identity
   git -C "$repo" init -q -b main
+  # Pin the identity in the repo too: this builder runs in a command
+  # substitution, so its exported identity dies with that subshell and a caller
+  # that commits into the returned repo would need a host-global git identity.
+  git -C "$repo" config user.name fmtest
+  git -C "$repo" config user.email fmtest@example.invalid
   printf '%s\n' initial > "$repo/README.md"
   git -C "$repo" add README.md
   git -C "$repo" commit -qm initial

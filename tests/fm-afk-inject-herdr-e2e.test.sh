@@ -193,11 +193,13 @@ redraw() {
 }
 submit_line() {
   local _line=$_buf _c _hex
-  if [ "${_line:0:1}" = "$MARK" ]; then
-    _c="injection"
-  else
-    _c="user"
-  fi
+  # Prefix match, not a 1-character slice: ${_line:0:1} counts BYTES without a
+  # UTF-8 locale, so it never equals the 3-byte marker and every injected line
+  # would be logged as plain user input.
+  case "$_line" in
+    "$MARK"*) _c="injection" ;;
+    *) _c="user" ;;
+  esac
   _hex=$(printf '%s' "$_line" | od -An -tx1 | tr -d ' \n')
   printf '%s\t%s\t%s\n' "$_hex" "$_line" "$_c" >> "$LOG"
   _buf=

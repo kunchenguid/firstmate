@@ -281,9 +281,9 @@ test_cursor_hooks_semantic_lifecycle() {
   mkdir -p "$WT_DIR/.cursor/rules"
   printf '%s\n' 'A real project rule must stay reviewable.' > "$WT_DIR/.cursor/rules/team.mdc"
   status=$(git -C "$WT_DIR" status --short --untracked-files=all)
-  printf '%s\n' "$status" | rg -Fq '?? .cursor/rules/team.mdc' \
+  printf '%s\n' "$status" | grep -Fq '?? .cursor/rules/team.mdc' \
     || fail "a real Cursor project rule was hidden with the hook artifact: $status"
-  printf '%s\n' "$status" | rg -Fq '.cursor/hooks.json' \
+  printf '%s\n' "$status" | grep -Fq '.cursor/hooks.json' \
     && fail "project-local Cursor hooks surfaced after adding a project rule: $status"
 
   rm -f "$state/$id.turn-ended"

@@ -235,7 +235,15 @@ print_status_tail() {
 }
 
 file_mtime_epoch() {
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+  # Keyed on uname, never a BSD-then-GNU fallback chain: GNU stat reads -f as
+  # --file-system and %m as another operand, so `stat -f %m <path>` prints a
+  # whole filesystem report on stdout and the `||` branch then appends the epoch
+  # to it - a value every numeric comparison downstream rejects.
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
 }
 
 compact_age() {

@@ -50,6 +50,24 @@ make_home() {  # <name>
   printf '%s\n' "$home"
 }
 
+# No spelling of `sed -i` is portable: BSD sed needs the backup suffix as its
+# own argument, while GNU sed reads that empty string as the script and then
+# takes the real script as a filename. Filter to a sibling temp file instead.
+sed_in_place() {  # <file> <sed-script>...
+  local file=$1 tmp
+  shift
+  tmp=$file.sed-in-place
+  sed "$@" "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+file_mode() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
+}
+
 make_fakebin() {  # <home>
   local home=$1 fakebin
   fakebin=$(fm_fakebin "$home")
@@ -999,10 +1017,10 @@ SH
   assert_not_contains "$building" "DECISIONS" "building view included approvals"
   assert_not_contains "$building" "REVIEWS WAITING ON PEDRO" "building view included review approvals"
   assert_not_contains "$building" "REVIEWING" "building view included colleague review work"
-  default_id=$(printf '%s\n' "$default" | rg -F "PR 4001 |" | tail -1 | awk '{print $2}')
-  building_id=$(printf '%s\n' "$building" | rg -F "PR 4001 |" | tail -1 | awk '{print $2}')
+  default_id=$(printf '%s\n' "$default" | grep -F "PR 4001 |" | tail -1 | awk '{print $2}')
+  building_id=$(printf '%s\n' "$building" | grep -F "PR 4001 |" | tail -1 | awk '{print $2}')
   [ "$building_id" = "$default_id" ] || fail "building view changed the stable row id"
-  build_id=$(printf '%s\n' "$building" | rg -F "Build the fleet cockpit section views" | awk '{print $2}')
+  build_id=$(printf '%s\n' "$building" | grep -F "Build the fleet cockpit section views" | awk '{print $2}')
   case "$build_id" in
     b:build-task*) ;;
     *) fail "building row lacks a readable stable id: $build_id" ;;
@@ -1276,9 +1294,8 @@ test_watch_redraw_clears_detail_tails_and_narrower_frames() {
   write_live_fixture "$home"
   fakebin=$(make_fakebin "$home")
   real_tmux=$(command -v tmux) || fail "tmux is required for the real-terminal redraw regression"
-  sed -i '' \
-    's/Decide the public API/Decide the public API AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA NARROW_FRAME_SENTINEL DETAIL_FRAME_SENTINEL/' \
-    "$home/data/backlog.md"
+  sed_in_place "$home/data/backlog.md" \
+    's/Decide the public API/Decide the public API AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA NARROW_FRAME_SENTINEL DETAIL_FRAME_SENTINEL/'
 
   metrics=$(python3 - "$real_tmux" "$DASHBOARD" "$home" "$fakebin" <<'PY'
 import os, subprocess, sys, time
@@ -1466,7 +1483,7 @@ test_default_slots_prioritize_new_rows_and_name_hidden_reviews() {
   mv "$updated" "$home/data/backlog.md"
   changed=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80) \
     || fail "priority-slot changed render failed"
-  printf '%s\n' "$changed" | rg -F "Decide whether to rotate the credential" | rg -F "[NEW]" >/dev/null \
+  printf '%s\n' "$changed" | grep -F "Decide whether to rotate the credential" | grep -F "[NEW]" >/dev/null \
     || fail "a NEW decision behind the cap did not win a default slot: $changed"
 
   review_home=$(make_home review-slot-label)
@@ -1893,8 +1910,8 @@ test_watch_expansion_acknowledges_new_row_during_forge_loading() {
     > "$home/state/decision-task.status"
   changed=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
     || fail "watch-newness changed render failed"
-  row_id=$(printf '%s\n' "$changed" | rg -F "Decide the public API" | awk '{print $2}')
-  row_number=$(printf '%s\n' "$changed" | rg -F "Decide the public API" | awk '{print $1}')
+  row_id=$(printf '%s\n' "$changed" | grep -F "Decide the public API" | awk '{print $2}')
+  row_number=$(printf '%s\n' "$changed" | grep -F "Decide the public API" | awk '{print $1}')
   [ -n "$row_id" ] && [ -n "$row_number" ] || fail "watch-newness row was not addressable"
   touch "$home/slow-github-fixture"
 
@@ -1976,7 +1993,7 @@ test_watch_keeps_forge_newness_visible_until_it_can_be_acknowledged() {
   touch "$home/ci-red-fixture"
   changed=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
     || fail "forge-newness changed render failed"
-  row_id=$(printf '%s\n' "$changed" | rg -F "PR 4001" | awk '{print $2}')
+  row_id=$(printf '%s\n' "$changed" | grep -F "PR 4001" | awk '{print $2}')
   [ -n "$row_id" ] || fail "forge-derived NEW row was not addressable"
   pending_before=$(jq -c '[.rows | to_entries[] | select(.value.pending == true) | .key] | sort' "$store")
   touch "$home/slow-github-fixture"
@@ -2298,10 +2315,10 @@ test_completed_ours_surfaces_terminal_forge_change_once() {
 
   NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
     || fail "terminal-OURS baseline render failed"
-  sed -i '' '/^- \[ \] review-task /d' "$home/data/backlog.md"
-  sed -i '' '/^## Done$/a\
+  sed_in_place "$home/data/backlog.md" '/^- \[ \] review-task /d'
+  sed_in_place "$home/data/backlog.md" '/^## Done$/a\
 - [x] review-task - Ship the review branch (repo: artemis) (kind: ship) (reported 2026-08-02)
-' "$home/data/backlog.md"
+'
   rm "$home/state/review-task.meta" "$home/state/review-task.status"
   touch "$home/merged-ours-fixture"
   out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all) \
@@ -2394,7 +2411,7 @@ test_observation_store_is_private() {
 
   NO_COLOR=1 render_terminal "$home" "$fakebin" --width 80 --all >/dev/null \
     || fail "private-store baseline render failed"
-  mode=$(stat -f '%Lp' "$home/state/fleet-dashboard-observations.json") \
+  mode=$(file_mode "$home/state/fleet-dashboard-observations.json") \
     || fail "could not inspect observation-store mode"
   [ "$mode" = 600 ] || fail "observation store mode is $mode, expected 600"
   pass "observation store is private to the captain's account"

@@ -233,7 +233,7 @@ test_poll_error_publication_failure_is_loud() {
   [ "$out" = "x-mode-error relay returned HTTP 401" ] \
     || fail "poll public marker directory must still emit the diagnostic (got: $out)"
   assert_present "$err" "poll must surface a failed private marker publication"
-  rg -F "failed to publish X poll error marker" "$err" >/dev/null \
+  grep -F "failed to publish X poll error marker" "$err" >/dev/null \
     || fail "poll must name the failed private marker publication"
   pass "fm-x-poll surfaces a publication failure in a non-private directory"
 }

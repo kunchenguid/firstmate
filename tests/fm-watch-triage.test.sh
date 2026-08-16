@@ -670,9 +670,9 @@ test_unavailable_harness_state_uses_only_current_pause_declaration() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "an unavailable-state declared pause did not re-surface on its bounded cadence"
-  rg -F "stale: $window" "$out" >/dev/null || fail "bounded pause recheck did not print a stale wake"
-  rg -F "awaiting external" "$out" >/dev/null || fail "bounded pause recheck omitted its external-wait label"
-  rg -F "awaiting external" "$state/.wake-queue" >/dev/null || fail "bounded pause recheck did not reach the durable wake queue"
+  grep -F "stale: $window" "$out" >/dev/null || fail "bounded pause recheck did not print a stale wake"
+  grep -F "awaiting external" "$out" >/dev/null || fail "bounded pause recheck omitted its external-wait label"
+  grep -F "awaiting external" "$state/.wake-queue" >/dev/null || fail "bounded pause recheck did not reach the durable wake queue"
   [ -e "$state/.paused-resurfaced-$key" ] || fail "bounded pause recheck did not record its throttle marker"
   [ ! -e "$state/.stale-since-$key" ] || fail "bounded pause recheck started wedge aging"
 
@@ -685,7 +685,7 @@ test_unavailable_harness_state_uses_only_current_pause_declaration() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "a wedged worker did not stale-alarm after a later append superseded its pause"
-  rg -Fx "stale: $window" "$out" >/dev/null \
+  grep -Fx "stale: $window" "$out" >/dev/null \
     || fail "a superseded pause suppressed the wedged worker's stale alarm: $(<"$out")"
   [ ! -e "$state/.paused-$key" ] || fail "a later non-pause append retained bounded pause handling"
   unset FM_FAKE_CREW_STATE
@@ -723,8 +723,8 @@ test_only_structural_no_source_reasons_trust_current_pause() {
         reap "$pid"
         printf 'not ok - %s %s lost its immediate stale alarm\n' "$harness" "$verdict" >&2
         failures=$((failures + 1))
-      elif ! rg -Fx "stale: $window" "$out" >/dev/null \
-        || ! rg -F "stale: $window" "$state/.wake-queue" >/dev/null; then
+      elif ! grep -Fx "stale: $window" "$out" >/dev/null \
+        || ! grep -F "stale: $window" "$state/.wake-queue" >/dev/null; then
         printf 'not ok - %s %s did not surface the exact immediate stale alarm\n' "$harness" "$verdict" >&2
         failures=$((failures + 1))
       fi
@@ -1293,9 +1293,9 @@ test_cursor_busy_turn_absorbs_observed_413s_false_wedge() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "the same Cursor pane did not surface after stop classified it idle"
-  rg -Fx "stale: $window" "$out" >/dev/null \
+  grep -Fx "stale: $window" "$out" >/dev/null \
     || fail "the post-stop Cursor stale wake was not surfaced: $(<"$out")"
-  rg -F "possible wedge" "$out" >/dev/null \
+  grep -F "possible wedge" "$out" >/dev/null \
     && fail "the post-stop Cursor stale was mislabeled as a busy-turn wedge"
   pass "Cursor's semantic busy turn absorbs the observed 413s false wedge, then stop makes the same pane actionable"
 }

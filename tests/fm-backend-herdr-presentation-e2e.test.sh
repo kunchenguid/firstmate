@@ -19,6 +19,7 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found"; exit
 
 REAL_HERDR=$(command -v herdr)
 REAL_TREEHOUSE=$(command -v treehouse)
+REAL_SLEEP=$(command -v sleep)
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XXXXXX")
 FAKEBIN="$TMP_ROOT/fakebin"
@@ -28,13 +29,14 @@ MOVE_CALL_LOG="$TMP_ROOT/workspace-move-calls.log"
 FOCUS_AUDIT_LOG="$TMP_ROOT/focus-audit.log"
 ACTIVE_SEEDED_CONTROL="$TMP_ROOT/active-seeded-control"
 POST_CREATE_ABORT_CONTROL="$TMP_ROOT/post-create-abort-control"
+RECOVERY_LOCK_CONTROL="$TMP_ROOT/recovery-lock-control"
 mkdir -p "$FAKEBIN"
 : > "$HERDR_CALL_LOG"
 : > "$TREEHOUSE_CALL_LOG"
 : > "$MOVE_CALL_LOG"
 : > "$FOCUS_AUDIT_LOG"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
-export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
+export REAL_HERDR REAL_TREEHOUSE REAL_SLEEP REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
 export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
 
 # Log every production-adapter call, remove its already-validated trailing
@@ -183,6 +185,13 @@ if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE
     break
   done
 fi
+recovery_lock_control="$TMP_ROOT/recovery-lock-control"
+if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] \
+   && [ -f "$recovery_lock_control/primary-pane" ] \
+   && [ "${3:-}" = "$(cat "$recovery_lock_control/primary-pane" 2>/dev/null || true)" ]; then
+  : > "$recovery_lock_control/ready"
+  while [ ! -e "$recovery_lock_control/release" ]; do sleep 0.05; done
+fi
 if [ -n "$mutation" ]; then
   after=$(focus_snapshot || printf ambiguous/ambiguous)
   printf '%s\t%s\t%s\t%s\n' "$mutation" "$before" "$after" "$mutation_target" >> "$FOCUS_AUDIT_LOG"
@@ -248,7 +257,13 @@ printf 'workspace-move\t%s\t%s\t%s\n' "$before" "$after" "$2" >> "$FOCUS_AUDIT_L
 [ -z "$out" ] || printf '%s\n' "$out"
 exit "$status"
 SH
-chmod +x "$FAKEBIN/herdr" "$FAKEBIN/treehouse"
+cat > "$FAKEBIN/sleep" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_TEST_RECOVERY_WAITER_READY:-}" ] || : > "$FM_TEST_RECOVERY_WAITER_READY"
+exec "$REAL_SLEEP" "$@"
+SH
+chmod +x "$FAKEBIN/herdr" "$FAKEBIN/treehouse" "$FAKEBIN/sleep"
 chmod +x "$FAKEBIN/herdr-workspace-mover"
 export PATH="$FAKEBIN:$PATH"
 export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
@@ -1232,12 +1247,29 @@ PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/
 PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
   || fail "could not reprovision the isolated session for concurrent recovery"
 CONCURRENT_RECOVERY_FOCUS=$(focus_snapshot)
+mkdir -p "$RECOVERY_LOCK_CONTROL"
+printf '%s\n' "$PRIMARY_WAVE_OLD_PANE" > "$RECOVERY_LOCK_CONTROL/primary-pane"
 spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/primary-wave-resume.out" 2> "$TMP_ROOT/primary-wave-resume.err" &
 PRIMARY_WAVE_PID=$!
-spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" &
+while [ ! -e "$RECOVERY_LOCK_CONTROL/ready" ] && kill -0 "$PRIMARY_WAVE_PID" 2>/dev/null; do sleep 0.01; done
+[ -e "$RECOVERY_LOCK_CONTROL/ready" ] \
+  || fail "primary concurrent recovery did not inspect its exact pane while holding the session lock: $(cat "$TMP_ROOT/primary-wave-resume.err")"
+FM_TEST_RECOVERY_WAITER_READY="$RECOVERY_LOCK_CONTROL/waiter-ready" \
+  spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" &
 BRAVO_WAVE_PID=$!
+while [ ! -e "$RECOVERY_LOCK_CONTROL/waiter-ready" ] && kill -0 "$BRAVO_WAVE_PID" 2>/dev/null; do sleep 0.01; done
+kill -0 "$BRAVO_WAVE_PID" 2>/dev/null \
+  || fail "second concurrent recovery exited before waiting on the presentation lock: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+# The ordinary worktree handoff is allowed to poll for 60 seconds while holding
+# this lock. Pause the first recovery during its real exact-pane inspection for
+# longer than the historical five-second recovery wait, then release it. This
+# is a timing boundary test, so the seven-second hold is deliberate rather than
+# a settle guess; both holder and waiter readiness are established first.
+sleep 7
+: > "$RECOVERY_LOCK_CONTROL/release"
 wait "$PRIMARY_WAVE_PID" || fail "concurrent primary recovery failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
 wait "$BRAVO_WAVE_PID" || fail "concurrent secondmate recovery failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+rm -rf "$RECOVERY_LOCK_CONTROL"
 PRIMARY_WAVE_NEW_WT=$(remember_meta_worktree "$PRIMARY_WAVE_META")
 BRAVO_WAVE_NEW_WT=$(remember_meta_worktree "$BRAVO_WAVE_META")
 PRIMARY_WAVE_NEW_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)

@@ -148,7 +148,7 @@ test_captain() {
   printf -v expected 'slack-captain-message %s\t%s' 1786735224.690829 status
   [ "$out" = "$expected" ] || fail "captain wake differs from poll contract: $out"
   [ -f "$home/state/slack-inbox/1786735224.690829.json" ] || fail "captain event was not stashed"
-  [ "$(rg -c '^method=chat.postMessage' "$log")" -eq 1 ] || fail "captain event was not acknowledged once"
+  [ "$(grep -c '^method=chat.postMessage' "$log")" -eq 1 ] || fail "captain event was not acknowledged once"
   pass "captain event produces the poll wake, inbox, and threaded acknowledgement"
 }
 

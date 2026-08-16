@@ -144,7 +144,7 @@ test_poll_continues_after_bot_cache_write_failure() {
     || fail "poll must not misreport a bot cache publication failure as auth.test failed"
   [[ "$out" == *"slack-captain-warning bot user cache publication failed"* ]] \
     || fail "poll must surface the bot cache publication failure distinctly"
-  rg -F '/conversations.history' "$log" >/dev/null \
+  grep -F '/conversations.history' "$log" >/dev/null \
     || fail "poll must reach conversations.history after a bot cache publication failure"
   pass "fm-slack-poll continues after a successful auth with a failed bot cache publication"
 }
@@ -425,7 +425,7 @@ FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config
   FM_SLACK_API_URL=https://slack.test/api FM_SLACK_CURL_BIN="$home/capture-curl" \
   PATH="$BASE_PATH" \
   "$ROOT/bin/fm-slack-poll.sh" >/dev/null 2>&1
-if rg -q -- "$argv_token" "$argvlog" 2>/dev/null; then
+if grep -q -- "$argv_token" "$argvlog" 2>/dev/null; then
   fail "poll must keep the bot token out of curl argv"
 fi
 pass "fm-slack-poll keeps the bot token out of curl argv"
@@ -495,18 +495,76 @@ out=$(run_poll "$home" "$(make_fake_curl "$home/fake-badchan")"); rc=$?
   || fail "poll must stay inert with an invalid configured channel id"
 pass "fm-slack-poll stays inert with an invalid channel id"
 
-# --- watcher globals stay narrow --------------------------------------------
+# --- watcher cadence stays narrow -------------------------------------------
 
-grep -F "CHECK_INTERVAL=\${FM_CHECK_INTERVAL:-300}" "$ROOT/bin/fm-watch.sh" >/dev/null \
-  || fail "fm-watch.sh must keep the global CHECK_INTERVAL default at 300"
-grep -F "SLACK_CHECK_INTERVAL=\${FM_SLACK_CHECK_INTERVAL:-\$POLL}" "$ROOT/bin/fm-watch.sh" >/dev/null \
-  || fail "fm-watch.sh must use a dedicated Slack fast interval"
-! grep -E '^CHECK_INTERVAL=\$\{FM_SLACK_CHECK_INTERVAL' "$ROOT/bin/fm-watch.sh" >/dev/null \
-  || fail "fm-watch.sh must not route Slack cadence through CHECK_INTERVAL"
-awk '/elif.*slack-watch\.check\.sh/ { getline; if ($0 ~ /continue/) found=1 } END { exit found ? 0 : 1 }' \
-  "$ROOT/bin/fm-watch.sh" \
-  || fail "fm-watch.sh must skip the Slack shim in the slow sweep"
-pass "fm-watch.sh keeps the global check interval and a dedicated Slack fast path"
+home="$TMP_ROOT/watch-cadence"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-watch-cadence")
+shim="$home/state/slack-watch.check.sh"
+# shellcheck source=bin/fm-slack-lib.sh
+. "$ROOT/bin/fm-slack-lib.sh"
+fms_poll_shim_content "$home" "$ROOT" > "$shim"
+chmod 0700 "$shim"
+
+# Each case ends on the watcher's own terminal wake, never on a timer: wake()
+# exits the process, so every assertion below reads one completed cycle instead
+# of whatever a fixed sleep happened to catch. The away flag plus a zero
+# heartbeat is the backstop wake, and it fires strictly after both check blocks,
+# so a case whose intended wake never happens still ends the cycle - and ends it
+# with evidence of how far the cycle got. The tick bound only keeps a watcher
+# that stops waking altogether a failure here instead of a hung CI shard.
+touch "$home/state/.afk"
+
+run_watch_cadence_cycle() {  # <slow-check-interval> <curl-log> <history-json>
+  local slow_interval=$1 curl_log=$2 history=$3 pid ticks=0
+  : > "$curl_log"
+  touch "$home/state/.last-check"
+  rm -f "$home/state/.last-slack-check"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_POLL=60 FM_CHECK_INTERVAL="$slow_interval" \
+    FM_SLACK_CHECK_INTERVAL=0 FM_HEARTBEAT=0 FM_SIGNAL_GRACE=0 \
+    FM_SLACK_API_URL=https://slack.test/api FM_SLACK_CURL_BIN="$fakebin/curl" \
+    FM_SLACK_CURL_LOG="$curl_log" FAKE_SLACK_CHANNEL="$CHANNEL_ID" \
+    FAKE_SLACK_HISTORY="$history" PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-watch.sh" > "$home/watch.out" 2> "$home/watch.err" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$ticks" -ge 600 ]; then
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      fail "watcher never reached a terminal wake: $(cat "$home/watch.out" "$home/watch.err")"
+    fi
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  wait "$pid" 2>/dev/null || true
+}
+
+history_calls() {  # <curl-log>
+  awk '/^url=.*conversations\.history/ { n++ } END { print n + 0 }' "$1"
+}
+
+# Fast path due, slow sweep not. The captain message wakes before the heartbeat
+# backstop can, so that wake is itself the proof the Slack poll ran off the
+# dedicated fast interval rather than the sweep that is not due here.
+log="$home/fast-only.log"
+run_watch_cadence_cycle 1000000 "$log" \
+  '{"ok":true,"messages":[{"type":"message","user":"U_CAPTAIN1","text":"cadence probe","ts":"1786735230.222222"}]}'
+[ "$(history_calls "$log")" -eq 1 ] \
+  || fail "watcher must run the Slack fast path while the slow check sweep is not due: $(cat "$log")"
+grep -Fq 'slack-captain-message 1786735230.222222' "$home/watch.out" \
+  || fail "watcher must wake on the fast-path Slack message: $(cat "$home/watch.out")"
+
+# Both due, and the fast path stays quiet. Ending on the heartbeat backstop is
+# the proof the cycle ran the sweep to completion: a sweep that had touched the
+# Slack shim would have exited inside the check block with its own wake instead.
+log="$home/both-due.log"
+run_watch_cadence_cycle 0 "$log" '{"ok":true,"messages":[]}'
+[ "$(history_calls "$log")" -eq 1 ] \
+  || fail "watcher must not run the Slack shim again in the slow check sweep"
+[ "$(cat "$home/watch.out")" = heartbeat ] \
+  || fail "slow check sweep must pass over the authenticated Slack shim silently: $(cat "$home/watch.out")"
+pass "fm-watch.sh keeps Slack polling on one dedicated fast path"
 
 # --- post board update ------------------------------------------------------
 
