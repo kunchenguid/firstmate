@@ -192,7 +192,7 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 `bin/fm-spawn.sh` accepts that dialog with Enter and does not return success until a bounded pane loop observes spinner activity, a new tool row, or a moving token counter.
 A muted-transcript warning, an unresolved dialog, or a timeout fails the spawn loudly with the final pane snapshot.
-The classifier and polling bounds are owned by `bin/fm-spawn.sh`'s header comment.
+The classifier contract is the pure pane-text checks in `bin/fm-control-lib.sh`; the polling bounds are owned by `bin/fm-spawn.sh`'s header comment.
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.

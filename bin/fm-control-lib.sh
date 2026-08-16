@@ -12,8 +12,11 @@
 # verbs addressed to an exact task id, with the per-harness mechanics owned
 # here rather than improvised per harness in agent prose.
 #
-# This file owns three capability tables plus their pure artifact-path tables
-# and nothing else. It has no side effects, runs no backend command, and reads
+# This file owns three capability tables, their pure artifact-path tables, and
+# the shared Claude launch-verification classifiers (pure pane-text checks for a
+# muted transcript, a trust or bypass-permissions dialog, a busy affordance, a
+# tool row, and the token counter) - and nothing else. It has no side effects,
+# runs no backend command, and reads
 # no state, so it can be sourced by a test as a pure contract:
 #
 #   1. Verb allowlist. There is no arbitrary-text and no generic raw-key entry
