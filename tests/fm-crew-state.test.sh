@@ -92,6 +92,7 @@ case "${1:-}" in
     ;;
   runs)
     printf 'runs\n' >> "${FM_FAKE_RUNS_CALL_LOG:-/dev/null}"
+    [ "${FM_FAKE_RUNS_FAIL:-0}" = 1 ] && exit 124
     printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
 esac
 exit 0
@@ -196,7 +197,8 @@ reset_fakes() {
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
   FM_FAKE_RUNS_CALL_LOG=/dev/null
-  export FM_FAKE_RUNS_CALL_LOG
+  FM_FAKE_RUNS_FAIL=0
+  export FM_FAKE_RUNS_CALL_LOG FM_FAKE_RUNS_FAIL
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
@@ -1636,6 +1638,41 @@ EOF
   pass "the supersession probe is damped for a negative answer and never caches a positive"
 }
 
+# The damping cache may only remember a DEFINITIVE answer. The runs call is
+# fail-open, so a timed-out listing looks exactly like "no replacement" by its
+# printed word alone; caching that non-answer would pin the terminal verdict for
+# a whole TTL and hand bin/fm-inactive-reconcile.sh the false inactive-outcome
+# record on its very first read, which is the failure this change exists to
+# prevent. An unanswered listing must cost only that one read, as before.
+test_unanswered_runs_listing_is_never_cached_as_absent() {
+  reset_fakes
+  local d short out
+  d=$(new_case runs-listing-unanswered)
+  make_repo_on_branch "$d/wt" fm/feat-listing-unanswered
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/listing-unanswered.meta" \
+    "window=fm:fm-listing-unanswered" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_outcome fm/feat-listing-unanswered failed)"
+  FM_FAKE_RUNS_FAIL=1
+  FM_FAKE_RUNS_CALL_LOG="$d/runs-calls.log"
+
+  out=$(run_crew_state "$d" listing-unanswered)
+  assert_contains "$out" "state: failed" "an unanswered listing leaves the terminal verdict as it was"
+  assert_runs_calls 1 "$FM_FAKE_RUNS_CALL_LOG" "the first read probes once"
+  assert_absent "$d/state/.run-superseded-listing-unanswered" \
+    "an unanswered listing must not be remembered as 'not superseded'"
+
+  out=$(run_crew_state "$d" listing-unanswered)
+  assert_runs_calls 2 "$FM_FAKE_RUNS_CALL_LOG" "the next read probes again instead of trusting a non-answer"
+
+  FM_FAKE_RUNS_FAIL=0
+  FM_FAKE_RUNS_LIST="  running    fm/feat-listing-unanswered ${short}  2026-08-16 08:56"
+  out=$(run_crew_state "$d" listing-unanswered)
+  assert_contains "$out" "state: working" "the replacement is detected as soon as the listing answers"
+  pass "an unanswered runs listing is never cached as a negative supersession answer"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1695,5 +1732,6 @@ test_coarse_stuck_running_row_below_newer_terminal_does_not_win
 test_replaced_done_run_not_reported_as_current
 test_ci_green_override_is_not_probed_for_supersession
 test_terminal_supersession_probe_is_damped_but_never_caches_a_positive
+test_unanswered_runs_listing_is_never_cached_as_absent
 
 echo "all fm-crew-state tests passed"

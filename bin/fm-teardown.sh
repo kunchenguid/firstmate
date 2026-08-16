@@ -2544,11 +2544,8 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
-  "$STATE/.run-progress-$ID" "$STATE/.run-superseded-$ID"
-# Both supervision records are rewritten via mktemp + mv, so a kill in that
-# window can leave a "$file.XXXXXX" sibling; sweep those too rather than let one
-# outlive its task.
-rm -f -- "$STATE/.run-progress-$ID".* "$STATE/.run-superseded-$ID".*
+  "$STATE/.run-progress-$ID" "$STATE/.run-superseded-$ID" \
+  "$STATE/.run-progress-$ID.tmp" "$STATE/.run-superseded-$ID.tmp"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

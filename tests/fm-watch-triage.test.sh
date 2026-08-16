@@ -1443,6 +1443,59 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   pass "a busy worker with a stable pane hash still escalates once its completed-turn age reaches the bound"
 }
 
+# The turn-age bound is deliberately NOT covered by the run-progress absorb that
+# the stale paths gained. It is an independent inspection-only guard that exists
+# to catch a hung FOREGROUND call, and an advancing pipeline says nothing about
+# that: the crew can be blocked on a wedged tool call while its no-mistakes run
+# keeps moving. Sharing wedge_timer_check with the stale paths must not quietly
+# soften it, so the mode is an explicit argument rather than an inferred one.
+test_busy_turn_age_bound_escalates_even_while_the_pipeline_advances() {
+  local dir state fakebin out capture_file window key pane_hash sig pid wt head axi
+  dir=$(make_case busy-turn-age-advancing); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; wt="$dir/wt"; axi="$dir/axi.out"
+  window="test:fm-busy-advancing"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  git -C "$wt" commit -q --allow-empty -m init
+  git -C "$wt" checkout -q -b fm/busy-advancing
+  head=$(git -C "$wt" rev-parse HEAD)
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = axi ] && [ "${2:-}" = status ] && cat "$FM_FAKE_AXI_STATUS_FILE" 2>/dev/null
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+  printf 'Working...' > "$capture_file"
+  fm_write_meta "$state/busy-advancing.meta" \
+    "window=$window" "kind=ship" "harness=pi" "worktree=$wt"
+  record_pi_busy "$state" busy-advancing
+  printf 'working: setup complete\n' > "$state/busy-advancing.status"
+  sig=$(seen_sig "$state/busy-advancing.status"); printf '%s' "$sig" > "$state/.seen-busy-advancing_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # No completed turn ever recorded: the spawn record itself is past the bound.
+  touch -t 200001010000 "$state/busy-advancing.meta"
+  run_object fm/busy-advancing 01R9 running "$head" running 500 > "$axi"
+  # A baseline that differs from the run's current fingerprint, so the probe
+  # would read genuine movement if it were consulted here at all.
+  printf 'an-older-fingerprint\n' > "$state/.run-progress-busy-advancing"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_AXI_STATUS_FILE="$axi" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "an advancing pipeline suppressed the busy turn-age escalation: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "busy turn-age escalation did not print the stale wake: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "busy turn-age escalation did not flag a possible wedge: $(cat "$out")"
+  pass "the busy turn-age bound still escalates while the crew's no-mistakes run advances"
+}
+
 # Regression fixture for the incident's actual masking condition: Pi's rendered
 # elapsed-time footer changes every poll, so the pane hash never repeats and the
 # watcher always takes the "new hash" branch, never the stable-hash one above.
@@ -2126,6 +2179,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
+test_busy_turn_age_bound_escalates_even_while_the_pipeline_advances
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection

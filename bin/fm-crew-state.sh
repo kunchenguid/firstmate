@@ -376,10 +376,17 @@ nm_ci_checks_state() {
 # read as working. The counterweight is the wedge-escalation progress probe
 # (crew_run_progressed in bin/fm-classify-lib.sh), which goes through `axi
 # status` and absorbs only on actual movement.
+#
+# Exit status separates "the listing answered" (0) from "the listing produced
+# nothing at all" (1), because nm_run is fail-open: a timed-out or erroring CLI
+# is indistinguishable from a clean answer by the printed word alone. Callers
+# that only need the word can keep ignoring the status - an unanswered listing
+# prints nothing either way - but a caller that would REMEMBER the answer must
+# not remember a non-answer.
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha newest=1
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
-  [ -n "$out" ] || return 0
+  [ -n "$out" ] || return 1
   while IFS= read -r row; do
     row=$(trim "$row")
     [ -n "$row" ] || continue
@@ -444,8 +451,14 @@ nm_supersession_record_absent() {
   [ -n "$head" ] || return 0
   now=$(date +%s 2>/dev/null) || return 0
   file=$(nm_supersession_cache_file)
-  tmp=$(umask 077; mktemp "$file.XXXXXX") || return 0
-  if printf '%s %s\n' "$head" "$now" > "$tmp"; then
+  # Fixed temp name, not mktemp: a random suffix would force teardown to sweep
+  # "$file".* to catch an orphan, and a task id may itself contain a dot
+  # (fm_task_id_path_safe allows it), so that glob would delete a live sibling
+  # task's records. There is no concurrent writer for one task - the watcher and
+  # the away daemon are mutually exclusive by mode - and the rename below is
+  # atomic regardless, so the deterministic name is safe. Do not restore mktemp.
+  tmp="$file.tmp"
+  if ( umask 077; printf '%s %s\n' "$head" "$now" > "$tmp" ); then
     mv -f -- "$tmp" "$file" || rm -f -- "$tmp"
   else
     rm -f -- "$tmp"
@@ -636,15 +649,21 @@ if [ "$HAVE_RUN" = 1 ]; then
   # ci-green override is deliberately excluded via RUN_TERMINAL - that run is
   # still executing and is its own newest row. The coarse path already applied
   # the same rule when it resolved, and nm_supersession_absent_cached damps the
-  # repeat cost for a terminal run nothing ever replaces.
+  # repeat cost for a terminal run nothing ever replaces. Only a listing that
+  # actually ANSWERED may be remembered - a timed-out one leaves the cache alone
+  # and costs just this read, rather than pinning the terminal verdict for a
+  # whole TTL and handing bin/fm-inactive-reconcile.sh the false record this
+  # exists to prevent.
   if [ "$RUN_TERMINAL" = 1 ] && [ "$RUN_SOURCE" = full ] \
      && { [ "$RUN_STATE" = failed ] || [ "$RUN_STATE" = "done" ]; } \
      && ! nm_supersession_absent_cached; then
-    if [ "$(nm_runs_status_for_branch "$CREW_BRANCH")" = running ]; then
-      RUN_DETAIL="validating (background run)${SEP}superseded $RUN_DETAIL"
-      RUN_STATE=working
-    else
-      nm_supersession_record_absent
+    if REPLACEMENT_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH"); then
+      if [ "$REPLACEMENT_STATUS" = running ]; then
+        RUN_DETAIL="validating (background run)${SEP}superseded $RUN_DETAIL"
+        RUN_STATE=working
+      else
+        nm_supersession_record_absent
+      fi
     fi
   fi
 

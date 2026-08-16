@@ -286,16 +286,31 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # captain-relevant status-log line that an active run/busy pane outranked), as
 # well as the busy-pane turn-age bound.
 #
-# At the ESCALATION moment only, crew_run_progressed (fm-classify-lib.sh, the
-# ONE owner of that rule) gets to absorb the series instead: a crew blocked on
-# an advancing no-mistakes run renders nothing, so its quiet endpoint is the
-# normal shape of a healthy validation rather than a wedge. Movement is
-# required, so a frozen run, and every crew with no run of its own, escalates
-# exactly as before. An absorb deliberately leaves the escalation counter
-# untouched rather than resetting it, so a pane that already demanded deep
-# inspection still carries that marker into its next escalation.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+# On the STALE paths, at the ESCALATION moment only, crew_run_progressed
+# (fm-classify-lib.sh, the ONE owner of that rule) gets to absorb the series
+# instead: a crew blocked on an advancing no-mistakes run renders nothing, so
+# its quiet endpoint is the normal shape of a healthy validation rather than a
+# wedge. Movement is required, so a frozen run, and every crew with no run of
+# its own, escalates exactly as before. An absorb deliberately leaves the
+# escalation counter untouched rather than resetting it, so a pane that already
+# demanded deep inspection still carries that marker into its next escalation.
+#
+# The busy-pane turn-age bound is deliberately EXCLUDED from that absorb, which
+# is why the mode is an explicit argument here rather than inferred from the
+# triage label: BUSY_TURN_MAX_SECS is an independent inspection-only guard on a
+# busy pane (see docs/architecture.md), and it exists precisely to catch a hung
+# foreground call - a state an advancing pipeline says nothing about. Letting
+# pipeline movement postpone it would soften a documented safety boundary. The
+# mode is mandatory so a new call site has to state its intent instead of
+# inheriting either behavior by default. The away-mode daemon needs no
+# equivalent: its housekeeping recheck is a stale path only, with no busy-turn
+# counterpart.
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <probe-run|no-probe-run>
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 mode=$5 since age n reason
+  case "$mode" in
+    probe-run|no-probe-run) ;;
+    *) triage_log "wedge_timer_check: unknown run-probe mode '$mode' for $win"; return 1 ;;
+  esac
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -305,7 +320,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        if crew_run_progressed "$(window_to_task "$win" "$STATE")" "$STATE"; then
+        if [ "$mode" = probe-run ] \
+           && crew_run_progressed "$(window_to_task "$win" "$STATE")" "$STATE"; then
           date +%s > "$since_file"
           triage_log "absorbed $label (pipeline advanced since the last check, idle ${age}s): $win"
           return 0
@@ -1098,7 +1114,7 @@ EOF
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
+            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" probe-run
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
@@ -1141,12 +1157,12 @@ EOF
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
+                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" probe-run
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" probe-run
             fi
           fi
         fi
@@ -1155,7 +1171,7 @@ EOF
         # unless a genuinely busy pane has gone too long with no completed turn -
         # then route it through the same wedge timer instead of erasing it.
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" no-probe-run
         else
           rm -f "$ssf" "$ewf"
         fi
@@ -1167,7 +1183,7 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" no-probe-run
       else
         rm -f "$ssf" "$ewf"
       fi

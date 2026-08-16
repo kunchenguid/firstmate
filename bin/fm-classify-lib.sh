@@ -1203,8 +1203,14 @@ crew_run_progressed() {  # <id> <state>
   previous=$(cat "$file" 2>/dev/null || true)
   # Atomic replace: the two supervisors and a test harness may read this while
   # it is rewritten, and a torn baseline would fake movement on the next probe.
-  tmp=$(umask 077; mktemp "$file.XXXXXX") || return 1
-  if ! printf '%s\n' "$fingerprint" > "$tmp" || ! mv -f -- "$tmp" "$file"; then
+  # The temp name is deterministic rather than mktemp-random so teardown can
+  # remove it by exact path; a "$file".* sweep would delete a live sibling
+  # task's records, because a task id may itself contain a dot. There is no
+  # concurrent writer for one task - the watcher and the away daemon are
+  # mutually exclusive by mode - and the rename stays atomic either way, so the
+  # fixed name is safe. Do not restore mktemp.
+  tmp="$file.tmp"
+  if ! ( umask 077; printf '%s\n' "$fingerprint" > "$tmp" ) || ! mv -f -- "$tmp" "$file"; then
     rm -f -- "$tmp"
     return 1
   fi
