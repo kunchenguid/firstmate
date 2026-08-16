@@ -38,6 +38,9 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
    For registered secondmates, use the snapshot's structured-home classification and provenance.
    A parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
    Structured captain-held decisions come from `decision-hold-lifecycle` and appear under `decisions_open`.
+   Every decision FIGURE you report comes from `decision_ledger`, and every open decision you report comes from `decision_keys`, which lists each one with its disposition and is never truncated.
+   `open_decision_keys` is the only open-decision count; the `raw_*` figures count individual status events, so never report one of them, a held-row total, or any other number as open decisions.
+   Never state a decision count you cannot name the keys behind, and never leave a `decision_keys` row unaccounted for in your answer.
    Do not scrape reports, visual-review artifacts, raw status-event tails, or visible conversation history to supplement current state.
    A queued item under `gates` only becomes "next work" when its blocker is gone and its time/date gate has arrived.
    Until then it stays queued with the reason.

@@ -1919,6 +1919,37 @@ test_all_landed_keeps_complete_global_order
 test_landed_bounded_and_disclosed
 test_live_blocker_is_not_charted_queue_work
 test_captains_call_anti_leak
+# A home whose whole-inventory JSON is larger than a single command-line argument
+# may carry. The canonical snapshot must hand those documents to jq on stdin: an
+# argv form dies with "Argument list too long" exactly when the fleet is largest,
+# taking the whole bearings surface with it.
+test_oversized_inventory_survives_argument_limits() {
+  local home fakebin filler i json size
+  home=$(make_home oversized-inventory)
+  : > "$home/data/secondmates.md"
+  filler=$(awk 'BEGIN { while (i++ < 400) printf "sample inventory filler " }')
+  {
+    printf '## In flight\n\n## Queued\n'
+    for i in $(seq 1 220); do
+      printf -- '- [ ] bulk-%03d - Bulk queued sample %03d %s (repo: sample) (kind: ship)\n' \
+        "$i" "$i" "$filler"
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+  size=$(wc -c < "$home/data/backlog.md" | tr -d ' ')
+  [ "$size" -gt 1900000 ] \
+    || fail "fixture inventory is only $size bytes, below every platform argument limit"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json) \
+    || fail "bearings failed on an inventory larger than the argument limit"
+  printf '%s' "$json" | jq -e '
+    (.gates | length) > 0
+      and (.omitted | any(.surface | startswith("gates showing")))
+  ' >/dev/null || fail "oversized inventory did not project its queued work: $json"
+  pass "an inventory beyond the argument limit still produces a complete bearings view"
+}
+
+test_oversized_inventory_survives_argument_limits
 test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning

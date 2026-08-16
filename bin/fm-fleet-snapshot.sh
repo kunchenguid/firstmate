@@ -607,11 +607,15 @@ task_json_lines() {
 # used by secondmate_home_summary_json, without inventing live task rows.
 # Meta inventory remains the sole source of live workers; this object only
 # discloses backlog↔task inconsistency for renderers (Bearings omitted/gates).
+# The two whole-inventory JSON documents arrive on stdin rather than in argv:
+# a home with a few hundred backlog rows pushes them past ARG_MAX, and an argv
+# form dies with "Argument list too long" exactly when the fleet is largest.
 main_inventory_json() {  # <backlog-json> <tasks-json>
-  jq -n \
-    --argjson backlog "$1" \
-    --argjson tasks "$2" '
-    ([ $backlog.records[]?
+  { printf '%s\n' "$1"; printf '%s\n' "$2"; } | jq -s '
+    if length != 2 then error("main inventory inputs are incomplete") else . end
+    | .[0] as $backlog
+    | .[1] as $tasks
+    | ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]?
          | select(.state == "in_flight" and .structured and .requires_child_metadata) ]) as $owned_in_flight
@@ -635,20 +639,22 @@ main_inventory_json() {  # <backlog-json> <tasks-json>
 # validated parent read needs.
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
+# Same stdin contract as main_inventory_json above, for the same ARG_MAX reason.
 secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
-  jq -n \
+  { printf '%s\n' "$1"; printf '%s\n' "$2"; } | jq -s \
     --arg generated "$SNAPSHOT_NOW" \
     --arg home "$FM_HOME" \
     --argjson child_n "$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
     --argjson queued_n "$FM_SNAPSHOT_SECONDMATE_QUEUED" \
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
-    --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
-    --argjson backlog "$1" \
-    --argjson tasks "$2" '
+    --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" '
     def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
-    ([ $backlog.records[]?
+    if length != 2 then error("secondmate home summary inputs are incomplete") else . end
+    | .[0] as $backlog
+    | .[1] as $tasks
+    | ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
     | ([ $backlog.records[]?
@@ -1362,7 +1368,10 @@ SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
 SECONDMATE_LANDED_JSON=$(secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON") \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
 
-jq -n \
+# The three documents that grow with the fleet - the backlog, the task inventory,
+# and the report pointers - arrive on stdin for the same ARG_MAX reason as
+# main_inventory_json above. The remaining arguments are bounded by construction.
+{ printf '%s\n' "$BACKLOG_JSON"; printf '%s\n' "$TASKS_JSON"; printf '%s\n' "$SCOUT_REPORTS_JSON"; } | jq -s \
   --arg generated "$SNAPSHOT_NOW" \
   --arg fm_home "$FM_HOME" \
   --arg fm_root "$FM_ROOT" \
@@ -1370,13 +1379,14 @@ jq -n \
   --arg data "$DATA" \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
-  --argjson backlog "$BACKLOG_JSON" \
-  --argjson tasks "$TASKS_JSON" \
   --argjson main_inventory "$MAIN_INVENTORY_JSON" \
-  --argjson scout_reports "$SCOUT_REPORTS_JSON" \
   --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
   --argjson secondmate_landed "$SECONDMATE_LANDED_JSON" \
-  'def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
+  'if length != 3 then error("fleet snapshot inputs are incomplete") else . end
+   | .[0] as $backlog
+   | .[1] as $tasks
+   | .[2] as $scout_reports
+   | def backlog_by_id($id): ($backlog.records[]? | select(.structured == true and .id == $id) | .) // null;
    def task_by_id($id): ($tasks[]? | select(.id == $id) | .) // null;
    def report_kind($id): (task_by_id($id).kind // backlog_by_id($id).kind // "scout");
    {

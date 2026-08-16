@@ -22,6 +22,7 @@
 #     --title <title> --reason <reason> [--repo <repo>]
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
+#   fm-decision-hold.sh state <origin-id> <decision-key>...
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
 #   fm-decision-hold.sh decline <origin-id> <decision-key> --decision-file <path>
@@ -34,6 +35,18 @@
 # complete against the surviving report and holds without recreating task state.
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
+#
+# A hold identity satisfies those gates in three states, all durable: actively
+# held, resolved in the live backlog, or resolved and then ARCHIVED out of the
+# live backlog by the backend's Done retention. An inventory key proves a decision
+# was inventoried, not that it is still open, so an answered-and-archived key is a
+# closed state rather than a permanent blocker. The archived state is accepted only
+# on the backend's own archive file and only when the archived record still carries
+# the complete `resolve` resolution record, so a row that was collapsed, edited
+# down, or deleted rather than answered stays unaccounted for and still refuses.
+# `state` is the read-only classifier behind all of that: it prints one
+# "<decision-key>\t<held|resolved|archived|invalid|absent>" line per requested key
+# and is what bin/fm-decision-ledger.sh calls for per-key dispositions.
 #
 # `resolve` and `decline` close active holds; `repair` attests a hold already closed
 # outside this script. All three paths require a non-empty captain decision file of
@@ -287,32 +300,111 @@ verify_hold_active() {  # <hold-id>
   [ "$hold_kind" = captain ] || fail "backlog item $id is not held for the captain"
 }
 
+# The backend's Done-retention archive, resolved exactly the way tasks-axi
+# resolves it: the [markdown] archive path from the active home's .tasks.toml,
+# relative to the home tasks_axi() runs in, defaulting to data/done-archive.md.
+archive_path() {
+  local config="$FM_HOME/.tasks.toml" path=''
+  if [ -f "$config" ] && [ ! -L "$config" ]; then
+    path=$(sed -n 's/^[[:space:]]*archive[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config" | head -1)
+  fi
+  [ -n "$path" ] || path=data/done-archive.md
+  case "$path" in
+    /*) printf '%s\n' "$path" ;;
+    *) printf '%s/%s\n' "$FM_HOME" "$path" ;;
+  esac
+}
+
+# Print the archived resolution body of <hold-id>, or return 1 when the archive
+# holds no ANSWERED record for it. The whole record must still be intact - a
+# captain-kind closed row whose body still opens with the `resolve` marker and
+# still carries the decision digest, the routed identities, and the routed-work
+# list - so only a genuine answer counts as accounted for. A row that was
+# collapsed into another, hand-edited down, or deleted leaves nothing that
+# satisfies this, which is what keeps collapsing rows from becoming a way to
+# clear the gate.
+archived_resolution_body() {  # <hold-id>
+  local id=$1 archive
+  archive=$(archive_path)
+  [ -f "$archive" ] && [ -r "$archive" ] && [ ! -L "$archive" ] || return 1
+  awk -v target="- [x] $id - " '
+    function record_ok(  lines, n, i, line, opened, digest, routes, routed) {
+      if (hdr !~ /\(kind: captain\)/) return 0
+      n = split(body, lines, "\n")
+      for (i = 1; i <= n; i++) {
+        line = lines[i]
+        if (line == "") continue
+        if (!opened) {
+          if (line != "Resolution recorded by fm-decision-hold.") return 0
+          opened = 1
+          continue
+        }
+        if (line ~ /^Decision digest: [0-9a-f]+$/ && length(line) == 81) digest = 1
+        else if (line ~ /^Routed identities: ([A-Za-z0-9._,-]+|\(none\))$/) routes = 1
+        else if (index(line, "Routed work:") == 1) routed = 1
+      }
+      return (opened && digest && routes && routed)
+    }
+    function flush() {
+      if (inrec && !found && record_ok()) { out = body; found = 1 }
+      inrec = 0; hdr = ""; body = ""
+    }
+    /^## / { flush(); next }
+    /^- \[/ {
+      flush()
+      if (index($0, target) == 1) { hdr = $0; inrec = 1 }
+      next
+    }
+    inrec { line = $0; sub(/^  /, "", line); body = body line "\n"; next }
+    END { flush(); if (!found) exit 1; printf "%s", out }
+  ' "$archive"
+}
+
+# The ONE classifier for a hold identity's durable state, used by every gate here
+# and by bin/fm-decision-ledger.sh:
+#   held      actively held for the captain in the live backlog
+#   resolved  answered, with the durable resolution record, in the live backlog
+#   archived  answered, with that record intact, and archived out of the live backlog
+#   invalid   a live backlog row exists under this identity but is neither
+#   absent    no live row and no archived answer - genuinely unaccounted for
+hold_state() {  # <hold-id>
+  local id=$1 show state held kind hold_kind body
+  if show=$(task_show "$id"); then
+    state=$(show_field "$show" state)
+    held=$(show_field "$show" held)
+    kind=$(show_field "$show" kind)
+    hold_kind=$(show_field "$show" hold_kind)
+    body=$(show_field "$show" body)
+    if [ "$state" = queued ] && [ "$held" = yes ] && [ "$kind" = captain ] && [ "$hold_kind" = captain ]; then
+      printf 'held\n'
+      return 0
+    fi
+    if [ "$state" = "done" ] && [ "$kind" = captain ] && body_has_resolution_record "$body"; then
+      printf 'resolved\n'
+      return 0
+    fi
+    printf 'invalid\n'
+    return 0
+  fi
+  if archived_resolution_body "$id" >/dev/null; then
+    printf 'archived\n'
+    return 0
+  fi
+  printf 'absent\n'
+}
+
 verify_hold_resolved() {  # <hold-id>
-  local id=$1 show state kind body
-  show=$(task_show "$id") || return 1
-  state=$(show_field "$show" state)
-  kind=$(show_field "$show" kind)
-  body=$(show_field "$show" body)
-  [ "$state" = "done" ] || return 1
-  [ "$kind" = captain ] || return 1
-  body_has_resolution_record "$body"
+  [ "$(hold_state "$1")" = resolved ]
 }
 
 verify_hold_durable() {  # <hold-id>
-  local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
-  state=$(show_field "$show" state)
-  held=$(show_field "$show" held)
-  kind=$(show_field "$show" kind)
-  hold_kind=$(show_field "$show" hold_kind)
-  body=$(show_field "$show" body)
-  if [ "$state" = queued ] && [ "$held" = yes ] && [ "$kind" = captain ] && [ "$hold_kind" = captain ]; then
-    return 0
-  fi
-  if [ "$state" = "done" ] && [ "$kind" = captain ] && body_has_resolution_record "$body"; then
-    return 0
-  fi
-  fail "captain decision $id is neither actively held nor durably resolved"
+  local id=$1 state
+  state=$(hold_state "$id")
+  case "$state" in
+    held|resolved|archived) return 0 ;;
+    invalid) fail "captain decision $id is neither actively held nor durably resolved" ;;
+    *) fail "captain decision $id is unaccounted for: no captain hold in $FM_HOME/data/backlog.md and no durable resolution record in $(archive_path)" ;;
+  esac
 }
 
 verify_resolution_identity() {
@@ -333,6 +425,18 @@ verify_resolution_identity() {
     || fail "captain hold $id records a different captain decision"
   [ "$recorded_routes" = "$routed_csv" ] \
     || fail "captain hold $id records different routed work"
+}
+
+# The archived form of the same retry identity check verify_resolution_identity
+# makes against a live hold body, reading the already de-indented archive record.
+verify_archived_resolution_identity() {  # <id> <archived-body> <digest> <routed-csv>
+  local id=$1 body=$2 decision_digest=$3 routed_csv=$4 recorded_digest recorded_routes
+  recorded_digest=$(printf '%s\n' "$body" | sed -n 's/^Decision digest: //p' | head -1)
+  recorded_routes=$(printf '%s\n' "$body" | sed -n 's/^Routed identities: //p' | head -1)
+  [ "$recorded_digest" = "$decision_digest" ] \
+    || fail "archived captain decision $id records a different captain decision"
+  [ "$recorded_routes" = "$routed_csv" ] \
+    || fail "archived captain decision $id records different routed work"
 }
 
 command_id() {
@@ -369,6 +473,8 @@ command_hold() {
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
   else
+    ! archived_resolution_body "$id" >/dev/null \
+      || fail "captain decision $id is already durably resolved and archived; use a new decision key for a new decision"
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
       repo=${repo%/}
@@ -494,8 +600,26 @@ EOF
   printf 'verified: %s unresolved-decision inventory\n' "$origin"
 }
 
+# Read-only per-key classifier. Unlike the gates it does not require the origin to
+# be owned by this home: it answers only "what durable state does this backlog
+# identity carry", which is exactly what a coverage ledger needs for a key whose
+# originating lane has already been cleaned up.
+command_state() {
+  local origin=${1:-} key
+  [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  shift
+  for key in "$@"; do
+    validate_slug decision-key "$key"
+  done
+  require_tasks_axi
+  for key in "$@"; do
+    printf '%s\t%s\n' "$key" "$(hold_state "$(hold_id "$origin" "$key")")"
+  done
+}
+
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body archived_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -514,6 +638,11 @@ command_resolve() {
   routed_csv=$(printf '%s\n' "$routed" | tr ' ' ',')
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
+  if archived_body=$(archived_resolution_body "$id"); then
+    verify_archived_resolution_identity "$id" "$archived_body" "$DECISION_DIGEST" "$routed_csv"
+    printf 'resolved: %s\n' "$id"
+    return 0
+  fi
   if verify_hold_resolved "$id"; then
     hold_show=$(task_show "$id")
     hold_body=$(show_field "$hold_show" body)
@@ -654,6 +783,7 @@ case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
+  state) shift; command_state "$@" ;;
   resolve) shift; command_resolve "$@" ;;
   decline) shift; command_decline "$@" ;;
   repair) shift; command_repair "$@" ;;
