@@ -161,9 +161,12 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
-# pane is absorbed rather than wedge-escalated.
-# A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once.
+# pane is absorbed rather than wedge-escalated. An authoritative paused verdict
+# from fm-crew-state is honored whether or not the agent is still alive - a
+# waiting worker normally keeps its agent at the idle prompt.
+# A captain-held or paused crew whose declared wait fm-crew-state cannot confirm
+# (stopped or unknown) uses the same bounded cadence only once its agent has
+# confidently exited, while a live or ambiguously read agent still surfaces once.
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -372,8 +375,14 @@ clear_pause_tracking() {  # <window>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# An authoritative paused verdict from fm-crew-state (crew_absorb_class) is
+# honored regardless of agent liveness: a worker that declares an external wait
+# normally KEEPS its agent alive at the idle prompt, so demanding a dead agent
+# there surfaced every ordinary pause as a false stale on each new pane hash.
+# Only a confidently dead ordinary crew may RECOVER paused classification after
+# fm-crew-state has fallen back to stopped or unknown - a live agent behind an
+# unconfirmed pause line could be an unanswered interactive gate, so that case
+# still surfaces.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -386,15 +395,9 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
+  # An established pause is trusted for one STALE_ESCALATE_SECS recheck window
+  # before authoritative crew state is consulted again.
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
     printf 'paused'
     return
   fi
@@ -404,7 +407,7 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
-  if [ "$(window_kind "$win")" != secondmate ]; then
+  if [ "$class" != paused ] && [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"
