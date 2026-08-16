@@ -50,8 +50,11 @@ write_brief() {  # <home> <id> [<recorded-mode>]
 }
 
 run_spawn() {  # <home> <fakebin> <spawn-args...>
+  # These cases are about the delivery contract, not the model axis, so every
+  # spawn takes the model's explicit opt-out to satisfy fm-spawn's requirement.
   local home=$1 fakebin=$2
   shift 2
+  set -- "$@" --model default
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \

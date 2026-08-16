@@ -453,7 +453,9 @@ spawn_secondmate() {
   # arg list explicitly so the optional harness is omitted cleanly.
   local spawn_args=("$id" "$home")
   [ -n "$harness" ] && spawn_args+=("$harness")
-  spawn_args+=(--secondmate)
+  # No caller of this helper exercises config/secondmate-harness's model token, so
+  # every one of them needs the explicit opt-out to satisfy the model backstop.
+  spawn_args+=(--secondmate --model default)
   PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
@@ -599,7 +601,7 @@ test_spawn_cursor_secondmate_launches_with_its_primary_contract() {
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PANE_PATH="$sm" \
-    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>&1 || rc=$?
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate --model default >/dev/null 2>&1 || rc=$?
 
   [ "$rc" -eq 0 ] || {
     echo "skip: cursor executable not resolvable in this environment, so the launch could not be built"
@@ -691,7 +693,7 @@ test_spawn_backend_precedence_over_inherited_config() {
   make_seeded_home "$sm" sm
 
   out=$(FM_BACKEND=tmux spawn_secondmate_capture \
-    "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+    "$w" sm "$sm" "$launchlog" --model default 2>&1); status=$?
   expect_code 0 "$status" \
     "FM_BACKEND=tmux should beat inherited config/backend=herdr"$'\n'"$out"
 
@@ -713,7 +715,7 @@ test_spawn_explicit_backend_precedence_over_env_and_inherited_config() {
   make_seeded_home "$sm" sm
 
   out=$(FM_BACKEND=zellij spawn_secondmate_capture \
-    "$w" sm "$sm" "$launchlog" --backend tmux 2>&1); status=$?
+    "$w" sm "$sm" "$launchlog" --backend tmux --model default 2>&1); status=$?
   expect_code 0 "$status" \
     "explicit --backend tmux should beat FM_BACKEND=zellij and inherited config/backend=herdr"$'\n'"$out"
 
@@ -737,7 +739,7 @@ test_spawn_bare_harness_no_model_effort_flag() {
   printf 'claude\n' > "$w/home/config/secondmate-harness"
   make_seeded_home "$sm" sm
 
-  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --model default 2>&1); status=$?
   expect_code 0 "$status" "bare-harness secondmate spawn should succeed"
 
   meta="$w/home/state/sm.meta"
@@ -847,7 +849,7 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
   printf 'claude opus high\n' > "$w/home/config/secondmate-harness"
   make_seeded_home "$sm" sm
 
-  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness codex >/dev/null 2>&1
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness codex --model default >/dev/null 2>&1
 
   meta="$w/home/state/sm.meta"
   [ "$(meta_field "$meta" harness)" = codex ] || fail "explicit-harness-no-tokens: meta harness not codex"
@@ -898,7 +900,7 @@ test_spawned_secondmate_uses_its_harness_supervision_model() {
     mkdir -p "$w/home/config"
     printf '%s\n' "$harness" > "$w/home/config/secondmate-harness"
     make_seeded_home "$sm" sm
-    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --model default >/dev/null 2>&1
     fm_write_meta "$sm/state/task.meta" "window=firstmate:fm-task" "kind=ship"
     touch "$sm/state/.last-watcher-beat"
     fakebin="$w/tmux-sm/fakebin"
@@ -941,7 +943,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   make_seeded_home "$sm" sm
 
-  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --model default >/dev/null 2>&1
 
   meta="$w/home/state/sm.meta"
   [ "$(meta_field "$meta" harness)" = codex ] \
@@ -966,7 +968,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off >/dev/null 2>&1
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off --model default >/dev/null 2>&1
   meta="$home/state/$id.meta"
   [ "$(meta_field "$meta" kind)" = ship ] || fail "crew-unaffected: expected an ordinary ship task"
   [ "$(meta_field "$meta" harness)" = codex ] || fail "crew-unaffected: crew harness resolution changed"
@@ -2386,7 +2388,7 @@ test_config_reread_bootstrap_path_and_spawn_flexibility() {
   fm_config_reread_mark_pending "$stale" "$stale.pending" \
     || fail "could not create spawn stale reread marker"
   launchlog="$w/spawn-flex.launch.log"
-  spawn_secondmate_capture "$w" sm-flex "$sm" "$launchlog" --harness pi >/dev/null 2>&1
+  spawn_secondmate_capture "$w" sm-flex "$sm" "$launchlog" --harness pi --model default >/dev/null 2>&1
   assert_no_reread_pending "$sm"
   assert_no_reread_instructions "$sm"
   launch=$(cat "$launchlog")
@@ -2489,7 +2491,7 @@ SH
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
-    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate 2>&1); status=$?
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate --model default 2>&1); status=$?
   expect_code 0 "$status" "spawn should remain available after reread cleanup failure"
   assert_contains "$out" "CONFIG_REREAD: secondmate sm: quarantined pre-relaunch generations" \
     "spawn cleanup failure did not emit a CONFIG_REREAD quarantine diagnostic"

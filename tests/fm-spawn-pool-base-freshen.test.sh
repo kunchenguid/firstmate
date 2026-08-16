@@ -81,7 +81,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
+    "$SPAWN" "$id" "$PROJECT_DIR" "$@" --model default 2>&1
 }
 
 test_stale_pool_base_refreshes_before_branching() {

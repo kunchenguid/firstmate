@@ -206,7 +206,7 @@ cmp -s "$REMOTE_HOME/.fm-secondmate-parent" <(
   printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=remote-mac\n'
 ) || fail "real remote provisioning must write the exact durable remote parent record"
 
-remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null \
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model default >/dev/null \
   || fail "real remote secondmate launch failed"
 
 DELIVERED_LINE=$(grep -F 'FM_PUBLIC_FOLLOWUP_PRIMARY_HOME' "$HERDR_LOG" | tail -1 || true)

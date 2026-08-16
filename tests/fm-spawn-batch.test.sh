@@ -17,6 +17,8 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
 export FM_BACKEND=tmux
 
 # Clear ambient firstmate overrides so the behavior test owns its environment.
+# These cases are about batch dispatch, not the model axis, so every spawn takes
+# the model's explicit opt-out to satisfy fm-spawn's requirement.
 run_spawn() {
   FM_ROOT_OVERRIDE='' \
     FM_HOME='' \
@@ -25,7 +27,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE='' \
     FM_CONFIG_OVERRIDE='' \
     FM_SPAWN_NO_GUARD=1 \
-    "$SPAWN" "$@" 2>&1
+    "$SPAWN" "$@" --model default 2>&1
 }
 
 # Ship spawns carry an explicit delivery contract (AGENTS.md section 7); the
@@ -87,12 +89,12 @@ test_projects_path_scoping() {
     if [ "$use_override" = yes ]; then
       out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
         FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 \
-        "$SPAWN" "$id" projects/alpha codex --mode no-mistakes --yolo off 2>&1)
+        "$SPAWN" "$id" projects/alpha codex --mode no-mistakes --yolo off --model default 2>&1)
     else
       mkdir -p "$home/projects/alpha"
       out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
         FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
-        "$SPAWN" "$id" projects/alpha codex --mode no-mistakes --yolo off 2>&1)
+        "$SPAWN" "$id" projects/alpha codex --mode no-mistakes --yolo off --model default 2>&1)
     fi
     status=$?
     [ "$status" -ne 0 ] || fail "$label: spawn with missing brief should fail"

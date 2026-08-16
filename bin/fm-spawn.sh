@@ -38,6 +38,22 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   Every spawn REFUSES unless a model resolved for it, so the launch model is a
+#   recorded decision rather than whatever the harness happens to prefer: an
+#   omitted model would land in meta as the same model=default a deliberate
+#   opt-out lands, leaving the record unable to tell the two apart. --model
+#   default IS that deliberate opt-out - it hands the choice to the harness and
+#   is recorded as such. A --secondmate launch governed by config/secondmate-harness
+#   satisfies the requirement from that file's model token. A --relaunch or a
+#   --secondmate respawn replaces a launch this home already recorded, so with
+#   nothing else resolved it adopts that record's model (a record predating the
+#   requirement carries no model= line, and the launch it describes ran on the
+#   harness default, so default transcribes it); a first launch has no record to
+#   adopt and is refused like any other. A raw launch command is exempt because
+#   it carries no model placeholder at all, so no --model value could reach it.
+#   --effort is deliberately not held to the same requirement: the model reaches
+#   every verified adapter, while opencode, kimi, and cursor accept no effort
+#   flag, so an effort decision is one those launches cannot carry.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -145,7 +161,9 @@
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
-#   and scout batches. The loop lives here, in bash, so callers never hand-write a
+#   and scout batches. The shared model is required for every batch, refused once
+#   for the whole batch rather than per pair after some have already launched.
+#   The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
@@ -350,6 +368,35 @@ case "$EFFORT" in
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
 
+# The model backstop. An unresolved model reaches the launch as no flag at all
+# and lands in state/<id>.meta as the same `model=default` a deliberate opt-out
+# records, so afterwards the durable record cannot tell "this model was chosen"
+# from "no model was chosen". This is the model counterpart of the
+# dispatch-profile harness backstop below, and it fires whether or not
+# config/crew-dispatch.json exists: that backstop guards consultation of a file,
+# while a model is worth naming on every spawn. `--model default` is the
+# explicit opt-out - it hands the choice to the harness as a decision the caller
+# took, and is recorded as exactly that. EFFORT is deliberately NOT held to this:
+# model_flag_for_harness threads the model into every verified adapter, while
+# opencode, kimi, and cursor accept no effort flag at all, so an effort decision
+# is one those launches provably cannot carry.
+unresolved_model_error() {
+  echo "error: this spawn has no resolved model - pass --model <name> resolved at intake (config/crew-dispatch.json when present, config/secondmate-harness for a secondmate), or --model default to hand the choice to the harness as a recorded opt-out (the model backstop, so the launch model is never silently omitted from the task record)." >&2
+}
+
+# $1 is the model resolved for this spawn, $2 the harness argument it launches on.
+refuse_unresolved_model() {
+  local model=$1 harness_arg=$2
+  [ -z "$model" ] || return 0
+  # The raw launch command is the unverified-adapter escape hatch: it carries no
+  # __MODELFLAG__ placeholder, so no model value could reach that launch even if
+  # one were named. Requiring a decision the spawn cannot honour would block the
+  # one workflow the escape hatch exists for.
+  case "$harness_arg" in *' '*) return 0 ;; esac
+  unresolved_model_error
+  return 1
+}
+
 # --relaunch reuses an existing task's endpoint, worktree, project, and kind,
 # so every axis this block resolves for a fresh spawn instead comes from that
 # task's own durable record below. Contradicting it on the command line is a
@@ -481,6 +528,22 @@ spawn_remote_secondmate() {
       return 1
       ;;
   esac
+  # A respawn replaces a launch this home already recorded, so it adopts that
+  # record's model rather than demanding the decision again; the local route
+  # below does the same for the same reason.
+  if [ "$model" = - ] && [ -f "$STATE/$id.meta" ]; then
+    model=$(fm_meta_get "$STATE/$id.meta" model)
+    [ -n "$model" ] || model=default
+  fi
+  # A remote route already refuses a raw launch command above, so `-` here means
+  # neither a flag, config/secondmate-harness, nor a durable record resolved a
+  # model for this launch.
+  if [ "$model" = - ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    unresolved_model_error
+    return 1
+  fi
   meta="$STATE/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if [ ! -f "$meta" ] || [ -L "$meta" ] \
@@ -857,6 +920,9 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
   fi
+  # One shared model covers every pair, so refuse the batch here rather than
+  # letting each re-exec'd pair refuse for itself after some have launched.
+  refuse_unresolved_model "$MODEL" "$HARNESS_ARG" || exit 1
   rc=0
   shared_args=()
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
@@ -1279,6 +1345,25 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     fi
   fi
 fi
+
+# A relaunch or a secondmate respawn replaces a launch this home already
+# recorded rather than deciding a new one, so it adopts that record's model
+# instead of demanding the decision a second time - otherwise unattended
+# recovery of a live secondmate would need a captain at the keyboard. A record
+# written before this requirement carries no model= line, and the launch it
+# describes provably ran on the harness default, so `default` transcribes what
+# that launch did rather than inventing a choice for it. A first launch has no
+# record to adopt and is refused below.
+if [ -z "$MODEL" ] && { [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; } \
+   && [ -f "$STATE/$ID.meta" ]; then
+  MODEL=$(fm_meta_get "$STATE/$ID.meta" model)
+  [ -n "$MODEL" ] || MODEL=default
+fi
+
+# Every axis that can still resolve a model has now had its turn: the explicit
+# flag, config/secondmate-harness for a secondmate launch it governs, and the
+# durable record a relaunch or respawn replaces.
+refuse_unresolved_model "$MODEL" "$ARG3" || exit 1
 
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"

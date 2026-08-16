@@ -228,7 +228,8 @@ Plain Pi launches set `FM_PI_HARNESS=pi`, so a signed primary's environment cann
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents, optionally followed by model and effort tokens on the same line.
 The first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>]`.
-A bare `<harness>` preserves the previous behavior: harness only, with no model or effort launch flag.
+A bare `<harness>` carries no model, so a secondmate's FIRST launch under this file is refused unless the spawn passes `--model` itself; write `<harness> default` to record handing that choice to the harness.
+Every later respawn of that secondmate, including session start's automatic relaunch of a dead one, adopts the model its durable record already carries, so recovery never waits on this token.
 When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model or effort is read from that file.
 `fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
 Changing this pin affects the next secondmate spawn or control-plane relaunch; the relaunch profile rules are owned by [`docs/agent-control.md`](agent-control.md#transactional-relaunch).
@@ -252,6 +253,7 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
+A resolved model is required on every spawn whether or not this file exists; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns that refusal and its exemptions.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics.
 `AGENTS.md` section 4 owns the always-loaded dispatch intake boundary, and `quota-array-dispatch` owns the completion-aware profile-array selection procedure.
@@ -277,7 +279,8 @@ Per rule, `when` and `use` are required.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
-An omitted model or effort means the selected harness uses its own default for that axis.
+An omitted effort means the selected harness uses its own default for that axis.
+A profile that omits `model` leaves the model unresolved and `fm-spawn.sh` refuses the spawn that reaches it, so write `"model": "default"` when handing the choice to the harness is the intended decision.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.

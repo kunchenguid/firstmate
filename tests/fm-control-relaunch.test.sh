@@ -175,10 +175,13 @@ run_control() {  # <case-dir> <args...>
 }
 
 run_spawn() {  # <case-dir> <args...>
+  # fm-spawn requires a resolved model on every launch, including a relaunch;
+  # these cases exercise harness wiring rather than the model axis, so they take
+  # the explicit opt-out. fm-control's own relaunch names the model it resolved.
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
-    "$SPAWN" "$@" 2>&1
+    "$SPAWN" "$@" --model default 2>&1
 }
 
 meta_field() {  # <case-dir> <id> <key>

@@ -812,7 +812,12 @@ do_relaunch() {
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
-  [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
+  # The model is always named, including the `default` sentinel: the launch owner
+  # refuses a spawn whose model was never decided, and resolve_relaunch_profile
+  # above HAS decided this one, from the task's own record or its secondmate pin.
+  # Omitting it here would hand that decision back to the harness silently.
+  # `default` is not in --effort's accepted set, so effort keeps omitting it.
+  spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then

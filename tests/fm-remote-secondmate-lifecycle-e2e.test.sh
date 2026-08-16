@@ -695,7 +695,7 @@ pass "mixed local and remote routes validate without migration"
 printf 'pi\n' > "$PARENT/config/crew-harness"
 launches_before_inherit=0
 [ ! -f "$HERDR_LOG" ] || launches_before_inherit=$(grep -c '^tab create' "$HERDR_LOG" || true)
-if FM_FAKE_SSH_MODE=inherit-partial remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+if FM_FAKE_SSH_MODE=inherit-partial remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model default \
   > "$TMP_ROOT/spawn-inherit-partial.out" 2>&1; then
   fail "remote spawn launched after ambiguous partial inheritance"
 fi
@@ -704,7 +704,7 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
-out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model default)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
@@ -763,7 +763,7 @@ pass "legacy and mismatched remote endpoints fail closed before backend access"
 cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-nonherdr.meta"
 cp "$PARENT/data/secondmates.md" "$TMP_ROOT/registry-before-nonherdr.md"
 set +e
-FM_FAKE_SSH_MODE=launch-nonherdr-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+FM_FAKE_SSH_MODE=launch-nonherdr-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model default \
   > "$TMP_ROOT/spawn-nonherdr-route.out" 2>&1
 nonherdr_parent_rc=$?
 set -e
@@ -776,7 +776,7 @@ cmp -s "$TMP_ROOT/registry-before-nonherdr.md" "$PARENT/data/secondmates.md" \
   || fail "parent removed or changed the registry route after a non-herdr route refusal"
 
 set +e
-FM_FAKE_SSH_MODE=launch-default-session-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+FM_FAKE_SSH_MODE=launch-default-session-route remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model default \
   > "$TMP_ROOT/spawn-default-session-route.out" 2>&1
 default_session_parent_rc=$?
 set -e
@@ -823,7 +823,7 @@ It is read-only in secondmate homes and must not be edited there.
 Changes return through a marked status document pointer.
 stale spawn preference
 EOF
-FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model default \
   > "$TMP_ROOT/spawn-concurrent.out" 2>&1 &
 spawn_concurrent=$!
 spawn_inherit_wait=0
@@ -1167,7 +1167,7 @@ while [ ! -f "$TMP_ROOT/handoff.entered" ]; do
   sleep 0.02
 done
 rm -f "$TMUX_STATE" "$TMP_ROOT/launch.entered" "$TMP_ROOT/launch.release"
-FM_FAKE_SSH_MODE=launch-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+FM_FAKE_SSH_MODE=launch-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model default \
   > "$TMP_ROOT/spawn-retirement.out" 2>&1 &
 spawn_retirement_pid=$!
 launch_wait=0

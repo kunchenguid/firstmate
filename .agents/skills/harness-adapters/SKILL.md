@@ -113,6 +113,10 @@ When changing any primary watcher adapter, update `docs/supervision-protocols/`,
 `bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake.
 Do not make the shell scripts parse or match natural-language dispatch rules.
 
+The model is required on every spawn, not merely accepted: `fm-spawn.sh` refuses a launch whose model never resolved, so the task record can always tell a chosen model from an unchosen one.
+Resolve it at intake like any other axis, and reach for `--model default` only when handing the choice to the harness is itself the decision, because that is exactly how the record reads it afterwards.
+`fm-spawn.sh --help` owns the refusal's exact conditions and its `--secondmate` and raw-launch-command boundaries.
+
 Effort precedence is an explicit per-task captain instruction first, then any applicable standing dispatch profile or secondmate pin, then the generic fallback below.
 Never replace an effort value supplied by either higher-precedence source.
 Use the fallback only when neither the captain nor applicable standing configuration specifies effort.

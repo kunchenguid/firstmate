@@ -166,7 +166,7 @@ FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
 # --- disabled: the remote route must stay byte-identically untraced ----------
 freeze_parent_session
 : > "$HERDR_LOG"
-remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model default >/dev/null 2>&1 \
   || fail "default-off remote secondmate spawn failed"
 assert_present "$PARENT/state/ios.meta" "default-off remote spawn published no parent metadata"
 ! grep -q '^traceparent=' "$PARENT/state/ios.meta" \
@@ -186,7 +186,7 @@ pass "disabled: a remote-routed second mate records and receives no carrier and 
 freeze_parent_session
 reset_remote_herdr_fixture "$HERDR_STATE"   # the previous endpoint is gone; this is an ordinary relaunch
 : > "$HERDR_LOG"
-remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model default >/dev/null 2>&1 \
   || fail "enabled remote secondmate spawn failed"
 
 PARENT_TP=$(meta_traceparent "$PARENT/state/ios.meta")
@@ -218,7 +218,7 @@ pass "enabled: a remote-routed second mate receives one carrier in its pane, ide
 # --- relaunch stability on the remote path ----------------------------------
 reset_remote_herdr_fixture "$HERDR_STATE"
 : > "$HERDR_LOG"
-remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model default >/dev/null 2>&1 \
   || fail "enabled remote secondmate relaunch failed"
 RELAUNCH_TP=$(meta_traceparent "$PARENT/state/ios.meta")
 RELAUNCH_INJECTED=$(remote_injected_traceparent)
@@ -240,7 +240,7 @@ FM_SECONDMATE_CHARTER='Own the second build Mac.' \
   || fail "second remote seed failed"
 reset_remote_herdr_fixture "$HERDR_STATE"
 : > "$HERDR_LOG"
-TRACEPARENT="$AMBIENT" remote_env "$ROOT/bin/fm-spawn.sh" ios2 --secondmate >/dev/null 2>&1 \
+TRACEPARENT="$AMBIENT" remote_env "$ROOT/bin/fm-spawn.sh" ios2 --secondmate --model default >/dev/null 2>&1 \
   || fail "second remote secondmate spawn failed"
 SECOND_TP=$(meta_traceparent "$PARENT/state/ios2.meta")
 fm_trace_context_valid "$SECOND_TP" \

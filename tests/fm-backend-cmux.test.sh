@@ -1093,7 +1093,7 @@ test_secondmate_spawn_refuses_cmux_backend() {
   dir="$TMP_ROOT/secondmate-refuse"; state="$dir/state"; data="$dir/data"; config="$dir/config"; projects="$dir/projects"
   mkdir -p "$state" "$data" "$config" "$projects"
   out=$( FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_PROJECTS_OVERRIDE="$projects" \
-    "$ROOT/bin/fm-spawn.sh" sm-cmux-test --secondmate --backend cmux 2>&1 )
+    "$ROOT/bin/fm-spawn.sh" sm-cmux-test --secondmate --backend cmux --model default 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "fm-spawn.sh should refuse a --secondmate spawn with --backend cmux"
   assert_contains "$out" "does not support --secondmate" "fm-spawn.sh did not report the cmux secondmate refusal"

@@ -114,7 +114,7 @@ phase_spawn() {
   : > "$LOG"
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_CONFIG_OVERRIDE="$HOME_DIR/parent-config" \
     FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
-    "$ROOT/bin/fm-spawn.sh" design "$SUB" codex --secondmate >/dev/null \
+    "$ROOT/bin/fm-spawn.sh" design "$SUB" codex --secondmate --model default >/dev/null \
     || fail "secondmate spawn failed"
 
   local meta="$HOME_DIR/state/design.meta"
