@@ -781,7 +781,7 @@ test_held_runtime_filter_excludes_non_workers_from_home_validity() {
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] held-external - External hold (repo: sample) (kind: ship) (hold: waiting for external operator) (hold-kind: external)
-- [ ] held-terminal - Parked terminal handoff (repo: sample) (kind: ship) (hold: parked terminal handoff) (hold-kind: external)
+- [ ] held-terminal - Parked terminal handoff (repo: sample) (kind: ship) (hold: parked terminal handoff) (hold-kind: parked)
 - [ ] active-unknown - Active unknown worker (repo: sample) (kind: ship)
 
 ## Queued
@@ -821,7 +821,7 @@ EOF
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] held-external - External hold (repo: sample) (kind: ship) (hold: waiting for external operator) (hold-kind: external)
-- [ ] held-terminal - Parked terminal handoff (repo: sample) (kind: ship) (hold: parked terminal handoff) (hold-kind: external)
+- [ ] held-terminal - Parked terminal handoff (repo: sample) (kind: ship) (hold: parked terminal handoff) (hold-kind: parked)
 
 ## Queued
 
@@ -847,7 +847,7 @@ EOF
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] held-external - External hold (repo: sample) (kind: ship) (hold: waiting for external operator) (hold-kind: external)
-- [ ] held-terminal - Parked terminal handoff (repo: sample) (kind: ship) (hold: parked terminal handoff) (hold-kind: external)
+- [ ] held-terminal - Parked terminal handoff (repo: sample) (kind: ship) (hold: parked terminal handoff) (hold-kind: parked)
 - [ ] ordinary-terminal - Ordinary terminal worker (repo: sample) (kind: ship)
 
 ## Queued
