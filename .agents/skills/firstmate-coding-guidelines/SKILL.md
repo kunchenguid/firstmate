@@ -46,6 +46,13 @@ A single deliberate one-line reinforcement at a genuine risk point is allowed, f
 Restating the contract's substance a second time is not allowed: the two copies will drift the moment only one is edited.
 When you touch a contract, patch, replace, or prune the owner's existing language rather than appending a new clause or paragraph wherever possible, then grep the repo for its other mentions and update the cross-references, not duplicate the change into a second full copy.
 
+## Design-fit review
+
+An independent design-fit review judges whether a complete Firstmate change, including its tests and documentation, belongs in the existing architecture rather than only whether it works.
+Block a change that creates a second owner for an existing contract, bypasses its established owner, weakens a guard or test to make the change pass, or adds a layer where an existing mechanism already owns the behavior.
+Treat tests as gate code that determines what later changes are allowed to believe, never as an exempt surface.
+Passing tests and implementation correctness do not by themselves establish design fit.
+
 ## Inline-stub pattern
 
 When content moves out of `AGENTS.md` into a skill, decide what stays behind by asking one question: what must survive with no skill loaded?

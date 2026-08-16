@@ -497,9 +497,9 @@ pass "fm-slack-poll stays inert with an invalid channel id"
 
 # --- watcher globals stay narrow --------------------------------------------
 
-grep -F 'CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}' "$ROOT/bin/fm-watch.sh" >/dev/null \
+grep -F "CHECK_INTERVAL=\${FM_CHECK_INTERVAL:-300}" "$ROOT/bin/fm-watch.sh" >/dev/null \
   || fail "fm-watch.sh must keep the global CHECK_INTERVAL default at 300"
-grep -F 'SLACK_CHECK_INTERVAL=${FM_SLACK_CHECK_INTERVAL:-$POLL}' "$ROOT/bin/fm-watch.sh" >/dev/null \
+grep -F "SLACK_CHECK_INTERVAL=\${FM_SLACK_CHECK_INTERVAL:-\$POLL}" "$ROOT/bin/fm-watch.sh" >/dev/null \
   || fail "fm-watch.sh must use a dedicated Slack fast interval"
 ! grep -E '^CHECK_INTERVAL=\$\{FM_SLACK_CHECK_INTERVAL' "$ROOT/bin/fm-watch.sh" >/dev/null \
   || fail "fm-watch.sh must not route Slack cadence through CHECK_INTERVAL"

@@ -44,6 +44,7 @@ FM_PR_REG_DATA_HASH=
 FM_PR_REG_TEMPLATE_HASH=
 FM_PR_REG_DATA_IDENTITY=
 FM_PR_REG_CHECK_IDENTITY=
+FM_PR_META_TMP=
 FM_PR_POLL_DATA_TMP=
 FM_PR_POLL_CHECK_TMP=
 FM_PR_POLL_REG_TMP=
@@ -213,6 +214,10 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
+fm_pr_override_ts_valid() {
+  [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+}
+
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %Lp "$1" 2>/dev/null
@@ -286,7 +291,7 @@ fm_pr_regular_destination_on_device_or_absent() {
 }
 
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line value pr_count=0 override_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
@@ -315,6 +320,14 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
+      missing_review_override_ts=*)
+        override_count=$((override_count + 1))
+        value=${line#missing_review_override_ts=}
+        if [ "$seen_pr" -ne 1 ] || [ "$override_count" -ne 1 ] \
+          || ! fm_pr_override_ts_valid "$value"; then
+          post_pr_invalid=1
+        fi
+        ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
         ;;
       *)
@@ -325,6 +338,50 @@ fm_pr_metadata_identity_parse() {
   [ "$pr_count" -eq 1 ] || return 1
   [ "$post_pr_invalid" -eq 0 ] || return 1
   [ -n "$FM_PR_META_URL" ]
+}
+
+fm_pr_meta_cleanup() {
+  [ -z "$FM_PR_META_TMP" ] || rm -f -- "$FM_PR_META_TMP"
+  FM_PR_META_TMP=
+}
+
+# Sole owner of the PR-identity metadata rewrite: drop the lines each writer
+# replaces, append its new ones, then validate and move the result into place.
+# The result must carry canonical PR identity, so this is not a general
+# state/<id>.meta writer - a task with no pr= yet cannot be rewritten through it,
+# and bin/fm-x-lib.sh keeps its own X-link rewriters for that reason. Writers
+# assert different identity subsets, so <identity-check> is called against the
+# FM_PR_META_* values parsed from the staged file and again from the published
+# one; it is the only part of the sequence a caller supplies.
+fm_pr_meta_rewrite() {  # <meta> <state> <tmp-prefix> <drop-keys> <identity-check> [<line> ...]
+  local meta=$1 state=$2 tmp_prefix=$3 drop_keys=$4 identity_check=$5
+  shift 5
+  local device line
+  device=$(fm_pr_file_device "$meta") || return 1
+  [ "$device" = "$(fm_pr_file_device "$state")" ] || return 1
+  FM_PR_META_TMP=$(mktemp "$state/$tmp_prefix.XXXXXX") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case ":$drop_keys:" in
+      *":${line%%=*}:"*) continue ;;
+    esac
+    printf '%s\n' "$line" >> "$FM_PR_META_TMP" || { fm_pr_meta_cleanup; return 1; }
+  done < "$meta"
+  for line in "$@"; do
+    printf '%s\n' "$line" >> "$FM_PR_META_TMP" || { fm_pr_meta_cleanup; return 1; }
+  done
+  chmod 0600 "$FM_PR_META_TMP" || { fm_pr_meta_cleanup; return 1; }
+  fm_pr_private_file_valid "$FM_PR_META_TMP" 600 "$device" \
+    || { fm_pr_meta_cleanup; return 1; }
+  fm_pr_metadata_identity_parse "$FM_PR_META_TMP" \
+    || { fm_pr_meta_cleanup; return 1; }
+  "$identity_check" || { fm_pr_meta_cleanup; return 1; }
+  fm_pr_regular_destination_on_device_or_absent "$meta" "$device" \
+    || { fm_pr_meta_cleanup; return 1; }
+  mv -f -- "$FM_PR_META_TMP" "$meta" || { fm_pr_meta_cleanup; return 1; }
+  FM_PR_META_TMP=
+  fm_pr_private_file_valid "$meta" 600 "$device" || return 1
+  fm_pr_metadata_identity_parse "$meta" || return 1
+  "$identity_check"
 }
 
 # Sidecar layout: provider, url, host, path, number, one per line. A sidecar

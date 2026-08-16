@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# exact pr_head=<sha> when available, carry a valid missing-Review override
+# receipt forward when the recorded PR is unchanged, then atomically arm a
+# static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -78,42 +80,43 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
-META_TMP=
 pr_check_cleanup() {
   fm_pr_poll_cleanup
-  [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  fm_pr_meta_cleanup
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
-META_DEVICE=$(fm_pr_file_device "$META") || exit 1
-STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
-[ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
-META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
-while IFS= read -r line || [ -n "$line" ]; do
-  case "$line" in
-    pr=*|pr_head=*) ;;
-    *) printf '%s\n' "$line" >> "$META_TMP" || exit 1 ;;
-  esac
-done < "$META"
-printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
-[ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
-chmod 0600 "$META_TMP" || exit 1
-fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
-fm_pr_metadata_identity_parse "$META_TMP" || exit 1
-[ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
-  && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
-  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
-fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
-mv -f -- "$META_TMP" "$META" || exit 1
-META_TMP=
-fm_pr_private_file_valid "$META" 600 "$STATE_DEVICE" || exit 1
-fm_pr_metadata_identity_parse "$META" || exit 1
-[ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
-  && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
-  && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
+pr_check_meta_identity_matches() {
+  [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
+    && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
+    && [ "$FM_PR_META_NUMBER" = "$NUMBER" ]
+}
+
+# The receipt outlives a refresh of the same pull request, but it was authorized
+# against that one PR: re-pointing the task elsewhere drops it rather than
+# asserting an override the new PR never received, and says so, because losing a
+# captain authorization is exactly as reportable as applying one. The shared
+# parser requires it to follow pr=, so it is re-emitted after the identity lines
+# rather than left in place, and a malformed value is dropped without a notice
+# because no authorization it could name was ever readable.
+PRIOR_PR=$(sed -n 's/^pr=//p' "$META" | tail -n 1)
+OVERRIDE_TS=$(sed -n 's/^missing_review_override_ts=//p' "$META" | tail -n 1)
+META_LINES=("pr=$URL")
+[ -z "$PR_HEAD" ] || META_LINES+=("pr_head=$PR_HEAD")
+if fm_pr_override_ts_valid "$OVERRIDE_TS"; then
+  if [ "$PRIOR_PR" = "$URL" ]; then
+    META_LINES+=("missing_review_override_ts=$OVERRIDE_TS")
+  else
+    echo "warning: discarding the captain-authorized missing-Review override recorded for ${PRIOR_PR:-another pull request}; $URL needs its own authorization" >&2
+  fi
+fi
+fm_pr_meta_rewrite "$META" "$STATE" .fm-pr-meta \
+  pr:pr_head:missing_review_override_ts \
+  pr_check_meta_identity_matches "${META_LINES[@]}" \
+  || { echo "error: task metadata is unavailable" >&2; exit 1; }
 
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2

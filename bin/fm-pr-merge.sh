@@ -8,7 +8,20 @@
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
 # A non-green PR requires --allow-red before the optional -- separator.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--allow-red] [-- <extra gh-axi pr merge args>]
+# When the task project is this Firstmate repository, or cannot be resolved to
+# any repository, the PR body must carry a completed no-mistakes Review record.
+# The rendered step summary is read the way the renderer writes it: any Review
+# entry counts as completed unless its status is one of the fixed incomplete
+# states, because the incomplete set is closed while new completed renderings
+# (a finding count, an auto-fix result, a risk verdict) keep being added.
+# Because that body is user-writable, the receipt records intent rather than
+# proving that the review ran.
+# A missing receipt requires --allow-missing-review under explicit captain
+# authorization; before the merge attempt, the override is recorded in the
+# task metadata and disclosed on stderr. An ordinary merge that needs no
+# override instead clears a stale receipt before merging, and either write
+# failing refuses the merge rather than landing an untrue audit record.
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--allow-red] [--allow-missing-review] [-- <extra gh-axi pr merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +31,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+
+trap fm_pr_meta_cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -39,11 +55,15 @@ PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
 shift 2
 ALLOW_RED=0
-if [ "${1:-}" = "--allow-red" ]; then
-  ALLOW_RED=1
-  shift
-fi
-[ "${1:-}" = "--" ] && shift
+ALLOW_MISSING_REVIEW=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --allow-red) ALLOW_RED=1; shift ;;
+    --allow-missing-review) ALLOW_MISSING_REVIEW=1; shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
 
 caller_has_merge_method() {
   local arg
@@ -76,11 +96,79 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   exit 1
 fi
 
+git_common_dir_abs() {  # <working-tree>
+  local repo=$1 common
+  common=$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common" in
+    /*) (cd "$common" 2>/dev/null && pwd -P) ;;
+    *) (cd "$repo/$common" 2>/dev/null && pwd -P) ;;
+  esac
+}
+
+# "Cannot tell" is not "another project": an absent or unresolvable project=
+# must take the Review guard, or a broken meta would silently disarm it.
+firstmate_review_receipt_required() {
+  local project root_common project_common
+  project=$(sed -n 's/^project=//p' "$META" | tail -n 1)
+  root_common=$(git_common_dir_abs "$FM_ROOT") || root_common=
+  project_common=
+  if [ -n "$project" ]; then
+    project_common=$(git_common_dir_abs "$project") || project_common=
+  fi
+  if [ -z "$root_common" ] || [ -z "$project_common" ]; then
+    echo "warning: could not resolve this task's project as a repository; requiring a Firstmate no-mistakes Review record" >&2
+    return 0
+  fi
+  [ "$project_common" = "$root_common" ]
+}
+
+firstmate_review_recorded() {
+  local out
+  # shellcheck disable=SC2016  # $body and $states are jq variables, not shell ones.
+  out=$(gh-axi api "/repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER" --jq '
+    (.body // "") as $body
+    | [ $body | scan("<summary>[^<]*\\*\\*Review\\*\\* - ([^<]*)</summary>") | .[0] ] as $states
+    | ($states | length) > 0
+      and ($states | all(test("^(pending|running|auto-fixing|review fix|skipped|failed|awaiting approval|findings unavailable)$") | not))
+  ' 2>&1) || {
+    printf '%s\n' "$out" >&2
+    return 1
+  }
+  printf '%s\n' "$out" | grep -qx true
+}
+
+merge_meta_identity_matches() {
+  [ "$FM_PR_META_URL" = "$URL" ]
+}
+
+record_missing_review_override() {
+  local timestamp
+  timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || return 1
+  fm_pr_meta_rewrite "$META" "$STATE" .fm-pr-merge-meta \
+    missing_review_override_ts \
+    merge_meta_identity_matches "missing_review_override_ts=$timestamp"
+}
+
+clear_missing_review_override() {
+  fm_pr_meta_rewrite "$META" "$STATE" .fm-pr-merge-meta \
+    missing_review_override_ts \
+    merge_meta_identity_matches
+}
+
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1
 }
+
+MISSING_REVIEW_OVERRIDE=0
+if firstmate_review_receipt_required && ! firstmate_review_recorded; then
+  if [ "$ALLOW_MISSING_REVIEW" -ne 1 ]; then
+    echo "error: refusing Firstmate merge without a recorded passing no-mistakes Review; pass --allow-missing-review only with explicit captain authorization" >&2
+    exit 1
+  fi
+  MISSING_REVIEW_OVERRIDE=1
+fi
 
 CHECKS_OUTPUT=
 MERGEABLE_OUTPUT=
@@ -109,6 +197,19 @@ fi
 merge_args=()
 if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
+fi
+
+if [ "$MISSING_REVIEW_OVERRIDE" -eq 1 ]; then
+  record_missing_review_override || {
+    echo "error: could not record the captain-authorized missing-Review override" >&2
+    exit 1
+  }
+  echo "warning: captain-authorized override: merging Firstmate PR without a recorded passing no-mistakes Review" >&2
+elif grep -q '^missing_review_override_ts=' "$META"; then
+  clear_missing_review_override || {
+    echo "error: could not clear the stale missing-Review override receipt" >&2
+    exit 1
+  }
 fi
 
 gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"

@@ -9,6 +9,17 @@
 # HEAD-continuity guard; see docs/architecture.md "No-mistakes gate authority boundary."
 disable_project_settings: true
 
+# Only the rule below is trusted: no-mistakes resolves review.path_instructions
+# from the default-branch config, so a pushed branch cannot drop the Review
+# step's pointer at the design-fit owner. The owner's own text is read from the
+# branch under review, so the rule makes weakening it part of what is reviewed.
+review:
+  path_instructions:
+    - path: '**'
+      instructions: |
+        Read .agents/skills/firstmate-coding-guidelines/SKILL.md from the branch under review and perform the design-fit review it defines.
+        A change that weakens or removes that file's design-fit section is itself a design-fit finding.
+
 # Trusted documentation placement policy for the Document step.
 # The audience inventory and coding guideline own the detail; keep this as a
 # pointer so gate instructions cannot become a second prose policy.
