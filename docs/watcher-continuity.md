@@ -58,6 +58,8 @@ The acknowledgement retires the marker only when no rows remain after sequence-b
 A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
 Consequently, an empty-queue downtime publication during handling can be retired by the outstanding acknowledgement without a dedicated recovery turn.
 An acknowledged episode does not freeze the generation, because the next downtime after it opens an episode of its own.
+A stale-lock recovery that finds a fully acknowledged episode and an empty durable queue does not reopen the episode and starts no recovery presentation, because everything that episode owed was already presented and acknowledged.
+This keeps a daemon-managed chain of one-shot watcher children settled instead of delivering `check: rearm-resurface` on every cycle, while a pending episode or any queued row at recovery still resurfaces through the ordinary durable handling path.
 
 ## Per-actor acknowledgement
 
