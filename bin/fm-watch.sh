@@ -7,13 +7,15 @@
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
 # working signal is never silently swallowed. A declared external-wait pause is
-# the separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# the separate idle absorb case: its no-verb status signals are absorbed too - so
+# declaring or refreshing a pause never wakes the supervisor that declared it -
+# and it re-surfaces only on its long bounded cadence.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
+#                          is neither provably working nor under a declared
+#                          external-wait pause, unless afk is active
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
 #                          timer) regardless of what the status log says - an active
 #                          run-step or busy pane outranks even a captain-relevant log
@@ -34,8 +36,10 @@
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
-#                          turn completes); past that bound busy_turn_over_age
-#                          routes it through the same wedge timer, so it surfaces
+#                          turn completes); past that bound busy_wedge_check
+#                          routes it through the same wedge timer - unless it
+#                          declared an external-wait pause, which keeps the long
+#                          pause cadence instead - so it surfaces
 #                          with the identical "stale: ..." reason, escalation
 #                          count, and demand-deep-inspection marker, for human
 #                          inspection only - never an automatic interrupt,
@@ -136,10 +140,11 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # / stale path is absorb-only-when-provably-working: such a wake is absorbed ONLY
 # while the crew shows positive evidence it is still working (an actively-running
 # no-mistakes step, or a busy pane, via crew_is_provably_working over
-# fm-crew-state.sh); a crew that stopped its turn with no running pipeline and no
-# busy pane is SURFACED, so a finish reported only through interactive pane menus
-# (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
-# signal, a no-verb signal whose crew is not provably working, any check, a stale
+# fm-crew-state.sh) or has declared an external-wait pause; a crew that stopped its
+# turn with no running pipeline, no busy pane and no declared pause is SURFACED, so
+# a finish reported only through interactive pane menus (no done: status) is never
+# swallowed. An ACTIONABLE wake (a captain-relevant
+# signal, a no-verb signal whose crew is neither working nor paused, any check, a stale
 # pane whose crew is not provably working, a provably-working stale past the
 # threshold, or anything unknown) is written to the durable queue and exits, which
 # is what wakes the LLM through the background-task completion. The same classifier
@@ -152,11 +157,13 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
 # may go with no completed turn: once its task's
 # state/<id>.turn-ended marker (or, before any turn has completed, the task's
-# spawn record) is this old, busy_turn_over_age routes the pane through the
+# spawn record) is this old, busy_wedge_check routes the pane through the
 # same STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
 # non-busy stale, so it escalates via the existing stale reason, escalation
 # counter, and demand-deep-inspection marker for human inspection only - never
-# an automatic interrupt, signal, or restart. A completed turn touches
+# an automatic interrupt, signal, or restart. A pane whose crew declared an
+# external-wait pause takes the long pause cadence there instead of the wedge
+# timer (see busy_wedge_check). A completed turn touches
 # turn-ended and resets the age. Set generously above any legitimate interval
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
@@ -352,6 +359,30 @@ handle_paused_stale() {  # <window> <task> <hash>
     wake "$reason"
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
+}
+
+# Busy-pane escalation past the completed-turn bound, with the declared-pause
+# carve-out. A crew waiting on its own background work can declare paused: while
+# its harness pane still renders a busy indicator; routing that through the wedge
+# timer reports a deliberate wait as a possible wedge every STALE_ESCALATE_SECS
+# and never records the pause, which is exactly the false-wedge nag the paused
+# verb exists to stop. The declaration is read from the status line rather than
+# pause_state_class because a busy pane's authoritative state is `working` by
+# construction, so the costly re-read would always talk the carve-out out of
+# itself. Not immunity: handle_paused_stale still re-surfaces the lane once every
+# PAUSE_RESURFACE_SECS for a recheck, and any other status verb drops it straight
+# back onto the wedge timer. Away mode is unchanged - the daemon owns pause triage
+# there. Returns 0 when the pause cadence was applied (the caller must then leave
+# the pause tracking it just recorded alone), 1 when the wedge timer ran.
+busy_wedge_check() {  # <window> <task> <hash> <since-file> <escalation-count-file>
+  local win=$1 task=$2 h=$3 ssf=$4 ewf=$5
+  if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+    rm -f "$ssf" "$ewf"
+    handle_paused_stale "$win" "$task" "$h"
+    return 0
+  fi
+  wedge_timer_check "$win" "$ssf" "busy (no completed turn)" "$ewf"
+  return 1
 }
 
 clear_pause_state() {  # <window>
@@ -964,17 +995,18 @@ EOF
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file carries a captain-relevant verb;
     #   - or it is a no-verb wake (a bare turn-end, a working: note) whose crew is
-    #     NOT provably working - the crew stopped its turn with no actively-running
-    #     pipeline and no busy pane, so it may be done (even via an interactive menu
-    #     that wrote no done: status), waiting on a decision, or wedged. Absorbing
-    #     such a turn-end is exactly the swallowed-finish this change guards against.
+    #     NEITHER provably working NOR under a declared external-wait pause - the
+    #     crew stopped its turn with no actively-running pipeline and no busy pane,
+    #     so it may be done (even via an interactive menu that wrote no done:
+    #     status), waiting on a decision, or wedged. Absorbing such a turn-end is
+    #     exactly the swallowed-finish this change guards against.
     # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
-    # whose crew IS provably working) in always-on mode -> advance the markers so it
-    # will not re-fire, log, and keep blocking without enqueuing. The provably-working
+    # whose crew IS working or paused) in always-on mode -> advance the markers so it
+    # will not re-fire, log, and keep blocking without enqueuing. The absorb-class
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+    if afk_present || signal_reason_is_actionable $files || ! signal_crew_absorbable $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
@@ -1139,20 +1171,22 @@ EOF
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping,
         # unless a genuinely busy pane has gone too long with no completed turn -
         # then route it through the same wedge timer instead of erasing it.
+        paused_busy=1
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+          busy_wedge_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_busy=0
         else
           rm -f "$ssf" "$ewf"
         fi
-        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        if [ "$paused_busy" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
           clear_pause_tracking "$w"
         fi
       fi
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
+      paused_busy=1
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+        busy_wedge_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_busy=0
       else
         rm -f "$ssf" "$ewf"
       fi
@@ -1162,7 +1196,7 @@ EOF
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           *)      clear_pause_tracking "$w" ;;
         esac
-      else
+      elif [ "$paused_busy" -ne 0 ]; then
         [ -e "$pf" ] && clear_pause_tracking "$w"
       fi
     fi
