@@ -171,7 +171,10 @@ crew_busy_verdict() {  # <target>
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
 # trim, strip_quotes, the bounded nm_run call, nm_field's TOON parse, and the
 # branch+head attribution rule below are thin wrappers over the ONE owner in
-# bin/fm-nm-run-lib.sh, shared with fm-teardown.sh's pre-teardown run abort.
+# bin/fm-nm-run-lib.sh. This reader binds a run by strict code identity, so a
+# run head it cannot read is never attributed. fm-teardown.sh's pre-teardown
+# run abort shares the same owner but calls its custody-aware rule, which also
+# attributes an unreadable head while the pipeline still drives that run.
 
 trim() { fm_nm_trim "$@"; }
 strip_quotes() { fm_nm_strip_quotes "$@"; }
