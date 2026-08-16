@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Shared, read-only record comparison for the two existing re-anchor surfaces:
-# bin/fm-session-start.sh and bin/fm-sessionstart-nudge.sh post-compact.
+# Shared, read-only record comparison for the two existing re-anchor surfaces -
+# bin/fm-session-start.sh and bin/fm-sessionstart-nudge.sh post-compact - and
+# for bin/fm-fleet-dashboard.mjs --section peace.
 #
 # This is an internal renderer, not a third reader or command. It writes no
 # state and prints no heading, healthy row, or confirmation when records agree.
-# The caller gets one bounded contradiction section or empty stdout.
+# A render caller gets one bounded contradiction section or empty stdout.
+# fm_record_contradictions_total prints the same collect's unbounded finding
+# count as one integer so a projector consumes a number instead of classifying
+# the prose kinds.
 
 fm_record_contradiction_positive_int() {  # <value> <fallback>
   case "$1" in
@@ -343,7 +347,7 @@ fm_record_contradictions_format() {
     "$FM_RECORD_CONTRADICTION_ORPHAN_COUNT" "$FM_RECORD_CONTRADICTION_ORPHAN_ENTRIES"
 }
 
-fm_record_contradictions_render() {  # <data-dir> <state-dir>
+fm_record_contradictions_collect() {  # <data-dir> <state-dir>
   local data=$1 state_dir=$2 meta id target backend endpoint status_file
   fm_record_contradictions_init "$data"
 
@@ -371,5 +375,14 @@ fm_record_contradictions_render() {  # <data-dir> <state-dir>
     [ ! -f "$state_dir/$id.meta" ] || continue
     fm_record_contradictions_observe_orphan "$status_file" "$id"
   done
+}
+
+fm_record_contradictions_render() {  # <data-dir> <state-dir>
+  fm_record_contradictions_collect "$1" "$2"
   fm_record_contradictions_format
+}
+
+fm_record_contradictions_total() {  # <data-dir> <state-dir>
+  fm_record_contradictions_collect "$1" "$2"
+  printf '%s\n' "$FM_RECORD_CONTRADICTION_COUNT"
 }

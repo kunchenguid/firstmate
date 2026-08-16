@@ -7,6 +7,45 @@
 //   3. REVIEWING - colleague PR relationships recorded by the reviews domain.
 // An explicit building section also shows in-flight tasks that have neither a
 // PR nor an open decision, while the no-selector display remains unchanged.
+// --section peace projects the existing record-contradiction digest and
+// unadvanceable-work detector as one records line and adds no other numbers.
+// That line carries exactly three verdicts:
+//   records: agree                                both instruments ran and are silent
+//   records: disagree (N ghost, M stranded)       at least one instrument found a contradiction
+//   records: unknown (0 ghost, stranded unknown)  nothing found and an instrument could not run
+// The third verdict, unknown, exists because an instrument that cannot answer
+// has to say so: reading its silence as agreement would report invented health,
+// and failing the whole section would drop the half that did answer. An
+// instrument that could not run spells its own count unknown rather than 0, so
+// disagree outranks unknown whenever the answering half found something:
+// `records: disagree (N ghost, stranded unknown)`.
+// Peace skips the cockpit's own forge fetch, but it is not an offline section:
+// the digest half inherits its owner's bounded gh-axi PR checks for metas that
+// record a PR, so peace reaches GitHub exactly when and as far as that owner
+// does. Those calls are uncached and per-collect, so watch mode refreshes the
+// records line on the same slow WATCH_GITHUB_SECONDS cadence as the forge
+// fetch it skips, never on the fast local frame. The strandedness half is
+// bounded by UNADVANCEABLE_WORK_TIMEOUT_MS, which covers the detector's serial
+// per-crew liveness probes (each bounded in turn by fm-crew-state.sh's own
+// no-mistakes timeout). That half is also the only one that degrades: it can be
+// unavailable because the tasks-axi backlog backend is disabled or because the
+// liveness probes outlast their bound, and the reason it gives is carried on
+// the records value so unknown stays diagnosable while the records line itself
+// keeps carrying nothing but the projection. The digest half has no unknown
+// spelling at all, so its unavailability is the one this section does not
+// survive, and it goes unavailable two ways. Quietly: the digest owner
+// swallows its own probe failures, returning a PR check that could not reach
+// GitHub as no contradiction rather than as a refusal, so the total arrives
+// confident and short - and a records line with nothing else to report then
+// prints `records: agree` when the honest value is unknown, which is the
+// invented health this section exists to prevent. Loudly: infrastructure
+// failure or the collect timeout rejects and the whole section exits non-zero,
+// discarding the strandedness answer that did arrive. Both are gaps awaiting a
+// degrade path on this half, not a designed contract. Each mode routes
+// that reason to stderr where stderr is safe to write: a one-shot render emits
+// it as it collects, while watch holds every distinct reason until the
+// alternate screen is torn down, so a diagnostic can never paint over a live
+// frame.
 // The default is a fixed-measure one-line list; --show and watch selection own
 // full context so titles never compete with status prose during a scan.
 //
@@ -85,7 +124,9 @@ const SECTION_BUCKET_KEYS = Object.freeze({
   approvals: ["decisions", "review-obligations"],
   reviewing: ["reviewing"],
   all: ["decisions", "building", "ours-in-review", "review-obligations", "reviewing"],
+  peace: [],
 });
+const UNADVANCEABLE_WORK_TIMEOUT_MS = 180000;
 const REVIEW_THREADS_QUERY = `
 query FleetDashboardReviewThreads($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
@@ -117,7 +158,7 @@ Render the fleet cockpit: decisions ranked by importance, our PRs in
 review with actionable status, and the reviews domain's PR relationships.
 --width <columns>  terminal frame width request (minimum 40; output capped at 80)
 --all              show deferred rows inside the selected view
---section <name>   render building, approvals, reviewing, or all; omitted keeps the default
+--section <name>   render building, approvals, reviewing, peace, or all; omitted keeps the default
 --show <row|id>    print one row's full context by position or exact stable id;
                    append * to request an unambiguous id-prefix match; expansion
                    marks only that row's current watched values seen
@@ -194,7 +235,7 @@ function parseArguments(argumentsList) {
 }
 
 function sectionForgeMode(section) {
-  if (section === "building") return "none";
+  if (section === "building" || section === "peace") return "none";
   if (section === "approvals") return "review-requests";
   return "full";
 }
@@ -216,6 +257,71 @@ function skippedForgeState() {
       reason: "not checked for local-only section",
     },
   };
+}
+
+function peaceRecordsLine(records) {
+  if (!records) {
+    throw new Error("peace records were not collected from the existing instruments");
+  }
+  if (records.ghost === 0 && records.stranded === 0) {
+    return "records: agree";
+  }
+  const verdict = records.ghost > 0 || records.stranded > 0 ? "disagree" : "unknown";
+  const stranded = records.stranded === null ? "stranded unknown" : `${records.stranded} stranded`;
+  return `records: ${verdict} (${records.ghost} ghost, ${stranded})`;
+}
+
+function contradictionTotalFromOwner(text) {
+  const total = Number.parseInt(String(text).trim(), 10);
+  if (!Number.isInteger(total) || total < 0) {
+    throw new Error(`fm_record_contradictions_total returned a non-count: ${String(text).trim()}`);
+  }
+  return total;
+}
+
+function strandedCountFromUnadvanceable(text) {
+  return String(text).split(/\r?\n/).filter((line) => line.trim() !== "").length;
+}
+
+async function collectContradictionTotal() {
+  return contradictionTotalFromOwner(await run("/bin/bash", [
+    "-c",
+    '. "$1/fm-backend.sh" && . "$1/fm-pr-lib.sh" && . "$1/fm-record-contradictions-lib.sh" && fm_record_contradictions_total "$2" "$3"',
+    "fm-record-contradictions-total",
+    scriptDirectory,
+    dataDirectory,
+    stateDirectory,
+  ]));
+}
+
+async function collectUnadvanceableWork() {
+  return run(
+    resolve(scriptDirectory, "fm-unadvanceable-work.sh"),
+    [],
+    process.env,
+    UNADVANCEABLE_WORK_TIMEOUT_MS,
+  );
+}
+
+async function collectPeaceRecords() {
+  const [ghost, unadvanceable] = await Promise.all([
+    collectContradictionTotal(),
+    collectUnadvanceableWork().then(
+      (text) => ({ text }),
+      (error) => ({ reason: error.message }),
+    ),
+  ]);
+  return {
+    ghost,
+    stranded: unadvanceable.reason === undefined
+      ? strandedCountFromUnadvanceable(unadvanceable.text)
+      : null,
+    strandedReason: unadvanceable.reason ?? null,
+  };
+}
+
+function peaceDegradationLine(reason) {
+  return `fm-fleet-dashboard: stranded unknown: ${reason}\n`;
 }
 
 function pathIsWithin(candidate, parent) {
@@ -1108,7 +1214,7 @@ async function collectEssentialLocalInputsAsync() {
   return { snapshot, telemetryRows: null, telemetryPresent: existsSync(telemetryPath), reviews };
 }
 
-function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github, reviewRequests, quota, forgeSkipped = false }) {
+function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github, reviewRequests, quota, forgeSkipped = false, peaceRecords = null }) {
   const observedMilliseconds = Date.parse(snapshot.generated || "");
   const backlogPresent = snapshot.backlog?.present === true;
   const records = Array.isArray(snapshot.backlog?.records) ? snapshot.backlog.records : [];
@@ -1576,6 +1682,7 @@ function buildModel({ snapshot, telemetryRows, telemetryPresent, reviews, github
     reviewRequests,
     quota,
     forgeSkipped,
+    peaceRecords,
     recap: {
       available: backlogPresent,
       needsPedro: [...localAttention.values()].filter((item) => item.markerKey === "yellow"),
@@ -1775,7 +1882,14 @@ function bucketItemGroups(bucket, items) {
   }));
 }
 
+function renderPeaceTerminal(model) {
+  return `PEACE\n${peaceRecordsLine(model.peaceRecords)}\n`;
+}
+
 function renderTerminal(model, width, useColor, showAll, nowMs = Date.now()) {
+  if (model.selectedSection === "peace") {
+    return renderPeaceTerminal(model);
+  }
   width = Math.min(width, 80);
   const paint = (name, text) => (useColor && name ? `${ANSI[name]}${text}${ANSI.reset}` : text);
   const lines = [];
@@ -2048,7 +2162,27 @@ function sourceValue(label, value) {
   return `<div class="source"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
 }
 
+function renderPeaceHtml(model) {
+  const line = peaceRecordsLine(model.peaceRecords);
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PEACE</title>
+</head>
+<body>
+  <h1>PEACE</h1>
+  <p>${escapeHtml(line)}</p>
+</body>
+</html>
+`;
+}
+
 function renderHtml(model) {
+  if (model.selectedSection === "peace") {
+    return renderPeaceHtml(model);
+  }
   const featured = recapFeaturedItems(model.recap);
   const hiddenRecap = model.recap.needsPedro.length + model.recap.stuck.length + model.recap.obligations.length - featured.length;
   const recapCounts = [
@@ -2576,10 +2710,14 @@ function watchLoop(width, useColor, showAll, section) {
   emitKeypressEvents(process.stdin);
   process.stdin.setRawMode(true);
   process.stdin.resume();
+  const peaceDegradations = new Set();
   process.stdout.write("\u001b[?1049h\u001b[?25l");
   process.on("exit", () => {
     if (process.stdin.isRaw) process.stdin.setRawMode(false);
     process.stdout.write("\u001b[?25h\u001b[?1049l");
+    for (const reason of peaceDegradations) {
+      process.stderr.write(peaceDegradationLine(reason));
+    }
   });
   process.on("SIGINT", () => process.exit(0));
   process.on("SIGTERM", () => process.exit(0));
@@ -2600,6 +2738,8 @@ function watchLoop(width, useColor, showAll, section) {
   let forgeRefreshInFlight = false;
   let lastForgeRefreshAtMs = null;
   let firstForgeRefresh = forgeEnabled;
+  let lastPeaceRefreshAtMs = null;
+  let peaceRecords = null;
 
   const draw = () => {
     const frameWidth = width ?? process.stdout.columns ?? 80;
@@ -2729,7 +2869,17 @@ function watchLoop(width, useColor, showAll, section) {
       telemetryRows: null,
       telemetryPresent: existsSync(telemetryPath),
     }));
-    collectEssentialLocalInputsAsync().then((collected) => {
+    collectEssentialLocalInputsAsync().then(async (collected) => {
+      if (section === "peace") {
+        const peaceIsDue = lastPeaceRefreshAtMs === null ||
+          secondsSince(lastPeaceRefreshAtMs, Date.now()) >= WATCH_GITHUB_SECONDS;
+        if (peaceIsDue) {
+          peaceRecords = await collectPeaceRecords();
+          lastPeaceRefreshAtMs = Date.now();
+          if (peaceRecords.strandedReason) peaceDegradations.add(peaceRecords.strandedReason);
+        }
+        collected.peaceRecords = peaceRecords;
+      }
       inputs = collected;
       const forgeIsDue = lastForgeRefreshAtMs === null ||
         secondsSince(lastForgeRefreshAtMs, Date.now()) >= WATCH_GITHUB_SECONDS;
@@ -2834,6 +2984,12 @@ if (!isMainThread && workerData?.operation === "fetch-forge-state") {
       watchLoop(width, process.env.NO_COLOR ? false : true, showAll, section);
     } else {
       const inputs = await collectLocalInputs();
+      if (section === "peace") {
+        inputs.peaceRecords = await collectPeaceRecords();
+        if (inputs.peaceRecords.strandedReason) {
+          process.stderr.write(peaceDegradationLine(inputs.peaceRecords.strandedReason));
+        }
+      }
       const forgeMode = sectionForgeMode(section);
       const forge = forgeMode === "none" ? skippedForgeState() : await fetchForgeState(inputs, null, forgeMode);
       const model = buildModel({ ...inputs, ...forge, forgeSkipped: forgeMode !== "full" });

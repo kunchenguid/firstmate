@@ -60,6 +60,7 @@ SH
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ ! -f "$FM_HOME/count-local-frames" ] || printf '%s\n' "${1:-}" >> "$FM_HOME/tmux-calls"
 if [ -f "$FM_HOME/slow-local-fixture" ] && [ ! -f "$FM_HOME/local-refresh-started" ]; then
   touch "$FM_HOME/local-refresh-started"
   sleep "${FM_TEST_LOCAL_SLEEP_SECONDS:-4}"
@@ -235,7 +236,104 @@ SH
 #!/usr/bin/env bash
 printf '{"generatedAt":"2026-08-02T00:05:01Z","providers":[{"provider":"codex","label":"Codex","windows":[{"id":"weekly","label":"week","percentRemaining":73,"resetsAt":"2026-08-09T00:00:00Z"}],"state":{"status":"fresh"}}]}'
 SH
-  chmod +x "$fakebin/no-mistakes" "$fakebin/tmux" "$fakebin/gh" "$fakebin/quota-axi"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+# Environment stand-in for the host tasks-axi binary. It lists in-flight rows
+# from the caller-supplied backlog file and does not decide strandedness.
+set -u
+case "${1:-}" in
+  --version|-v|-V)
+    printf '%s\n' '0.2.5'
+    exit 0
+    ;;
+  update)
+    if [ "${2:-}" = --help ]; then
+      printf '%s\n' 'usage: tasks-axi update <id> [--archive-body]'
+      exit 0
+    fi
+    printf 'fm-fleet-dashboard test fixture: unsupported tasks-axi %s\n' "$*" >&2
+    exit 1
+    ;;
+  mv)
+    if [ "${2:-}" = --help ]; then
+      printf '%s\n' 'usage: tasks-axi mv <dest> [<id>...]'
+      exit 0
+    fi
+    printf 'fm-fleet-dashboard test fixture: unsupported tasks-axi %s\n' "$*" >&2
+    exit 1
+    ;;
+  list) ;;
+  *)
+    printf 'fm-fleet-dashboard test fixture: unsupported tasks-axi %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+file=
+state=
+previous=
+for argument in "$@"; do
+  if [ "$previous" = "--file" ]; then
+    file=$argument
+  fi
+  if [ "$previous" = "--state" ]; then
+    state=$argument
+  fi
+  case "$argument" in
+    --file=*) file=${argument#--file=} ;;
+    --state=*) state=${argument#--state=} ;;
+  esac
+  previous=$argument
+done
+if [ -z "$file" ] || [ "$state" != in_flight ]; then
+  printf 'fm-fleet-dashboard test fixture: expected list --file <backlog> --state in_flight\n' >&2
+  exit 1
+fi
+[ -f "$file" ] || { printf 'count: 0\n'; exit 0; }
+rows=$(LC_ALL=C awk '
+  function section_state(line, heading) {
+    heading = line
+    sub(/^##[[:space:]]+/, "", heading)
+    sub(/[[:space:]]+$/, "", heading)
+    if (heading == "In flight") return "in_flight"
+    return ""
+  }
+  /^##[[:space:]]+/ {
+    state = section_state($0)
+    next
+  }
+  state == "in_flight" && $0 ~ /^[-*][[:space:]]+\[[ xX]\][[:space:]]+[^[:space:]]+/ {
+    row = $0
+    sub(/^[-*][[:space:]]+\[[ xX]\][[:space:]]+/, "", row)
+    id = row
+    sub(/[[:space:]].*$/, "", id)
+    held = "no"
+    if ($0 ~ /\(hold-kind:[[:space:]]*[^)]*\)/ || $0 ~ /\(hold:[[:space:]]*[^)]*\)/) held = "yes"
+    blocked = "none"
+    if ($0 ~ /blocked-by:[[:space:]]*"/) {
+      blocked = $0
+      sub(/^.*blocked-by:[[:space:]]*"/, "", blocked)
+      sub(/".*$/, "", blocked)
+    } else if ($0 ~ /blocked-by:[[:space:]]*[^[:space:]]+/) {
+      blocked = $0
+      sub(/^.*blocked-by:[[:space:]]*/, "", blocked)
+      sub(/[[:space:]].*$/, "", blocked)
+    }
+    if (blocked ~ /,/) blocked = "\"" blocked "\""
+    printf "%s,in_flight,ship,firstmate,work,%s,%s\n", id, blocked, held
+  }
+' "$file")
+count=$(printf '%s\n' "$rows" | awk 'NF { n++ } END { print n + 0 }')
+printf 'count: %s\n' "$count"
+printf 'tasks[%s]{id,state,kind,repo,title,blocked_by,held}:\n' "$count"
+if [ -n "$rows" ]; then
+  printf '%s\n' "$rows" | awk 'NF { printf "  %s\n", $0 }'
+fi
+# Real tasks-axi 0.2.5 always closes a listing with this two-space-indented
+# help block, so the fixture reproduces it too.
+printf 'help[1]:\n'
+printf '  - Run `tasks-axi show <id> --file=%s` for full notes on a task\n' "$file"
+SH
+  chmod +x "$fakebin/no-mistakes" "$fakebin/tmux" "$fakebin/gh" "$fakebin/quota-axi" "$fakebin/tasks-axi"
   printf '%s\n' "$fakebin"
 }
 
@@ -950,7 +1048,7 @@ SH
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "unknown section name rendered the full fleet"
-  assert_contains "$error" "valid sections: building, approvals, reviewing, all" \
+  assert_contains "$error" "valid sections: building, approvals, reviewing, all, peace" \
     "unknown section error omitted the valid names"
   pass "section selector renders intentional views and rejects unknown names"
 }
@@ -2418,6 +2516,581 @@ test_newness_render_fixture_can_be_inspected() {
   cat "$changed"
 }
 
+write_empty_backlog() {  # <home>
+  cat > "$1/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+
+## Queued
+
+## Done
+EOF
+}
+
+fingerprint_truth_records() {  # <home>
+  local home=$1
+  {
+    [ -f "$home/data/backlog.md" ] && openssl dgst -sha256 "$home/data/backlog.md"
+    find "$home/state" -maxdepth 1 -name '*.meta' -type f 2>/dev/null | sort | while IFS= read -r file; do
+      openssl dgst -sha256 "$file"
+    done
+    find "$home/data" "$home/state" \( -iname '*hold*' -o -name 'backlog.md' \) -type f 2>/dev/null | sort | while IFS= read -r file; do
+      openssl dgst -sha256 "$file"
+    done
+  }
+}
+
+assert_peace_omits_other_health() {  # <output>
+  local out=$1
+  assert_not_contains "$out" "needs you" "peace section invented a needs-you count"
+  assert_not_contains "$out" "lanes:" "peace section invented a lanes line"
+  assert_not_contains "$out" "problems:" "peace section invented a problems line"
+  assert_not_contains "$out" "ATTENTION NOW" "peace section projected the attention recap"
+  assert_not_contains "$out" "DECISIONS" "peace section listed decisions"
+  assert_not_contains "$out" "BUILDING" "peace section listed building work"
+  assert_not_contains "$out" "https://" "peace section printed a URL"
+}
+
+peace_digest_total() {  # <home>
+  local home=$1
+  FM_HOME="$home" /bin/bash -c \
+    '. "$1/fm-backend.sh" && . "$1/fm-pr-lib.sh" && . "$1/fm-record-contradictions-lib.sh" && fm_record_contradictions_total "$2" "$3"' \
+    peace-digest-total "$ROOT/bin" "$home/data" "$home/state"
+}
+
+write_peace_gh_axi() {  # <fakebin>
+  cat > "$1/gh-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  --version) printf '%s\n' '0.1.29'; exit 0 ;;
+  api)
+    case "${2:-}" in
+      /repos/example/repo/pulls/9)
+        printf '%s\n' 'api_response:' '  body: "MERGED:UNKNOWN"' '  truncated: false'
+        ;;
+      *) exit 1 ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$1/gh-axi"
+}
+
+test_peace_records_disagree_one_ghost() {
+  local home fakebin before after out
+  home=$(make_home peace-ghost)
+  write_empty_backlog "$home"
+  fm_write_meta "$home/state/ghost-task.meta" "kind=ship"
+  fakebin=$(make_fakebin "$home")
+  before=$(fingerprint_truth_records "$home")
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --section peace) \
+    || fail "peace section failed on a ghost-meta fixture"
+  after=$(fingerprint_truth_records "$home")
+  [ "$before" = "$after" ] || fail "peace render wrote backlog, metadata, or holds"
+  assert_contains "$out" "records: disagree (1 ghost, 0 stranded)" \
+    "one meta-without-backlog did not light the truth lamp"
+  assert_not_contains "$out" "ghost-task" "peace section named the ghost id"
+  assert_peace_omits_other_health "$out"
+  pass "peace records disagree for one ghost meta and no stranded row"
+}
+
+test_peace_records_no_meta_is_digest_not_stranded() {
+  local home fakebin before after out
+  home=$(make_home peace-no-meta)
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] stranded-task - Stranded in-flight work (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  before=$(fingerprint_truth_records "$home")
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --section peace) \
+    || fail "peace section failed on a no-meta in-flight fixture"
+  after=$(fingerprint_truth_records "$home")
+  [ "$before" = "$after" ] || fail "peace render wrote backlog, metadata, or holds"
+  assert_contains "$out" "records: disagree (1 ghost, 0 stranded)" \
+    "a no-meta in-flight row was double-counted or left the lamp dark"
+  assert_not_contains "$out" "stranded-task" "peace section named the no-meta id"
+  assert_peace_omits_other_health "$out"
+  pass "no-meta in-flight work is a digest finding, not a stranded row"
+}
+
+test_peace_records_disagree_one_stranded() {
+  local home fakebin before after out
+  home=$(make_home peace-stranded)
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] stranded-task - Stranded in-flight work (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/stranded-task.meta" "kind=ship"
+  printf 'failed: worker finished without advancing the backlog row\n' \
+    > "$home/state/stranded-task.status"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: done · source: fixture\n'
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  before=$(fingerprint_truth_records "$home")
+  out=$(NO_COLOR=1 PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z \
+    FM_CREW_STATE_OVERRIDE="$fakebin/fm-crew-state.sh" \
+    "$DASHBOARD" --section peace) \
+    || fail "peace section failed on an unadvanceable fixture"
+  after=$(fingerprint_truth_records "$home")
+  [ "$before" = "$after" ] || fail "peace render wrote backlog, metadata, or holds"
+  assert_contains "$out" "records: disagree (0 ghost, 1 stranded)" \
+    "one finished worker still in flight did not light the truth lamp"
+  assert_not_contains "$out" "stranded-task" "peace section named the stranded id"
+  assert_not_contains "$out" "Stranded in-flight work" "peace section named the stranded title"
+  assert_peace_omits_other_health "$out"
+  pass "peace records disagree for one stranded row and no digest finding"
+}
+
+test_peace_records_count_every_digest_kind() {
+  local home fakebin before after out expected
+  home=$(make_home peace-all-kinds)
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] missing-meta - In-flight work without metadata (repo: firstmate) (kind: ship)
+- [ ] held-flight - Held in-flight work (repo: firstmate) (kind: ship) (hold: wait) (hold-kind: parked)
+- [ ] closed-pr - Recorded pull request that is no longer open (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+- [x] complete-meta - Completed work with live metadata (repo: firstmate) (kind: ship)
+EOF
+  fm_write_meta "$home/state/ghost-meta.meta" "kind=ship"
+  fm_write_meta "$home/state/complete-meta.meta" \
+    "window=firstmate:fm-complete-meta" \
+    "kind=ship"
+  printf 'done: leftover completion event\n' > "$home/state/complete-meta.status"
+  fm_write_meta "$home/state/held-flight.meta" "kind=ship"
+  fm_write_meta "$home/state/closed-pr.meta" \
+    "kind=ship" \
+    "pr=https://github.com/example/repo/pull/9"
+  printf 'resolved: archival candidate\n' > "$home/state/stale-orphan.status"
+  touch -t 202608010000 "$home/state/stale-orphan.status"
+  fakebin=$(make_fakebin "$home")
+  write_peace_gh_axi "$fakebin"
+  expected=$(PATH="$fakebin:$PATH" peace_digest_total "$home")
+  [ "$expected" -ge 4 ] || fail "all-kinds fixture produced only $expected digest findings"
+  before=$(fingerprint_truth_records "$home")
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --section peace) \
+    || fail "peace section failed on a multi-kind digest fixture"
+  after=$(fingerprint_truth_records "$home")
+  [ "$before" = "$after" ] || fail "peace render wrote backlog, metadata, or holds"
+  assert_contains "$out" "records: disagree ($expected ghost, 0 stranded)" \
+    "the lamp did not project the digest owner's total"
+  assert_peace_omits_other_health "$out"
+  pass "peace records count every digest kind the owner reports"
+}
+
+test_peace_ghost_count_is_the_owners_total_not_its_displayed_entries() {
+  local home fakebin before after out digest id
+  home=$(make_home peace-over-cap)
+  write_empty_backlog "$home"
+  # Five metas of one kind: past the digest's per-kind display cap of 3, so the
+  # owner's total (5) and anything derived from its printed entries (3) differ.
+  for id in ghost-1 ghost-2 ghost-3 ghost-4 ghost-5; do
+    fm_write_meta "$home/state/$id.meta" "kind=ship"
+  done
+  fakebin=$(make_fakebin "$home")
+  digest=$(PATH="$fakebin:$PATH" FM_HOME="$home" /bin/bash -c \
+    '. "$1/fm-backend.sh" && . "$1/fm-pr-lib.sh" && . "$1/fm-record-contradictions-lib.sh" && fm_record_contradictions_render "$2" "$3"' \
+    peace-digest-render "$ROOT/bin" "$home/data" "$home/state")
+  assert_contains "$digest" "+2 more" \
+    "the fixture no longer exceeds the digest's display cap"
+  before=$(fingerprint_truth_records "$home")
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --section peace) \
+    || fail "peace section failed on an over-cap digest fixture"
+  after=$(fingerprint_truth_records "$home")
+  [ "$before" = "$after" ] || fail "peace render wrote backlog, metadata, or holds"
+  assert_contains "$out" "records: disagree (5 ghost, 0 stranded)" \
+    "the lamp did not project the owner's machine-readable total"
+  assert_not_contains "$out" "3 ghost" \
+    "the lamp counted the digest's displayed entries instead of its total"
+  assert_peace_omits_other_health "$out"
+  pass "the ghost count is the owner's total, not its displayed entries"
+}
+
+test_peace_records_agree_on_clean_fixture() {
+  local home fakebin before after out
+  home=$(make_home peace-clean)
+  write_empty_backlog "$home"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+touch "$FM_HOME/github-called"
+echo "unexpected GitHub call in peace section" >&2
+exit 97
+SH
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+touch "$FM_HOME/quota-called"
+echo "unexpected quota call in peace section" >&2
+exit 98
+SH
+  # gh-axi is reachable from peace: the digest half queries every meta that
+  # records a PR. With no such meta it must stay unqueried.
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+touch "$FM_HOME/gh-axi-called"
+exit 97
+SH
+  chmod +x "$fakebin/gh" "$fakebin/quota-axi" "$fakebin/gh-axi"
+  before=$(fingerprint_truth_records "$home")
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --section peace) \
+    || fail "peace section failed on a clean fixture"
+  [ ! -e "$home/github-called" ] || fail "peace section ran the cockpit's GitHub fetch"
+  [ ! -e "$home/quota-called" ] || fail "peace section ran the cockpit's quota fetch"
+  [ ! -e "$home/gh-axi-called" ] || fail "peace section queried a PR that no metadata records"
+  after=$(fingerprint_truth_records "$home")
+  [ "$before" = "$after" ] || fail "peace render wrote backlog, metadata, or holds"
+  assert_contains "$out" "records: agree" "clean records did not report agree"
+  assert_not_contains "$out" "disagree" "clean records invented a disagreement"
+  assert_not_contains "$out" "ghost" "clean records invented a ghost count"
+  assert_not_contains "$out" "stranded" "clean records invented a stranded count"
+  assert_peace_omits_other_health "$out"
+  pass "peace records agree on a clean fixture and invent no other health"
+}
+
+test_peace_records_ignore_blocked_worker() {
+  local home fakebin before after out
+  home=$(make_home peace-blocked)
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] blocked-task - Blocked worker with live records (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/blocked-task.meta" \
+    "window=firstmate:fm-blocked-task" \
+    "kind=ship"
+  printf 'blocked [key=wait]: Waiting on an external dependency.\n' \
+    > "$home/state/blocked-task.status"
+  fakebin=$(make_fakebin "$home")
+  before=$(fingerprint_truth_records "$home")
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --section peace) \
+    || fail "peace section failed on a blocked-worker fixture"
+  after=$(fingerprint_truth_records "$home")
+  [ "$before" = "$after" ] || fail "peace render wrote backlog, metadata, or holds"
+  assert_contains "$out" "records: agree" \
+    "a blocked worker with live meta and a current backlog row lit the truth lamp"
+  assert_not_contains "$out" "disagree" "a blocked worker was treated as a record contradiction"
+  assert_not_contains "$out" "blocked-task" "peace section named the blocked worker"
+  assert_peace_omits_other_health "$out"
+  pass "a blocked worker with matching records does not light the truth lamp"
+}
+
+test_peace_keeps_the_ghost_half_without_a_backlog_backend() {
+  local home fakebin before after out
+  home=$(make_home peace-manual-backend)
+  write_empty_backlog "$home"
+  fm_write_meta "$home/state/ghost-task.meta" "kind=ship"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  fakebin=$(make_fakebin "$home")
+  before=$(fingerprint_truth_records "$home")
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --section peace) \
+    || fail "peace section died with the strandedness instrument unavailable"
+  after=$(fingerprint_truth_records "$home")
+  [ "$before" = "$after" ] || fail "peace render wrote backlog, metadata, or holds"
+  assert_contains "$out" "records: disagree (1 ghost, stranded unknown)" \
+    "an unreadable strandedness instrument took the ghost half down with it"
+  assert_peace_omits_other_health "$out"
+  pass "an unreadable strandedness instrument still reports the ghost half"
+}
+
+test_peace_never_reads_an_unavailable_instrument_as_agreement() {
+  local home fakebin out
+  home=$(make_home peace-manual-backend-clean)
+  write_empty_backlog "$home"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  fakebin=$(make_fakebin "$home")
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --section peace) \
+    || fail "peace section died with the strandedness instrument unavailable"
+  assert_contains "$out" "records: unknown (0 ghost, stranded unknown)" \
+    "peace did not report the unreadable strandedness instrument as unknown"
+  assert_not_contains "$out" "agree" \
+    "an unreadable strandedness instrument was reported as agreement"
+  assert_peace_omits_other_health "$out"
+  pass "an unreadable strandedness instrument never reads as agreement"
+}
+
+test_peace_names_the_reason_an_instrument_could_not_run() {
+  local home fakebin out err
+  home=$(make_home peace-degraded-reason)
+  write_empty_backlog "$home"
+  fm_write_meta "$home/state/ghost-task.meta" "kind=ship"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  fakebin=$(make_fakebin "$home")
+  out=$(NO_COLOR=1 render_terminal "$home" "$fakebin" --section peace 2>"$TMP_ROOT/peace-degraded.err") \
+    || fail "peace section died with the strandedness instrument unavailable"
+  err=$(cat "$TMP_ROOT/peace-degraded.err")
+  assert_contains "$out" "records: disagree (1 ghost, stranded unknown)" \
+    "the degraded records line changed"
+  assert_not_contains "$out" "backlog backend" \
+    "the degradation diagnostic leaked onto the records line"
+  assert_peace_omits_other_health "$out"
+  assert_contains "$err" "stranded unknown" \
+    "peace degraded to unknown without naming it on stderr"
+  assert_contains "$err" "tasks-axi backlog backend is disabled or incompatible" \
+    "peace discarded the instrument's own reason for being unavailable"
+  pass "an unavailable instrument names its reason on stderr, not on the records line"
+}
+
+test_watch_peace_refetches_github_on_the_slow_cadence() {
+  local home fakebin out calls probes
+  home=$(make_home peace-watch)
+  write_empty_backlog "$home"
+  fm_write_meta "$home/state/closed-pr.meta" \
+    "kind=ship" \
+    "window=firstmate:fm-closed-pr" \
+    "pr=https://github.com/example/repo/pull/9"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  --version) printf '%s\n' '0.1.29'; exit 0 ;;
+  api)
+    printf '%s\n' "${2:-}" >> "$FM_HOME/gh-axi-calls"
+    printf '%s\n' 'api_response:' '  body: "MERGED:UNKNOWN"' '  truncated: false'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/gh-axi"
+  touch "$home/count-local-frames"
+
+  out=$(PATH="$fakebin:$PATH" python3 - "$DASHBOARD" "$home" <<'PY'
+import fcntl
+import os
+import pty
+import select
+import struct
+import subprocess
+import sys
+import termios
+import time
+
+dashboard, home = sys.argv[1:]
+environment = os.environ.copy()
+environment.update({
+    "FM_HOME": home,
+    "FM_SNAPSHOT_NOW": "2026-08-02T00:05:00Z",
+    "FM_FLEET_WATCH_LOCAL_SECONDS": "1",
+    "FM_FLEET_WATCH_GITHUB_SECONDS": "600",
+    "NO_COLOR": "1",
+})
+
+master_fd, slave_fd = pty.openpty()
+fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+process = subprocess.Popen(
+    [dashboard, "--watch", "--section", "peace", "--width", "80"],
+    stdin=slave_fd,
+    stdout=slave_fd,
+    stderr=slave_fd,
+    close_fds=True,
+    env=environment,
+)
+os.close(slave_fd)
+
+output = bytearray()
+
+
+def pump():
+    readable, _, _ = select.select([master_fd], [], [], 0)
+    if not readable:
+        return
+    try:
+        chunk = os.read(master_fd, 65536)
+    except OSError:
+        return
+    if chunk:
+        output.extend(chunk)
+
+
+def backend_probes():
+    try:
+        with open(os.path.join(home, "tmux-calls"), encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except OSError:
+        return 0
+
+
+# Every local frame re-probes the recorded backend, so backend probes witness
+# frames. Hold the loop open until enough have run that several fast frames
+# demonstrably elapsed, so a slow machine cannot pass this by completing one.
+deadline = time.monotonic() + 40
+while time.monotonic() < deadline and process.poll() is None and backend_probes() < 8:
+    pump()
+    time.sleep(0.01)
+observed_probes = backend_probes()
+if process.poll() is None:
+    os.write(master_fd, b"q")
+exit_deadline = time.monotonic() + 5
+while process.poll() is None and time.monotonic() < exit_deadline:
+    pump()
+    time.sleep(0.01)
+if process.poll() is None:
+    process.kill()
+process.wait(timeout=5)
+pump()
+os.close(master_fd)
+
+print(f"backend_probes={observed_probes}")
+print(output.decode("utf-8", "replace"))
+PY
+  ) || fail "watch peace run failed"
+
+  probes=$(printf '%s\n' "$out" | sed -n 's/^backend_probes=\([0-9][0-9]*\)$/\1/p' | sed -n '1p')
+  [ -n "$probes" ] && [ "$probes" -ge 8 ] \
+    || fail "watch never ran enough fast local frames to prove a cadence: got '${probes:-none}' probes"
+  calls=$(wc -l < "$home/gh-axi-calls" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$calls" ] || calls=0
+  [ "$calls" -eq 1 ] \
+    || fail "watch peace issued $calls GitHub PR calls across $probes backend probes; expected 1"
+  assert_contains "$out" "records: disagree" \
+    "throttling the peace refresh dropped the data the lamp needs"
+  pass "watch peace keeps the lamp lit while refetching GitHub on the slow cadence"
+}
+
+test_watch_peace_holds_its_diagnostic_until_the_screen_is_restored() {
+  local home fakebin out before_teardown after_teardown
+  home=$(make_home peace-watch-diagnostic)
+  write_empty_backlog "$home"
+  fm_write_meta "$home/state/ghost-task.meta" \
+    "kind=ship" \
+    "window=firstmate:fm-ghost-task"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  fakebin=$(make_fakebin "$home")
+  touch "$home/count-local-frames"
+
+  # The terminal control stream is the contract under test: everything the
+  # dashboard paints before the alternate screen is torn down lands on the live
+  # frame, everything after it lands on the restored screen.
+  out=$(PATH="$fakebin:$PATH" python3 - "$DASHBOARD" "$home" <<'PY'
+import fcntl
+import os
+import pty
+import select
+import struct
+import subprocess
+import sys
+import termios
+import time
+
+dashboard, home = sys.argv[1:]
+environment = os.environ.copy()
+environment.update({
+    "FM_HOME": home,
+    "FM_SNAPSHOT_NOW": "2026-08-02T00:05:00Z",
+    "FM_FLEET_WATCH_LOCAL_SECONDS": "1",
+    "FM_FLEET_WATCH_GITHUB_SECONDS": "1",
+    "NO_COLOR": "1",
+})
+
+master_fd, slave_fd = pty.openpty()
+fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+process = subprocess.Popen(
+    [dashboard, "--watch", "--section", "peace", "--width", "80"],
+    stdin=slave_fd,
+    stdout=slave_fd,
+    stderr=slave_fd,
+    close_fds=True,
+    env=environment,
+)
+os.close(slave_fd)
+
+output = bytearray()
+
+
+def pump():
+    readable, _, _ = select.select([master_fd], [], [], 0)
+    if not readable:
+        return
+    try:
+        chunk = os.read(master_fd, 65536)
+    except OSError:
+        return
+    if chunk:
+        output.extend(chunk)
+
+
+def backend_probes():
+    try:
+        with open(os.path.join(home, "tmux-calls"), encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except OSError:
+        return 0
+
+
+# The refresh cadence is 1s here, so several degraded collects run before quit.
+deadline = time.monotonic() + 40
+while time.monotonic() < deadline and process.poll() is None and backend_probes() < 8:
+    pump()
+    time.sleep(0.01)
+if process.poll() is None:
+    os.write(master_fd, b"q")
+exit_deadline = time.monotonic() + 5
+while process.poll() is None and time.monotonic() < exit_deadline:
+    pump()
+    time.sleep(0.01)
+if process.poll() is None:
+    process.kill()
+process.wait(timeout=5)
+pump()
+os.close(master_fd)
+
+stream = output.decode("utf-8", "replace")
+teardown = "[?1049l"
+index = stream.rfind(teardown)
+print(f"teardown_seen={int(index >= 0)}")
+print("---BEFORE-TEARDOWN---")
+print(stream if index < 0 else stream[:index])
+print("---AFTER-TEARDOWN---")
+print("" if index < 0 else stream[index + len(teardown):])
+PY
+  ) || fail "watch peace diagnostic run failed"
+
+  assert_contains "$out" "teardown_seen=1" "watch never restored the normal screen"
+  before_teardown=${out%%---AFTER-TEARDOWN---*}
+  after_teardown=${out#*---AFTER-TEARDOWN---}
+  assert_contains "$before_teardown" "records: disagree (1 ghost, stranded unknown)" \
+    "the degraded lamp stopped rendering in watch mode"
+  assert_not_contains "$before_teardown" "fm-fleet-dashboard: stranded unknown:" \
+    "the degradation diagnostic painted over the live watch frame"
+  assert_contains "$after_teardown" "fm-fleet-dashboard: stranded unknown:" \
+    "watch dropped the reason the lamp does not know"
+  assert_contains "$after_teardown" "tasks-axi backlog backend is disabled or incompatible" \
+    "watch surfaced a diagnostic without the instrument's own reason"
+  pass "watch holds the stranded-unknown reason until the screen is restored"
+}
+
 if [ -n "${FM_DASHBOARD_TEST_ONLY:-}" ]; then
   "$FM_DASHBOARD_TEST_ONLY"
   exit
@@ -2440,6 +3113,18 @@ test_show_expands_rows_with_full_context
 test_absent_sources_and_unreachable_reviews_stay_honest
 test_html_page_renders_minimal_sections_with_reachable_detail
 test_section_selector_renders_intention_views_and_rejects_unknown
+test_peace_records_disagree_one_ghost
+test_peace_records_no_meta_is_digest_not_stranded
+test_peace_records_disagree_one_stranded
+test_peace_records_count_every_digest_kind
+test_peace_ghost_count_is_the_owners_total_not_its_displayed_entries
+test_peace_records_agree_on_clean_fixture
+test_peace_records_ignore_blocked_worker
+test_peace_keeps_the_ghost_half_without_a_backlog_backend
+test_peace_never_reads_an_unavailable_instrument_as_agreement
+test_peace_names_the_reason_an_instrument_could_not_run
+test_watch_peace_refetches_github_on_the_slow_cadence
+test_watch_peace_holds_its_diagnostic_until_the_screen_is_restored
 test_help_describes_the_fixed_terminal_measure
 test_watch_flag_needs_a_terminal_and_stays_exclusive
 test_watch_paints_and_accepts_input_during_forge_refresh
