@@ -994,7 +994,7 @@ fm_failure_episode_reset() {
 # 40 minutes without a beat, no watcher lock at all, two workers in flight, and
 # both of their reports unread until an operator drained the queue by hand.
 #
-# The abandonment proof is the ledger, not pid liveness, because both ways a
+# One abandonment proof is the ledger, not pid liveness, because both ways a
 # finished claim keeps a live pid - reuse of the recorded pid, and a hook still
 # blocked writing its rewake banner - look alive:
 #
@@ -1009,6 +1009,21 @@ fm_failure_episode_reset() {
 # mistaken for an abandoned one. Condition 4 treats "arming" as in progress no
 # matter how old, because the owner foregrounds fm-watch-arm.sh for the whole
 # watcher cycle, which legitimately runs for hours.
+#
+# The ledger alone cannot prove every abandonment, though: an entry still reading
+# "arming", or no entry at all, says nothing about a recorded pid the operating
+# system has since handed to an unrelated live process - the same lapse, reached
+# when a session teardown kills a claim's whole process group before it can record
+# any outcome or run its release trap. So the claim also records the pid-identity
+# every other supervision lock in this repo records (fm_pid_identity above, used by
+# state/.watch.lock, the supervise-daemon lock, and the AFK launch lock), and a
+# recorded identity that no longer matches the live pid is abandonment on its own,
+# whatever the ledger says. That identity is written BEFORE the auto-arm role is
+# published, and every participant requires that role first, so a claim that is
+# genuinely mid-flight is never read as identity-less. A claim carrying no recorded
+# identity at all (an older build, a hand-edited lock) keeps exactly the
+# ledger-only reasoning above, and an identity that cannot be recomputed for the
+# live pid proves nothing either way, so it falls through to the ledger too.
 _fm_autoarm_epoch_field() {  # <epoch-file> <field>
   local file=$1 field=$2 tok
   local -a toks=()
@@ -1024,8 +1039,40 @@ _fm_autoarm_epoch_field() {  # <epoch-file> <field>
   return 1
 }
 
+# Record the claiming process's pid-identity inside the auto-arm owner lock, the
+# way every other supervision lock in this repo records it. Best effort by design:
+# a platform where fm_pid_identity cannot answer keeps the ledger-only reasoning
+# rather than losing the claim, and a record that cannot be completed leaves NO
+# identity file behind, so a partial write can never read as a mismatch against
+# its own live owner. Call it before publishing the auto-arm role.
+fm_autoarm_claim_record_identity() {  # <state-dir>
+  local state=$1 lock pid held identity back
+  lock="$state/.claude-autoarm.lock"
+  # Resolve the pid into a variable FIRST: expanding ${BASHPID:-$$} inside the
+  # command substitution below would resolve it in that subshell, recording the
+  # identity of a process that exits immediately and leaving every later reader
+  # with a permanent mismatch against the real owner.
+  pid=${BASHPID:-$$}
+  # The identity must describe the pid the lock publishes, so record it only for a
+  # lock this process actually holds (the same ownership test as fm_lock_set_role).
+  held=$(cat "$lock/pid" 2>/dev/null || true)
+  [ "$held" = "$pid" ] || return 1
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$identity" ] || return 1
+  if ! printf '%s\n' "$identity" > "$lock/pid-identity" 2>/dev/null; then
+    rm -f "$lock/pid-identity" 2>/dev/null || true
+    return 1
+  fi
+  back=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  if [ "$back" != "$identity" ]; then
+    rm -f "$lock/pid-identity" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
 fm_autoarm_claim_abandoned() {  # <state-dir>
-  local state=$1 epoch lock role pid owner outcome
+  local state=$1 epoch lock role pid owner outcome recorded current
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   [ -e "$lock" ] || [ -L "$lock" ] || return 1
@@ -1035,6 +1082,11 @@ fm_autoarm_claim_abandoned() {  # <state-dir>
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  recorded=$(cat "$lock/pid-identity" 2>/dev/null || true)
+  if [ -n "$recorded" ] && current=$(fm_pid_identity "$pid" 2>/dev/null) \
+    && [ -n "$current" ] && [ "$current" != "$recorded" ]; then
+    return 0
+  fi
   owner=$(_fm_autoarm_epoch_field "$epoch" owner_pid) || return 1
   [ "$owner" = "$pid" ] || return 1
   outcome=$(_fm_autoarm_epoch_field "$epoch" outcome) || return 1

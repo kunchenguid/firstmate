@@ -287,6 +287,23 @@ recorded_windows() {
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
+# One bounded re-surface for a pane the watcher is deliberately absorbing, so no
+# absorb can rot invisibly. <age> is how long the current absorb has held and
+# <throttle> is the per-window marker whose mtime records the last re-surface, so
+# once past PAUSE_RESURFACE_SECS the pane wakes once per window rather than every
+# poll. Shared by the declared-pause absorb and the worktree-write deferral so the
+# two cadences cannot drift apart; each caller owns its own marker and reason.
+# Returns without waking while either the absorb or the throttle is inside the
+# window; wake() itself exits the cycle, exactly as it does inline.
+resurface_absorbed() {  # <window> <throttle-marker> <age> <reason>
+  local win=$1 throttle=$2 age=$3 reason=$4
+  [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
+  [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
+  fm_wake_append stale "$win" "$reason" || exit 1
+  date +%s > "$throttle"
+  wake "$reason"
+}
+
 # Defer ONE wedge escalation for a pane that went quiet while its own task
 # worktree is demonstrably still being written (crew_worktree_written_since in
 # fm-classify-lib.sh). The pane and the run step both say nothing is happening;
@@ -294,27 +311,22 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # fake, so the escalation is deferred rather than fired. Deliberately a DEFERRAL,
 # not a cancellation: the idle timer restarts, so the next window probes again,
 # and a .writing-since-<key> marker ages the whole deferral chain so the pane
-# still re-surfaces once every PAUSE_RESURFACE_SECS - the same bounded cadence a
-# declared pause uses, via the same .writing-resurfaced-<key> throttle shape as
-# handle_paused_stale - and a crew whose worktree churns without real progress
-# cannot stay invisible. The escalation counter is left alone: it is neither
-# advanced (this is not an escalation) nor reset (a later genuine escalation must
-# still carry the demand-deep-inspection history it had already earned).
+# still re-surfaces once every PAUSE_RESURFACE_SECS through the shared
+# resurface_absorbed above - literally the same bounded cadence a declared pause
+# uses, throttled by its own .writing-resurfaced-<key> marker - and a crew whose
+# worktree churns without real progress cannot stay invisible. The escalation
+# counter is left alone: it is neither advanced (this is not an escalation) nor
+# reset (a later genuine escalation must still carry the demand-deep-inspection
+# history it had already earned).
 wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
-  local win=$1 since_file=$2 label=$3 age=$4 key wsf rf wage rf_age reason
+  local win=$1 since_file=$2 label=$3 age=$4 key wsf wage
   key=$(printf '%s' "$win" | tr ':/.' '___')
   wsf="$STATE/.writing-since-$key"
-  rf="$STATE/.writing-resurfaced-$key"
   [ -e "$wsf" ] || date +%s > "$wsf"
   wage=$(age_of "$wsf")
-  rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
   date +%s > "$since_file"
-  if [ "$wage" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
-    reason="stale: $win (idle ${age}s, writing its worktree for ${wage}s, rechecked on a long cadence not a wedge; confirm the writes are real progress)"
-    fm_wake_append stale "$win" "$reason" || exit 1
-    date +%s > "$rf"
-    wake "$reason"
-  fi
+  resurface_absorbed "$win" "$STATE/.writing-resurfaced-$key" "$wage" \
+    "stale: $win (idle ${age}s, writing its worktree for ${wage}s, rechecked on a long cadence not a wedge; confirm the writes are real progress)"
   triage_log "absorbed $label (worktree written since the idle window opened, idle ${age}s): $win"
 }
 
@@ -390,11 +402,11 @@ busy_turn_over_age() {  # <task>
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
 # status file mtime, not a per-hash marker, so a churny idle pane (a ticking
 # clock, a token counter) cannot keep resetting the cadence the way a hash-tied
-# timer would. A .paused-resurfaced-<key> throttle marker records the last
-# re-surface epoch so, once past the window, it fires once per window rather than
-# every poll. Advances the stale suppressor to <hash> and flags the key paused.
+# timer would. The bounded re-surface itself is the shared resurface_absorbed
+# above, throttled by this window's own .paused-resurfaced-<key> marker. Advances
+# the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+  local win=$1 task=$2 h=$3 key statusf mtime age
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -404,14 +416,8 @@ handle_paused_stale() {  # <window> <task> <hash>
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
-  rf="$STATE/.paused-resurfaced-$key"
-  rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
-  if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
-    reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
-    fm_wake_append stale "$win" "$reason" || exit 1
-    date +%s > "$rf"
-    wake "$reason"
-  fi
+  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" \
+    "stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
 }
 
