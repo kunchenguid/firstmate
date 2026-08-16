@@ -25,4 +25,5 @@ bin/fm-doc-audience-check.sh
 
 The check intentionally does not lint dates, versions, commands, paths, incident language, or transcript-like prose.
 Those forms are legitimate in maintainer verification and require semantic review rather than keyword heuristics.
+One separate contract still bounds them: [`outward-facing-text.md`](outward-facing-text.md) requires every identifier tracked prose adds, including an absolute path inside a recorded command or its output, to be resolvable by a reader holding this repository alone.
 For every changed prose surface, review its audience, authoritative owner, current relevance, evidence destination, and unique safety facts, then repeat that review over the complete branch diff after all fixes.

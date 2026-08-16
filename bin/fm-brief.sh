@@ -41,6 +41,11 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# The no-mistakes and direct-PR briefs, the two that publish text outward, require
+# the worker to scan the run intent or the PR body with bin/fm-outward-text-check.sh
+# before publishing it. The local-only brief carries no such step because it
+# publishes nothing outward.
+# docs/outward-facing-text.md owns what that scan enforces.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
