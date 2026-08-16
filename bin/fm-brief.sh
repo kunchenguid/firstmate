@@ -177,6 +177,7 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+CLAUDE_SYMLINK_CHECK=$(shell_quote "$FM_ROOT/bin/fm-claude-symlink-check.sh")
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -458,6 +459,12 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+# Repo hygiene check
+Before you report done, run \`$CLAUDE_SYMLINK_CHECK .\`. For direct-PR delivery, run this before pushing or opening the PR.
+It is silent and exits 0 in almost every project; it only speaks up when the resolved base branch manages \`CLAUDE.md\` as a symlink to its expected target and your branch lost that symlink or its target - a known git hazard where syncing a branch whose history predates the symlink against a base that already has it hits a "distinct types on each side" conflict, easy to mis-resolve by dropping the file instead of keeping the symlink.
+It checks your working tree and your branch tip, so a restore only counts once you commit it.
+If it reports an error, run the recovery command it prints, then re-run the check until it passes.
 
 $DOD
 EOF

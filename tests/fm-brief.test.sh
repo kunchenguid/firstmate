@@ -371,6 +371,41 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_ship_repo_hygiene_check_renders_in_every_mode() {
+  local home mode id brief foreign_root quoted_guard
+  home="$TMP_ROOT/repo-hygiene-home"
+  foreign_root="$TMP_ROOT/firstmate helper's root"
+  quoted_guard=$(printf '%s' "$foreign_root/bin/fm-claude-symlink-check.sh" | sed "s/'/'\\\\''/g")
+  quoted_guard="'$quoted_guard'"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-hygiene-$mode"
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$mode: brief was not scaffolded"
+    assert_grep "# Repo hygiene check" "$brief" \
+      "$mode: brief missing the repo hygiene check section"
+    assert_grep "fm-claude-symlink-check.sh" "$brief" \
+      "$mode: brief does not tell the worker to run fm-claude-symlink-check.sh"
+    assert_grep "run \`$quoted_guard .\`" "$brief" \
+      "$mode: brief does not shell-quote the hygiene-check executable path"
+    assert_grep "run the recovery command it prints, then re-run the check until it passes" "$brief" \
+      "$mode: brief lost the recovery-and-recheck instruction"
+    assert_grep "a restore only counts once you commit it" "$brief" \
+      "$mode: brief does not say the restored symlink has to be committed"
+    assert_grep "resolved base branch manages \`CLAUDE.md\` as a symlink to its expected target" "$brief" \
+      "$mode: brief hardcodes an incorrect symlink target"
+    if [ "$mode" = direct-PR ]; then
+      hygiene_line=$(grep -n "For direct-PR delivery, run this before pushing or opening the PR" "$brief" | cut -d: -f1)
+      push_line=$(grep -n "push your branch and open a PR" "$brief" | cut -d: -f1)
+      [ -n "$hygiene_line" ] || fail "$mode: brief does not put the hygiene check before direct-PR delivery"
+      [ -n "$push_line" ] || fail "$mode: brief is missing its direct-PR push instruction"
+      [ "$hygiene_line" -lt "$push_line" ] || fail "$mode: hygiene check appears after the direct-PR push instruction"
+    fi
+  done
+  pass "fm-brief.sh: every ship mode renders the CLAUDE.md symlink guard before Definition of done"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -720,6 +755,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_ship_repo_hygiene_check_renders_in_every_mode
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
