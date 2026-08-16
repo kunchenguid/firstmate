@@ -716,6 +716,10 @@ test_opencode_plugin_forces_followup() {
 
 test_opencode_plugin_anchors_guard_to_worktree() {
   local plugin parent worktree_dir wrong_dir out status
+  if ! fm_node_supports_esm_stdin; then
+    pass ".opencode primary plugin: worktree anchoring probe skipped; ambient node cannot detect ESM stdin"
+    return 0
+  fi
   plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
   [ -f "$plugin" ] || fail "tracked OpenCode primary plugin is missing"
   parent="$TMP_ROOT/opencode-plugin-parent"

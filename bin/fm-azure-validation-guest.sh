@@ -766,6 +766,22 @@ NEW_BINDING=$(python3 "$LEASE_BINDING_HELPER" "$CREDENTIAL_MOUNT" "$PROVIDER_PAT
 tmp=$IDENTITY.tmp
 jq --arg binding "$NEW_BINDING" '.credential_content_binding=$binding' "$IDENTITY" >"$tmp"
 mv "$tmp" "$IDENTITY"
+# The pipeline daemon owns the branch and advances it past this checkout
+# (document commits, CI-fix commits, monitor rebases are committed and
+# pushed from the daemon's own workspace), so the checkout HEAD is not
+# the pipeline's final state - generation 050 ground truth: the document
+# step's pushed history commit left remote_head one commit ahead of
+# current_head and the collect head-freshness invariant refused an
+# otherwise checks-passed result. Fast-forward the checkout to the pushed
+# branch before capturing heads: only a descendant of the local HEAD is
+# accepted, so a foreign or rewritten remote still captures mismatched
+# heads and fails collection exactly as before.
+if runuser -u fmvalidate -- git -C "$REPO" fetch --quiet origin "refs/heads/$BRANCH" 2>>"$RUN_LOG"; then
+  FETCHED=$(git -C "$REPO" rev-parse FETCH_HEAD 2>/dev/null || true)
+  if [ -n "$FETCHED" ] && git -C "$REPO" merge-base --is-ancestor HEAD "$FETCHED" 2>/dev/null; then
+    runuser -u fmvalidate -- git -C "$REPO" merge --ff-only --quiet "$FETCHED" >>"$RUN_LOG" 2>&1 || true
+  fi
+fi
 CURRENT_HEAD=$(git -C "$REPO" rev-parse HEAD)
 CURRENT_TREE=$(git -C "$REPO" rev-parse 'HEAD^{tree}')
 REMOTE_HEAD=$(git -C "$REPO" ls-remote --heads origin "refs/heads/$BRANCH" | awk 'NR==1 {print $1}')
@@ -781,20 +797,49 @@ OUTCOME=failed
 # post-mortem status can never say so. The run log's structured gate block
 # is authoritative for gate detection; the status read stays authoritative
 # for completed outcomes.
+# A run parked at a gate when the unit tore down is a decision, not a
+# failure - but the daemon marks the run failed on shutdown, so the durable
+# status cannot say so (generation 047 ground truth: a rebase-conflict gate
+# classified failed). Conversely, an ALREADY-ANSWERED gate leaves awaiting
+# lines mid-log while the run continues to a genuine terminal failure
+# (generation 041 ground truth: a failed push classified needs-decision).
+# The discriminator is whether the run log ENDS parked: after the last
+# awaiting line, a still-parked run shows only gate findings and help text,
+# while an answered gate is followed by later step rows or terminal lines.
+gate_parked=0
+last_awaiting=$(grep -nEi 'status:[[:space:]]*awaiting[_ -](approval|user)' "$RUN_LOG" 2>/dev/null | tail -n 1 | cut -d: -f1)
+# A refused respond attempt prints an error line while the gate stays
+# parked, so error lines cannot terminate the parked window; only later
+# step-progress rows or a rendered run outcome prove the gate was answered.
+if [ -n "$last_awaiting" ] && ! tail -n +"$((last_awaiting + 1))" "$RUN_LOG" | grep -Eq ',(completed|failed),|^outcome:'; then
+  gate_parked=1
+fi
 if [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'needs[-_ ]decision|awaiting[_ -]user|awaiting[_ -]approval|ask-user' "$STATUS_LOG"; then
+  OUTCOME=needs-decision
+elif [ "$gate_parked" = 1 ]; then
   OUTCOME=needs-decision
 elif [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*(passed|checks-passed)|checks[- ]passed|checks green' "$STATUS_LOG"; then
   OUTCOME=checks-passed
 elif [ "$RUN_EXIT" -eq 0 ] && [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*passed' "$STATUS_LOG"; then
   OUTCOME=passed
 elif [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*failed' "$STATUS_LOG"; then
-  # A terminal failed status is authoritative even when the run log carries
-  # a historical gate block from an earlier, already-answered decision point
-  # (generation 041 ground truth: a failed push classified as needs-decision
-  # because the answered test gate still matched the run-log grep).
-  OUTCOME=failed
-elif grep -Eq '^gate:' "$RUN_LOG" && grep -Eiq 'status:[[:space:]]*awaiting[_ -](approval|user)' "$RUN_LOG"; then
-  OUTCOME=needs-decision
+  # The ci step turns green and then stays running to monitor until merge,
+  # so unit teardown kills it mid-monitor and the daemon marks the run
+  # failed on shutdown - the same teardown artifact the gate discriminator
+  # above handles (generation 049 ground truth: every step green, ci
+  # verified "all CI checks passed", durable status still failed with
+  # "daemon shutting down"). The run command's final rendered outcome is
+  # written before teardown, so when the durable failure carries the
+  # shutdown signature and the run's own terminal report was
+  # checks-passed, the terminal report wins. The LAST outcome line guards
+  # against checks that greened mid-run and regressed before the end.
+  last_run_outcome=$(grep -Ei '^outcome:' "$RUN_LOG" 2>/dev/null | tail -n 1)
+  if [ "$RUN_EXIT" -eq 0 ] && grep -q 'daemon shutting down' "$STATUS_LOG" \
+    && printf '%s' "$last_run_outcome" | grep -Eiq 'outcome:[[:space:]]*checks-passed'; then
+    OUTCOME=checks-passed
+  else
+    OUTCOME=failed
+  fi
 fi
 PR=$(grep -hEo 'https://github\.com/[^ /]+/[^ /]+/pull/[0-9]+' "$STATUS_LOG" "$RUN_LOG" | tail -n 1 || true)
 CHECKS_GREEN=false

@@ -190,6 +190,26 @@ def main():
     stderr_path = output / "stderr.log"
     stdout_handle = open(stdout_path, "xb", buffering=0)
     stderr_handle = open(stderr_path, "xb", buffering=0)
+    # The unit's PrivateTmp puts /tmp on its own tmpfs, so repository tests
+    # that hard-link between their temp root and the work mount fail with
+    # EXDEV (generation 051 ground truth: fm-auto-reap's fixture hard
+    # link). A temp root beside the repository stays on the same device.
+    # Sticky world-writable /tmp semantics instead of chown: the unit's
+    # bounding set carries no CAP_CHOWN, so a chown here crashes the
+    # executor on the real VM. When the directory cannot be provided
+    # (hermetic harnesses run the executor outside a work mount) the
+    # child simply keeps the default TMPDIR.
+    work_tmp = Path(repo).resolve().parent / "tmp"
+    try:
+        work_tmp.mkdir(exist_ok=True)
+    except OSError:
+        pass
+    try:
+        os.chmod(work_tmp, 0o1777)
+    except OSError:
+        pass
+    if not work_tmp.is_dir() or not os.access(work_tmp, os.W_OK):
+        work_tmp = None
     child_env = {
         "HOME": "/work/home",
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -199,7 +219,15 @@ def main():
         "FM_AZURE_RUNNER": "1",
         "FM_AZURE_RUNNER_INVOCATION": request["invocation"],
         "FM_AZURE_RUNNER_DEPENDENCIES": "/work/repo",
+        # Declares the sealed-lane environment fact: deny-all repository
+        # networking with only the staged tool closure. Tests whose runtime
+        # dependencies cannot exist here (interpreter versions, package
+        # registries) key their explicit skip on this, keeping their full
+        # coverage in public CI which the ci step still requires green.
+        "FM_TEST_SEALED_CELL": "1",
     }
+    if work_tmp is not None:
+        child_env["TMPDIR"] = str(work_tmp)
     started = time.monotonic()
     try:
         def enter_repo_as_runner():

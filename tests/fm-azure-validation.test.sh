@@ -174,8 +174,9 @@ assert "code: recover_custody" in guest
 assert guest.count('cd "$3" && exec "$2" axi status') == 2
 assert "FM_AZURE_VALIDATION_BRANCH" in guest and "FM_AZURE_VALIDATION_BRANCH" in bridge
 assert "awaiting[_ -]approval" in guest
-assert "grep -Eq '^gate:' \"$RUN_LOG\"" in guest
-assert guest.index("gate:") < guest.index('"$STATUS_RC" -eq 0 ] && grep -Eiq')
+assert "status:[[:space:]]*awaiting[_ -](approval|user)" in guest
+assert 'tail -n +"$((last_awaiting + 1))" "$RUN_LOG"' in guest
+assert guest.index("status:[[:space:]]*awaiting[_ -](approval|user)") < guest.index('"$STATUS_RC" -eq 0 ] && grep -Eiq')
 assert "credential disk content binding drift (expected {} observed {}); adopting observed" in guest
 assert "binding mismatch" not in guest
 assert "credential_content_binding // empty" in guest

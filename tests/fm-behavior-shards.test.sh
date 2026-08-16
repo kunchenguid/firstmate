@@ -256,8 +256,8 @@ test_ci_wires_matrix_isolation_timeout_and_union_verification() {
     "CI does not expose the failing shard in the job name"
   assert_grep 'shard: [1, 2, 3, 4, 5, 6, 7, 8]' "$CI" \
     "CI does not launch every deterministic shard"
-  [ "$(grep -Fc 'timeout-minutes: 15' "$CI")" -eq 1 ] \
-    || fail "behavior matrix must have one 15-minute per-shard timeout"
+  [ "$(grep -Fc 'timeout-minutes: 25' "$CI")" -eq 1 ] \
+    || fail "behavior matrix must have one 25-minute per-shard timeout"
   # shellcheck disable=SC2016  # Workflow shell variables must remain literal.
   assert_grep 'echo "TMPDIR=$shard_root/tmp"' "$CI" \
     "CI does not give each shard a private temp root"

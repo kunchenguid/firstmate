@@ -5,6 +5,14 @@
 # behavior.
 set -eu
 
+# The sealed validation-cell lane has deny-all repository networking, so
+# the npm registry install can never succeed there; public CI remains the
+# authoritative run.
+if [ "${FM_TEST_SEALED_CELL:-0}" = 1 ]; then
+  printf 'ok - sealed cell lane: npm registry access is outside the staged tool closure\n'
+  exit 0
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 test_intake_requires_store_forward_protocol() {

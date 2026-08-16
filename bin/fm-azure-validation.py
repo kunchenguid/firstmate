@@ -1084,7 +1084,12 @@ def retail_rate(env, sku):
     best-effort and used verbatim when the API throttles, and only a SKU with
     no cached rate at all requires the live read to succeed.
     """
-    cache_path = env["state_dir"] / "retail-rate-cache.json"
+    # An environment without durable state (the transport contract drives
+    # this function with a bare env) prices directly with no cache.
+    state_dir = env.get("state_dir")
+    if state_dir is None:
+        return retail_rate_from_api(env, sku)
+    cache_path = state_dir / "retail-rate-cache.json"
     try:
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):

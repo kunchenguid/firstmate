@@ -171,6 +171,26 @@ fm_test_tmproot_into() {
 
 FM_NODE_TS_IMPORT_SUPPORT=""
 
+# fm_node_supports_esm_stdin succeeds when the ambient node detects ESM
+# syntax on stdin without an explicit --input-type flag (unflagged detection
+# arrived in node 22.7). The OpenCode plugin probes drive the plugin through
+# an ESM stdin script, so on an older node those probes skip instead of
+# failing with a CommonJS SyntaxError. The probe runs once per test file.
+
+FM_NODE_ESM_STDIN_SUPPORT=""
+
+fm_node_supports_esm_stdin() {
+  if [ -z "$FM_NODE_ESM_STDIN_SUPPORT" ]; then
+    if printf 'import { pathToFileURL } from "node:url";\nprocess.exit(typeof pathToFileURL === "function" ? 0 : 1);\n' \
+      | node >/dev/null 2>&1; then
+      FM_NODE_ESM_STDIN_SUPPORT=yes
+    else
+      FM_NODE_ESM_STDIN_SUPPORT=no
+    fi
+  fi
+  [ "$FM_NODE_ESM_STDIN_SUPPORT" = yes ]
+}
+
 fm_node_supports_ts_import() {
   if [ -z "$FM_NODE_TS_IMPORT_SUPPORT" ]; then
     local probe_dir

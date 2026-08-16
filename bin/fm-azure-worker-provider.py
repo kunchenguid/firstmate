@@ -9,6 +9,8 @@ disk, account, and worktree identity matches the controller action.
 
 import contextlib
 import datetime as dt
+import email.utils
+import fcntl
 import hashlib
 import json
 import math
@@ -439,20 +441,135 @@ def cost_throttle_signature(stderr):
     return '"code":"429"' in text or "Too Many Requests" in text
 
 
+COST_CACHE_FRESH_SECONDS = 600
+COST_CACHE_MAX_AGE_SECONDS = 4 * 60 * 60
+RETAIL_RATE_CACHE_FRESH_SECONDS = 7 * 24 * 3600
+
+
+def shared_runner_state_dir():
+    home = os.environ.get("FM_HOME", "")
+    if not home:
+        return None
+    path = Path(home) / "state" / "azure-runner"
+    return path if path.is_dir() else None
+
+
+def cost_cache_key(endpoint, url, body):
+    body_digest = "sha256:" + hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    key = hashlib.sha256((endpoint + "\0" + url + "\0" + body_digest).encode("utf-8")).hexdigest()
+    return key, body_digest
+
+
+def cost_result_value(result):
+    properties = result.get("properties", result)
+    columns = properties.get("columns") or []
+    rows = properties.get("rows") or []
+    if not rows:
+        return 0.0
+    names = [item.get("name") for item in columns]
+    index = names.index("PreTaxCost") if "PreTaxCost" in names else 0
+    try:
+        return float(rows[0][index])
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def load_cost_cache_entry(controller, key, endpoint, body_digest, max_age_seconds):
+    state_dir = shared_runner_state_dir()
+    if state_dir is None:
+        return None
+    try:
+        cache = json.loads((state_dir / "cost-management-cache.json").read_text(encoding="utf-8"))
+        entry = cache["entries"][key]
+        fetched = dt.datetime.fromisoformat(entry["fetched_at"].replace("Z", "+00:00"))
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if (
+        cache.get("schema") != "fm.azure-cost-cache/v1"
+        or cache.get("subscription") != controller["subscription"]
+        or cache.get("resource_group") != controller["resource_group"]
+        or entry.get("endpoint") != endpoint
+        or entry.get("body_digest") != body_digest
+        or fetched.tzinfo is None
+    ):
+        return None
+    now = dt.datetime.now(dt.timezone.utc)
+    if now < fetched or (now - fetched).total_seconds() > max_age_seconds:
+        return None
+    return entry.get("result") if isinstance(entry.get("result"), dict) else None
+
+
+def save_cost_cache_entry(controller, key, endpoint, body_digest, result):
+    state_dir = shared_runner_state_dir()
+    if state_dir is None:
+        return
+    path = state_dir / "cost-management-cache.json"
+    try:
+        with open(state_dir / ".lock", "a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                cache = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                cache = {
+                    "schema": "fm.azure-cost-cache/v1",
+                    "subscription": controller["subscription"],
+                    "resource_group": controller["resource_group"],
+                    "entries": {},
+                }
+            if (
+                cache.get("schema") != "fm.azure-cost-cache/v1"
+                or cache.get("subscription") != controller["subscription"]
+                or cache.get("resource_group") != controller["resource_group"]
+                or not isinstance(cache.get("entries"), dict)
+            ):
+                return
+            cache["entries"][key] = {
+                "endpoint": endpoint,
+                "body_digest": body_digest,
+                "server_date": email.utils.formatdate(usegmt=True),
+                "fetched_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "result": result,
+            }
+            temp = path.with_name(".{}.{}.tmp".format(path.name, os.getpid()))
+            temp.write_text(json.dumps(cache, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+            os.chmod(temp, 0o600)
+            os.replace(temp, path)
+    except OSError:
+        return
+
+
 def cost_query_with_state(controller, forecast):
     """Return (value, untrained). untrained is True only for the exact
     Cost Management refusal that the forecast model has insufficient
     training data, which is the expected bootstrap state of a fresh
-    resource group; every other failure stays plainly unreadable."""
+    resource group; every other failure stays plainly unreadable.
+
+    Spend reads go through the shared runner cost cache: a fresh entry
+    skips the API entirely, so concurrent shard admissions stop competing
+    for the shared Cost Management throttle bucket (generation 050 lost a
+    full shard fan-out to admission refusals from that competition). On an
+    unreadable live read a bounded-age stale entry substitutes: admission
+    adds outstanding durable reservations on top of this figure, so spend
+    landed between refreshes cannot bypass the budget ceiling through
+    staleness."""
     endpoint = "forecast" if forecast else "query"
     url = "https://management.azure.com/subscriptions/{}/providers/Microsoft.CostManagement/{}?api-version=2023-11-01".format(
         controller["subscription"], endpoint
     )
+    body = cost_body(controller, forecast)
+    key, body_digest = cost_cache_key(endpoint, url, body)
+    fresh = load_cost_cache_entry(controller, key, endpoint, body_digest, COST_CACHE_FRESH_SECONDS)
+    if fresh is not None:
+        value = cost_result_value(fresh)
+        if value is not None:
+            return value, False
     fd, name = tempfile.mkstemp(prefix="fm-worker-cost-", suffix=".json")
     os.chmod(name, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(cost_body(controller, forecast), handle, separators=(",", ":"))
+            json.dump(body, handle, separators=(",", ":"))
         deadline = time.monotonic() + COST_THROTTLE_RETRY_DEADLINE_SECONDS
         while True:
             result, rc, stderr = az(controller, [
@@ -469,15 +586,17 @@ def cost_query_with_state(controller, forecast):
             ):
                 time.sleep(COST_THROTTLE_RETRY_SPACING_SECONDS)
                 continue
+            stale = load_cost_cache_entry(controller, key, endpoint, body_digest, COST_CACHE_MAX_AGE_SECONDS)
+            if stale is not None:
+                value = cost_result_value(stale)
+                if value is not None:
+                    return value, False
             return None, False
-        properties = result.get("properties", result)
-        columns = properties.get("columns") or []
-        rows = properties.get("rows") or []
-        if not rows:
-            return 0.0, False
-        names = [item.get("name") for item in columns]
-        index = names.index("PreTaxCost") if "PreTaxCost" in names else 0
-        return float(rows[0][index]), False
+        value = cost_result_value(result)
+        if value is None:
+            return None, False
+        save_cost_cache_entry(controller, key, endpoint, body_digest, result)
+        return value, False
     except (IndexError, TypeError, ValueError):
         return None, False
     finally:
@@ -486,6 +605,47 @@ def cost_query_with_state(controller, forecast):
 
 
 def retail_rate(sku):
+    """Resolve the SKU's hourly retail rate through the shared runner cache.
+
+    The rate only feeds worst-case cost ceilings, so freshness is worth very
+    little and prices.azure.com throttles bursts hard. A fresh cached rate
+    skips the API entirely; a live failure falls back to any cached rate
+    verbatim. Only a SKU with no cached rate requires the live read."""
+    state_dir = shared_runner_state_dir()
+    cache_path = None if state_dir is None else state_dir / "retail-rate-cache.json"
+    cache = {}
+    if cache_path is not None:
+        try:
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cache = {}
+    entry = cache.get(sku)
+    cached_rate = None
+    if (
+        isinstance(entry, dict)
+        and isinstance(entry.get("rate"), (int, float))
+        and entry["rate"] > 0
+        and isinstance(entry.get("fetched_at"), (int, float))
+    ):
+        cached_rate = float(entry["rate"])
+        if time.time() - entry["fetched_at"] < RETAIL_RATE_CACHE_FRESH_SECONDS:
+            return cached_rate
+    rate = retail_rate_live(sku)
+    if rate is None:
+        return cached_rate
+    if cache_path is not None:
+        try:
+            cache[sku] = {"rate": rate, "fetched_at": time.time()}
+            temp = cache_path.with_suffix(".tmp")
+            temp.write_text(json.dumps(cache, sort_keys=True) + "\n", encoding="utf-8")
+            os.chmod(temp, 0o600)
+            temp.replace(cache_path)
+        except OSError:
+            pass
+    return rate
+
+
+def retail_rate_live(sku):
     query = urllib.parse.urlencode({
         "$filter": "armRegionName eq 'eastus' and armSkuName eq '{}' and priceType eq 'Consumption'".format(sku)
     })
