@@ -97,6 +97,14 @@ fm_nm_run_has_gate() {  # <toon-output>
 # executing run over a stale record - a terminal run a newer executing one
 # replaced, or a head the pipeline moved off the local line of history - while
 # a parked or terminal run gets no such relaxation.
+#
+# It answers "is something executing this run", never "is it THIS crew's run".
+# `axi status` answers per repository, not per worktree, so a crew whose branch
+# has no run of its own is handed a sibling worktree's run instead (that CLI
+# behavior is owned by nm_runs_status_for_branch's comment in
+# bin/fm-crew-state.sh). Every relaxation this predicate unlocks drops the HEAD
+# condition only: callers must still require the run's branch to equal the
+# crew's branch, or a sibling task's run becomes this crew's state.
 fm_nm_run_is_executing() {  # <toon-output>
   local out=$1 status
   [ -n "$out" ] || return 1
