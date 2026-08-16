@@ -60,6 +60,7 @@ FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
 FM_REMOTE_JOB_PROBE_WAIT_SECONDS=${FM_REMOTE_JOB_PROBE_WAIT_SECONDS:-60}
 FM_REMOTE_JOB_STOP_WAIT_SECONDS=${FM_REMOTE_JOB_STOP_WAIT_SECONDS:-15}
 FM_REMOTE_JOB_CLOCK_MAX_STALLS=${FM_REMOTE_JOB_CLOCK_MAX_STALLS:-50}
+FM_REMOTE_JOB_WAIT_MAX_POLLS_PER_SECOND=${FM_REMOTE_JOB_WAIT_MAX_POLLS_PER_SECOND:-1000}
 FM_REMOTE_JOB_OPERATOR_PATH=
 FM_REMOTE_JOB_CHILD_PATH=
 FM_REMOTE_JOB_STATE=
@@ -100,6 +101,8 @@ fm_remote_job_validate_settings() {
   [ "$FM_REMOTE_JOB_STOP_WAIT_SECONDS" -le 300 ] || return 1
   case "$FM_REMOTE_JOB_CLOCK_MAX_STALLS" in ''|*[!0-9]*|0) return 1 ;; esac
   [ "$FM_REMOTE_JOB_CLOCK_MAX_STALLS" -le 1000 ] || return 1
+  case "$FM_REMOTE_JOB_WAIT_MAX_POLLS_PER_SECOND" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$FM_REMOTE_JOB_WAIT_MAX_POLLS_PER_SECOND" -le 100000 ] || return 1
   return 0
 }
 
@@ -113,27 +116,39 @@ fm_remote_job_validate_settings() {
 # successful check.
 #
 # What a wait owes its caller when the clock misbehaves is deliberately narrow,
-# and narrower than three earlier attempts at it. Each of those tried to hold a
-# budget whole across a backwards clock step by re-anchoring the deadline, and
+# and narrower than several earlier attempts at it. Each of those tried to hold
+# a budget whole across a backwards clock step by re-anchoring the deadline, and
 # each shipped a fresh way to end a wait early instead: the exact "worker did
-# not report ready" failure the deadline exists to prevent. The re-anchor was
-# never what made a wait terminate, so it is gone. What remains is one deadline
-# and one counter of consecutive readings that fail to advance the clock, and
-# the counter alone is the termination guarantee, because a clock that is
-# unreadable, frozen, or stepping backwards never advances and so spends that
-# allowance unaided.
+# not report ready" failure the deadline exists to prevent. The re-anchor is
+# gone. A backwards reading now simply sits behind the deadline and is not
+# expired, so a backwards step lengthens a wait rather than collapsing its
+# budget, and no arithmetic pretends otherwise.
 #
-# The guarantees are therefore exactly these. A wait always terminates, whatever
-# the clock does. A backwards step lengthens a wait by the size of the step
-# instead of collapsing its budget, because a reading behind the deadline is
-# simply not expired and no arithmetic pretends otherwise. The allowance is
-# FM_REMOTE_JOB_CLOCK_MAX_STALLS readings, whose headroom is relative to the
-# poll below: `date` has one second resolution, so even a healthy clock repeats
-# a reading about ten times per second of polling, and anyone shortening that
-# sleep has to revisit the bound. Making these waits correct against a clock
-# that is wrong in other ways, a forward step in particular, is deliberately out
-# of scope here and tracked as its own item, so this stays a deadline rather
-# than a clock subsystem.
+# That leaves termination, which two backstops guarantee unconditionally.
+# FM_REMOTE_JOB_CLOCK_MAX_STALLS bounds consecutive readings that fail to
+# advance the clock, unreadable, frozen, or backwards alike, and covers the
+# common broken clock. Its headroom is relative to the poll below: `date` has
+# one second resolution, so even a healthy clock repeats a reading about ten
+# times per second of polling, and anyone shortening that sleep has to revisit
+# the bound. That counter is not enough on its own, because it resets on any
+# advancing reading, so a clock that ticks forward and is corrected backwards
+# again and again never spends it and never reaches the deadline either. No
+# measure taken from the clock can settle that, so the second backstop does not
+# come from the clock: a wait may poll at most
+# FM_REMOTE_JOB_WAIT_MAX_POLLS_PER_SECOND times per second of its budget.
+#
+# That ceiling is a liveness backstop and never a budget, which is the opposite
+# of the counted loop this file replaced. There the count WAS the budget, so a
+# check that grew more expensive under load ate the wait alive and produced the
+# CI flake. This ceiling can only ever fire late: the loop sleeps a tenth of a
+# second per poll, so a healthy wait cannot exceed ten polls per second of
+# budget and the default leaves a hundredfold margin, and an expensive check
+# means fewer polls per second, which moves the ceiling further away rather than
+# closer. It cannot shorten a budget and it cannot be reached in healthy
+# operation, so do not mistake it for a leftover and delete it. Making these
+# waits correct against a clock that is wrong in other ways, a forward step in
+# particular, is deliberately out of scope here and tracked as its own item, so
+# this stays a deadline rather than a clock subsystem.
 fm_remote_job_clock_now() { # epoch seconds, or nothing when the clock is unreadable
   local now
   now=$(date +%s 2>/dev/null || true)
@@ -144,12 +159,15 @@ fm_remote_job_clock_now() { # epoch seconds, or nothing when the clock is unread
 fm_remote_job_wait_until() { # <seconds> <predicate> [args...]
   local seconds=$1
   shift
-  local now deadline='' last='' stalled=0
+  local now deadline='' last='' stalled=0 polls=0 ceiling
+  ceiling=$((seconds * FM_REMOTE_JOB_WAIT_MAX_POLLS_PER_SECOND))
   now=$(fm_remote_job_clock_now) || now=
   last=$now
   [ -z "$now" ] || deadline=$((now + seconds))
   while :; do
     "$@" && return 0
+    polls=$((polls + 1))
+    [ "$polls" -lt "$ceiling" ] || return 1
     now=$(fm_remote_job_clock_now) || now=
     if [ -n "$now" ] && { [ -z "$last" ] || [ "$now" -gt "$last" ]; }; then
       stalled=0

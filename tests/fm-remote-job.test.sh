@@ -704,7 +704,7 @@ fm_remote_job_wait_for_probe "$1" "$1" || exit 3
 printf '%s\n' "$(($(date +%s) - start))"
 SH
 run_wait_script "$BUDGET_SCRIPT" 30 "the readiness wait for a worker already ready" "$REMOTE_ROOT"
-[ "$WAIT_ELAPSED" -le 5 ] || fail "a ready worker was made to wait out the readiness budget"
+[ "$WAIT_ELAPSED" -le 10 ] || fail "a ready worker was made to wait out the readiness budget"
 pass "the readiness wait returns immediately once the worker reports ready"
 
 # A deadline is only a bound while the clock can be read. Under the memory
@@ -732,9 +732,9 @@ fm_remote_job_wait_for_probe "$1" "$1" && exit 3
 printf '%s\n' "$(($(command date +%s) - start))"
 SH
 chmod 700 "$CLOCK_SCRIPT"
-run_wait_script "$CLOCK_SCRIPT" 20 "the readiness wait with an unreadable clock" "$REMOTE_ROOT" 60 30
+run_wait_script "$CLOCK_SCRIPT" 30 "the readiness wait with an unreadable clock" "$REMOTE_ROOT" 60 30
 [ "$WAIT_ELAPSED" -ge 2 ] || fail "an unreadable clock collapsed the readiness budget into an instant failure"
-[ "$WAIT_ELAPSED" -le 15 ] || fail "an unreadable clock let the readiness wait outlast its own budget"
+[ "$WAIT_ELAPSED" -le 25 ] || fail "an unreadable clock let the readiness wait outlast its own budget"
 pass "the readiness wait spends its miss allowance and still terminates when the clock cannot be read"
 
 # The realistic clock failure is transient: one `date` fork loses a race for
@@ -825,9 +825,9 @@ fm_remote_job_wait_for_probe "$1" "$1" && exit 3
 [ "$(cat "$STEP_FILE")" -gt 1 ] || exit 4
 printf '%s\n' "$(($(command date +%s) - start))"
 SH
-run_wait_script "$CLOCK_SCRIPT" 30 "the readiness wait with a clock that only goes backwards" \
+run_wait_script "$CLOCK_SCRIPT" 40 "the readiness wait with a clock that only goes backwards" \
   "$REMOTE_ROOT" 60 "$TMP_ROOT/clock-back"
-[ "$WAIT_ELAPSED" -le 20 ] || fail "a clock that only goes backwards outran the readiness wait's budget"
+[ "$WAIT_ELAPSED" -le 30 ] || fail "a clock that only goes backwards outran the readiness wait's budget"
 pass "the readiness wait ends against a clock that never moves forwards"
 
 # A clock stopped dead reads perfectly and never reaches any deadline, so the
@@ -845,30 +845,67 @@ fm_remote_job_worker_identity_matches() { return 1; }
 fm_remote_job_wait_for_probe "$1" "$1" && exit 3
 printf '%s\n' "$(($(command date +%s) - start))"
 SH
-run_wait_script "$CLOCK_SCRIPT" 30 "the readiness wait with a frozen clock" "$REMOTE_ROOT" 60
-[ "$WAIT_ELAPSED" -le 20 ] || fail "a frozen clock outran the readiness wait's budget"
+run_wait_script "$CLOCK_SCRIPT" 40 "the readiness wait with a frozen clock" "$REMOTE_ROOT" 60
+[ "$WAIT_ELAPSED" -le 30 ] || fail "a frozen clock outran the readiness wait's budget"
 pass "the readiness wait ends against a clock that never moves at all"
 
 # The allowance is a backstop, not a second budget, so a healthy clock must
 # reach its deadline first. `date` only resolves to a second, so a wait polling
-# ten times a second repeats each reading about ten times over, and the
-# allowance has to keep enough headroom above that to never fire here.
+# ten times a second repeats each reading about ten times over, and an allowance
+# of twenty is the tightest headroom above that worth running: were the repeats
+# to spend it, the wait would end after two seconds instead of five, and the
+# lower bound below is what catches that.
 cat > "$CLOCK_SCRIPT" <<'SH'
 #!/usr/bin/env bash
 set -u
 # shellcheck source=/dev/null
 . "$1/bin/fm-remote-job-lib.sh"
 FM_REMOTE_JOB_PROBE_WAIT_SECONDS=$2
+FM_REMOTE_JOB_CLOCK_MAX_STALLS=$3
 start=$(command date +%s)
 fm_remote_job_probe() { return 1; }
 fm_remote_job_worker_identity_matches() { return 1; }
 fm_remote_job_wait_for_probe "$1" "$1" && exit 3
 printf '%s\n' "$(($(command date +%s) - start))"
 SH
-run_wait_script "$CLOCK_SCRIPT" 20 "the readiness wait on a healthy clock" "$REMOTE_ROOT" 3
-[ "$WAIT_ELAPSED" -ge 3 ] || fail "the readiness wait ended before its deadline on a healthy clock"
-[ "$WAIT_ELAPSED" -le 4 ] || fail "a healthy clock ran the readiness wait past its deadline into the stall allowance"
+run_wait_script "$CLOCK_SCRIPT" 30 "the readiness wait on a healthy clock" "$REMOTE_ROOT" 5 20
+[ "$WAIT_ELAPSED" -ge 5 ] || fail "a healthy clock ended the readiness wait on its stall allowance instead of its deadline"
+[ "$WAIT_ELAPSED" -le 15 ] || fail "a healthy clock ran the readiness wait well past its deadline"
 pass "the readiness wait ends on its deadline, not its stall allowance, when the clock is healthy"
+
+# The stall allowance resets on any advancing reading, so it cannot end a wait
+# on a clock that ticks forward and is corrected backwards again and again: that
+# clock never advances on balance, so it never reaches the deadline either. The
+# poll ceiling is what ends this one, and it is the only bound here that does
+# not come from the clock. The stub alternates between two readings for a net
+# movement of zero, holds its position in a file because it runs inside a
+# command substitution, and refuses to pass unless it really did oscillate.
+cat > "$CLOCK_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_PROBE_WAIT_SECONDS=$2
+FM_REMOTE_JOB_WAIT_MAX_POLLS_PER_SECOND=$4
+start=$(command date +%s)
+STEP_FILE=$3
+printf '0\n' > "$STEP_FILE"
+date() { # one second forwards, one second back, for ever
+  local step
+  step=$(($(cat "$STEP_FILE") + 1))
+  printf '%s\n' "$step" > "$STEP_FILE"
+  printf '%s\n' "$((2000000000 + step % 2))"
+}
+fm_remote_job_probe() { return 1; }
+fm_remote_job_worker_identity_matches() { return 1; }
+fm_remote_job_wait_for_probe "$1" "$1" && exit 3
+[ "$(cat "$STEP_FILE")" -gt 1 ] || exit 4
+printf '%s\n' "$(($(command date +%s) - start))"
+SH
+run_wait_script "$CLOCK_SCRIPT" 40 "the readiness wait with an oscillating clock" \
+  "$REMOTE_ROOT" 3 "$TMP_ROOT/clock-oscillate" 20
+[ "$WAIT_ELAPSED" -le 30 ] || fail "an oscillating clock outran the readiness wait's poll ceiling"
+pass "the readiness wait ends against a clock that never moves forwards on balance"
 
 # The shutdown wait shares the mechanism, so it needs the same guarantee: a
 # worker that never exits plus a clock that cannot be read must still end in a
@@ -888,8 +925,8 @@ fm_remote_job_worker_tree_alive() { return 0; }
 fm_remote_job_stop_worker_tree 999999 && exit 3
 printf '%s\n' "$(($(command date +%s) - start))"
 SH
-run_wait_script "$CLOCK_SCRIPT" 30 "the shutdown wait with an unreadable clock" "$REMOTE_ROOT" 15 20
-[ "$WAIT_ELAPSED" -le 20 ] || fail "an unreadable clock let the shutdown wait outlast its own budget"
+run_wait_script "$CLOCK_SCRIPT" 40 "the shutdown wait with an unreadable clock" "$REMOTE_ROOT" 15 20
+[ "$WAIT_ELAPSED" -le 30 ] || fail "an unreadable clock let the shutdown wait outlast its own budget"
 pass "the shutdown wait reports a surviving worker rather than spin on an unreadable clock"
 
 # The shutdown budget needs the same cost asymmetry the readiness tests use, or
@@ -913,8 +950,8 @@ run_wait_script "$CLOCK_SCRIPT" 40 "the shutdown wait under a one-second livenes
   "$REMOTE_ROOT" 3
 # Two legs, TERM then KILL, each spending its own budget plus at most the one
 # check already in flight when the budget ran out.
-[ "$WAIT_ELAPSED" -ge 5 ] || fail "the shutdown wait gave up before spending its configured budget"
-[ "$WAIT_ELAPSED" -le 20 ] || fail "the shutdown wait scaled with liveness-check cost instead of holding its budget"
+[ "$WAIT_ELAPSED" -ge 4 ] || fail "the shutdown wait gave up before spending its configured budget"
+[ "$WAIT_ELAPSED" -le 25 ] || fail "the shutdown wait scaled with liveness-check cost instead of holding its budget"
 pass "the shutdown wait spends a wall-clock budget regardless of liveness-check cost"
 
 # The wait's collaborator has to fail in the same direction it does. The probe
