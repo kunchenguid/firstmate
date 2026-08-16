@@ -20,7 +20,8 @@ mkdir -p "$STATE" "$WORK" "$FAKEBIN"
 
 cleanup() {
   local suffix
-  for suffix in success exit-mismatch terminal-missing interrupt timeout log-failure delayed-evidence; do
+  for suffix in success exit-mismatch terminal-missing interrupt timeout log-failure delayed-evidence \
+    log-init-failure sync-send-failure; do
     rm -rf -- "/tmp/fm-codex-appserver-test-$suffix"
   done
   fm_test_cleanup
@@ -55,12 +56,14 @@ const mode = process.env.FM_FAKE_SERVER_MODE || "success";
 const marker = process.env.FM_FAKE_DESCENDANT_MARKER || "";
 const busyRecord = process.env.FM_FAKE_BUSY_RECORD || "";
 const stderrLog = process.env.FM_FAKE_STDERR_LOG || "";
+const serverPidFile = process.env.FM_FAKE_SERVER_PID_FILE || "";
 const threadId = "thread-fixture-1";
 const turnId = "turn-fixture-1";
 const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 let exitCode = 0;
+writeFileSync(serverPidFile, `${process.pid}\n`);
 
-if (mode === "timeout") {
+if (mode === "timeout" || mode === "sync-send-failure") {
   process.on("SIGTERM", () => {});
 }
 
@@ -98,6 +101,10 @@ input.on("line", (line) => {
     }
     write({ method: "turn/started", params: { turn: { id: turnId, status: "inProgress", items: [] } } });
     write({ method: "thread/status/changed", params: { threadId, status: { type: "active" } } });
+    if (mode === "sync-send-failure") {
+      setTimeout(() => process.stdout.write("{\n"), 30);
+      return;
+    }
     if (mode === "success" || mode === "exit-mismatch") {
       process.stderr.write(`${"x".repeat(10000)}LOG_END\n`);
       write({ method: "item/agentMessage/delta", params: { itemId: "item-1", delta: "FIXTURE_DONE" } });
@@ -132,7 +139,9 @@ input.on("line", (line) => {
     write({ id: message.id, result: { turnId } });
   }
 });
-input.on("close", () => setTimeout(() => process.exit(exitCode), 5));
+input.on("close", () => {
+  if (mode !== "sync-send-failure") setTimeout(() => process.exit(exitCode), 5);
+});
 NODE
 chmod +x "$SERVER"
 
@@ -158,9 +167,10 @@ run_case() {  # <mode> <id> <gen> <tasktmp> [stdin-producer]
       FM_FAKE_DESCENDANT_MARKER="$task_tmp/descendant-survived" \
       FM_FAKE_BUSY_RECORD="$STATE/$id.busy-state" \
       FM_FAKE_STDERR_LOG="$task_tmp/codex-appserver.stderr.log" \
+      FM_FAKE_SERVER_PID_FILE="$task_tmp/server.pid" \
       FM_CODEX_APPSERVER_STDERR_MAX_BYTES=4096 \
       FM_CODEX_APPSERVER_STARTUP_TIMEOUT_MS=1000 \
-      FM_CODEX_APPSERVER_INTERRUPT_GRACE_MS=100 \
+      FM_CODEX_APPSERVER_INTERRUPT_GRACE_MS="${FM_TEST_INTERRUPT_GRACE_MS:-100}" \
       FM_CODEX_APPSERVER_TERM_GRACE_MS=100 "${command[@]}"
   else
     env PATH="$FAKEBIN:$PATH" FM_CODEX_BIN="$FAKEBIN/codex" \
@@ -168,9 +178,10 @@ run_case() {  # <mode> <id> <gen> <tasktmp> [stdin-producer]
       FM_FAKE_DESCENDANT_MARKER="$task_tmp/descendant-survived" \
       FM_FAKE_BUSY_RECORD="$STATE/$id.busy-state" \
       FM_FAKE_STDERR_LOG="$task_tmp/codex-appserver.stderr.log" \
+      FM_FAKE_SERVER_PID_FILE="$task_tmp/server.pid" \
       FM_CODEX_APPSERVER_STDERR_MAX_BYTES=4096 \
       FM_CODEX_APPSERVER_STARTUP_TIMEOUT_MS=1000 \
-      FM_CODEX_APPSERVER_INTERRUPT_GRACE_MS=100 \
+      FM_CODEX_APPSERVER_INTERRUPT_GRACE_MS="${FM_TEST_INTERRUPT_GRACE_MS:-100}" \
       FM_CODEX_APPSERVER_TERM_GRACE_MS=100 "${command[@]}" < /dev/null
   fi
 }
@@ -285,6 +296,43 @@ EOF
   pass "delayed active evidence preserves the turn's absolute deadline"
 }
 
+test_bounded_log_initialization_failure_publishes_unknown() {
+  local id gen task_tmp out rc=0
+  IFS=$'\t' read -r id gen task_tmp <<EOF
+$(new_case log-init-failure)
+EOF
+  mkdir -p "$task_tmp/codex-appserver.stderr.log"
+  out=$(run_case success "$id" "$gen" "$task_tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "bounded log initialization failure returned success: $out"
+  [ "$(classify "$id")" = "unknown codex-stderr-log-error" ] \
+    || fail "bounded log initialization failure was not concrete: $(classify "$id")"
+  assert_contains "$(cat "$STATE/$id.codex-appserver-result")" "child_pid=0" \
+    "pre-spawn bounded log failure recorded a child"
+  assert_contains "$(cat "$STATE/$id.codex-appserver-result")" "event=stderr-log-error" \
+    "bounded log initialization receipt omitted its concrete event"
+  [ -f "$STATE/$id.turn-ended" ] || fail "bounded log initialization failure omitted its turn-ended wake"
+  pass "bounded log initialization failures publish a concrete unknown result"
+}
+
+test_sync_send_failure_retains_cleanup_ownership() {
+  local id gen task_tmp out rc=0 child_pid survived=0
+  IFS=$'\t' read -r id gen task_tmp <<EOF
+$(new_case sync-send-failure)
+EOF
+  out=$(FM_TEST_INTERRUPT_GRACE_MS=1200 run_case sync-send-failure "$id" "$gen" "$task_tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "protocol failure returned success: $out"
+  [ "$(classify "$id")" = "unknown codex-protocol-error" ] \
+    || fail "synchronous send failure displaced the original protocol result: $(classify "$id")"
+  child_pid=$(cat "$task_tmp/server.pid")
+  if kill -0 "$child_pid" 2>/dev/null; then
+    survived=1
+    kill -KILL -- "-$child_pid" 2>/dev/null || true
+  fi
+  [ "$survived" = 0 ] || fail "owned app-server PID $child_pid survived synchronous send failure escalation"
+  [ -f "$STATE/$id.turn-ended" ] || fail "synchronous send failure omitted its turn-ended wake"
+  pass "synchronous send failures retain exact-group cleanup and publication"
+}
+
 test_terminal_and_clean_exit_are_joint_success
 test_terminal_without_clean_exit_refuses_success
 test_clean_exit_without_terminal_refuses_success
@@ -292,5 +340,7 @@ test_manual_interrupt_requires_interrupted_terminal_and_exit
 test_timeout_kills_only_the_owned_process_group
 test_bounded_log_failure_publishes_unknown_and_reaps_group
 test_delayed_evidence_preserves_absolute_deadline
+test_bounded_log_initialization_failure_publishes_unknown
+test_sync_send_failure_retains_cleanup_ownership
 
 echo "all fm-codex-appserver-client tests passed"

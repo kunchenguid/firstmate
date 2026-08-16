@@ -231,9 +231,14 @@ class AppServerRun {
 
   request(method, params = {}) {
     const id = this.nextRequestId++;
-    this.send({ method, id, params });
     return new Promise((resolve, reject) => {
       this.requests.set(id, { method, resolve, reject });
+      try {
+        this.send({ method, id, params });
+      } catch (error) {
+        this.requests.delete(id);
+        reject(error);
+      }
     });
   }
 
@@ -418,7 +423,7 @@ class AppServerRun {
 
   timeout() {
     if (this.childClosed || this.terminalStatus) return;
-    this.forcedOutcome = "timeout";
+    if (!this.forcedOutcome.startsWith("protocol-")) this.forcedOutcome = "timeout";
     if (this.threadId && this.turnId) {
       this.request("turn/interrupt", { threadId: this.threadId, turnId: this.turnId })
         .catch(() => {});
@@ -471,6 +476,7 @@ class AppServerRun {
     } else if (!this.terminalStatus) {
       outcome = "failure";
       if (this.forcedOutcome?.startsWith("protocol-")) event = "protocol-error";
+      else if (this.forcedOutcome?.startsWith("stderr-log-")) event = "stderr-log-error";
       else if (this.forcedOutcome === "startup-timeout") event = "startup-timeout";
       else if (this.forcedOutcome?.startsWith("spawn-") || this.forcedOutcome?.startsWith("child-")) {
         event = "process-error";
@@ -556,10 +562,17 @@ class AppServerRun {
   }
 
   async execute() {
-    mkdirSync(this.options.taskTmp, { recursive: true, mode: 0o700 });
-    chmodSync(this.options.taskTmp, 0o700);
-    const stderrPath = path.join(this.options.taskTmp, "codex-appserver.stderr.log");
-    const stderrLog = new BoundedLog(stderrPath, this.owner.stderrLimit);
+    let stderrLog;
+    try {
+      mkdirSync(this.options.taskTmp, { recursive: true, mode: 0o700 });
+      chmodSync(this.options.taskTmp, 0o700);
+      const stderrPath = path.join(this.options.taskTmp, "codex-appserver.stderr.log");
+      stderrLog = new BoundedLog(stderrPath, this.owner.stderrLimit);
+    } catch (error) {
+      this.forcedOutcome = `stderr-log-${token(error.message)}`;
+      this.childClosed = true;
+      return this.result();
+    }
     const codex = process.env.FM_CODEX_BIN || "codex";
     try {
       this.child = spawn(codex, ["app-server", "--listen", "stdio://"], {
