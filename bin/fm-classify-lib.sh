@@ -1170,7 +1170,9 @@ FM_WORKTREE_WRITE_MAXDEPTH=${FM_WORKTREE_WRITE_MAXDEPTH:-6}
 # when the quiet window opened, so `-newer` needs no clock arithmetic, no temp
 # file, and no portable mtime-setting. Not a pure status-file read (see the header):
 # one pruned, depth-bounded walk per call, which callers must reach only when they
-# are otherwise about to escalate, never on every poll.
+# are otherwise about to escalate, never on every poll. -xdev holds that walk to the
+# worktree's own filesystem rather than descending into a nested network or container
+# mount, so a write that lands only under such a mount is one more negative outcome.
 crew_worktree_written_since() {  # <id> <state> <anchor-file>
   local id=$1 state=$2 anchor=$3 wt kind name hit
   local -a names=() prune=()
