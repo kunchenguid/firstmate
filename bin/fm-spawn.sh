@@ -142,8 +142,8 @@
 #   list, never inferred from a failed fetch, so an origin that is configured but
 #   unusable still refuses) skips only that fetch-and-reset machinery and launches
 #   with one notice that its base was not freshened; the non-clean worktree
-#   refusal is remote-independent and still applies, in its own wording that names
-#   the missing remote instead of claiming a refresh that never ran.
+#   refusal is remote-independent and still applies, in its own wording that
+#   names the missing origin remote instead of claiming a refresh that never ran.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
