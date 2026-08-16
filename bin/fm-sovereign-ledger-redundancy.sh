@@ -21,10 +21,16 @@ ADMITTED_PRIMARY_DEVICE=
 ADMITTED_REPLICA_DEVICE=
 ADMITTED_PRIMARY_DIRECTORY_IDENTITY=
 ADMITTED_REPLICA_DIRECTORY_IDENTITY=
+ADMITTED_PRIMARY_MEMBER_IDENTITIES=
+ADMITTED_REPLICA_MEMBER_IDENTITIES=
 CREATED_REPLICA=
 
 die() {
-  printf 'REFUSED: %s\n' "$*" >&2
+  if [ -n "$CREATED_REPLICA" ]; then
+    printf 'REFUSED: %s; partial replica retained without deletion: %s\n' "$*" "$CREATED_REPLICA" >&2
+  else
+    printf 'REFUSED: %s\n' "$*" >&2
+  fi
   exit 1
 }
 
@@ -117,6 +123,10 @@ portable_directory_identity() {
   printf '%s\n' "$identity"
 }
 
+portable_member_identity() {
+  portable_directory_identity "$1"
+}
+
 require_noncontained_pair() {
   local primary=$1 replica=$2
   [ "$primary" != "$replica" ] || die "primary and replica directories must differ"
@@ -162,12 +172,56 @@ require_admitted_directory() {
   [ "$identity" = "$expected" ] || die "$label directory changed after admission: $path"
 }
 
+admit_independent_bundle_members() {
+  local primary=$1 replica=$2 entry primary_entry replica_entry identity
+  local primary_identities= replica_identities= primary_identity replica_identity compared=0
+  collect_bundle_entries "$primary"
+  while IFS= read -r entry; do
+    identity=$(portable_member_identity "$primary/$entry") \
+      || die "could not establish primary bundle member identity: $primary/$entry"
+    primary_identities="${primary_identities}${entry}\t${identity}\n"
+    identity=$(portable_member_identity "$replica/$entry") \
+      || die "could not establish replica bundle member identity: $replica/$entry"
+    replica_identities="${replica_identities}${entry}\t${identity}\n"
+  done <<< "$BUNDLE_ENTRIES"
+  while IFS=$'\t' read -r primary_entry primary_identity; do
+    while IFS=$'\t' read -r replica_entry replica_identity; do
+      [ "$primary_identity" != "$replica_identity" ] \
+        || die "replica $replica_entry shares storage with primary $primary_entry (device:inode), not an independent file"
+      compared=$((compared + 1))
+    done < <(printf '%b' "$replica_identities")
+  done < <(printf '%b' "$primary_identities")
+  [ "$compared" -eq $((BUNDLE_MEMBER_COUNT * BUNDLE_MEMBER_COUNT)) ] \
+    || die "bundle member identity proof compared $compared of $((BUNDLE_MEMBER_COUNT * BUNDLE_MEMBER_COUNT)) required pairs"
+  ADMITTED_PRIMARY_MEMBER_IDENTITIES=$(printf '%b' "$primary_identities")
+  ADMITTED_REPLICA_MEMBER_IDENTITIES=$(printf '%b' "$replica_identities")
+}
+
+require_admitted_bundle_members() {
+  local primary=$1 replica=$2 entry expected identity checked=0
+  while IFS=$'\t' read -r entry expected; do
+    identity=$(portable_member_identity "$primary/$entry") \
+      || die "could not re-establish primary bundle member identity: $primary/$entry"
+    [ "$identity" = "$expected" ] || die "primary bundle member changed after admission: $primary/$entry"
+    checked=$((checked + 1))
+  done <<< "$ADMITTED_PRIMARY_MEMBER_IDENTITIES"
+  while IFS=$'\t' read -r entry expected; do
+    identity=$(portable_member_identity "$replica/$entry") \
+      || die "could not re-establish replica bundle member identity: $replica/$entry"
+    [ "$identity" = "$expected" ] || die "replica bundle member changed after admission: $replica/$entry"
+    checked=$((checked + 1))
+  done <<< "$ADMITTED_REPLICA_MEMBER_IDENTITIES"
+  [ "$checked" -eq $((BUNDLE_MEMBER_COUNT * 2)) ] \
+    || die "admitted bundle member check read $checked of $((BUNDLE_MEMBER_COUNT * 2)) required identities"
+}
+
 admit_existing_pair() {
   local primary=$1 replica=$2 mode=$3
   require_noncontained_pair "$primary" "$replica"
   admit_device_pair "$primary" "$replica"
   require_bundle "$primary"
   require_bundle "$replica"
+  admit_independent_bundle_members "$primary" "$replica"
   compare_files "$primary" "$replica" ledger.tsv
   verify_with_primary "$primary" "$primary"
   verify_with_primary "$primary" "$replica"
@@ -181,6 +235,7 @@ admit_existing_pair() {
   require_bundle "$primary"
   require_bundle "$replica"
   admit_device_pair "$primary" "$replica"
+  admit_independent_bundle_members "$primary" "$replica"
   compare_files "$primary" "$replica" ledger.tsv
   case "$mode" in
     exact) compare_files "$primary" "$replica" ;;
@@ -234,18 +289,8 @@ copy_bundle() {
     || die "bundle copy read $copied of $BUNDLE_MEMBER_COUNT required members"
 }
 
-cleanup_created_replica() {
-  local identity
-  [ -n "$CREATED_REPLICA" ] || return 0
-  [ -d "$CREATED_REPLICA" ] || return 0
-  [ ! -L "$CREATED_REPLICA" ] || return 0
-  identity=$(portable_directory_identity "$CREATED_REPLICA") || return 0
-  [ "$identity" = "$ADMITTED_REPLICA_DIRECTORY_IDENTITY" ] || return 0
-  rm -rf -- "$CREATED_REPLICA"
-}
-
 admit_snapshot_destination() {
-  local primary=$1 replica_input=$2 parent base replica
+  local primary=$1 replica_input=$2 parent base replica parent_identity
   parent=$(dirname -- "$replica_input")
   [ -d "$parent" ] || die "replica parent directory does not exist: $parent"
   [ ! -L "$parent" ] || die "replica parent directory is symlinked: $parent"
@@ -257,11 +302,13 @@ admit_snapshot_destination() {
   [ ! -e "$replica" ] && [ ! -L "$replica" ] \
     || die "replica destination already exists or is symlinked: $replica"
   admit_device_pair "$primary" "$parent"
+  parent_identity=$(portable_directory_identity "$parent") \
+    || die "could not establish replica parent directory identity before creation: $parent"
+  require_admitted_directory "replica parent" "$parent" "$parent_identity"
   mkdir -- "$replica" || die "could not exclusively create replica destination: $replica"
   CREATED_REPLICA=$replica
   ADMITTED_REPLICA_DIRECTORY_IDENTITY=$(portable_directory_identity "$replica") \
     || die "could not establish new replica directory identity: $replica"
-  trap cleanup_created_replica EXIT HUP INT TERM
   copy_bundle "$primary" "$replica"
   admit_existing_pair "$primary" "$replica" exact
   ADMITTED_REPLICA=$replica
@@ -293,6 +340,7 @@ copy_ledger_atomically() {
   local primary=$1 replica=$2 parent base tmp
   require_admitted_directory primary "$primary" "$ADMITTED_PRIMARY_DIRECTORY_IDENTITY"
   require_admitted_directory replica "$replica" "$ADMITTED_REPLICA_DIRECTORY_IDENTITY"
+  require_admitted_bundle_members "$primary" "$replica"
   parent=$(dirname -- "$replica")
   base=$(basename -- "$replica")
   tmp=$(mktemp "$parent/.${base}.ledger.tsv.tmp.XXXXXX") \
@@ -311,7 +359,6 @@ cmd_snapshot() {
   admit_pair "$1" "$2" snapshot
   if [ -n "$CREATED_REPLICA" ]; then
     CREATED_REPLICA=
-    trap - EXIT HUP INT TERM
     printf 'SNAPSHOT PASS (replica created: %s)\n' "$ADMITTED_REPLICA"
   else
     printf 'SNAPSHOT PASS (replica already identical: %s)\n' "$ADMITTED_REPLICA"

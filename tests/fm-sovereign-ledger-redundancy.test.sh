@@ -535,5 +535,54 @@ else
   bad "snapshot publication race escaped admission (status=$R5_TOC_STATUS; output: ${R5_TOC_DIAGNOSTIC//$'\n'/ | })"
 fi
 
+echo 'T18 same-volume waiver preserves member independence and snapshot failure boundaries'
+for entry in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
+  waived_hardlink_replica="$TMP/waived-hardlink-$entry"
+  check_ok "snapshot CREATES a waived $entry hard-link fixture" "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$waived_hardlink_replica"
+  unlink "$waived_hardlink_replica/$entry"
+  ln "$PRIMARY/$entry" "$waived_hardlink_replica/$entry"
+  check_fails_with "same-volume waiver REFUSES a hard-linked $entry" 'shares storage with primary' "$SAME_VOLUME_TOOL" verify "$PRIMARY" "$waived_hardlink_replica"
+done
+
+WAIVED_CROSS_PRIMARY="$TMP/waived-cross-primary"
+WAIVED_CROSS_REPLICA="$TMP/waived-cross-replica"
+make_bundle "$WAIVED_CROSS_PRIMARY" "$TMP/waived-cross-sources"
+cp "$WAIVED_CROSS_PRIMARY/CONTRACT.md" "$WAIVED_CROSS_PRIMARY/tests.sh"
+chmod +x "$WAIVED_CROSS_PRIMARY/tests.sh"
+check_ok 'snapshot CREATES a waived cross-member fixture' "$SAME_VOLUME_TOOL" snapshot "$WAIVED_CROSS_PRIMARY" "$WAIVED_CROSS_REPLICA"
+unlink "$WAIVED_CROSS_REPLICA/CONTRACT.md"
+ln "$WAIVED_CROSS_PRIMARY/tests.sh" "$WAIVED_CROSS_REPLICA/CONTRACT.md"
+check_fails_with 'same-volume waiver REFUSES cross-member shared storage' 'replica CONTRACT.md shares storage with primary tests.sh' "$SAME_VOLUME_TOOL" verify "$WAIVED_CROSS_PRIMARY" "$WAIVED_CROSS_REPLICA"
+
+PREFLIGHT_STAT_BIN="$TMP/preflight-stat-bin"
+PREFLIGHT_DEST="$TMP/preflight-stat-replica"
+mkdir "$PREFLIGHT_STAT_BIN"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'case "$*" in' \
+  '  *%d:%i*) exit 75 ;;' \
+  '  *%d*) printf "1\\n" ;;' \
+  '  *) exit 76 ;;' \
+  'esac' > "$PREFLIGHT_STAT_BIN/stat"
+chmod +x "$PREFLIGHT_STAT_BIN/stat"
+check_fails_with 'snapshot REFUSES unsupported directory identity before destination creation' 'could not establish replica parent directory identity before creation' env PATH="$PREFLIGHT_STAT_BIN:$PATH" "$TOOL" --allow-same-volume-without-device-redundancy snapshot "$PRIMARY" "$PREFLIGHT_DEST"
+if [ ! -e "$PREFLIGHT_DEST" ] && [ ! -L "$PREFLIGHT_DEST" ]; then
+  ok 'directory identity preflight leaves no replica destination'
+else
+  bad 'directory identity preflight created a replica destination'
+fi
+
+PARTIAL_PERL_BIN="$TMP/partial-perl-bin"
+PARTIAL_DEST="$TMP/retained-partial-replica"
+mkdir "$PARTIAL_PERL_BIN"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 77' > "$PARTIAL_PERL_BIN/perl"
+chmod +x "$PARTIAL_PERL_BIN/perl"
+check_fails_with 'snapshot identifies a retained partial after post-creation copy failure' 'partial replica retained without deletion' env PATH="$PARTIAL_PERL_BIN:$PATH" "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$PARTIAL_DEST"
+if [ -d "$PARTIAL_DEST" ] && [ ! -L "$PARTIAL_DEST" ]; then
+  ok 'post-creation failure retains the partial replica directory'
+else
+  bad 'post-creation failure deleted or replaced the partial replica directory'
+fi
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
