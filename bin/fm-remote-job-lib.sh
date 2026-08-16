@@ -113,16 +113,22 @@ fm_remote_job_validate_settings() {
 # successful check.
 #
 # What a wait owes its caller when the clock misbehaves is deliberately narrow.
-# It must always terminate, and it must never hand back a budget it has not
-# spent: a `date` fork can fail under the very memory pressure these waits exist
-# for, and an NTP correction can step the clock backwards on a host that just
-# woke from sleep, and either one ending a wait early would produce the exact
-# "worker did not report ready" failure the deadline exists to prevent. So an
-# unreadable reading is skipped rather than counted, up to a bounded number of
-# consecutive misses that guarantees termination, and a backwards step
-# re-anchors the deadline by the size of the step. Making these waits correct
-# against a clock that is wrong in other ways is out of scope here and tracked
-# as its own item, so this stays a deadline rather than a clock subsystem.
+# It must always terminate, whatever the clock does, and it must never hand back
+# a budget it has not spent: a `date` fork can fail under the very memory
+# pressure these waits exist for, and an NTP correction can step the clock
+# backwards on a host that just woke from sleep, and either one ending a wait
+# early would produce the exact "worker did not report ready" failure the
+# deadline exists to prevent. So a backwards step re-anchors the deadline by the
+# size of the step, and two backstops make termination unconditional whether the
+# clock is unreadable, frozen, stepping backwards, or oscillating. A run of
+# consecutive readings that tell the wait nothing new, unreadable or not
+# advancing, ends it after FM_REMOTE_JOB_CLOCK_MAX_MISSES of them. Re-anchoring
+# stops once it has given back the whole budget, and a backwards reading past
+# that point ends the wait too, which caps the worst case at roughly twice the
+# budget while still absorbing the one-off correction this exists for. Making
+# these waits correct against a clock that is wrong in other ways, a forward
+# step in particular, is out of scope here and tracked as its own item, so this
+# stays a deadline rather than a clock subsystem.
 fm_remote_job_clock_now() { # epoch seconds, or nothing when the clock is unreadable
   local now
   now=$(date +%s 2>/dev/null || true)
@@ -133,22 +139,27 @@ fm_remote_job_clock_now() { # epoch seconds, or nothing when the clock is unread
 fm_remote_job_wait_until() { # <seconds> <predicate> [args...]
   local seconds=$1
   shift
-  local now deadline='' last='' misses=0
+  local now deadline='' last='' stalled=0 returned=0 step
   now=$(fm_remote_job_clock_now) || now=
   last=$now
   [ -z "$now" ] || deadline=$((now + seconds))
   while :; do
     "$@" && return 0
     now=$(fm_remote_job_clock_now) || now=
-    if [ -z "$now" ]; then
-      misses=$((misses + 1))
-      [ "$misses" -lt "$FM_REMOTE_JOB_CLOCK_MAX_MISSES" ] || return 1
+    if [ -n "$now" ] && { [ -z "$last" ] || [ "$now" -gt "$last" ]; }; then
+      stalled=0
     else
-      misses=0
+      stalled=$((stalled + 1))
+      [ "$stalled" -lt "$FM_REMOTE_JOB_CLOCK_MAX_MISSES" ] || return 1
+    fi
+    if [ -n "$now" ]; then
       if [ -z "$deadline" ]; then
         deadline=$((now + seconds))
       elif [ -n "$last" ] && [ "$now" -lt "$last" ]; then
-        deadline=$((deadline - (last - now)))
+        [ "$returned" -lt "$seconds" ] || return 1
+        step=$((last - now))
+        returned=$((returned + step))
+        deadline=$((deadline - step))
       fi
       last=$now
       [ "$now" -lt "$deadline" ] || return 1

@@ -711,7 +711,7 @@ pass "the readiness wait returns immediately once the worker reports ready"
 # pressure these waits exist for, the `date` fork is itself a thing that can
 # fail, and the readiness wait runs on the remote side of an ssh invocation that
 # has no client-side bound of its own, so an unreadable clock must still end the
-# wait rather than leave it spinning against a deadline it can never reach. It
+# wait rather than leave it spinning against a deadline it can never reach.
 # It must not end it early either: a wait that gave up at the first unreadable
 # reading would report the same "worker did not report ready" failure these
 # deadlines exist to prevent. So a clock that can never be read ends the wait
@@ -795,6 +795,36 @@ run_wait_script "$CLOCK_SCRIPT" 30 "the readiness wait with a backwards clock st
 [ "$WAIT_ELAPSED" -ge 4 ] || fail "a backwards clock step threw away readiness budget the wait had not spent"
 [ "$WAIT_ELAPSED" -le 20 ] || fail "a backwards clock step stretched the readiness wait past its budget"
 pass "the readiness wait keeps its budget across a backwards clock step and still ends"
+
+# Giving the budget back for a backwards step is only safe while the giving back
+# is bounded. A clock that keeps stepping backwards hands back exactly as much
+# as the wait spends, so a deadline that re-anchored every time would recede
+# forever against a clock that reads perfectly well. The wait stops re-anchoring
+# once it has given back its whole budget, and ends there.
+cat > "$CLOCK_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_PROBE_WAIT_SECONDS=$2
+start=$(command date +%s)
+STEP_FILE=$3
+printf '0\n' > "$STEP_FILE"
+date() { # every reading lands a second before the one before it
+  local step
+  step=$(($(cat "$STEP_FILE") + 1))
+  printf '%s\n' "$step" > "$STEP_FILE"
+  printf '%s\n' "$((2000000000 - step))"
+}
+fm_remote_job_probe() { return 1; }
+fm_remote_job_worker_identity_matches() { return 1; }
+fm_remote_job_wait_for_probe "$1" "$1" && exit 3
+printf '%s\n' "$(($(command date +%s) - start))"
+SH
+run_wait_script "$CLOCK_SCRIPT" 30 "the readiness wait with a clock that only goes backwards" \
+  "$REMOTE_ROOT" 5 "$TMP_ROOT/clock-back"
+[ "$WAIT_ELAPSED" -le 20 ] || fail "a clock that only goes backwards outran the readiness wait's budget"
+pass "the readiness wait ends against a clock that never moves forwards"
 
 # The shutdown wait shares the mechanism, so it needs the same guarantee: a
 # worker that never exits plus a clock that cannot be read must still end in a
