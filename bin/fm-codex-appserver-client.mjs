@@ -437,6 +437,17 @@ class AppServerRun {
     this.scheduleEscalation();
   }
 
+  startupTimeout() {
+    if (this.turnId || this.terminalStatus || this.childExited) return;
+    this.forcedOutcome = "startup-timeout";
+    try {
+      this.child?.stdin.end();
+    } catch {
+      this.shutdownForced = true;
+    }
+    this.scheduleEscalation();
+  }
+
   interrupt() {
     if (this.childExited || this.terminalStatus || !this.threadId || !this.turnId) return false;
     if (!this.forcedOutcome) this.forcedOutcome = "manual-interrupt";
@@ -491,11 +502,13 @@ class AppServerRun {
     if (this.forcedOutcome === "timeout") {
       outcome = "timeout";
       event = "timeout";
+    } else if (this.forcedOutcome === "startup-timeout") {
+      outcome = "failure";
+      event = "startup-timeout";
     } else if (!this.terminalStatus) {
       outcome = "failure";
       if (this.forcedOutcome?.startsWith("protocol-")) event = "protocol-error";
       else if (this.forcedOutcome?.startsWith("stderr-log-")) event = "stderr-log-error";
-      else if (this.forcedOutcome === "startup-timeout") event = "startup-timeout";
       else if (this.forcedOutcome?.startsWith("spawn-") || this.forcedOutcome?.startsWith("child-")) {
         event = "process-error";
       } else event = "terminal-missing";
@@ -563,8 +576,6 @@ class AppServerRun {
     }
     if (!TOKEN_RE.test(thread?.id || "")) throw new Error("thread-response-invalid");
     this.threadId = thread.id;
-    this.deadlineAt = Math.floor(Date.now() / 1000) + this.options.deadlineSecs;
-    this.turnTimer = setTimeout(() => this.timeout(), this.options.deadlineSecs * 1000);
     const turnParams = {
       threadId: this.threadId,
       input: [{ type: "text", text: this.prompt }],
@@ -577,6 +588,11 @@ class AppServerRun {
     this.turnResponseId = responseId;
     if (this.turnId && this.turnId !== responseId) throw new Error("turn-response-id-mismatch");
     this.turnId = responseId;
+    if (this.startupTimer) clearTimeout(this.startupTimer);
+    this.startupTimer = null;
+    this.deadlineAt = Math.floor(Date.now() / 1000) + this.options.deadlineSecs;
+    this.turnTimer = setTimeout(() => this.timeout(), this.options.deadlineSecs * 1000);
+    this.maybePublishBusy();
   }
 
   async execute() {
@@ -624,12 +640,7 @@ class AppServerRun {
     this.child.on("error", (error) => this.protocolFailure(`child-${token(error.message)}`));
     this.child.on("exit", (code, signal) => this.handleExit(code, signal));
     this.child.on("close", (code, signal) => this.handleClose(code, signal));
-    this.startupTimer = setTimeout(() => {
-      if (!this.turnId && !this.terminalStatus && !this.childExited) {
-        this.forcedOutcome = "startup-timeout";
-        this.scheduleEscalation();
-      }
-    }, this.owner.startupTimeoutMs);
+    this.startupTimer = setTimeout(() => this.startupTimeout(), this.owner.startupTimeoutMs);
     this.handshake().catch((error) => this.protocolFailure(token(error.message)));
     return this.finishPromise;
   }

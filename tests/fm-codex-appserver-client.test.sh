@@ -22,7 +22,7 @@ mkdir -p "$STATE" "$WORK" "$FAKEBIN"
 cleanup() {
   local suffix
   for suffix in success exit-mismatch terminal-missing interrupt timeout log-failure delayed-evidence \
-    log-init-failure sync-send-failure reaped-pipe-holder; do
+    log-init-failure sync-send-failure reaped-pipe-holder startup-timeout; do
     rm -rf -- "/tmp/fm-codex-appserver-test-$suffix"
   done
   fm_test_cleanup
@@ -72,6 +72,7 @@ const input = readline.createInterface({ input: process.stdin });
 input.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
+    if (mode === "startup-timeout") return;
     write({ id: message.id, result: { userAgent: "fixture" } });
     return;
   }
@@ -195,7 +196,7 @@ run_case() {  # <mode> <id> <gen> <tasktmp> [stdin-producer]
       FM_FAKE_SIGNAL_AUDIT="${FM_TEST_SIGNAL_AUDIT:-}" \
       NODE_OPTIONS="${FM_TEST_NODE_OPTIONS:-}" \
       FM_CODEX_APPSERVER_STDERR_MAX_BYTES=4096 \
-      FM_CODEX_APPSERVER_STARTUP_TIMEOUT_MS=1000 \
+      FM_CODEX_APPSERVER_STARTUP_TIMEOUT_MS="${FM_TEST_STARTUP_TIMEOUT_MS:-1000}" \
       FM_CODEX_APPSERVER_INTERRUPT_GRACE_MS="${FM_TEST_INTERRUPT_GRACE_MS:-100}" \
       FM_CODEX_APPSERVER_TERM_GRACE_MS=100 "${command[@]}"
   else
@@ -208,7 +209,7 @@ run_case() {  # <mode> <id> <gen> <tasktmp> [stdin-producer]
       FM_FAKE_SIGNAL_AUDIT="${FM_TEST_SIGNAL_AUDIT:-}" \
       NODE_OPTIONS="${FM_TEST_NODE_OPTIONS:-}" \
       FM_CODEX_APPSERVER_STDERR_MAX_BYTES=4096 \
-      FM_CODEX_APPSERVER_STARTUP_TIMEOUT_MS=1000 \
+      FM_CODEX_APPSERVER_STARTUP_TIMEOUT_MS="${FM_TEST_STARTUP_TIMEOUT_MS:-1000}" \
       FM_CODEX_APPSERVER_INTERRUPT_GRACE_MS="${FM_TEST_INTERRUPT_GRACE_MS:-100}" \
       FM_CODEX_APPSERVER_TERM_GRACE_MS=100 "${command[@]}" < /dev/null
   fi
@@ -384,6 +385,30 @@ EOF
   pass "a reaped app-server pid is never signalled even when inherited pipes remain open"
 }
 
+test_startup_timeout_surfaces_before_turn_deadline() {
+  local id gen task_tmp out rc=0 started_at ended_at elapsed
+  IFS=$'\t' read -r id gen task_tmp <<EOF
+$(new_case startup-timeout)
+EOF
+  started_at=$(date +%s)
+  out=$(FM_TEST_STARTUP_TIMEOUT_MS=500 FM_TEST_DEADLINE_SECS=30 \
+    run_case startup-timeout "$id" "$gen" "$task_tmp" 2>&1) || rc=$?
+  ended_at=$(date +%s)
+  elapsed=$((ended_at - started_at))
+  [ "$rc" -ne 0 ] || fail "startup timeout returned success: $out"
+  [ "$elapsed" -le 8 ] \
+    || fail "startup timeout inherited the 30-second turn deadline and took ${elapsed}s"
+  [ "$(classify "$id")" = "unknown codex-startup-timeout" ] \
+    || fail "startup timeout was not surfaced concretely: $(classify "$id")"
+  assert_contains "$(cat "$STATE/$id.codex-appserver-result")" \
+    "outcome=failure event=startup-timeout" \
+    "startup timeout receipt omitted its concrete refusal"
+  assert_contains "$(cat "$STATE/$id.codex-appserver-result")" "deadline=none" \
+    "startup timeout incorrectly started the long turn deadline"
+  [ -f "$STATE/$id.turn-ended" ] || fail "startup timeout omitted its turn-ended wake"
+  pass "startup timeout publishes a bounded refusal before the turn deadline"
+}
+
 test_terminal_and_clean_exit_are_joint_success
 test_terminal_without_clean_exit_refuses_success
 test_clean_exit_without_terminal_refuses_success
@@ -394,5 +419,6 @@ test_delayed_evidence_preserves_absolute_deadline
 test_bounded_log_initialization_failure_publishes_unknown
 test_sync_send_failure_retains_cleanup_ownership
 test_reaped_child_pid_is_never_signalled
+test_startup_timeout_surfaces_before_turn_deadline
 
 echo "all fm-codex-appserver-client tests passed"
