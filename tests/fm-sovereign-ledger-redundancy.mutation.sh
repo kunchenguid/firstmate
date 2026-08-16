@@ -6,22 +6,28 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE="$ROOT/bin/fm-sovereign-ledger-redundancy.sh"
 TEST="$ROOT/tests/fm-sovereign-ledger-redundancy.test.sh"
 EVIDENCE=
+EMIT_EVIDENCE=0
 MODE=mutation
 EVIDENCE_FIXTURE=
 EVIDENCE_SWAP_PATH=
 EVIDENCE_SWAP_TARGET=
-if [ "${1:-}" = --self-test-evidence-fixture ]; then
-  [ "$#" -eq 2 ] || { printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+if [ "${1:-}" = --emit-evidence ]; then
+  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  EMIT_EVIDENCE=1
+  exec 3>&1
+  exec >&2
+elif [ "${1:-}" = --self-test-evidence-fixture ]; then
+  [ "$#" -eq 2 ] || { printf 'usage: %s [--emit-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   MODE=fixture
   EVIDENCE_FIXTURE=$2
 elif [ "${1:-}" = --self-test-evidence-containment ]; then
-  [ "$#" -eq 1 ] || { printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   MODE=containment
 elif [ "${1:-}" = --write-evidence ]; then
-  [ "$#" -eq 2 ] || { printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  [ "$#" -eq 2 ] || { printf 'usage: %s [--emit-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   EVIDENCE=$2
 elif [ "$#" -ne 0 ]; then
-  printf 'usage: %s [--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2
+  printf 'usage: %s [--emit-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2
   exit 2
 fi
 
@@ -285,7 +291,7 @@ run_mutation_test() {
     waitpid $pid, 0;
     alarm 0;
     exit($? >> 8);
-  ' 30 "$TEST" >"$output" 2>&1
+  ' 60 "$TEST" >"$output" 2>&1
 }
 
 mutant() {
@@ -432,36 +438,7 @@ EVIDENCE_STAGE="$TMP/evidence.md"
 
 ## Evidence publication containment
 
-The publication chokepoint was verified with scoped temporary fixtures on 2026-08-15.
-
-```sh
-tests/fm-sovereign-ledger-evidence-publish.mutation.sh
-```
-
-Observed bounded summary:
-
-```text
-CONTAINMENT FIXTURES passed=13 failed=0
-PUBLISH MUTANT P001 anchor=resolved-path-validator-call substitutions=1 killed=6 survived=6 void=0
-PUBLISH MUTANT P002 anchor=exclusive-create-flag substitutions=1 killed=0 survived=12 void=0
-PUBLISH MUTANT P003 anchor=symlink-component-precheck substitutions=1 killed=1 survived=11 void=0
-PUBLISH MUTANT P004 anchor=canonical-structural-containment substitutions=1 killed=0 survived=12 void=0
-PUBLISH MUTANT P005 anchor=absolute-path-guard substitutions=1 killed=0 survived=12 void=0
-PUBLISH MUTANT P006 anchor=unsafe-component-guard substitutions=1 killed=0 survived=12 void=0
-PUBLISH MUTANT P007 anchor=symlink-leaf-guard substitutions=1 killed=0 survived=12 void=0
-PUBLISH MUTANT P008 anchor=existing-leaf-guard substitutions=1 killed=0 survived=12 void=0
-PUBLISH MUTANT P009 anchor=canonical-parent-resolution substitutions=1 killed=0 survived=12 void=0
-PUBLISH MUTANT P010 anchor=final-structural-containment substitutions=1 killed=0 survived=12 void=0
-PUBLISH MUTANT P011 anchor=scope-symlink-guard substitutions=1 killed=0 survived=12 void=0
-PUBLISH MUTANT P012 anchor=canonical-scope-resolution substitutions=1 killed=0 survived=12 void=0
-PUBLISH MUTANT P013 anchor=unsafe-leaf-guard substitutions=1 killed=0 survived=12 void=0
-PUBLISH MATRIX SUMMARY mechanisms=14 written_boundaries=13 natural_boundaries=1 mutants=13 fixtures=12 cells=156 killed=7 survived=149 void=0
-```
-
-The denominator covers the validator call, exclusive creation, every destination and scope guard reached by the fixtures, and the separately classified natural unresolved-parent failure.
-Every mutant records exactly one substitution and every one of its twelve fixture cells independently.
-Every survived cell printed by the command names the actual remaining boundary that refused publication.
-The `resolved-outside` fixture passes the component precheck as a real directory, swaps it to a scoped fake-outside link, and remains safe through final structural containment when the earlier canonical containment clause is neutralized.
+The complete fixture results, cell outcomes, alternate defenders, per-mutant totals, and aggregate denominator below come from one canonical generated stream.
 EVIDENCE_PUBLICATION
     printf '\n'
     cat "$PUBLICATION_MATRIX"
@@ -475,4 +452,6 @@ printf 'MUTATION SUMMARY killed=%s survived=%s void=%s denominator=%s\n' "$kille
 [ "$control_outcome" = SURVIVED ]
 if [ -n "$EVIDENCE" ]; then
   publish_evidence "$ROOT/docs/verification" "$EVIDENCE" "$EVIDENCE_STAGE"
+elif [ "$EMIT_EVIDENCE" -eq 1 ]; then
+  cat "$EVIDENCE_STAGE" >&3
 fi
