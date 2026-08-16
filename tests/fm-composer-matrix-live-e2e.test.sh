@@ -330,6 +330,7 @@ if command -v herdr >/dev/null 2>&1 && command -v claude >/dev/null 2>&1; then
     hd_examined=0
     hd_shaped=0
     hd_noted=0
+    hd_failed=0
     hd_panes=$(fm_backend_herdr_cli default pane list 2>/dev/null || true)
     if [ -n "$hd_panes" ]; then
       # EVERY claude pane is scanned, not only the focused one. The 2026-08-11
@@ -377,12 +378,34 @@ EOF
           printf '#   rule above the glyph row: [%s]\n' "$hd_above"
           continue
         fi
+        # A row carrying no 8-column dash run anywhere is not a titled rule at
+        # all, so neither the titled-rule framing nor the column proof's refusal
+        # reasons describe it. It is its own regression: the composer has a
+        # closing rule and no opening one, which is what a vendor restyle that
+        # drops the top rule looks like.
+        case "$hd_above" in
+          *────────*) ;;
+          *)
+            FAILED=1
+            hd_failed=$((hd_failed + 1))
+            printf '# pane %s row above the composer row:\n#   [%s]\n' "$hd_pane" "$hd_above" >&2
+            printf 'not ok - herdr (%s) + claude (%s): pane %s has a closing rule below its composer row but NO rule above it - the row above carries no 8-column dash run at all, titled or plain - so this composer has no readable frame and the classifier will defer on it\n' \
+              "$hd_version" "$cl_version" "$hd_pane" >&2
+            continue
+            ;;
+        esac
+        # Reaching here, the row opens with the dash run and the column proof
+        # refused it: a documented refusal would already have been noted above.
         FAILED=1
+        hd_failed=$((hd_failed + 1))
         hd_cols=$(fm_composer_column_spaces "${hd_above//─/ }" || true)
         hd_residue=${hd_cols//[[:space:]]/}
         printf '# pane %s rule above the glyph row:\n#   [%s]\n' "$hd_pane" "$hd_above" >&2
         if [ -n "$hd_residue" ]; then
-          printf '#   the column proof could not count: [%s]\n' "$hd_residue" >&2
+          # Dumped as bytes as well as text: a control byte is exactly the kind of
+          # leftover that would otherwise print as an empty pair of brackets.
+          printf '#   the column proof could not count: [%s] bytes:%s\n' \
+            "$hd_residue" "$(printf '%s' "$hd_residue" | LC_ALL=C od -An -tx1 | tr -d '\n')" >&2
         else
           printf '#   the column proof refused the row before counting anything (a structural box-drawing glyph)\n' >&2
         fi
@@ -485,7 +508,9 @@ EOF
     if [ "$hd_checked" -eq 0 ]; then
       note "herdr ($hd_version) running but no idle claude pane to read; live empty verdicts not exercised here"
     fi
-    if [ "$hd_titled" -eq 0 ]; then
+    if [ "$hd_titled" -eq 0 ] && [ "$hd_failed" -gt 0 ]; then
+      note "herdr ($hd_version) + claude ($cl_version) read NO titled composer rule as a live pass, and $hd_failed pane(s) FAILED above: of $hd_examined claude composer pane(s) examined, $hd_shaped carried a rule directly below the composer row, $hd_clean of those drew a plain rule, and $hd_noted drew a titled rule declined on a documented boundary; the failures above are this run's finding, so the shape was exercised live and did not hold"
+    elif [ "$hd_titled" -eq 0 ]; then
       note "herdr ($hd_version) + claude ($cl_version) read NO titled composer rule live: of $hd_examined claude composer pane(s) examined, $hd_shaped carried a rule directly below the composer row, $hd_clean of those drew a plain rule, and $hd_noted drew a titled rule declined on a documented boundary (noted above); the titled-rule regression was NOT exercised live here and rests on the portable regression in tests/fm-composer-lib.test.sh"
     fi
   else

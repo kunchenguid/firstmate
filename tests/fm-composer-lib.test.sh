@@ -366,13 +366,15 @@ test_matrix_grok_titled_bottom_border() {
   assert_screen "grok titled on zellij" empty "$CAPS_STYLED_NOID" "$titled"
   # The tolerance is additive: an untitled border still proves the same box.
   assert_screen "grok untitled border" empty "$CAPS_TMUX" "$plain_border" 1
-  # The titled-bottom proof shares fm_composer_column_spaces with the titled-rule
-  # predicate, so a non-ASCII glyph in this title is counted rather than refused
-  # at the same border width. Pinned here because that boundary moved with the
-  # shared proof, not only in the titled-rule case that asked for it.
+  # A non-ASCII glyph in this title still refuses, at the same border width. The
+  # titled-bottom proof shares the column count with the titled-rule predicate but
+  # NOT its widened script boundary: this border decides a bordered composer's
+  # geometry, and `empty` there authorizes an injection, so the boundary stays
+  # where it was reviewed. Pinned so a future consolidation cannot move it as a
+  # side effect.
   local glyph_titled
   glyph_titled=$'  ╭──────────────────────────────────────╮\n  │ ❯                                    │\n  ╰────────────────── ✳ Grok 4.5 (high) ─╯'
-  assert_screen "grok non-ASCII titled bottom border" empty "$CAPS_TMUX" "$glyph_titled" 1
+  assert_screen "grok non-ASCII titled bottom border refuses" unknown "$CAPS_TMUX" "$glyph_titled" 1
   typed=$'  ╭──────────────────────────────────────╮\n  │ ❯ deploy the fix                     │\n  ╰──────────────────── Grok 4.5 (high) ─╯'
   assert_screen "grok typed on tmux" pending "$CAPS_TMUX" "$typed" 1
   pass "matrix: grok's titled bottom border is tolerated as a title, not read as ambiguity"
@@ -491,6 +493,25 @@ test_matrix_claude_titled_composer_rule() {
   badlead="${mid%─}$badbyte"
   ! _fm_composer_rule_row "$badlead" "$spaces" \
     || fail "an invalid UTF-8 lead byte in the title must refuse, never count as a column"
+  # Sequences UTF-8 forbids are malformed even though their lead byte is in range,
+  # so a lead-range-only proof would credit them with a column. Each is spliced in
+  # at the partner's exact character count, so only the byte sequence differs.
+  local overlong surrogate toohigh combining
+  printf -v overlong '%b' '\0340\0200\0200'
+  printf -v surrogate '%b' '\0355\0240\0200'
+  printf -v toohigh '%b' '\0364\0220\0200\0200'
+  ! _fm_composer_rule_row "${mid%─}$overlong" "$spaces" \
+    || fail "an overlong UTF-8 sequence in the title must refuse, never count as a column"
+  ! _fm_composer_rule_row "${mid%─}$surrogate" "$spaces" \
+    || fail "a UTF-16 surrogate sequence in the title must refuse, never count as a column"
+  ! _fm_composer_rule_row "${mid%─}$toohigh" "$spaces" \
+    || fail "a sequence above U+10FFFF in the title must refuse, never count as a column"
+  # A COMBINING mark occupies no column of its own and is counted as one, so the
+  # proof over-counts and refuses - the mirror of the double-width case above, and
+  # the same safe direction.
+  printf -v combining '%b' 'e\0314\0201'
+  ! _fm_composer_rule_row "${mid%─}$combining" "$spaces" \
+    || fail "a combining mark over-counts the row's columns and must not read as a rule"
   assert_screen "claude double-width titled rule" unknown "$CAPS_PLAIN" \
     $'transcript\n'"$dwide"$'\n❯\n'"$rule"
   assert_screen "claude structural glyph in titled rule" unknown "$CAPS_PLAIN" \
@@ -539,16 +560,23 @@ test_matrix_kimi_bordered_shell_glyph_box() {
   assert_screen "kimi idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
   assert_screen "kimi idle on herdr" empty "$CAPS_STYLED" "$screen"
   assert_screen "kimi idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
-  # The box geometry proof shares fm_composer_column_spaces with the titled-rule
-  # predicate, so a single-width non-ASCII character in a content row is counted
-  # as the one column it occupies instead of failing the proof outright. This row
-  # read `pending-unproven` before that consolidation and reads `pending` now,
-  # because the geometry really is proven; `empty` remains the only verdict that
-  # authorizes an injection, so the widening does not widen what may be typed
-  # into.
-  local accented
+  # THE BORDERED BOUNDARY THIS CHANGE DELIBERATELY DID NOT MOVE. The box geometry
+  # proof shares the column count with the titled-rule predicate, whose script
+  # boundary was widened, but keeps its own ASCII-only content boundary: `empty`
+  # from a bordered composer is what authorizes away mode to type into that pane,
+  # and only the titled composer RULE was authorized to start reading wider.
+  #
+  # Both directions are pinned so a future consolidation cannot move either one
+  # silently. A non-ASCII idle placeholder stays unreadable geometry and so reads
+  # `unknown`, never an injectable `empty`; a non-ASCII draft in the same box is
+  # `pending-unproven`, unsent text whose container could not be proven, which is
+  # the verdict this shape has always had.
+  local accented cyrillic_placeholder
+  cyrillic_placeholder=$'╭────────────╮\n│ > кот      │\n╰────────────╯'
+  FM_COMPOSER_IDLE_RE='^кот$' assert_screen "bordered non-ASCII placeholder is not injectable" \
+    unknown "$CAPS_PLAIN" "$cyrillic_placeholder"
   accented=$'╭────────────────────────╮\n│ > café                 │\n╰────────────────────────╯'
-  assert_screen "kimi non-ASCII draft proves box geometry" pending "$CAPS_TMUX" "$accented" 1
+  assert_screen "bordered non-ASCII draft stays unproven" pending-unproven "$CAPS_TMUX" "$accented" 1
   pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired)"
 }
 
