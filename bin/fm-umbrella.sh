@@ -12,13 +12,11 @@
 # What an umbrella deliberately is NOT: it launches no autonomous worker, arms no
 # merge poll, and creates no branch. There is nothing for the watcher, fm-spawn,
 # fm-teardown, or fm-pr-check to reason about, so its metadata lives under
-# data/umbrellas/<umbrella-id>/umbrella.meta (NOT state/<id>.meta) and no
-# single-repo task mechanism ever sees it. That is what makes this construct
-# zero-risk to the existing task flow. The data/umbrellas/ tree is machine-local
-# working state (gitignored), kept out of the synced knowledge dirs under data/.
+# umbrellas/<umbrella-id>/umbrella.meta (NOT state/<id>.meta) and no single-repo task
+# mechanism ever sees it. That is what makes this construct zero-risk to the
+# existing task flow.
 #
-# Its durable output is data/umbrellas/<umbrella-id>/DESIGN.md - the cross-repo
-# contract.
+# Its durable output is umbrellas/<umbrella-id>/DESIGN.md - the cross-repo contract.
 # The repos/ worktrees are scratch, exactly like a scout worktree: teardown
 # discards them once DESIGN.md exists, and DESIGN.md survives teardown. The
 # contract worked out here is expected to LAND FIRST as its own ordinary task
@@ -37,9 +35,8 @@
 #   fm-umbrella.sh list
 #
 #   create    Allocate one isolated worktree per named project under
-#             data/umbrellas/<umbrella-id>/repos/<name>, write a DESIGN.md and a
-#             cross-repo AGENTS.md skeleton, and record
-#             data/umbrellas/<umbrella-id>/umbrella.meta.
+#             umbrellas/<umbrella-id>/repos/<name>, write a DESIGN.md and a cross-repo
+#             AGENTS.md skeleton, and record umbrellas/<umbrella-id>/umbrella.meta.
 #             Transactional: any failure rolls back every worktree and the dir.
 #             Refuses if the umbrella id already exists. Each <name> must resolve
 #             to a git clone at projects/<name>.
@@ -51,8 +48,8 @@
 #   list      Print each umbrella id, its repos, and its DESIGN.md state.
 #
 # --repos names are comma-separated with no spaces. The captain enters the lab
-# with `cd data/umbrellas/<umbrella-id> && <your coding agent>`; AGENTS.md treats
-# direct captain work in that workspace as authoritative.
+# with `cd umbrellas/<umbrella-id> && <your coding agent>`; AGENTS.md treats direct
+# captain work in that workspace as authoritative.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,14 +73,11 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
-if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
-  DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
+if [ -n "${FM_UMBRELLAS_OVERRIDE:-}" ]; then
+  UMBRELLAS=$(resolve_directory_input FM_UMBRELLAS_OVERRIDE "$FM_UMBRELLAS_OVERRIDE") || exit 1
 else
-  DATA="$FM_HOME/data"
+  UMBRELLAS="$FM_HOME/umbrellas"
 fi
-# Umbrella working areas live in a dedicated gitignored subtree, kept out of the
-# synced knowledge dirs directly under data/.
-UMBRELLAS="$DATA/umbrellas"
 if [ -n "${FM_PROJECTS_OVERRIDE:-}" ]; then
   PROJECTS=$(resolve_directory_input FM_PROJECTS_OVERRIDE "$FM_PROJECTS_OVERRIDE") || exit 1
 else
@@ -192,7 +186,7 @@ cmd_create() {
   local umbrella_dir="$UMBRELLAS/$id"
   local meta="$umbrella_dir/umbrella.meta"
   if [ -e "$umbrella_dir" ] || [ -e "$STATE/$id.meta" ]; then
-    err "id already in use: $id (data/umbrellas/$id or state/$id.meta exists)"
+    err "id already in use: $id (umbrellas/$id or state/$id.meta exists)"
     exit 1
   fi
 
@@ -308,7 +302,7 @@ Repos: $repos_field
   single-repo tasks once the contract has landed.
 EOF
 
-  # Metadata - deliberately under data/, invisible to the task/watcher scan.
+  # Metadata - deliberately under umbrellas/ (a sibling of data/, never state/), invisible to the task/watcher scan.
   {
     printf 'kind=umbrella\n'
     printf 'umbrella_id=%s\n' "$id"
@@ -326,8 +320,8 @@ EOF
 
   echo "created umbrella $id"
   echo "  repos: $repos_field"
-  echo "  lab:   data/umbrellas/$id/  (cd there and drive your coding agent)"
-  echo "  design: data/umbrellas/$id/DESIGN.md"
+  echo "  lab:   umbrellas/$id/  (cd there and drive your coding agent)"
+  echo "  design: umbrellas/$id/DESIGN.md"
 }
 
 cmd_teardown() {
@@ -351,11 +345,11 @@ cmd_teardown() {
   local umbrella_dir="$UMBRELLAS/$id"
   local meta="$umbrella_dir/umbrella.meta"
   if [ ! -f "$meta" ]; then
-    err "no umbrella metadata at data/umbrellas/$id/umbrella.meta"
+    err "no umbrella metadata at umbrellas/$id/umbrella.meta"
     exit 1
   fi
   if [ "$(umbrella_meta_get "$meta" kind || true)" != umbrella ]; then
-    err "data/umbrellas/$id is not an umbrella (kind mismatch)"
+    err "umbrellas/$id is not an umbrella (kind mismatch)"
     exit 1
   fi
 
@@ -414,7 +408,7 @@ cmd_teardown() {
 
   echo "tore down umbrella $id"
   if [ -f "$umbrella_dir/DESIGN.md" ]; then
-    echo "  kept: data/umbrellas/$id/DESIGN.md"
+    echo "  kept: umbrellas/$id/DESIGN.md"
   fi
 }
 

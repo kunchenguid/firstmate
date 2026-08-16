@@ -3,7 +3,7 @@
 #
 # These drive the real script against throwaway git clones and prove that
 # create/teardown/list build isolated worktrees, keep umbrella metadata out of
-# the task/watcher scan (data/ not state/), roll back cleanly on failure, keep
+# the task/watcher scan (umbrellas/ not state/), roll back cleanly on failure, keep
 # DESIGN.md across teardown, and refuse unsafe input.
 set -u
 
@@ -18,7 +18,7 @@ TMP_ROOT=$(fm_test_tmproot fm-umbrella)
 make_home() {
   local name=$1; shift
   local home="$TMP_ROOT/$name"
-  mkdir -p "$home/projects" "$home/state" "$home/data"
+  mkdir -p "$home/projects" "$home/state" "$home/umbrellas"
   home=$(cd "$home" && pwd -P)
   local r
   for r in "$@"; do
@@ -40,25 +40,25 @@ test_create_builds_isolated_worktrees() {
   expect_code 0 "$RC" "create feat-x"
   assert_contains "$OUT" "created umbrella feat-x" "create did not confirm"
 
-  assert_present "$home/data/umbrellas/feat-x/repos/backend" "backend worktree missing"
-  assert_present "$home/data/umbrellas/feat-x/repos/frontend" "frontend worktree missing"
-  assert_present "$home/data/umbrellas/feat-x/DESIGN.md" "DESIGN.md missing"
-  assert_present "$home/data/umbrellas/feat-x/AGENTS.md" "cross-repo AGENTS.md missing"
-  assert_present "$home/data/umbrellas/feat-x/umbrella.meta" "umbrella.meta missing"
+  assert_present "$home/umbrellas/feat-x/repos/backend" "backend worktree missing"
+  assert_present "$home/umbrellas/feat-x/repos/frontend" "frontend worktree missing"
+  assert_present "$home/umbrellas/feat-x/DESIGN.md" "DESIGN.md missing"
+  assert_present "$home/umbrellas/feat-x/AGENTS.md" "cross-repo AGENTS.md missing"
+  assert_present "$home/umbrellas/feat-x/umbrella.meta" "umbrella.meta missing"
 
   # Each worktree is a real, isolated git worktree distinct from its clone.
   local top
-  top=$(git -C "$home/data/umbrellas/feat-x/repos/backend" rev-parse --show-toplevel)
-  [ "$top" = "$home/data/umbrellas/feat-x/repos/backend" ] \
+  top=$(git -C "$home/umbrellas/feat-x/repos/backend" rev-parse --show-toplevel)
+  [ "$top" = "$home/umbrellas/feat-x/repos/backend" ] \
     || fail "backend worktree root is not itself: $top"
   [ "$top" != "$home/projects/backend" ] || fail "backend worktree tangled the clone"
 
   # Metadata stays OUT of state/ so no task/watcher scan ever sees it.
   assert_absent "$home/state/feat-x.meta" "umbrella leaked a state/<id>.meta"
-  assert_grep "kind=umbrella" "$home/data/umbrellas/feat-x/umbrella.meta" "meta missing kind"
-  assert_grep "repos=backend,frontend" "$home/data/umbrellas/feat-x/umbrella.meta" "meta missing repos"
+  assert_grep "kind=umbrella" "$home/umbrellas/feat-x/umbrella.meta" "meta missing kind"
+  assert_grep "repos=backend,frontend" "$home/umbrellas/feat-x/umbrella.meta" "meta missing repos"
 
-  pass "create builds isolated worktrees with metadata under data/"
+  pass "create builds isolated worktrees with metadata under umbrellas/"
 }
 
 test_worktree_bases_on_fresh_default() {
@@ -73,7 +73,7 @@ test_worktree_bases_on_fresh_default() {
 
   run_umb "$home" create f --repos backend
   expect_code 0 "$RC" "create with advanced origin"
-  local wt_head; wt_head=$(git -C "$home/data/umbrellas/f/repos/backend" rev-parse HEAD)
+  local wt_head; wt_head=$(git -C "$home/umbrellas/f/repos/backend" rev-parse HEAD)
   [ "$wt_head" = "$newtip" ] \
     || fail "worktree did not base on the fetched origin tip ($wt_head vs $newtip)"
   pass "worktree bases on the fetched default-branch tip"
@@ -87,11 +87,11 @@ test_teardown_keeps_design_removes_worktrees() {
   run_umb "$home" teardown f
   expect_code 0 "$RC" "teardown f"
   assert_contains "$OUT" "tore down umbrella f" "teardown did not confirm"
-  assert_absent "$home/data/umbrellas/f/repos" "repos/ survived teardown"
-  assert_absent "$home/data/umbrellas/f/umbrella.meta" "meta survived teardown"
-  assert_present "$home/data/umbrellas/f/DESIGN.md" "DESIGN.md was not kept"
+  assert_absent "$home/umbrellas/f/repos" "repos/ survived teardown"
+  assert_absent "$home/umbrellas/f/umbrella.meta" "meta survived teardown"
+  assert_present "$home/umbrellas/f/DESIGN.md" "DESIGN.md was not kept"
   # The clone's worktree list no longer references the lab.
-  assert_no_grep "data/umbrellas/f/repos/backend" <(git -C "$home/projects/backend" worktree list) \
+  assert_no_grep "umbrellas/f/repos/backend" <(git -C "$home/projects/backend" worktree list) \
     "clone still lists the removed worktree"
   pass "teardown removes worktrees but keeps DESIGN.md"
 }
@@ -100,13 +100,13 @@ test_teardown_discards_dirty_scratch_visibly() {
   local home; home=$(make_home dirty backend)
   run_umb "$home" create f --repos backend
   expect_code 0 "$RC" "create for dirty teardown"
-  printf 'scratch\n' > "$home/data/umbrellas/f/repos/backend/scratch.txt"
+  printf 'scratch\n' > "$home/umbrellas/f/repos/backend/scratch.txt"
 
   run_umb "$home" teardown f
   expect_code 0 "$RC" "teardown with dirty scratch"
   assert_contains "$OUT" "discarding scratch changes in backend" \
     "teardown discarded dirty scratch silently"
-  assert_absent "$home/data/umbrellas/f/repos" "dirty worktree not removed"
+  assert_absent "$home/umbrellas/f/repos" "dirty worktree not removed"
   pass "teardown discards dirty scratch but prints what it discards"
 }
 
@@ -114,16 +114,16 @@ test_empty_design_gate() {
   local home; home=$(make_home gate backend)
   run_umb "$home" create f --repos backend
   expect_code 0 "$RC" "create for gate"
-  : > "$home/data/umbrellas/f/DESIGN.md"   # empty it
+  : > "$home/umbrellas/f/DESIGN.md"   # empty it
 
   run_umb "$home" teardown f
   expect_code 1 "$RC" "teardown should refuse an empty DESIGN.md"
   assert_contains "$OUT" "DESIGN.md is missing or empty" "gate message wrong"
-  assert_present "$home/data/umbrellas/f/repos/backend" "refused teardown still removed the worktree"
+  assert_present "$home/umbrellas/f/repos/backend" "refused teardown still removed the worktree"
 
   run_umb "$home" teardown f --force
   expect_code 0 "$RC" "--force should bypass the gate"
-  assert_absent "$home/data/umbrellas/f/repos" "--force teardown left worktrees"
+  assert_absent "$home/umbrellas/f/repos" "--force teardown left worktrees"
   pass "empty DESIGN.md gates teardown unless --force"
 }
 
@@ -132,9 +132,9 @@ test_rollback_on_bad_repo() {
   run_umb "$home" create f --repos backend,nope
   expect_code 1 "$RC" "create should fail on unknown repo"
   assert_contains "$OUT" "not a git clone" "did not name the missing repo"
-  assert_absent "$home/data/umbrellas/f" "failed create left the umbrella dir behind"
+  assert_absent "$home/umbrellas/f" "failed create left the umbrella dir behind"
   # The good repo's worktree list must be clean (rollback removed it).
-  assert_no_grep "data/umbrellas/f/repos/backend" <(git -C "$home/projects/backend" worktree list) \
+  assert_no_grep "umbrellas/f/repos/backend" <(git -C "$home/projects/backend" worktree list) \
     "rollback left a dangling worktree"
   pass "a bad repo rolls back every created worktree and the dir"
 }

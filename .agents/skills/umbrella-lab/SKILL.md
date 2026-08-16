@@ -40,7 +40,7 @@ If a named repo is not cloned, load `project-management` and register it first; 
 
 ## Contract-first discipline
 
-The umbrella's only durable output is `data/umbrellas/<umbrella-id>/DESIGN.md`; the `repos/` worktrees are scratch, exactly like a scout worktree.
+The umbrella's only durable output is `umbrellas/<umbrella-id>/DESIGN.md`; the `repos/` worktrees are scratch, exactly like a scout worktree.
 The design is finished when it produces a concrete contract that can land first on its own - an OpenAPI spec, a proto file, a shared types package, a schema migration.
 Ship that contract as its own ordinary task and let it merge before any dependent per-repo work is delegated.
 Never delegate a per-repo task whose contract is still prose; if it has not landed as code, the work belongs back in the lab.
