@@ -7,6 +7,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 RETIRE="$ROOT/bin/fm-record-retire.sh"
+RETIRE_LIB="$ROOT/bin/fm-record-retire-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-record-retire)
 
 assert_content() {  # <file> <expected> <message>
@@ -73,6 +74,12 @@ write_scout() {  # <home> <id> <worktree>
   : > "$home/state/$id.turn-ended"
 }
 
+write_retirement_marker() {  # <state> <id> <window> <digest> [<schema>]
+  local state=$1 id=$2 window=$3 digest=$4 schema=${5:-fm-record-retired.v1}
+  printf 'schema=%s\ntask_id=%s\nwindow=%s\nmeta_sha256=%s\n' \
+    "$schema" "$id" "$window" "$digest" > "$state/.record-retired-$id"
+}
+
 run_retire() {  # <home> <args...>
   local home=$1
   shift
@@ -92,22 +99,39 @@ assert_retired() {  # <home> <id>
 }
 
 test_ordinary_retire() {
-  local home id queue_before queue_after
+  local home id window key prefix queue_before queue_after
   home=$(make_home ordinary)
   id=scout-ordinary
+  window="firstmate:fm-$id"
+  key=${window//:/_}
+  key=${key//\//_}
+  key=${key//./_}
   mkdir -p "$home/copies/task"
   printf 'copy bytes remain\n' > "$home/copies/task/sentinel"
   write_scout "$home" "$id" "$home/copies/task"
-  printf '1\t1\tsignal\t%s.status\tsignal: task\n' "$id" > "$home/state/.wake-queue"
-  printf '1\t2\theartbeat\theartbeat\theartbeat\n' >> "$home/state/.wake-queue"
+  {
+    printf '1\t1\tsignal\t%s.status\tsignal: task\n' "$id"
+    printf '1\t2\tstale\t%s\tstale: task\n' "$window"
+    printf '1\t3\tcheck\t%s/%s.check.sh\tcheck: task\n' "$home/state" "$id"
+    printf '1\t4\tsignal\t%s.status\n' "$id"
+    printf '1\t5\theartbeat\theartbeat\theartbeat\n'
+  } > "$home/state/.wake-queue"
+  for prefix in hash count stale stale-since paused paused-rechecked paused-resurfaced wedge-escalations; do
+    printf 'retired %s state\n' "$prefix" > "$home/state/.$prefix-$key"
+  done
 
   run_retire "$home" "$id" --work-safety scout-report >/dev/null \
     || fail "ordinary record retirement refused"
   assert_retired "$home" "$id"
   assert_content "$home/copies/task/sentinel" "copy bytes remain" \
     "ordinary retirement touched the recorded copy"
-  assert_content "$home/state/.wake-queue" $'1\t2\theartbeat\theartbeat\theartbeat' \
+  assert_content "$home/state/.wake-queue" \
+    $'1\t4\tsignal\tscout-ordinary.status\n1\t5\theartbeat\theartbeat\theartbeat' \
     "ordinary retirement did not remove only this task's queued wake"
+  for prefix in hash count stale stale-since paused paused-rechecked paused-resurfaced wedge-escalations; do
+    assert_absent "$home/state/.$prefix-$key" \
+      "ordinary retirement left collapsed runtime-slot state for $prefix"
+  done
   [ ! -s "$home/commands.log" ] \
     || fail "ordinary retirement invoked a copy, process, backend, or forge command: $(cat "$home/commands.log")"
 
@@ -827,6 +851,293 @@ test_marker_integrity_and_fail_open_guards() {
   pass "marker format, link identity, task binding, and fresh-spawn validation fail open or refuse"
 }
 
+test_marker_requires_exact_line_count() {
+  local home id digest
+  home=$(make_home marker-line-count)
+  id=retired-extra-line
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  write_retirement_marker "$home/state" "$id" "firstmate:fm-$id" "$digest"
+  printf 'unexpected=fifth-line\n' >> "$home/state/.record-retired-$id"
+  if bash -c '. "$1"; fm_record_retire_marker_valid "$2" "$3"' _ \
+    "$RETIRE_LIB" "$home/state" "$id"; then
+    fail "five-line retirement marker was accepted"
+  fi
+  pass "retirement markers require exactly four lines"
+}
+
+test_marker_requires_exact_schema() {
+  local home id digest
+  home=$(make_home marker-schema)
+  id=retired-wrong-schema
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  write_retirement_marker "$home/state" "$id" "firstmate:fm-$id" "$digest" wrong-schema
+  if bash -c '. "$1"; fm_record_retire_marker_valid "$2" "$3"' _ \
+    "$RETIRE_LIB" "$home/state" "$id"; then
+    fail "wrong-schema retirement marker was accepted"
+  fi
+  pass "retirement markers require the exact schema"
+}
+
+test_marker_requires_nonempty_window() {
+  local home id digest
+  home=$(make_home marker-empty-window)
+  id=retired-empty-window
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  write_retirement_marker "$home/state" "$id" '' "$digest"
+  if bash -c '. "$1"; fm_record_retire_marker_valid "$2" "$3"' _ \
+    "$RETIRE_LIB" "$home/state" "$id"; then
+    fail "empty-window retirement marker was accepted"
+  fi
+  pass "retirement markers require a nonempty runtime window"
+}
+
+test_marker_rejects_control_window() {
+  local home id digest
+  home=$(make_home marker-control-window)
+  id=retired-control-window
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  write_retirement_marker "$home/state" "$id" $'firstmate:\tfm-task' "$digest"
+  if bash -c '. "$1"; fm_record_retire_marker_valid "$2" "$3"' _ \
+    "$RETIRE_LIB" "$home/state" "$id"; then
+    fail "control-character retirement window was accepted"
+  fi
+  pass "retirement markers reject control characters in runtime windows"
+}
+
+test_marker_publish_rejects_invalid_id() {
+  local home digest
+  home=$(make_home publish-invalid-id)
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  if bash -c '. "$1"; fm_record_retire_marker_publish "$2" .hidden window "$3"' _ \
+    "$RETIRE_LIB" "$home/state" "$digest"; then
+    fail "marker publication accepted an invalid task id"
+  fi
+  assert_absent "$home/state/.record-retired-.hidden" \
+    "invalid task id published a retirement marker"
+  pass "marker publication validates the task id"
+}
+
+test_marker_publish_rejects_empty_window() {
+  local home id digest
+  home=$(make_home publish-empty-window)
+  id=retired-publish-empty-window
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  if bash -c '. "$1"; fm_record_retire_marker_publish "$2" "$3" "" "$4"' _ \
+    "$RETIRE_LIB" "$home/state" "$id" "$digest"; then
+    fail "marker publication accepted an empty runtime window"
+  fi
+  assert_absent "$home/state/.record-retired-$id" \
+    "empty runtime window published a retirement marker"
+  pass "marker publication requires a nonempty runtime window"
+}
+
+test_marker_publish_rejects_control_window() {
+  local home id digest window
+  home=$(make_home publish-control-window)
+  id=retired-publish-control-window
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  window=$'firstmate:\tfm-task'
+  if bash -c '. "$1"; fm_record_retire_marker_publish "$2" "$3" "$4" "$5"' _ \
+    "$RETIRE_LIB" "$home/state" "$id" "$window" "$digest"; then
+    fail "marker publication accepted a control-character runtime window"
+  fi
+  assert_absent "$home/state/.record-retired-$id" \
+    "control-character runtime window published a retirement marker"
+  pass "marker publication rejects control characters in runtime windows"
+}
+
+test_marker_publish_rejects_invalid_digest() {
+  local home id
+  home=$(make_home publish-invalid-digest)
+  id=retired-publish-invalid-digest
+  if bash -c '. "$1"; fm_record_retire_marker_publish "$2" "$3" window bad' _ \
+    "$RETIRE_LIB" "$home/state" "$id"; then
+    fail "marker publication accepted a malformed metadata digest"
+  fi
+  assert_absent "$home/state/.record-retired-$id" \
+    "malformed metadata digest published a retirement marker"
+  pass "marker publication requires a full lowercase SHA-256 digest"
+}
+
+test_marker_republish_requires_same_window() {
+  local home id digest marker_before
+  home=$(make_home republish-window)
+  id=retired-republish-window
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  write_retirement_marker "$home/state" "$id" original-window "$digest"
+  marker_before=$(shasum -a 256 "$home/state/.record-retired-$id")
+  if bash -c '. "$1"; fm_record_retire_marker_publish "$2" "$3" changed-window "$4"' _ \
+    "$RETIRE_LIB" "$home/state" "$id" "$digest"; then
+    fail "marker republish accepted a different runtime window"
+  fi
+  [ "$marker_before" = "$(shasum -a 256 "$home/state/.record-retired-$id")" ] \
+    || fail "different-window republish changed the existing marker"
+  pass "marker republish requires the same runtime window"
+}
+
+test_marker_republish_requires_same_digest() {
+  local home id original changed marker_before
+  home=$(make_home republish-digest)
+  id=retired-republish-digest
+  original=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  changed=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  write_retirement_marker "$home/state" "$id" original-window "$original"
+  marker_before=$(shasum -a 256 "$home/state/.record-retired-$id")
+  if bash -c '. "$1"; fm_record_retire_marker_publish "$2" "$3" original-window "$4"' _ \
+    "$RETIRE_LIB" "$home/state" "$id" "$changed"; then
+    fail "marker republish accepted a different metadata digest"
+  fi
+  [ "$marker_before" = "$(shasum -a 256 "$home/state/.record-retired-$id")" ] \
+    || fail "different-digest republish changed the existing marker"
+  pass "marker republish requires the same metadata generation"
+}
+
+test_marker_publish_verifies_the_published_file() {
+  local home id digest fakebin rc
+  home=$(make_home publish-postverify)
+  id=retired-publish-postverify
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  fakebin="$home/noop-mv"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/mv"
+  chmod +x "$fakebin/mv"
+  set +e
+  PATH="$fakebin:$PATH" bash -c \
+    '. "$1"; fm_record_retire_marker_publish "$2" "$3" window "$4"' _ \
+    "$RETIRE_LIB" "$home/state" "$id" "$digest"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "marker publication trusted a false-successful atomic move"
+  assert_absent "$home/state/.record-retired-$id" \
+    "false-successful atomic move unexpectedly published a marker"
+  pass "marker publication verifies the exact file after atomic publication"
+}
+
+test_marker_clear_accepts_absent_marker() {
+  local home
+  home=$(make_home clear-absent-marker)
+  bash -c '. "$1"; fm_record_retire_marker_clear_for_spawn "$2" fresh-task' _ \
+    "$RETIRE_LIB" "$home/state" \
+    || fail "fresh spawn refused when no retirement marker existed"
+  pass "fresh spawn treats an absent retirement marker as already clear"
+}
+
+test_marker_clear_removes_valid_marker_and_restores_wakes() {
+  local home id digest
+  home=$(make_home clear-valid-marker)
+  id=fresh-reused-task
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  write_retirement_marker "$home/state" "$id" "firstmate:fm-$id" "$digest"
+  bash -c '. "$1"; fm_record_retire_marker_clear_for_spawn "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$id" \
+    || fail "fresh spawn could not clear a valid inherited retirement marker"
+  assert_absent "$home/state/.record-retired-$id" \
+    "fresh spawn left a valid retirement marker in place"
+  : > "$home/state/.wake-queue"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    bash -c '. "$1"; fm_wake_append signal "$2.status" "signal: fresh"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$id" \
+    || fail "fresh incarnation could not append a wake after marker clearing"
+  [ "$(wc -l < "$home/state/.wake-queue" | tr -d ' ')" -eq 1 ] \
+    || fail "fresh incarnation remained muted after valid marker clearing"
+  pass "fresh spawn removes a valid marker and restores the new incarnation's wakes"
+}
+
+test_marker_does_not_mute_unrecognized_signal_key() {
+  local home id digest
+  home=$(make_home signal-key-scope)
+  id=retired-plain-key
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  write_retirement_marker "$home/state" "$id" window "$digest"
+  if bash -c '. "$1"; fm_record_retire_wake_muted "$2" signal "$3"' _ \
+    "$RETIRE_LIB" "$home/state" "$id"; then
+    fail "retirement marker muted an unrecognized signal key"
+  fi
+  pass "retirement markers mute only status and turn-end signal keys"
+}
+
+test_marker_does_not_mute_foreign_check_path() {
+  local home id digest foreign
+  home=$(make_home foreign-check-path)
+  id=retired-foreign-check
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  foreign="$home/foreign/$id.check.sh"
+  mkdir -p "${foreign%/*}"
+  write_retirement_marker "$home/state" "$id" window "$digest"
+  if bash -c '. "$1"; fm_record_retire_wake_muted "$2" check "$3"' _ \
+    "$RETIRE_LIB" "$home/state" "$foreign"; then
+    fail "retirement marker muted a check path outside its state home"
+  fi
+  pass "retirement markers mute only state-home check paths"
+}
+
+test_marker_never_mutes_stale_wake() {
+  local home id digest
+  home=$(make_home stale-key-scope)
+  id=retired-slot
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  write_retirement_marker "$home/state" "$id" "$id:window" "$digest"
+  if bash -c '. "$1"; fm_record_retire_wake_muted "$2" stale "$3:window"' _ \
+    "$RETIRE_LIB" "$home/state" "$id"; then
+    fail "retirement marker muted a slot-keyed stale wake"
+  fi
+  pass "retirement markers never mute slot-keyed stale wakes"
+}
+
+test_marker_does_not_mute_unknown_wake_kind() {
+  local home id digest
+  home=$(make_home unknown-wake-kind)
+  id=retired-unknown-kind
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  write_retirement_marker "$home/state" "$id" window "$digest"
+  if bash -c '. "$1"; fm_record_retire_wake_muted "$2" heartbeat "$3.status"' _ \
+    "$RETIRE_LIB" "$home/state" "$id"; then
+    fail "retirement marker muted an unknown wake kind"
+  fi
+  pass "retirement markers fail open for unknown wake kinds"
+}
+
+test_retired_marker_hides_full_open_decision_scan() {
+  local home id digest output
+  home=$(make_home classify-full-retired)
+  id=retired-full-scan
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  printf 'needs-decision: held work\n' > "$home/state/$id.status"
+  write_retirement_marker "$home/state" "$id" window "$digest"
+  output=$(FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1"; scan_open_decisions "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$home/state")
+  [ -z "$output" ] || fail "full decision scan resurfaced a retired task"
+  pass "full open-decision scans omit validly retired tasks"
+}
+
+test_retired_marker_hides_incremental_open_decision_scan() {
+  local home id digest output
+  home=$(make_home classify-incremental-retired)
+  id=retired-incremental-scan
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  printf 'needs-decision: held work\n' > "$home/state/$id.status"
+  write_retirement_marker "$home/state" "$id" window "$digest"
+  output=$(FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1"; scan_open_decisions_incremental "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state")
+  [ -z "$output" ] || fail "incremental decision scan resurfaced a retired task"
+  pass "incremental open-decision scans omit validly retired tasks"
+}
+
+test_retired_marker_hides_status_snapshot() {
+  local home id digest output
+  home=$(make_home classify-snapshot-retired)
+  id=retired-status-snapshot
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  printf 'blocked: held work\n' > "$home/state/$id.status"
+  write_retirement_marker "$home/state" "$id" window "$digest"
+  output=$(FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1"; status_presentation_snapshot "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state")
+  [ -z "$output" ] || fail "status snapshot resurfaced a retired task"
+  pass "status presentation snapshots omit validly retired tasks"
+}
+
 test_partial_wake_library_fails_open() {
   local home id rc
   home=$(make_home partial-wake-library)
@@ -902,6 +1213,723 @@ test_watcher_key_collision_refuses() {
   pass "nonidentical windows that collapse to one watcher key refuse safely"
 }
 
+test_unsupported_safety_mode_refuses() {
+  local home id rc
+  home=$(make_home unsupported-safety)
+  id=scout-unsupported-safety
+  write_scout "$home" "$id" "$home/copies/missing"
+  set +e
+  run_retire "$home" "$id" --work-safety guessed-safe > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "unsupported work-safety mode was accepted"
+  assert_grep "unsupported --work-safety value" "$home/err" \
+    "unsupported work-safety refusal was not concrete"
+  assert_present "$home/state/$id.meta" "unsupported work-safety mode removed metadata"
+  pass "record retirement rejects unsupported work-safety modes"
+}
+
+test_scout_report_rejects_remote_arguments() {
+  local home id rc
+  home=$(make_home scout-remote-args)
+  id=scout-with-remote-args
+  write_scout "$home" "$id" "$home/copies/missing"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report \
+    --remote-url https://github.com/example/sample.git --remote-ref refs/heads/main \
+    > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "scout-report accepted remote custody arguments"
+  assert_grep "scout-report safety does not accept remote-ref arguments" "$home/err" \
+    "scout remote-argument refusal was not concrete"
+  assert_present "$home/state/$id.meta" "scout remote-argument refusal removed metadata"
+  pass "scout-report safety rejects remote custody arguments"
+}
+
+test_remote_ref_requires_both_arguments() {
+  local home id sha rc
+  sha=0123456789abcdef0123456789abcdef01234567
+
+  home=$(make_home remote-missing-url)
+  id=ship-missing-url
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "kind=ship" \
+    "record_retire_work_head=$sha" "record_retire_worktree_clean=1"
+  set +e
+  run_retire "$home" "$id" --work-safety remote-ref --remote-ref refs/heads/main \
+    > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "remote-ref safety accepted a missing remote URL"
+  assert_grep "requires --remote-url" "$home/err" \
+    "missing remote URL refusal was not concrete"
+
+  home=$(make_home remote-missing-ref)
+  id=ship-missing-ref
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "kind=ship" \
+    "record_retire_work_head=$sha" "record_retire_worktree_clean=1"
+  set +e
+  run_retire "$home" "$id" --work-safety remote-ref \
+    --remote-url https://github.com/example/sample.git > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "remote-ref safety accepted a missing full ref"
+  assert_grep "requires --remote-ref" "$home/err" \
+    "missing remote ref refusal was not concrete"
+  pass "remote-ref safety requires both explicit custody arguments"
+}
+
+test_symlinked_data_directory_refuses() {
+  local home id real_data rc
+  home=$(make_home unsafe-data-dir)
+  id=scout-unsafe-data-dir
+  write_scout "$home" "$id" "$home/copies/missing"
+  real_data="$home/data-real"
+  mv "$home/data" "$real_data"
+  ln -s "$real_data" "$home/data"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "symlinked data directory was accepted"
+  assert_grep "data directory is absent or unsafe" "$home/err" \
+    "data-directory refusal was not concrete"
+  assert_present "$home/state/$id.meta" "data-directory refusal removed metadata"
+  pass "record retirement refuses a symlinked data directory"
+}
+
+test_gate_agent_refuses_before_retirement() {
+  local home id rc
+  home=$(make_home gate-agent)
+  id=scout-gate-agent
+  write_scout "$home" "$id" "$home/copies/missing"
+  set +e
+  NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS='' \
+    run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "gate-agent retirement did not refuse with exit 3 (rc=$rc)"
+  assert_grep "NO_MISTAKES_GATE set" "$home/err" \
+    "gate-agent refusal did not name its authority boundary"
+  assert_present "$home/state/$id.meta" "gate-agent refusal removed metadata"
+  pass "no-mistakes gate agents cannot drive record retirement"
+}
+
+test_task_set_lock_path_must_resolve() {
+  local home id rc
+  home=$(make_home $'task-set-path\tcontrol')
+  id=scout-task-set-path
+  write_scout "$home" "$id" "$home/copies/missing"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "unresolvable task-set lock path was accepted"
+  assert_grep "task-set lock cannot be resolved" "$home/err" \
+    "task-set lock path refusal was not concrete"
+  assert_present "$home/state/$id.meta" "task-set lock path refusal removed metadata"
+  pass "record retirement requires a resolvable task-set lock path"
+}
+
+test_symlinked_metadata_refuses_before_locking() {
+  local home id outside rc
+  home=$(make_home symlinked-metadata)
+  id=scout-symlinked-metadata
+  write_scout "$home" "$id" "$home/copies/missing"
+  outside="$home/outside-meta"
+  mv "$home/state/$id.meta" "$outside"
+  ln -s "$outside" "$home/state/$id.meta"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "symlinked metadata was accepted"
+  assert_grep "has no regular metadata" "$home/err" \
+    "pre-lock metadata refusal was not concrete"
+  assert_present "$outside" "symlinked metadata refusal removed its target"
+  pass "record retirement rejects symlinked metadata before taking its lock"
+}
+
+test_metadata_is_rechecked_after_lock_wait() {
+  local home id rc
+  home=$(make_home metadata-lock-recheck)
+  id=scout-metadata-lock-recheck
+  write_scout "$home" "$id" "$home/copies/missing"
+  set +e
+  PATH="$home/fakebin:$PATH" FM_TASKS_AXI_COMPATIBLE=1 \
+    FM_COMMAND_LOG="$home/commands.log" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" bash -c '
+      . "$1"
+      lock=$(fm_meta_lock_path "$FM_STATE_OVERRIDE/$3.meta") || exit 80
+      fm_lock_acquire_wait "$lock" || exit 81
+      "$2" "$3" --work-safety scout-report > "$4/out" 2> "$4/err" &
+      child=$!
+      ready=0
+      attempts=0
+      while [ "$attempts" -lt 100 ]; do
+        if [ -e "$FM_STATE_OVERRIDE/.control-$3.lock" ] \
+          || [ -L "$FM_STATE_OVERRIDE/.control-$3.lock" ]; then
+          ready=1
+          break
+        fi
+        attempts=$((attempts + 1))
+        sleep 0.01
+      done
+      [ "$ready" -eq 1 ] || { kill "$child"; wait "$child"; exit 82; }
+      sleep 0.1
+      mv "$FM_STATE_OVERRIDE/$3.meta" "$FM_STATE_OVERRIDE/$3.meta.removed"
+      fm_lock_release "$lock"
+      wait "$child"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$RETIRE" "$id" "$home"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "metadata disappearance during lock wait was accepted"
+  assert_grep "metadata disappeared before retirement" "$home/err" \
+    "post-lock metadata refusal was not concrete"
+  assert_present "$home/state/$id.meta.removed" \
+    "post-lock metadata refusal changed the removed record bytes"
+  pass "record retirement rechecks metadata after waiting for its lifecycle lock"
+}
+
+test_metadata_window_rejects_control_characters() {
+  local home id rc
+  home=$(make_home metadata-control-window)
+  id=scout-metadata-control-window
+  write_scout "$home" "$id" "$home/copies/missing"
+  awk -v window=$'firstmate:\tfm-task' '
+    /^window=/ { print "window=" window; next }
+    { print }
+  ' "$home/state/$id.meta" > "$home/state/$id.meta.next"
+  mv -f "$home/state/$id.meta.next" "$home/state/$id.meta"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "metadata accepted a control-character runtime window"
+  assert_grep "metadata window contains a control character" "$home/err" \
+    "metadata control-character refusal was not concrete"
+  assert_present "$home/state/$id.meta" "metadata control-character refusal removed metadata"
+  pass "record retirement rejects control characters in metadata windows"
+}
+
+test_state_artifact_device_boundary_refuses() {
+  local home id artifact rc
+  home=$(make_home artifact-device)
+  id=scout-foreign-device-artifact
+  artifact="$home/state/$id.pi-ext.ts"
+  write_scout "$home" "$id" "$home/copies/missing"
+  printf 'regular artifact bytes\n' > "$artifact"
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [ "$*" = "-f %d $FM_FOREIGN_DEVICE_ARTIFACT" ]; then' \
+    '  printf "999999999\n"' \
+    '  exit 0' \
+    'fi' \
+    'exec /usr/bin/stat "$@"' > "$home/fakebin/stat"
+  chmod +x "$home/fakebin/stat"
+  set +e
+  FM_FOREIGN_DEVICE_ARTIFACT="$artifact" \
+    run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "regular task artifact from another device was accepted"
+  assert_grep "unsafe task-state artifact" "$home/err" \
+    "cross-device task-artifact refusal was not concrete"
+  assert_present "$artifact" "cross-device task-artifact refusal removed the artifact"
+  assert_present "$home/state/$id.meta" "cross-device task-artifact refusal removed metadata"
+  pass "record retirement rejects regular task artifacts from another device"
+}
+
+test_unsupported_task_kind_refuses() {
+  local home id rc
+  home=$(make_home unsupported-kind)
+  id=unsupported-kind-record
+  write_scout "$home" "$id" "$home/copies/missing"
+  awk '{ sub(/^kind=scout$/, "kind=crew"); print }' \
+    "$home/state/$id.meta" > "$home/state/$id.meta.next"
+  mv -f "$home/state/$id.meta.next" "$home/state/$id.meta"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "unsupported task kind was accepted"
+  assert_grep "unsupported task kind" "$home/err" \
+    "unsupported task-kind refusal was not concrete"
+  assert_present "$home/state/$id.meta" "unsupported task-kind refusal removed metadata"
+  pass "record retirement rejects unsupported task kinds"
+}
+
+test_unsafe_other_metadata_refuses() {
+  local home id other outside rc
+  home=$(make_home unsafe-other-metadata)
+  id=scout-target-safe
+  other=ship-other-unsafe
+  write_scout "$home" "$id" "$home/copies/missing"
+  fm_write_meta "$home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" "kind=ship"
+  outside="$home/outside-other-meta-link"
+  ln "$home/state/$other.meta" "$outside"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "hardlinked foreign metadata was accepted"
+  assert_grep "metadata is unsafe" "$home/err" \
+    "unsafe foreign metadata refusal was not concrete"
+  assert_present "$home/state/$id.meta" "unsafe foreign metadata refusal removed target metadata"
+  pass "runtime-slot proof rejects unsafe foreign metadata"
+}
+
+test_locked_other_metadata_refuses() {
+  local home id other rc
+  home=$(make_home locked-other-metadata)
+  id=scout-target-locked-other
+  other=ship-changing-other
+  write_scout "$home" "$id" "$home/copies/missing"
+  fm_write_meta "$home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" "kind=ship"
+  set +e
+  PATH="$home/fakebin:$PATH" FM_TASKS_AXI_COMPATIBLE=1 \
+    FM_COMMAND_LOG="$home/commands.log" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" bash -c '
+      . "$1"
+      lock=$(fm_meta_lock_path "$FM_STATE_OVERRIDE/$4.meta") || exit 80
+      fm_lock_acquire_wait "$lock" || exit 81
+      set +e
+      "$2" "$3" --work-safety scout-report > "$5/out" 2> "$5/err"
+      rc=$?
+      set -e
+      fm_lock_release "$lock"
+      exit "$rc"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$RETIRE" "$id" "$other" "$home"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "changing foreign metadata was accepted"
+  assert_grep "metadata is changing" "$home/err" \
+    "changing foreign metadata refusal was not concrete"
+  assert_present "$home/state/$id.meta" "changing foreign metadata refusal removed target metadata"
+  pass "runtime-slot proof refuses while foreign metadata is locked"
+}
+
+test_other_metadata_is_rechecked_after_lock() {
+  local home id other target fakebin rc
+  home=$(make_home other-metadata-recheck)
+  id=scout-target-other-recheck
+  other=ship-other-recheck
+  write_scout "$home" "$id" "$home/copies/missing"
+  fm_write_meta "$home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" "kind=ship"
+  target="$home/other-meta-target"
+  fm_write_meta "$target" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" "kind=ship"
+  fakebin="$home/swap-bin"
+  mkdir -p "$fakebin"
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -u' \
+    '/bin/ln "$@"' \
+    'rc=$?' \
+    'for arg in "$@"; do' \
+    '  if [ "$arg" = "$FM_SWAP_LOCK" ]; then' \
+    '    /bin/mv "$FM_SWAP_META" "$FM_SWAP_META.regular"' \
+    '    /bin/ln -s "$FM_SWAP_TARGET" "$FM_SWAP_META"' \
+    '  fi' \
+    'done' \
+    'exit "$rc"' > "$fakebin/ln"
+  chmod +x "$fakebin/ln"
+  set +e
+  FM_SWAP_LOCK="$home/state/.meta-$other.lock" \
+    FM_SWAP_META="$home/state/$other.meta" FM_SWAP_TARGET="$target" \
+    PATH="$fakebin:$home/fakebin:$PATH" FM_TASKS_AXI_COMPATIBLE=1 \
+    FM_COMMAND_LOG="$home/commands.log" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$RETIRE" "$id" --work-safety scout-report \
+    > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "foreign metadata replacement after locking was accepted"
+  assert_grep "metadata changed" "$home/err" \
+    "foreign metadata post-lock refusal was not concrete"
+  assert_present "$home/state/$id.meta" "foreign metadata post-lock refusal removed target metadata"
+  pass "runtime-slot proof rechecks foreign metadata after taking its lock"
+}
+
+test_other_metadata_requires_exact_task_binding() {
+  local home id other rc
+  home=$(make_home other-binding)
+  id=scout-target-other-binding
+  other=ship-other-binding
+  write_scout "$home" "$id" "$home/copies/missing"
+  fm_write_meta "$home/state/$other.meta" "window=firstmate:fm-$other" "kind=ship"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "foreign metadata without an exact task binding was accepted"
+  assert_grep "requires one exact endpoint_task_id" "$home/err" \
+    "foreign task-binding refusal was not concrete"
+  assert_present "$home/state/$id.meta" "foreign task-binding refusal removed target metadata"
+  pass "runtime-slot proof requires exact foreign task bindings"
+}
+
+test_other_metadata_filename_must_match_binding() {
+  local home id other rc
+  home=$(make_home other-filename-binding)
+  id=scout-target-filename-binding
+  other=ship-other-filename
+  write_scout "$home" "$id" "$home/copies/missing"
+  fm_write_meta "$home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=different-task" "kind=ship"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "foreign metadata with a mismatched filename binding was accepted"
+  assert_grep "mismatched task binding" "$home/err" \
+    "foreign filename-binding refusal was not concrete"
+  assert_present "$home/state/$id.meta" "foreign filename-binding refusal removed target metadata"
+  pass "runtime-slot proof binds every foreign record to its filename"
+}
+
+test_other_metadata_requires_exact_window() {
+  local home id other rc
+  home=$(make_home other-window)
+  id=scout-target-other-window
+  other=ship-other-window
+  write_scout "$home" "$id" "$home/copies/missing"
+  fm_write_meta "$home/state/$other.meta" "endpoint_task_id=$other" "kind=ship"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "foreign metadata without an exact runtime window was accepted"
+  assert_grep "requires one exact window" "$home/err" \
+    "foreign window refusal was not concrete"
+  assert_present "$home/state/$id.meta" "foreign window refusal removed target metadata"
+  pass "runtime-slot proof requires an exact window for every foreign record"
+}
+
+test_remote_ref_requires_full_namespace() {
+  local home id sha rc
+  home=$(make_home remote-short-ref)
+  id=ship-short-ref
+  sha=0123456789abcdef0123456789abcdef01234567
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "kind=ship" \
+    "record_retire_work_head=$sha" "record_retire_worktree_clean=1"
+  set +e
+  FM_FAKE_REMOTE_SHA=$sha FM_FAKE_REMOTE_REF=main \
+    run_retire "$home" "$id" --work-safety remote-ref \
+      --remote-url https://github.com/example/sample.git --remote-ref main \
+      > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "short remote ref was accepted"
+  assert_grep "must be a full refs/... name" "$home/err" \
+    "short remote-ref refusal was not concrete"
+  assert_present "$home/state/$id.meta" "short remote-ref refusal removed metadata"
+  pass "remote custody requires a full refs namespace"
+}
+
+test_runtime_binding_directory_must_be_safe() {
+  local home id outside rc
+  home=$(make_home runtime-binding-dir)
+  id=scout-runtime-binding-dir
+  write_scout "$home" "$id" "$home/copies/missing"
+  outside="$home/outside-terminal-outcomes"
+  mkdir -p "$outside"
+  ln -s "$outside" "$home/state/terminal-outcomes"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "symlinked runtime-binding directory was accepted"
+  assert_grep "runtime binding directory is unsafe" "$home/err" \
+    "runtime-binding directory refusal was not concrete"
+  assert_present "$home/state/$id.meta" "runtime-binding directory refusal removed metadata"
+  pass "record retirement rejects unsafe runtime-binding directories"
+}
+
+test_runtime_binding_record_must_be_safe() {
+  local home id outside rc
+  home=$(make_home runtime-binding-record)
+  id=scout-runtime-binding-record
+  write_scout "$home" "$id" "$home/copies/missing"
+  mkdir -p "$home/state/terminal-outcomes"
+  outside="$home/outside-terminal-record"
+  printf 'task_id=another-task\n' > "$outside"
+  ln -s "$outside" "$home/state/terminal-outcomes/foreign.pending"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "symlinked runtime-binding record was accepted"
+  assert_grep "runtime binding record is unsafe" "$home/err" \
+    "runtime-binding record refusal was not concrete"
+  assert_present "$home/state/$id.meta" "runtime-binding record refusal removed metadata"
+  pass "record retirement rejects unsafe runtime-binding records"
+}
+
+test_procevent_binding_must_be_settled() {
+  local home id rc
+  home=$(make_home procevent-binding)
+  id=scout-procevent-bound
+  write_scout "$home" "$id" "$home/copies/missing"
+  mkdir -p "$home/state/procevent"
+  printf 'task_id=%s\n' "$id" > "$home/state/procevent/exact.source"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "task-owned process-event binding was orphaned"
+  assert_grep "still owns runtime binding" "$home/err" \
+    "process-event binding refusal was not concrete"
+  assert_present "$home/state/$id.meta" "process-event binding refusal removed metadata"
+  pass "record retirement refuses task-owned process-event bindings"
+}
+
+test_pending_reply_binding_must_be_settled() {
+  local home id rc
+  home=$(make_home pending-reply-binding)
+  id=scout-pending-reply-bound
+  write_scout "$home" "$id" "$home/copies/missing"
+  mkdir -p "$home/state/pending-replies"
+  printf 'task_id=%s\n' "$id" > "$home/state/pending-replies/exact.pending"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "task-owned pending-reply binding was orphaned"
+  assert_grep "still owns runtime binding" "$home/err" \
+    "pending-reply binding refusal was not concrete"
+  assert_present "$home/state/$id.meta" "pending-reply binding refusal removed metadata"
+  pass "record retirement refuses task-owned pending-reply bindings"
+}
+
+test_quarantine_directory_must_be_safe() {
+  local home id outside rc
+  home=$(make_home quarantine-directory)
+  id=scout-quarantine-directory
+  write_scout "$home" "$id" "$home/copies/missing"
+  outside="$home/outside-quarantine-directory"
+  mkdir -p "$outside"
+  ln -s "$outside" "$home/state/.pr-check-quarantine"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "symlinked PR-check quarantine was accepted"
+  assert_grep "PR-check quarantine path is unsafe" "$home/err" \
+    "quarantine-directory refusal was not concrete"
+  assert_present "$home/state/$id.meta" "quarantine-directory refusal removed metadata"
+  pass "record retirement rejects an unsafe PR-check quarantine directory"
+}
+
+test_marker_digest_requires_sha256_support() {
+  local home id work_head nohash tool rc
+  home=$(make_home missing-sha256)
+  id=ship-missing-sha256
+  work_head=0123456789abcdef0123456789abcdef01234567
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "kind=ship" \
+    "record_retire_work_head=$work_head" "record_retire_worktree_clean=1"
+  nohash="$home/nohash-bin"
+  mkdir -p "$nohash"
+  for tool in awk basename bash cat chmod cut date dirname grep head ln mkdir mktemp mv od ps \
+    readlink rm rmdir sed sleep stat touch tr uname wc; do
+    ln -s "$(command -v "$tool")" "$nohash/$tool"
+  done
+  set +e
+  PATH="$nohash" FM_FAKE_REMOTE_SHA=$work_head FM_FAKE_REMOTE_REF=refs/heads/main \
+    run_retire "$home" "$id" --work-safety remote-ref \
+      --remote-url https://github.com/example/sample.git --remote-ref refs/heads/main \
+      > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "retirement proceeded without a metadata SHA-256 digest"
+  assert_grep "SHA-256 support is required" "$home/err" \
+    "missing SHA-256 refusal was not concrete: $(cat "$home/err")"
+  assert_present "$home/state/$id.meta" "missing SHA-256 refusal removed metadata"
+  assert_absent "$home/state/.record-retired-$id" \
+    "missing SHA-256 refusal published a marker"
+  pass "record retirement requires a verified metadata SHA-256 digest"
+}
+
+test_existing_marker_requires_same_window() {
+  local home id digest rc
+  home=$(make_home existing-marker-window)
+  id=scout-existing-marker-window
+  write_scout "$home" "$id" "$home/copies/missing"
+  digest=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+  write_retirement_marker "$home/state" "$id" different-window "$digest"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "existing marker for a different runtime target was accepted"
+  assert_grep "names a different runtime target" "$home/err" \
+    "existing-marker window refusal was not concrete"
+  assert_present "$home/state/$id.meta" "existing-marker window refusal removed metadata"
+  pass "record retirement binds an existing marker to the same runtime target"
+}
+
+test_existing_marker_requires_same_metadata_generation() {
+  local home id digest rc
+  home=$(make_home existing-marker-generation)
+  id=scout-existing-marker-generation
+  write_scout "$home" "$id" "$home/copies/missing"
+  digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  write_retirement_marker "$home/state" "$id" "firstmate:fm-$id" "$digest"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "existing marker for a different metadata generation was accepted"
+  assert_grep "names a different metadata generation" "$home/err" \
+    "existing-marker generation refusal was not concrete"
+  assert_present "$home/state/$id.meta" "existing-marker generation refusal removed metadata"
+  pass "record retirement binds an existing marker to the same metadata generation"
+}
+
+test_status_presentation_failure_refuses_before_marker() {
+  local home id outside rc
+  home=$(make_home status-presentation-failure)
+  id=scout-status-presentation-failure
+  write_scout "$home" "$id" "$home/copies/missing"
+  outside="$home/outside-status-cursor"
+  printf 'other\tident\t0\n' > "$outside"
+  ln -s "$outside" "$home/state/.status-presentation-cursor"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "unsafe status-presentation state was ignored"
+  assert_grep "status presentation state could not be retired safely" "$home/err" \
+    "status-presentation refusal was not concrete"
+  assert_present "$home/state/$id.meta" "status-presentation refusal removed metadata"
+  assert_absent "$home/state/.record-retired-$id" \
+    "status-presentation refusal published a retirement marker"
+  pass "status-presentation retirement must succeed before marker publication"
+}
+
+test_busy_generation_mismatch_refuses() {
+  local home id rc
+  home=$(make_home busy-generation-mismatch)
+  id=scout-busy-generation-mismatch
+  write_scout "$home" "$id" "$home/copies/missing"
+  printf 'busy_gen=metadata-gen\n' >> "$home/state/$id.meta"
+  printf 'sidecar-gen\n' > "$home/state/$id.busy-gen"
+  printf 'v1 gen=sidecar-gen seq=1 state=idle source=test event=test ts=1\n' \
+    > "$home/state/$id.busy-state"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "mismatched busy-state incarnation was retired"
+  assert_grep "busy-state incarnation could not be retired safely" "$home/err" \
+    "busy-generation refusal was not concrete"
+  assert_present "$home/state/$id.meta" "busy-generation refusal removed metadata"
+  assert_present "$home/state/$id.busy-state" "busy-generation refusal removed busy state"
+  pass "record retirement refuses a mismatched busy-state incarnation"
+}
+
+test_marker_publication_failure_refuses() {
+  local home id rc
+  home=$(make_home marker-publication-failure)
+  id=scout-marker-publication-failure
+  write_scout "$home" "$id" "$home/copies/missing"
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'for arg in "$@"; do' \
+    '  case "$arg" in *.record-retired-*) exit 75 ;; esac' \
+    'done' \
+    'exec /bin/mv "$@"' > "$home/fakebin/mv"
+  chmod +x "$home/fakebin/mv"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "failed retirement-marker publication was ignored"
+  assert_grep "record-retirement marker could not be published safely" "$home/err" \
+    "marker-publication refusal was not concrete"
+  assert_present "$home/state/$id.meta" "marker-publication refusal removed metadata"
+  assert_absent "$home/state/.record-retired-$id" \
+    "failed marker publication left a retirement marker"
+  pass "record retirement refuses when its marker cannot be published"
+}
+
+test_wake_queue_must_be_regular() {
+  local home id outside rc
+  home=$(make_home unsafe-wake-queue)
+  id=scout-unsafe-wake-queue
+  write_scout "$home" "$id" "$home/copies/missing"
+  outside="$home/outside-wake-queue"
+  printf '1\t1\theartbeat\theartbeat\theartbeat\n' > "$outside"
+  ln -s "$outside" "$home/state/.wake-queue"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "symlinked wake queue was accepted"
+  assert_grep "task wake rows could not be retired safely" "$home/err" \
+    "wake-queue identity refusal was not concrete"
+  assert_present "$home/state/$id.meta" "wake-queue identity refusal removed metadata"
+  assert_content "$outside" $'1\t1\theartbeat\theartbeat\theartbeat' \
+    "wake-queue identity refusal changed the symlink target"
+  pass "record retirement requires a regular single-link wake queue"
+}
+
+test_wake_queue_rewrite_failure_refuses() {
+  local home id rc
+  home=$(make_home wake-queue-rewrite-failure)
+  id=scout-wake-queue-rewrite-failure
+  write_scout "$home" "$id" "$home/copies/missing"
+  printf '1\t1\theartbeat\theartbeat\theartbeat\n' > "$home/state/.wake-queue"
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'last=' \
+    'for arg in "$@"; do last=$arg; done' \
+    'case "$last" in */.wake-queue) exit 75 ;; esac' \
+    'exec /usr/bin/awk "$@"' > "$home/fakebin/awk"
+  chmod +x "$home/fakebin/awk"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "failed wake-queue rewrite was ignored"
+  assert_grep "task wake rows could not be retired safely" "$home/err" \
+    "wake-queue rewrite refusal was not concrete"
+  assert_present "$home/state/$id.meta" "wake-queue rewrite refusal removed metadata"
+  assert_content "$home/state/.wake-queue" $'1\t1\theartbeat\theartbeat\theartbeat' \
+    "failed wake-queue rewrite changed the queue"
+  pass "record retirement refuses when wake-queue rewriting fails"
+}
+
+test_pr_poll_recovery_failure_refuses() {
+  local home id rc
+  home=$(make_home pr-poll-recovery-failure)
+  id=scout-pr-poll-recovery-failure
+  write_scout "$home" "$id" "$home/copies/missing"
+  printf 'invalid retirement receipt\n' > "$home/state/$id.pr-poll-retirement"
+  set +e
+  run_retire "$home" "$id" --work-safety scout-report > "$home/out" 2> "$home/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "unreconciled PR-poll retirement state was ignored"
+  assert_grep "PR-poll retirement state could not be reconciled safely" "$home/err" \
+    "PR-poll recovery refusal was not concrete"
+  assert_present "$home/state/$id.meta" "PR-poll recovery refusal removed metadata"
+  pass "record retirement refuses unreconciled PR-poll retirement state"
+}
+
 run_test() {  # <test-function>
   [ -z "${FM_RECORD_RETIRE_TEST_ONLY:-}" ] \
     || [ "$FM_RECORD_RETIRE_TEST_ONLY" = "$1" ] \
@@ -935,6 +1963,58 @@ run_test test_metadata_busy_and_quarantine_guards
 run_test test_task_set_and_directory_guards
 run_test test_task_id_guard
 run_test test_marker_integrity_and_fail_open_guards
+run_test test_marker_requires_exact_line_count
+run_test test_marker_requires_exact_schema
+run_test test_marker_requires_nonempty_window
+run_test test_marker_rejects_control_window
+run_test test_marker_publish_rejects_invalid_id
+run_test test_marker_publish_rejects_empty_window
+run_test test_marker_publish_rejects_control_window
+run_test test_marker_publish_rejects_invalid_digest
+run_test test_marker_republish_requires_same_window
+run_test test_marker_republish_requires_same_digest
+run_test test_marker_publish_verifies_the_published_file
+run_test test_marker_clear_accepts_absent_marker
+run_test test_marker_clear_removes_valid_marker_and_restores_wakes
+run_test test_marker_does_not_mute_unrecognized_signal_key
+run_test test_marker_does_not_mute_foreign_check_path
+run_test test_marker_never_mutes_stale_wake
+run_test test_marker_does_not_mute_unknown_wake_kind
+run_test test_retired_marker_hides_full_open_decision_scan
+run_test test_retired_marker_hides_incremental_open_decision_scan
+run_test test_retired_marker_hides_status_snapshot
 run_test test_partial_wake_library_fails_open
 run_test test_partial_classify_library_fails_open
 run_test test_watcher_key_collision_refuses
+run_test test_unsupported_safety_mode_refuses
+run_test test_scout_report_rejects_remote_arguments
+run_test test_remote_ref_requires_both_arguments
+run_test test_symlinked_data_directory_refuses
+run_test test_gate_agent_refuses_before_retirement
+run_test test_task_set_lock_path_must_resolve
+run_test test_symlinked_metadata_refuses_before_locking
+run_test test_metadata_is_rechecked_after_lock_wait
+run_test test_metadata_window_rejects_control_characters
+run_test test_state_artifact_device_boundary_refuses
+run_test test_unsupported_task_kind_refuses
+run_test test_unsafe_other_metadata_refuses
+run_test test_locked_other_metadata_refuses
+run_test test_other_metadata_is_rechecked_after_lock
+run_test test_other_metadata_requires_exact_task_binding
+run_test test_other_metadata_filename_must_match_binding
+run_test test_other_metadata_requires_exact_window
+run_test test_remote_ref_requires_full_namespace
+run_test test_runtime_binding_directory_must_be_safe
+run_test test_runtime_binding_record_must_be_safe
+run_test test_procevent_binding_must_be_settled
+run_test test_pending_reply_binding_must_be_settled
+run_test test_quarantine_directory_must_be_safe
+run_test test_marker_digest_requires_sha256_support
+run_test test_existing_marker_requires_same_window
+run_test test_existing_marker_requires_same_metadata_generation
+run_test test_status_presentation_failure_refuses_before_marker
+run_test test_busy_generation_mismatch_refuses
+run_test test_marker_publication_failure_refuses
+run_test test_wake_queue_must_be_regular
+run_test test_wake_queue_rewrite_failure_refuses
+run_test test_pr_poll_recovery_failure_refuses
