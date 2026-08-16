@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Run the owned mutation population for sovereign-ledger redundancy enforcement.
+# Mutation anchors and Markdown code spans intentionally preserve shell expressions as literal data.
+# shellcheck disable=SC2016
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
