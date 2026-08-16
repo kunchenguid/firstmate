@@ -815,7 +815,7 @@ test_no_run_busy_pane() {
   pass "no run + a busy semantic record reads working, attributed to its source"
 }
 
-test_codex_deadline_states_end_to_end() {
+test_codex_appserver_states_end_to_end() {
   reset_fakes
   local d gen out
   d=$(new_case codex-deadline-states)
@@ -824,21 +824,28 @@ test_codex_deadline_states_end_to_end() {
   fm_write_meta "$d/state/codex-state.meta" \
     "window=fm:fm-codex-state" "worktree=$d/wt" "kind=ship" "harness=codex"
   FM_FAKE_CODEX_VERSION='codex-cli 0.147.0'
-  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" codex-state --deadline-secs 60)
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" codex-state \
+    --state unknown --source codex-appserver --event launch-pending)
 
+  out=$(run_crew_state "$d" codex-state)
+  assert_contains "$out" "state: unknown" "Codex without protocol evidence must stay unknown"
+  assert_contains "$out" "codex-launch-pending" "the unknown launch must name its missing evidence"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" codex-state busy --gen "$gen" \
+    --source codex-appserver --event turn-started --deadline-secs 60
   out=$(run_crew_state "$d" codex-state)
   assert_contains "$out" "state: working" "a deadline-bound real Codex open must read working"
-  assert_contains "$out" "harness busy (fm-spawn)" "the Codex working verdict must name its semantic source"
+  assert_contains "$out" "harness busy (codex-appserver)" "the Codex working verdict must name its semantic source"
 
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" codex-state idle --gen "$gen" \
-    --source codex-hook --event stop
+    --source codex-appserver --event turn-completed
   printf 'done: Codex turn completed successfully\n' > "$d/state/codex-state.status"
   out=$(run_crew_state "$d" codex-state)
-  assert_contains "$out" "state: done" "a Codex Stop must permit the successful status result"
+  assert_contains "$out" "state: done" "joined Codex success must permit the successful status result"
   assert_contains "$out" "source: status-log" "a successfully closed Codex turn must fall through to its result"
 
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" codex-state busy --gen "$gen" \
-    --source codex-hook --event user-prompt-submit --deadline-secs 60
+    --source codex-appserver --event turn-started --deadline-secs 60
   sed -E 's/deadline=[0-9]+$/deadline=1/' "$d/state/codex-state.busy-state" \
     > "$d/state/codex-state.busy-state.expired"
   mv "$d/state/codex-state.busy-state.expired" "$d/state/codex-state.busy-state"
@@ -851,7 +858,13 @@ test_codex_deadline_states_end_to_end() {
   out=$(run_crew_state "$d" codex-state)
   assert_contains "$out" "state: unknown" "a dead Codex endpoint with no run must surface unknown"
   assert_contains "$out" "backend target gone" "a dead Codex endpoint must name its lost target"
-  pass "fm-crew-state distinguishes Codex working, successful, deadline-expired, and dead states"
+  FM_FAKE_TMUX_MISSING=0
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" codex-state unknown --gen "$gen" \
+    --source codex-appserver --event timeout
+  out=$(run_crew_state "$d" codex-state)
+  assert_contains "$out" "codex-timeout" "an owning-client timeout must stay concrete"
+
+  pass "fm-crew-state distinguishes Codex launch, working, success, timeout, expiry, and dead states"
 }
 
 # A converted adapter must NOT read working from rendered footer text: the
@@ -1383,7 +1396,7 @@ test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
-test_codex_deadline_states_end_to_end
+test_codex_appserver_states_end_to_end
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture

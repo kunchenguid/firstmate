@@ -90,6 +90,9 @@ exclusion_reason() {
     fm-test-isolation-proof.test.sh)
       printf '%s\n' 'isolation-proof harness contract itself; must not re-enter concurrent matrix'
       ;;
+    fm-codex-appserver-client.test.sh)
+      printf '%s\n' 'owned process-group and timeout escalation fixture; keep serial until dedicated concurrent proof'
+      ;;
     fm-backend-tmux-smoke.test.sh)
       printf '%s\n' 'real tmux on a private socket; keep exclusive of default-server contention class'
       ;;

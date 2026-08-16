@@ -843,6 +843,19 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
   pass "fm-spawn --relaunch: switching away from cursor retires its session binding"
 }
 
+test_codex_appserver_receipt_is_retired_on_a_harness_switch() {
+  local dir
+  dir=$(new_case codexwiring rl36)
+  add_ship_task "$dir" rl36 codex
+  printf 'v1 outcome=success event=turn-completed\n' \
+    > "$dir/home/state/rl36.codex-appserver-result"
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl36 --relaunch --harness claude >/dev/null
+  [ ! -e "$dir/home/state/rl36.codex-appserver-result" ] \
+    || fail "the retired Codex incarnation's terminal receipt must not outlive it"
+  pass "fm-spawn --relaunch: switching away from Codex retires its terminal receipt"
+}
+
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
 test_missing_worktree_refuses_before_stopping_anything() {
@@ -1337,6 +1350,7 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
+test_codex_appserver_receipt_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical

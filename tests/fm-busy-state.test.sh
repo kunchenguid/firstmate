@@ -259,22 +259,21 @@ Ctrl+c:cancel')
 
 # --- kimi verification gate -----------------------------------------------------
 
-test_codex_version_gate_and_deadline() {
+test_codex_appserver_gate_and_deadline() {
   local state gen out
   state=$(new_state_dir codex-gate)
-  gen=$("$EV" arm "$state" t1)
-  "$EV" apply "$state" t1 busy --gen "$gen" --source codex-hook --event user-prompt-submit
+  gen=$("$EV" arm "$state" t1 --state unknown --source codex-appserver --event launch-pending)
   out=$(fm_busy_classify tmux w1 codex t1 "$state")
   [ "$out" = "unknown codex-unverified" ] || fail "unverified codex must classify unknown, got '$out'"
   [ -z "$(fm_busy_sources_for_harness codex)" ] \
     || fail "codex must trust no semantic source until one is verified"
 
   FM_FAKE_CODEX_VERSION='codex-cli 00.147.0'
-  fm_busy_codex_hooks_verified \
+  fm_busy_codex_appserver_observable \
     && fail "a Codex version with a non-canonical major component must stay unverified"
 
   FM_FAKE_CODEX_VERSION='codex-cli 0.147.00'
-  fm_busy_codex_hooks_verified \
+  fm_busy_codex_appserver_observable \
     && fail "a Codex version with a non-canonical patch component must stay unverified"
 
   FM_FAKE_CODEX_VERSION='codex-cli 0.147.0-beta.1'
@@ -282,15 +281,16 @@ test_codex_version_gate_and_deadline() {
   [ "$out" = "unknown codex-unverified" ] || fail "unexpected version syntax must stay unverified, got '$out'"
 
   FM_FAKE_CODEX_VERSION='codex-cli 0.147.0'
-  fm_busy_codex_hooks_verified || fail "canonical Codex 0.147.0 must pass the version gate"
+  fm_busy_codex_appserver_observable || fail "canonical Codex 0.147.0 must pass the app-server gate"
+  "$EV" apply "$state" t1 busy --gen "$gen" --source codex-appserver --event turn-started
   out=$(fm_busy_classify tmux w1 codex t1 "$state")
   [ "$out" = "unknown codex-deadline-missing" ] \
-    || fail "a verified Codex busy record without a deadline must surface unknown, got '$out'"
+    || fail "an app-server busy record without a deadline must surface unknown, got '$out'"
 
-  "$EV" apply "$state" t1 busy --gen "$gen" --source codex-hook \
-    --event user-prompt-submit --deadline-secs 30
+  "$EV" apply "$state" t1 busy --gen "$gen" --source codex-appserver \
+    --event turn-started --deadline-secs 30
   out=$(fm_busy_classify tmux w1 codex t1 "$state")
-  [ "$out" = "busy codex-hook" ] || fail "deadline-bound Codex turn must classify busy, got '$out'"
+  [ "$out" = "busy codex-appserver" ] || fail "deadline-bound Codex turn must classify busy, got '$out'"
 
   sed -E 's/deadline=[0-9]+$/deadline=1/' "$state/t1.busy-state" > "$state/t1.busy-state.expired"
   mv "$state/t1.busy-state.expired" "$state/t1.busy-state"
@@ -298,17 +298,15 @@ test_codex_version_gate_and_deadline() {
   [ "$out" = "unknown codex-deadline-expired" ] \
     || fail "an expired Codex turn must surface unknown, got '$out'"
 
-  "$EV" apply "$state" t1 idle --gen "$gen" --source codex-hook --event stop
+  "$EV" apply "$state" t1 unknown --gen "$gen" --source codex-appserver --event timeout
   out=$(fm_busy_classify tmux w1 codex t1 "$state")
-  [ "$out" = "unknown codex-hook" ] \
-    || fail "a late Stop must not turn an expired Codex turn into idle, got '$out'"
-  [ "$(fm_busy_record_read "$state" t1 | awk '{print $3}')" = deadline-expired ] \
-    || fail "the writer did not preserve the expired-deadline reason"
+  [ "$out" = "unknown codex-timeout" ] \
+    || fail "the owning client timeout must stay concrete, got '$out'"
 
   FM_FAKE_CODEX_VERSION='codex-cli 1.0.0'
-  fm_busy_codex_hooks_verified || fail "a strict later Codex version must pass the from-0.147.0 gate"
+  fm_busy_codex_appserver_observable || fail "a strict later Codex version must pass the from-0.147.0 gate"
   FM_FAKE_CODEX_VERSION='codex-cli 0.145.0'
-  pass "Codex version gating is strict and every verified open turn is deadline-bound"
+  pass "Codex app-server gating is strict and every verified open turn is deadline-bound"
 }
 
 test_kimi_unverified_gate() {
@@ -446,7 +444,7 @@ test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
-test_codex_version_gate_and_deadline
+test_codex_appserver_gate_and_deadline
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides

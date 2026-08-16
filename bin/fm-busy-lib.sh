@@ -31,8 +31,7 @@
 #   pi-ext           Pi/pi-signed per-task extension (agent_start/agent_settled)
 #   opencode-plugin  OpenCode per-task plugin (session.status)
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
-#   codex-hook, codex-appserver  reserved: Codex, gated by
-#                    fm_busy_codex_semantic_source
+#   codex-appserver  Firstmate's owning app-server protocol client
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
@@ -76,20 +75,23 @@
 # cleared. See fm_busy_cursor_turn_state for the fold. Cursor's rendered
 # `ctrl+c to stop` footer is deliberately not a state source here.
 #
-# Codex negotiation (fm_busy_codex_appserver_observable,
-# fm_busy_codex_hooks_verified): the approved contract prefers Codex's
-# app-server turn lifecycle with capability negotiation, and sanctions its
-# stable lifecycle hooks as the intermediate. Project hooks are verified from
-# codex-cli 0.147.0 onward, but Codex exposes no negative turn-close hook.
-# Every Codex turn-open record therefore carries an absolute deadline. A Stop
-# proves idle; a missing Stop stays busy only until that deadline, then becomes
-# unknown codex-deadline-expired so supervision cannot absorb it forever.
+# Codex negotiation (fm_busy_codex_appserver_observable): Firstmate launches
+# bin/fm-codex-appserver-client.mjs as the client that owns both the protocol
+# connection and one app-server process group per turn. The client publishes a
+# positive busy record only after matching turn/started plus
+# thread/status/changed(active), and publishes idle only after a matching
+# turn/completed(completed) plus clean child exit. Every open record keeps the
+# deadline field introduced by the earlier deadline-aware hook repair, so a
+# crashed supervisor still degrades to codex-deadline-expired rather than
+# preserving stale busy. Hooks are no longer a Codex state source because they
+# omit API-error and manual-interrupt terminals.
 # docs/verification/supervision.md owns the evidence for both probes.
 #
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
 
 FM_BUSY_LIB_VERSION=v1
 FM_BUSY_CODEX_TURN_DEADLINE_SECS=${FM_BUSY_CODEX_TURN_DEADLINE_SECS:-28800}
+FM_BUSY_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)
 
 # Standalone-Kimi verification gate. Empty means no installed Kimi version
 # has passed live verification, so every standalone Kimi task classifies
@@ -115,28 +117,12 @@ fm_busy_kimi_verified() {
   [ -n "$FM_BUSY_KIMI_VERIFIED_VERSIONS" ]
 }
 
-# fm_busy_codex_appserver_observable: capability/version negotiation for the
-# Codex app-server turn lifecycle. Returns 0 only when a pane worker's turns
-# are observable through the app-server protocol on the installed binary.
-# codex-cli 0.145.0 verdict (live, 2026-07-28): NOT observable. The v2
-# protocol does define the needed turn lifecycle (turn/started plus a
-# turn/completed status of completed, interrupted, failed, or inProgress),
-# but an interactive TUI worker neither starts nor attaches to the
-# app-server daemon, and `codex app-server daemon start` refuses outside the
-# managed standalone install, so no client can observe a pane worker's turns.
-fm_busy_codex_appserver_observable() {
-  return 1
-}
-
-# fm_busy_codex_hooks_verified: the sanctioned intermediate - Codex's stable
-# hooks engine (UserPromptSubmit opens a deadline-bound turn and Stop proves a
-# successful close). Returns 0 only for a strict installed `codex-cli X.Y.Z`
-# version at or above the first live-verified release. codex-cli 0.145.0 did
-# not fire project hooks; 0.147.0 does in exec and interactive workers.
-# Unreadable, unexpected, prerelease, or older version output stays
-# conservative. Codex exposes no StopFailure, and API error or interruption
-# emits no Stop, which is why this gate is usable only with the deadline fold.
-fm_busy_codex_hooks_verified() {
+# fm_busy_codex_version_supported: strict version negotiation for the first
+# app-server release exercised end to end by this adapter. Unexpected,
+# prerelease, noncanonical, unreadable, or older output fails closed. A later
+# stable version may enter the client, but its initialize/thread/turn handshake
+# must still succeed before any positive busy verdict is published.
+fm_busy_codex_version_supported() {
   local version major minor patch
   version=$(codex --version 2>/dev/null) || return 1
   if [[ ! "$version" =~ ^codex-cli[[:space:]]+(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
@@ -155,11 +141,22 @@ fm_busy_codex_hooks_verified() {
   [ "$minor" -eq 147 ] && [ "$patch" -ge 0 ]
 }
 
-# fm_busy_codex_semantic_source: 0 when ANY verified Codex semantic source
-# exists. fm-spawn arms and wires Codex only behind this gate, and the
-# classifier reports unknown codex-unverified until it opens.
+# fm_busy_codex_appserver_observable: 0 only when the owning client and its
+# local runtime prerequisites are available for a supported Codex version.
+# This is a launch-capability gate, not a positive turn verdict: only the live
+# protocol client may publish one of those.
+fm_busy_codex_appserver_observable() {
+  fm_busy_codex_version_supported || return 1
+  command -v node >/dev/null 2>&1 || return 1
+  [ -n "$FM_BUSY_LIB_DIR" ] || return 1
+  [ -x "$FM_BUSY_LIB_DIR/fm-codex-appserver-client.mjs" ]
+}
+
+# fm_busy_codex_semantic_source: the ONE Codex source resolver. Hooks are not
+# an alternative arm: every Codex worker state read passes through the owning
+# app-server client or stays unknown codex-unverified.
 fm_busy_codex_semantic_source() {
-  fm_busy_codex_appserver_observable || fm_busy_codex_hooks_verified
+  fm_busy_codex_appserver_observable
 }
 
 fm_busy_record_path() {  # <state-dir> <id>
@@ -204,7 +201,7 @@ fm_busy_sources_for_harness() {  # <harness>
     claude*) adapter=claude-hook ;;
     codex*)
       fm_busy_codex_semantic_source || { printf ''; return 0; }
-      adapter='codex-hook codex-appserver'
+      adapter=codex-appserver
       ;;
     opencode*) adapter=opencode-plugin ;;
     pi|pi-signed) adapter=pi-ext ;;
@@ -857,7 +854,7 @@ fm_busy_grok_tail_busy() {
 # if available, else reports unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
-  local out rc r_state r_source r_deadline native log now
+  local out rc r_state r_source r_event r_deadline native log now
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then
@@ -895,6 +892,8 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     r_state=${out%% *}
     out=${out#* }
     r_source=${out%% *}
+    out=${out#* }
+    r_event=${out%% *}
     if fm_busy_source_trusted "$harness" "$r_source"; then
       case "$harness:$r_state" in
         codex*:busy)
@@ -909,6 +908,12 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
           }
           if [ "$now" -ge "$r_deadline" ]; then
             printf 'unknown codex-deadline-expired'
+            return 0
+          fi
+          ;;
+        codex*:unknown)
+          if [ "$r_source" = codex-appserver ]; then
+            printf 'unknown codex-%s' "$r_event"
             return 0
           fi
           ;;

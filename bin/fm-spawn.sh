@@ -154,8 +154,12 @@
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
-#     __CODEXHOOKS__ per-launch inline lifecycle hooks when the installed Codex
-#                    version passes the semantic-source gate; empty otherwise
+#     __CODEXCLIENT__ absolute path to Firstmate's owning app-server client
+#     __STATE__       absolute path to this home's state directory
+#     __TASKID__      canonical task id
+#     __BUSYGEN__     armed semantic busy-state generation
+#     __TASKTMP__     short /tmp/fm-<id> path for bounded app-server stderr
+#     __CODEXDEADLINE__ absolute per-turn deadline duration in seconds
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
@@ -1076,10 +1080,6 @@ shell_quote() {
   printf "'"
 }
 
-toml_basic_escape() {
-  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
-}
-
 resolve_pi_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
@@ -1120,9 +1120,9 @@ launch_template() {
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXHOOKS__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXHOOKS__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__CODEXCLIENT__ --state-dir __STATE__ --task-id __TASKID__ --generation __BUSYGEN__ --cwd __WORKTREE__ --task-tmp __TASKTMP__ --turn-ended __TURNEND__ --deadline-secs __CODEXDEADLINE__ __MODELFLAG____EFFORTFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -2307,7 +2307,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
-CODEX_HOOK_FLAGS=
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
@@ -2326,20 +2325,22 @@ if [ "$KIND" != secondmate ]; then
       [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
       ;;
     codex*)
-      if fm_busy_codex_hooks_verified; then
-        case "$FM_BUSY_CODEX_TURN_DEADLINE_SECS" in
-          ''|0|0*|*[!0-9]*)
-            echo "error: invalid Codex turn deadline: $FM_BUSY_CODEX_TURN_DEADLINE_SECS" >&2
-            exit 1
-            ;;
-        esac
-        BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID" \
-          --deadline-secs "$FM_BUSY_CODEX_TURN_DEADLINE_SECS") || {
-          echo "error: failed to arm the deadline-bound Codex busy-state contract for $ID" >&2
+      fm_busy_codex_appserver_observable || {
+        echo "error: Codex app-server owning client is unavailable for the installed Codex version; refusing an unobservable Codex worker" >&2
+        exit 1
+      }
+      case "$FM_BUSY_CODEX_TURN_DEADLINE_SECS" in
+        ''|0|0*|*[!0-9]*)
+          echo "error: invalid Codex turn deadline: $FM_BUSY_CODEX_TURN_DEADLINE_SECS" >&2
           exit 1
-        }
-        [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
-      fi
+          ;;
+      esac
+      BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID" \
+        --state unknown --source codex-appserver --event launch-pending) || {
+        echo "error: failed to arm the Codex app-server busy-state contract for $ID" >&2
+        exit 1
+      }
+      [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
       ;;
     kimi*)
       # Standalone Kimi stays unknown until fm_busy_kimi_verified opens on a
@@ -2353,28 +2354,6 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    codex*)
-      if [ -n "$BUSY_GEN" ]; then
-        # Codex 0.147.0+ runs project lifecycle hooks, but has no negative
-        # per-turn close: API errors and manual interrupts omit Stop. Inline
-        # config keeps the generated task hooks separate from every project
-        # hook file. UserPromptSubmit opens with an absolute deadline, Stop is
-        # the only successful close, and SessionEnd is unknown rather than an
-        # invented success. A missing close expires to a surfaced unknown in
-        # fm-busy-lib.sh; the writer rejects a Stop that arrives after expiry.
-        busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
-        busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source codex-hook"
-        codex_submit="$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit --deadline-secs $FM_BUSY_CODEX_TURN_DEADLINE_SECS 2>/dev/null || true"
-        codex_stop="$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true"
-        codex_sessionend="$busy_cmd_prefix unknown $busy_suffix --event session-end 2>/dev/null || true"
-        codex_submit_toml=$(toml_basic_escape "$codex_submit")
-        codex_stop_toml=$(toml_basic_escape "$codex_stop")
-        codex_sessionend_toml=$(toml_basic_escape "$codex_sessionend")
-        CODEX_HOOK_FLAGS="--dangerously-bypass-hook-trust -c $(shell_quote "hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=\"$codex_submit_toml\"}]}]") "
-        CODEX_HOOK_FLAGS="$CODEX_HOOK_FLAGS-c $(shell_quote "hooks.Stop=[{hooks=[{type=\"command\",command=\"$codex_stop_toml\"}]}]") "
-        CODEX_HOOK_FLAGS="$CODEX_HOOK_FLAGS-c $(shell_quote "hooks.SessionEnd=[{hooks=[{type=\"command\",command=\"$codex_sessionend_toml\"}]}]") "
-      fi
-      ;;
     claude*)
       # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
       # a turn; Stop (normal completion), StopFailure (API-error turn end),
@@ -2739,13 +2718,21 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+sq_state=$(shell_quote "$STATE_REAL")
+sq_tasktmp=$(shell_quote "$TASK_TMP")
+sq_codex_client=$(shell_quote "$FM_ROOT/bin/fm-codex-appserver-client.mjs")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
-LAUNCH=${LAUNCH//__CODEXHOOKS__/$CODEX_HOOK_FLAGS}
+LAUNCH=${LAUNCH//__CODEXCLIENT__/$sq_codex_client}
+LAUNCH=${LAUNCH//__STATE__/$sq_state}
+LAUNCH=${LAUNCH//__TASKID__/$ID}
+LAUNCH=${LAUNCH//__BUSYGEN__/${BUSY_GEN:-}}
+LAUNCH=${LAUNCH//__TASKTMP__/$sq_tasktmp}
+LAUNCH=${LAUNCH//__CODEXDEADLINE__/$FM_BUSY_CODEX_TURN_DEADLINE_SECS}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}

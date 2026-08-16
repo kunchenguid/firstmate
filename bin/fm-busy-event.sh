@@ -25,8 +25,6 @@
 #       Claude fm-send --key Escape path (fm-interrupt) and firstmate recovery
 #       paths (fm-recovery) may pass --current-gen to bind to the incarnation
 #       armed right now.
-#       A Codex Stop arriving after its prior open deadline records unknown
-#       deadline-expired instead of rewriting the timed-out turn as idle.
 #
 #   retire <state-dir> <id> (--gen G | --current-gen)
 #       Remove one incarnation's sidecar and record while holding the same
@@ -216,29 +214,6 @@ if [ -f "$REC" ]; then
       case "$old_seq_field" in
         ''|*[!0-9]*) OLD_SEQ=0 ;;
         *) OLD_SEQ=$old_seq_field ;;
-      esac
-      ;;
-  esac
-fi
-if [ "$NEW_STATE" = idle ] && [ "$SOURCE" = codex-hook ]; then
-  case "$old_line" in
-    *' state=busy '*deadline=none)
-      NEW_STATE=unknown
-      EVENT=deadline-missing
-      ;;
-    *' state=busy '*deadline=*)
-      old_deadline=${old_line##* deadline=}
-      case "$old_deadline" in
-        ''|*[!0-9]*)
-          NEW_STATE=unknown
-          EVENT=deadline-missing
-          ;;
-        *)
-          if [ "$(date +%s)" -ge "$old_deadline" ]; then
-            NEW_STATE=unknown
-            EVENT=deadline-expired
-          fi
-          ;;
       esac
       ;;
   esac

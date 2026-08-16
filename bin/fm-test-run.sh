@@ -136,7 +136,7 @@ family_for_basename() {
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
-    fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
+    fm-composer-ghost.test.sh|fm-composer-lib.test.sh|fm-codex-appserver-client.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
@@ -397,6 +397,7 @@ tests/fm-calm-pi-extension.test.sh 203
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 19
 tests/fm-claude-stop-autoarm.test.sh 60521
 tests/fm-codex-continuity-live-e2e.test.sh 19
+tests/fm-codex-appserver-client.test.sh 6000
 tests/fm-codex-liveness-live-e2e.test.sh 19
 tests/fm-daemon.test.sh 15140
 tests/fm-documentation-audiences.test.sh 572
@@ -945,6 +946,11 @@ families_for_changed_path() {
       # portable families.
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-codex-appserver-client.mjs|bin/fm-busy-lib.sh|bin/fm-busy-event.sh)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' backend-dispatch
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\

@@ -329,18 +329,19 @@ test_claude_hooks_stale_incarnation_harmless() {
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
-test_codex_version_gated_deadline_wiring() {
+test_codex_owning_appserver_wiring() {
   local rec id=busy-cx-1 out state
   FM_FAKE_CODEX_VERSION='codex-cli 0.145.0'
   export FM_FAKE_CODEX_VERSION
   rec=$(make_spawn_case codex-unverified codex "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
-  expect_code 0 $? "codex spawn should succeed: $out"
+  expect_code 1 $? "unobservable codex spawn must refuse: $out"
   state="$HOME_DIR/state"
   assert_absent "$state/$id.busy-gen" "codex must not arm a busy contract with no verified semantic source"
   assert_absent "$WT_DIR/.codex/hooks.json" "codex must not install unverified busy hooks"
-  assert_contains "$out" 'spawned '"$id"' harness=codex' "codex spawn did not complete normally"
+  assert_contains "$out" 'refusing an unobservable Codex worker' \
+    "unobservable Codex refusal did not name the missing owning client"
   out=$(classify codex "$id" "$state")
   [ "$out" = "unknown codex-unverified" ] || fail "codex must classify 'unknown codex-unverified', got '$out'"
   out=$(PATH="$FAKEBIN_DIR:$PATH" fm_busy_classify tmux fake:w codex "$id" "$state" '• Working (6s • esc to interrupt)')
@@ -354,34 +355,36 @@ test_codex_version_gated_deadline_wiring() {
   expect_code 0 $? "verified codex spawn should succeed: $out"
   state="$HOME_DIR/state"
   assert_present "$state/$id.busy-gen" "verified Codex did not arm its busy generation"
-  assert_absent "$WT_DIR/.codex/hooks.json" "inline Codex wiring must not overwrite project hook files"
+  assert_absent "$WT_DIR/.codex/hooks.json" "app-server wiring must not overwrite project hook files"
   out=$(classify codex "$id" "$state")
-  [ "$out" = "busy fm-spawn" ] || fail "deadline-bound spawn must classify busy, got '$out'"
-  assert_contains "$(cat "$HOME_DIR/tmux-launch")" 'hooks.UserPromptSubmit=' "Codex launch omitted its open hook"
-  assert_contains "$(cat "$HOME_DIR/tmux-launch")" '--dangerously-bypass-hook-trust' \
-    "Codex launch did not authorize its generated inline hooks"
-  assert_contains "$(cat "$HOME_DIR/tmux-launch")" 'hooks.Stop=' "Codex launch omitted its successful close hook"
-  assert_contains "$(cat "$HOME_DIR/tmux-launch")" 'hooks.SessionEnd=' "Codex launch omitted its session-loss hook"
-  assert_contains "$(cat "$HOME_DIR/tmux-launch")" ' unknown --gen ' \
-    "Codex SessionEnd hook does not surface an unknown state"
-  assert_contains "$(cat "$HOME_DIR/tmux-launch")" '--deadline-secs 60' "Codex open hook omitted its deadline"
-  assert_contains "$(cat "$HOME_DIR/tmux-launch")" '--gen ' "Codex hooks omit generation binding"
+  [ "$out" = "unknown codex-launch-pending" ] \
+    || fail "a launch without protocol evidence must stay unknown, got '$out'"
+  assert_contains "$(cat "$HOME_DIR/tmux-launch")" 'fm-codex-appserver-client.mjs' \
+    "Codex launch omitted the owning app-server client"
+  assert_not_contains "$(cat "$HOME_DIR/tmux-launch")" 'hooks.UserPromptSubmit=' \
+    "Codex launch retained the incomplete hook source beside the app-server owner"
+  assert_contains "$(cat "$HOME_DIR/tmux-launch")" '--deadline-secs 60' \
+    "Codex app-server client omitted its deadline"
+  assert_contains "$(cat "$HOME_DIR/tmux-launch")" '--generation ' \
+    "Codex app-server client omitted generation binding"
   assert_contains "$(cat "$HOME_DIR/tmux-launch")" "$(cat "$state/$id.busy-gen")" \
-    "Codex hooks are not bound to the armed generation"
+    "Codex app-server client is not bound to the armed generation"
 
-  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle --current-gen \
-    --source codex-hook --event stop
-  out=$(classify codex "$id" "$state")
-  [ "$out" = "idle codex-hook" ] || fail "Codex Stop must classify idle, got '$out'"
   "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --current-gen \
-    --source codex-hook --event user-prompt-submit --deadline-secs 60
+    --source codex-appserver --event turn-started --deadline-secs 60
   out=$(classify codex "$id" "$state")
-  [ "$out" = "busy codex-hook" ] || fail "next deadline-bound Codex turn must classify busy, got '$out'"
+  [ "$out" = "busy codex-appserver" ] \
+    || fail "the protocol turn open must classify busy, got '$out'"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle --current-gen \
+    --source codex-appserver --event turn-completed
+  out=$(classify codex "$id" "$state")
+  [ "$out" = "idle codex-appserver" ] \
+    || fail "the joined protocol and process success must classify idle, got '$out'"
   "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" unknown --current-gen \
-    --source codex-hook --event session-end
+    --source codex-appserver --event timeout
   out=$(classify codex "$id" "$state")
-  [ "$out" = "unknown codex-hook" ] || fail "Codex SessionEnd must surface unknown, got '$out'"
-  pass "Codex wiring is version-gated, inline, generation-bound, and deadline-bound"
+  [ "$out" = "unknown codex-timeout" ] || fail "Codex timeout must surface concretely, got '$out'"
+  pass "Codex wiring is version-gated, owning-client-only, generation-bound, and deadline-bound"
   FM_FAKE_CODEX_VERSION='codex-cli 0.145.0'
 }
 
@@ -407,6 +410,6 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
-test_codex_version_gated_deadline_wiring
+test_codex_owning_appserver_wiring
 
 echo "all fm-busy-adapter-wiring tests passed"

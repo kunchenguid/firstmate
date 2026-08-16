@@ -181,7 +181,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
 | OpenCode | 1.17.18 | Plugin `session.status` | In a real TUI pane: seed, then `busy source=opencode-plugin event=session-busy`, then `idle source=opencode-plugin event=session-status-idle`. |
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
-| Codex | codex-cli 0.147.0 | Per-launch inline `UserPromptSubmit`, `Stop`, and `SessionEnd` hooks plus an absolute deadline | The spawn seed and `UserPromptSubmit` classify busy only while their deadline is live; `Stop` classifies idle; API error and manual interruption omit `Stop`, so they surface as unknown when `SessionEnd` fires or the deadline expires. Strict older or unexpected versions remain `unknown codex-unverified`. |
+| Codex | codex-cli 0.147.0 | Firstmate-owned `codex app-server` protocol pipes plus the owned child process result | `thread/status/changed(active)` and `turn/started` classify busy. Only `turn/completed(completed)` plus a clean child exit classify idle. Failed, interrupted, timed-out, incomplete, or disagreeing protocol/process results classify a concrete unknown. Strict older or unexpected versions remain `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
 
@@ -214,8 +214,10 @@ codex --no-alt-screen --dangerously-bypass-hook-trust \
 The successful exec returned exit 0 and emitted `SessionStart -> UserPromptSubmit -> Stop -> SessionEnd` plus `turn.completed`.
 The invalid-model exec returned exit 1 and emitted `SessionStart -> UserPromptSubmit -> SessionEnd`, `error`, and `turn.failed`, with no `Stop` or `StopFailure`.
 The interactive turn was interrupted with the adapter-owned single Escape and emitted only `SessionStart -> UserPromptSubmit`; it returned to the prompt with no `Stop`, and `/quit` later added `SessionEnd`.
-The repair therefore enables hooks only for strict installed versions from 0.147.0 onward, embeds an eight-hour absolute deadline in every open record, accepts `Stop` as the only successful close, and turns an unclosed expired turn into `unknown codex-deadline-expired`.
-The hook configuration rides per-launch `-c hooks.<event>=...` overrides with the automation-only `--dangerously-bypass-hook-trust` acknowledgement, so it composes with and never rewrites project hook files; the official hook contract confirms that matching hooks from multiple sources all run: `https://learn.chatgpt.com/docs/hooks`.
+Those hook findings establish why hooks cannot own Codex worker liveness: API failure and manual interruption leave no reliable closing hook.
+The replacement makes Firstmate the client of one foreground `codex app-server` child process group per turn, with JSONL protocol pipes and bounded stderr under the short `/tmp/fm-<id>` task directory.
+It publishes success only after the matching terminal protocol event and child result agree, and it refuses missing, failed, interrupted, or contradictory evidence.
+An explicit absolute deadline is the only hang detector; expiry requests `turn/interrupt`, then escalates TERM and KILL only to the exact process group the client created, and records `unknown codex-timeout`.
 
 Deterministic entry points:
 
@@ -223,6 +225,7 @@ Deterministic entry points:
 tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
+tests/fm-codex-appserver-client.test.sh
 FM_CODEX_LIVENESS_LIVE_E2E=1 tests/fm-codex-liveness-live-e2e.test.sh
 ```
 
