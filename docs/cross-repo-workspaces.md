@@ -57,7 +57,7 @@ It exists so the captain (or one agent the captain drives directly) can design a
 Layout under the firstmate home:
 
 ```
-data/<umbrella-id>/
+data/umbrellas/<umbrella-id>/
   DESIGN.md            the cross-repo contract being designed; the durable output
   AGENTS.md            how the repos relate, for whichever agent works here
   repos/
@@ -71,7 +71,7 @@ Properties:
 - Each `repos/<name>/` is a real worktree of that repo, created directly with `git worktree add --detach` against the `projects/<name>` clone at a clean default-branch base, distinct from every primary checkout - the same isolation firstmate already guarantees for a single task worktree. (The treehouse pool is deliberately not used; that is the supervised-crew path, not the lab path.)
 - No autonomous worker is launched and no merge poll is armed.
   The umbrella is a laboratory; there is nothing for teardown or pr-check to reason about because there is no branch to land yet.
-- The captain enters the umbrella and runs their own coding-agent session there (`cd data/<umbrella-id> && claude`), or firstmate spawns one worker scoped to the whole umbrella dir for a design/scout deliverable.
+- The captain enters the umbrella and runs their own coding-agent session there (`cd data/umbrellas/<umbrella-id> && claude`), or firstmate spawns one worker scoped to the whole umbrella dir for a design/scout deliverable.
   AGENTS.md already treats direct captain work in a pane as authoritative, so this is a first-class mode, not a bypass.
 
 The umbrella's job is finished when it produces a **concrete contract that can land first**: an OpenAPI spec, a proto file, a shared types package, a schema migration - something mergeable into the shared repo on its own.
@@ -95,7 +95,7 @@ Because children are ordinary tasks, the captain keeps full firstmate control of
 
 ## 5. The full flow
 
-1. **Umbrella (you-drive design).** Firstmate stands up `data/<umbrella-id>/` with worktrees of the involved repos and an empty DESIGN.md.
+1. **Umbrella (you-drive design).** Firstmate stands up `data/umbrellas/<umbrella-id>/` with worktrees of the involved repos and an empty DESIGN.md.
    The captain drives one session across all of them and produces DESIGN.md plus a contract artifact.
 2. **Land the contract first.** The contract artifact ships as its own ordinary task into the shared repo and merges before anything depends on it.
    Now the contract is real code on `main`, not prose in a brief.
@@ -111,9 +111,9 @@ The captain drives exactly the phase that needs them and delegates exactly the p
 Creates and tears down umbrella workspaces.
 
 - `fm-umbrella.sh create <umbrella-id> --repos <name>,<name>,...`
-  - For each named repo, resolved directly to its clone at `projects/<name>`, create a worktree with `git worktree add --detach` at the fetched default-branch tip into `data/<umbrella-id>/repos/<name>/`.
+  - For each named repo, resolved directly to its clone at `projects/<name>`, create a worktree with `git worktree add --detach` at the fetched default-branch tip into `data/umbrellas/<umbrella-id>/repos/<name>/`.
   - Write a skeleton `DESIGN.md` and a cross-repo `AGENTS.md` describing the repo relationships.
-  - Record `data/<umbrella-id>/umbrella.meta` (deliberately under `data/`, NOT `state/<id>.meta`, so no single-repo task/watcher/teardown/pr-check scan ever sees it) with `kind=umbrella` and one `worktree_<name>=<path>` line per repo.
+  - Record `data/umbrellas/<umbrella-id>/umbrella.meta` (deliberately under the gitignored `data/umbrellas/` working subtree, NOT `state/<id>.meta`, so no single-repo task/watcher/teardown/pr-check scan ever sees it) with `kind=umbrella` and one `worktree_<name>=<path>` line per repo.
   - Do **not** arm a poll, launch a worker, or create a branch. This is a lab.
 - `fm-umbrella.sh teardown <umbrella-id>`
   - Completion gate: proceed only once DESIGN.md exists and is non-empty; `--force` bypasses that gate.
