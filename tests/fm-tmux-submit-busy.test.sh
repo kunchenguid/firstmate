@@ -327,7 +327,7 @@ test_claude_busy_signature_uses_real_capture_shapes() {
   # against the candidate regex before passing the same capture through the
   # pane reader, so this cannot become a self-confirming synthetic fixture.
   local omp_spinner omp_line
-  for omp_spinner in '-' '/' '\\' '|'; do
+  for omp_spinner in '-' '/' "\\" '|'; do
     omp_line=$(printf ' %s Working\xe2\x80\xa6 [esc]' "$omp_spinner")
     printf '%s\n' "$omp_line" | grep -Eq "$FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT" \
       || fail "OMP captured $omp_spinner spinner frame must match its busy regex"
