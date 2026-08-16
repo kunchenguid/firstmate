@@ -55,6 +55,99 @@ assert_block_equals() {
   fi
 }
 
+# seed_public_commitment <home> <obligation> <work-home> <work-id>: the intake
+# half of a promised public reply - the typed obligation, its bound work, and
+# this home's registration - so a later handoff can be observed against a real
+# unresolved commitment rather than a stub.
+seed_public_commitment() {
+  local home=$1 obligation=$2 work_home=$3 work_id=$4
+  printf 'FMX_PAIRING_TOKEN=test-token\n' > "$home/.env"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  jq -n '{request_id:"req-handoff", platform:"x",
+          context_binding:{version:"ctx1", value:"ctx1_req-handoff"},
+          public_safe_summary:"looking into the sign-in redirect",
+          received_at:"2026-07-30T10:00:00Z",
+          followup_expires_at:"2026-08-06T10:00:00Z",
+          reservation_expires_at:"2026-08-06T10:00:00Z"}' > "$home/request.json"
+  jq -n '{type:"pr-merged", project:"alpha",
+          required_deliverables:["pr_url"], completion_policy:"all-required"}' \
+    > "$home/expected.json"
+  jq -n --arg h "$work_home" --arg w "$work_id" \
+    '{relation_id:"rel-code", work_ref:{home_id:$h, task_id:$w},
+      role:"fulfills", required:true, generation:1}' > "$home/relation.json"
+  (cd "$home" && tasks-axi public-followup add "$obligation" \
+    --request-context-file "$home/request.json" --purpose promised-final \
+    --expected-final-file "$home/expected.json" --expires-at 2026-10-01T00:00:00Z) >/dev/null \
+    || fail "could not create the public commitment"
+  (cd "$home" && tasks-axi public-followup bind-work "$obligation" \
+    --relation-file "$home/relation.json") >/dev/null \
+    || fail "could not bind work to the public commitment"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$ROOT/bin/fm-public-followup.sh" register \
+    "$obligation" --relation rel-code --work-home "$work_home" --work-id "$work_id" \
+    --generation 1 >/dev/null \
+    || fail "could not register the public commitment"
+}
+
+# A public promise binds its work by home AND id. Handing that work to a
+# secondmate leaves the binding naming a home that no longer owns it, which used
+# to go unnoticed until the promised reply was never delivered. The move itself
+# stays safe; the staleness must be reported at the moment it is created.
+test_handoff_warns_when_a_moved_item_still_owes_a_public_reply() {
+  local home="$TMP_ROOT/pf-stale-main"
+  local sub="$TMP_ROOT/pf-stale-sub"
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the public-commitment guard)"; return 0; }
+  setup_homes "$home" "$sub"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] promised-item - fix the sign-in redirect (repo: alpha)
+- [ ] plain-item - unrelated queued work (repo: alpha)
+
+## Done
+EOF
+  seed_public_commitment "$home" pf-handoff main promised-item
+
+  local out rc=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design promised-item plain-item 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "handoff must still succeed while reporting the stale binding: $out"
+  assert_contains "$out" "handed off 2 item(s)" "the move itself must still be reported"
+  assert_grep 'promised-item' "$sub/data/backlog.md" "the promised item did not reach the secondmate backlog"
+  assert_contains "$out" "promised-item still owes a public reply bound to main/promised-item" \
+    "the stale public-commitment binding was not reported"
+  # The report must come from a genuinely unresolved commitment, not from a state
+  # the guard merely could not verify.
+  assert_contains "$out" "public commitment pf-handoff is still" \
+    "the report did not carry the unresolved commitment the guard actually found"
+  assert_contains "$out" "--work-home secondmate:design" \
+    "the report did not name the rebinding that keeps the promise reachable"
+  case "$out" in
+    *"plain-item still owes"*) fail "an item with no public commitment must not be reported" ;;
+  esac
+
+  pass "handoff reports a moved item whose public commitment still binds this home"
+}
+
+# A home that never opted into the relay must pay nothing and say nothing here.
+test_handoff_is_silent_about_public_commitments_without_the_relay() {
+  local home="$TMP_ROOT/pf-silent-main"
+  local sub="$TMP_ROOT/pf-silent-sub"
+  setup_homes "$home" "$sub"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] quiet-item - ordinary queued work (repo: alpha)
+
+## Done
+EOF
+
+  local out rc=0
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design quiet-item 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "handoff failed in a relay-free home: $out"
+  case "$out" in
+    *"public reply"*) fail "a relay-free home must not mention public commitments: $out" ;;
+  esac
+  assert_grep 'quiet-item' "$sub/data/backlog.md" "the item did not reach the secondmate backlog"
+  pass "handoff says nothing about public commitments in a relay-free home"
+}
+
 test_body_moves_when_followed_by_another_item() {
   local home="$TMP_ROOT/body-next-item-main"
   local sub="$TMP_ROOT/body-next-item-sub"
@@ -550,5 +643,7 @@ test_noncanonical_indented_continuations_refuse_without_changes
 test_indented_heading_is_not_section_boundary
 test_registry_home_with_pre_home_parentheses
 test_registry_home_missing_field_fails_cleanly
+test_handoff_warns_when_a_moved_item_still_owes_a_public_reply
+test_handoff_is_silent_about_public_commitments_without_the_relay
 
 echo "ALL TESTS PASSED"
