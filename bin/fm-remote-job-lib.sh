@@ -59,7 +59,7 @@ FM_REMOTE_JOB_POLL_SECONDS=${FM_REMOTE_JOB_POLL_SECONDS:-0.05}
 FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
 FM_REMOTE_JOB_PROBE_WAIT_SECONDS=${FM_REMOTE_JOB_PROBE_WAIT_SECONDS:-60}
 FM_REMOTE_JOB_STOP_WAIT_SECONDS=${FM_REMOTE_JOB_STOP_WAIT_SECONDS:-15}
-FM_REMOTE_JOB_CLOCK_MAX_MISSES=${FM_REMOTE_JOB_CLOCK_MAX_MISSES:-50}
+FM_REMOTE_JOB_CLOCK_MAX_STALLS=${FM_REMOTE_JOB_CLOCK_MAX_STALLS:-50}
 FM_REMOTE_JOB_OPERATOR_PATH=
 FM_REMOTE_JOB_CHILD_PATH=
 FM_REMOTE_JOB_STATE=
@@ -98,8 +98,8 @@ fm_remote_job_validate_settings() {
   [ "$FM_REMOTE_JOB_PROBE_WAIT_SECONDS" -le 300 ] || return 1
   case "$FM_REMOTE_JOB_STOP_WAIT_SECONDS" in ''|*[!0-9]*|0) return 1 ;; esac
   [ "$FM_REMOTE_JOB_STOP_WAIT_SECONDS" -le 300 ] || return 1
-  case "$FM_REMOTE_JOB_CLOCK_MAX_MISSES" in ''|*[!0-9]*|0) return 1 ;; esac
-  [ "$FM_REMOTE_JOB_CLOCK_MAX_MISSES" -le 1000 ] || return 1
+  case "$FM_REMOTE_JOB_CLOCK_MAX_STALLS" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$FM_REMOTE_JOB_CLOCK_MAX_STALLS" -le 1000 ] || return 1
   return 0
 }
 
@@ -112,23 +112,28 @@ fm_remote_job_validate_settings() {
 # a healthy machine nothing because every wait still returns on its first
 # successful check.
 #
-# What a wait owes its caller when the clock misbehaves is deliberately narrow.
-# It must always terminate, whatever the clock does, and it must never hand back
-# a budget it has not spent: a `date` fork can fail under the very memory
-# pressure these waits exist for, and an NTP correction can step the clock
-# backwards on a host that just woke from sleep, and either one ending a wait
-# early would produce the exact "worker did not report ready" failure the
-# deadline exists to prevent. So a backwards step re-anchors the deadline by the
-# size of the step, and two backstops make termination unconditional whether the
-# clock is unreadable, frozen, stepping backwards, or oscillating. A run of
-# consecutive readings that tell the wait nothing new, unreadable or not
-# advancing, ends it after FM_REMOTE_JOB_CLOCK_MAX_MISSES of them. Re-anchoring
-# stops once it has given back the whole budget, and a backwards reading past
-# that point ends the wait too, which caps the worst case at roughly twice the
-# budget while still absorbing the one-off correction this exists for. Making
-# these waits correct against a clock that is wrong in other ways, a forward
-# step in particular, is out of scope here and tracked as its own item, so this
-# stays a deadline rather than a clock subsystem.
+# What a wait owes its caller when the clock misbehaves is deliberately narrow,
+# and narrower than three earlier attempts at it. Each of those tried to hold a
+# budget whole across a backwards clock step by re-anchoring the deadline, and
+# each shipped a fresh way to end a wait early instead: the exact "worker did
+# not report ready" failure the deadline exists to prevent. The re-anchor was
+# never what made a wait terminate, so it is gone. What remains is one deadline
+# and one counter of consecutive readings that fail to advance the clock, and
+# the counter alone is the termination guarantee, because a clock that is
+# unreadable, frozen, or stepping backwards never advances and so spends that
+# allowance unaided.
+#
+# The guarantees are therefore exactly these. A wait always terminates, whatever
+# the clock does. A backwards step lengthens a wait by the size of the step
+# instead of collapsing its budget, because a reading behind the deadline is
+# simply not expired and no arithmetic pretends otherwise. The allowance is
+# FM_REMOTE_JOB_CLOCK_MAX_STALLS readings, whose headroom is relative to the
+# poll below: `date` has one second resolution, so even a healthy clock repeats
+# a reading about ten times per second of polling, and anyone shortening that
+# sleep has to revisit the bound. Making these waits correct against a clock
+# that is wrong in other ways, a forward step in particular, is deliberately out
+# of scope here and tracked as its own item, so this stays a deadline rather
+# than a clock subsystem.
 fm_remote_job_clock_now() { # epoch seconds, or nothing when the clock is unreadable
   local now
   now=$(date +%s 2>/dev/null || true)
@@ -139,7 +144,7 @@ fm_remote_job_clock_now() { # epoch seconds, or nothing when the clock is unread
 fm_remote_job_wait_until() { # <seconds> <predicate> [args...]
   local seconds=$1
   shift
-  local now deadline='' last='' stalled=0 returned=0 step
+  local now deadline='' last='' stalled=0
   now=$(fm_remote_job_clock_now) || now=
   last=$now
   [ -z "$now" ] || deadline=$((now + seconds))
@@ -150,17 +155,10 @@ fm_remote_job_wait_until() { # <seconds> <predicate> [args...]
       stalled=0
     else
       stalled=$((stalled + 1))
-      [ "$stalled" -lt "$FM_REMOTE_JOB_CLOCK_MAX_MISSES" ] || return 1
+      [ "$stalled" -lt "$FM_REMOTE_JOB_CLOCK_MAX_STALLS" ] || return 1
     fi
     if [ -n "$now" ]; then
-      if [ -z "$deadline" ]; then
-        deadline=$((now + seconds))
-      elif [ -n "$last" ] && [ "$now" -lt "$last" ]; then
-        [ "$returned" -lt "$seconds" ] || return 1
-        step=$((last - now))
-        returned=$((returned + step))
-        deadline=$((deadline - step))
-      fi
+      [ -n "$deadline" ] || deadline=$((now + seconds))
       last=$now
       [ "$now" -lt "$deadline" ] || return 1
     fi

@@ -723,7 +723,7 @@ set -u
 # shellcheck source=/dev/null
 . "$1/bin/fm-remote-job-lib.sh"
 FM_REMOTE_JOB_PROBE_WAIT_SECONDS=$2
-FM_REMOTE_JOB_CLOCK_MAX_MISSES=$3
+FM_REMOTE_JOB_CLOCK_MAX_STALLS=$3
 start=$(command date +%s)
 date() { return 1; }
 fm_remote_job_probe() { return 1; }
@@ -770,8 +770,9 @@ pass "a transient clock-read failure does not shorten the readiness budget"
 
 # An NTP correction on a host that just woke from sleep steps the clock
 # backwards once, mid-wait. None of the budget was spent by that step, so none
-# of it may be lost to it: the wait re-anchors its deadline and goes on to spend
-# the time it was configured to spend, then still ends.
+# of it may be lost to it. The wait therefore has to still be waiting well after
+# the budget it was configured with would otherwise have run out, which is what
+# an outer bound the wait deliberately outlives proves.
 cat > "$CLOCK_SCRIPT" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -779,8 +780,8 @@ set -u
 . "$1/bin/fm-remote-job-lib.sh"
 FM_REMOTE_JOB_PROBE_WAIT_SECONDS=$2
 start=$(command date +%s)
-export FM_STEP_AFTER=$((start + 2))
-date() { # one hour backwards, two seconds in, and forwards as usual after that
+export FM_STEP_AFTER=$((start + 1))
+date() { # one hour backwards, a second in, and forwards as usual after that
   local now
   now=$(command date +%s)
   if [ "$now" -ge "$FM_STEP_AFTER" ]; then now=$((now - 3600)); fi
@@ -791,16 +792,18 @@ fm_remote_job_worker_identity_matches() { return 1; }
 fm_remote_job_wait_for_probe "$1" "$1" && exit 3
 printf '%s\n' "$(($(command date +%s) - start))"
 SH
-run_wait_script "$CLOCK_SCRIPT" 30 "the readiness wait with a backwards clock step" "$REMOTE_ROOT" 5
-[ "$WAIT_ELAPSED" -ge 4 ] || fail "a backwards clock step threw away readiness budget the wait had not spent"
-[ "$WAIT_ELAPSED" -le 20 ] || fail "a backwards clock step stretched the readiness wait past its budget"
-pass "the readiness wait keeps its budget across a backwards clock step and still ends"
+BACKSTEP_STATUS=0
+fm_run_timed 10 bash "$CLOCK_SCRIPT" "$REMOTE_ROOT" 3 >/dev/null 2>&1 || BACKSTEP_STATUS=$?
+[ "$BACKSTEP_STATUS" -eq 124 ] \
+  || fail "a backwards clock step ended the readiness wait early, exit $BACKSTEP_STATUS against a budget of 3s"
+pass "a backwards clock step lengthens the readiness wait instead of collapsing its budget"
 
-# Giving the budget back for a backwards step is only safe while the giving back
-# is bounded. A clock that keeps stepping backwards hands back exactly as much
-# as the wait spends, so a deadline that re-anchored every time would recede
-# forever against a clock that reads perfectly well. The wait stops re-anchoring
-# once it has given back its whole budget, and ends there.
+# That leniency is only safe because it is not what makes a wait end. A clock
+# that steps backwards on every reading never advances, so it spends the same
+# allowance an unreadable one does and the wait ends without the deadline ever
+# being reached. The stub keeps its position in a file because it runs inside a
+# command substitution, and the script refuses to pass unless the clock really
+# did move, so this cannot go green as an accidental frozen-clock test.
 cat > "$CLOCK_SCRIPT" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -819,12 +822,53 @@ date() { # every reading lands a second before the one before it
 fm_remote_job_probe() { return 1; }
 fm_remote_job_worker_identity_matches() { return 1; }
 fm_remote_job_wait_for_probe "$1" "$1" && exit 3
+[ "$(cat "$STEP_FILE")" -gt 1 ] || exit 4
 printf '%s\n' "$(($(command date +%s) - start))"
 SH
 run_wait_script "$CLOCK_SCRIPT" 30 "the readiness wait with a clock that only goes backwards" \
-  "$REMOTE_ROOT" 5 "$TMP_ROOT/clock-back"
+  "$REMOTE_ROOT" 60 "$TMP_ROOT/clock-back"
 [ "$WAIT_ELAPSED" -le 20 ] || fail "a clock that only goes backwards outran the readiness wait's budget"
 pass "the readiness wait ends against a clock that never moves forwards"
+
+# A clock stopped dead reads perfectly and never reaches any deadline, so the
+# same allowance has to end the wait here too.
+cat > "$CLOCK_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_PROBE_WAIT_SECONDS=$2
+start=$(command date +%s)
+date() { printf '2000000000\n'; }
+fm_remote_job_probe() { return 1; }
+fm_remote_job_worker_identity_matches() { return 1; }
+fm_remote_job_wait_for_probe "$1" "$1" && exit 3
+printf '%s\n' "$(($(command date +%s) - start))"
+SH
+run_wait_script "$CLOCK_SCRIPT" 30 "the readiness wait with a frozen clock" "$REMOTE_ROOT" 60
+[ "$WAIT_ELAPSED" -le 20 ] || fail "a frozen clock outran the readiness wait's budget"
+pass "the readiness wait ends against a clock that never moves at all"
+
+# The allowance is a backstop, not a second budget, so a healthy clock must
+# reach its deadline first. `date` only resolves to a second, so a wait polling
+# ten times a second repeats each reading about ten times over, and the
+# allowance has to keep enough headroom above that to never fire here.
+cat > "$CLOCK_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_PROBE_WAIT_SECONDS=$2
+start=$(command date +%s)
+fm_remote_job_probe() { return 1; }
+fm_remote_job_worker_identity_matches() { return 1; }
+fm_remote_job_wait_for_probe "$1" "$1" && exit 3
+printf '%s\n' "$(($(command date +%s) - start))"
+SH
+run_wait_script "$CLOCK_SCRIPT" 20 "the readiness wait on a healthy clock" "$REMOTE_ROOT" 3
+[ "$WAIT_ELAPSED" -ge 3 ] || fail "the readiness wait ended before its deadline on a healthy clock"
+[ "$WAIT_ELAPSED" -le 4 ] || fail "a healthy clock ran the readiness wait past its deadline into the stall allowance"
+pass "the readiness wait ends on its deadline, not its stall allowance, when the clock is healthy"
 
 # The shutdown wait shares the mechanism, so it needs the same guarantee: a
 # worker that never exits plus a clock that cannot be read must still end in a
@@ -835,7 +879,7 @@ set -u
 # shellcheck source=/dev/null
 . "$1/bin/fm-remote-job-lib.sh"
 FM_REMOTE_JOB_STOP_WAIT_SECONDS=$2
-FM_REMOTE_JOB_CLOCK_MAX_MISSES=$3
+FM_REMOTE_JOB_CLOCK_MAX_STALLS=$3
 start=$(command date +%s)
 date() { return 1; }
 fm_remote_job_worker_process_group() { return 1; }
