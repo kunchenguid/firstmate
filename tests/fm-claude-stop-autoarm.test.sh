@@ -29,6 +29,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
+  cp "$ROOT/bin/fm-state-capability-lib.sh" "$dir/bin/fm-state-capability-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
@@ -511,6 +512,30 @@ test_arms_for_x_mode_poll_need_without_inflight() {
   pass "auto-arm: X-mode poll need arms the cycle even with no tasks in flight"
 }
 
+test_data_only_never_sources_stale_x_config() {
+  local dir marker out status
+  dir=$(make_primary_dir "$TMP_ROOT/data-only-stale-x")
+  mkdir -p "$dir/config" "$dir/fakebin"
+  marker="$dir/state/stale-x-sourced"
+  printf 'printf sourced > %s\n' "$marker" > "$dir/config/x-mode.env"
+  cat > "$dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in */.fm-state-capability.*) exit 1 ;; esac
+done
+exec "$FM_TEST_REAL_STAT" "$@"
+SH
+  chmod +x "$dir/fakebin/stat"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  FM_TEST_REAL_STAT=$(command -v stat)
+  export FM_TEST_REAL_STAT
+  out=$(PATH="$dir/fakebin:$PATH" run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "data-only auto-arm should still supervise worker state"
+  [ ! -e "$marker" ] || fail "data-only auto-arm sourced stale config/x-mode.env"
+  pass "auto-arm: data-only supervision does not source stale X cadence config"
+}
+
 test_single_flight_admits_exactly_one_owner() {
   local dir rc1 rc2 count
   dir=$(make_primary_dir "$TMP_ROOT/single-flight")
@@ -594,6 +619,7 @@ test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_arms_for_x_mode_poll_need_without_inflight
+test_data_only_never_sources_stale_x_config
 test_single_flight_admits_exactly_one_owner
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake

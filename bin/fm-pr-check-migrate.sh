@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Non-executing migration for watcher PR checks created by older Firstmate
 # versions. Legacy check files are never run, sourced, or parsed by Bash.
+# Secure-mode only: data-only supervision never creates migration or quarantine
+# artifacts and never invokes this script.
 # Pending validated merged-poll retirements finish first. Canonical polls are
 # then rebuilt from validated metadata, remaining provenance-bound polls and
 # registered custom checks remain armed, and every other task poll is
@@ -39,7 +41,6 @@ fi
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
-
 umask 077
 if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
   mkdir -p "$STATE" || {
@@ -49,6 +50,12 @@ if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
 fi
 if [ ! -d "$STATE" ] || [ -L "$STATE" ]; then
   echo "PR_CHECK_MIGRATION: state directory is not a private ordinary directory; migration did not complete safely" >&2
+  exit 1
+fi
+
+fm_state_mode_detect "$STATE"
+if [ "$FM_STATE_MODE" = data-only ]; then
+  fm_state_mode_refusal "$STATE" "PR-check migration" >&2
   exit 1
 fi
 

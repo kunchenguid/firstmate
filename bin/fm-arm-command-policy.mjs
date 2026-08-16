@@ -26,15 +26,16 @@ const REASONS = {
   "broad-watcher-kill": "a broad process kill targeting the firstmate watcher is forbidden",
   "unclassifiable-protected-command": "unsupported or malformed shell syntax contains a protected watcher command",
   "watcher-direct": "bin/fm-watch.sh must not be run directly; arm the watcher with bin/fm-watch-arm.sh or run bin/fm-watch-checkpoint.sh instead",
+  "x-mode-unavailable": "X-mode configuration requires an established secure state filesystem",
 };
 
 function parseArguments(argv) {
-  const result = { command: "", root: "", home: "" };
+  const result = { command: "", root: "", home: "", stateMode: "unknown" };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
-    if (name === "--command" || name === "--root" || name === "--home") {
+    if (name === "--command" || name === "--root" || name === "--home" || name === "--state-mode") {
       if (i + 1 >= argv.length) throw new Error(`${name} requires a value`);
-      result[name.slice(2)] = argv[i + 1];
+      result[name === "--state-mode" ? "stateMode" : name.slice(2)] = argv[i + 1];
       i += 1;
       continue;
     }
@@ -50,6 +51,11 @@ function rawMentionsProtected(command) {
 function rawMentionsBroadKill(command) {
   const normalized = normalizeLineContinuations(command);
   return /fm-watch/.test(normalized) && /\b(?:pkill|kill)\b/.test(normalized);
+}
+
+function rawMentionsXModeSource(command) {
+  const normalized = normalizeLineContinuations(command).replace(/["']/g, "");
+  return /(?:^|[\s;|&()])(?:source|\.)\s+/.test(normalized) && normalized.includes("config/x-mode.env");
 }
 
 function normalizeLineContinuations(source) {
@@ -728,16 +734,17 @@ function isWatcherPgrep(position, context) {
 
 function analyzeProgram(command, context, depth = 0) {
   if (depth > 12) {
-    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), xModeCandidate: rawMentionsXModeSource(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const lexed = new Lexer(command).tokenize();
   if (lexed.error) {
-    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), xModeCandidate: rawMentionsXModeSource(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const program = splitProgram(lexed.tokens);
   const nodeInfos = [];
   let nestedProtected = false;
   let broadKill = false;
+  let xModeCandidate = rawMentionsXModeSource(command);
   let pgrepWatcher = false;
   let unsupported = false;
   let activeContext = {
@@ -763,6 +770,7 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      xModeCandidate ||= nested.xModeCandidate;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -771,6 +779,7 @@ function analyzeProgram(command, context, depth = 0) {
         const nested = analyzeProgram(token.content, nodeContext, depth + 1);
         nodeNestedProtected ||= nested.protectedFound;
         broadKill ||= nested.broadKill;
+        xModeCandidate ||= nested.xModeCandidate;
         nodePgrepWatcher ||= nested.pgrepWatcher;
         if (nested.error && rawMentionsProtected(token.content)) unsupported = true;
       }
@@ -780,6 +789,7 @@ function analyzeProgram(command, context, depth = 0) {
           substitutionResults.set(substitution, nested);
           nodeNestedProtected ||= nested.protectedFound;
           broadKill ||= nested.broadKill;
+          xModeCandidate ||= nested.xModeCandidate;
           nodePgrepWatcher ||= nested.pgrepWatcher;
           if (nested.error && rawMentionsProtected(substitution.content)) unsupported = true;
         }
@@ -790,6 +800,7 @@ function analyzeProgram(command, context, depth = 0) {
     const shellPayload = shell?.kind === "command" ? shell.payload : null;
     const shellScript = shell?.kind === "script" ? shell.payload : null;
     const sourceScript = sourcedScript(position);
+    xModeCandidate ||= xModeSourceCandidate(position, context);
     const literalEvalPayload = evalPayload(position);
     const heredocPayloads = shellHeredocPayloads(tokens, position);
     const hereStringPayloads = shellHereStringPayloads(tokens, position);
@@ -804,6 +815,7 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(shellPayload.value, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      xModeCandidate ||= nested.xModeCandidate;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(shellPayload.value)) unsupported = true;
     }
@@ -812,6 +824,7 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      xModeCandidate ||= nested.xModeCandidate;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -849,15 +862,29 @@ function analyzeProgram(command, context, depth = 0) {
   if (unclassifiableProtected) unsupported = true;
   const broadKillFound = broadKill || (unsupported && rawMentionsBroadKill(command));
   if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound)) {
-    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, xModeCandidate, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
   }
-  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, xModeCandidate, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
 function xModePathAllowed(value, home) {
   if (value === "config/x-mode.env" || value === "./config/x-mode.env") return true;
   if (!path.isAbsolute(value)) return false;
   return path.normalize(value) === path.join(path.normalize(home), "config/x-mode.env");
+}
+
+function xModePathCandidate(value, home) {
+  return xModePathAllowed(value, home) || /(?:^|\/)config\/x-mode\.env$/.test(value);
+}
+
+function xModeSourceCandidate(position, context) {
+  const source = sourcedScript(position);
+  if (source) {
+    if (xModePathCandidate(source.value, context.home)) return true;
+    if (!source.literal || source.subs.length > 0 || /[*?\[\]]/.test(source.value)) return true;
+  }
+  const values = position.words.map((word) => word.value);
+  return values[0] === "[" && values[1] === "-f" && values[3] === "]" && values.length === 4 && xModePathCandidate(values[2], context.home);
 }
 
 function ordinaryWordsOnly(tokens) {
@@ -870,8 +897,8 @@ function setupKind(info, context) {
   const values = position.words.map((word) => word.value);
   if (values[0] === "cd" && values.length === 2) return "cd";
   if (values[0] === "export" && values.length === 2 && isAssignment(values[1])) return "export";
-  if ((values[0] === "source" || values[0] === ".") && values.length === 2 && xModePathAllowed(values[1], context.home)) return "source";
-  if (values[0] === "[" && values[1] === "-f" && values[3] === "]" && values.length === 4 && xModePathAllowed(values[2], context.home)) return "test-source";
+  if ((values[0] === "source" || values[0] === ".") && values.length === 2 && context.stateMode === "secure" && xModePathAllowed(values[1], context.home)) return "source";
+  if (values[0] === "[" && values[1] === "-f" && values[3] === "]" && values.length === 4 && context.stateMode === "secure" && xModePathAllowed(values[2], context.home)) return "test-source";
   return "";
 }
 
@@ -899,12 +926,15 @@ function blessedProgram(analysis, context) {
   return true;
 }
 
-function decision(command, root, home) {
-  const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
+function decision(command, root, home, stateMode = "unknown") {
+  const context = { root: path.normalize(root), home: path.normalize(home), stateMode, protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
   const analysis = analyzeProgram(command, context);
   if (analysis.broadKill) return deny("broad-watcher-kill");
   if (analysis.error && analysis.protectedFound) return deny("unclassifiable-protected-command");
-  if (!analysis.protectedFound) return { decision: "allow" };
+  if (!analysis.protectedFound) {
+    if (stateMode !== "secure" && analysis.xModeCandidate) return deny("x-mode-unavailable");
+    return { decision: "allow" };
+  }
   if (analysis.nodeInfos?.some((info) => info.protectedKind === "watch")) return deny("watcher-direct");
   if (analysis.nestedProtected) return deny("watcher-nested");
 
@@ -946,7 +976,7 @@ if (invokedDirectly()) {
     if (!args.command) {
       process.stdout.write("allow\n");
     } else {
-      const result = decision(args.command, args.root, args.home);
+      const result = decision(args.command, args.root, args.home, args.stateMode);
       if (result.decision === "allow") {
         process.stdout.write("allow\n");
       } else {

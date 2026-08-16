@@ -268,9 +268,11 @@ if ! fm_supervision_needed "$STATE" "$GRACE"; then
   exit 0
 fi
 
-# X mode cadence: an opted-in home polls Relay at its generated cadence.
+# Secure-mode X cadence: an opted-in home polls Relay at its generated cadence.
 # shellcheck source=/dev/null
-[ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+if fm_state_mode_secure "$STATE" && [ -f "$CONFIG/x-mode.env" ]; then
+  . "$CONFIG/x-mode.env"
+fi
 
 # --- the park ----------------------------------------------------------------
 # The arm runs as a tracked child of THIS hook process, which stays alive and

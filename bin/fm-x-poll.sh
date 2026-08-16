@@ -2,7 +2,9 @@
 # One short-poll of the relay connector for a pending X-mode mention.
 #
 # Inert by default: a HARD no-op (exit 0, no output) unless X mode is configured
-# via a non-empty FMX_PAIRING_TOKEN (from the home's .env or the environment).
+# via a non-empty FMX_PAIRING_TOKEN (from the home's .env or the environment) and
+# the state filesystem proves secure mode. Data-only supervision refuses this
+# executable polling path without creating or trusting its artifacts.
 # The watcher invokes this trusted repository script directly only after
 # state/x-watch.check.sh matches the expected byte-static identity shim.
 # Its contract is "output => wake firstmate, silence => keep sleeping", so the
@@ -47,6 +49,19 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 fmx_load_config
 # Hard no-op when X mode is off: this is what keeps the check shim inert.
 [ -n "$FMX_TOKEN" ] || exit 0
+
+# An opted-in X poll is an executable feature. Prove the state filesystem only
+# after the inert no-token path has returned, so a home without a state
+# directory remains the historical hard no-op.
+# shellcheck source=bin/fm-state-capability-lib.sh
+. "$SCRIPT_DIR/fm-state-capability-lib.sh"
+if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
+  (umask 077; mkdir -p "$STATE") 2>/dev/null || true
+fi
+if fm_state_mode_data_only "$STATE"; then
+  fm_state_mode_refusal "$STATE" "X-mode polling" >&2
+  exit 1
+fi
 
 # Unreconciled terminal results for a public commitment are actionable even when
 # the relay has no new mention, and they outlive any session, so surface them

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Link a spawned task to the X-mode mention that triggered it, so firstmate can
 # post up to THREE completion follow-ups when the task lands (within a 7-day window).
+# Data-only supervision refuses this Relay task-link mutation because it cannot
+# activate or trust the X polling path.
 #
 # Usage: fm-x-link.sh <task-id> <request_id> [--carry-count <n> --carry-ts <epoch> [--carry-platform <x|discord>] [--carry-max <n>]]
 #
@@ -180,6 +182,11 @@ if [ ! -f "$META" ]; then
     printf 'fm-x-link: bind the public promise through the promised-final path instead: tasks-axi public-followup add + bind-work, then bin/fm-public-followup.sh register <obligation-id> --relation <relation-id> --work-home %s --work-id %s --generation <n>, and put the bin/fm-public-followup.sh brief <obligation-id> command into the routed worker instructions.\n' \
       "$ROUTE_HOME_ARG" "$ID" >&2
   fi
+  exit 1
+fi
+
+if fm_state_mode_data_only "$STATE"; then
+  fm_state_mode_refusal "$STATE" "X-mode task linking" >&2
   exit 1
 fi
 

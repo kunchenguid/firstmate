@@ -174,7 +174,9 @@ block_stop() {
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
-  [ -f "$CONFIG/x-mode.env" ] && x_mode=1
+  if fm_state_mode_secure "$STATE" && [ -f "$CONFIG/x-mode.env" ]; then
+    x_mode=1
+  fi
   reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
     || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'

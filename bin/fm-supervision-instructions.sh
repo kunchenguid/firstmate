@@ -100,10 +100,6 @@ shell_quote() {
 
 x_mode_env_sh=$(shell_quote "$x_mode_env")
 
-if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
-  X_MODE=1
-fi
-
 render_snippet() {
   local line
   while IFS= read -r line || [ -n "$line" ]; do

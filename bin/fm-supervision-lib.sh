@@ -3,7 +3,7 @@
 # Usage: . bin/fm-supervision-lib.sh
 #
 # Reports whether a firstmate home needs supervision because it has in-flight
-# work (a state/<id>.meta exists) or an X-mode relay poll
+# work (a state/<id>.meta exists) or a secure-mode X relay poll
 # (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
 # (state/.last-watcher-beat, touched every poll cycle, within the grace window).
 # bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
@@ -11,6 +11,9 @@
 # fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh), which owns what a
 # live watcher process means per supervision model. The status fields here retain
 # the beacon-age details used in their messages.
+
+# shellcheck source=bin/fm-state-capability-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-state-capability-lib.sh"
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
@@ -25,7 +28,7 @@ fm_sup_stat_mtime() {
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
 #   FM_SUP_SOURCES        count of registered process-to-event sources
-#   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, or a
+#   FM_SUP_NEEDED         true/false - in-flight work, a secure-mode X relay poll, or a
 #                         registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata)
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
@@ -34,12 +37,16 @@ fm_sup_stat_mtime() {
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age x_mode_allowed=0
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
   FM_SUP_BEACON_DESC=never
   FM_SUP_QUEUE_PENDING=false
+
+  if [ "${FM_GUARD_READ_ONLY:-0}" != 1 ]; then
+    fm_state_mode_secure "$state" && x_mode_allowed=1
+  fi
 
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
@@ -50,9 +57,9 @@ fm_supervision_status() {
     [ -e "$source" ] || continue
     FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
   done
-  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
-    || [ -f "$state/x-watch.check.sh" ] \
-    || [ "$FM_SUP_SOURCES" -gt 0 ]; then
+  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || [ "$FM_SUP_SOURCES" -gt 0 ]; then
+    FM_SUP_NEEDED=true
+  elif [ "$x_mode_allowed" -eq 1 ] && [ -f "$state/x-watch.check.sh" ]; then
     FM_SUP_NEEDED=true
   fi
 

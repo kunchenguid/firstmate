@@ -31,11 +31,12 @@
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
 #                       diagnostics always run. Bootstrap's six MUTATING sweeps
-#                       (legacy PR-check migration, secondmate convergence,
+#                       (secure-mode PR-check migration, secondmate convergence,
 #                       secondmate liveness, pending remote handoff retry,
-#                       X-mode artifact writes, fleet sync) also run only when
-#                       locked; the four network sweeps run in the deferred
-#                       stage rather than this synchronous bootstrap section.
+#                       secure-mode X artifacts, fleet sync) also run only when
+#                       locked; data-only mode skips the secure-only sweeps, and
+#                       the four network sweeps run in the deferred stage rather
+#                       than this synchronous bootstrap section.
 #   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
 #                       reconciliation before presenting durable wakes and advancing
 #                       recovery handling state, so both only run when locked.
@@ -333,6 +334,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-state-capability-lib.sh
+. "$SCRIPT_DIR/fm-state-capability-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 
@@ -726,7 +729,9 @@ stage supervision-instructions
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
 X_MODE_PRESENT=0
-[ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
+if [ "$READ_ONLY" -eq 0 ] && fm_state_mode_secure "$STATE" && [ -f "$CONFIG/x-mode.env" ]; then
+  X_MODE_PRESENT=1
+fi
 
 if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
@@ -903,7 +908,7 @@ load /afk and ensure the daemon is running, because the daemon owns watcher
 supervision.
 
 EOF
-elif [ -f "$CONFIG/x-mode.env" ]; then
+elif [ "$X_MODE_PRESENT" -eq 1 ]; then
   cat <<EOF
 Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
 X mode is active, so the emitted block's cadence instruction applies.

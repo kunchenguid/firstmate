@@ -59,10 +59,10 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
    - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use "Morning status" only when the captain specifically asks for a morning brief), followed by two or three sentences framing where things stand.
    - **Captain's Call** - every open decision summarized with its options from the structured decision record, plus each PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
    - **Recently Landed** - the bounded current recent-completions baseline from structured state across the main fleet and every registered secondmate home, rendered in full on every run.
-   - **Underway** - each live direct report making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
+   - **Underway** - each live direct report making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files).
    - **Charted Next** - queued or gated work, including any main-inventory integrity warning, with each item's blocker, date, or integrity reason.
    After writing the file, return the concise four-section chat digest and include the report path or link without adding a fifth section.
-   For a richer review surface, optionally offer a Lavish board with `lavish-axi` when the report has enough structure to deserve one, but only after the required digest is ready.
+   Use the existing report and evidence surfaces when a richer review surface is useful, but only after the required digest is ready.
 
 ## Chat-response contract
 

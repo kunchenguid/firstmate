@@ -101,17 +101,19 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
+| `fm-state-capability-lib.sh` | Detect owner-only state-file capability by behavior and select secure or data-only mode |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication and identity-bound retirement |
-| `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
-| `fm-pr-check-migrate.sh` | Quarantine older task polls without execution and rebuild only canonical polls       |
-| `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
-| `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
+| `fm-pr-poll.sh`          | Provide the secure-mode byte-static watcher program for validated PR/MR-poll sidecars |
+| `fm-pr-check-migrate.sh` | In secure mode, quarantine older task polls without execution and rebuild only canonical polls |
+| `fm-pr-inspect.sh`       | Inspect one canonical GitHub PR and its CI through `gh-axi api --jq` without writing state |
+| `fm-pr-check.sh`         | Record validated PR metadata and arm a secure-mode static merge poll or a data-only record-only result |
+| `fm-pr-merge.sh`         | Revalidate and merge a task's canonical GitHub URL through the mode-specific guarded path |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared Relay config, relay, and reply-threading helpers                              |
-| `fm-x-poll.sh`           | One bounded Relay poll: stash newly offered mentions and emit their once-only wake   |
+| `fm-x-poll.sh`           | One bounded secure-mode Relay poll: stash newly offered mentions and emit their once-only wake |
 | `fm-x-reply.sh`          | Post or dry-run preview a composed Relay reply or follow-up                          |
 | `fm-x-dismiss.sh`        | Dismiss a skipped Relay mention at the relay without replying                        |
 | `fm-x-link.sh`           | Link a spawned task to its originating Relay mention in task meta                    |

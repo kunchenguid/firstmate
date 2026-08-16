@@ -11,7 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
-`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay polling artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`); executable-check, PR-poll, Relay polling, and migration artifacts are conditional on the state-filesystem capability described below.
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
@@ -205,6 +205,20 @@ The full zellij home label also includes a short hash of the resolved `FM_ROOT` 
 For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
 
+### State-filesystem capability
+
+Firstmate keeps `FM_HOME` where you set it, including on a mounted filesystem such as a Windows-mounted path; it does not relocate operational state back into the tracked code root.
+At a mutable session boundary, bootstrap creates an absent `state/` directory with owner-only permissions and probes a temporary directory and regular file inside the selected state directory by changing and reading their modes.
+The probe requires behaviorally verified directory mode `0700`, regular-file mode `0600`, and ordinary link counts; it does not infer capability from the operating system or mount name.
+A successful probe selects secure mode, preserving the existing executable-check, secure Relay-poll, PR-poll, and PR-check-migration paths.
+An unavailable, ambiguous, or unenforceable probe selects data-only mode.
+Data-only mode keeps ordinary task metadata, append-only status events, worker supervision, and process-event sources available, but never creates, trusts, sources, or executes custom executable checks, Relay/X polling artifacts, PR polling artifacts, or PR-check migration/quarantine artifacts.
+Pre-existing artifacts in those classes remain untrusted and cause the relevant path to refuse without executing them; data-only mode does not remove them.
+In data-only mode, `bin/fm-pr-check.sh` records only a validated canonical PR URL and, for GitHub, the exact validated head SHA in task metadata; it does not arm a poll.
+Run `bin/fm-pr-inspect.sh <github-pr-url> --expected-head <sha> --require-green` for direct GitHub PR and CI inspection through `gh-axi api --jq`; it emits only validated scalar facts and writes no state artifact.
+Only after explicit captain approval may `bin/fm-pr-merge.sh` be used in data-only mode; it revalidates the same canonical URL and head, requires an open unmerged PR, green completed checks, `mergeable=true`, and `mergeable_state=clean`, then sends the API merge request through `gh-axi api --jq`.
+The secure-mode path remains the existing authenticated static poll and `gh-axi pr merge` flow.
+
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, kimi, and cursor are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.
@@ -293,10 +307,10 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.31.2 or newer, compatible gh-axi, chrome-devtools-axi, compatible lavish-axi, compatible tasks-axi per "Backlog backend" above, and compatible quota-axi.
-[`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
+The universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.31.2 or newer, compatible gh-axi, chrome-devtools-axi, compatible tasks-axi per "Backlog backend" above, and compatible quota-axi.
+[`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the gh-axi floor, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
-In that list, no-mistakes runs the validation pipeline, gh-axi, chrome-devtools-axi, and lavish-axi cover GitHub, browser, and rich-review operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
+In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
 That delta is owned in code by `fm_backend_required_tools` in `bin/fm-backend.sh`: the resolved backend's own session-provider CLI (`tmux`, `herdr`, `zellij`, `orca`, or `cmux`), `jq` for the JSON-emitting experimental adapters (`herdr`, `zellij`, `cmux`) whose spawn and liveness paths parse the backend's JSON output, and the `treehouse` worktree provider for every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`).
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
@@ -304,11 +318,10 @@ An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead 
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
 When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
-When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
-`tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
+When Relay is opted in and the state-filesystem capability is secure, bootstrap also requires `curl` and `jq` before arming the relay poll shim; data-only mode does not arm the shim or require those Relay-only tools.
+`tasks-axi` and `quota-axi` are required bootstrap tools in every profile.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
 An absent or incompatible `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)`.
-An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: npm install -g lavish-axi && lavish-axi setup hooks)`.
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
@@ -337,13 +350,13 @@ Skipped items, such as a destination checkout that does not yet gitignore the it
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
 It covers both public surfaces the relay supports: `@myfirstmate` mentions on X, and mentions of the myfirstmate bot in a Discord server where it is installed.
-Both surfaces are the same opt-in and the same machinery - one pairing token, one relay poll, and one reply path - so everything below applies to Discord mentions unless a line names a platform explicitly.
+Both surfaces are the same opt-in and the same machinery - one pairing token, one secure-mode relay poll when enforceable, and one reply path - so everything below applies to Discord mentions unless a line names a platform explicitly.
 It is off unless the firstmate home's gitignored `.env` contains a non-empty `FMX_PAIRING_TOKEN`.
 The pairing token both identifies the relay tenant and records opt-in consent for autonomous public replies and eligible lifecycle actions.
 Destructive, irreversible, or security-sensitive asks are flagged for trusted-channel confirmation instead of being executed from a public mention.
 The relay uses owner-only routing: a mention delivered to a home is from that home's owner/captain, while its surrounding conversation context may still include other public accounts.
 `FMX_RELAY_URL` is optional and defaults to `https://myfirstmate.io`, mainly for developers pointing at a local relay.
-For direct client invocations, environment values override `.env`; bootstrap activation still keys off `.env` presence so watcher artifacts are explicit local opt-in state.
+For direct client invocations, environment values override `.env`; bootstrap activation still keys off `.env` presence so secure-mode watcher artifacts are explicit local opt-in state.
 `FMX_ENV_FILE` can point direct poll/reply client invocations at another `.env`-style file, but it does not change bootstrap activation.
 
 To turn it on:
@@ -355,15 +368,15 @@ To turn it on:
 
 The dashboard owns account creation, identity linking, bot installation, and token issuance; this document owns only what the local firstmate home does with the token once it is in `.env`.
 
-The locked session-start bootstrap step turns the token into local generated state.
+When the state-filesystem capability is secure, the locked session-start bootstrap step turns the token into local generated state.
 It writes `state/x-watch.check.sh`, a byte-static identity shim for `bin/fm-x-poll.sh`, and `config/x-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.
 The watcher accepts the shim only when its bytes match the expected generated content, then invokes the trusted repository poll script directly instead of executing state-file source.
 This section is the single owner of the Relay cadence contract: a Relay instance polls every 30 seconds instead of the default 300, only a Relay instance speeds up because a non-Relay home has no `config/x-mode.env`, and the session-start supervision operating block includes the cadence instruction when that file exists.
 The active primary-harness supervision protocol owns how that sourced cadence reaches the watcher process.
 Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, a cadence transition - opt-in while a watcher is already running, or opt-out - is applied by restarting the home-scoped watcher through the emitted harness protocol; bootstrap deliberately never restarts the watcher itself.
 While away mode is active the daemon owns the watcher and its default cadence applies; away-mode Relay cadence is a deferred follow-up.
-When the token is removed or empty, the next locked session-start bootstrap step removes those artifacts.
-Steady-state off is silent and writes nothing.
+When the token is removed or empty, the next locked session-start bootstrap step removes those artifacts in secure mode.
+Steady-state off is silent and writes nothing in secure mode; data-only mode reports an unavailable Relay configuration when pre-existing artifacts or cadence state need attention and does not execute or remove them.
 Relay remains additive to non-Relay lifecycle behavior: homes without the generated artifacts keep the default watcher cadence and do not run the Relay poll.
 Its request handling remains in Relay-specific `bin/` scripts and the `fmx-respond` skill, while the watcher owns authenticated dispatch from the generated local identity shim.
 
@@ -433,11 +446,11 @@ The home that owns the commitment also owns the outward post, because only it ho
 Work routed elsewhere reports a typed terminal result with `bin/fm-public-followup-emit.sh` and never looks for the thread; that emitter refuses to write into a home with no registration for the named obligation.
 A terminal event's id is derived from its identity tuple, so a duplicate report, a retry, or a replay after restart resolves to the same event and changes nothing.
 
-Activation is the same `.env` `FMX_PAIRING_TOKEN` contract as the rest of Relay, with no second flag.
+Activation uses the same `.env` `FMX_PAIRING_TOKEN` consent as direct Relay clients, while secure state capability separately gates polling artifacts; there is no second user flag.
 A home without that token runs one file test and stops: no `tasks-axi` call, no backlog or request-context scan, and no `state/public-followup/` directory.
 Ordinary startup, polling, cleanup, and silent read-side subcommands also produce no output; commands that require an active relay report that configuration error after the same gate.
 A relay-enabled home with no registered commitment stops at an O(1) directory presence check, so the empty state costs no CLI call and adds no periodic scan.
-Unreconciled terminal results ride the existing 30-second relay poll rather than a new process or timer: `bin/fm-x-poll.sh` compares the pending-event signature against `surfaced` and wakes firstmate once per new result set.
+Unreconciled terminal results ride the existing secure-mode 30-second relay poll rather than a new process or timer: `bin/fm-x-poll.sh` compares the pending-event signature against `surfaced` and wakes firstmate once per new result set.
 The session-start digest separately prints an "Public commitments awaiting delivery" subsection from disk when, and only when, this home is relay-active and still owes a reply, so compaction and restart are non-events.
 `bin/fm-teardown.sh` refuses to clean up a task while this home still owes a public reply for exactly that work, unless `--force` carries explicit discard approval.
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
@@ -446,7 +459,7 @@ See [verification/public-followup.md](verification/public-followup.md) for the c
 ## Process-to-event sources (state/procevent)
 
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
-`bin/fm-procevent.sh` owns the generic contract; `bin/fm-procevent-lavish.sh` is the first adapter and wraps only the currently published `lavish-axi poll` interface.
+`bin/fm-procevent.sh` owns the generic contract; each supported adapter owns its source-specific commands and result classification.
 
 The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action at most once before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs.
@@ -469,7 +482,7 @@ Whether a captured result ends its source is adapter knowledge, never the runner
 After capture - and after initial `check` publication for the default ordering - the runner calls `bin/fm-procevent-<adapter>.sh terminal <result-file>` and retires the registration on exit 0 alone, dropping only the exact registration generation captured by its claim and releasing that claim only after removal succeeds under one source boundary; a missing command, an error, or any other exit keeps the source armed, so an adapter with no notion of ending needs no change.
 A failed terminal removal stays durably terminal and is completed by ordinary reconciliation without restarting its poll, while a concurrently replaced registration survives and becomes independently runnable after the old claim releases.
 A source that has ended therefore captures at most one terminal result, is never restarted, and leaves no recurring poll work, while explicit `retire` stays the supported and idempotent path afterwards.
-For Lavish that verdict covers an ended session, a missing session, and the final feedback of a `Send & End` review, which the published poll marks with `session_ended` before it returns only empty ended sessions.
+The adapter may classify an ended session, a missing source, or a final result as terminal, but the generic runner never infers terminality from payload text.
 
 Applying a captured result is adapter knowledge too, and some results carry no judgement at all: they must simply be applied idempotently to this home's own durable state.
 Leaving that to a handler means it can silently not happen, so immediately after the terminal check above the runner calls `bin/fm-procevent-<adapter>.sh autohandle <source-id> <sequence> <result-file>` and lets the adapter apply and acknowledge its own result.
@@ -502,9 +515,9 @@ The runner proves exactly one durability boundary: output that reached the runne
 `bin/fm-procevent.sh handled <source-id> <sequence>` is the only thing that stops re-announcement: a generation-keyed, private, path-safe, durable, and idempotent acknowledgement that atomically checks and deduplicates by the exact source and sequence, so a paired effect gated on its first-time-vs-repeat report is never authorized twice.
 Default and fallback `check` publication is still best-effort, so the same source and sequence can repeat even before any restart; handlers deduplicate that identity rather than assuming a wake is unique.
 The runner proves nothing about the source side, and the handled acknowledgement proves nothing about a paired external effect performed before it: a crash between that effect and the acknowledgement call can still repeat the effect on replay, so this is never a generic exactly-once guarantee.
-The published `lavish-axi poll` clears feedback destructively before returning it, so a result lost between that clearing and the runner reading process output is unrecoverable.
+An adapter's source-side durability limits remain its own documented boundary, and the runner never claims recovery for bytes lost before capture.
 Never describe this path as at-least-once, no-loss, or lossless.
-`docs/verification/process-event-sources.md` holds the measurements and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
+`.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
 ## Environment variables
 
@@ -538,7 +551,7 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_INACTIVE_RECONCILE_SECS=900  # 60..1800-second watcher cadence and inactivity threshold; locked session start also scans immediately
 FM_INACTIVE_RECONCILE_BUDGET_SECS=10  # 1..30-second aggregate bound per inactive-outcome scan
-FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or Relay dispatch)
+FM_CHECK_INTERVAL=300   # seconds between secure-mode slow checks (authenticated merge polls, custom checks, or Relay dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims

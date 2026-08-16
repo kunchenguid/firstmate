@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated PR/MR poll sidecar.
+# Secure-mode only: data-only supervision never creates or executes this poll.
 # It emits exactly one merged line for a merged PR or MR and stays silent
 # otherwise, including on every error, so a failed lookup can never be read as
 # a merge. The provider-tagged identity is data in the sidecar and is never

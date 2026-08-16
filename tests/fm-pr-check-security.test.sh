@@ -68,6 +68,7 @@ make_case() {
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  fm_fake_exit0 "$fakebin" jq
   cat > "$fake_root/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'guard\n' >> "$FM_TEST_GUARD_LOG"
@@ -634,10 +635,10 @@ SH
     [ -d "$dir/home/state/$id.check.sh" ] \
       || fail "legacy task teardown changed the unsafe direct artifact"
     rmdir "$dir/home/state/$id.check.sh"
-    FM_HOME="$dir/home" "$ROOT/bin/fm-x-link.sh" "$id" req-legacy \
+    FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" "$ROOT/bin/fm-x-link.sh" "$id" req-legacy \
       --carry-count 0 --carry-ts 1700000000 --carry-platform x --carry-max 280 \
       > "$dir/x-link.out" 2> "$dir/x-link.err" \
-      || fail "path-safe legacy task ID could not link an X request"
+      || fail "path-safe legacy task ID could not link an X request: $(cat "$dir/x-link.err")"
     run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
       > "$dir/merge.out" 2> "$dir/merge.err" \
       || fail "path-safe legacy task ID could not use the PR merge flow"

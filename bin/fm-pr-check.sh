@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# Record a PR-ready task: in secure mode, store one validated canonical pr=<url>
+# and the forge's exact pr_head=<sha> when available, then atomically arm a
+# static merge poll. In data-only mode, record only validated canonical metadata
+# and never create or arm executable poll artifacts.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -39,6 +41,48 @@ META="$STATE/$ID.meta"
 if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" != 1 ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
+fi
+
+fm_state_mode_detect "$STATE"
+if [ "$FM_STATE_MODE" = data-only ]; then
+  unsafe=$(fm_state_data_only_artifacts "$STATE")
+  [ -z "$unsafe" ] || {
+    echo "error: data-only supervision refuses PR recording while executable/check artifacts exist; remove them only through the secure home owner: $unsafe" >&2
+    exit 1
+  }
+  PR_HEAD=
+  if [ "$PROVIDER" = github ]; then
+    inspection=$("$SCRIPT_DIR/fm-pr-inspect.sh" "$URL") || {
+      echo "error: data-only PR recording could not validate GitHub identity and head through gh-axi" >&2
+      exit 1
+    }
+    inspection_head=
+    inspection_head_count=0
+    while IFS='=' read -r inspection_key inspection_value || [ -n "$inspection_key" ]; do
+      case "$inspection_key" in
+        pr_head=*)
+          inspection_head=${inspection_key#pr_head=}
+          inspection_head_count=$((inspection_head_count + 1))
+          ;;
+        pr_head)
+          inspection_head=$inspection_value
+          inspection_head_count=$((inspection_head_count + 1))
+          ;;
+      esac
+    done <<< "$inspection"
+    [ "$inspection_head_count" -eq 1 ] || inspection_head=
+    PR_HEAD=$inspection_head
+    fm_pr_head_valid "$PR_HEAD" || {
+      echo "error: data-only PR recording received an ambiguous GitHub head" >&2
+      exit 1
+    }
+  fi
+  fm_pr_metadata_record_data_only "$STATE" "$ID" "$URL" "$PR_HEAD" || {
+    echo "error: data-only PR metadata could not be recorded safely" >&2
+    exit 1
+  }
+  printf 'recorded: state/%s.meta (manual PR inspection required before merge)\n' "$ID"
+  exit 0
 fi
 
 # A prior exact merged result may have queued its durable wake immediately
