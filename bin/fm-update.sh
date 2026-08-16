@@ -192,7 +192,7 @@ preflight_firstmate() {
 
 sync_github_fork_if_needed() {
   local local_default=$1 origin_slug=$2 upstream_url=$3
-  local metadata api_origin is_fork api_default api_parent configured_parent
+  local metadata api_origin is_fork api_default api_parent api_parent_owner configured_parent
   local rest_is_fork rest_parent _rest_source
   local before_oid after_oid sync_base sync_parent sync_default
 
@@ -241,6 +241,9 @@ sync_github_fork_if_needed() {
     fi
     api_parent=$rest_parent
   fi
+  github_repo_identity_is_valid "$api_parent" \
+    || refuse "GitHub origin inspection returned invalid parent identity: $api_parent"
+  api_parent_owner=${api_parent%%/*}
   if [ -n "$upstream_url" ]; then
     configured_parent=$(github_slug_from_url "$upstream_url" || true)
     [ -n "$configured_parent" ] \
@@ -268,10 +271,12 @@ sync_github_fork_if_needed() {
       ;;
     *) refuse "GitHub fork sync returned malformed base branch: $sync_base" ;;
   esac
-  github_repo_identity_is_valid "$sync_parent" \
-    || refuse "GitHub fork sync returned an invalid parent identity: $sync_parent"
-  same_repo_identity "$sync_parent" "$api_parent" \
-    || refuse "GitHub fork sync parent $sync_parent differs from GitHub parent $api_parent"
+  case "$sync_parent" in
+    ''|*[![:alnum:]-]*) refuse "GitHub fork sync returned malformed parent owner: $sync_parent" ;;
+  esac
+  [ "$(printf '%s' "$sync_parent" | tr '[:upper:]' '[:lower:]')" = \
+    "$(printf '%s' "$api_parent_owner" | tr '[:upper:]' '[:lower:]')" ] \
+    || refuse "GitHub fork sync parent owner $sync_parent differs from GitHub parent owner $api_parent_owner"
   [ "$sync_default" = "$api_default" ] \
     || refuse "GitHub fork sync returned base branch $sync_default, expected $api_default"
   if ! after_oid=$(gh api "repos/$api_origin/commits/$api_default" --jq .sha 2>&1); then

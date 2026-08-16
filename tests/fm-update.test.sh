@@ -185,7 +185,10 @@ case "${1:-} ${2:-}" in
         printf 'not-a-parent-branch\n'
         ;;
       merge-upstream-parent-mismatch)
-        printf 'acme/not-the-parent:main\n'
+        printf 'not-acme:main\n'
+        ;;
+      merge-upstream-branch-mismatch)
+        printf 'acme:trunk\n'
         ;;
       merge-upstream-conflict)
         echo "merge conflict" >&2
@@ -193,7 +196,7 @@ case "${1:-} ${2:-}" in
         ;;
       *)
         sync_fork_from_upstream
-        printf 'acme/firstmate:main\n'
+        printf 'acme:main\n'
         ;;
     esac
     ;;
@@ -601,13 +604,34 @@ test_github_fork_merge_upstream_response_disagreement_refused() {
 
   [ "$rc" -ne 0 ] || fail "merge-upstream parent disagreement unexpectedly succeeded"
   assert_contains "$out" \
-    "update refused: GitHub fork sync parent acme/not-the-parent differs from GitHub parent acme/firstmate" \
+    "update refused: GitHub fork sync parent owner not-acme differs from GitHub parent owner acme" \
     "merge-upstream parent disagreement was not refused"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$local_before" ] \
     || fail "local checkout moved after merge-upstream parent disagreement"
   [ "$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)" = "$fork_before" ] \
     || fail "fork changed after merge-upstream parent disagreement"
   pass "T38 merge-upstream parent disagreement refuses before local or fork mutation"
+}
+
+test_github_fork_merge_upstream_branch_disagreement_refused() {
+  local w out local_before fork_before rc
+  w=$(new_world github-merge-upstream-branch-disagreement)
+  configure_github_world "$w"
+  local_before=$(git -C "$w/main" rev-parse HEAD)
+  fork_before=$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)
+
+  out=$(FM_TEST_GH_MODE=merge-upstream-branch-mismatch run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "merge-upstream branch disagreement unexpectedly succeeded"
+  assert_contains "$out" \
+    "update refused: GitHub fork sync returned base branch trunk, expected main" \
+    "merge-upstream branch disagreement was not refused"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$local_before" ] \
+    || fail "local checkout moved after merge-upstream branch disagreement"
+  [ "$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)" = "$fork_before" ] \
+    || fail "fork changed after merge-upstream branch disagreement"
+  pass "T40 merge-upstream branch disagreement refuses before local or fork mutation"
 }
 
 test_github_fork_merge_upstream_conflict_refused() {
@@ -1089,6 +1113,7 @@ test_github_fork_sync_survives_cli_encoded_ref_fallback_refusal
 test_github_fork_merge_upstream_api_failure_refused
 test_github_fork_merge_upstream_malformed_response_refused
 test_github_fork_merge_upstream_response_disagreement_refused
+test_github_fork_merge_upstream_branch_disagreement_refused
 test_github_fork_merge_upstream_conflict_refused
 test_github_fork_already_current
 test_github_fork_missing_graphql_parent_uses_rest_metadata
