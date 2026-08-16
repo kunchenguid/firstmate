@@ -127,6 +127,17 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## Automic Vault secret injection (config/av-inject / FM_AV_INJECT)
+
+The optional local, gitignored `config/av-inject` toggle wraps every worker launch in `av inject +KEY... -- <launch>` so the crewmate or secondmate receives the captain's static API keys from Automic Vault as environment variables, never written to disk and never printed.
+It is OFF by default: absent, empty, `off`, `false`, `no`, `0`, or any unrecognized value disables injection and launches are unchanged, while `on`, `true`, `yes`, or `1` enables it.
+`FM_AV_INJECT` overrides the file with the same truthiness and exists for tests.
+Enable it only after the attended per-key `av save` migration is verified, because turning it on before the keys exist would make every injection fail closed and break every spawn.
+When enabled, a home with no resolvable `av` CLI refuses to spawn with a clear error rather than launching without the secrets it was told to inject; the injected keys default to the researched static set and can be overridden for tests with `FM_AV_INJECT_KEYS`.
+Injection applies to the verified launch templates only; the raw unverified-adapter escape hatch is never wrapped.
+`config/av-inject` is primary-authoritative and inherited into secondmate homes like the other local config toggles, so a secondmate's own workers inherit the same injection.
+`bin/fm-av-inject-lib.sh`'s header owns the exact mode parsing, key validation, and wrapper mechanics, and points to the private research record that holds the Automic Vault security model, the migration prerequisites (verified launcher, per-secret Direct Access Rules, availability), and the key inventory.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
@@ -326,7 +337,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, `av-inject`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.
