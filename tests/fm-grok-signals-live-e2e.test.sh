@@ -9,8 +9,8 @@
 # 1.0.4 accepts it - which is exactly the drift this guard exists to catch.
 # Fails naming the harness and version.
 #
-# Refresh docs/verification/runtime-backends.md from this guard after every grok
-# upgrade.
+# Refresh the grok section of .agents/skills/harness-adapters/SKILL.md - which
+# owns these adapter facts - from this guard after every grok upgrade.
 set -u
 
 GROK_BIN=$(command -v grok 2>/dev/null || true)

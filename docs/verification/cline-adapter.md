@@ -289,7 +289,7 @@ cline -i --tui --auto-approve true __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ enc
 | `bin/fm-busy-lib.sh` (herdr arm) | the cline-only native staleness bound falls through to that fold, so the structural source is reachable on herdr rather than shadowed by herdr's own guess |
 | `bin/fm-control-lib.sh` + `bin/fm-control.sh` | cline control mechanics; the exit-key table and its delivery path |
 | `.agents/skills/harness-adapters/SKILL.md` | cline knowledge section |
-| `tests/fm-cline-harness.test.sh` | 24 portable behavior checks (all green) |
+| `tests/fm-cline-harness.test.sh` | 35 portable behavior checks (all green) |
 | `tests/fm-cline-signals-live-e2e.test.sh` | opt-in live drift guard against the real binary |
 
 ## Remaining acceptance (live end-to-end)

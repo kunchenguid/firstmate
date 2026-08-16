@@ -320,7 +320,7 @@ The model arms through `fm_watch_arm_pi`, never a foreground bash arm; the watch
 `bin/fm-session-start.sh` reports when the live Pi-family session has not loaded both the turn-end guard and watcher extensions, and points at the selected executable after project trust as the fix, with `-e` as a trust-free fallback.
 When a secondmate is launched on Pi or pi-signed, `fm-spawn.sh --secondmate` launches the selected executable with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`, both already present in the secondmate home's git worktree.
 
-## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; reasoning-effort ceiling re-verified 2026-07-13 on 0.2.99; exit paths re-verified 2026-07-19 on grok 0.2.103)
+## grok (VERIFIED 2026-06-29, grok 0.2.73; slash-submit re-verified 2026-07-03 on 0.2.82; exit paths re-verified 2026-07-19 on grok 0.2.103; reasoning-effort ceiling, headless surface, no-pty failure, and capacity re-verified 2026-08-16 on grok 1.0.4)
 
 Grok Build TUI (`grok`), a Claude-Code-compatible CLI from xAI.
 Launch with a positional prompt: `grok --always-approve "$(cat <brief>)"`.
@@ -340,6 +340,11 @@ For Grok's supported reasoning-effort values and omission behavior, see the [lau
 Reproduced live: the herdr adapter's submit-verification at the time treated ANY pane-content change after Enter as "submitted", and the popup-close-with-placeholder-fill described above IS a visible content change even though nothing was actually sent.
 The current tmux and Herdr adapters pass their captures and capability descriptors to `bin/fm-composer-lib.sh`, whose shared structural classifier sees placeholder-filled text on any proven content row as still pending, so the retry loop sends the needed second Enter.
 See `docs/herdr-backend.md` "Composer and injection safety" for Herdr's current boundary and `tests/fm-backend-herdr.test.sh` for regression coverage.
+
+**Headless, no-pty, and capacity facts (verified 2026-08-16, grok 1.0.4).**
+`grok --reasoning-effort xhigh -p '<prompt>'` answers a real single turn, so the highest effort firstmate passes is usable and not merely parsed.
+The bare TUI form launched without a pty fails with an OS device error (`Device not configured` / `os error 6`) and names no credential problem: that is a harness artifact and must never be read as an auth fault, because the two need opposite responses.
+`quota-axi` resolves no grok quota window at all while grok's own auth reads usable, so grok stays unpriceable and `bin/fm-dispatch-select.mjs` must not treat that pairing as missing credentials.
 
 The launch-profile, headless, no-pty, and capacity facts above are refreshed by:
 
