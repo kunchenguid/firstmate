@@ -2643,7 +2643,7 @@ EOF
   fakebin=$(make_fakebin "$home")
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'state: done · source: fixture\n'
+printf 'liveness: absent · source: fixture\n'
 SH
   chmod +x "$fakebin/fm-crew-state.sh"
   before=$(fingerprint_truth_records "$home")
@@ -2698,7 +2698,10 @@ EOF
     || fail "peace section failed on a multi-kind digest fixture"
   after=$(fingerprint_truth_records "$home")
   [ "$before" = "$after" ] || fail "peace render wrote backlog, metadata, or holds"
-  assert_contains "$out" "records: disagree ($expected ghost, 0 stranded)" \
+  # The closed-pr row's leftover metadata has no live worktree, so the
+  # centralized worker-liveness verdict resolves it to absent and the
+  # unadvanceable-work detector counts that one row as stranded.
+  assert_contains "$out" "records: disagree ($expected ghost, 1 stranded)" \
     "the lamp did not project the digest owner's total"
   assert_peace_omits_other_health "$out"
   pass "peace records count every digest kind the owner reports"
@@ -2786,8 +2789,10 @@ test_peace_records_ignore_blocked_worker() {
 
 ## Done
 EOF
+  mkdir -p "$home/projects/blocked-task"
   fm_write_meta "$home/state/blocked-task.meta" \
     "window=firstmate:fm-blocked-task" \
+    "worktree=$home/projects/blocked-task" \
     "kind=ship"
   printf 'blocked [key=wait]: Waiting on an external dependency.\n' \
     > "$home/state/blocked-task.status"

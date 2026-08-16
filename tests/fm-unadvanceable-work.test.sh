@@ -38,9 +38,26 @@ esac
 printf 'fm-unadvanceable-work fixture: unsupported tasks-axi %s\n' "$*" >&2
 exit 1
 SH
+  # The fake liveness owner models the real fm-crew-state.sh --worker-liveness
+  # contract: an explicit override line wins, missing metadata is structural
+  # absence, and anything else defers to the fixture's liveness word.
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'state: %s · source: pane · fixture liveness\n' "${FM_TEST_LIVENESS:-unknown}"
+set -u
+[ "${1:-}" = --worker-liveness ] || {
+  printf 'usage: fm-crew-state.sh [--worker-liveness] <id>\n' >&2
+  exit 2
+}
+id=${2:-}
+if [ -n "${FM_TEST_CREW_LINE:-}" ]; then
+  printf '%s\n' "$FM_TEST_CREW_LINE"
+  exit 0
+fi
+if [ -n "$id" ] && [ ! -e "${FM_STATE_OVERRIDE:-/nonexistent}/$id.meta" ]; then
+  printf 'liveness: absent · source: metadata · no metadata for %s\n' "$id"
+  exit 0
+fi
+printf 'liveness: %s · source: pane · fixture liveness\n' "${FM_TEST_LIVENESS:-unknown}"
 SH
   chmod +x "$fakebin/tasks-axi" "$fakebin/fm-crew-state.sh"
   printf '%s\n' "$fakebin"
@@ -61,7 +78,7 @@ with_help_trailer() {  # <listing>
 }
 
 run_detector() {
-  local name=$1 listing=$2 liveness=${3:-unknown} meta_ids=${4:-} dir fakebin id
+  local name=$1 listing=$2 liveness=${3:-unknown} meta_ids=${4:-} crew_line=${5:-} dir fakebin id
   dir="$TMP_ROOT/$name"
   mkdir -p "$dir/home/data" "$dir/home/state" "$dir/home/config"
   : > "$dir/home/data/backlog.md"
@@ -79,6 +96,7 @@ run_detector() {
     FM_CONFIG_OVERRIDE="$dir/home/config" \
     FM_TEST_TASKS="$(with_help_trailer "$listing")" \
     FM_TEST_LIVENESS="$liveness" \
+    FM_TEST_CREW_LINE="$crew_line" \
     FM_CREW_STATE_OVERRIDE="$fakebin/fm-crew-state.sh" \
     "$DETECTOR"
 }
@@ -88,7 +106,7 @@ test_unadvanceable_task_is_flagged() {
   listing='count: 1
 tasks[1]{id,state,kind,repo,title,blocked_by,held}:
   abandoned,in_flight,ship,firstmate,Abandoned work,none,no'
-  out=$(run_detector abandoned "$listing" "done" abandoned) || fail "unadvanceable-work detector failed"
+  out=$(run_detector abandoned "$listing" absent abandoned) || fail "unadvanceable-work detector failed"
   assert_contains "$out" \
     "abandoned: state=in_flight; live_worker=no; hold=no; blocked_by=no" \
     "genuinely unadvanceable task finding"
@@ -110,9 +128,34 @@ test_live_worker_is_not_flagged() {
   listing='count: 1
 tasks[1]{id,state,kind,repo,title,blocked_by,held}:
   active,in_flight,ship,firstmate,Active work,none,no'
-  out=$(run_detector active "$listing" working active) || fail "live-worker detector case failed"
+  out=$(run_detector active "$listing" live active) || fail "live-worker detector case failed"
   [ -z "$out" ] || fail "live worker was flagged: $out"
   pass "an in-flight task with a live worker is silent"
+}
+
+test_merge_wait_run_state_is_not_flagged() {
+  local listing out line
+  listing='count: 1
+tasks[1]{id,state,kind,repo,title,blocked_by,held}:
+  ready,in_flight,ship,firstmate,Ready for merge,none,no'
+  line='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+  out=$(run_detector ready "$listing" unknown ready "$line") || fail "merge-wait detector case failed"
+  [ -z "$out" ] || fail "merge-wait task was flagged: $out"
+  pass "a checks-green run still monitoring for merge is silent"
+}
+
+test_empty_metadata_with_absent_worker_is_flagged() {
+  local listing out line
+  listing='count: 1
+tasks[1]{id,state,kind,repo,title,blocked_by,held}:
+  abandoned-meta,in_flight,ship,firstmate,Abandoned work with stale metadata,none,no'
+  line='liveness: absent · source: metadata · worktree gone (torn down?)'
+  out=$(run_detector abandoned-meta "$listing" unknown abandoned-meta "$line") \
+    || fail "empty-metadata detector case failed"
+  assert_contains "$out" \
+    "abandoned-meta: state=in_flight; live_worker=no; hold=no; blocked_by=no" \
+    "leftover empty metadata with an absent worker finding"
+  pass "leftover empty metadata does not hide abandoned work"
 }
 
 test_held_task_is_not_flagged() {
@@ -151,7 +194,7 @@ test_manual_backlog_backend_cannot_answer() {
 tasks[1]{id,state,kind,repo,title,blocked_by,held}:
   abandoned,in_flight,ship,firstmate,Abandoned work,none,no'
   out=$(FM_TEST_BACKLOG_BACKEND=manual \
-    run_detector manual-backend "$listing" "done" abandoned 2>/dev/null)
+    run_detector manual-backend "$listing" absent abandoned 2>/dev/null)
   rc=$?
   [ "$rc" -ne 0 ] || fail "a manual backlog backend reported strandedness it never read"
   [ -z "$out" ] || fail "a manual backlog backend printed a finding: $out"
@@ -164,7 +207,7 @@ test_incompatible_tasks_axi_cannot_answer() {
 tasks[1]{id,state,kind,repo,title,blocked_by,held}:
   abandoned,in_flight,ship,firstmate,Abandoned work,none,no'
   out=$(FM_TEST_TASKS_AXI_VERSION=0.1.0 \
-    run_detector incompatible-backend "$listing" "done" abandoned 2>/dev/null)
+    run_detector incompatible-backend "$listing" absent abandoned 2>/dev/null)
   rc=$?
   [ "$rc" -ne 0 ] || fail "an incompatible tasks-axi reported strandedness it never read"
   [ -z "$out" ] || fail "an incompatible tasks-axi printed a finding: $out"
@@ -176,7 +219,7 @@ test_unreadable_listing_shape_is_an_error() {
   listing='count: 1
 tasks[1]{id,state,kind,repo,title,blocked_by,held,priority}:
   abandoned,in_flight,ship,firstmate,Abandoned work,none,no,p2'
-  out=$(run_detector unreadable-shape "$listing" "done" abandoned 2>/dev/null)
+  out=$(run_detector unreadable-shape "$listing" absent abandoned 2>/dev/null)
   rc=$?
   [ "$rc" -ne 0 ] || fail "a listing the row scan cannot read reported peace instead of failing"
   [ -z "$out" ] || fail "an unreadable listing shape printed a finding: $out"
@@ -187,7 +230,7 @@ test_listing_without_a_count_is_an_error() {
   local listing out rc
   listing='tasks[1]{id,state,kind,repo,title,blocked_by,held}:
   abandoned,in_flight,ship,firstmate,Abandoned work,none,no'
-  out=$(run_detector countless-listing "$listing" "done" abandoned 2>/dev/null)
+  out=$(run_detector countless-listing "$listing" absent abandoned 2>/dev/null)
   rc=$?
   [ "$rc" -ne 0 ] || fail "a listing with no task count was parsed as authoritative"
   [ -z "$out" ] || fail "a listing with no task count printed a finding: $out"
@@ -208,6 +251,8 @@ tasks: 0 in_flight tasks in this backlog'
 test_unadvanceable_task_is_flagged
 test_missing_meta_is_not_flagged
 test_live_worker_is_not_flagged
+test_merge_wait_run_state_is_not_flagged
+test_empty_metadata_with_absent_worker_is_flagged
 test_held_task_is_not_flagged
 test_dependency_edge_is_not_flagged
 test_unknown_liveness_is_not_flagged

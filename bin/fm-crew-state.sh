@@ -18,6 +18,15 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
+# `--worker-liveness` keeps this script as the sole owner of the same inputs and
+# emits a conservative mechanism verdict for read-only fleet detectors:
+#
+#   liveness: <live|absent|unknown> · source: <run-step|pane|metadata|none> · <detail>
+#
+# Structural absence (missing metadata or worktree) is `absent`. Every other
+# result is `unknown` until an advancing mechanism is positively identified;
+# consumers must treat `unknown` as live and stay silent.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
@@ -48,7 +57,7 @@
 #      than trusting a stale status log.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
-# of state; exit 2 only on a usage error (no id).
+# of state; exit 2 only on a usage error (no id or an unknown option).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,8 +76,19 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
+LIVENESS_MODE=0
+case "${1:-}" in
+  --worker-liveness)
+    LIVENESS_MODE=1
+    shift
+    ;;
+  --*)
+    echo "usage: fm-crew-state.sh [--worker-liveness] <id>" >&2
+    exit 2
+    ;;
+esac
 ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+[ -n "$ID" ] || { echo "usage: fm-crew-state.sh [--worker-liveness] <id>" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -84,15 +104,37 @@ SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
+  if [ "$LIVENESS_MODE" -eq 1 ]; then
+    local liveness=unknown
+    # A reconciled run-step is an advancing mechanism even when its product
+    # state is terminal: CI/merge monitoring outlives the implementation run.
+    # Pane liveness requires the existing positive semantic-busy verdict.
+    case "$2:$1" in
+      run-step:*) liveness=live ;;
+      pane:working) liveness=live ;;
+    esac
+    local liveness_line="liveness: $liveness${SEP}source: $2"
+    [ -n "${3:-}" ] && liveness_line="$liveness_line${SEP}$3"
+    printf '%s\n' "$liveness_line"
+    exit 0
+  fi
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
 }
 
+emit_structural_absence() {  # <detail>
+  if [ "$LIVENESS_MODE" -eq 1 ]; then
+    printf 'liveness: absent%ssource: metadata%s%s\n' "$SEP" "$SEP" "$1"
+    exit 0
+  fi
+  emit unknown none "$1"
+}
+
 # --- meta resolution --------------------------------------------------------
 
-[ -f "$META" ] || emit unknown none "no metadata for $ID"
+[ -f "$META" ] || emit_structural_absence "no metadata for $ID"
 
 meta_value() {  # <key>
   grep "^$1=" "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true
@@ -105,7 +147,7 @@ HARNESS=$(meta_value harness)
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
-  emit unknown none "worktree gone (torn down?)"
+  emit_structural_absence "worktree gone (torn down?)"
 fi
 
 # --- status log ------------------------------------------------------------

@@ -8,12 +8,12 @@
 #
 # Missing task metadata is owned by the contradiction digest's
 # backlog-without-meta kind, so this detector does not report a no-meta row.
-# When metadata exists, it delegates current-state classification to
-# fm-crew-state.sh. Only a terminal done/failed result proves there is no live
-# worker; unknown, malformed, or failed liveness reads count as live and
-# suppress the finding. This makes the detector deliberately blind to crashed
-# or unreachable workers whose metadata remains but whose liveness cannot be
-# resolved.
+# When metadata exists, fm-crew-state.sh is the sole owner of worker-mechanism
+# liveness, including structural absence such as a torn-down worktree. Only its
+# explicit `liveness: absent` verdict proves there is no live worker; live,
+# unknown, malformed, or failed reads all suppress the finding. This makes the
+# detector deliberately blind to crashed or unreachable workers whose metadata
+# remains but whose liveness cannot be resolved.
 #
 # In-flight enumeration comes from the tasks-axi backlog backend, so the
 # detector is only an instrument on a home where that backend is available
@@ -111,13 +111,11 @@ while IFS= read -r line; do
       esac
       [ "$blocked_by" = none ] || continue
       [ -e "$STATE/$id.meta" ] || continue
-      crew_line=$("$CREW_STATE" "$id" 2>/dev/null) || crew_line='state: unknown · source: none'
+      crew_line=$("$CREW_STATE" --worker-liveness "$id" 2>/dev/null) \
+        || crew_line='liveness: unknown · source: none'
       case "$crew_line" in
-        "state: done"*|"state: failed"*)
-          ;;
-        *)
-          continue
-          ;;
+        "liveness: absent"*) ;;
+        *) continue ;;
       esac
       findings="$findings$id: state=in_flight; live_worker=no; hold=no; blocked_by=no
 "
