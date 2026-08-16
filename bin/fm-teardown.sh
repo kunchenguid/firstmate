@@ -2,8 +2,10 @@
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
 # clear volatile state, refresh/prune the project's clone for PR-based ship
-# tasks, then print a backlog-refresh reminder for ship and scout teardowns
-# (a secondmate teardown prints none, since secondmates are not backlog items).
+# tasks, then print a backlog refresh reminder. Before destructive worktree return,
+# ship and scout teardowns print retro-acceleration and secondmate memory-hygiene
+# prompts and refuse when a linked Spec Kit run is unsealed (list_worktrees.py
+# owner). Secondmate teardown prints none of the above.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -54,8 +56,10 @@
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--terminal-payload <json>]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
-#   checks, and discards secondmate child work for kind=secondmate. Only use it
-#   when the captain has explicitly said to discard the work.
+#   checks, discards secondmate child work for kind=secondmate, and bypasses an
+#   unsealed linked kit-run outcome seal after recording the bypass in
+#   data/teardown-kit-seal-forces.jsonl. Only use it when the captain has
+#   explicitly said to discard the work.
 #   --terminal-payload is a compatibility fallback for a task with no observable
 #   delivery-gate result. A matching no-mistakes run always supplies mechanical
 #   quality facts instead, and says on stderr that the payload was not recorded.
@@ -850,6 +854,188 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default
+}
+
+TEARDOWN_SPEC_KIT_SCRIPTS_DIR="${FM_SPEC_KIT_SCRIPTS_DIR:-$HOME/.claude/skills/artemis-spec-kit-plugin/scripts}"
+TEARDOWN_KIT_SCRATCH_ROOT="${FM_KIT_SCRATCH_ROOT:-$HOME/.claude/scratch}"
+TEARDOWN_KIT_SEAL_FORCE_LOG="$DATA/teardown-kit-seal-forces.jsonl"
+
+record_kit_seal_force_bypass() {
+  local run_dir=$1 error=$2 record log=$TEARDOWN_KIT_SEAL_FORCE_LOG
+  if ! mkdir -p "$DATA"; then
+    echo "REFUSED: cannot create data directory for kit-seal force bypass record: $DATA" >&2
+    return 1
+  fi
+  if [ -L "$log" ] || { [ -e "$log" ] && [ ! -f "$log" ]; }; then
+    echo "REFUSED: kit-seal force bypass record is not a regular non-symlink file: $log" >&2
+    return 1
+  fi
+  if ! record=$(jq -cn \
+    --arg task "$ID" \
+    --arg runDir "$run_dir" \
+    --arg error "$error" \
+    --arg forcedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{task:$task,runDir:$runDir,error:$error,forcedAt:$forcedAt}'); then
+    echo "REFUSED: cannot build kit-seal force bypass record" >&2
+    return 1
+  fi
+  if [ ! -e "$log" ]; then
+    if ! (umask 077 && : > "$log"); then
+      echo "REFUSED: cannot create kit-seal force bypass record at $log" >&2
+      return 1
+    fi
+  elif ! chmod 0600 "$log" 2>/dev/null; then
+    echo "REFUSED: cannot tighten kit-seal force bypass record mode to 600 at $log" >&2
+    return 1
+  fi
+  if ! python3 - "$log" "$record" <<'PY'
+import os
+import sys
+
+path, record = sys.argv[1:3]
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+try:
+    os.write(fd, (record + "\n").encode("utf-8"))
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+  then
+    echo "REFUSED: cannot append kit-seal force bypass record to $log" >&2
+    return 1
+  fi
+}
+
+teardown_kit_unsealed_linked_run_error() {
+  local wt=$1 list_worktrees_py py_out py_err py_rc
+  [ -n "$wt" ] || return 0
+  [ -d "$wt" ] || return 0
+  list_worktrees_py="$TEARDOWN_SPEC_KIT_SCRIPTS_DIR/list_worktrees.py"
+  if [ ! -f "$list_worktrees_py" ]; then
+    if [ -n "${FM_SPEC_KIT_SCRIPTS_DIR:-}" ]; then
+      echo "configured kit seal scripts missing: $list_worktrees_py"
+      return 1
+    fi
+    echo "kit-seal-check: Spec Kit scripts not installed; linked-run outcome check skipped" >&2
+    return 0
+  fi
+  py_rc=0
+  py_err=$(mktemp)
+  py_out=$(python3 - "$wt" "$TEARDOWN_KIT_SCRATCH_ROOT" "$list_worktrees_py" 2>"$py_err" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+worktree, scratch_root, script_path = sys.argv[1:4]
+scripts_dir = str(Path(script_path).resolve().parent)
+if scripts_dir not in sys.path:
+    sys.path.insert(0, scripts_dir)
+spec = importlib.util.spec_from_file_location("fm_list_worktrees", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+if not hasattr(module, "_unsealed_linked_run"):
+    print("kit-seal-check: list_worktrees.py has no _unsealed_linked_run entry point", file=sys.stderr)
+    sys.exit(2)
+error = module._unsealed_linked_run(worktree, Path(scratch_root))
+if error:
+    print(error)
+PY
+) || py_rc=$?
+  if [ "${py_rc:-0}" -ne 0 ]; then
+    echo "kit-seal-check: linked-run outcome check could not run; teardown continues without it" >&2
+    [ -s "$py_err" ] && cat "$py_err" >&2
+    rm -f "$py_err"
+    return 0
+  fi
+  rm -f "$py_err"
+  [ -n "$py_out" ] || return 0
+  printf '%s\n' "$py_out"
+}
+
+teardown_enforce_kit_outcome_seal() {
+  local error run_dir
+  error=$(teardown_kit_unsealed_linked_run_error "$WT")
+  [ -n "$error" ] || return 0
+  run_dir=$(printf '%s\n' "$error" | sed -n 's/.*linked run \([^ ]*\) .*/\1/p')
+  if [ "$FORCE" = "--force" ]; then
+    record_kit_seal_force_bypass "${run_dir:-unknown}" "$error" || return 1
+    echo "note: --force bypassed unsealed kit-run outcome seal for $ID; recorded in data/teardown-kit-seal-forces.jsonl" >&2
+    return 0
+  fi
+  echo "REFUSED: $error" >&2
+  echo "Seal the linked kit run before teardown, or re-run with --force after explicit discard approval to record a bypass in data/teardown-kit-seal-forces.jsonl:" >&2
+  if [ -n "$run_dir" ]; then
+    case "$KIND" in
+      scout)
+        echo "  python3 $TEARDOWN_SPEC_KIT_SCRIPTS_DIR/record_outcome.py $run_dir --event abandoned" >&2
+        ;;
+      *)
+        echo "  python3 $TEARDOWN_SPEC_KIT_SCRIPTS_DIR/reconcile_run_outcome.py $run_dir --repo-root $PROJ" >&2
+        ;;
+    esac
+  else
+    echo "  PR ships: python3 $TEARDOWN_SPEC_KIT_SCRIPTS_DIR/reconcile_run_outcome.py <run_dir> --repo-root <project>" >&2
+    echo "  Scouts: python3 $TEARDOWN_SPEC_KIT_SCRIPTS_DIR/record_outcome.py <run_dir> --event abandoned" >&2
+  fi
+  return 1
+}
+
+teardown_task_repo() {
+  local id=$1 backlog=$DATA/backlog.md line repo
+  [ -f "$backlog" ] || return 1
+  line=$(grep -E "^- \\[[ x]\\] ${id} - " "$backlog" 2>/dev/null | sed -n '1p') || return 1
+  repo=$(printf '%s\n' "$line" | sed -n 's/.*(repo: \([^)]*\)).*/\1/p')
+  [ -n "$repo" ] || return 1
+  printf '%s\n' "$repo"
+}
+
+teardown_first_ready_task() {
+  local listing rows row id rest repo
+  fm_tasks_axi_backend_available "$CONFIG" || return 1
+  command -v tasks-axi >/dev/null 2>&1 || return 1
+  listing=$(tasks-axi ready 2>/dev/null) || return 1
+  rows=$(printf '%s\n' "$listing" | sed -n 's/^  \([A-Za-z0-9._-][A-Za-z0-9._-]*,.*\)$/\1/p')
+  row=$(printf '%s\n' "$rows" | sed -n '1p')
+  [ -n "$row" ] || return 1
+  id=${row%%,*}
+  rest=${row#*,}
+  rest=${rest#*,}
+  rest=${rest#*,}
+  repo=${rest%%,*}
+  [ -n "$id" ] && [ -n "$repo" ] || return 1
+  printf '%s\t%s\n' "$id" "$repo"
+}
+
+teardown_retro_acceleration_reminder() {
+  printf '%s\n' "Retro acceleration: answer in one line each; record only an INVARIANT on its second independent occurrence (the ledger is for counting, never for reading):"
+  printf '%s\n' "- What did this task spend time on that something we already own would have done?"
+  printf '%s\n' "- Did a blocker sit unanswered, and for how long?"
+  printf '%s\n' "- Did a review fail on a defect class our own records already name?"
+  printf '%s\n' "- Did a recheck produce no change at an unchanged head?"
+}
+
+teardown_secondmate_seam_reminder() {
+  local cur_repo next_line next_id next_repo
+  [ -f "$FM_HOME/$SUB_HOME_MARKER" ] || return 0
+  cur_repo=$(teardown_task_repo "$ID") || return 0
+  next_line=$(teardown_first_ready_task) || return 0
+  next_id=${next_line%%$'\t'*}
+  next_repo=${next_line#*$'\t'}
+  [ -n "$next_id" ] && [ -n "$next_repo" ] || return 0
+  [ "$next_repo" != "$cur_repo" ] || return 0
+  printf '%s\n' "Secondmate memory hygiene: $ID ($cur_repo) just finished and the next ready item $next_id ($next_repo) is a different subject. Run /stow in this home, then clear its context, before dispatching $next_id."
+}
+
+teardown_pre_return_reminders() {
+  [ "$KIND" = secondmate ] && return 0
+  teardown_retro_acceleration_reminder
+  teardown_secondmate_seam_reminder
+}
+
+teardown_before_worktree_removal() {
+  [ "$KIND" = secondmate ] && return 0
+  [ -d "$WT" ] || return 0
+  teardown_pre_return_reminders
 }
 
 backlog_refresh_reminder() {
@@ -2347,6 +2533,13 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+# Linked kit-run outcome seals are ordinary refusals: they run with the other
+# landed-work gates above, before process reaping, telemetry sealing, or any
+# destructive cleanup.
+if [ "$KIND" != secondmate ] && [ -d "$WT" ]; then
+  teardown_enforce_kit_outcome_seal || exit 1
+fi
+
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
 # --force, and before ANY destructive step below - a still-parked run or a
@@ -2454,6 +2647,7 @@ fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
+  teardown_before_worktree_removal
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
@@ -2468,6 +2662,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  teardown_before_worktree_removal
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then

@@ -39,6 +39,14 @@ export FM_GATE_REFUSE_BYPASS=1
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Keep bin/fm-teardown.sh's linked-run seal gate off the host. Its defaults are
+# $HOME/.claude/skills/artemis-spec-kit-plugin/scripts and $HOME/.claude/scratch,
+# so without these EVERY test that drives a teardown imports the developer's
+# installed Spec Kit plugin and scans their real run dirs - suite results would
+# then vary with machine state. Cases that exercise the gate set both explicitly.
+export FM_SPEC_KIT_SCRIPTS_DIR="${FM_SPEC_KIT_SCRIPTS_DIR:-$ROOT/tests/fixtures/spec-kit-kit-seal}"
+export FM_KIT_SCRATCH_ROOT="${FM_KIT_SCRATCH_ROOT:-$ROOT/tests/fixtures/spec-kit-empty-scratch}"
+
 # --- reporters --------------------------------------------------------------
 
 fail() {

@@ -89,6 +89,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   projects.md        thin fleet navigation registry recording each project's standing delivery posture; firstmate-private, parsed for mechanical sync and seeding by fm-project-mode.sh (section 6)
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
   routing-outcomes.jsonl  canonical private model-attempt ledger; append-only, never hand-edited, and written only by bin/fm-model-telemetry.sh, whose header owns its event, receipt, recovery, and read-only sheet contracts
+  teardown-kit-seal-forces.jsonl  durable record of every --force teardown that bypassed an unsealed linked Spec Kit run outcome seal; append-only, never hand-edited, and written only by bin/fm-teardown.sh, which refuses the bypass when the record cannot be written
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception

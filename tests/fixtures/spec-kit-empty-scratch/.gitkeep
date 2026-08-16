@@ -1,0 +1,3 @@
+Empty Spec Kit scratch root: the hermetic FM_KIT_SCRATCH_ROOT default for tests
+that do not exercise the linked-run seal gate. Holding no run dirs is the whole
+contract - _unsealed_linked_run finds no linked run and the gate stays quiet.

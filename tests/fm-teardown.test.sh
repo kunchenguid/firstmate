@@ -84,7 +84,9 @@ make_case() {
   # run; the ALLOW cases need them so the script can complete cleanly.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-# `treehouse return --force <wt>`: succeed silently.
+if [ "${1:-}" = return ] && [ "${2:-}" = --force ] && [ -n "${3:-}" ]; then
+  rm -rf -- "$3"
+fi
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
@@ -204,6 +206,367 @@ fi
 exit 0
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
+setup_allow_local_teardown() {
+  local name=$1 case_dir wt_head
+  case_dir=$(make_case "$name")
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "completion reminder work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf '%s\n' "$case_dir"
+}
+
+write_backlog_repo_line() {
+  local case_dir=$1 id=$2 repo=$3
+  mkdir -p "$case_dir/data"
+  printf '%s\n' "- [ ] $id - Completion reminder fixture (repo: $repo) (kind: ship)" \
+    > "$case_dir/data/backlog.md"
+}
+
+add_unsealed_linked_kit_run_fixture() {
+  local case_dir=$1
+  local wt_path
+  wt_path=$(cd "$case_dir/wt" && pwd -P)
+  mkdir -p "$case_dir/scratch/demo-run"
+  printf '%s\n' "{\"schemaVersion\":\"1\",\"phase\":\"done\",\"worktree\":{\"path\":\"$wt_path\"}}" \
+    > "$case_dir/scratch/demo-run/run.json"
+}
+
+add_sealed_linked_kit_run_fixture() {
+  local case_dir=$1
+  local wt_path
+  wt_path=$(cd "$case_dir/wt" && pwd -P)
+  mkdir -p "$case_dir/scratch/demo-run"
+  printf '%s\n' "{\"schemaVersion\":\"1\",\"phase\":\"done\",\"worktree\":{\"path\":\"$wt_path\"}}" \
+    > "$case_dir/scratch/demo-run/run.json"
+  printf '%s\n' '{"schemaVersion":"1","event":"shipped","timestamp":"2026-08-15T00:00:00Z"}' \
+    > "$case_dir/scratch/demo-run/outcomes.jsonl"
+}
+
+spec_kit_scripts_dir() {
+  printf '%s\n' "${FM_SPEC_KIT_SCRIPTS_DIR:-$ROOT/tests/fixtures/spec-kit-kit-seal}"
+}
+
+with_kit_teardown_env() {
+  local case_dir=$1; shift
+  FM_HOME="${FM_HOME:-$case_dir}" \
+  FM_DATA_OVERRIDE="${FM_DATA_OVERRIDE:-$case_dir/data}" \
+  FM_KIT_SCRATCH_ROOT="$case_dir/scratch" \
+  FM_SPEC_KIT_SCRIPTS_DIR="$(spec_kit_scripts_dir)" \
+    run_teardown "$case_dir" "$@"
+}
+
+test_teardown_allows_when_no_linked_kit_run() {
+  local case_dir out rc
+  case_dir=$(setup_allow_local_teardown no-kit-run)
+  add_compatible_tasks_axi "$case_dir"
+  set +e
+  out=$(with_kit_teardown_env "$case_dir" 2> "$case_dir/stderr")
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "no-kit-run: teardown should succeed without a linked kit run"
+  [ ! -d "$case_dir/wt" ] || fail "no-kit-run: realistic treehouse return left the worktree behind"
+  pass "teardown allows cleanup when no linked kit run exists"
+}
+
+test_teardown_refuses_unsealed_linked_kit_run_before_return() {
+  local case_dir rc stderr
+  case_dir=$(setup_allow_local_teardown unsealed-kit-run)
+  add_unsealed_linked_kit_run_fixture "$case_dir"
+  set +e
+  with_kit_teardown_env "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  stderr=$(cat "$case_dir/stderr")
+  expect_code 1 "$rc" "unsealed-kit-run: teardown should refuse before return"
+  grep -F 'unsealed-outcome' "$case_dir/stderr" >/dev/null \
+    || fail "unsealed-kit-run: refusal did not name unsealed-outcome: $stderr"
+  grep -F 'reconcile_run_outcome.py' "$case_dir/stderr" >/dev/null \
+    || fail "unsealed-kit-run: refusal did not name reconcile_run_outcome.py: $stderr"
+  [ -d "$case_dir/wt" ] || fail "unsealed-kit-run: refusal removed the worktree"
+  pass "teardown refuses an unsealed linked kit run before destructive return"
+}
+
+test_teardown_kit_seal_refusal_precedes_telemetry_seal() {
+  local case_dir rc stderr ledger terminal_count
+  case_dir=$(setup_allow_local_teardown kit-before-telemetry)
+  add_unsealed_linked_kit_run_fixture "$case_dir"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed telemetry for kit-ordering test"
+  set +e
+  with_kit_teardown_env "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  stderr=$(cat "$case_dir/stderr")
+  expect_code 1 "$rc" "kit-before-telemetry: teardown should refuse on unsealed kit run"
+  grep -F 'unsealed-outcome' "$case_dir/stderr" >/dev/null \
+    || fail "kit-before-telemetry: refusal did not name unsealed-outcome: $stderr"
+  grep -F 'model telemetry terminal seal refused' "$case_dir/stderr" >/dev/null \
+    && fail "kit-before-telemetry: telemetry seal ran before kit refusal: $stderr"
+  ledger="$case_dir/data/routing-outcomes.jsonl"
+  if [ -f "$ledger" ]; then
+    terminal_count=$(jq -s '[.[] | select(.eventType=="attempt-terminal")] | length' "$ledger")
+    [ "$terminal_count" -eq 0 ] || fail "kit-before-telemetry: telemetry terminal seal wrote before kit refusal (count=$terminal_count)"
+  fi
+  [ -d "$case_dir/wt" ] || fail "kit-before-telemetry: refusal removed the worktree"
+  pass "teardown kit-seal refusal runs before telemetry sealing"
+}
+
+test_teardown_force_bypasses_unsealed_kit_run_with_durable_record() {
+  local case_dir rc force_log
+  case_dir=$(setup_allow_local_teardown kit-force-bypass)
+  add_unsealed_linked_kit_run_fixture "$case_dir"
+  mkdir -p "$case_dir/data"
+  set +e
+  with_kit_teardown_env "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "kit-force-bypass: --force should complete teardown"
+  force_log="$case_dir/data/teardown-kit-seal-forces.jsonl"
+  [ -f "$force_log" ] || fail "kit-force-bypass: durable bypass record missing"
+  jq -e 'select(.task=="task-x1" and (.error|test("unsealed-outcome")))' "$force_log" >/dev/null \
+    || fail "kit-force-bypass: bypass record did not capture task-x1 and unsealed-outcome"
+  grep -F 'recorded in data/teardown-kit-seal-forces.jsonl' "$case_dir/stderr" >/dev/null \
+    || fail "kit-force-bypass: stderr did not name the durable bypass record"
+  [ ! -d "$case_dir/wt" ] || fail "kit-force-bypass: teardown did not return the worktree"
+  pass "teardown --force bypasses unsealed kit seal with a durable record"
+}
+
+test_teardown_force_bypass_record_appends_to_existing_ledger() {
+  local case_dir rc force_log rows
+  case_dir=$(setup_allow_local_teardown kit-force-bypass-append)
+  add_unsealed_linked_kit_run_fixture "$case_dir"
+  mkdir -p "$case_dir/data"
+  force_log="$case_dir/data/teardown-kit-seal-forces.jsonl"
+  printf '%s\n' '{"task":"task-prior","runDir":"prior-run","error":"prior bypass","forcedAt":"2026-08-01T00:00:00Z"}' \
+    > "$force_log"
+  set +e
+  with_kit_teardown_env "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "kit-force-bypass-append: --force should complete teardown"
+  rows=$(wc -l < "$force_log" | tr -d ' ')
+  [ "$rows" = 2 ] || fail "kit-force-bypass-append: expected 2 ledger rows after the append, got $rows"
+  jq -se 'any(.[]; .task=="task-prior")' "$force_log" >/dev/null \
+    || fail "kit-force-bypass-append: the pre-existing bypass record was destroyed"
+  jq -se 'any(.[]; .task=="task-x1")' "$force_log" >/dev/null \
+    || fail "kit-force-bypass-append: the new bypass record was not appended"
+  pass "teardown --force appends the bypass record without destroying prior rows"
+}
+
+test_teardown_force_refuses_when_bypass_record_unwritable() {
+  local case_dir rc
+  case_dir=$(setup_allow_local_teardown kit-force-bypass-log-blocked)
+  add_unsealed_linked_kit_run_fixture "$case_dir"
+  mkdir -p "$case_dir/data"
+  mkdir "$case_dir/data/teardown-kit-seal-forces.jsonl"
+  set +e
+  with_kit_teardown_env "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "kit-force-bypass-log-blocked: teardown should refuse when bypass record cannot be written"
+  [ -d "$case_dir/wt" ] || fail "kit-force-bypass-log-blocked: worktree was removed despite failed bypass record"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "kit-force-bypass-log-blocked: task metadata was removed despite failed bypass record"
+  grep -F 'teardown-kit-seal-forces.jsonl' "$case_dir/stderr" >/dev/null \
+    || fail "kit-force-bypass-log-blocked: refusal did not name the bypass log path"
+  grep -F 'recorded in data/teardown-kit-seal-forces.jsonl' "$case_dir/stderr" >/dev/null \
+    && fail "kit-force-bypass-log-blocked: stderr falsely claimed the bypass was recorded"
+  pass "teardown --force refuses when kit-seal bypass record cannot be written"
+}
+
+test_teardown_force_refuses_when_bypass_record_is_symlink() {
+  local case_dir rc
+  case_dir=$(setup_allow_local_teardown kit-force-bypass-log-symlink)
+  add_unsealed_linked_kit_run_fixture "$case_dir"
+  mkdir -p "$case_dir/data"
+  ln -s /dev/null "$case_dir/data/teardown-kit-seal-forces.jsonl"
+  set +e
+  with_kit_teardown_env "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "kit-force-bypass-log-symlink: teardown should refuse when the bypass record is a symlink"
+  [ -d "$case_dir/wt" ] || fail "kit-force-bypass-log-symlink: worktree was removed though the bypass went unrecorded"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "kit-force-bypass-log-symlink: task metadata was removed though the bypass went unrecorded"
+  grep -F 'teardown-kit-seal-forces.jsonl' "$case_dir/stderr" >/dev/null \
+    || fail "kit-force-bypass-log-symlink: refusal did not name the bypass log path"
+  grep -F 'recorded in data/teardown-kit-seal-forces.jsonl' "$case_dir/stderr" >/dev/null \
+    && fail "kit-force-bypass-log-symlink: stderr falsely claimed the bypass was recorded"
+  pass "teardown --force refuses when the kit-seal bypass record is a symlink"
+}
+
+test_teardown_reports_unrunnable_kit_seal_predicate() {
+  local case_dir rc stderr scripts_dir
+  case_dir=$(setup_allow_local_teardown kit-seal-predicate-unrunnable)
+  add_unsealed_linked_kit_run_fixture "$case_dir"
+  add_compatible_tasks_axi "$case_dir"
+  scripts_dir="$case_dir/kitscripts"
+  mkdir -p "$scripts_dir"
+  printf '%s\n' 'ENTRY_POINT_REMOVED = True' > "$scripts_dir/list_worktrees.py"
+  set +e
+  FM_SPEC_KIT_SCRIPTS_DIR="$scripts_dir" \
+    with_kit_teardown_env "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  stderr=$(cat "$case_dir/stderr")
+  expect_code 0 "$rc" "kit-seal-predicate-unrunnable: teardown should continue when the predicate cannot run"
+  grep -F 'linked-run outcome check could not run' "$case_dir/stderr" >/dev/null \
+    || fail "kit-seal-predicate-unrunnable: teardown skipped the seal gate without warning: $stderr"
+  grep -F 'has no _unsealed_linked_run entry point' "$case_dir/stderr" >/dev/null \
+    || fail "kit-seal-predicate-unrunnable: predicate stderr was discarded: $stderr"
+  pass "teardown reports when the kit-seal predicate cannot run"
+}
+
+test_teardown_kit_gate_ignores_host_scratch_root() {
+  local case_dir rc wt_path stderr
+  case_dir=$(setup_allow_local_teardown kit-host-scratch-isolation)
+  add_compatible_tasks_axi "$case_dir"
+  wt_path=$(cd "$case_dir/wt" && pwd -P)
+  mkdir -p "$case_dir/home/.claude/scratch/poison-run"
+  printf '%s\n' "{\"schemaVersion\":\"1\",\"phase\":\"done\",\"worktree\":{\"path\":\"$wt_path\"}}" \
+    > "$case_dir/home/.claude/scratch/poison-run/run.json"
+  set +e
+  HOME="$case_dir/home" FM_SPEC_KIT_SCRIPTS_DIR="$(spec_kit_scripts_dir)" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  stderr=$(cat "$case_dir/stderr")
+  expect_code 0 "$rc" "kit-host-scratch-isolation: a teardown case that never opts into the kit gate must not read \$HOME/.claude/scratch"
+  grep -F 'poison-run' "$case_dir/stderr" >/dev/null \
+    && fail "kit-host-scratch-isolation: the gate scanned the host scratch root: $stderr"
+  [ ! -d "$case_dir/wt" ] || fail "kit-host-scratch-isolation: teardown left the worktree behind"
+  pass "teardown kit gate ignores the host scratch root for cases that do not opt in"
+}
+
+test_teardown_configured_kit_scripts_missing_refuses() {
+  local case_dir rc stderr
+  case_dir=$(setup_allow_local_teardown kit-scripts-missing)
+  add_unsealed_linked_kit_run_fixture "$case_dir"
+  set +e
+  FM_SPEC_KIT_SCRIPTS_DIR=/nonexistent/spec-kit/scripts \
+    FM_KIT_SCRATCH_ROOT="$case_dir/scratch" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  stderr=$(cat "$case_dir/stderr")
+  expect_code 1 "$rc" "kit-scripts-missing: configured missing scripts should refuse"
+  grep -F 'configured kit seal scripts missing' "$case_dir/stderr" >/dev/null \
+    || fail "kit-scripts-missing: refusal did not name missing configured scripts: $stderr"
+  pass "teardown refuses when FM_SPEC_KIT_SCRIPTS_DIR points at missing scripts"
+}
+
+test_teardown_allows_sealed_linked_kit_run() {
+  local case_dir out rc
+  case_dir=$(setup_allow_local_teardown sealed-kit-run)
+  add_sealed_linked_kit_run_fixture "$case_dir"
+  add_compatible_tasks_axi "$case_dir"
+  set +e
+  out=$(with_kit_teardown_env "$case_dir" 2> "$case_dir/stderr")
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "sealed-kit-run: teardown should succeed once the linked run is sealed"
+  [ ! -d "$case_dir/wt" ] || fail "sealed-kit-run: realistic treehouse return left the worktree behind"
+  pass "teardown allows cleanup when the linked kit run is sealed"
+}
+
+test_teardown_prints_retro_acceleration_before_return() {
+  local case_dir out accel_line complete_line
+  case_dir=$(setup_allow_local_teardown retro-acceleration)
+  add_compatible_tasks_axi "$case_dir"
+  out=$(with_kit_teardown_env "$case_dir") \
+    || fail "teardown failed before retro acceleration prompt"
+  printf '%s\n' "$out" | grep -F 'Retro acceleration:' >/dev/null \
+    || fail "teardown did not print retro acceleration header: $out"
+  printf '%s\n' "$out" | grep -F 'something we already own would have done' >/dev/null \
+    || fail "teardown did not print the highest-yield retro question: $out"
+  accel_line=$(printf '%s\n' "$out" | grep -n 'Retro acceleration:' | sed -n '1p' | cut -d: -f1)
+  complete_line=$(printf '%s\n' "$out" | grep -n 'teardown task-x1 complete' | sed -n '1p' | cut -d: -f1)
+  [ -n "$accel_line" ] && [ -n "$complete_line" ] && [ "$accel_line" -lt "$complete_line" ] \
+    || fail "retro acceleration printed after teardown completion: $out"
+  [ ! -d "$case_dir/wt" ] || fail "retro-acceleration ordering test left the worktree behind"
+  pass "teardown prints retro acceleration before destructive return"
+}
+
+add_compatible_tasks_axi_with_ready() {
+  local case_dir=$1 ready_row=$2
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf '%s\n' '0.2.4'
+  exit 0
+fi
+if [ "\${1:-}" = ready ]; then
+  cat <<'OUT'
+count: 1
+ready: 1 unblocked queued tasks
+ready[1]{id,state,kind,repo,title}:
+  $ready_row
+OUT
+  exit 0
+fi
+if [ "\${1:-}" = update ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi update <id> [flags]'
+  printf '%s\n' '  --body-file <path>'
+  printf '%s\n' '  --archive-body'
+  exit 0
+fi
+if [ "\${1:-}" = mv ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+}
+
+test_teardown_secondmate_seam_prompt_on_subject_change() {
+  local case_dir out home
+  case_dir=$(setup_allow_local_teardown secondmate-seam-change)
+  home="$case_dir"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  write_backlog_repo_line "$case_dir" task-x1 alpha
+  add_compatible_tasks_axi_with_ready "$case_dir" 'next-task,queued,ship,beta,Next subject'
+  out=$(FM_HOME="$home" with_kit_teardown_env "$case_dir") \
+    || fail "teardown failed for secondmate seam prompt"
+  printf '%s\n' "$out" | grep -F 'Secondmate memory hygiene:' >/dev/null \
+    || fail "teardown did not print secondmate seam prompt on subject change: $out"
+  printf '%s\n' "$out" | grep -F 'Run /stow in this home' >/dev/null \
+    || fail "teardown secondmate seam did not prompt /stow: $out"
+  printf '%s\n' "$out" | grep -F 'next-task (beta)' >/dev/null \
+    || fail "teardown secondmate seam did not name the next ready item: $out"
+  pass "teardown prompts secondmate /stow when the next ready item changes subject"
+}
+
+test_teardown_secondmate_seam_silent_when_same_subject() {
+  local case_dir out home
+  case_dir=$(setup_allow_local_teardown secondmate-seam-same)
+  home="$case_dir"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  write_backlog_repo_line "$case_dir" task-x1 alpha
+  add_compatible_tasks_axi_with_ready "$case_dir" 'next-task,queued,ship,alpha,Same subject'
+  out=$(FM_HOME="$home" with_kit_teardown_env "$case_dir") \
+    || fail "teardown failed for same-subject secondmate seam"
+  printf '%s\n' "$out" | grep -F 'Secondmate memory hygiene:' >/dev/null \
+    && fail "teardown nagged secondmate seam when the next ready item matches repo: $out"
+  pass "teardown stays silent on secondmate seam when the next ready item matches subject"
+}
+
+test_teardown_secondmate_kind_skips_completion_reminders() {
+  local case_dir out rc sub_home
+  case_dir=$(make_case secondmate-no-completion-reminders)
+  write_meta "$case_dir" local-only secondmate
+  sub_home="$case_dir/secondmate-home"
+  mkdir -p "$sub_home/state" "$sub_home/data" "$sub_home/config"
+  printf '%s\n' task-x1 > "$sub_home/.fm-secondmate-home"
+  printf '%s\n' "home=$sub_home" >> "$case_dir/state/task-x1.meta"
+  set +e
+  out=$(run_teardown "$case_dir" --force 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "secondmate teardown failed: $out"
+  printf '%s\n' "$out" | grep -E 'Backlog:|Retro acceleration:|Secondmate memory hygiene:' >/dev/null \
+    && fail "secondmate teardown emitted ship/scout completion reminders: $out"
+  pass "secondmate teardown prints no ship/scout completion reminders"
 }
 
 # Write a meta file for the task. Args: case_dir mode kind
@@ -2860,6 +3223,21 @@ test_local_only_empty_commit_does_not_seal_accepted
 test_local_only_delivery_seals_true_outcome_and_usage
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
+test_teardown_allows_when_no_linked_kit_run
+test_teardown_refuses_unsealed_linked_kit_run_before_return
+test_teardown_kit_seal_refusal_precedes_telemetry_seal
+test_teardown_force_bypasses_unsealed_kit_run_with_durable_record
+test_teardown_force_bypass_record_appends_to_existing_ledger
+test_teardown_force_refuses_when_bypass_record_unwritable
+test_teardown_force_refuses_when_bypass_record_is_symlink
+test_teardown_reports_unrunnable_kit_seal_predicate
+test_teardown_kit_gate_ignores_host_scratch_root
+test_teardown_configured_kit_scripts_missing_refuses
+test_teardown_allows_sealed_linked_kit_run
+test_teardown_prints_retro_acceleration_before_return
+test_teardown_secondmate_seam_prompt_on_subject_change
+test_teardown_secondmate_seam_silent_when_same_subject
+test_teardown_secondmate_kind_skips_completion_reminders
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
