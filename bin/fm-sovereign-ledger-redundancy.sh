@@ -182,7 +182,7 @@ require_admitted_directory() {
 
 admit_independent_bundle_members() {
   local primary=$1 replica=$2 entry primary_entry replica_entry identity
-  local primary_identities= replica_identities= primary_identity replica_identity compared=0
+  local primary_identities='' replica_identities='' primary_identity replica_identity compared=0
   collect_bundle_entries "$primary"
   while IFS= read -r entry; do
     identity=$(portable_member_identity "$primary/$entry") \

@@ -455,8 +455,11 @@ if [ "$REFRESH_EVIDENCE" -eq 1 ]; then
     || { printf 'REFUSED: could not stage maintained mutation evidence\n' >&2; exit 1; }
   cp "$EVIDENCE_STAGE" "$install_stage" \
     || { rm -f -- "$install_stage"; printf 'REFUSED: could not copy maintained mutation evidence\n' >&2; exit 1; }
-  [ -s "$install_stage" ] && cmp -s "$EVIDENCE_STAGE" "$install_stage" \
-    || { rm -f -- "$install_stage"; printf 'REFUSED: staged maintained mutation evidence is empty or differs\n' >&2; exit 1; }
+  if ! [ -s "$install_stage" ] || ! cmp -s "$EVIDENCE_STAGE" "$install_stage"; then
+    rm -f -- "$install_stage"
+    printf 'REFUSED: staged maintained mutation evidence is empty or differs\n' >&2
+    exit 1
+  fi
   mv -f -- "$install_stage" "$maintained" \
     || { rm -f -- "$install_stage"; printf 'REFUSED: could not atomically install maintained mutation evidence\n' >&2; exit 1; }
   [ -s "$maintained" ] || { printf 'REFUSED: installed maintained mutation evidence is empty\n' >&2; exit 1; }
