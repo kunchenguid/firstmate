@@ -780,7 +780,13 @@ case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
-  capture-pane) printf '✻ Working…\\n  esc to interrupt\\n'; exit 0 ;;
+  capture-pane)
+    if grep -q 'encode launch-brief' "\${FM_TMUX_LOG:?}" 2>/dev/null; then
+      printf '✻ Working…\\n  esc to interrupt\\n'
+    else
+      printf '╭────╮\\n│    │\\n╰────╯\\n'
+    fi
+    exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0
@@ -851,7 +857,13 @@ case "\${1:-}" in
       exit 0
     ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
-  capture-pane) printf '✻ Working…\\n  esc to interrupt\\n'; exit 0 ;;
+  capture-pane)
+    if grep -q 'encode launch-brief' "\${FM_TMUX_LOG:?}" 2>/dev/null; then
+      printf '✻ Working…\\n  esc to interrupt\\n'
+    else
+      printf '╭────╮\\n│    │\\n╰────╯\\n'
+    fi
+    exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0

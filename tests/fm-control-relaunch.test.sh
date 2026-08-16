@@ -129,6 +129,13 @@ case "${1:-}" in
           fi
           ;;
         muted) printf 'Transcript saving is off\n  esc to interrupt\n' ;;
+        muted-then-active)
+          if [ "$captures" -le 2 ]; then
+            printf 'Transcript saving is off\n'
+          else
+            printf '✻ Working…\n  esc to interrupt\n'
+          fi
+          ;;
         idle) printf '╭────╮\n│    │\n╰────╯\n' ;;
         empty-once)
           [ "$captures" -gt 1 ] && printf '✻ Working…\n  esc to interrupt\n'
@@ -137,7 +144,11 @@ case "${1:-}" in
         tokens) printf 'Context · %s tokens\n' "$((100 + captures))" ;;
       esac
     else
-      printf '╭────╮\n│    │\n╰────╯\n'
+      case "${FM_FAKE_CLAUDE_BASELINE:-blank}" in
+        busy) printf '✻ Working…\n  esc to interrupt\n' ;;
+        muted) printf 'Transcript saving is off\n' ;;
+        *) printf '╭────╮\n│    │\n╰────╯\n' ;;
+      esac
     fi
     exit 0
     ;;
@@ -207,6 +218,7 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
     FM_FAKE_CLAUDE_SCREEN="${FM_FAKE_CLAUDE_SCREEN:-active}" \
+    FM_FAKE_CLAUDE_BASELINE="${FM_FAKE_CLAUDE_BASELINE:-blank}" \
     FM_CLAUDE_VERIFY_POLLS="${FM_CLAUDE_VERIFY_POLLS:-4}" \
     FM_CLAUDE_VERIFY_INTERVAL="${FM_CLAUDE_VERIFY_INTERVAL:-0.01}" \
     "$CONTROL" "$@" 2>&1
@@ -219,6 +231,7 @@ run_spawn() {  # <case-dir> <args...>
     FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_FAKE_CLAUDE_SCREEN="${FM_FAKE_CLAUDE_SCREEN:-active}" \
+    FM_FAKE_CLAUDE_BASELINE="${FM_FAKE_CLAUDE_BASELINE:-blank}" \
     FM_CLAUDE_VERIFY_POLLS="${FM_CLAUDE_VERIFY_POLLS:-4}" \
     FM_CLAUDE_VERIFY_INTERVAL="${FM_CLAUDE_VERIFY_INTERVAL:-0.01}" \
     "$SPAWN" "$@" 2>&1
@@ -377,6 +390,34 @@ test_claude_relaunch_times_out_instead_of_returning_unverified_success() {
   assert_contains "$out" "╭────╮" \
     "the timeout should include the last non-empty pane snapshot"
   pass "Claude relaunch times out loudly instead of treating process liveness as proof of work"
+}
+
+test_claude_relaunch_ignores_a_stale_busy_affordance_in_the_baseline() {
+  local dir out rc
+  dir=$(new_case claude-stale-busy rl38)
+  add_ship_task "$dir" rl38 claude
+  out=$(FM_FAKE_CLAUDE_BASELINE=busy FM_FAKE_CLAUDE_SCREEN=active \
+    run_control "$dir" rl38 relaunch --note "verify a fresh signal, not the leftover spinner"); rc=$?
+  expect_code 1 "$rc" "a stale busy affordance alone must not verify the relaunch"$'\n'"$out"
+  assert_contains "$out" "activity-timeout" \
+    "a spinner already on screen before launch must end in a bounded timeout"
+  assert_not_contains "$out" "activity-visible" \
+    "the leftover spinner must not be reported as fresh activity"
+  pass "Claude relaunch refuses to treat a pre-launch spinner as proof of a fresh launch"
+}
+
+test_claude_relaunch_waits_out_a_stale_muted_banner_before_succeeding() {
+  local dir out rc
+  dir=$(new_case claude-stale-muted rl39)
+  add_ship_task "$dir" rl39 claude
+  out=$(FM_FAKE_CLAUDE_BASELINE=muted FM_FAKE_CLAUDE_SCREEN=muted-then-active \
+    run_control "$dir" rl39 relaunch --note "continue once the fresh launch renders"); rc=$?
+  expect_code 0 "$rc" "a stale muted banner must not fail a fresh Claude relaunch"$'\n'"$out"
+  assert_not_contains "$out" "transcript-saving-off" \
+    "the pre-launch muted banner must not be reported as a fresh failure"
+  assert_contains "$out" "relaunched rl39 harness=claude" \
+    "the relaunch should succeed on the fresh activity that follows the stale banner"
+  pass "Claude relaunch ignores a pre-launch muted banner and verifies the fresh activity instead"
 }
 
 test_relaunch_preserves_durable_task_metadata() {
@@ -1432,6 +1473,8 @@ test_claude_relaunch_accepts_the_startup_dialog_and_proves_activity
 test_claude_relaunch_fails_loudly_when_transcript_saving_is_off
 test_claude_relaunch_retries_empty_captures_and_accepts_each_activity_proof
 test_claude_relaunch_times_out_instead_of_returning_unverified_success
+test_claude_relaunch_ignores_a_stale_busy_affordance_in_the_baseline
+test_claude_relaunch_waits_out_a_stale_muted_banner_before_succeeding
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context

@@ -41,7 +41,14 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  capture-pane) printf '✻ Working…\n  esc to interrupt\n'; exit 0 ;;
+  capture-pane)
+    if grep -q 'encode launch-brief' "${FM_FAKE_LAUNCH_LOG:-}" 2>/dev/null; then
+      printf '✻ Working…\n  esc to interrupt\n'
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0
+    ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)

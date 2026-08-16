@@ -2211,19 +2211,26 @@ claude_capture() {
 
 claude_wait_for_activity() {
   local pane failure dialog tokens prior_tokens='' tools baseline_tools i=0
+  local baseline_failure='' baseline_busy=0
   local max=${FM_CLAUDE_VERIFY_POLLS:-40}
   local interval=${FM_CLAUDE_VERIFY_INTERVAL:-0.5}
   local dialog_accepts=0 dialog_max=${FM_CLAUDE_DIALOG_ACCEPTS:-3}
   CLAUDE_VERIFY_SNAPSHOT=
   CLAUDE_VERIFY_RESULT=
   baseline_tools=$(fm_control_claude_tool_activity "$CLAUDE_VERIFY_BASELINE")
+  baseline_failure=$(fm_control_claude_startup_failure "$CLAUDE_VERIFY_BASELINE" || true)
+  if fm_control_claude_busy_visible "$CLAUDE_VERIFY_BASELINE"; then
+    baseline_busy=1
+  fi
   while [ "$i" -lt "$max" ]; do
     pane=$(claude_capture)
     if [ -n "$pane" ]; then
       CLAUDE_VERIFY_SNAPSHOT=$pane
       if failure=$(fm_control_claude_startup_failure "$pane"); then
-        CLAUDE_VERIFY_RESULT=$failure
-        return 2
+        if [ -z "$baseline_failure" ] || [ "$failure" != "$baseline_failure" ]; then
+          CLAUDE_VERIFY_RESULT=$failure
+          return 2
+        fi
       fi
       if dialog=$(fm_control_claude_startup_dialog "$pane"); then
         if [ "$dialog_accepts" -ge "$dialog_max" ]; then
@@ -2235,7 +2242,7 @@ claude_wait_for_activity() {
           return 3
         }
         dialog_accepts=$((dialog_accepts + 1))
-      elif fm_control_claude_busy_visible "$pane"; then
+      elif [ "$baseline_busy" -eq 0 ] && fm_control_claude_busy_visible "$pane"; then
         CLAUDE_VERIFY_RESULT='activity-visible'
         return 0
       else
