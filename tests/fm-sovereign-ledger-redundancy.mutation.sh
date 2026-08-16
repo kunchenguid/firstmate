@@ -9,27 +9,31 @@ SOURCE="$ROOT/bin/fm-sovereign-ledger-redundancy.sh"
 TEST="$ROOT/tests/fm-sovereign-ledger-redundancy.test.sh"
 EVIDENCE=
 EMIT_EVIDENCE=0
+VERIFY_EVIDENCE=0
 MODE=mutation
 EVIDENCE_FIXTURE=
 EVIDENCE_SWAP_PATH=
 EVIDENCE_SWAP_TARGET=
 if [ "${1:-}" = --emit-evidence ]; then
-  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   EMIT_EVIDENCE=1
   exec 3>&1
   exec >&2
+elif [ "${1:-}" = --verify-evidence ]; then
+  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  VERIFY_EVIDENCE=1
 elif [ "${1:-}" = --self-test-evidence-fixture ]; then
-  [ "$#" -eq 2 ] || { printf 'usage: %s [--emit-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  [ "$#" -eq 2 ] || { printf 'usage: %s [--emit-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   MODE=fixture
   EVIDENCE_FIXTURE=$2
 elif [ "${1:-}" = --self-test-evidence-containment ]; then
-  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   MODE=containment
 elif [ "${1:-}" = --write-evidence ]; then
-  [ "$#" -eq 2 ] || { printf 'usage: %s [--emit-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  [ "$#" -eq 2 ] || { printf 'usage: %s [--emit-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   EVIDENCE=$2
 elif [ "$#" -ne 0 ]; then
-  printf 'usage: %s [--emit-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2
+  printf 'usage: %s [--emit-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2
   exit 2
 fi
 
@@ -355,7 +359,7 @@ mutant M023 verifier.execute 'LEDGER_DIR="$subject" "$primary/fm-sovereign-ledge
 mutant M024 prefix.nonempty '[ "$replica_lines" -gt 0 ]' 'true' 'An empty ledger is not a prefix.'
 mutant M025 prefix.shorter '[ "$primary_lines" -gt "$replica_lines" ]' 'true' 'A prefix is strictly shorter.'
 mutant M026 prefix.leading 'head -n "$replica_lines"' 'tail -n "$replica_lines"' 'Prefix comparison uses leading records.'
-mutant M027 recheck.replica-type $'require_bundle "$primary"\n  require_bundle "$replica"\n  admit_device_pair "$primary" "$replica"\n  compare_files' $'require_bundle "$primary"\n  :\n  admit_device_pair "$primary" "$replica"\n  compare_files' 'Admission reclassifies replica entries after verifier execution.'
+mutant M027 recheck.replica-type $'require_bundle "$primary"\n  require_bundle "$replica"\n  admit_device_pair "$primary" "$replica"\n  admit_independent_bundle_members "$primary" "$replica"\n  compare_files' $'require_bundle "$primary"\n  :\n  admit_device_pair "$primary" "$replica"\n  admit_independent_bundle_members "$primary" "$replica"\n  compare_files' 'Admission reclassifies replica entries after verifier execution.'
 mutant M028 directory.canonical-stable '[ "$canonical" = "$path" ] || die "$label directory no longer resolves to its admitted path: $path"' ':' 'A directory path cannot change after admission.'
 mutant M029 directory.identity-stable '[ "$identity" = "$expected" ] || die "$label directory changed after admission: $path"' ':' 'A directory object cannot change after admission.'
 mutant M030 publish.exclusive-create 'O_WRONLY | O_CREAT | O_EXCL' 'O_WRONLY | O_CREAT' 'Bundle members are created exclusively.'
@@ -369,15 +373,21 @@ mutant M037 publish.copy-bundle 'copy_bundle "$primary" "$replica"' ':' 'Snapsho
 mutant M038 publish.validate-object 'admit_existing_pair "$primary" "$replica" exact' ':' 'Snapshot validates the object it published.'
 mutant M039 refresh.prefix-admission 'admit_pair "$1" "$2" prefix' 'admit_pair "$1" "$2" inspect' 'Refresh proves the prefix before writing.'
 mutant M040 refresh.atomic-copy 'copy_ledger_atomically "$ADMITTED_PRIMARY" "$ADMITTED_REPLICA"' ':' 'Refresh publishes the admitted ledger update.'
-mutant M041 refresh.post-admission 'admit_pair "$ADMITTED_PRIMARY" "$ADMITTED_REPLICA" exact' ':' 'Refresh re-admits the published exact pair.'
+mutant M041 refresh.post-admission $'  copy_ledger_atomically "$ADMITTED_PRIMARY" "$ADMITTED_REPLICA"\n  admit_pair "$ADMITTED_PRIMARY" "$ADMITTED_REPLICA" exact\n  printf \'REFRESH PASS (replica advanced to primary)\\n\'' $'  copy_ledger_atomically "$ADMITTED_PRIMARY" "$ADMITTED_REPLICA"\n  :\n  printf \'REFRESH PASS (replica advanced to primary)\\n\'' 'Refresh re-admits the published exact pair.'
 mutant M042 verify.inspect-admission 'admit_pair "$1" "$2" inspect' 'admit_pair "$1" "$2" exact' 'Verify admits stale pairs before classifying them.'
 mutant M043 verify.exact-recheck $'  admit_pair "$ADMITTED_PRIMARY" "$ADMITTED_REPLICA" exact\n  if [ "$ALLOW_SAME_VOLUME_WITHOUT_DEVICE_REDUNDANCY" = yes ]; then' $'  :\n  if [ "$ALLOW_SAME_VOLUME_WITHOUT_DEVICE_REDUNDANCY" = yes ]; then' 'Verify re-admits an exact pair before PASS.'
 mutant M044 option.named-flag 'if [ "${1:-}" = --allow-same-volume-without-device-redundancy ]; then' 'if [ "${1:-}" = --allow-same-volume ]; then' 'The opt-out name states the surrendered property.'
 mutant M045 dispatch.snapshot 'snapshot) shift; [ "$#" -eq 2 ] || usage; cmd_snapshot "$@"' 'snapshot) shift; [ "$#" -eq 2 ] || usage; :' 'Dispatch cannot bypass snapshot admission.'
 mutant M046 dispatch.refresh 'refresh) shift; [ "$#" -eq 2 ] || usage; cmd_refresh "$@"' 'refresh) shift; [ "$#" -eq 2 ] || usage; :' 'Dispatch cannot bypass refresh admission.'
 mutant M047 dispatch.verify 'verify) shift; [ "$#" -eq 2 ] || usage; cmd_verify "$@"' 'verify) shift; [ "$#" -eq 2 ] || usage; :' 'Dispatch cannot bypass verify admission.'
+mutant M048 identity.member-read $'portable_member_identity() {\n  portable_directory_identity "$1"\n}' $'portable_member_identity() {\n  printf "1:1\\n"\n}' 'Member identity is read from the admitted filesystem object.'
+mutant M049 identity.cross-product-disjoint '[ "$primary_identity" != "$replica_identity" ]' 'true' 'Every primary identity must differ from every replica identity.'
+mutant M050 identity.cross-product-denominator '[ "$compared" -eq $((BUNDLE_MEMBER_COUNT * BUNDLE_MEMBER_COUNT)) ]' 'true' 'The complete four-by-four member cross-product is proved.'
+mutant M051 admission.initial-member-identity $'  admit_device_pair "$primary" "$replica"\n  require_bundle "$primary"\n  require_bundle "$replica"\n  admit_independent_bundle_members "$primary" "$replica"\n  compare_files' $'  admit_device_pair "$primary" "$replica"\n  require_bundle "$primary"\n  require_bundle "$replica"\n  :\n  compare_files' 'Initial pair admission proves member independence before verifier execution.'
+mutant M052 admission.final-member-identity $'  require_bundle "$primary"\n  require_bundle "$replica"\n  admit_device_pair "$primary" "$replica"\n  admit_independent_bundle_members "$primary" "$replica"\n  compare_files' $'  require_bundle "$primary"\n  require_bundle "$replica"\n  admit_device_pair "$primary" "$replica"\n  :\n  compare_files' 'Final pair admission re-proves member independence after verifier execution.'
+mutant M053 refresh.carried-member-identity '  require_admitted_bundle_members "$primary" "$replica"' '  :' 'Refresh rechecks the admitted member identities before publication.'
 
-[ "$denominator" -eq 47 ] || { printf 'invalid owned denominator: %s\n' "$denominator" >&2; exit 1; }
+[ "$denominator" -eq 53 ] || { printf 'invalid owned denominator: %s\n' "$denominator" >&2; exit 1; }
 
 control="$TMP/CONTROL.sh"
 control_count="$TMP/CONTROL.count"
@@ -402,7 +412,7 @@ EVIDENCE_STAGE="$TMP/evidence.md"
     printf '# Sovereign ledger redundancy mutation evidence\n\n'
     printf 'Audience: maintainer verification.\n\n'
     printf 'Verified on 2026-08-15 against the R5 sovereign-ledger redundancy chokepoint.\n'
-    printf 'The owned denominator spans exact real-name enumeration, the st_dev predicate, shared admission, exclusive publication, pre-write refresh admission, post-write re-admission, verification, and all three dispatch entries.\n'
+    printf 'The owned denominator spans exact real-name enumeration, the st_dev predicate, the four-by-four member-identity cross-product, both member admission calls, carried-identity refresh recheck, exclusive publication, verification, and all three dispatch entries.\n'
     printf 'Every run copied the implementation under one scoped `mktemp -d`; the live ledger, `data/`, and `state/` were never inputs or targets.\n\n'
     printf '```sh\n'
     printf 'tests/fm-sovereign-ledger-redundancy.mutation.sh --write-evidence sovereign-ledger-redundancy-mutation.candidate.md\n'
@@ -434,4 +444,9 @@ if [ -n "$EVIDENCE" ]; then
   publish_evidence "$ROOT/docs/verification" "$EVIDENCE" "$EVIDENCE_STAGE"
 elif [ "$EMIT_EVIDENCE" -eq 1 ]; then
   cat "$EVIDENCE_STAGE" >&3
+elif [ "$VERIFY_EVIDENCE" -eq 1 ]; then
+  cmp -s "$EVIDENCE_STAGE" "$ROOT/docs/verification/sovereign-ledger-redundancy-mutation.md" || {
+    diff -u "$ROOT/docs/verification/sovereign-ledger-redundancy-mutation.md" "$EVIDENCE_STAGE" >&2 || true
+    exit 1
+  }
 fi

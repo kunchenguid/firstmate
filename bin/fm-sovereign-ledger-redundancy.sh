@@ -24,6 +24,7 @@ ADMITTED_REPLICA_DIRECTORY_IDENTITY=
 ADMITTED_PRIMARY_MEMBER_IDENTITIES=
 ADMITTED_REPLICA_MEMBER_IDENTITIES=
 CREATED_REPLICA=
+POSSIBLE_REPLICA=
 
 die() {
   if [ -n "$CREATED_REPLICA" ]; then
@@ -32,6 +33,13 @@ die() {
     printf 'REFUSED: %s\n' "$*" >&2
   fi
   exit 1
+}
+
+report_snapshot_signal() {
+  local signal=$1 status=$2
+  trap - HUP INT TERM
+  printf 'REFUSED: snapshot interrupted by %s; partial replica retained or may exist without deletion: %s\n' "$signal" "$POSSIBLE_REPLICA" >&2
+  exit "$status"
 }
 
 usage() {
@@ -305,6 +313,10 @@ admit_snapshot_destination() {
   parent_identity=$(portable_directory_identity "$parent") \
     || die "could not establish replica parent directory identity before creation: $parent"
   require_admitted_directory "replica parent" "$parent" "$parent_identity"
+  POSSIBLE_REPLICA=$replica
+  trap 'report_snapshot_signal HUP 129' HUP
+  trap 'report_snapshot_signal INT 130' INT
+  trap 'report_snapshot_signal TERM 143' TERM
   mkdir -- "$replica" || die "could not exclusively create replica destination: $replica"
   CREATED_REPLICA=$replica
   ADMITTED_REPLICA_DIRECTORY_IDENTITY=$(portable_directory_identity "$replica") \
@@ -359,6 +371,8 @@ cmd_snapshot() {
   admit_pair "$1" "$2" snapshot
   if [ -n "$CREATED_REPLICA" ]; then
     CREATED_REPLICA=
+    POSSIBLE_REPLICA=
+    trap - HUP INT TERM
     printf 'SNAPSHOT PASS (replica created: %s)\n' "$ADMITTED_REPLICA"
   else
     printf 'SNAPSHOT PASS (replica already identical: %s)\n' "$ADMITTED_REPLICA"

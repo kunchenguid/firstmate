@@ -584,5 +584,46 @@ else
   bad 'post-creation failure deleted or replaced the partial replica directory'
 fi
 
+SIGNAL_MKDIR_BIN="$TMP/signal-mkdir-bin"
+SIGNAL_DEST="$TMP/signal-partial-replica"
+SIGNAL_READY="$TMP/signal-mkdir-ready"
+SIGNAL_OUTPUT="$TMP/signal-output"
+REAL_MKDIR=$(command -v mkdir)
+mkdir "$SIGNAL_MKDIR_BIN"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  '"$REAL_MKDIR" "$@"' \
+  ': > "$SIGNAL_READY"' \
+  'sleep 0.1' > "$SIGNAL_MKDIR_BIN/mkdir"
+chmod +x "$SIGNAL_MKDIR_BIN/mkdir"
+set +e
+env PATH="$SIGNAL_MKDIR_BIN:$PATH" REAL_MKDIR="$REAL_MKDIR" SIGNAL_READY="$SIGNAL_READY" \
+  "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$SIGNAL_DEST" > "$SIGNAL_OUTPUT" 2>&1 &
+SIGNAL_PID=$!
+set -e
+SIGNAL_ATTEMPT=0
+while [ ! -e "$SIGNAL_READY" ] && [ "$SIGNAL_ATTEMPT" -lt 100 ]; do
+  sleep 0.02
+  SIGNAL_ATTEMPT=$((SIGNAL_ATTEMPT + 1))
+done
+if [ -e "$SIGNAL_READY" ]; then kill -TERM "$SIGNAL_PID"; fi
+set +e
+wait "$SIGNAL_PID"
+SIGNAL_STATUS=$?
+set -e
+if [ "$SIGNAL_STATUS" -eq 143 ] \
+  && grep -Fq 'partial replica retained or may exist without deletion' "$SIGNAL_OUTPUT"; then
+  ok 'TERM reports the retained or possibly-created replica destination'
+else
+  SIGNAL_DIAGNOSTIC=$(cat "$SIGNAL_OUTPUT")
+  bad "TERM did not report its non-deleting snapshot boundary (status=$SIGNAL_STATUS; output: ${SIGNAL_DIAGNOSTIC//$'\n'/ | })"
+fi
+if [ -d "$SIGNAL_DEST" ] && [ ! -L "$SIGNAL_DEST" ]; then
+  ok 'TERM leaves the created partial replica directory in place'
+else
+  bad 'TERM deleted or replaced the created partial replica directory'
+fi
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
