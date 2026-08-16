@@ -1887,7 +1887,7 @@ test_wake_queue_must_be_regular() {
 }
 
 test_wake_queue_rewrite_failure_refuses() {
-  local home id rc
+  local home id rc output
   home=$(make_home wake-queue-rewrite-failure)
   id=scout-wake-queue-rewrite-failure
   write_scout "$home" "$id" "$home/copies/missing"
@@ -1908,9 +1908,25 @@ test_wake_queue_rewrite_failure_refuses() {
   assert_grep "task wake rows could not be retired safely" "$home/err" \
     "wake-queue rewrite refusal was not concrete"
   assert_present "$home/state/$id.meta" "wake-queue rewrite refusal removed metadata"
+  assert_present "$home/state/.record-retired-$id" \
+    "wake-queue rewrite failure did not exercise post-publication recovery"
   assert_content "$home/state/.wake-queue" $'1\t1\theartbeat\theartbeat\theartbeat' \
     "failed wake-queue rewrite changed the queue"
-  pass "record retirement refuses when wake-queue rewriting fails"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    bash -c '. "$1"; fm_wake_append signal "$2.status" "signal: still live"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$id" \
+    || fail "post-publication refusal could not queue the still-live task wake"
+  [ "$(wc -l < "$home/state/.wake-queue" | tr -d ' ')" -eq 2 ] \
+    || fail "post-publication marker suppressed a task whose metadata remains"
+  printf 'failed: still-live task reported after retirement refusal\n' \
+    > "$home/state/$id.status"
+  output=$(FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1"; scan_captain_relevant_statuses "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state") \
+    || fail "post-publication refusal could not scan captain-relevant status"
+  printf '%s\n' "$output" | grep -q "$id" \
+    || fail "post-publication marker hid status while canonical metadata remains"
+  pass "post-publication failure keeps the live task visible while metadata remains"
 }
 
 test_pr_poll_recovery_failure_refuses() {

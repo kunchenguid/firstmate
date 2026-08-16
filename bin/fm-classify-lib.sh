@@ -35,7 +35,7 @@ if [ -r "$_FM_CLASSIFY_LIB_DIR/fm-record-retire-lib.sh" ]; then
 else
   # A partial-bin recovery copy has no retirement-marker authority.
   # Treat every marker as inert so status remains visible.
-  fm_record_retire_marker_valid() { return 1; }
+  fm_record_retire_marker_active() { return 1; }
 fi
 
 # The crew current-state reader used for the "provably working" decision.
@@ -371,7 +371,7 @@ scan_open_decisions() {  # <state>
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
-    fm_record_retire_marker_valid "$state" "$task" && continue
+    fm_record_retire_marker_active "$state" "$task" && continue
     open=$(status_open_decisions "$f") || continue
     [ -n "$open" ] || continue
     while IFS= read -r line; do
@@ -610,7 +610,7 @@ scan_open_decisions_incremental() {  # <state>
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
-    fm_record_retire_marker_valid "$state" "$task" && continue
+    fm_record_retire_marker_active "$state" "$task" && continue
     open=$(status_open_decisions_incremental "$f") || continue
     [ -n "$open" ] || continue
     while IFS= read -r line; do
@@ -629,7 +629,7 @@ status_presentation_snapshot() {  # <state>
     [ -e "$f" ] || continue
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
-    fm_record_retire_marker_valid "$state" "$task" && continue
+    fm_record_retire_marker_active "$state" "$task" && continue
     size=$(_fm_status_file_size "$f") || return 1
     size=${size//[[:space:]]/}
     ident=$(_fm_open_decisions_file_ident "$f") || return 1
@@ -1202,7 +1202,7 @@ scan_captain_relevant_statuses() {  # <state>
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
-    fm_record_retire_marker_valid "$state" "$task" && continue
+    fm_record_retire_marker_active "$state" "$task" && continue
     last=$(last_status_line "$f")
     status_is_captain_relevant "$last" || continue
     printf '%s\t%s\t%s\n' "$f" "$task" "$last"
