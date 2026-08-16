@@ -159,7 +159,7 @@
 #     __TASKID__      canonical task id
 #     __BUSYGEN__     armed semantic busy-state generation
 #     __TASKTMP__     short /tmp/fm-<id> path for bounded app-server stderr
-#     __CODEXDEADLINE__ absolute per-turn deadline duration in seconds
+#     __CODEXDEADLINE__ per-turn deadline duration in seconds
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home

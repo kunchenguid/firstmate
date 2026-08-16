@@ -221,7 +221,7 @@ Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on
 
 The owning client has no autocomplete or directory-trust dialog.
 It resumes its app-server thread across turns while the pane remains live, and prints the thread id when it exits.
-An explicit absolute deadline is the only hang detector; on expiry the client requests interruption, then sends TERM and KILL only to the process group it created for that turn.
+An explicit absolute turn deadline is the only turn hang detector; on expiry the client requests interruption, then sends TERM and KILL only to the process group it created for that turn.
 
 **Primary-session guard fact (verified 2026-07-08, codex-cli 0.142.1).**
 The firstmate PRIMARY's own `.codex/hooks.json` registers a Stop hook that pipes Codex's Stop payload to `bin/fm-turnend-guard.sh`.

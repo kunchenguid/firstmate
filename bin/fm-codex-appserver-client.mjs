@@ -9,7 +9,8 @@
 // thread/status/changed active, and turn/completed(completed), then the owning
 // client closed the protocol pipe and observed a clean child exit. Every other
 // terminal, protocol loss, child failure, or deadline expiry publishes unknown
-// through bin/fm-busy-event.sh. The absolute deadline is the only hang detector.
+// through bin/fm-busy-event.sh. The absolute turn deadline is the only turn
+// hang detector; protocol startup also has its own bounded handshake timeout.
 // Timeout escalation targets only the process group whose leader is the child
 // PID created here: turn/interrupt, TERM, then KILL.
 //

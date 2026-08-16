@@ -35,7 +35,7 @@
 #      backend is refused rather than performed blind.
 #
 # `resume` is deliberately NOT a verb. It is not deterministic across the
-# verified adapters: codex and grok resume only from a session id printed at
+# verified adapters: codex and grok require an adapter-specific id printed at
 # exit, opencode resumes the most recent session for the cwd with --continue,
 # and claude, pi, pi-signed, and kimi have no verified pane-resume contract at
 # all. `relaunch` covers the same need deterministically for every adapter,

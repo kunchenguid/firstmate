@@ -102,7 +102,7 @@ The current operator boundary is in [Composer and injection safety](herdr-backen
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
 On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, durable catch-up evidence, and the fail-closed gate that keeps ordinary work behind every live firstmate-actionable blocker.
-`fm-send.sh` selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
+`fm-send.sh` selects a longer pre-Enter settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful text sends so immediate peeks catch the receiving turn starting; the Firstmate-owned Codex client accepts `$...` as ordinary turn input without an autocomplete popup, and the sub-supervisor uses only the shared submit core without paying that post-submit pause.
 
 Text for a worker to read and commands that drive a worker's process are separate planes.
 `fm-send.sh` is the data plane and always routing-marks a `kind=secondmate` target, which is right for a message and wrong for a lifecycle command, because a marked exit command arrives as chat the agent reasons about instead of executing.
@@ -117,7 +117,7 @@ Every classification returns a verdict of busy, idle, unknown, or dead together 
 Each converted adapter reports its own turn lifecycle through a machine-readable contract the vendor already exposes, rather than through rendered footer text: Pi and pi-signed through the Firstmate-owned extension's `agent_start` and `agent_settled` confirmed by `ctx.isIdle()`, OpenCode through its plugin's semantic `session.status`, Claude through owned `UserPromptSubmit`, `Stop`, `StopFailure`, and `SessionEnd` hooks, Codex through a Firstmate-owned `codex app-server` protocol connection and child process, Muse through its session log, and Cursor through its conversation transcript.
 Kimi behind Pi inherits Pi's lifecycle.
 Codex reports busy only after the owned connection observes both `thread/status/changed(active)` and `turn/started`, and reports idle only when `turn/completed(completed)` agrees with a clean exit from that turn's app-server process group.
-Its absolute deadline is the only hang detector, and expiry interrupts then terminates only that owned process group before publishing `unknown codex-timeout`.
+Its absolute turn deadline is the only turn hang detector, and expiry interrupts then terminates only that owned process group before publishing `unknown codex-timeout`.
 Standalone Kimi classifies unknown behind an explicit probe until a semantic source is live-verified for it, and Grok keeps one clearly isolated rendered-tail fallback that can only ever classify a Grok task.
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.

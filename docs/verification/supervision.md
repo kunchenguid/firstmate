@@ -217,7 +217,7 @@ The interactive turn was interrupted with the adapter-owned single Escape and em
 Those hook findings establish why hooks cannot own Codex worker liveness: API failure and manual interruption leave no reliable closing hook.
 The replacement makes Firstmate the client of one foreground `codex app-server` child process group per turn, with JSONL protocol pipes and bounded stderr under the short `/tmp/fm-<id>` task directory.
 It publishes success only after the matching terminal protocol event and child result agree, and it refuses missing, failed, interrupted, or contradictory evidence.
-An explicit absolute deadline is the only hang detector; expiry requests `turn/interrupt`, then escalates TERM and KILL only to the exact process group the client created, and records `unknown codex-timeout`.
+An explicit absolute turn deadline is the only turn hang detector; expiry requests `turn/interrupt`, then escalates TERM and KILL only to the exact process group the client created, and records `unknown codex-timeout`.
 
 Deterministic entry points:
 
