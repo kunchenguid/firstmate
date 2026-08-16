@@ -771,6 +771,107 @@ EOF
   pass "nonprogressing child states are explicit and inconsistent terminal rows invalidate"
 }
 
+test_held_runtime_filter_excludes_non_workers_from_home_validity() {
+  local home mate fakebin summary json
+  home=$(make_home held-runtime-filter-parent)
+  mate="$TMP_ROOT/held-runtime-filter-home"
+  make_valid_secondmate_home held-runtime-filter "$mate"
+  append_secondmate_registry "$home" held-runtime-filter "$mate"
+  mkdir -p "$mate/projects/held-external" "$mate/projects/held-terminal" "$mate/projects/active-unknown"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] held-external - External hold (repo: sample) (kind: ship) (hold: waiting for external operator) (hold-kind: external)
+- [ ] held-terminal - Parked terminal handoff (repo: sample) (kind: ship) (hold: parked terminal handoff) (hold-kind: external)
+- [ ] active-unknown - Active unknown worker (repo: sample) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/held-external.meta" \
+    "window=firstmate:fm-held-external" "worktree=$mate/projects/held-external" \
+    "project=sample" "harness=codex" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$mate/state/held-terminal.meta" \
+    "window=firstmate:fm-held-terminal" "worktree=$mate/projects/held-terminal" \
+    "project=sample" "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" held-terminal idle
+  printf 'done: terminal child was parked under an external hold\n' > "$mate/state/held-terminal.status"
+  fm_write_meta "$mate/state/active-unknown.meta" \
+    "window=firstmate:fm-active-unknown" "worktree=$mate/projects/active-unknown" \
+    "project=sample" "harness=codex" "kind=ship" "mode=no-mistakes"
+  fakebin=$(make_fakebin "$home")
+
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e '
+    .valid == false
+      and .invalidity == {kind:"child_current_unavailable",ids:["active-unknown"]}
+      and .reason == "child current state unavailable: active-unknown"
+  ' >/dev/null || fail "home invalidity did not name only the ordinary unknown worker: $summary"
+
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .secondmates
+    | any(.[]; .id == "held-runtime-filter" and .state == "unknown"
+      and .reason == "structured home state invalid: child current state unavailable: active-unknown")
+  ' >/dev/null || fail "Bearings did not disclose only the active worker as unavailable: $json"
+
+  rm "$mate/state/active-unknown.meta"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] held-external - External hold (repo: sample) (kind: ship) (hold: waiting for external operator) (hold-kind: external)
+- [ ] held-terminal - Parked terminal handoff (repo: sample) (kind: ship) (hold: parked terminal handoff) (hold-kind: external)
+
+## Queued
+
+## Done
+EOF
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e '
+    .valid == true
+      and .state == "externally_held"
+      and .invalidity == {kind:null,ids:[]}
+      and ([.holds[].id] | sort) == ["held-external", "held-terminal"]
+  ' >/dev/null || fail "held external and held terminal rows did not yield a valid externally-held home: $summary"
+
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.secondmates | any(.[]; .id == "held-runtime-filter" and .state == "externally_held"))
+      and ([.gates[] | select(.owner == "held-runtime-filter") | .id] | sort)
+        == ["held-external", "held-terminal"]
+  ' >/dev/null || fail "valid held-home gates were not projected by Bearings: $json"
+
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] held-external - External hold (repo: sample) (kind: ship) (hold: waiting for external operator) (hold-kind: external)
+- [ ] held-terminal - Parked terminal handoff (repo: sample) (kind: ship) (hold: parked terminal handoff) (hold-kind: external)
+- [ ] ordinary-terminal - Ordinary terminal worker (repo: sample) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$mate/projects/ordinary-terminal"
+  fm_write_meta "$mate/state/ordinary-terminal.meta" \
+    "window=firstmate:fm-ordinary-terminal" "worktree=$mate/projects/ordinary-terminal" \
+    "project=sample" "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" ordinary-terminal idle
+  printf 'done: ordinary worker completed\n' > "$mate/state/ordinary-terminal.status"
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e '
+    .valid == false
+      and .invalidity.kind == "terminal_in_flight"
+      and .invalidity.ids == ["ordinary-terminal"]
+      and (.reason | contains("ordinary-terminal=done"))
+  ' >/dev/null || fail "ordinary terminal worker no longer produced terminal_in_flight invalidity: $summary"
+  pass "held unknown and terminal rows stay valid while ordinary worker lifecycle rows remain strict"
+}
+
 test_registry_unavailability_and_bounds_are_explicit() {
   local home fakebin json canonical id mate boundary
   home=$(make_home registry-unavailable)
@@ -1905,6 +2006,7 @@ test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only
 test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
+test_held_runtime_filter_excludes_non_workers_from_home_validity
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only

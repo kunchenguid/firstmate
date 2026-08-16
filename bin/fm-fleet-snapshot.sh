@@ -667,14 +667,16 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
-    | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
-    | ([ $owned_in_flight[]
-         | select(.requires_child_metadata)
+    | ([ $owned_in_flight[] | select(.requires_child_metadata) ]) as $runtime_required_in_flight
+    | ([ $tasks[]
+         | select(.current_state.state == "unknown")
+         | select(.id as $id | any($runtime_required_in_flight[]; .id == $id)) ]) as $unknown_children
+    | ([ $runtime_required_in_flight[]
          | select(.id as $id | [$tasks[].id] | index($id) | not) ]) as $orphan_in_flight
     | ([ $tasks[]
          | select(.id as $id | [$owned_in_flight[].id] | index($id) | not)
          | {id,state:.current_state.state} ]) as $unowned_children
-    | ([ $owned_in_flight[] as $work
+    | ([ $runtime_required_in_flight[] as $work
          | $tasks[]
          | select(.id == $work.id and (.current_state.state == "done" or .current_state.state == "failed"))
          | {id,state:.current_state.state} ]) as $terminal_in_flight
