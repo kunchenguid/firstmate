@@ -98,7 +98,7 @@ ok - harness liveness: claude 2.1.220 (Claude Code) classifies alive
 ### Claude launch activity verification
 
 The child-session sanitization and rendered activity classifier were verified on 2026-08-16 with Claude Code 2.1.233 and tmux 3.6a on macOS arm64.
-The live guard injects `CLAUDE_CODE_CHILD_SESSION=1` at the launch boundary, clears it with the production launcher prefix, forces session persistence, submits a prompt that requires the Bash tool, and waits for one live-rendered activity proof (a busy affordance, a tool row, or a moving token counter). The muted-transcript and trust/bypass-dialog classifiers are pinned by the portable simulations in `tests/fm-control-relaunch.test.sh` rather than observed here: clearing the injected child-session flag suppresses the muted banner, and an already-trusted checkout renders no startup dialog.
+The live guard injects `CLAUDE_CODE_CHILD_SESSION=1` at the launch boundary, clears it with the production launcher prefix, forces session persistence, submits a prompt that requires the Bash tool, and waits for one live-rendered activity proof (a busy affordance, a tool row, or a moving token counter); every non-empty capture also records the token counter it parsed. The token counter's parsing of plain, comma-separated, decimal-k/K, decimal-M, and `used/limit tokens` footers — preferring the moving used-count numerator or a standalone counter over the static limit denominator — is pinned by `tests/fm-control.test.sh`. The muted-transcript and trust/bypass-dialog classifiers are pinned by the portable simulations in `tests/fm-control-relaunch.test.sh` rather than observed here: clearing the injected child-session flag suppresses the muted banner, and an already-trusted checkout renders no startup dialog.
 
 ```sh
 FM_CLAUDE_SPAWN_VERIFY_LIVE=1 bin/fm-test-run.sh tests/fm-claude-spawn-verification-live-e2e.test.sh
@@ -107,7 +107,7 @@ FM_CLAUDE_SPAWN_VERIFY_LIVE=1 bin/fm-test-run.sh tests/fm-claude-spawn-verificat
 Observed bounded output:
 
 ```text
-ok - Claude 2.1.233 (Claude Code) launch verification observes real activity through tool-row with child-session mode cleared
+ok - Claude 2.1.233 (Claude Code) launch verification observes real activity through tool-row with child-session mode cleared (token counter live: none)
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
 

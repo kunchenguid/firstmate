@@ -54,12 +54,17 @@ prior_tokens=
 prior_tools=
 snapshot=
 verified=
+token_live=
 i=0
 while [ "$i" -lt 240 ]; do
   snapshot=$(tmux capture-pane -p -S -160 -t "$TARGET" 2>/dev/null || true)
   if [ -n "$snapshot" ]; then
     if failure=$(fm_control_claude_startup_failure "$snapshot"); then
       fail "Claude $CLAUDE_VERSION rendered $failure"$'\n'"$snapshot"
+    fi
+    tokens=$(fm_control_claude_token_counter "$snapshot")
+    if [ -n "$tokens" ] && [ -z "$token_live" ]; then
+      token_live=$tokens
     fi
     if fm_control_claude_startup_dialog "$snapshot" >/dev/null; then
       tmux send-keys -t "$TARGET" Enter
@@ -72,7 +77,6 @@ while [ "$i" -lt 240 ]; do
         verified='tool-row'
         break
       fi
-      tokens=$(fm_control_claude_token_counter "$snapshot")
       if [ -n "$tokens" ] && [ -n "$prior_tokens" ] \
          && [ "$tokens" != "$prior_tokens" ]; then
         verified=token-counter
@@ -88,4 +92,4 @@ done
 
 [ -n "$verified" ] \
   || fail "Claude $CLAUDE_VERSION exposed no supported activity proof within 60 seconds"$'\n'"${snapshot:-<empty pane capture>}"
-pass "Claude $CLAUDE_VERSION launch verification observes real activity through $verified with child-session mode cleared"
+pass "Claude $CLAUDE_VERSION launch verification observes real activity through $verified with child-session mode cleared (token counter live: ${token_live:-none})"

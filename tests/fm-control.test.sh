@@ -406,6 +406,11 @@ Context · 8.4k tokens|8400
 Context · 8.4K tokens|8400
 Context · 1.2M tokens|1200000
 ✢ Pollinating… (16s · ↓ 1.1k tokens · thought for 1s)|1100
+Context: 12.3k/200k tokens (6%)|12300
+Context: 1.2M/2.0M tokens (60%)|1200000
+Context: 12,300/200,000 tokens (6%)|12300
+↓ 1.1k tokens · Context: 12.3k/200k tokens|1100
+Context: 12.3k/200k tokens · ↓ 1.1k tokens|1100
 EOF
   [ "$(fm_control_claude_token_counter 'Context · 8.4k tokens')" \
     = "$(fm_control_claude_token_counter 'Context · 8400 tokens')" ] \
@@ -413,9 +418,17 @@ EOF
   [ "$(fm_control_claude_token_counter 'Context · 1.2M tokens')" \
     = "$(fm_control_claude_token_counter 'Context · 1,200,000 tokens')" ] \
     || fail "1.2M and 1,200,000 token renderings must normalize to one value"
+  [ "$(fm_control_claude_token_counter 'Context: 12.3k/200k tokens')" \
+    != "$(fm_control_claude_token_counter 'Context: 12.4k/200k tokens')" ] \
+    || fail "a moving used-count numerator must be reported as motion"
+  [ "$(fm_control_claude_token_counter 'Context: 12.3k/200k tokens')" \
+    = "$(fm_control_claude_token_counter 'Context: 12.3k/205k tokens')" ] \
+    || fail "a static used-count must not report motion when only the limit moves"
   [ -z "$(fm_control_claude_token_counter 'esc to interrupt')" ] \
     || fail "a pane with no token count must yield no token value"
-  pass "fm-control-lib: the Claude token counter normalizes plain, comma, decimal-k/K, and decimal-M footer counts"
+  [ -z "$(fm_control_claude_token_counter '/200k tokens')" ] \
+    || fail "a bare limit denominator must yield no token value"
+  pass "fm-control-lib: the Claude token counter normalizes plain, comma, decimal-k/K, decimal-M, and used/limit footer counts"
 }
 
 test_orca_refuses_an_escape_harness_interrupt() {
