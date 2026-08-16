@@ -34,9 +34,10 @@
 # record, then refuses any raw runtime-slot or collapsed watcher-key collision.
 #
 # A successful retirement leaves state/.record-retired-<task-id>, whose format
-# is owned by fm-record-retire-lib.sh.
-# That marker mutes late status and turn-end writes from the intentionally
-# untouched agent until a later fresh spawn of the same id clears it.
+# and activation contract are owned by fm-record-retire-lib.sh.
+# Once active, that marker keeps late status and turn-end writes from the
+# intentionally untouched agent out of supervision until a later fresh spawn
+# of the same id publishes new metadata and clears it.
 # It never mutes slot-keyed stale wakes because those carry no task identity.
 set -eu
 

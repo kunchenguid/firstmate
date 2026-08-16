@@ -1047,10 +1047,10 @@ fm_wake_print_deduped() {
 # status or turn-ended change by comparing a size:mtime signature against a
 # persisted state/.seen-* marker, and advances that marker only after the change
 # has been surfaced to firstmate or deliberately absorbed by the signal triage.
-# These three helpers plus the guarded append below are the ONE owner of that
-# signature and marker format, shared by the scan itself, by the drain-time
-# historical-annotation staleness check, and by this home's own bookkeeping
-# writers.
+# These producer functions plus the guarded append below are the ONE owner of
+# the signature and every task surface-marker path, shared by signal and
+# heartbeat producers, retirement, the drain-time historical-annotation
+# staleness check, and this home's own bookkeeping writers.
 
 fm_wake_signal_sig() {  # <file> -> "size:mtime"
   if [ "$_FM_UNAME" = Darwin ]; then

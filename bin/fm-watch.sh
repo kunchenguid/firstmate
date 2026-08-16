@@ -604,8 +604,8 @@ run_check_capture() {
   fm_check_output_cleanup
 }
 
-# Surfaced-marker bookkeeping for the heartbeat backstop is owned by
-# fm-push-transition-lib.sh because push and poll paths must write one format.
+# The heartbeat surfaced-marker path and task-id normalization are owned by
+# fm-wake-lib.sh so push, poll, and retirement use one format.
 # Mark every current captain-relevant status as surfaced. Called after the
 # heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
 # by the next heartbeat.
