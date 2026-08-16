@@ -2222,17 +2222,37 @@ gate: review
 EOF
 }
 
-# A terminal run: history, never something teardown may abort.
+# A terminal run: history, never something teardown may abort. Real terminal
+# runs report `status: completed` with the verdict in `outcome:` (the shape
+# tests/fm-crew-state.test.sh's run_failed pins).
 terminal_axi_status_toon() {  # <branch> <head> [run-id]
   cat <<EOF
 run:
   id: "${3:-01RUN}"
   branch: $1
-  status: failed
+  status: completed
   head: "$2"
   pr: ""
   findings: none
 outcome: failed
+EOF
+}
+
+# A run whose status word says the pipeline is no longer driving it, but which
+# has not reported an outcome yet, still carries parked evidence, and sits on a
+# head the worktree cannot read. Nothing here binds the run to this worktree's
+# code, so the custody rule must refuse it on the status word alone.
+settled_status_parked_axi_status_toon() {  # <branch> <head> [run-id]
+  cat <<EOF
+run:
+  id: "${3:-01RUN}"
+  branch: $1
+  status: completed
+  awaiting_agent: parked 12m
+  head: "$2"
+  pr: ""
+  findings: none
+gate: review
 EOF
 }
 
@@ -2324,6 +2344,28 @@ test_terminal_unreadable_head_run_is_never_aborted() {
   assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
     "terminal-run-unreadable-head: teardown reported aborting a terminal run"
   pass "a terminal run on an unreadable head is history, not custody, and is left alone"
+}
+
+test_non_live_status_unreadable_head_run_is_never_aborted() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-non-live-status)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(pipeline_gate_fix_head "$case_dir")
+  git -C "$case_dir/wt" rev-parse --verify --quiet "$head^{commit}" >/dev/null 2>&1 \
+    && fail "parked-run-non-live-status: fixture head is readable from the worktree, so custody is not what decides this case"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(settled_status_parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-non-live-status: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-non-live-status: teardown aborted a run on an unreadable head that no live pipeline holds"
+  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
+    "parked-run-non-live-status: teardown reported aborting a run it cannot bind to this worktree"
+  pass "a parked run on an unreadable head is left alone once its status word says no pipeline drives it"
 }
 
 test_leaked_worktree_process_is_reaped() {
@@ -2765,6 +2807,7 @@ test_own_autonomous_run_is_left_alone
 test_gate_fixed_parked_run_is_aborted_before_teardown
 test_diverged_readable_head_run_is_never_aborted
 test_terminal_unreadable_head_run_is_never_aborted
+test_non_live_status_unreadable_head_run_is_never_aborted
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
