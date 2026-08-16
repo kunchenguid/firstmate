@@ -1272,8 +1272,10 @@ task_status_is_run_not_found() {  # <status-error> <run-id>
 # Abort THIS task's own parked no-mistakes run before the worker that would
 # have answered its gate is removed, so no run is left orphaned holding a
 # fleet slot. Only KIND=ship drives a no-mistakes validation of its own
-# worktree (scouts and secondmates never do, mirroring bin/fm-crew-state.sh);
-# a run not attributed to this exact branch+head is left completely alone.
+# worktree (scouts and secondmates never do, mirroring bin/fm-crew-state.sh).
+# Attribution is this branch plus fm_nm_run_matches_worktree: a readable run
+# head is decided by the ancestry rules, an unreadable one by live-pipeline
+# custody. Anything else is left completely alone.
 conclude_task_no_mistakes_run() {  # <worktree>
   local wt=$1 out run_id
   [ "$KIND" = ship ] || return 0
