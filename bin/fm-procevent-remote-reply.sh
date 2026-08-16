@@ -16,10 +16,12 @@
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. A continuity break is escalated and not re-armed.
 #
-# Ingest accepts only bounded, printable status lines with an allowed lifecycle
-# verb and corr=<16hex>. Exact lines are appended at most once to the parent's
-# state/<id>.status. A data/*.md pointer is fetched through the path-confined
-# remote file reader and rewritten to its local private copy before append.
+# Ingest accepts bounded, printable status lines with an allowed lifecycle verb.
+# New lines must carry corr=<16hex>, while a byte-zero compatibility prefix of
+# legacy lines without corr= is mirrored verbatim before the first new line.
+# Exact lines are appended at most once to the parent's state/<id>.status.
+# A data/*.md pointer is fetched through the path-confined remote file reader and
+# rewritten to its local private copy before append for correlated lines.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -229,19 +231,26 @@ fetch_document() { # <id> <remote-relative> <result-var>
   printf -v "$result_var" '%s' "$local_rel"
 }
 
-line_valid() { # <line>
+line_status_valid() { # <line>
   local line=$1 bytes
   [ -n "$line" ] || return 1
   bytes=$(printf '%s' "$line" | LC_ALL=C wc -c | tr -d ' ')
   [ "$bytes" -le "$MAX_LINE_BYTES" ] || return 1
   [ -z "$(printf '%s' "$line" | LC_ALL=C tr -d '\11\40-\176')" ] || return 1
   printf '%s' "$line" | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+\[[^]]+\])?:' || return 1
-  printf '%s' "$line" | grep -Eq 'corr=[A-Fa-f0-9]{16}'
+}
+
+line_has_valid_corr() { # <line>
+  printf '%s' "$1" | grep -Eq 'corr=[A-Fa-f0-9]{16}'
+}
+
+line_has_corr_token() { # <line>
+  printf '%s' "$1" | grep -Eq 'corr='
 }
 
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
-  local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp
+  local actual_bytes actual_hash line doc local_doc rewritten appended=0 cursor_already=0 lock status_file tmp legacy_prefix=1
   validate_id "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
   class=$(classify_result "$result")
@@ -294,7 +303,19 @@ cmd_ingest() {
   fi
   [ "$status" = delta ] && [ "$payload_bytes" -gt 0 ] || { fm_lock_release "$lock"; die "delta result has no payload"; }
   while IFS= read -r line || [ -n "$line" ]; do
-    line_valid "$line" || { fm_lock_release "$lock"; die "delta contains an invalid or uncorrelated status line"; }
+    line_status_valid "$line" || { fm_lock_release "$lock"; die "delta contains an invalid status line"; }
+    if ! line_has_valid_corr "$line"; then
+      if [ "$from" -ne 0 ] || [ "$legacy_prefix" -ne 1 ] || line_has_corr_token "$line"; then
+        fm_lock_release "$lock"
+        die "delta contains an invalid or uncorrelated status line"
+      fi
+      if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
+        printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append legacy remote reply"; }
+        appended=$((appended + 1))
+      fi
+      continue
+    fi
+    legacy_prefix=0
     rewritten=$line
     while IFS= read -r doc; do
       [ -n "$doc" ] || continue

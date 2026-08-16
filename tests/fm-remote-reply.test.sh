@@ -127,8 +127,17 @@ assert_contains "$out" 'already-handled: remote-reply-ios 1' "replayed generatio
   || fail "replayed ingest duplicated the parent status line"
 pass "replayed capture has one deduplicated append and one durable handling identity"
 
+# Generation 2 compatibility fixture: an old remote status prefix can be
+# replayed from byte zero before a current correlated reply arrives.
+remote_env "$ADAPTER" retire ios >/dev/null \
+  || fail "could not retire the first generation before the compatibility replay"
+: > "$REMOTE/state/parent-replies.status"
+printf 'working: legacy remote prefix\n' \
+  >> "$REMOTE/state/parent-replies.status"
 printf 'working [corr=1111111111111111]: second generation\n' \
   >> "$REMOTE/state/parent-replies.status"
+remote_env "$ADAPTER" arm ios >/dev/null \
+  || fail "could not re-arm the generation-2 compatibility fixture"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
   || fail "second reply generation was not captured"
 RESULT_TWO="$PARENT/state/procevent-inbox/$SID.2.result"
@@ -139,6 +148,19 @@ handle_two_rc=$?
 set -e
 [ "$handle_two_rc" -ne 0 ] || fail "second generation acknowledged through an unsafe handled marker"
 assert_grep 'working [corr=1111111111111111]' "$PARENT/state/ios.status" "unacknowledged generation was not ingested"
+assert_grep 'working: legacy remote prefix' "$PARENT/state/ios.status" \
+  "legacy prefix was not preserved while ingesting the correlated reply"
+printf 'working: legacy remote prefix\n' > "$TMP_ROOT/expected-legacy-prefix"
+grep -F -x 'working: legacy remote prefix' "$PARENT/state/ios.status" \
+  > "$TMP_ROOT/actual-legacy-prefix" \
+  || fail "legacy prefix was not retained as a complete line"
+cmp -s "$TMP_ROOT/expected-legacy-prefix" "$TMP_ROOT/actual-legacy-prefix" \
+  || fail "legacy prefix bytes were changed during compatibility ingest"
+generation_two_offset=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/ios.cursor")
+generation_two_hash=$(sed -n 's/^prefix_sha256=//p' "$PARENT/state/remote-replies/ios.cursor")
+head -c "$generation_two_offset" "$REMOTE/state/parent-replies.status" > "$TMP_ROOT/generation-two-prefix"
+[ "$(sha256_file "$TMP_ROOT/generation-two-prefix")" = "$generation_two_hash" ] \
+  || fail "generation-2 cursor hash did not match its committed byte prefix"
 printf 'done [corr=2222222222222222]: third generation\n' \
   >> "$REMOTE/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null \
