@@ -228,25 +228,76 @@ fi
 
 # hd_rule_refusal_reason: the DOCUMENTED reason _fm_composer_rule_row declined a
 # dashes-plus-text row, or nothing when the refusal is not one of the shape
-# owner's authorized boundaries. Two are authorized here: a title that precedes
-# the opening 8-column dash run, the one title position that predicate
-# deliberately does not read, and a row whose mapped column count cannot be
-# matched against its partner, which is what a double-width title glyph does.
+# owner's authorized boundaries. Two are authorized here.
+#
+# A title that precedes the opening 8-column dash run is the one title position
+# that predicate deliberately does not read.
+#
+# A column count that does not match the partner rule is authorized ONLY when the
+# title carries non-ASCII text. There, one space per character can be wrong in
+# either direction - a double-width glyph under-counts, a zero-width or combining
+# character over-counts - so the width genuinely cannot be established. When the
+# title is ASCII-only the count is exact, because every ASCII printable is one
+# column and a captured grid carries no tabs, so a mismatch means the two rules
+# really are different widths: the shared-width assumption this fix rests on has
+# stopped holding, the classifier returns `unknown`, and away-mode escalation
+# defers silently. That is the outage shape, so it must FAIL rather than be
+# excused.
+#
+# Residual, stated rather than papered over: a SINGLE-width non-ASCII title whose
+# rules genuinely disagree in width is still only noted, because nothing in a
+# captured grid distinguishes a single-width glyph from a double-width one without
+# a width table. That hole runs in the same safe-refusal direction as every other
+# limit here, and it is recorded in docs/verification/runtime-backends.md.
+#
 # Anything else - a structural glyph, a malformed byte, no dash run at all - is
 # not a documented refusal, so the caller must fail rather than excuse it.
 hd_rule_refusal_reason() {  # <trimmed-row> <partner-spaces>
-  local row=$1 expected=$2 cols
+  local row=$1 expected=$2 spaces cols
   case "$row" in
     ────────*)
-      cols=$(fm_composer_column_spaces "${row//─/ }") || return 1
+      spaces=${row//─/ }
+      cols=$(fm_composer_column_spaces "$spaces") || return 1
       [ "$cols" = "$expected" ] && return 1
-      printf 'its mapped column count does not match the closing rule, so the width cannot be established honestly (a double-width title glyph, or rules of unequal width)'
+      _fm_composer_ascii_only "$spaces" && return 1
+      printf 'its mapped column count does not match the closing rule, and its title carries non-ASCII text, so the width cannot be established honestly (a double-width, zero-width, or combining title glyph)'
       ;;
     *────────*)
       printf 'its title precedes the opening 8-column dash run, the one title position the rule predicate deliberately does not read'
       ;;
     *) return 1 ;;
   esac
+}
+
+# hd_composer_row_blank: 0 when a FRESH plain capture still shows this pane's
+# composer row blank, 1 when it carries text now or no longer reads at all.
+#
+# The idle loop derives its expectation from one pane read and its verdict from
+# another, inside fm_backend_herdr_composer_state, so a keystroke landing between
+# the two turns a correct `pending` into a false failure on the operator's own
+# fleet. Only the BLANK expectation races: the text branch already accepts `empty`,
+# which is what clearing the row produces.
+#
+# Blankness, never the row's TEXT: claude's dim rotating suggestion changes that
+# text on its own, so a comparison would excuse a pane on every rotation and hide
+# real failures behind a race that did not happen.
+hd_composer_row_blank() {  # <target>
+  local cap line trim glyph draft='' found=0
+  cap=$(fm_backend_herdr_capture "$1" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null) || return 1
+  [ -n "$cap" ] || return 1
+  while IFS= read -r line; do
+    trim=$line
+    fm_composer_normalize_trim_var trim
+    if fm_composer_leading_agent_glyph_var glyph "$trim"; then
+      found=1
+      draft=${trim#*"$glyph"}
+      fm_composer_normalize_trim_var draft
+    fi
+  done <<EOF
+$cap
+EOF
+  [ "$found" -eq 1 ] || return 1
+  [ -z "$draft" ]
 }
 
 # hd_documented_unknown: the DOCUMENTED reason a pane's composer reads `unknown`,
@@ -394,13 +445,20 @@ EOF
             continue
             ;;
         esac
-        # Reaching here, the row opens with the dash run and the column proof
-        # refused it: a documented refusal would already have been noted above.
+        # Reaching here, the row opens with the dash run and was not excused, so
+        # either the column proof refused it or the count was exact and the two
+        # rules are different widths. Both rows are printed so an operator can
+        # compare their widths directly from this output.
         FAILED=1
         hd_failed=$((hd_failed + 1))
-        hd_cols=$(fm_composer_column_spaces "${hd_above//─/ }" || true)
+        printf '# pane %s rule above the glyph row:\n#   [%s]\n# pane %s closing rule below it:\n#   [%s]\n' \
+          "$hd_pane" "$hd_above" "$hd_pane" "$hd_below" >&2
+        if hd_cols=$(fm_composer_column_spaces "${hd_above//─/ }"); then
+          printf 'not ok - herdr (%s) + claude (%s): pane %s titled composer rule carries an ASCII-only title, so its column count is exact, and that count still disagrees with the closing rule - the two rules are different widths, the shared-width assumption this fix rests on has stopped holding, and the classifier will defer on this composer\n' \
+            "$hd_version" "$cl_version" "$hd_pane" >&2
+          continue
+        fi
         hd_residue=${hd_cols//[[:space:]]/}
-        printf '# pane %s rule above the glyph row:\n#   [%s]\n' "$hd_pane" "$hd_above" >&2
         if [ -n "$hd_residue" ]; then
           # Dumped as bytes as well as text: a control byte is exactly the kind of
           # leftover that would otherwise print as an empty pair of brackets.
@@ -489,6 +547,8 @@ EOF2
              && hd_reason=$(hd_documented_unknown "$hd_cap" "$hd_glyph_row") \
              && [ -n "$hd_reason" ]; then
           note "herdr ($hd_version) + claude ($cl_version): idle pane $hd_pane (focused=$hd_focused) $hd_why and classifies unknown on a documented boundary - $hd_reason; reported, not asserted, and not a live pass"
+        elif [ "$hd_accept" = empty ] && ! hd_composer_row_blank "default:$hd_pane"; then
+          note "herdr ($hd_version): idle pane $hd_pane raced this read - its composer row was blank when the expectation was derived and is not blank (or no longer readable) now, so the verdict describes a different row than the expectation does; skipped, not asserted, and not a live pass"
         else
           FAILED=1
           printf '# herdr pane %s tail at failure:\n' "$hd_pane" >&2
