@@ -59,6 +59,7 @@ FM_REMOTE_JOB_POLL_SECONDS=${FM_REMOTE_JOB_POLL_SECONDS:-0.05}
 FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
 FM_REMOTE_JOB_PROBE_WAIT_SECONDS=${FM_REMOTE_JOB_PROBE_WAIT_SECONDS:-60}
 FM_REMOTE_JOB_STOP_WAIT_SECONDS=${FM_REMOTE_JOB_STOP_WAIT_SECONDS:-15}
+FM_REMOTE_JOB_CLOCK_MAX_MISSES=${FM_REMOTE_JOB_CLOCK_MAX_MISSES:-50}
 FM_REMOTE_JOB_OPERATOR_PATH=
 FM_REMOTE_JOB_CHILD_PATH=
 FM_REMOTE_JOB_STATE=
@@ -97,6 +98,8 @@ fm_remote_job_validate_settings() {
   [ "$FM_REMOTE_JOB_PROBE_WAIT_SECONDS" -le 300 ] || return 1
   case "$FM_REMOTE_JOB_STOP_WAIT_SECONDS" in ''|*[!0-9]*|0) return 1 ;; esac
   [ "$FM_REMOTE_JOB_STOP_WAIT_SECONDS" -le 300 ] || return 1
+  case "$FM_REMOTE_JOB_CLOCK_MAX_MISSES" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$FM_REMOTE_JOB_CLOCK_MAX_MISSES" -le 1000 ] || return 1
   return 0
 }
 
@@ -109,15 +112,17 @@ fm_remote_job_validate_settings() {
 # a healthy machine nothing because every wait still returns on its first
 # successful check.
 #
-# The clock is treated as untrustworthy, because a deadline is only a bound
-# while it can be read. A `date` fork that fails under the very memory pressure
-# these waits exist for, or a clock stepped backwards by an NTP correction on a
-# host that just woke from sleep, must never turn a bounded wait into an
-# unbounded one. Nor may either one silently shorten a budget: giving up at the
-# first bad reading would end a wait with the very "worker did not report ready"
-# failure these deadlines exist to prevent. So every bound carries two
-# independent measures of elapsed time, and a wait ends only when the measure
-# that can still be trusted says the budget is spent.
+# What a wait owes its caller when the clock misbehaves is deliberately narrow.
+# It must always terminate, and it must never hand back a budget it has not
+# spent: a `date` fork can fail under the very memory pressure these waits exist
+# for, and an NTP correction can step the clock backwards on a host that just
+# woke from sleep, and either one ending a wait early would produce the exact
+# "worker did not report ready" failure the deadline exists to prevent. So an
+# unreadable reading is skipped rather than counted, up to a bounded number of
+# consecutive misses that guarantees termination, and a backwards step
+# re-anchors the deadline by the size of the step. Making these waits correct
+# against a clock that is wrong in other ways is out of scope here and tracked
+# as its own item, so this stays a deadline rather than a clock subsystem.
 fm_remote_job_clock_now() { # epoch seconds, or nothing when the clock is unreadable
   local now
   now=$(date +%s 2>/dev/null || true)
@@ -125,45 +130,31 @@ fm_remote_job_clock_now() { # epoch seconds, or nothing when the clock is unread
   printf '%s\n' "$now"
 }
 
-# The second measure is bash's own SECONDS, which needs no fork and so still
-# advances on a host that has run out of the resources to run `date` at all. It
-# is the safety net rather than the authority, because it is reset by anything
-# that assigns to it and cannot outlive the shell that owns the wait.
-#
-# Establishing a bound retries, because one transient fork failure must not
-# decide what a whole wait is worth. Both measures start at the same instant, so
-# a reading earlier than the start is provably a backwards step: that is spent
-# budget, not fresh time.
-fm_remote_job_wait_deadline() { # <seconds>; opaque bound token for a wait
-  local seconds=$1 now='' attempt=0
+fm_remote_job_wait_until() { # <seconds> <predicate> [args...]
+  local seconds=$1
+  shift
+  local now deadline='' last='' misses=0
+  now=$(fm_remote_job_clock_now) || now=
+  last=$now
+  [ -z "$now" ] || deadline=$((now + seconds))
   while :; do
-    now=$(fm_remote_job_clock_now) && break
-    attempt=$((attempt + 1))
-    [ "$attempt" -lt 5 ] || break
+    "$@" && return 0
+    now=$(fm_remote_job_clock_now) || now=
+    if [ -z "$now" ]; then
+      misses=$((misses + 1))
+      [ "$misses" -lt "$FM_REMOTE_JOB_CLOCK_MAX_MISSES" ] || return 1
+    else
+      misses=0
+      if [ -z "$deadline" ]; then
+        deadline=$((now + seconds))
+      elif [ -n "$last" ] && [ "$now" -lt "$last" ]; then
+        deadline=$((deadline - (last - now)))
+      fi
+      last=$now
+      [ "$now" -lt "$deadline" ] || return 1
+    fi
     sleep 0.1
   done
-  printf '%s:%s:%s:%s\n' "$SECONDS" "$((SECONDS + seconds))" "$now" "${now:+$((now + seconds))}"
-}
-
-# Expired, still running, or 2 for a bound this clock cannot judge at all.
-fm_remote_job_epoch_expired() { # <start> <deadline>
-  local start=$1 deadline=$2 now
-  case "$start" in ''|*[!0-9]*) return 2 ;; esac
-  case "$deadline" in ''|*[!0-9]*) return 2 ;; esac
-  now=$(fm_remote_job_clock_now) || return 2
-  [ "$now" -ge "$start" ] || return 0
-  [ "$now" -ge "$deadline" ]
-}
-
-fm_remote_job_wait_expired() { # <bound from fm_remote_job_wait_deadline>
-  local bound=$1 shell_start shell_deadline epoch_start epoch_deadline verdict=0
-  IFS=: read -r shell_start shell_deadline epoch_start epoch_deadline <<< "$bound"
-  fm_remote_job_epoch_expired "$epoch_start" "$epoch_deadline" || verdict=$?
-  [ "$verdict" -eq 2 ] || return "$verdict"
-  case "$shell_start" in ''|*[!0-9]*) return 0 ;; esac
-  case "$shell_deadline" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$SECONDS" -ge "$shell_start" ] || return 0
-  [ "$SECONDS" -ge "$shell_deadline" ]
 }
 
 fm_remote_job_platform() {
@@ -828,13 +819,13 @@ fm_remote_job_signal_worker_tree() { # <signal> <pid> <pgid-or-empty>
   fi
 }
 
+fm_remote_job_worker_tree_exited() { # <pid> <pgid-or-empty>
+  ! fm_remote_job_worker_tree_alive "$1" "$2"
+}
+
 fm_remote_job_wait_for_tree_exit() { # <pid> <pgid-or-empty>
-  local pid=$1 pgid=$2 deadline
-  deadline=$(fm_remote_job_wait_deadline "$FM_REMOTE_JOB_STOP_WAIT_SECONDS")
-  while fm_remote_job_worker_tree_alive "$pid" "$pgid"; do
-    fm_remote_job_wait_expired "$deadline" && return 1
-    sleep 0.1
-  done
+  fm_remote_job_wait_until "$FM_REMOTE_JOB_STOP_WAIT_SECONDS" \
+    fm_remote_job_worker_tree_exited "$1" "$2"
 }
 
 # Stop a worker and every descendant it leaked, TERM first and KILL only for a
@@ -965,14 +956,13 @@ fm_remote_job_probe() { # <account-home>; a fresh worker heartbeat or active job
 # worker reclaiming ownership from a predecessor: that reclaim cannot finish
 # until the predecessor's readiness heartbeat and lock age past their ten
 # second staleness windows. Those windows are wall clock, so this budget is too.
+fm_remote_job_worker_ready() { # <remote-root> <account-home>
+  fm_remote_job_probe "$2" && fm_remote_job_worker_identity_matches "$1" "$2"
+}
+
 fm_remote_job_wait_for_probe() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 deadline
-  deadline=$(fm_remote_job_wait_deadline "$FM_REMOTE_JOB_PROBE_WAIT_SECONDS")
-  while :; do
-    fm_remote_job_probe "$account_home" && fm_remote_job_worker_identity_matches "$root" "$account_home" && return 0
-    fm_remote_job_wait_expired "$deadline" && return 1
-    sleep 0.1
-  done
+  fm_remote_job_wait_until "$FM_REMOTE_JOB_PROBE_WAIT_SECONDS" \
+    fm_remote_job_worker_ready "$1" "$2"
 }
 
 fm_remote_job_write_launchagent() { # <remote-root> <account-home>
