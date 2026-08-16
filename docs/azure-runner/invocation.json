@@ -122,14 +122,6 @@
         "hardwareProfile": {
           "vmSize": "[parameters('vmSize')]"
         },
-        "securityProfile": {
-          "securityType": "TrustedLaunch",
-          "uefiSettings": {
-            "secureBootEnabled": true,
-            "vTpmEnabled": true
-          },
-          "encryptionAtHost": true
-        },
         "osProfile": {
           "computerName": "[parameters('vmName')]",
           "adminUsername": "fmbootstrap",

@@ -1,5 +1,24 @@
 # Azure validation cells
 
+> **Isolation-only stack (2026-08-15).** This single-operator harness was
+> deliberately stripped to its one real requirement: resource-contention
+> isolation (one VM per run/shard) plus wallet protection (cost-ceiling
+> admission, Cost Management actual/forecast checks, DevTestLab TTL) and a
+> private NIC. The LUKS worktree/credential-disk machinery, disk content
+> bindings, custody chains, TrustedLaunch requirements, UAMI cost-reservation
+> objects, and multi-step absence-fence proofs described below are GONE.
+> Today: the worktree is a plain ext4 data disk; the GitHub token is injected
+> at boot as a run-command parameter; persistent provider auth (pi-codex
+> primary, one claude cross-check profile) lives on the `fm-auth-home` Azure
+> Files share and syncs into the cell home each boot; runner spend is tracked
+> in a local JSON ledger; and `bin/fm-azure-cell-image.sh` can bake a golden
+> image preferred via `FM_AZURE_VM_IMAGE_ID`. Dispatch is multi-lane:
+> `FM_AZURE_VALIDATION_LANES` (default 4) concurrent cells, FIFO admission of
+> any number of queued generations, lane index mapped deterministically onto
+> the four-family coordinator SKU pool; `queue` shows lanes used and queue
+> order. Sections below describing the removed machinery are retained as
+> history until rewritten.
+
 This document owns the architecture, identity, admission, recovery, credential, cleanup, and operator contract for elastic Azure no-mistakes validation cells.
 [`bin/fm-azure-validation.sh`](../bin/fm-azure-validation.sh) owns exact host commands, [`bin/fm-azure-validation.py`](../bin/fm-azure-validation.py) owns the state machine, and [`docs/azure-validation/cell.json`](azure-validation/cell.json) owns the per-cell Azure declaration.
 The private foundation remains owned by [`docs/azure-pilot.md`](azure-pilot.md), and credential-free command VMs remain owned by [`docs/azure-runner.md`](azure-runner.md).

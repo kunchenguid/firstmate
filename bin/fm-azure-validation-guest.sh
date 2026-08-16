@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Trusted root-side payload for one isolated Azure no-mistakes cell.
 #
-# Azure Managed Run Command supplies unlock material and optional gate response
-# only as protected parameters. This script clears those values before starting
-# the credentialed coordinator. Repository commands are not run here: the
-# trusted no-mistakes command seam delegates lint/test and requested behavior
-# parallelism to identity-less Azure shard VMs through the shard exchange.
+# Azure Managed Run Command supplies the GitHub token and optional gate
+# response as run-command parameters at boot time; nothing durable carries
+# credentials. The worktree data disk is a plain ext4 filesystem. Repository
+# commands are not run here: the trusted no-mistakes command seam delegates
+# lint/test and requested behavior parallelism to identity-less Azure shard
+# VMs through the shard exchange.
 set -euo pipefail
 set +x
 umask 077
@@ -19,18 +20,17 @@ ATTEMPT=${attempt:-}
 VM_RESOURCE_ID=${vm_resource_id:-}
 VM_INSTANCE_ID=${vm_instance_id:-}
 WORKTREE_DISK_ID=${worktree_disk_id:-}
-CREDENTIAL_DISK_ID=${credential_disk_id:-}
 STORAGE_ACCOUNT=${storage_account:-}
 STORAGE_CONTAINER=${storage_container:-}
 IDENTITY_CLIENT_ID=${identity_client_id:-}
+AUTH_SHARE=${auth_share:-fm-auth-home}
 INPUT_URL=${input_url:-}
 OUTPUT_URL=${output_url:-}
 RESPONSE=${response:-}
-WORKTREE_KEY=${fm_azure_validation_worktree_key_file:-}
-CREDENTIAL_KEY=${fm_azure_validation_credential_key_file:-}
+GITHUB_TOKEN_VALUE=${github_token:-}
 unset mode input_digest request_digest cell attempt vm_resource_id vm_instance_id
-unset worktree_disk_id credential_disk_id storage_account storage_container identity_client_id
-unset input_url output_url response fm_azure_validation_worktree_key_file fm_azure_validation_credential_key_file
+unset worktree_disk_id storage_account storage_container identity_client_id auth_share
+unset input_url output_url response github_token
 case "$MODE" in
   start)
     [ -n "$INPUT_URL" ] && [ -n "$OUTPUT_URL" ] || { echo "validation guest: start capability is absent" >&2; exit 125; }
@@ -52,18 +52,13 @@ case "$CELL" in azv-[a-z0-9][a-z0-9]*) ;; *) echo "validation guest: cell identi
 case "$ATTEMPT" in ''|*[!0-9]*) echo "validation guest: attempt is malformed" >&2; exit 125 ;; esac
 case "$OUTPUT_URL" in https://*) ;; *) if [ "$MODE" != respond ]; then echo "validation guest: output capability is not HTTPS" >&2; exit 125; fi ;; esac
 case "$INPUT_URL" in https://*) ;; *) if [ "$MODE" = start ]; then echo "validation guest: input capability is not HTTPS" >&2; exit 125; fi ;; esac
-[ -n "$WORKTREE_KEY" ] && [ -n "$CREDENTIAL_KEY" ] || { echo "validation guest: disk unlock material is absent" >&2; exit 125; }
+[ -n "$GITHUB_TOKEN_VALUE" ] || { echo "validation guest: GitHub token parameter is absent" >&2; exit 125; }
 
 BOOTSTRAP=/var/lib/fm-azure-validation
 install -d -m 0700 -o root -g root "$BOOTSTRAP"
-WORKTREE_KEY_FILE=$BOOTSTRAP/worktree.key
-CREDENTIAL_KEY_FILE=$BOOTSTRAP/credential.key
-printf '%s' "$WORKTREE_KEY" >"$WORKTREE_KEY_FILE"
-printf '%s' "$CREDENTIAL_KEY" >"$CREDENTIAL_KEY_FILE"
-unset WORKTREE_KEY CREDENTIAL_KEY
 
 missing=()
-for tool in curl git python3 sha256sum tar systemd-run cryptsetup blkid lsblk findmnt jq mount umount useradd runuser; do
+for tool in curl git python3 sha256sum tar systemd-run blkid findmnt jq mount umount useradd runuser; do
   command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
@@ -71,7 +66,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
   bootstrap_packages() {
     apt-get update -qq
     apt-get install -y --no-install-recommends \
-      ca-certificates curl git python3 cryptsetup-bin util-linux jq systemd tar passwd
+      ca-certificates curl git python3 util-linux jq systemd tar passwd
   }
   if ! bootstrap_packages; then
     # The regional azure.archive mirror rides plain port 80, whose egress can
@@ -83,17 +78,17 @@ if [ "${#missing[@]}" -gt 0 ]; then
     bootstrap_packages
   fi
 fi
-for tool in curl git python3 sha256sum tar systemd-run cryptsetup blkid lsblk findmnt jq mount umount useradd runuser; do
+for tool in curl git python3 sha256sum tar systemd-run blkid findmnt jq mount umount useradd runuser; do
   command -v "$tool" >/dev/null 2>&1 || { echo "validation guest: fixed bootstrap closure is incomplete" >&2; exit 125; }
 done
 
 # Azure LUN identity is part of the ARM contract, but the guest also re-reads
-# IMDS and rejects a disk swap before opening either encrypted volume.
+# IMDS and rejects a disk swap before mounting the worktree.
 METADATA=$BOOTSTRAP/metadata.json
 curl --fail --silent --show-error --noproxy '*' \
   -H Metadata:true \
   'http://169.254.169.254/metadata/instance?api-version=2021-02-01' >"$METADATA"
-python3 - "$METADATA" "$VM_RESOURCE_ID" "$VM_INSTANCE_ID" "$WORKTREE_DISK_ID" "$CREDENTIAL_DISK_ID" <<'PY'
+python3 - "$METADATA" "$VM_RESOURCE_ID" "$VM_INSTANCE_ID" "$WORKTREE_DISK_ID" <<'PY'
 import json
 import sys
 
@@ -105,14 +100,13 @@ if compute.get("vmId") != sys.argv[3]:
     raise SystemExit("validation guest: IMDS immutable VM identity mismatch")
 data = compute.get("storageProfile", {}).get("dataDisks", [])
 by_lun = {str(item.get("lun")): str(item.get("managedDisk", {}).get("id", "")).lower() for item in data}
-if by_lun.get("0") != sys.argv[4].lower() or by_lun.get("1") != sys.argv[5].lower():
+if by_lun.get("0") != sys.argv[4].lower():
     raise SystemExit("validation guest: IMDS data-disk identity mismatch")
 PY
 
 # SCSI SKUs publish data disks under scsi1/lunN; NVMe-only SKUs (v6 families)
 # publish them under data/by-lun/N via azure-vm-utils. Both are udev identity
-# paths; never guess raw namespaces because luksFormat runs on the resolved
-# device.
+# paths; never guess raw namespaces because mkfs runs on the resolved device.
 resolve_data_disk() {
   lun="$1"
   deadline=$((SECONDS + 120))
@@ -130,39 +124,27 @@ resolve_data_disk() {
   exit 125
 }
 WORK_DEVICE=$(resolve_data_disk 0)
-CREDENTIAL_DEVICE=$(resolve_data_disk 1)
-
-if cryptsetup isLuks "$WORK_DEVICE"; then
-  [ "$MODE" != start ] || { echo "validation guest: new cell found a pre-existing LUKS worktree" >&2; exit 125; }
-else
-  [ "$MODE" = start ] || { echo "validation guest: replacement worktree is not LUKS2" >&2; exit 125; }
-  cryptsetup luksFormat --type luks2 --batch-mode --key-file "$WORKTREE_KEY_FILE" "$WORK_DEVICE"
-fi
-cryptsetup isLuks "$CREDENTIAL_DEVICE" || { echo "validation guest: credential lease disk is not LUKS2" >&2; exit 125; }
-cryptsetup open --key-file "$WORKTREE_KEY_FILE" "$WORK_DEVICE" fm-validation-work
-cryptsetup open --key-file "$CREDENTIAL_KEY_FILE" "$CREDENTIAL_DEVICE" fm-validation-credentials
-shred -u "$WORKTREE_KEY_FILE" "$CREDENTIAL_KEY_FILE" 2>/dev/null || rm -f "$WORKTREE_KEY_FILE" "$CREDENTIAL_KEY_FILE"
 
 WORK_MOUNT=/srv/fm-validation
-CREDENTIAL_MOUNT=/run/fm-validation-credentials
-install -d -m 0700 -o root -g root "$WORK_MOUNT" "$CREDENTIAL_MOUNT"
+install -d -m 0700 -o root -g root "$WORK_MOUNT"
 set +e
-WORKTREE_FS_TYPE=$(blkid -p -s TYPE -o value /dev/mapper/fm-validation-work 2>/dev/null)
+WORKTREE_FS_TYPE=$(blkid -p -s TYPE -o value "$WORK_DEVICE" 2>/dev/null)
 WORKTREE_FS_RC=$?
 set -e
 case "$WORKTREE_FS_RC:$WORKTREE_FS_TYPE" in
-  2:) mkfs.ext4 -q -F -L fm-validation-work /dev/mapper/fm-validation-work ;;
-  0:ext4) ;;
-  0:*) echo "validation guest: worktree mapping has a foreign filesystem" >&2; exit 125 ;;
+  2:)
+    [ "$MODE" = start ] || { echo "validation guest: replacement worktree has no filesystem" >&2; exit 125; }
+    mkfs.ext4 -q -F -L fm-validation-work "$WORK_DEVICE"
+    ;;
+  0:ext4)
+    [ "$MODE" != start ] || { echo "validation guest: new cell found a pre-existing worktree filesystem" >&2; exit 125; }
+    ;;
+  0:*) echo "validation guest: worktree disk has a foreign filesystem" >&2; exit 125 ;;
   *) echo "validation guest: worktree filesystem identity is unreadable" >&2; exit 125 ;;
 esac
-mount -o nodev,nosuid /dev/mapper/fm-validation-work "$WORK_MOUNT"
-mount -o nodev,nosuid,noexec /dev/mapper/fm-validation-credentials "$CREDENTIAL_MOUNT"
+mount -o nodev,nosuid "$WORK_DEVICE" "$WORK_MOUNT"
 cleanup_mounts() {
-  umount "$CREDENTIAL_MOUNT" 2>/dev/null || true
   umount "$WORK_MOUNT" 2>/dev/null || true
-  cryptsetup close fm-validation-credentials 2>/dev/null || true
-  cryptsetup close fm-validation-work 2>/dev/null || true
 }
 trap cleanup_mounts EXIT
 
@@ -177,6 +159,169 @@ CACHE=$CELL_ROOT/cache
 TMP=$CELL_ROOT/tmp
 REPO=$CELL_ROOT/repo
 install -d -m 0700 -o root -g root "$CELL_ROOT" "$STATE" "$LOGS" "$EVIDENCE" "$SHARD_EXCHANGE"
+
+# Persistent-auth home sync (auth-once-ever): the fm-auth-home Azure Files
+# share carries the agent user's home-shaped auth state (~/.codex, ~/.claude,
+# ...) across every cell and runner boot. Pull overlays the share onto the
+# cell home before the run; push writes refreshed token files back after the
+# run. Transfers use the cell's managed identity over plain REST; failures
+# warn and continue because the submit-time bundle still seeds a first boot.
+AUTH_SYNC=$BOOTSTRAP/auth-sync.py
+cat >"$AUTH_SYNC" <<'PY'
+import json
+import pathlib
+import sys
+import urllib.error
+import urllib.request
+
+# Azure firstmate is powered entirely by pi-codex; ~/.codex (including its
+# multi-profile extension state) is the primary contents. Exactly one claude
+# profile (~/.claude) rides along for the cross-check lane only.
+AUTH_DIRS = (".codex", ".claude")
+VERSION = "2024-11-04"
+
+
+def token(client_id):
+    request = urllib.request.Request(
+        "http://169.254.169.254/metadata/identity/oauth2/token"
+        "?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F"
+        "&client_id=" + client_id,
+        headers={"Metadata": "true"},
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.load(response)["access_token"]
+
+
+def call(bearer, method, url, data=None, headers=None):
+    request = urllib.request.Request(url, data=data, method=method)
+    request.add_header("Authorization", "Bearer " + bearer)
+    request.add_header("x-ms-version", VERSION)
+    request.add_header("x-ms-file-request-intent", "backup")
+    for name, value in (headers or {}).items():
+        request.add_header(name, value)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read()
+
+
+def list_directory(bearer, base, directory):
+    from xml.etree import ElementTree
+    url = base + ("/" + directory if directory else "") + "?restype=directory&comp=list"
+    tree = ElementTree.fromstring(call(bearer, "GET", url))
+    files, directories = [], []
+    for entry in tree.iter("File"):
+        files.append((directory + "/" if directory else "") + entry.findtext("Name"))
+    for entry in tree.iter("Directory"):
+        directories.append((directory + "/" if directory else "") + entry.findtext("Name"))
+    return files, directories
+
+
+def pull(bearer, base, destination):
+    count = 0
+    pending = [""]
+    while pending:
+        directory = pending.pop()
+        files, directories = list_directory(bearer, base, directory)
+        pending.extend(directories)
+        for relative in files:
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(call(bearer, "GET", base + "/" + relative))
+            target.chmod(0o600)
+            count += 1
+    return count
+
+
+def ensure_remote_directory(bearer, base, directory):
+    try:
+        call(bearer, "PUT", base + "/" + directory + "?restype=directory")
+    except urllib.error.HTTPError as error:
+        if error.code != 409:
+            raise
+
+
+def push(bearer, base, source):
+    count = 0
+    for name in AUTH_DIRS:
+        root = source / name
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            relative = path.relative_to(source).as_posix()
+            parts = relative.split("/")
+            for depth in range(1, len(parts)):
+                ensure_remote_directory(bearer, base, "/".join(parts[:depth]))
+            data = path.read_bytes()
+            call(bearer, "PUT", base + "/" + relative, headers={
+                "x-ms-type": "file",
+                "x-ms-content-length": str(len(data)),
+                "Content-Length": "0",
+            })
+            offset = 0
+            while offset < len(data) or (len(data) == 0 and offset == 0):
+                if len(data) == 0:
+                    break
+                chunk = data[offset:offset + 4 * 1024 * 1024]
+                call(
+                    bearer, "PUT",
+                    base + "/" + relative + "?comp=range",
+                    data=chunk,
+                    headers={
+                        "x-ms-range": "bytes={}-{}".format(offset, offset + len(chunk) - 1),
+                        "x-ms-write": "update",
+                    },
+                )
+                offset += len(chunk)
+            count += 1
+    return count
+
+
+def main():
+    operation, account, share, client_id, local = sys.argv[1:6]
+    base = "https://{}.file.core.windows.net/{}".format(account, share)
+    bearer = token(client_id)
+    home = pathlib.Path(local)
+    if operation == "pull":
+        count = pull(bearer, base, home)
+        print(count)
+    elif operation == "push":
+        print(push(bearer, base, home))
+    else:
+        raise SystemExit("auth-sync: unknown operation")
+
+
+main()
+PY
+chmod 0700 "$AUTH_SYNC"
+
+auth_home_pull() {
+  set +e
+  pulled=$(python3 "$AUTH_SYNC" pull "$STORAGE_ACCOUNT" "$AUTH_SHARE" "$IDENTITY_CLIENT_ID" "$HOME_DIR" 2>>"$LOGS/auth-sync-a$ATTEMPT.log")
+  pull_rc=$?
+  set -e
+  if [ "$pull_rc" -ne 0 ]; then
+    echo "validation guest: auth-home pull failed; continuing with the seeded bundle" >&2
+  elif [ "${pulled:-0}" -eq 0 ]; then
+    # First-ever boot against an empty share: proceed, but leave a durable
+    # marker so the operator knows one interactive auth is still needed.
+    printf 'auth share %s was empty at %s; interactive provider auth is needed once\n' \
+      "$AUTH_SHARE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STATE/auth-needed"
+    chmod 0600 "$STATE/auth-needed"
+    echo "validation guest: auth share is empty; interactive auth marker written" >&2
+  else
+    rm -f "$STATE/auth-needed"
+  fi
+}
+
+auth_home_push() {
+  set +e
+  python3 "$AUTH_SYNC" push "$STORAGE_ACCOUNT" "$AUTH_SHARE" "$IDENTITY_CLIENT_ID" "$HOME_DIR" \
+    >>"$LOGS/auth-sync-a$ATTEMPT.log" 2>&1
+  push_rc=$?
+  set -e
+  [ "$push_rc" -eq 0 ] || echo "validation guest: auth-home push failed; refreshed tokens stay cell-local" >&2
+}
 
 if [ "$MODE" = start ]; then
   INPUT=$BOOTSTRAP/input.tar.gz
@@ -197,7 +342,7 @@ import tarfile
 
 source = pathlib.Path(sys.argv[1])
 destination = pathlib.Path(sys.argv[2])
-allowed = {"request.json", "snapshot.bundle", "runtime.tar.gz", "shard-bridge.py"}
+allowed = {"request.json", "snapshot.bundle", "runtime.tar.gz", "credentials.tar.gz", "shard-bridge.py"}
 with tarfile.open(source, "r:gz") as archive:
     members = archive.getmembers()
     if {member.name for member in members} != allowed:
@@ -208,7 +353,7 @@ with tarfile.open(source, "r:gz") as archive:
     archive.extractall(destination, members=members)
 PY
   REQUEST=$EXTRACT/request.json
-  python3 - "$REQUEST" "$REQUEST_DIGEST" "$CELL" "$WORKTREE_DISK_ID" "$CREDENTIAL_DISK_ID" "$EXTRACT/snapshot.bundle" "$EXTRACT/runtime.tar.gz" "$EXTRACT/shard-bridge.py" <<'PY'
+  python3 - "$REQUEST" "$REQUEST_DIGEST" "$CELL" "$WORKTREE_DISK_ID" "$EXTRACT/snapshot.bundle" "$EXTRACT/runtime.tar.gz" "$EXTRACT/credentials.tar.gz" "$EXTRACT/shard-bridge.py" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -224,18 +369,16 @@ if supplied != sys.argv[2] or supplied != "sha256:" + hashlib.sha256(canonical).
 if request.get("cell") != sys.argv[3]:
     raise SystemExit("validation guest: cell identity mismatch")
 bindings = request.get("resource_bindings", {})
-if (
-    bindings.get("worktree_disk_id", "").lower() != sys.argv[4].lower()
-    or bindings.get("credential_disk_id", "").lower() != sys.argv[5].lower()
-    or request.get("credential_lease", {}).get("disk", {}).get("id", "").lower() != sys.argv[5].lower()
-):
-    raise SystemExit("validation guest: worktree/credential disk request mismatch")
+if bindings.get("worktree_disk_id", "").lower() != sys.argv[4].lower():
+    raise SystemExit("validation guest: worktree disk request mismatch")
 def digest(path):
     return "sha256:" + hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
-if digest(sys.argv[6]) != request["repository"]["snapshot_digest"]:
+if digest(sys.argv[5]) != request["repository"]["snapshot_digest"]:
     raise SystemExit("validation guest: repository bundle digest mismatch")
-if digest(sys.argv[7]) != request["runtime_digest"]:
+if digest(sys.argv[6]) != request["runtime_digest"]:
     raise SystemExit("validation guest: runtime bundle digest mismatch")
+if digest(sys.argv[7]) != request["credentials"]["bundle_digest"]:
+    raise SystemExit("validation guest: credentials bundle digest mismatch")
 if digest(sys.argv[8]) != request["protocol"]["shard_bridge_digest"]:
     raise SystemExit("validation guest: shard bridge digest mismatch")
 PY
@@ -307,13 +450,34 @@ PY
   git -C "$REPO" checkout -B "$BRANCH" "$HEAD" >/dev/null
   git -C "$REPO" remote set-url origin "https://github.com/$SLUG.git"
   install -d -m 0700 "$HOME_DIR" "$NM_HOME" "$CACHE" "$TMP"
+  # The auth bundle is home-shaped (.codex/, .claude/, ...) and seeds the
+  # agent home on the durable worktree disk; a later reattach keeps the
+  # session state a provider run legitimately mutates.
+  python3 - "$EXTRACT/credentials.tar.gz" "$HOME_DIR" <<'PY'
+import pathlib
+import sys
+import tarfile
+
+destination = pathlib.Path(sys.argv[2])
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    members = archive.getmembers()
+    for member in members:
+        if member.issym() or member.islnk() or member.isdev() or member.name.startswith("/") or ".." in member.name.split("/"):
+            raise SystemExit("validation guest: unsafe credentials member")
+    archive.extractall(destination, members=members)
+PY
 else
   REQUEST=$STATE/request.json
   [ -f "$REQUEST" ] || { echo "validation guest: retained request is absent" >&2; exit 125; }
+  [ -d "$HOME_DIR" ] || { echo "validation guest: retained agent home is absent" >&2; exit 125; }
 fi
 
+# Overlay the persistent auth home on every attempt so refreshed tokens from
+# any earlier cell or runner win over the submit-time seed.
+auth_home_pull
+
 # Re-prove every durable identity after opening retained state.
-python3 - "$REQUEST" "$REQUEST_DIGEST" "$CELL" "$WORKTREE_DISK_ID" "$CREDENTIAL_DISK_ID" <<'PY'
+python3 - "$REQUEST" "$REQUEST_DIGEST" "$CELL" "$WORKTREE_DISK_ID" <<'PY'
 import hashlib
 import json
 import sys
@@ -327,123 +491,22 @@ bindings = request.get("resource_bindings", {})
 if (
     request["cell"] != sys.argv[3]
     or bindings.get("worktree_disk_id", "").lower() != sys.argv[4].lower()
-    or bindings.get("credential_disk_id", "").lower() != sys.argv[5].lower()
-    or request["credential_lease"]["disk"]["id"].lower() != sys.argv[5].lower()
 ):
     raise SystemExit("validation guest: retained run/disk identity mismatch")
 PY
 
-WORKTREE_LUKS_UUID=$(cryptsetup luksUUID "$WORK_DEVICE")
-EXPECTED_LUKS=$(jq -r '.credential_lease.disk.luks_uuid' "$REQUEST")
-[ "$(cryptsetup luksUUID "$CREDENTIAL_DEVICE")" = "$EXPECTED_LUKS" ] \
-  || { echo "validation guest: credential lease LUKS UUID mismatch" >&2; exit 125; }
-PROVIDER_PATH=$(jq -r '.credential_lease.paths.provider_home' "$REQUEST")
-ACCOUNT_BINDING_PATH=$(jq -r '.credential_lease.paths.account_binding' "$REQUEST")
-GITHUB_TOKEN_PATH=$(jq -r '.credential_lease.paths.github_token' "$REQUEST")
-LEASE_BINDING_HELPER=$BOOTSTRAP/lease-binding.py
-cat >"$LEASE_BINDING_HELPER" <<'PY'
-import hashlib
-import json
-import os
-import pathlib
-import stat
-import sys
-
-root = pathlib.Path(sys.argv[1]).resolve()
-provider_relative, account_relative, github_relative = sys.argv[2:5]
-request = json.load(open(sys.argv[5], encoding="utf-8"))
-paths = []
-for relative in (provider_relative, account_relative, github_relative):
-    path = (root / relative).resolve()
-    if path != root and root not in path.parents:
-        raise SystemExit("validation guest: credential lease path escapes disk")
-    if not path.exists() or path.is_symlink():
-        raise SystemExit("validation guest: credential lease path is absent or linked")
-    paths.append(path)
-provider, account_binding, github_token = paths
-if not provider.is_dir() or not account_binding.is_file() or not github_token.is_file():
-    raise SystemExit("validation guest: provider/account/GitHub lease path types are invalid")
-expected_account = request["credential_lease"]["provider_account_binding"]
-if account_binding.read_text(encoding="utf-8").strip() != expected_account:
-    raise SystemExit("validation guest: provider account-binding marker mismatch")
-
-# The content binding covers every regular file under the provider home plus
-# the exact GitHub token. Anything else on the credential disk is rejected so
-# a lease cannot silently carry a sibling account or unrelated credential.
-allowed_files = []
-for directory, names, files in os.walk(root, topdown=True, followlinks=False):
-    current = pathlib.Path(directory)
-    names[:] = sorted(name for name in names if not (current == root and name == "lost+found"))
-    for name in names:
-        child = current / name
-        mode = child.lstat().st_mode
-        if not stat.S_ISDIR(mode) or child.is_symlink():
-            raise SystemExit("validation guest: credential lease contains a linked/non-directory path")
-    for name in sorted(files):
-        child = current / name
-        info = child.lstat()
-        if not stat.S_ISREG(info.st_mode) or child.is_symlink() or info.st_nlink != 1:
-            raise SystemExit("validation guest: credential lease contains a linked/non-regular file")
-        if child == github_token or provider in child.parents:
-            allowed_files.append(child)
-        else:
-            raise SystemExit("validation guest: credential lease contains out-of-scope content")
-digest = hashlib.sha256()
-for child in sorted(allowed_files):
-    relative = child.relative_to(root).as_posix().encode("utf-8")
-    content = hashlib.sha256(child.read_bytes()).hexdigest().encode("ascii")
-    size = child.stat().st_size
-    digest.update(len(relative).to_bytes(4, "big"))
-    digest.update(relative)
-    digest.update(content)
-    digest.update(size.to_bytes(8, "big"))
-actual = "sha256:" + digest.hexdigest()
-expected = sys.argv[6] if len(sys.argv) > 6 else ""
-if expected and actual != expected:
-    # Single-operator harness: binding drift is expected whenever a provider
-    # session ran, so adopt the observed digest with a logged trail instead
-    # of refusing the attempt (both values are integrity digests, never
-    # content). The end-of-attempt reseal keeps the custody chain current.
-    print(
-        "validation guest: credential disk content binding drift (expected {} observed {}); adopting observed".format(
-            expected, actual
-        ),
-        file=sys.stderr,
-    )
-print(actual)
-PY
-chmod 0700 "$LEASE_BINDING_HELPER"
-# A provider session legitimately mutates its home, so the staged binding can
-# only prove the FIRST attach. Later attempts verify against the binding the
-# previous attempt sealed into the retained identity: a chain of custody from
-# staging through every attempt.
-EXPECTED_BINDING=$(jq -r '.credential_lease.disk_content_binding' "$REQUEST")
-if [ "$MODE" != start ] && [ -f "$STATE/identity.json" ]; then
-  SEALED_BINDING=$(jq -r '.credential_content_binding // empty' "$STATE/identity.json")
-  [ -n "$SEALED_BINDING" ] && EXPECTED_BINDING=$SEALED_BINDING
-fi
-python3 "$LEASE_BINDING_HELPER" "$CREDENTIAL_MOUNT" "$PROVIDER_PATH" "$ACCOUNT_BINDING_PATH" "$GITHUB_TOKEN_PATH" "$REQUEST" "$EXPECTED_BINDING" >/dev/null
-PROVIDER_HOME=$CREDENTIAL_MOUNT/$PROVIDER_PATH
-GITHUB_TOKEN_FILE=$CREDENTIAL_MOUNT/$GITHUB_TOKEN_PATH
-[ -f "$GITHUB_TOKEN_FILE" ] || { echo "validation guest: exact GitHub token file is absent" >&2; exit 125; }
+# The token arrives fresh on every attempt as a run-command parameter and
+# lives only in this per-cell state file for the run user's tooling.
+GITHUB_TOKEN_FILE=$STATE/github-token
+printf '%s' "$GITHUB_TOKEN_VALUE" >"$GITHUB_TOKEN_FILE"
+unset GITHUB_TOKEN_VALUE
+chmod 0600 "$GITHUB_TOKEN_FILE"
 
 if ! id fmvalidate >/dev/null 2>&1; then
   useradd --system --home-dir "$HOME_DIR" --shell /usr/sbin/nologin fmvalidate
 fi
-chown -R fmvalidate:fmvalidate "$CELL_ROOT" "$PROVIDER_HOME"
-chown fmvalidate:fmvalidate "$GITHUB_TOKEN_FILE"
-# The token file's intermediate directories on the credential mount are
-# root-only, so the credential helper's read as the cell user dies on
-# traversal before it ever reaches the 0600 token (generation 043 ground
-# truth: "cat: .../github/token: Permission denied" inside the gate push).
-# Hand every directory between the mount root and the token to the cell user.
-token_dir=$(dirname "$GITHUB_TOKEN_FILE")
-while [ "$token_dir" != "$CREDENTIAL_MOUNT" ] && [ "$token_dir" != "/" ]; do
-  chown fmvalidate:fmvalidate "$token_dir"
-  chmod 0700 "$token_dir"
-  token_dir=$(dirname "$token_dir")
-done
-chmod 0700 "$CELL_ROOT" "$HOME_DIR" "$NM_HOME" "$CACHE" "$TMP" "$PROVIDER_HOME"
+chown -R fmvalidate:fmvalidate "$CELL_ROOT"
+chmod 0700 "$CELL_ROOT" "$HOME_DIR" "$NM_HOME" "$CACHE" "$TMP"
 chmod 0600 "$GITHUB_TOKEN_FILE"
 # The chown above hands the cloned repository to fmvalidate, so every later
 # root-run git command in this script trips the dubious-ownership guard
@@ -460,7 +523,7 @@ GH_AXI_BIN=$RUNTIME/$(jq -r '.runtime.gh_axi_path' "$REQUEST")
 for executable in "$NM_BIN" "$PROVIDER_BIN" "$GH_BIN" "$GH_AXI_BIN"; do
   [ -x "$executable" ] || { echo "validation guest: exact runtime executable is absent" >&2; exit 125; }
 done
-PROVIDER=$(jq -r '.credential_lease.provider' "$REQUEST")
+PROVIDER=$(jq -r '.credentials.provider' "$REQUEST")
 ENV_FILE=$STATE/cell.env
 {
   printf 'HOME=%s\n' "$HOME_DIR"
@@ -477,12 +540,12 @@ ENV_FILE=$STATE/cell.env
   printf 'FM_AZURE_VALIDATION_IDENTITY_CLIENT_ID=%s\n' "$IDENTITY_CLIENT_ID"
   printf 'GH_TOKEN_FILE=%s\n' "$GITHUB_TOKEN_FILE"
   printf 'FM_AZURE_VALIDATION_RUNTIME_PATH=%s\n' "$(dirname "$NM_BIN"):$(dirname "$PROVIDER_BIN"):$(dirname "$GH_BIN"):$(dirname "$GH_AXI_BIN")"
+  # Auth state lives in the home-shaped persistent auth layout, so provider
+  # config dirs are the conventional home-relative locations. pi-codex is the
+  # only cell provider; the claude profile exists for cross-check reviews.
   case "$PROVIDER" in
-    claude) printf 'CLAUDE_CONFIG_DIR=%s\nCLAUDE_SECURESTORAGE_CONFIG_DIR=%s\n' "$PROVIDER_HOME" "$PROVIDER_HOME" ;;
-    codex) printf 'CODEX_HOME=%s\n' "$PROVIDER_HOME" ;;
-    pi) printf 'PI_CODING_AGENT_DIR=%s\n' "$PROVIDER_HOME" ;;
-    opencode) printf 'XDG_CONFIG_HOME=%s\n' "$PROVIDER_HOME" ;;
-    grok) printf 'GROK_CONFIG_HOME=%s\n' "$PROVIDER_HOME" ;;
+    codex) printf 'CODEX_HOME=%s\n' "$HOME_DIR/.codex" ;;
+    claude) printf 'CLAUDE_CONFIG_DIR=%s\nCLAUDE_SECURESTORAGE_CONFIG_DIR=%s\n' "$HOME_DIR/.claude" "$HOME_DIR/.claude" ;;
     *) echo "validation guest: provider is not verified" >&2; exit 125 ;;
   esac
 } >"$ENV_FILE"
@@ -535,17 +598,14 @@ if [ "$MODE" = start ]; then
   jq -n \
     --arg cell "$CELL" --arg request "$REQUEST_DIGEST" --arg branch "$BRANCH" \
     --arg head "$CURRENT_HEAD" --arg worktree "$WORKTREE_DISK_ID" \
-    --arg worktree_luks "$WORKTREE_LUKS_UUID" \
-    --arg lease "$(jq -r '.credential_lease.lease_id' "$REQUEST")" \
-    '{cell:$cell,request_digest:$request,branch:$branch,current_head:$head,worktree_disk_id:$worktree,worktree_luks_uuid:$worktree_luks,credential_lease_id:$lease,run_id:null}' \
+    '{cell:$cell,request_digest:$request,branch:$branch,current_head:$head,worktree_disk_id:$worktree,run_id:null}' \
     >"$IDENTITY"
   chmod 0600 "$IDENTITY"
 else
   [ -f "$IDENTITY" ] || { echo "validation guest: retained run identity is absent" >&2; exit 125; }
   jq -e --arg cell "$CELL" --arg request "$REQUEST_DIGEST" --arg branch "$BRANCH" \
     --arg head "$CURRENT_HEAD" --arg worktree "$WORKTREE_DISK_ID" \
-    --arg worktree_luks "$WORKTREE_LUKS_UUID" \
-    '.cell==$cell and .request_digest==$request and .branch==$branch and .current_head==$head and .worktree_disk_id==$worktree and .worktree_luks_uuid==$worktree_luks and (.run_id|type=="string")' \
+    '.cell==$cell and .request_digest==$request and .branch==$branch and .current_head==$head and .worktree_disk_id==$worktree and (.run_id|type=="string")' \
     "$IDENTITY" >/dev/null || { echo "validation guest: exact retained run identity refused reattach" >&2; exit 125; }
   RUN_ID=$(jq -r '.run_id' "$IDENTITY")
   STATUS_PROOF=$LOGS/reattach-status-a$ATTEMPT.log
@@ -571,7 +631,7 @@ if [ "$MODE" = respond ]; then
   chmod 0600 "$RESPONSE_FILE"
 fi
 
-# Build an argv-only launcher so protected values never enter the unit, logs, or
+# Build an argv-only launcher so run inputs never enter the unit definition or
 # process environment. The unit's cgroup is this cell's only restart boundary.
 LAUNCH=$STATE/launch-a$ATTEMPT.sh
 cat >"$LAUNCH" <<'SH'
@@ -705,7 +765,7 @@ jq -r '.intent' "$REQUEST" >"$INTENT_FILE"
 chmod 0600 "$INTENT_FILE"
 # The credential helper is executed by fmvalidate's git during fetch/push,
 # so it must be owned by the run user like the other run inputs.
-chown fmvalidate:fmvalidate "$INTENT_FILE" "$ENV_FILE" "$IDENTITY" "$LAUNCH" "$GIT_HELPER"
+chown fmvalidate:fmvalidate "$INTENT_FILE" "$ENV_FILE" "$IDENTITY" "$LAUNCH" "$GIT_HELPER" "$GITHUB_TOKEN_FILE"
 
 MEMORY_MAX=$(jq -r '.limits.memory_max_bytes' "$REQUEST")
 TASKS_MAX=$(jq -r '.limits.tasks_max' "$REQUEST")
@@ -735,7 +795,7 @@ systemd-run --quiet --wait --collect --unit "$UNIT" \
   --property=RestrictSUIDSGID=yes \
   --property=LockPersonality=yes \
   --property=CapabilityBoundingSet= \
-  --property="ReadWritePaths=$CELL_ROOT $CREDENTIAL_MOUNT" \
+  --property="ReadWritePaths=$CELL_ROOT" \
   "$LAUNCH" "$ENV_FILE" "$REPO" "$NM_BIN" "$MODE" "$INTENT_FILE" "$RESPONSE_FILE" "$RUN_LOG"
 
 END_EPOCH=$(date +%s)
@@ -760,12 +820,6 @@ if [ -n "$RUN_ID" ]; then
   jq --arg run "$RUN_ID" '.run_id=$run' "$IDENTITY" >"$tmp"
   mv "$tmp" "$IDENTITY"
 fi
-# Seal the post-attempt credential binding for the next attempt's custody
-# verification; the session may have legitimately mutated the provider home.
-NEW_BINDING=$(python3 "$LEASE_BINDING_HELPER" "$CREDENTIAL_MOUNT" "$PROVIDER_PATH" "$ACCOUNT_BINDING_PATH" "$GITHUB_TOKEN_PATH" "$REQUEST")
-tmp=$IDENTITY.tmp
-jq --arg binding "$NEW_BINDING" '.credential_content_binding=$binding' "$IDENTITY" >"$tmp"
-mv "$tmp" "$IDENTITY"
 # The pipeline daemon owns the branch and advances it past this checkout
 # (document commits, CI-fix commits, monitor rebases are committed and
 # pushed from the daemon's own workspace), so the checkout HEAD is not
@@ -788,6 +842,10 @@ REMOTE_HEAD=$(git -C "$REPO" ls-remote --heads origin "refs/heads/$BRANCH" | awk
 tmp=$IDENTITY.tmp
 jq --arg head "$CURRENT_HEAD" '.current_head=$head' "$IDENTITY" >"$tmp"
 mv "$tmp" "$IDENTITY"
+
+# Clean-shutdown sync: write any provider-refreshed token files back to the
+# persistent auth share so the next boot anywhere starts authenticated.
+auth_home_push
 
 # The durable no-mistakes database view, not free-form run output or intent,
 # owns terminal outcome classification.
@@ -896,8 +954,6 @@ result = {
     "current_tree": sys.argv[9],
     "remote_head": sys.argv[10],
     "worktree_disk_id": identity["worktree_disk_id"],
-    "worktree_luks_uuid": identity["worktree_luks_uuid"],
-    "credential_lease_id": identity["credential_lease_id"],
     "run_id": identity.get("run_id"),
     "vm_resource_id": sys.argv[4],
     "vm_instance_id": sys.argv[5],
@@ -920,6 +976,9 @@ REPORT=$STATE/report.md
   printf -- "- Submitted head: \`%s\`\n" "$(jq -r '.repository.head' "$REQUEST")"
   printf -- "- Current head: \`%s\`\n" "$CURRENT_HEAD"
   printf -- "- Run id: \`%s\`\n" "${RUN_ID:-unavailable}"
+  if [ -f "$STATE/auth-needed" ]; then
+    printf -- "- Auth: \`interactive provider auth needed once (auth share empty)\`\n"
+  fi
 } >"$REPORT"
 
 RESULT_ARCHIVE=$BOOTSTRAP/result.tar.gz

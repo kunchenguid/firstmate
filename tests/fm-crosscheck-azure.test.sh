@@ -642,6 +642,66 @@ PY
   pass "image and network-policy mutations are declaration-owned and refuse without exact confirmations"
 }
 
+lane_queue_unit() {
+  python3 - "$ADAPTER" "$MODEL_GUEST" <<'PY2' || fail "reviewer lane FIFO queue failed"
+import importlib.util,inspect,os,pathlib,tempfile,sys
+spec=importlib.util.spec_from_file_location("azure_crosscheck",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+# Deterministic lane -> reviewer SKU spread across four distinct families.
+runner=m.load_runner()
+assert len(set(m.CROSSCHECK_SKU_POOL))==4
+assert len({runner.SKU_FAMILY[sku] for sku in m.CROSSCHECK_SKU_POOL})==4
+assert [m.reviewer_lane_sku(i) for i in range(4)]==list(m.CROSSCHECK_SKU_POOL)
+assert m.reviewer_lane_sku(4)==m.CROSSCHECK_SKU_POOL[0]
+home=pathlib.Path(tempfile.mkdtemp())
+# Two lanes fill in order; a third caller with zero patience refuses with an
+# explicit queue-wait error instead of over-provisioning.
+lane_a,handle_a=m.acquire_review_lane(home,2,0)
+lane_b,handle_b=m.acquire_review_lane(home,2,0)
+assert (lane_a,lane_b)==(0,1)
+try: m.acquire_review_lane(home,2,0)
+except m.AzureCrosscheckError as exc: assert "queue wait exceeded" in str(exc)
+else: raise AssertionError("saturated lanes over-provisioned a reviewer")
+status=m.lanes_status(home,2)
+assert [entry["busy"] for entry in status["lanes"]]==[True,True]
+assert all(entry["pid"]==os.getpid() for entry in status["lanes"])
+assert status["queued"]==[]
+# Releasing a lane frees exactly that slot for the next caller.
+m.release_review_lane(handle_a)
+lane_c,handle_c=m.acquire_review_lane(home,2,0)
+assert lane_c==0
+# FIFO: a live earlier ticket blocks a later caller even with a free lane.
+m.release_review_lane(handle_b)
+root=m.lane_root(home)
+head=m._issue_lane_ticket(root)
+try: m.acquire_review_lane(home,2,0)
+except m.AzureCrosscheckError: pass
+else: raise AssertionError("younger caller jumped a live FIFO head")
+assert m.lanes_status(home,2)["queued"]==[os.getpid()]
+# A dead ticket owner is pruned so the queue never wedges on a crash.
+head.write_text("999999999\n")
+assert m._live_tickets(root)==[]
+lane_d,handle_d=m.acquire_review_lane(home,2,0)
+assert lane_d==1
+for handle in (handle_c,handle_d):
+    m.release_review_lane(handle)
+# The review entrypoint queues before any Azure mutation and pins the lane
+# SKU unless config fixed one; reviewers copy auth in and never sync back.
+source=inspect.getsource(m.run_azure_review)
+assert source.index("acquire_review_lane")<source.index("_run_azure_review_in_lane")
+assert "finally:" in source and "release_review_lane" in source
+in_lane=inspect.getsource(m._run_azure_review_in_lane)
+assert 'if not azure["reviewer_sku_fixed"]:' in in_lane
+assert 'azure["reviewer_sku"] = reviewer_lane_sku(lane)' in in_lane
+adapter=pathlib.Path(sys.argv[1]).read_text()
+assert "FM_AZURE_CROSSCHECK_LANES" in adapter and "FM_AZURE_CROSSCHECK_QUEUE_WAIT_SECONDS" in adapter
+assert "never sync back" in adapter
+guest=pathlib.Path(sys.argv[2]).read_text()
+assert "file.core.windows.net" not in guest
+assert "auth-sync" not in guest
+PY2
+  pass "reviewer lanes admit FIFO, spread families deterministically, prune dead waiters, and never write auth back"
+}
+
 static_contract
 adapter_mode_unit
 identity_outcome_unit
@@ -649,6 +709,7 @@ account_and_cleanup_identity_unit
 bridge_security_unit
 replay_positive_and_failure_unit
 shared_capacity_unit
+lane_queue_unit
 image_and_policy_contract
 documented_acceptance_contract
 printf 'Azure Crosscheck tests passed.\n'

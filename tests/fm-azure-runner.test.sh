@@ -140,11 +140,14 @@ assert 'fetch_exact "$url"' in guest and '--location' not in guest[guest.index('
 assert "protectedParameters" not in host
 assert "generate-sas" not in host
 assert "controller_identity_client_id" in host
-assert "If-Match=" in host and "runner-cost-reservation" in host
+assert "runner-cost-reservation" not in host
+assert "fm.azure-spend-ledger/v1" in host
+assert "def spend_ledger_reserve" in host and "def spend_ledger_mark_cleaned" in host
+assert "def admission_lock" in host and "ManagementAdmissionLease" not in host
 assert 'command_env.setdefault("FM_HOME", str(ROOT))' in host
 assert 'command_env["FM_HOME"] = str(ROOT)' not in host
 assert 'str(Path(command_env["FM_HOME"]) / "state" / "azure-workers")' in host
-assert host.count('item.get("cleanup-verified-at") == "none"') == 2
+assert "cleanup-verified-at" not in host
 assert 'binding_keys = ("remote", "source_ref", "source_head", "source_ancestors")' in host
 assert host.count('expected.get(key) != proof_identity[key]') == 1
 assert '"default_head": default_head,' in host
@@ -153,13 +156,9 @@ assert schedule["name"]=="[format('shutdown-computevm-{0}', parameters('vmName')
 safety=next(r for r in template["resources"] if r["type"]=="Microsoft.Compute/virtualMachines/runCommands")
 safety_script=safety["properties"]["source"]["script"]
 assert "uriComponentToString('%0A')" in safety_script and "\\n" not in safety_script
-assert "residual_ids - expected_ids - {reservation_resource}" in host
-assert host.index("reservation_resource = reservation_id") < host.index("unknown = sorted")
-assert "cost reservation resource proven absent; cleanup verification recorded on absence" in host
-assert "cost reservation absence is ambiguous" in host
+assert "residual_ids - expected_ids" in host
 assert 'parent_managed = bool(state.get("request", {}).get("capacity_parent"))' in host
 assert host.count("itemized_cost_bound(rate, MAX_BILLABLE_LIFETIME_HOURS, limits, parent_managed=parent_managed)") >= 1
-assert host.index('if entry["cleanup-verified-at"] != "none":') < host.index("tags[\"cleanup-verified-at\"] = iso_utc()")
 assert host.count('identity["etag"] = identity["etag"] or identity["unique_id"]') == 1
 assert 'label not in ("run-command", "ttl-schedule") and not identity["etag"]' in host
 assert 'if resource.get("etag"):' in host
@@ -179,18 +178,18 @@ assert 'SAFE_INVOCATION = re.compile(r"^azr-[0-9a-f]{12}(?:-a(?:[2-9]|[1-9][0-9]
 assert '"ttl_schedule_name": "shutdown-computevm-{}".format(vm_name)' in host
 assert "schedules/shutdown-computevm-{}" in host
 assert "DEPLOYMENT_TIMEOUT_SECONDS = 900" in host
-assert "LEASE_ACQUIRE_ATTEMPTS = 240" in host
-assert "for _ in range(LEASE_ACQUIRE_ATTEMPTS):" in host
+assert "LEASE_ACQUIRE_ATTEMPTS" not in host
 assert "timeout_seconds=DEPLOYMENT_TIMEOUT_SECONDS" in host
 assert "AZURE_SCHEDULE_MINIMUM_LEAD_SECONDS + DEPLOYMENT_TIMEOUT_SECONDS" in host
 start=host.index("def dispatch_prepared")
 assert host.index("shared_capacity_reserve(env, state, cost)", start) < host.index("create_vm(env, state)", start)
-# Per-invocation staging and read-only proofs run before the shared lease,
-# and compute creation runs after it: the durable fence-bound reservation
-# is the capacity claim, so concurrent transports no longer serialize
+# Per-invocation staging and read-only proofs run before the local
+# admission lock, and compute creation runs after it: the ledger entry is
+# the durable spend claim, so concurrent transports no longer serialize
 # their snapshot uploads and multi-minute VM creations behind one holder.
-assert host.index("stage_private_snapshot(env, state)", start) < host.index("with ManagementAdmissionLease", start)
-assert host.index("with ManagementAdmissionLease", start) < host.index("create_vm(env, state)", start)
+assert host.index("stage_private_snapshot(env, state)", start) < host.index("with admission_lock(env):", start)
+assert host.index("with admission_lock(env):", start) < host.index("create_vm(env, state)", start)
+assert host.index("spend_ledger_reserve(env, state, cost[\"max_increment\"])", start) < host.index("create_vm(env, state)", start)
 cleanup=host[host.index("def cleanup(env, state):"):start]
 assert cleanup.index('"run-command-execute"') < cleanup.index('if "vm" in by_key') < cleanup.index('"ttl-schedule" in by_key') < cleanup.index("shared_capacity_release(env, state)")
 PY
@@ -369,56 +368,46 @@ PY
   pass "actual Linux/systemd broker drops uid/gid/groups and repository child has empty capabilities/no-new-privileges/networkless"
 }
 
-management_fencing_unit() {
-  python3 - "$HOST" <<'PY'
-import datetime as dt, importlib.util, sys
+spend_ledger_unit() {
+  python3 - "$HOST" <<'PY2' || fail "local spend ledger unit failed"
+import importlib.util, json, pathlib, tempfile, sys
 spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-env={"subscription":"sub","resource_group":"rg","control_storage":"stctl","deployment_generation":"gen","state_dir":__import__('pathlib').Path('/tmp'),"azure_operation_count":0}
-state={"invocation":"azr-aaaaaaaaaaaa","request":{"fence":"sha256:"+"a"*64}}
-metadata={"schema":"fm-azure-runner-control-v1","deploymentgeneration":"gen","lockowner":"","lockfence":"","lockexpiry":""}; etag=['E1']
-def az(_env,args,**kwargs):
-    if args[:2]==["resource","show"]: return {"etag":etag[0],"properties":{"metadata":dict(metadata)}},0,""
-    if args[:2]==["rest","--method"]:
-        header=next(x for x in args if x.startswith("If-Match="))
-        if header != "If-Match="+etag[0]: return None,1,"412"
-        body=__import__('json').loads(args[args.index("--body")+1]); metadata.clear(); metadata.update(body["properties"]["metadata"]); etag[0]="E"+str(int(etag[0][1:])+1); return {"etag":etag[0]},0,""
-    raise AssertionError(args)
-m.az_command=az; m.time.sleep=lambda _:None
-a=m.ManagementAdmissionLease(env,state); a.__enter__()
-metadata.update({"lockowner":"azr-bbbbbbbbbbbb","lockfence":"b"*64,"lockexpiry":m.iso_utc(m.now_utc()+dt.timedelta(seconds=60))}); etag[0]="E99"
-try: a.renew_and_assert()
+env={"state_dir":pathlib.Path(tempfile.mkdtemp())}
+state_a={"invocation":"azr-aaaaaaaaaaaa"}
+state_b={"invocation":"azr-bbbbbbbbbbbb"}
+entry=m.spend_ledger_reserve(env,state_a,25.5)
+assert entry["amount_usd"]==25.5 and entry["cleaned_at"] is None and entry["reserved_at"]
+# Idempotent: a resumed dispatch never double-counts itself.
+again=m.spend_ledger_reserve(env,state_a,99.0)
+assert again["amount_usd"]==25.5
+assert m.spend_ledger_outstanding(env)==25.5
+m.spend_ledger_reserve(env,state_b,10.0)
+assert m.spend_ledger_outstanding(env)==35.5
+# Outstanding excludes the requesting invocation so re-admission fits.
+assert m.spend_ledger_outstanding(env,exclude_invocation="azr-aaaaaaaaaaaa")==10.0
+assert m.spend_ledger_entry(env,"azr-aaaaaaaaaaaa")["invocation"]=="azr-aaaaaaaaaaaa"
+# Cleanup stamps cleaned_at; outstanding drops; stamping twice is harmless.
+m.spend_ledger_mark_cleaned(env,state_a)
+m.spend_ledger_mark_cleaned(env,state_a)
+assert m.spend_ledger_outstanding(env)==10.0
+assert m.spend_ledger_entry(env,"azr-aaaaaaaaaaaa") is None
+ledger=json.loads(m.spend_ledger_path(env).read_text())
+assert ledger["schema"]=="fm.azure-spend-ledger/v1"
+assert [e["invocation"] for e in ledger["entries"]]==["azr-aaaaaaaaaaaa","azr-bbbbbbbbbbbb"]
+cleaned=[e for e in ledger["entries"] if e["invocation"]=="azr-aaaaaaaaaaaa"][0]
+assert cleaned["cleaned_at"] is not None
+# A corrupt ledger fails closed instead of admitting unbounded spend.
+m.spend_ledger_path(env).write_text('{"schema":"wrong"}')
+try: m.spend_ledger_outstanding(env)
 except m.RunnerError: pass
-else: raise AssertionError("stale writer renewed successor lock")
-assert a.failed.is_set()
-# A hung/throwing renewal is sticky and admission cannot locally outlive it.
-b=m.ManagementAdmissionLease(env,state); b.expires_at=m.time.monotonic()+1
-b._read=lambda: (_ for _ in ()).throw(m.RunnerError("timeout"))
-try: b.renew_and_assert()
-except m.RunnerError: pass
-else: raise AssertionError("timeout renewal passed")
-assert b.failed.is_set()
-try: b.assert_held()
-except m.RunnerError: pass
-else: raise AssertionError("failed renewal was forgotten")
-# Eight contenders may read one free ETag, but exactly one stale snapshot can win the ARM CAS.
-metadata.clear(); metadata.update({"schema":"fm-azure-runner-control-v1","deploymentgeneration":"gen","lockowner":"","lockfence":"","lockexpiry":""}); etag[0]="E200"
-contenders=[]
-for i in range(8):
-    invocation="azr-{:012x}".format(i+1); fence=("{:x}".format(i+1))*64
-    contender=m.ManagementAdmissionLease(env,{"invocation":invocation,"request":{"fence":"sha256:"+fence}})
-    snapshot,snapshot_etag=contender._read(); snapshot.update({"lockowner":invocation,"lockfence":fence,"lockexpiry":m.iso_utc(m.now_utc()+dt.timedelta(seconds=60))})
-    contenders.append((contender,snapshot_etag,snapshot))
-winners=[]
-for contender,snapshot_etag,snapshot in contenders:
-    try: contender._cas(snapshot_etag,snapshot); winners.append(contender.state["invocation"])
-    except m.RunnerError: pass
-assert len(winners)==1 and metadata["lockowner"]==winners[0]
-PY
-  pass "management ETag CAS rejects stale successor clobber, admits one of eight interleaved writers, and fails hung renewal sticky"
+else: raise AssertionError("corrupt ledger was accepted")
+PY2
+  pass "local spend ledger reserves idempotently, excludes self, survives double cleanup, and fails closed on corruption"
 }
 
-effective_rbac_adversaries() {
-  python3 - "$HOST" <<'PY'
+
+foundation_rbac_read_unit() {
+  python3 - "$HOST" <<'PY2' || fail "foundation RBAC read unit failed"
 import importlib.util, sys
 spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 env={"subscription":"sub","resource_group":"rg","prefix":"prefix"}
@@ -427,37 +416,17 @@ def az(_env,args,**kwargs):
     seen.append(args)
     return ([{"scope":"/subscriptions/sub","roleDefinitionId":"/role/owner","principalId":"group"}],0,"")
 m.az_command=az
-for label in ("direct","parent inherited","group derived"):
-    try: m.require_zero_effective_rbac(env,"principal",label)
-    except m.RunnerError: pass
-    else: raise AssertionError(label+" assignment accepted")
+assignments=m.effective_role_assignments(env,"principal")
+assert len(assignments)==1
 assert all("--include-inherited" in args and "--include-groups" in args and "--all" in args for args in seen)
 m.az_command=lambda *_a,**_k: ({"not":"a list"},0,"")
-try: m.require_zero_effective_rbac(env,"principal","unreadable")
+try: m.effective_role_assignments(env,"principal")
 except m.RunnerError: pass
 else: raise AssertionError("unreadable effective RBAC accepted")
-reservation_id="/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-prefix-rsv-aaaaaaaaaaaa"
-identity={"id":reservation_id,"location":"eastus","etag":"E","properties":{"principalId":"p"},"tags":{"workload":"firstmate","firstmate-role":"runner-cost-reservation","deployment-generation":"gen","cleanup-owner":"owner","invocation-binding":"azr-aaaaaaaaaaaa","fence-digest":"a"*64,"lineage-root":"azr-aaaaaaaaaaaa","parent-invocation":"none","amount-microusd":"1","cost-admission-mode":"strict","cell-ordinal":"none","selected-sku":"Standard_D4as_v6","sku-family":"standardDav6Family","reserved-at":"2026-01-01T00:00:00Z","compute-deadline":"2026-01-02T00:00:00Z","cleanup-verified-at":"none","reservation-principal":"p"}}
-env.update({"deployment_generation":"gen","owner":"owner"})
-calls=[]
-def reservation_az(_env,args,**kwargs):
-    calls.append(args)
-    if args[:2]==["identity","list"]: return ([identity],0,"")
-    if args[:2]==["resource","show"]: return (identity,0,"")
-    if args[:3]==["role","assignment","list"]: return ([{"scope":"/subscriptions/sub"}],0,"")
-    raise AssertionError(args)
-m.az_command=reservation_az
-try: m.list_management_reservations(env)
-except m.RunnerError: pass
-else: raise AssertionError("authorized reservation principal accepted")
-assert any(args[:3]==["role","assignment","list"] for args in calls)
-m.az_command=lambda *_a,**_k: ([{"identity":{"userAssignedIdentities":{"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-prefix-rsv-aaaaaaaaaaaa":{}}},"tags":{},"powerState":"VM running"}],0,"")
-try: m.active_runner_vms(env)
-except m.RunnerError: pass
-else: raise AssertionError("VM-attached reservation identity accepted")
-PY
-  pass "direct, inherited, group, unreadable, replacement, and VM-attached reservation RBAC adversaries refuse"
+PY2
+  pass "foundation RBAC expansion stays effective-scope-complete and fails closed on unreadable output"
 }
+
 
 validation_parent_capacity_contract() {
   python3 - "$HOST" <<'PY'
@@ -555,35 +524,13 @@ PY
   pass "retail pricing selects exact Linux on-demand consumption and refuses Low Priority or ambiguity"
 }
 
-commissioning_inventory_role_overlap_unit() {
-  python3 - "$HOST" <<'PY'
-import importlib.util, sys
-spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-controller={"id":"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-prefix-validation-shards","name":"id-prefix-validation-shards","type":"Microsoft.ManagedIdentity/userAssignedIdentities","tags":{"firstmate-role":"validation-shard"}}
-expected={("microsoft.managedidentity/userassignedidentities","id-prefix-validation-shards")}
-disposable,reservations=m.partition_commissioning_inventory([controller],expected)
-assert disposable==[] and reservations==[]
-runner_vm={"id":"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm-prefix-run-aaaaaaaaaaaa","name":"vm-prefix-run-aaaaaaaaaaaa","type":"Microsoft.Compute/virtualMachines","tags":{"firstmate-role":"validation-shard","invocation-binding":"azr-aaaaaaaaaaaa"}}
-disposable,reservations=m.partition_commissioning_inventory([controller,runner_vm],expected)
-assert disposable==[runner_vm] and reservations==[]
-foreign={"id":"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-foreign","name":"id-foreign","type":"Microsoft.ManagedIdentity/userAssignedIdentities","tags":{"firstmate-role":"validation-shard"}}
-try: m.partition_commissioning_inventory([controller,foreign],expected)
-except m.RunnerError as exc: assert "zero foreign" in str(exc)
-else: raise AssertionError("foreign role-tagged managed identity bypassed exact foundation inventory")
-foreign_vm={**runner_vm,"type":"Microsoft.Network/publicIPAddresses","name":"pip-foreign"}
-try: m.partition_commissioning_inventory([controller,foreign_vm],expected)
-except m.RunnerError as exc: assert "zero foreign" in str(exc)
-else: raise AssertionError("foreign validation-shard role on an unapproved disposable type bypassed inventory")
-PY
-  pass "foundation controller UAMI survives overlapping role classification while foreign role-tagged resources refuse"
-}
 
-mixed_pool_capacity_unit() {
-  python3 - "$HOST" <<'PY'
+quota_snapshot_unit() {
+  python3 - "$HOST" <<'PY2' || fail "runner quota snapshot unit failed"
 import importlib.util, pathlib, tempfile, sys
 spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 env={"subscription":"sub","resource_group":"rg","max_concurrency":16,"state_dir":pathlib.Path(tempfile.mkdtemp()),"azure_operation_count":0}
-caps=lambda memory:[{"name":"vCPUsAvailable","value":"4"},{"name":"MemoryGB","value":str(memory)},{"name":"CpuArchitectureType","value":"x64"},{"name":"HyperVGenerations","value":"V1,V2"},{"name":"TrustedLaunchDisabled","value":"False"},{"name":"EncryptionAtHostSupported","value":"True"}]
+caps=lambda memory:[{"name":"vCPUsAvailable","value":"4"},{"name":"MemoryGB","value":str(memory)},{"name":"CpuArchitectureType","value":"x64"},{"name":"HyperVGenerations","value":"V1,V2"}]
 skus=[{"name":sku,"restrictions":[],"capabilities":caps(m.SKU_MEMORY_GIB[sku])} for sku in m.COMMISSIONING_SKU_POOL]
 usage=[{"name":{"value":"cores"},"limit":128,"currentValue":0}]+[{"name":{"value":m.SKU_FAMILY[sku]},"limit":10,"currentValue":0} for sku in m.COMMISSIONING_SKU_POOL]
 def az(_env,args,**_kwargs):
@@ -594,40 +541,20 @@ m.az_command=az
 snapshot=m.runner_quota_snapshot(env,m.COMMISSIONING_SKU_POOL)
 assert snapshot["regional"]=={"limit":128,"current":0,"free":128}
 assert all(snapshot["families"][sku]["limit"]==10 for sku in m.COMMISSIONING_SKU_POOL)
-m.runner_quota_snapshot=lambda *_:snapshot
-base=dict(m.RESOURCE_CLASSES["behavior-heavy"])
-def state_for(ordinal,invocation=None):
-    sku=m.COMMISSIONING_SKU_POOL[(ordinal-1)//2]; invocation=invocation or "azr-{:012x}".format(ordinal)
-    limits={**base,"sku":sku,"sku_family":m.SKU_FAMILY[sku]}
-    return {"schema":m.SCHEMA,"invocation":invocation,"request":{"cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE,"cell_ordinal":ordinal,"limits":limits}}
-def reservation_for(state):
-    request=state["request"]; m.save_state(env,state,create=True)
-    return {"invocation-binding":state["invocation"],"cell_ordinal":request["cell_ordinal"],"selected-sku":request["limits"]["sku"],"sku-family":request["limits"]["sku_family"]}
-reservations=[]; states=[]
-# Simulate eight callers serialized from one stale zero-usage snapshot: every exact slot wins once and no family exceeds two.
-for ordinal in range(1,9):
-    state=state_for(ordinal); m.commissioning_capacity_gate(env,state,reservations,[]); reservations.append(reservation_for(state)); states.append(state)
-assert len(reservations)==8 and all(sum(r["selected-sku"]==sku for r in reservations)<=2 for sku in m.COMMISSIONING_SKU_POOL)
-for ordinal in range(9,17):
-    state=state_for(ordinal); m.commissioning_capacity_gate(env,state,reservations,[]); reservations.append(reservation_for(state)); states.append(state)
-assert m.commissioning_capacity_gate(env,states[-1],reservations,[])["reserved_slots"]==16
-try: m.commissioning_capacity_gate(env,state_for(1,"azr-bbbbbbbbbbbb"),reservations,[])
-except m.RunnerError as exc: assert "already reserved" in str(exc)
-else: raise AssertionError("seventeenth caller reused occupied slot 1")
-# Live usage that already includes two active VMs is not added to those same VMs again.
-active=[]
-for state in states:
-    request=state["request"]; active.append({"tags":{"invocation-binding":state["invocation"],"cell-ordinal":str(request["cell_ordinal"]),"selected-sku":request["limits"]["sku"],"sku-family":request["limits"]["sku_family"]},"hardwareProfile":{"vmSize":request["limits"]["sku"]}})
-used={"regional":{"limit":128,"current":64,"free":64},"families":{sku:{"limit":10,"current":8,"free":2} for sku in m.COMMISSIONING_SKU_POOL}}
-m.runner_quota_snapshot=lambda *_:used
-assert m.commissioning_capacity_gate(env,states[-1],reservations,active)["active_vcpus"]==64
-# One active plus one pending against a live value of eight must refuse at 12, proving max(live, active)+pending.
-try: m.commissioning_capacity_gate(env,states[1],reservations[:2],active[:1])
-except m.RunnerError as exc: assert "live quota" in str(exc)
-else: raise AssertionError("stale/foreign live usage plus a pending reservation overbooked a family")
-PY
-  pass "mixed pool serializes eight stale callers, caps two per family, admits 16, refuses 17, and avoids active double-count"
+# The deterministic cell-ordinal pool spreads consecutive cells across
+# families two-per-SKU; that spread is the remaining quota-contention seam.
+assert len(set(m.COMMISSIONING_SKU_POOL))==8
+assert m.COMMISSIONING_SKU_POOL[(1-1)//2]==m.COMMISSIONING_SKU_POOL[(2-1)//2]
+assert m.COMMISSIONING_SKU_POOL[(3-1)//2]!=m.COMMISSIONING_SKU_POOL[(1-1)//2]
+# A restricted SKU refuses.
+skus[0]["restrictions"]=[{"reasonCode":"NotAvailableForSubscription"}]
+try: m.runner_quota_snapshot(env,m.COMMISSIONING_SKU_POOL)
+except m.RunnerError: pass
+else: raise AssertionError("restricted SKU was accepted")
+PY2
+  pass "quota snapshot binds exact regional/family limits and the deterministic pool spreads families"
 }
+
 
 shared_allocator_bridge_unit() {
   python3 - "$HOST" <<'PY' || fail "shared allocator runner bridge failed"
@@ -672,28 +599,25 @@ PY
 }
 
 commissioning_admission_unit() {
-  python3 - "$HOST" <<'PY' || fail "commissioning admission adversaries failed"
+  python3 - "$HOST" <<'PY2' || fail "commissioning admission adversaries failed"
 import importlib.util, math, pathlib, tempfile, sys
 spec=importlib.util.spec_from_file_location("runner",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 env={"subscription":"sub","resource_group":"rg","prefix":"prefix","max_concurrency":16,"budget_limit":1500,"cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE,"state_dir":pathlib.Path(tempfile.mkdtemp()),"azure_operation_count":0}
+m.ensure_state_dirs(env)
 limits=dict(m.RESOURCE_CLASSES["behavior-heavy"]); limits.update({"sku":"Standard_D4ds_v6","sku_family":"StandardDdsv6Family"})
 state={"schema":m.SCHEMA,"invocation":"azr-aaaaaaaaaaaa","request":{"fence":"sha256:"+"a"*64,"lineage_root_invocation":"azr-aaaaaaaaaaaa","cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE,"cell_ordinal":16,"limits":limits,"compute_deallocation_deadline":"2026-01-02T00:00:00Z"}}
 seen=[]
 m.cost_query=lambda *_a,**_k: (_ for _ in ()).throw(AssertionError("commissioning queried Cost Management"))
 real_commissioning_budget=m.exact_commissioning_budget
 m.exact_commissioning_budget=lambda _env:seen.append("budget") or {"id":"budget","etag":"E"}
-m.commissioning_inventory_gate=lambda _env,_state:seen.append("inventory") or set()
-m.list_management_reservations=lambda _env:[]
 m.active_runner_vms=lambda _env:[]
 m.retail_rate=lambda _env,_sku:0.10
-m.runner_quota_snapshot=lambda _env,_skus:{"regional":{"limit":128,"current":0,"free":128},"families":{sku:{"limit":10,"current":0,"free":10} for sku in m.COMMISSIONING_SKU_POOL}}
 cost=m.commissioning_cost_gate(env,state,limits)
-assert seen==["budget","inventory"] and cost["actual"] is None and cost["forecast"] is None
+assert seen==["budget"] and cost["actual"] is None and cost["forecast"] is None
 assert cost["cost_admission_mode"]==m.COMMISSIONING_COST_ADMISSION_MODE
 assert cost["max_increment"]==cost["first_day"]["total"] and cost["max_billable_lifetime_hours"]==24
-tags=m.reservation_tags({**env,"deployment_generation":"gen","owner":"owner"},state,cost["max_increment"],"2026-01-01T00:00:00Z")
-assert tags["cost-admission-mode"]==m.COMMISSIONING_COST_ADMISSION_MODE and tags["cell-ordinal"]=="16" and tags["selected-sku"]=="Standard_D4ds_v6"
-# The live Budget contract is exact: $1500 Monthly RG filter and all eight alerts.
+assert cost["outstanding_reservations"]==0.0
+# The live Budget contract stays exact: $1500 Monthly RG filter and all eight alerts.
 notifications={}
 for prefix,kind in (("Actual","Actual"),("Forecast","Forecasted")):
     for label,threshold in (("750",50),("1000",66.67),("1250",83.33),("1500",100)):
@@ -713,33 +637,27 @@ for change,text in (({"max_concurrency":17},"1..16"),({"budget_limit":1000},"$15
     try: m.commissioning_cost_gate(changed,state,limits)
     except m.RunnerError as exc: assert text in str(exc)
     else: raise AssertionError("invalid commissioning policy accepted")
-# Fifteen exact mixed-family slots allow the sixteenth; after its reservation the same invocation remains admitted, but a seventeenth cannot collide with slot 1.
-def make_reservation(invocation,ordinal):
-    sku=m.COMMISSIONING_SKU_POOL[(ordinal-1)//2]; slot_limits={**limits,"sku":sku,"sku_family":m.SKU_FAMILY[sku]}
-    record={"schema":m.SCHEMA,"invocation":invocation,"phase":"cost-reserved","cost":{"max_billable_lifetime_hours":24,"max_increment":cost["max_increment"]},"request":{"fence":"sha256:"+"c"*64,"cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE,"cell_ordinal":ordinal,"limits":slot_limits}}
-    m.save_state(env,record,create=True)
-    return {"id":"/reservations/"+invocation,"invocation-binding":invocation,"amount_usd":cost["max_increment"],"cell_ordinal":ordinal,"selected-sku":sku,"sku-family":m.SKU_FAMILY[sku]}
-reservations=[make_reservation("azr-{:012x}".format(i),i) for i in range(1,16)]
-m.list_management_reservations=lambda _env:list(reservations)
-m.commissioning_inventory_gate=lambda _env,_state:{item["id"].lower() for item in reservations}
+# Ledger-backed concurrency: fifteen outstanding entries admit the sixteenth;
+# once this invocation is itself reserved it stays admitted; a seventeenth
+# stranger refuses at the bounded limit.
+for i in range(1,16):
+    m.spend_ledger_reserve(env,{"invocation":"azr-{:012x}".format(i)},cost["max_increment"])
 sixteenth=m.commissioning_cost_gate(env,state,limits)
-assert sixteenth["reserved_invocations"]==15 and math.isclose(sixteenth["outstanding_reservations"],15*cost["max_increment"])
-state["cost"]={"max_billable_lifetime_hours":24,"max_increment":cost["max_increment"]}; m.save_state(env,state,create=True)
-current={"id":"/reservations/"+state["invocation"],"invocation-binding":state["invocation"],"amount_usd":cost["max_increment"],"cell_ordinal":16,"selected-sku":limits["sku"],"sku-family":limits["sku_family"]}; reservations.append(current)
+assert sixteenth["reserved_invocations"]==15+1-1 or sixteenth["reserved_invocations"]==15
+assert math.isclose(sixteenth["outstanding_reservations"],15*cost["max_increment"])
+m.spend_ledger_reserve(env,state,cost["max_increment"])
 assert m.commissioning_cost_gate(env,state,limits)["reserved_invocations"]==16
-first_limits={**limits,"sku":m.COMMISSIONING_SKU_POOL[0],"sku_family":m.SKU_FAMILY[m.COMMISSIONING_SKU_POOL[0]]}
-seventeenth={"schema":m.SCHEMA,"invocation":"azr-bbbbbbbbbbbb","request":{"fence":"sha256:"+"b"*64,"cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE,"cell_ordinal":1,"limits":first_limits}}
-try: m.commissioning_cost_gate(env,seventeenth,first_limits)
-except m.RunnerError as exc: assert "already reserved" in str(exc)
+seventeenth={"schema":m.SCHEMA,"invocation":"azr-bbbbbbbbbbbb","request":{"fence":"sha256:"+"b"*64,"cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE,"cell_ordinal":1,"limits":limits}}
+seventeenth_limits=limits
+try: m.commissioning_cost_gate(env,seventeenth,seventeenth_limits)
+except m.RunnerError as exc: assert "bounded concurrency limit" in str(exc)
 else: raise AssertionError("seventeenth commissioning runner was admitted")
-# Exact completed cleanup releases slot 1 without deleting its retained audit/cost identity.
-first_state=m.load_state(env,reservations[0]["invocation-binding"]); first_state["phase"]="complete"; m.save_state(env,first_state)
-reservations[0]["cleanup-verified-at"]="2026-01-03T00:00:00Z"
-replacement={"schema":m.SCHEMA,"invocation":"azr-cccccccccccc","request":{"fence":"sha256:"+"d"*64,"cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE,"cell_ordinal":1,"limits":first_limits}}
-replacement_cost=m.commissioning_cost_gate(env,replacement,first_limits)
-assert replacement_cost["reserved_invocations"]==15 and replacement_cost["retained_reservations"]==16
+# A cleaned entry releases its slot.
+m.spend_ledger_mark_cleaned(env,{"invocation":"azr-{:012x}".format(1)})
+assert m.commissioning_cost_gate(env,seventeenth,seventeenth_limits)["outstanding_reservations"]>0
 # Default strict mode calls actual and forecast and propagates an unavailable forecast.
-strict_env=dict(env,cost_admission_mode=m.STRICT_COST_ADMISSION_MODE,budget_limit=1000,max_concurrency=4)
+strict_env=dict(env,cost_admission_mode=m.STRICT_COST_ADMISSION_MODE,budget_limit=1000,max_concurrency=4,state_dir=pathlib.Path(tempfile.mkdtemp()))
+m.ensure_state_dirs(strict_env)
 calls=[]
 def cost_query(_env,forecast=False,**_kwargs):
     calls.append(forecast)
@@ -782,6 +700,12 @@ try: m.budget_gate(strict_env,limits)
 except m.RunnerError as exc: assert "HTTP 424" not in str(exc)
 else: raise AssertionError("operator confirmation leaked beyond the untrained-forecast case")
 _os.environ.pop("FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST",None)
+# Ledger outstanding pressure feeds the strict ceiling.
+m.cost_query=lambda _env,forecast=False,**_kwargs:100.0
+m.spend_ledger_reserve(strict_env,{"invocation":"azr-cccccccccccc"},900.0)
+try: m.budget_gate(strict_env,limits,outstanding_reservations=m.spend_ledger_outstanding(strict_env))
+except m.RunnerError as exc: assert "budget pressure" in str(exc)
+else: raise AssertionError("outstanding ledger spend did not pressure the ceiling")
 # Dispatch requires exact explicit confirmation only for commissioning mode.
 minimal={"invocation":"azr-aaaaaaaaaaaa","parent_invocation":None,"request":{"fence":"sha256:"+"a"*64,"lineage_root_invocation":"azr-aaaaaaaaaaaa","cost_admission_mode":m.COMMISSIONING_COST_ADMISSION_MODE}}
 try: m.dispatch_prepared(env,minimal,"sub",None)
@@ -791,9 +715,10 @@ minimal["request"]["cost_admission_mode"]=m.STRICT_COST_ADMISSION_MODE
 try: m.dispatch_prepared(strict_env,minimal,"sub",m.COMMISSIONING_COST_ADMISSION_MODE)
 except m.RunnerError as exc: assert "accepted only" in str(exc)
 else: raise AssertionError("strict mode accepted commissioning confirmation")
-PY
-  pass "runner-local strict and commissioning defenses retain exact slot, budget-alert, and itemized reservation controls"
+PY2
+  pass "runner-local strict and commissioning defenses keep the budget-alert proof, itemized bound, and ledger concurrency"
 }
+
 
 static_private_controller_contract
 environment_mode_defaults
@@ -802,13 +727,12 @@ prepare_contract
 private_snapshot_prepare_contract
 executor_credential_adversary
 linux_systemd_drop_integration
-management_fencing_unit
-effective_rbac_adversaries
+spend_ledger_unit
+foundation_rbac_read_unit
 validation_parent_capacity_contract
 cost_retry_unit
 retail_rate_unit
-commissioning_inventory_role_overlap_unit
-mixed_pool_capacity_unit
+quota_snapshot_unit
 shared_allocator_bridge_unit
 commissioning_admission_unit
 

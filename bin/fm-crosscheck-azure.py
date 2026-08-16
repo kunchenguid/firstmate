@@ -14,6 +14,8 @@ See docs/azure-crosscheck.md for the operator and acceptance contract.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -30,6 +32,16 @@ from typing import Any
 SCHEMA = "fm.azure-crosscheck/v1"
 RESULT_SCHEMA = "fm.azure-crosscheck-result/v1"
 EXECUTION_MODE = "azure-compartment-v1"
+
+# Reviewer lane spread: concurrent reviewer VMs land in distinct SKU families
+# so four lanes never contend for one family cap. Lane index maps
+# deterministically; an explicit reviewer_sku in config pins every lane.
+CROSSCHECK_SKU_POOL = (
+    "Standard_D4as_v6",
+    "Standard_D4s_v6",
+    "Standard_D4ads_v7",
+    "Standard_D4ds_v6",
+)
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_RESULT_BYTES = 2 * 1024 * 1024
@@ -241,6 +253,10 @@ def runtime_config(home: Path) -> dict[str, Any]:
     template_skus = template["parameters"]["vmSize"]["allowedValues"]
     if reviewer_sku not in runner.SKU_FAMILY or reviewer_sku not in template_skus:
         raise AzureCrosscheckError("Azure Crosscheck reviewer SKU is not reviewed for the model compartment")
+    for pool_sku in CROSSCHECK_SKU_POOL:
+        if pool_sku not in runner.SKU_FAMILY or pool_sku not in template_skus:
+            raise AzureCrosscheckError("Azure Crosscheck lane SKU pool names an unreviewed SKU")
+    lanes = bounded_environment_integer("FM_AZURE_CROSSCHECK_LANES", MAX_ACTIVE_REVIEWS, 1, 8)
     return {
         "tenant": os.environ["FM_AZURE_TENANT_ID"],
         "subscription": subscription,
@@ -251,9 +267,12 @@ def runtime_config(home: Path) -> dict[str, Any]:
         "provider_host": provider_host,
         "provider_port": port,
         "reviewer_sku": reviewer_sku,
+        "reviewer_sku_fixed": "reviewer_sku" in file_value,
         "model_image_id": model_image_id,
-        "max_concurrency": bounded_environment_integer(
-            "FM_CROSSCHECK_AZURE_MAX_CONCURRENCY", MAX_ACTIVE_REVIEWS, 1, 8
+        "lanes": lanes,
+        "max_concurrency": lanes,
+        "queue_wait_seconds": bounded_environment_integer(
+            "FM_AZURE_CROSSCHECK_QUEUE_WAIT_SECONDS", 7200, 0, 86400
         ),
         "timeout_seconds": bounded_environment_integer(
             "FM_CROSSCHECK_REVIEWER_TIMEOUT_SECONDS", 1800, 30, MAX_REVIEW_SECONDS
@@ -397,6 +416,14 @@ def create_credential_archive(
     config: dict[str, str],
     reviewer_account_identity: str,
 ) -> tuple[str, str]:
+    """Package the reviewer credential for one-way copy-in at boot.
+
+    Exactly one claude profile exists (the fm-auth-home mirror), so
+    concurrent reviewers must never clobber each other's token refresh:
+    reviewers copy auth in and never sync back. Only the validation cell
+    lane writes to fm-auth-home; the model guest has no share access and
+    no write-back path.
+    """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(credential, flags)
@@ -558,6 +585,125 @@ def active_review_vms(config: dict[str, Any]) -> int:
         and "deallocated" not in str(vm.get("powerState", "")).lower()
     )
 
+
+
+def lane_root(home: Path) -> Path:
+    root = home / "state" / "azure-crosscheck" / "lanes"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return root
+
+
+def reviewer_lane_sku(lane: int) -> str:
+    return CROSSCHECK_SKU_POOL[lane % len(CROSSCHECK_SKU_POOL)]
+
+
+def _issue_lane_ticket(root: Path) -> Path:
+    """Assign one monotonically increasing FIFO ticket under a short lock."""
+    sequence_lock = root / ".seq.lock"
+    with open(sequence_lock, "a+", encoding="utf-8") as handle:
+        os.chmod(sequence_lock, 0o600)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        counter = root / ".seq"
+        try:
+            current = int(counter.read_text(encoding="utf-8").strip() or "0")
+        except (OSError, ValueError):
+            current = 0
+        counter.write_text(str(current + 1) + "\n", encoding="utf-8")
+        os.chmod(counter, 0o600)
+        ticket = root / "ticket-{:016d}-{}".format(current + 1, os.getpid())
+        ticket.write_text(str(os.getpid()) + "\n", encoding="utf-8")
+        os.chmod(ticket, 0o600)
+        return ticket
+
+
+def _live_tickets(root: Path) -> list[Path]:
+    """FIFO-ordered pending tickets; tickets of dead processes are pruned."""
+    tickets = []
+    for path in sorted(root.glob("ticket-*")):
+        try:
+            pid = int(path.read_text(encoding="utf-8").strip())
+            os.kill(pid, 0)
+        except (OSError, ValueError, ProcessLookupError):
+            path.unlink(missing_ok=True)
+            continue
+        tickets.append(path)
+    return tickets
+
+
+def acquire_review_lane(home: Path, lanes: int, wait_seconds: int) -> tuple[int, Any]:
+    """Block FIFO until one of the bounded reviewer lanes is free.
+
+    Lane occupancy is one flock per lane index held for the whole review by
+    the owning process; a crashed reviewer releases its lane automatically.
+    Only the head ticket may claim a lane, so waiters are served in exact
+    submission order with no priorities.
+    """
+    root = lane_root(home)
+    ticket = _issue_lane_ticket(root)
+    deadline = time.monotonic() + wait_seconds
+    try:
+        while True:
+            pending = _live_tickets(root)
+            if pending and pending[0] == ticket:
+                for index in range(lanes):
+                    handle = open(root / "lane-{}.lock".format(index), "a+", encoding="utf-8")
+                    os.chmod(root / "lane-{}.lock".format(index), 0o600)
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError:
+                        handle.close()
+                        continue
+                    handle.seek(0)
+                    handle.truncate()
+                    handle.write(str(os.getpid()) + "\n")
+                    handle.flush()
+                    ticket.unlink(missing_ok=True)
+                    return index, handle
+            if time.monotonic() >= deadline:
+                raise AzureCrosscheckError(
+                    "crosscheck review queue wait exceeded {} seconds with all {} lanes busy".format(
+                        wait_seconds, lanes
+                    )
+                )
+            time.sleep(5)
+    except BaseException:
+        ticket.unlink(missing_ok=True)
+        raise
+
+
+def release_review_lane(handle: Any) -> None:
+    with contextlib.suppress(OSError):
+        handle.close()
+
+
+def lanes_status(home: Path, lanes: int) -> dict[str, Any]:
+    """Queued/running lane snapshot for the operator status command."""
+    root = lane_root(home)
+    running = []
+    for index in range(lanes):
+        path = root / "lane-{}.lock".format(index)
+        if not path.exists():
+            running.append({"lane": index, "busy": False, "pid": None})
+            continue
+        with open(path, "a+", encoding="utf-8") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                handle.seek(0)
+                owner = handle.read().strip()
+                running.append({
+                    "lane": index, "busy": True,
+                    "pid": int(owner) if owner.isdigit() else None,
+                })
+                continue
+            running.append({"lane": index, "busy": False, "pid": None})
+    queued = []
+    for path in _live_tickets(root):
+        try:
+            queued.append(int(path.read_text(encoding="utf-8").strip()))
+        except (OSError, ValueError):
+            continue
+    return {"lanes": running, "queued": queued}
 
 
 def shared_capacity_command(arguments: list[str]) -> "subprocess.CompletedProcess[str]":
@@ -1267,10 +1413,50 @@ def run_azure_review(
     config: dict[str, str],
     author_account_identity: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """FIFO lane admission around one reviewer run.
+
+    All lanes busy means this caller queues durably (ticket file) and blocks
+    until a lane frees, in exact submission order. The lane index selects the
+    reviewer SKU deterministically so concurrent reviewers spread families.
+    """
+    probe = runtime_config(home)
+    lane, lane_handle = acquire_review_lane(
+        home, probe["lanes"], probe["queue_wait_seconds"]
+    )
+    try:
+        return _run_azure_review_in_lane(
+            core=core, root=root, home=home, task_id=task_id, pr_url=pr_url,
+            review_dir=review_dir, proof_root=proof_root,
+            snapshot_value=snapshot_value, ledger=ledger, config=config,
+            author_account_identity=author_account_identity, lane=lane,
+        )
+    finally:
+        release_review_lane(lane_handle)
+
+
+def _run_azure_review_in_lane(
+    *,
+    core: Any,
+    root: Path,
+    home: Path,
+    task_id: str,
+    pr_url: str,
+    review_dir: Path,
+    proof_root: Path,
+    snapshot_value: dict[str, Any],
+    ledger: dict[str, Any],
+    config: dict[str, str],
+    author_account_identity: str,
+    lane: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     del root
     azure = runtime_config(home)
+    if not azure["reviewer_sku_fixed"]:
+        azure["reviewer_sku"] = reviewer_lane_sku(lane)
     runner = verify_scope_and_foundation(azure)
-    if active_review_vms(azure) >= azure["max_concurrency"]:
+    if active_review_vms(azure) >= azure["lanes"]:
+        # The lane locks are the queue authority; this live-VM read is only a
+        # safety cap against leaked or foreign reviewer compute.
         raise core.CrosscheckToolError("Azure review admission reached its local model concurrency safety cap")
     config["account_selector"] = {
         "codex": "CODEX_HOME",
@@ -1694,3 +1880,34 @@ def verify_azure_reviewer_record(
         raise AzureCrosscheckError("Azure review identity is stale for the live PR head")
     if identity["claims_sha256"] != snapshot_value["claims_sha256"]:
         raise AzureCrosscheckError("Azure review identity is stale for the live PR claims")
+
+
+def main(argv: list[str]) -> int:
+    """Tiny operator CLI: `lanes` prints queued/running per reviewer lane."""
+    if argv[1:] and argv[1] == "lanes":
+        home = Path(os.environ.get("FM_HOME", str(ROOT))).resolve()
+        lanes = bounded_environment_integer(
+            "FM_AZURE_CROSSCHECK_LANES", MAX_ACTIVE_REVIEWS, 1, 8
+        )
+        status = lanes_status(home, lanes)
+        busy = [entry for entry in status["lanes"] if entry["busy"]]
+        print("CROSSCHECK LANES used={}/{} queued={}".format(
+            len(busy), lanes, len(status["queued"])
+        ))
+        for entry in status["lanes"]:
+            print("lane={} busy={} pid={} sku={}".format(
+                entry["lane"], str(entry["busy"]).lower(),
+                entry["pid"] if entry["pid"] is not None else "-",
+                reviewer_lane_sku(entry["lane"]),
+            ))
+        for position, pid in enumerate(status["queued"], start=1):
+            print("queued position={} pid={}".format(position, pid))
+        return 0
+    print("usage: fm-crosscheck-azure.py lanes", file=__import__("sys").stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main(sys.argv))

@@ -1,5 +1,13 @@
 # Azure Crosscheck isolation
 
+> **Multi-lane reviews (2026-08-15).** Reviews run in `FM_AZURE_CROSSCHECK_LANES`
+> (default 4) parallel lanes with durable FIFO queuing when all lanes are busy
+> (bounded by `FM_AZURE_CROSSCHECK_QUEUE_WAIT_SECONDS`); lane index selects the
+> reviewer SKU deterministically across four families unless `reviewer_sku` is
+> pinned in config. `python3 bin/fm-crosscheck-azure.py lanes` lists
+> queued/running per lane. Reviewers copy the single claude auth profile in at
+> boot and never sync it back; only the validation cell lane writes fm-auth-home.
+
 This document owns the architecture, identity, network, cleanup, and operator contract for policy-grade Azure Crosscheck.
 [`bin/fm-crosscheck-azure.py`](../bin/fm-crosscheck-azure.py) owns the local control adapter, [`docs/azure-crosscheck/compartment.json`](azure-crosscheck/compartment.json) owns the credentialed model VM, and the existing Crosscheck core remains the sole owner of the v2 finding ledger, readable report, and expected-head merge gate.
 

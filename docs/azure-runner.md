@@ -1,5 +1,15 @@
 # Disposable Azure command runner
 
+> **Isolation-only stack (2026-08-15).** UAMI cost-reservation objects,
+> RBAC-zero proofs, ETag CAS admission leases, and the 72h reconcile are gone.
+> Worst-case spend is now recorded in a local JSON ledger
+> (`state/azure-runner/spend-ledger.json`, one entry per invocation with
+> `reserved_at`/`cleaned_at`; outstanding = entries without `cleaned_at`).
+> The Cost Management actual/forecast queries and the budget ceiling are
+> unchanged. Absence fencing is now the minimum: VM gone without a verified
+> result marks the invocation `absent-fenced`, children are cleaned, and a
+> fresh `-aN` lineage attempt is allowed after a plain VM-existence check.
+
 This document owns the architecture, state, security, restart, and operator contract for the private one-shot command substrate.
 [`bin/fm-azure-runner.sh`](../bin/fm-azure-runner.sh) owns exact command mechanics, [`bin/fm-azure-runner-dispatch.sh`](../bin/fm-azure-runner-dispatch.sh) owns local-versus-Azure selection, and [`docs/azure-runner/invocation.json`](azure-runner/invocation.json) owns the invocation VM declaration.
 
