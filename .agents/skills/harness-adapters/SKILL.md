@@ -190,8 +190,9 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
-After every spawn, peek the pane within about 20 seconds.
-If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
+`bin/fm-spawn.sh` accepts that dialog with Enter and does not return success until a bounded pane loop observes spinner activity, a new tool row, or a moving token counter.
+A muted-transcript warning, an unresolved dialog, or a timeout fails the spawn loudly with the final pane snapshot.
+The classifier and polling bounds are owned by `bin/fm-spawn.sh`'s header comment.
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
