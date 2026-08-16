@@ -4,6 +4,8 @@
 # (recovery) into one ordered digest.
 #
 # Coverage:
+#   - pending downward-inbox drops, including title extraction, README
+#     exclusion, absent-folder silence, and lock-refused visibility
 #   - absent-file markers vs empty-but-present files in the context digest
 #   - the lock-refusal read-only path: banner leads, every mutating step is
 #     skipped (including bootstrap's five mutating sweeps, verified by their
@@ -697,6 +699,65 @@ write_pi_loaded_markers() {
   write_pi_turnend_loaded_marker "$home" "$root" "$pid"
 }
 
+# --- downward inbox ---------------------------------------------------------
+
+test_downward_inbox_pending_drops() {
+  local rec root home fakebin out wake_line inbox_line supervision_line
+  local absent_rec absent_root absent_home absent_fakebin absent_out status
+  rec=$(new_world downward-inbox)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mkdir -p "$home/inbox-from-warroom"
+  cat > "$home/inbox-from-warroom/20260817_warroom_commissions.md" <<'EOF'
+Context before the heading.
+
+# War-room commissions
+EOF
+  cat > "$home/inbox-from-warroom/20260818_planner_followup.md" <<'EOF'
+
+Planner follow-up without a heading
+More detail follows.
+EOF
+  cat > "$home/inbox-from-warroom/README.md" <<'EOF'
+# Downward inbox guide that is not a drop
+EOF
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "DOWNWARD INBOX" "pending drops did not produce a downward-inbox section"
+  assert_contains "$out" "- 20260817_warroom_commissions.md: War-room commissions" \
+    "the first drop did not use its first Markdown heading as the title"
+  assert_contains "$out" "- 20260818_planner_followup.md: Planner follow-up without a heading" \
+    "a headingless drop did not use its first non-empty line as the title"
+  assert_not_contains "$out" "README.md" "the downward-inbox README was listed as a pending drop"
+  assert_contains "$out" "Read each drop, convert accepted work into backlog items or holds, then archive the processed drop into data/." \
+    "the downward-inbox section omitted its processing instruction"
+
+  wake_line=$(printf '%s\n' "$out" | grep -n '^WAKE QUEUE$' | head -1 | cut -d: -f1)
+  inbox_line=$(printf '%s\n' "$out" | grep -n '^DOWNWARD INBOX$' | head -1 | cut -d: -f1)
+  supervision_line=$(printf '%s\n' "$out" | grep -n '^SUPERVISION OPERATING INSTRUCTIONS' | head -1 | cut -d: -f1)
+  [ "$wake_line" -lt "$inbox_line" ] || fail "DOWNWARD INBOX did not follow WAKE QUEUE"
+  [ "$inbox_line" -lt "$supervision_line" ] || fail "DOWNWARD INBOX did not precede supervision instructions"
+
+  absent_rec=$(new_world downward-inbox-absent)
+  IFS='|' read -r absent_root absent_home absent_fakebin <<EOF
+$absent_rec
+EOF
+  make_fake_toolchain "$absent_fakebin"
+  make_fake_ps_claude "$absent_fakebin"
+  status=0
+  absent_out=$(run_session_start "$absent_home" "$absent_root" "$absent_fakebin:$BASE_PATH") || status=$?
+  expect_code 0 "$status" "fm-session-start.sh with no downward-inbox folder"
+  assert_not_contains "$absent_out" "DOWNWARD INBOX" \
+    "an absent downward-inbox folder printed an actionable section"
+
+  pass "session start surfaces pending downward-inbox drops and stays silent when the folder is absent"
+}
+
 # --- context digest: absent vs empty vs present -----------------------------
 
 test_context_digest_absent_empty_present() {
@@ -753,6 +814,8 @@ EOF
   # line. Absence of any such line is this test's proof that
   # FM_BOOTSTRAP_DETECT_ONLY=1 actually suppressed the mutating sweep.
   mkdir -p "$home/other-secondmate/state"
+  mkdir -p "$home/inbox-from-warroom"
+  printf '# Read-only-visible work order\n' > "$home/inbox-from-warroom/20260819_warroom_read_only.md"
   fm_write_secondmate_meta "$home/state/sm-x.meta" "$home/other-secondmate" "firstmate:fm-sm-x" alpha
   append_wake "$home/state" signal sm-x "done: surfaced before refusal" || fail "seed wake failed"
   git -C "$root" checkout -q -B fm/read-only-tangle
@@ -768,6 +831,8 @@ EOF
 
   expect_code 0 "$status" "fm-session-start.sh must exit 0 even on a lock refusal"
   assert_contains "$out" "READ-ONLY SESSION" "read-only banner missing on lock refusal"
+  assert_contains "$out" "- 20260819_warroom_read_only.md: Read-only-visible work order" \
+    "lock refusal hid the read-only downward-inbox scan"
   assert_contains "$out" "another live firstmate session holds the lock" "read-only banner did not surface fm-lock.sh's own error text"
   assert_contains "$out" "Skipping every mutating step" "read-only banner did not explain what was skipped"
   assert_contains "$out" "skipped (read-only session)" "wake-queue section did not report itself skipped"
@@ -1769,7 +1834,7 @@ EOF
   assert_contains "$out" "RUNTIME BOUND" "the truncation banner did not name the bound it hit"
   assert_contains "$out" 'stopped during the "bootstrap" stage' "the truncation banner did not name the incomplete stage"
   assert_contains "$out" "RECONCILE these stages" "the truncation banner did not tell the agent what to reconcile"
-  assert_contains "$out" "wake-queue supervision-instructions read-once fleet-state network-checks context next-step" \
+  assert_contains "$out" "wake-queue downward-inbox supervision-instructions read-once fleet-state network-checks context next-step" \
     "the truncation banner did not list every stage that never ran"
   assert_not_contains "$out" "NEXT STEP" "a truncated digest claimed to have reached its closing reminder"
   assert_absent "$home/state/.session-start-complete" \
@@ -2398,6 +2463,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_downward_inbox_pending_drops
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock

@@ -39,24 +39,26 @@
 #   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
 #                       reconciliation before presenting durable wakes and advancing
 #                       recovery handling state, so both only run when locked.
-#   4. supervision-instructions - the one emitted operating block for the
+#   4. downward-inbox - pending operator-handed work orders from the private
+#                       downward inbox: read-only, always runs when drops exist.
+#   5. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
-#   5. read-once contract - the do-not-re-read contract covering every source
+#   6. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
-#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#   7. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
-#   7. network checks - the result of the deferred network stage started back at
+#   8. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
-#   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   9. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
-#   9. closing reminder - prints the context-specific watcher next step; this
+#  10. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
-# Those nine names are also the runtime-bound stage list below, so a truncated
+# Those ten names are also the runtime-bound stage list below, so a truncated
 # startup can name exactly which of them never ran.
 #
 # NO NETWORK ON THE BLOCKING PATH. This digest runs on a session-open hook that
@@ -69,7 +71,7 @@
 # call. The five that did - `gh auth status`, secondmate liveness, secondmate
 # convergence, pending remote handoff delivery, and the fleet-sync fetch - are
 # started as one detached bounded worker right after the lock (step 1) and
-# harvested at step 7 without ever blocking on it. bin/fm-startup-network.sh
+# harvested at step 8 without ever blocking on it. bin/fm-startup-network.sh
 # owns that stage and its safety argument; bin/fm-bootstrap.sh remains the owner
 # of the sweeps themselves and still runs every one of them.
 # The digest is therefore composed from local reads and local subprocesses only,
@@ -94,6 +96,13 @@
 # honest when a stage below it never ran.
 # The LOCK/BOOTSTRAP/WAKE-QUEUE safety preamble keeps its order: it establishes
 # mutation authority and this turn's work queue before anything else is read.
+#
+# DOWNWARD INBOX: every session start scans $FM_HOME/inbox-from-warroom/ for
+# regular *.md files other than README.md. Presence means pending; for each drop
+# the digest prints its filename and the first Markdown heading, falling back to
+# the first non-empty line. An absent or empty inbox prints no section. This
+# stage only reads and prints, so it runs after the wake queue on both the locked
+# and lock-refused paths; processing and archiving remain later locked actions.
 #
 # On a Pi primary, the supervision-block step also checks whether Pi's two
 # tracked primary extensions are loaded and prints a PI_WATCH_EXTENSION
@@ -253,7 +262,7 @@ done
 # The ordered stage list is the contract behind the truncation banner: the child
 # names the stage it is entering, and the parent reports every stage at or after
 # that one as never emitted. Keep it in the exact order the digest prints.
-SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
+SESSION_START_STAGES='lock bootstrap wake-queue downward-inbox supervision-instructions read-once fleet-state network-checks context next-step'
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
@@ -379,6 +388,53 @@ print_file_or_absent() {
 
 print_backlog_pointer() {
   printf 'Full task bodies remain available on demand: tasks-axi show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
+}
+
+print_downward_inbox() {
+  local inbox="$FM_HOME/inbox-from-warroom" drop filename title
+  local -a drops=()
+
+  [ -d "$inbox" ] || return 0
+  for drop in "$inbox"/*.md; do
+    [ -f "$drop" ] && [ ! -L "$drop" ] || continue
+    filename=${drop##*/}
+    [ "$filename" != README.md ] || continue
+    drops+=("$drop")
+  done
+  [ "${#drops[@]}" -gt 0 ] || return 0
+
+  section "DOWNWARD INBOX"
+  for drop in "${drops[@]}"; do
+    filename=${drop##*/}
+    title=$(awk '
+      {
+        line = $0
+        sub(/\r$/, "", line)
+        if (fallback == "" && line !~ /^[[:space:]]*$/) {
+          fallback = line
+          sub(/^[[:space:]]+/, "", fallback)
+          sub(/[[:space:]]+$/, "", fallback)
+        }
+        heading = line
+        if (heading ~ /^[[:space:]]*#+[[:space:]]+/) {
+          sub(/^[[:space:]]*#+[[:space:]]+/, "", heading)
+          sub(/[[:space:]]+#+[[:space:]]*$/, "", heading)
+          sub(/[[:space:]]+$/, "", heading)
+          if (heading != "") {
+            print heading
+            found = 1
+            exit
+          }
+        }
+      }
+      END {
+        if (!found && fallback != "") print fallback
+      }
+    ' "$drop")
+    [ -n "$title" ] || title='(untitled)'
+    printf -- '- %s: %s\n' "$filename" "$title"
+  done
+  printf 'Read each drop, convert accepted work into backlog items or holds, then archive the processed drop into data/.\n'
 }
 
 # A queued title line whose own text already marks it held or blocked. The
@@ -721,7 +777,14 @@ else
   fi
 fi
 
-# --- 4. supervision operating instructions ----------------------------------
+# --- 4. downward inbox -------------------------------------------------------
+# Operator-handed work input belongs beside the durable wake queue, before the
+# supervision and bulk digest sections. This read-only scan deliberately runs
+# outside the lock branch so a refused session still learns what is pending.
+stage downward-inbox
+print_downward_inbox
+
+# --- 5. supervision operating instructions ----------------------------------
 stage supervision-instructions
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
@@ -749,7 +812,7 @@ fi
   --afk "$AFK_PRESENT" \
   --x-mode "$X_MODE_PRESENT"
 
-# --- 5. read-once contract -------------------------------------------------
+# --- 6. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is
 # exactly what drops a closing reminder, and this contract is what stops the
 # next turn from re-reading everything the digest just printed. Because it now
@@ -780,7 +843,7 @@ Go to a source directly only when:
     which case that stage's sources were never emitted and must be reconciled.
 EOF
 
-# --- 6. fleet-state digest ---------------------------------------------
+# --- 7. fleet-state digest ---------------------------------------------
 # Before CONTEXT: see this file's ORDERING note. Live fleet identity is what a
 # truncated tail must never take.
 stage fleet-state
@@ -854,7 +917,7 @@ if fm_pf_relay_active "$FM_HOME" \
   fi
 fi
 
-# --- 7. network checks ------------------------------------------------------
+# --- 8. network checks ------------------------------------------------------
 # Deliberately here and not later: these lines are actionable (a stuck clone, a
 # secondmate that could not be relaunched, broken GitHub auth), and the section
 # after this one is the curated memory a truncated tail is meant to take first.
@@ -873,7 +936,7 @@ else
   "$SCRIPT_DIR/fm-startup-network.sh" harvest --pid $$ 2>&1 || true
 fi
 
-# --- 8. context digest -----------------------------------------------------
+# --- 9. context digest -----------------------------------------------------
 # Last of the bulk sections deliberately: curated memory is stable session to
 # session, already governed by config/startup-memory-budget, and recoverable
 # with one targeted read, so it is the cheapest thing for a truncated tail to
@@ -886,7 +949,7 @@ print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
-# --- 9. closing reminder -----------------------------------------------
+# --- 10. closing reminder ----------------------------------------------
 stage next-step
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
