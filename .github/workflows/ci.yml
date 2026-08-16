@@ -35,6 +35,15 @@ jobs:
       - name: Prove complete regression partition
         run: bin/fm-test-run.sh --check-coverage
 
+  sovereign-ledger-mutation-evidence:
+    name: Sovereign ledger mutation evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Regenerate and byte-compare maintained evidence
+        run: tests/fm-sovereign-ledger-redundancy.mutation.sh --verify-evidence
+
   # Two duration-balanced portable parallel shards of the Phase 2 proven-isolated
   # set only. Composition owner: bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
   tests-portable-parallel-1:
