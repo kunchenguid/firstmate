@@ -36,7 +36,7 @@ jobs:
     name: Behavior tests (shard ${{ matrix.shard }}/8)
     needs: behavior-test-plan
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:

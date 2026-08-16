@@ -68,9 +68,20 @@ for tool in curl git python3 sha256sum tar systemd-run cryptsetup blkid lsblk fi
 done
 if [ "${#missing[@]}" -gt 0 ]; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y --no-install-recommends \
-    ca-certificates curl git python3 cryptsetup-bin util-linux jq systemd tar passwd
+  bootstrap_packages() {
+    apt-get update -qq
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl git python3 cryptsetup-bin util-linux jq systemd tar passwd
+  }
+  if ! bootstrap_packages; then
+    # The regional azure.archive mirror rides plain port 80, whose egress can
+    # die while 443 stays healthy (generation 044 ground truth: connection
+    # timeouts to the mirror while storage uploads succeeded). apt-get update
+    # exits 0 on failed fetches, so the install step is what surfaces it.
+    sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+      /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+    bootstrap_packages
+  fi
 fi
 for tool in curl git python3 sha256sum tar systemd-run cryptsetup blkid lsblk findmnt jq mount umount useradd runuser; do
   command -v "$tool" >/dev/null 2>&1 || { echo "validation guest: fixed bootstrap closure is incomplete" >&2; exit 125; }
@@ -421,6 +432,17 @@ if ! id fmvalidate >/dev/null 2>&1; then
 fi
 chown -R fmvalidate:fmvalidate "$CELL_ROOT" "$PROVIDER_HOME"
 chown fmvalidate:fmvalidate "$GITHUB_TOKEN_FILE"
+# The token file's intermediate directories on the credential mount are
+# root-only, so the credential helper's read as the cell user dies on
+# traversal before it ever reaches the 0600 token (generation 043 ground
+# truth: "cat: .../github/token: Permission denied" inside the gate push).
+# Hand every directory between the mount root and the token to the cell user.
+token_dir=$(dirname "$GITHUB_TOKEN_FILE")
+while [ "$token_dir" != "$CREDENTIAL_MOUNT" ] && [ "$token_dir" != "/" ]; do
+  chown fmvalidate:fmvalidate "$token_dir"
+  chmod 0700 "$token_dir"
+  token_dir=$(dirname "$token_dir")
+done
 chmod 0700 "$CELL_ROOT" "$HOME_DIR" "$NM_HOME" "$CACHE" "$TMP" "$PROVIDER_HOME"
 chmod 0600 "$GITHUB_TOKEN_FILE"
 # The chown above hands the cloned repository to fmvalidate, so every later
@@ -491,6 +513,17 @@ runuser -u fmvalidate -- git -C "$REPO" config credential.useHttpPath true
 # program's commit identity so pipeline commits attribute consistently.
 runuser -u fmvalidate -- git -C "$REPO" config user.name "ruby-dlee"
 runuser -u fmvalidate -- git -C "$REPO" config user.email "dongkeun@rubydata.ai"
+# The pipeline's push step runs from the no-mistakes gate repo under the cell
+# home, where repo-local config does not reach (generation 041 ground truth:
+# "could not read Username for 'https://github.com': terminal prompts
+# disabled"). User-level config covers every git context the cell user owns.
+# -C keeps git's working directory inside the repo: without it git resolves
+# the run-command handler's root-only download directory as cwd and fatals
+# with EACCES before touching the global config (generation 042 ground truth).
+runuser -u fmvalidate -- env HOME="$HOME_DIR" git -C "$REPO" config --global credential.helper "$GIT_HELPER"
+runuser -u fmvalidate -- env HOME="$HOME_DIR" git -C "$REPO" config --global credential.useHttpPath true
+runuser -u fmvalidate -- env HOME="$HOME_DIR" git -C "$REPO" config --global user.name "ruby-dlee"
+runuser -u fmvalidate -- env HOME="$HOME_DIR" git -C "$REPO" config --global user.email "dongkeun@rubydata.ai"
 
 IDENTITY=$STATE/identity.json
 CURRENT_HEAD=$(git -C "$REPO" rev-parse HEAD)
@@ -748,14 +781,20 @@ OUTCOME=failed
 # post-mortem status can never say so. The run log's structured gate block
 # is authoritative for gate detection; the status read stays authoritative
 # for completed outcomes.
-if grep -Eq '^gate:' "$RUN_LOG" && grep -Eiq 'status:[[:space:]]*awaiting[_ -](approval|user)' "$RUN_LOG"; then
-  OUTCOME=needs-decision
-elif [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'needs[-_ ]decision|awaiting[_ -]user|awaiting[_ -]approval|ask-user' "$STATUS_LOG"; then
+if [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'needs[-_ ]decision|awaiting[_ -]user|awaiting[_ -]approval|ask-user' "$STATUS_LOG"; then
   OUTCOME=needs-decision
 elif [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*(passed|checks-passed)|checks[- ]passed|checks green' "$STATUS_LOG"; then
   OUTCOME=checks-passed
 elif [ "$RUN_EXIT" -eq 0 ] && [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*passed' "$STATUS_LOG"; then
   OUTCOME=passed
+elif [ "$STATUS_RC" -eq 0 ] && grep -Eiq 'outcome:[[:space:]]*failed' "$STATUS_LOG"; then
+  # A terminal failed status is authoritative even when the run log carries
+  # a historical gate block from an earlier, already-answered decision point
+  # (generation 041 ground truth: a failed push classified as needs-decision
+  # because the answered test gate still matched the run-log grep).
+  OUTCOME=failed
+elif grep -Eq '^gate:' "$RUN_LOG" && grep -Eiq 'status:[[:space:]]*awaiting[_ -](approval|user)' "$RUN_LOG"; then
+  OUTCOME=needs-decision
 fi
 PR=$(grep -hEo 'https://github\.com/[^ /]+/[^ /]+/pull/[0-9]+' "$STATUS_LOG" "$RUN_LOG" | tail -n 1 || true)
 CHECKS_GREEN=false

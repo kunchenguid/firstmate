@@ -1573,7 +1573,57 @@ def cost_http_query(env, endpoint, url, body):
             raise RunnerError("Cost Management {} transport failed closed: {}".format(endpoint, exc.reason))
 
 
+RETAIL_RATE_CACHE_FRESH_SECONDS = 7 * 24 * 3600
+
+
 def retail_rate(env, sku):
+    """Resolve the SKU's hourly retail rate through a durable cache.
+
+    The rate only feeds worst-case cost ceilings, so freshness is worth very
+    little: prices.azure.com throttles bursts hard (generation 045 lost 21
+    minutes to HTTP 429 backoff on a single dispatch), and a same-week cached
+    ceiling bounds spend exactly as well. A fresh cache entry skips the API
+    entirely; a stale entry is refreshed best-effort and still used verbatim
+    when the API times out or throttles. Only a SKU with no cached rate at
+    all requires the live read to succeed.
+    """
+    cache_path = env["state_dir"] / "retail-rate-cache.json"
+    cache = {}
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    entry = cache.get(sku)
+    now = time.time()
+    if (
+        isinstance(entry, dict)
+        and isinstance(entry.get("rate"), (int, float))
+        and entry["rate"] > 0
+        and isinstance(entry.get("fetched_at"), (int, float))
+        and now - entry["fetched_at"] < RETAIL_RATE_CACHE_FRESH_SECONDS
+    ):
+        return float(entry["rate"])
+    try:
+        rate = retail_rate_from_api(env, sku)
+    except RunnerError as exc:
+        if isinstance(entry, dict) and isinstance(entry.get("rate"), (int, float)) and entry["rate"] > 0:
+            print(
+                "azure-runner: retail rate API unavailable ({}); using cached ceiling for {}".format(
+                    str(exc)[:120], sku
+                ),
+                file=sys.stderr,
+            )
+            return float(entry["rate"])
+        raise
+    cache[sku] = {"rate": rate, "fetched_at": now}
+    tmp = cache_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cache, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(cache_path)
+    return rate
+
+
+def retail_rate_from_api(env, sku):
     escaped = sku.replace("_", "%5F")
     url = (
         "https://prices.azure.com/api/retail/prices?%24filter="
@@ -3055,7 +3105,16 @@ def poll_run_command(env, state):
             output = str(view.get("output", ""))
             error = str(view.get("error", ""))
             if execution != "Succeeded":
-                raise RunnerError("managed run command failed ({}, {}): {}".format(execution, provisioning, error[-1000:]))
+                # An unstructured guest death (bootstrap failure, OOM, eviction)
+                # used to raise here and leave a live VM holding an ambiguous
+                # non-result forever: retry demands proven absence, and nothing
+                # deleted the VM (generation 044 deadlock). Record the failure
+                # durably and tear the disposable compute down in this same
+                # call so the next pass can fence and retry without an
+                # operator sweep.
+                transition(env, state, "failed-retained", "managed run command failed ({}, {}): {}".format(execution, provisioning, error[-500:]))
+                teardown_failed_compute(env, state)
+                raise RunnerError("guest died without a structured result ({}); compute removed so the retry lane can fence: {}".format(execution, error[-500:]))
             marker = re.search(r"FM_AZURE_RESULT\s+(sha256:[0-9a-f]{64})\s+boot=([0-9a-f-]{36})\s+result=([A-Za-z0-9+/=]+)", output)
             if not marker:
                 raise RunnerError("managed run command completed without a valid result identity marker")
@@ -3147,7 +3206,18 @@ def verify_live_resource_identity(env, state, kind, resource_id, identity_key=No
     recorded = state["resources"].get("identities", {}).get(identity_key)
     live = immutable_identity(resource, kind)
     if recorded is None:
-        raise RunnerError("live {} immutable identity changed; cleanup retained ambiguous state".format(kind))
+        if kind == "run-command":
+            # The resume adopt lane ("existing Managed Run Command adopted
+            # without resubmission") can own a run command whose creating
+            # pass was interrupted between creation and identity recording;
+            # its ownership tags were verified above, and its exact id plus
+            # those tags carry its whole identity, so adopt-and-log instead
+            # of refusing cleanup forever (generation 044 ground truth).
+            state["resources"].setdefault("identities", {})[identity_key] = live
+            save_state(env, state)
+            recorded = live
+        else:
+            raise RunnerError("live {} immutable identity changed; cleanup retained ambiguous state".format(kind))
     if kind == "run-command":
         # Execution mutates a run command's etag and provisioning state, so
         # the exact resource id plus the verified ownership tags carry its
@@ -3158,12 +3228,23 @@ def verify_live_resource_identity(env, state, kind, resource_id, identity_key=No
         # Deleting the VM mutates every dependent resource's etag, so the
         # absence fence compares the stable immutable field and exact id
         # instead of the full creation-time identity.
-        stable_field = {
-            "vm": "instance_id", "nic": "resource_guid", "disk": "unique_id",
-            "run-command": "provisioning_state", "ttl-schedule": "task_type",
-        }[kind]
-        if live["id"] != recorded["id"] or live.get(stable_field) != recorded.get(stable_field):
-            raise RunnerError("live {} immutable identity changed; cleanup retained ambiguous state".format(kind))
+        if kind == "run-command":
+            # A run command's provisioning state legitimately transitions when
+            # it executes - including the wallet's safety-shutdown sibling
+            # firing on its own schedule - so it can never serve as a stable
+            # identity field: doing so deadlocked cleanup behind a deterministic
+            # refusal once the wallet fired (generation 041/044 ground truth).
+            # The exact resource id plus verified ownership tags carry the
+            # whole identity, matching the non-stable run-command rule above.
+            if live["id"] != recorded["id"]:
+                raise RunnerError("live {} immutable identity changed; cleanup retained ambiguous state".format(kind))
+        else:
+            stable_field = {
+                "vm": "instance_id", "nic": "resource_guid", "disk": "unique_id",
+                "ttl-schedule": "task_type",
+            }[kind]
+            if live["id"] != recorded["id"] or live.get(stable_field) != recorded.get(stable_field):
+                raise RunnerError("live {} immutable identity changed; cleanup retained ambiguous state".format(kind))
     elif live != recorded:
         raise RunnerError("live {} immutable identity changed; cleanup retained ambiguous state".format(kind))
     if require_vm_relation and kind == "nic" and str(resource.get("properties", {}).get("virtualMachine", {}).get("id", "")).lower() != state["resources"]["vm_id"].lower():
@@ -3280,6 +3361,37 @@ def adopt_expected_detach(env, state, kind, identity_key, resource_id):
     state["resources"]["identities"][identity_key] = current
     save_state(env, state)
     return resource
+
+
+def teardown_failed_compute(env, state):
+    """Remove a dead guest's disposable compute so absence can be proven.
+
+    Reached only from a durably recorded terminal run-command failure with no
+    result to protect. Deletes the same disposable set as cleanup (run
+    commands, VM, NIC, OS disk, TTL schedule) under the same identity
+    verification; durable snapshot/staging state is untouched. A refusal
+    leaves the phase failed-retained, and the next resume converges by
+    re-entering this teardown.
+    """
+    classified = classify_disposable_resources(env, state, include_vm=True)
+    by_key = {identity_key: (kind, resource_id, resource) for kind, identity_key, resource_id, resource in classified}
+    for identity_key in ("run-command-execute", "run-command-safety"):
+        if identity_key in by_key:
+            kind, resource_id, resource = by_key[identity_key]
+            delete_classified_resource(env, state, resource_id, kind, identity_key, resource)
+    if "vm" in by_key:
+        kind, resource_id, resource = by_key["vm"]
+        delete_classified_resource(env, state, resource_id, kind, "vm", resource)
+    for kind, identity_key, resource_id in (
+        ("nic", "nic", state["resources"]["nic_id"]),
+        ("disk", "disk", state["resources"]["os_disk_id"]),
+    ):
+        resource = adopt_expected_detach(env, state, kind, identity_key, resource_id)
+        if resource is not None:
+            delete_classified_resource(env, state, resource_id, kind, identity_key, resource)
+    if "ttl-schedule" in by_key:
+        kind, resource_id, resource = by_key["ttl-schedule"]
+        delete_classified_resource(env, state, resource_id, kind, "ttl-schedule", resource)
 
 
 def cleanup(env, state):

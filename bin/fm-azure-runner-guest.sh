@@ -60,8 +60,19 @@ missing=()
 for tool in mkfs.ext4 mount runuser groupadd useradd getent tmux node npm xz; do command -v "$tool" >/dev/null 2>&1 || missing+=("$tool"); done
 if [ "${#missing[@]}" -gt 0 ]; then
   export DEBIAN_FRONTEND=noninteractive
-  run_bootstrap_network apt-get update -qq
-  run_bootstrap_network apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-venv e2fsprogs util-linux passwd systemd tmux jq nodejs npm xz-utils ripgrep
+  bootstrap_packages() {
+    run_bootstrap_network apt-get update -qq &&
+    run_bootstrap_network apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-venv e2fsprogs util-linux passwd systemd tmux jq nodejs npm xz-utils ripgrep
+  }
+  if ! bootstrap_packages; then
+    # The regional azure.archive mirror rides plain port 80, whose egress can
+    # die while 443 stays healthy (generation 044 ground truth: connection
+    # timeouts to the mirror while storage uploads succeeded). apt-get update
+    # exits 0 on failed fetches, so the install step is what surfaces it.
+    sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+      /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+    bootstrap_packages
+  fi
 fi
 
 BASE=/var/lib/fm-azure-runner

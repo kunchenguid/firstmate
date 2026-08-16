@@ -1065,7 +1065,56 @@ def release_shape_constituent(env, state, reservation_id, evidence):
         ))
 
 
+RETAIL_RATE_CACHE_FRESH_SECONDS = 7 * 24 * 3600
+
+
 def retail_rate(env, sku):
+    """Resolve the SKU's hourly retail rate through a durable cache.
+
+    Dispatch prices the cell plus the whole shard SKU pool in one burst, and
+    prices.azure.com throttles bursts hard (generation 045 lost 21 minutes to
+    HTTP 429 backoff before a single VM existed). The rate only feeds
+    worst-case cost ceilings, so a same-week cached value bounds spend just as
+    well: fresh cache entries skip the API, stale entries are refreshed
+    best-effort and used verbatim when the API throttles, and only a SKU with
+    no cached rate at all requires the live read to succeed.
+    """
+    cache_path = env["state_dir"] / "retail-rate-cache.json"
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    entry = cache.get(sku)
+    now = time.time()
+    if (
+        isinstance(entry, dict)
+        and isinstance(entry.get("rate"), (int, float))
+        and entry["rate"] > 0
+        and isinstance(entry.get("fetched_at"), (int, float))
+        and now - entry["fetched_at"] < RETAIL_RATE_CACHE_FRESH_SECONDS
+    ):
+        return float(entry["rate"])
+    try:
+        rate = retail_rate_from_api(env, sku)
+    except ValidationError as exc:
+        if isinstance(entry, dict) and isinstance(entry.get("rate"), (int, float)) and entry["rate"] > 0:
+            print(
+                "azure-validation: retail rate API unavailable ({}); using cached ceiling for {}".format(
+                    str(exc)[:120], sku
+                ),
+                file=sys.stderr,
+            )
+            return float(entry["rate"])
+        raise
+    cache[sku] = {"rate": rate, "fetched_at": now}
+    tmp = cache_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cache, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(cache_path)
+    return rate
+
+
+def retail_rate_from_api(env, sku):
     escaped = sku.replace("_", "%5F")
     url = (
         "https://prices.azure.com/api/retail/prices?%24filter="
@@ -2442,6 +2491,22 @@ def run_shard_invocations(env, state, records):
         save_state(env, state)
     for record in records:
         runner_state = runner_state_dir(env) / (record["invocation"] + ".json")
+        if runner_state.is_file():
+            try:
+                probe = json.loads(runner_state.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValidationError("recorded shard runner state is unreadable: {}".format(exc))
+            probe_digest = (probe.get("request") or {}).get("command_digest")
+            if probe_digest is not None and probe_digest != record["command_digest"]:
+                # The state at this invocation belongs to a different request
+                # that shared the id (two records on one shard constituent):
+                # retrying it would rerun the other record's command forever.
+                # Rebind this record to its own derived invocation instead.
+                record["invocation"] = "azr-" + hashlib.sha256(
+                    record["request_digest"].encode("utf-8")
+                ).hexdigest()[:12]
+                save_state(env, state)
+                runner_state = runner_state_dir(env) / (record["invocation"] + ".json")
         operation = [str(runner), "resume", "--invocation", record["invocation"]]
         if runner_state.is_file():
             try:

@@ -699,15 +699,29 @@ def merged_specialized_reservations(state, inventory, ignore_reservation_id=None
             continue
         current = merged.get(reservation_id)
         identity_fields = ("role", "sku", "sku_family", "vcpus", "amount_usd")
-        if current is not None and (
-            any(current.get(field) != local.get(field) for field in ("role", "sku", "vcpus"))
-            or str(current.get("sku_family", "")).lower() != str(local.get("sku_family", "")).lower()
-            or not math.isclose(
-                float(current.get("amount_usd", -1.0)), float(local.get("amount_usd", -2.0)),
-                rel_tol=0.0, abs_tol=1e-6,
-            )
-        ):
-            raise LifecycleError("local and provider specialized reservation identity differs")
+        if current is not None:
+            if local.get("shape_id"):
+                # A shape constituent is held locally at its parent's cushioned
+                # worst-case amount while the provider registration carries the
+                # child's exact bound; within the cushion the identities agree
+                # (the same rule the re-admission path applies). Exact equality
+                # here poisoned every admission while any shard ran (generation
+                # 044 ground truth: a one-dollar cushion refused all retries).
+                amount_exact = (
+                    float(current.get("amount_usd", -1.0))
+                    <= float(local.get("amount_usd", -2.0)) + 1e-6
+                )
+            else:
+                amount_exact = math.isclose(
+                    float(current.get("amount_usd", -1.0)), float(local.get("amount_usd", -2.0)),
+                    rel_tol=0.0, abs_tol=1e-6,
+                )
+            if (
+                any(current.get(field) != local.get(field) for field in ("role", "sku", "vcpus"))
+                or str(current.get("sku_family", "")).lower() != str(local.get("sku_family", "")).lower()
+                or not amount_exact
+            ):
+                raise LifecycleError("local and provider specialized reservation identity differs")
         if current is None:
             current = {field: local[field] for field in identity_fields}
             current.update({"reservation_id": reservation_id, "active": False})
