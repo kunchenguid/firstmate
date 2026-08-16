@@ -135,8 +135,8 @@ publish_mutant P001 resolved-path-validator-call \
   'evidence_validate_destination "$scope" "$relative" "$destination" || return 1' \
   ':'
 publish_mutant P002 exclusive-create-flag \
-  'O_WRONLY | O_CREAT | O_EXCL' \
-  'O_WRONLY | O_CREAT'
+  $'sysopen my $output, $destination, O_WRONLY | O_CREAT | O_EXCL, 0600\n      or die "$destination: $!\\n";' \
+  $'sysopen my $output, $destination, O_WRONLY | O_CREAT, 0600\n      or die "$destination: $!\\n";'
 publish_mutant P003 symlink-component-precheck \
   '[ ! -L "$cursor/$component" ]' \
   'true'

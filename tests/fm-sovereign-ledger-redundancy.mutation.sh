@@ -10,30 +10,34 @@ TEST="$ROOT/tests/fm-sovereign-ledger-redundancy.test.sh"
 EVIDENCE=
 EMIT_EVIDENCE=0
 VERIFY_EVIDENCE=0
+REFRESH_EVIDENCE=0
 MODE=mutation
 EVIDENCE_FIXTURE=
 EVIDENCE_SWAP_PATH=
 EVIDENCE_SWAP_TARGET=
 if [ "${1:-}" = --emit-evidence ]; then
-  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--refresh-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   EMIT_EVIDENCE=1
   exec 3>&1
   exec >&2
+elif [ "${1:-}" = --refresh-evidence ]; then
+  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--refresh-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  REFRESH_EVIDENCE=1
 elif [ "${1:-}" = --verify-evidence ]; then
-  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--refresh-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   VERIFY_EVIDENCE=1
 elif [ "${1:-}" = --self-test-evidence-fixture ]; then
-  [ "$#" -eq 2 ] || { printf 'usage: %s [--emit-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  [ "$#" -eq 2 ] || { printf 'usage: %s [--emit-evidence|--refresh-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   MODE=fixture
   EVIDENCE_FIXTURE=$2
 elif [ "${1:-}" = --self-test-evidence-containment ]; then
-  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  [ "$#" -eq 1 ] || { printf 'usage: %s [--emit-evidence|--refresh-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   MODE=containment
 elif [ "${1:-}" = --write-evidence ]; then
-  [ "$#" -eq 2 ] || { printf 'usage: %s [--emit-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
+  [ "$#" -eq 2 ] || { printf 'usage: %s [--emit-evidence|--refresh-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2; exit 2; }
   EVIDENCE=$2
 elif [ "$#" -ne 0 ]; then
-  printf 'usage: %s [--emit-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2
+  printf 'usage: %s [--emit-evidence|--refresh-evidence|--verify-evidence|--write-evidence <relative-path>|--self-test-evidence-containment|--self-test-evidence-fixture <id>]\n' "$0" >&2
   exit 2
 fi
 
@@ -436,17 +440,35 @@ EVIDENCE_PUBLICATION
 } > "$EVIDENCE_STAGE"
 
 printf 'MUTATION SUMMARY killed=%s survived=%s void=%s harness_broken=%s denominator=%s\n' "$killed" "$survived" "$void" "$harness_broken" "$denominator"
+[ -s "$EVIDENCE_STAGE" ] || { printf 'REFUSED: generated mutation evidence is empty\n' >&2; exit 1; }
+[ "$(wc -l < "$RESULTS" | tr -d '[:space:]')" -eq "$denominator" ] \
+  || { printf 'REFUSED: mutation result rows do not match denominator\n' >&2; exit 1; }
+awk -F '\t' 'NF != 6 || $3 != 1 || ($4 != "KILLED" && $4 != "SURVIVED") { exit 1 }' "$RESULTS" \
+  || { printf 'REFUSED: every mutant must record one substitution and an individual outcome\n' >&2; exit 1; }
 [ "$void" -eq 0 ]
 [ "$harness_broken" -eq 0 ]
 [ "$control_substitutions" -eq 1 ]
 [ "$control_outcome" = SURVIVED ]
-if [ -n "$EVIDENCE" ]; then
+if [ "$REFRESH_EVIDENCE" -eq 1 ]; then
+  maintained="$ROOT/docs/verification/sovereign-ledger-redundancy-mutation.md"
+  install_stage=$(mktemp "$ROOT/docs/verification/.sovereign-ledger-redundancy-mutation.XXXXXX") \
+    || { printf 'REFUSED: could not stage maintained mutation evidence\n' >&2; exit 1; }
+  cp "$EVIDENCE_STAGE" "$install_stage" \
+    || { rm -f -- "$install_stage"; printf 'REFUSED: could not copy maintained mutation evidence\n' >&2; exit 1; }
+  [ -s "$install_stage" ] && cmp -s "$EVIDENCE_STAGE" "$install_stage" \
+    || { rm -f -- "$install_stage"; printf 'REFUSED: staged maintained mutation evidence is empty or differs\n' >&2; exit 1; }
+  mv -f -- "$install_stage" "$maintained" \
+    || { rm -f -- "$install_stage"; printf 'REFUSED: could not atomically install maintained mutation evidence\n' >&2; exit 1; }
+  [ -s "$maintained" ] || { printf 'REFUSED: installed maintained mutation evidence is empty\n' >&2; exit 1; }
+elif [ -n "$EVIDENCE" ]; then
   publish_evidence "$ROOT/docs/verification" "$EVIDENCE" "$EVIDENCE_STAGE"
 elif [ "$EMIT_EVIDENCE" -eq 1 ]; then
   cat "$EVIDENCE_STAGE" >&3
 elif [ "$VERIFY_EVIDENCE" -eq 1 ]; then
-  cmp -s "$EVIDENCE_STAGE" "$ROOT/docs/verification/sovereign-ledger-redundancy-mutation.md" || {
-    diff -u "$ROOT/docs/verification/sovereign-ledger-redundancy-mutation.md" "$EVIDENCE_STAGE" >&2 || true
+  maintained="$ROOT/docs/verification/sovereign-ledger-redundancy-mutation.md"
+  [ -s "$maintained" ] || { printf 'REFUSED: maintained mutation evidence is empty\n' >&2; exit 1; }
+  cmp -s "$EVIDENCE_STAGE" "$maintained" || {
+    diff -u "$maintained" "$EVIDENCE_STAGE" >&2 || true
     exit 1
   }
 fi
