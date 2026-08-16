@@ -316,7 +316,9 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 ## Self-updates stay safe
 
 `/updatefirstmate` first resolves the configured origin and upstream identities without assuming the forge.
-For a github.com fork, it uses GitHub's guarded fork-sync API through `gh` before fetching; direct GitHub, non-GitHub, and local origins retain the ordinary direct update path.
+For a github.com fork, it keeps GraphQL fork metadata as the primary topology source, uses authenticated REST parent metadata only when GraphQL reports an empty parent, and calls GitHub's guarded `merge-upstream` endpoint through `gh` before the local fast-forward; direct GitHub, non-GitHub, and local origins retain the ordinary direct update path.
+When configured, the upstream must match the API-confirmed parent, and the endpoint's documented `owner:branch` response must match that parent's owner and the API-confirmed default branch.
+Missing, malformed, disagreeing, or failed topology and sync metadata, including authentication failure or conflict, refuses before local, secondmate, or config mutation.
 It then fast-forwards the running Firstmate repo and registered secondmate homes from `origin`, converges inherited local material through the existing config contract, re-reads updated instructions, and nudges updated secondmates without touching project clones.
 The configured fork's default branch may be a downstream product line that accepts custom pull requests.
 When canonical and downstream main advance independently, their histories diverge and `/updatefirstmate` refuses before local, secondmate, or config mutation.

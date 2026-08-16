@@ -5,8 +5,9 @@
 # This is the deterministic owner of /updatefirstmate's update sequence:
 #   1. preflight the running checkout before any remote mutation;
 #   2. identify origin and any configured upstream without assuming GitHub;
-#   3. when origin is a github.com fork, ask gh to fast-forward the fork from
-#      its API-reported parent (never --force);
+#   3. when origin is a github.com fork, call GitHub's guarded merge-upstream
+#      endpoint through gh after validating its API-reported parent (never
+#      --force);
 #   4. fast-forward the running checkout and every registered secondmate through
 #      the existing guarded origin paths; and
 #   5. run the existing inherited-local-material convergence after tracked code
