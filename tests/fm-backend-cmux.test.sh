@@ -941,6 +941,40 @@ test_send_text_submit_send_failed_when_target_absent() {
 
 # --- window_of_workspace: which window holds a workspace, and its count ------
 
+test_target_state_scans_every_window() {
+  local dir fb out
+  dir="$TMP_ROOT/target-state-all-windows"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 window-1 1 window-2 1
+  cmux_workspace_list_response "$dir" 2 workspace-other other
+  cmux_workspace_list_response "$dir" 3 workspace-target task
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_state workspace-target:surface-target' "$ROOT")
+  [ "$out" = present ] || fail "target_state missed a workspace in another cmux window: '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''--window'$'\x1f''window-1' \
+    "target_state did not scan the first cmux window"
+  assert_contains "$(cat "$dir/log")" $'\x1f''--window'$'\x1f''window-2' \
+    "target_state did not scan the second cmux window"
+
+  dir="$TMP_ROOT/target-state-all-windows-absent"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 window-1 1 window-2 1
+  cmux_workspace_list_response "$dir" 2 workspace-one one
+  cmux_workspace_list_response "$dir" 3 workspace-two two
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_state workspace-target:surface-target' "$ROOT")
+  [ "$out" = absent ] || fail "target_state did not prove absence across every cmux window: '$out'"
+
+  dir="$TMP_ROOT/target-state-window-unreadable"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 window-1 1
+  printf '1\n' > "$dir/responses/2.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_target_state workspace-target:surface-target' "$ROOT")
+  [ "$out" = unknown ] || fail "target_state treated an unreadable cmux window as absence: '$out'"
+  pass "fm_backend_cmux_target_state scans every window before proving absence"
+}
+
 test_window_of_workspace_finds_window_and_count() {
   local dir fb out
   dir="$TMP_ROOT/win-of-ws"; mkdir -p "$dir/responses"
@@ -1042,14 +1076,13 @@ test_kill_recovers_stale_target_by_label() {
   local dir fb title
   dir="$TMP_ROOT/kill-stale-target"; mkdir -p "$dir/responses"
   title=$(cmux_expected_scoped_title fm-label)
-  # target_ready label recovery: 1 workspace list (title lookup, misses stale id),
-  # 2 workspace list (id-for-label -> refreshed id), 3 list-panes (surface id).
-  cmux_workspace_list_response "$dir" 1 "cccccccc-2222-2222-2222-222222222222" "$title"
-  cmux_workspace_list_response "$dir" 2 "cccccccc-2222-2222-2222-222222222222" "$title"
-  cmux_panes_response "$dir" 3 "dddddddd-3333-3333-3333-333333333333"
-  # window_of_workspace on the REFRESHED id: 4 list-windows (not last), 5 workspace list --window.
-  cmux_windows_response "$dir" 4 "eeeeeeee-0000-0000-0000-000000000000" 2
-  cmux_workspace_list_response "$dir" 5 "cccccccc-2222-2222-2222-222222222222" "$title" "ffffffff-0000-0000-0000-000000000000" "other"
+  cmux_windows_response "$dir" 1 \
+    "eeeeeeee-0000-0000-0000-000000000000" 1 \
+    "eeeeeeee-1111-1111-1111-111111111111" 2
+  cmux_workspace_list_response "$dir" 2 "ffffffff-0000-0000-0000-000000000000" "other"
+  cmux_workspace_list_response "$dir" 3 \
+    "cccccccc-2222-2222-2222-222222222222" "$title" \
+    "ffffffff-1111-1111-1111-111111111111" "other"
   fb=$(make_cmux_fakebin "$dir")
   PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_kill "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111" "" fm-label' "$ROOT"
@@ -1060,7 +1093,9 @@ test_kill_recovers_stale_target_by_label() {
     "kill should not target the stale cmux workspace id after label recovery"
   assert_not_contains "$(cat "$dir/log")" $'\x1f''close-surface' \
     "kill should not call close-surface"
-  pass "fm_backend_cmux_kill: recovers stale workspace/surface ids by expected label"
+  assert_contains "$(cat "$dir/log")" $'\x1f''--window'$'\x1f''eeeeeeee-1111-1111-1111-111111111111' \
+    "kill did not scan outside the current cmux window"
+  pass "fm_backend_cmux_kill: recovers and closes a stale target across cmux windows"
 }
 
 # --- list_live: label-based orphan discovery ---------------------------------
@@ -1084,6 +1119,65 @@ test_list_live_filters_by_title_prefix() {
   [ "$out" = $'aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111\tfm-task1' ] \
     || fail "list_live should list only the in-home task workspace with its plain label and surface id, got '$out'"
   pass "fm_backend_cmux_list_live: lists only this home's scoped task workspaces using plain fm-<id> labels"
+}
+
+# --- fm-teardown.sh: secondmate child-home cleanup ---------------------------
+
+test_forced_secondmate_teardown_uses_child_cmux_config() {
+  local dir state data config home project fb out status child_title
+  dir="$TMP_ROOT/teardown-cmux-secondmate-child"
+  state="$dir/state"; data="$dir/data"; config="$dir/config"; home="$dir/secondmate-home"; project="$dir/project"
+  mkdir -p "$state" "$data" "$config" "$home/state" "$home/data" "$home/config" "$home/projects" "$project" "$dir/responses"
+  printf 'smc\n' > "$home/.fm-secondmate-home"
+  printf 'parent-secret\n' > "$config/cmux-socket-password"
+  printf 'child-secret\n' > "$home/config/cmux-socket-password"
+  fm_write_meta "$state/smc.meta" \
+    "window=firstmate:fm-smc" \
+    "worktree=$home" \
+    "project=$home" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home"
+  fm_write_meta "$home/state/childc.meta" \
+    "window=ws-child:sf-child" \
+    "backend=cmux" \
+    "endpoint_task_id=childc" \
+    "cmux_workspace_id=ws-child" \
+    "cmux_surface_id=sf-child" \
+    "worktree=$dir/missing-child-worktree" \
+    "project=$project" \
+    "kind=scout"
+  child_title=$(cmux_expected_scoped_title fm-childc "$home" "$home")
+  cmux_windows_response "$dir" 1 win-child 2
+  cmux_workspace_list_response "$dir" 2 ws-child "$child_title" ws-other default
+  : > "$dir/responses/3.out"
+  cmux_windows_response "$dir" 4 win-child 1
+  cmux_workspace_list_response "$dir" 5 ws-other default
+  fb=$(make_cmux_fakebin "$dir")
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+stopped="${FM_CMUX_LOG}.tmux-stopped"
+case "${1:-}" in
+  kill-window) : > "$stopped" ;;
+  display-message) [ ! -e "$stopped" ] && printf '%%1\n' ;;
+  list-panes) exit 0 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fb/tmux"
+  out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    "$ROOT/bin/fm-teardown.sh" smc --force 2>&1 )
+  status=$?
+  expect_code 0 "$status" "fm-teardown should force-retire a secondmate with a cmux child: $out"
+  assert_contains "$(cat "$dir/log")" $'close-workspace\x1f--workspace\x1fws-child' \
+    "forced secondmate teardown did not close the child cmux workspace"
+  assert_contains "$(cat "$dir/log")" 'CMUX_SOCKET_PASSWORD=child-secret' \
+    "forced secondmate teardown did not use the child home's cmux password"
+  assert_not_contains "$(cat "$dir/log")" 'CMUX_SOCKET_PASSWORD=parent-secret' \
+    "forced secondmate teardown leaked the parent cmux password into child cleanup"
+  pass "fm-teardown.sh: force cleanup uses the child home for cmux workers"
 }
 
 # --- fm-spawn.sh: --secondmate refuses backend=cmux --------------------------
@@ -1156,6 +1250,7 @@ test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_send_failed_when_target_absent
+test_target_state_scans_every_window
 test_window_of_workspace_finds_window_and_count
 test_window_of_workspace_empty_when_not_found
 test_kill_closes_workspace_directly_when_not_last
@@ -1163,4 +1258,5 @@ test_kill_adds_sibling_when_last_in_window
 test_kill_is_best_effort_when_close_workspace_fails
 test_kill_recovers_stale_target_by_label
 test_list_live_filters_by_title_prefix
+test_forced_secondmate_teardown_uses_child_cmux_config
 test_secondmate_spawn_refuses_cmux_backend

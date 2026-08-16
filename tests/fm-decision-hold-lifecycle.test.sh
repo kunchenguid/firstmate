@@ -15,6 +15,19 @@ TASKS_AXI_BIN=$(command -v tasks-axi || true)
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
 
+write_stop_aware_tmux() {
+  cat > "$1/tmux" <<'SH'
+#!/usr/bin/env bash
+stopped="${0}.stopped"
+case "${1:-}" in
+  kill-window) : > "$stopped" ;;
+  display-message) [ ! -e "$stopped" ] ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$1/tmux"
+}
+
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
@@ -27,7 +40,8 @@ make_home() {  # <name>
 ## Done
 EOF
   fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$fakebin" treehouse no-mistakes gh gh-axi
+  write_stop_aware_tmux "$fakebin"
   printf '%s\n' "$home"
 }
 
@@ -436,7 +450,8 @@ test_secondmate_hold_stays_in_authoritative_home() {
 ## Done
 EOF
   fakebin=$(fm_fakebin "$mate")
-  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$fakebin" treehouse no-mistakes gh gh-axi
+  write_stop_aware_tmux "$fakebin"
   origin=sample-mate-review
   mkdir -p "$mate/data/$origin"
   tasks_in "$mate" add "$origin" "Investigate secondmate sample" --kind scout --repo sample --start >/dev/null

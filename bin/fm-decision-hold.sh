@@ -15,6 +15,7 @@
 # is idempotent. A different decision key creates a different backlog identity.
 # All backlog mutations run in the active FM_HOME, which keeps main-home and
 # secondmate-home ownership aligned with the work that discovered the decision.
+# Host-root origins bind to their recorded physical host cwd before task or backlog activity.
 #
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
@@ -77,6 +78,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-host-root-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-host-root-lib.sh"
 
 DECISION_META_LOCK=
 DECISION_META_LOCK_HELD=0
@@ -114,6 +118,18 @@ validate_one_line() {  # <label> <value>
   case "$value" in
     *$'\n'*|*$'\r'*) fail "$label must be one line" ;;
   esac
+}
+
+assert_origin_host() {  # <origin-id>
+  local origin=$1 meta="$STATE/$1.meta" owner="$DATA/$1/host-root"
+  if [ -f "$meta" ]; then
+    fm_host_root_assert_task_cwd "$FM_ROOT" "$meta"
+  elif [ -e "$owner" ] || [ -L "$owner" ]; then
+    [ -f "$owner" ] && [ ! -L "$owner" ] || fail "origin host owner is not a regular file: $owner"
+    fm_host_root_assert_task_cwd "$FM_ROOT" "$owner"
+  elif fm_host_root_enabled; then
+    fail "origin $origin has no durable recorded host owner"
+  fi
 }
 
 sha256_text() {  # <text>
@@ -355,6 +371,7 @@ command_hold() {
   done
   validate_slug origin-id "$origin"
   validate_slug decision-key "$key"
+  assert_origin_host "$origin" || exit $?
   validate_one_line title "$title"
   validate_one_line reason "$reason"
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
@@ -393,6 +410,7 @@ command_complete() {
   shift
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] && has_meta=1
+  assert_origin_host "$origin" || exit $?
   if [ "$has_meta" = 1 ]; then
     DECISION_META_LOCK=$(fm_meta_lock_path "$meta") || fail "could not resolve task metadata lock"
     fm_lock_acquire_wait "$DECISION_META_LOCK"
@@ -436,6 +454,9 @@ $open
 EOF
 
   if [ "$has_meta" = 1 ]; then
+    fm_host_root_persist_task_owner "$meta" "$DATA/$origin/host-root" || exit $?
+  fi
+  if [ "$has_meta" = 1 ]; then
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
       printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
     fi
@@ -470,6 +491,7 @@ command_verify() {
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] || fail "origin metadata is absent: $meta"
+  assert_origin_host "$origin" || exit $?
   require_tasks_axi
   reviewed=$(meta_value "$meta" decisions_reviewed)
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed unresolved-decision inventory"
@@ -508,6 +530,7 @@ command_resolve() {
   done
   validate_slug origin-id "$origin"
   validate_slug decision-key "$key"
+  assert_origin_host "$origin" || exit $?
   load_decision "$decision_file"
   [ -n "$routed" ] || fail "at least one --routed-to task is required; use decline when the captain's answer routes no work"
   routed=$(printf '%s\n' "$routed" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -)
@@ -580,6 +603,7 @@ command_decline() {
   decision_file=$(parse_decision_only_flags "$@") || exit 2
   validate_slug origin-id "$origin"
   validate_slug decision-key "$key"
+  assert_origin_host "$origin" || exit $?
   load_decision "$decision_file"
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
@@ -619,6 +643,7 @@ command_repair() {
   decision_file=$(parse_decision_only_flags "$@") || exit 2
   validate_slug origin-id "$origin"
   validate_slug decision-key "$key"
+  assert_origin_host "$origin" || exit $?
   load_decision "$decision_file"
   require_tasks_axi
   id=$(hold_id "$origin" "$key")

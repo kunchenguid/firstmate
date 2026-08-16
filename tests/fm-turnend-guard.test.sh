@@ -111,6 +111,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
+  cp "$ROOT/bin/fm-host-root-lib.sh" "$dir/bin/fm-host-root-lib.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
@@ -599,13 +600,18 @@ test_hook_silent_in_crewmate_worktree() {
 }
 
 test_hook_silent_without_jq() {
-  local dir out status fakebin tool tool_path
+  local dir out status fakebin tool tool_path bash_path
   dir=$(make_primary_dir "$TMP_ROOT/hook-nojq")
   : > "$dir/state/task1.meta"
   fakebin=$(fm_fakebin "$TMP_ROOT/hook-nojq-fake")
+  bash_path=$(type -P bash) || fail "test host must provide bash"
   for tool in bash sh git cat printf date uname stat mkdir dirname; do
-    tool_path=$(command -v "$tool") || fail "test host must provide $tool"
-    ln -s "$tool_path" "$fakebin/$tool"
+    tool_path=$(type -P "$tool") || fail "test host must provide $tool"
+    cat > "$fakebin/$tool" <<SH
+#!$bash_path
+exec "$tool_path" "\$@"
+SH
+    chmod +x "$fakebin/$tool"
   done
   out=$(printf '{"stop_hook_active":false}' | PATH="$fakebin" bash "$dir/bin/fm-turnend-guard.sh" 2>&1)
   status=$?
@@ -760,14 +766,19 @@ test_grok_adapter_invalid_inputs_start_neither_path() {
 }
 
 test_grok_adapter_missing_jq_and_no_supervision_allow() {
-  local dir fakebin log out status tool tool_path
+  local dir fakebin log out status tool tool_path bash_path
   dir=$(make_primary_dir "$TMP_ROOT/grok-nojq")
   : > "$dir/state/task1.meta"
   fakebin=$(fm_fakebin "$TMP_ROOT/grok-nojq-bin")
   log="$TMP_ROOT/grok-nojq.log"
+  bash_path=$(type -P bash) || fail "test host must provide bash"
   for tool in bash cat printf; do
-    tool_path=$(command -v "$tool") || fail "test host must provide $tool"
-    ln -s "$tool_path" "$fakebin/$tool"
+    tool_path=$(type -P "$tool") || fail "test host must provide $tool"
+    cat > "$fakebin/$tool" <<SH
+#!$bash_path
+exec "$tool_path" "\$@"
+SH
+    chmod +x "$fakebin/$tool"
   done
   printf '#!/usr/bin/env bash\nprintf called >> %q\n' "$log" > "$fakebin/grok"
   chmod +x "$fakebin/grok"
@@ -1116,7 +1127,7 @@ record_autoarm_owner() {
 }
 
 install_integrated_autoarm() {
-  local dir=$1
+  local dir=$1 bash_path
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
@@ -1126,7 +1137,12 @@ install_integrated_autoarm() {
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
-  ln -s /bin/bash "$dir/fake-claude"
+  bash_path=$(type -P bash) || fail "test host must provide bash"
+  cat > "$dir/fake-claude" <<SH
+#!$bash_path
+exec -a claude "$bash_path" "\$@"
+SH
+  chmod +x "$dir/fake-claude"
 }
 
 run_integrated_autoarm() {

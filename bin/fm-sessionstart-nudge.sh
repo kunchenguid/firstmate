@@ -16,9 +16,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-operational-input.sh
 . "$SCRIPT_DIR/fm-operational-input.sh"
+# shellcheck source=bin/fm-host-root-lib.sh
+. "$SCRIPT_DIR/fm-host-root-lib.sh"
 
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+if fm_host_root_enabled; then
+  fm_host_root_assert_session_cwd "$FM_ROOT" >/dev/null 2>&1 || exit 0
+fi
 
 lock_is_in_ancestry() {
   local lock_pid pid=$$ _
@@ -37,9 +42,10 @@ lock_is_in_ancestry() {
 }
 
 lock_is_in_ancestry && exit 0
+SESSION_START=$(fm_host_root_command "$FM_ROOT" bin/fm-session-start.sh)
 nudge=
 fm_operational_input_encode session-start \
-  "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions." \
+  "Run \`$SESSION_START\` now, exactly once, before executing any other instructions." \
   nudge || exit 0
 printf '%s\n' "$nudge"
 exit 0

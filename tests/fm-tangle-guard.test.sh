@@ -159,13 +159,28 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+stopped="${0}.stopped"
+[ "${1:-}" != list-panes ] || exit 0
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    [ ! -e "$stopped" ] || exit 1
+    if [ -n "${FM_FAKE_PANE_SEQUENCE:-}" ] && [ -s "$FM_FAKE_PANE_SEQUENCE" ]; then
+      head -1 "$FM_FAKE_PANE_SEQUENCE"
+      tail -n +2 "$FM_FAKE_PANE_SEQUENCE" > "$FM_FAKE_PANE_SEQUENCE.next"
+      mv "$FM_FAKE_PANE_SEQUENCE.next" "$FM_FAKE_PANE_SEQUENCE"
+    else
+      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    fi
+    exit 0
+    ;;
+  *"#{pane_id}"*) [ ! -e "$stopped" ] && printf '%%1\n'; exit $? ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys) exit 0 ;;
+  new-window) rm -f "$stopped"; exit 0 ;;
+  kill-window) : > "$stopped"; exit 0 ;;
+  has-session|new-session|send-keys) exit 0 ;;
 esac
 exit 0
 SH
@@ -181,8 +196,8 @@ run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
-    PATH="$fakebin:$PATH" \
+    FM_SPAWN_NO_GUARD=1 FM_WORKTREE_CWD_ATTEMPTS="${FM_WORKTREE_CWD_ATTEMPTS:-2}" FM_WORKTREE_CWD_DELAY=0 \
+    FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --mode no-mistakes --yolo off 2>&1
 }
 
@@ -212,7 +227,18 @@ test_spawn_isolation_abort() {
   expect_code 0 "$status" "spawn into a genuine isolated worktree should succeed"
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "did not yield an isolated worktree" "isolated spawn wrongly tripped the guard"
-  pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
+
+  # A real Treehouse shell may briefly traverse a non-repository container
+  # directory before entering the linked worktree. Keep polling that transient
+  # cwd instead of treating the first project-external path as final.
+  mkdir -p "$TMP_ROOT/transient-container"
+  printf '%s\n%s\n' "$TMP_ROOT/transient-container" "$TMP_ROOT/spawn-wt" > "$TMP_ROOT/pane-sequence"
+  status=0
+  out=$(FM_FAKE_PANE_SEQUENCE="$TMP_ROOT/pane-sequence" FM_WORKTREE_CWD_ATTEMPTS=3 \
+    run_spawn "$home" transient-isolated-gg7 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "spawn should poll past a transient non-worktree cwd"
+  assert_contains "$out" "spawned transient-isolated-gg7" "transient cwd recovery did not complete the spawn"
+  pass "fm-spawn: requires a genuine isolated worktree and polls past transient container cwd values"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------

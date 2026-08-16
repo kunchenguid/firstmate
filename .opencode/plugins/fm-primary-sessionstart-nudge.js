@@ -33,6 +33,7 @@ async function resolveRoot(anchor) {
 }
 
 export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }) => {
+  if (process.env.FM_TARGET_WORKTREE) return {};
   const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
 
   return {

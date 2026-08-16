@@ -354,6 +354,29 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+test_unset_and_empty_host_mode_match() {
+  local home="$TMP_ROOT/default-host-home" expected kind args
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    if [ "$kind" = ship ]; then
+      args=(--mode no-mistakes)
+    else
+      args=(--scout)
+    fi
+    env -u FM_HOST_ROOT FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+      "$ROOT/bin/fm-brief.sh" byte-compat sample "${args[@]}" >/dev/null 2>&1
+    expected="$TMP_ROOT/$kind-default-brief.md"
+    cp "$home/data/byte-compat/brief.md" "$expected"
+    rm -rf "$home/data/byte-compat"
+    FM_HOST_ROOT='' FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+      "$ROOT/bin/fm-brief.sh" byte-compat sample "${args[@]}" >/dev/null 2>&1
+    cmp -s "$expected" "$home/data/byte-compat/brief.md" \
+      || fail "$kind brief differs between unset and explicitly empty host mode"
+    rm -rf "$home/data/byte-compat"
+  done
+  pass "fm-brief.sh: unset and empty host mode preserve the same default scaffold"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -719,6 +742,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_unset_and_empty_host_mode_match
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path

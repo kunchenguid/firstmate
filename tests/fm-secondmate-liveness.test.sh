@@ -35,7 +35,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+BASE_PATH=${FM_TEST_BASE_PATH:-$(dirname "$(command -v git)"):/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-liveness)
@@ -206,7 +206,7 @@ test_agent_state_dispatcher_and_compatibility() {
 make_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" node chrome-devtools-axi pi-signed
+  fm_fake_exit0 "$fakebin" node chrome-devtools-axi pi-signed codex
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
@@ -300,6 +300,11 @@ case "${1:-}" in
     [ "${1:-}" = new-window ] && rm -f "${FM_TMUX_CALL_LOG}.killed"
     exit 0
     ;;
+  send-keys)
+    case " $* " in
+      *' -l '*) [ "${FM_TEST_FAIL_LAUNCH_LITERAL:-0}" != 1 ] || exit 88 ;;
+    esac
+    ;;
   has-session) exit 0 ;;
 esac
 exit 0
@@ -368,6 +373,64 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   assert_contains "$(cat "$log")" "new-window" \
     "a confirmed-dead secondmate should actually be relaunched"
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+}
+
+test_direct_secondmate_respawn_cannot_bypass_retained_metadata() {
+  local w fb tmuxfb log out status=0
+  w=$(new_world direct-duplicate)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" FM_HOME="$w/home" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm1 --secondmate 2>&1) || status=$?
+
+  [ "$status" -ne 0 ] || fail "direct same-id secondmate respawn bypassed retained metadata"
+  assert_contains "$out" "task metadata already exists for sm1" \
+    "direct secondmate duplicate refusal was not explicit"
+  [ ! -s "$log" ] || fail "direct secondmate duplicate inspected or created an endpoint: $(cat "$log")"
+  pass "sweep: only recovery-classified secondmate relaunches may replace retained metadata"
+}
+
+test_clean_recovery_abort_restores_retained_metadata() {
+  local w fb tmuxfb log out before
+  w=$(new_world recovery-clean-abort)
+  add_sm_home "$w" sm1 firstmate:fm-sm1 pi
+  printf 'recovery_marker=retain-me\n' >> "$w/home/state/sm1.meta"
+  printf 'decision: preserve unread routed result\n' > "$w/home/state/sm1.status"
+  printf 'turn-ended-sentinel\n' > "$w/home/state/sm1.turn-ended"
+  printf 'auth-sentinel\n' > "$w/home/state/sm1.grok-turnend-token"
+  before="$w/sm1.meta.before"
+  cp -p "$w/home/state/sm1.meta" "$before"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_TEST_PANE_CMD=missing FM_TMUX_CALL_LOG="$log" FM_SPAWN_NO_GUARD=1 \
+    FM_SPAWN_SECOND_MATE_RECOVERY=1 FM_SKIP_SECONDMATE_INHERIT=1 \
+    FM_TEST_FAIL_LAUNCH_LITERAL=1 "$ROOT/bin/fm-spawn.sh" sm1 --secondmate 2>&1) \
+    && fail "the injected pre-Enter recovery failure unexpectedly succeeded"
+  cmp -s "$before" "$w/home/state/sm1.meta" \
+    || fail "a clean pre-Enter recovery abort did not restore retained secondmate metadata byte-for-byte"
+  [ "$(cat "$w/home/state/sm1.status")" = 'decision: preserve unread routed result' ] \
+    || fail "a clean recovery abort lost the retained secondmate status"
+  [ "$(cat "$w/home/state/sm1.turn-ended")" = 'turn-ended-sentinel' ] \
+    || fail "a clean recovery abort lost the retained turn-ended record"
+  [ "$(cat "$w/home/state/sm1.grok-turnend-token")" = 'auth-sentinel' ] \
+    || fail "a clean recovery abort lost retained harness wiring"
+  assert_contains "$(cat "$log")" "new-window" "the recovery attempt did not create its replacement endpoint"
+
+  : > "$log"
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_TEST_PANE_CMD=missing FM_TMUX_CALL_LOG="$log" FM_SPAWN_NO_GUARD=1 \
+    FM_SPAWN_SECOND_MATE_RECOVERY=1 FM_SKIP_SECONDMATE_INHERIT=1 \
+    "$ROOT/bin/fm-spawn.sh" sm1 --secondmate 2>&1) \
+    || fail "the retry after restored metadata failed: $out"
+  assert_contains "$(cat "$log")" "new-window" \
+    "the restored record was not discoverable by the next authorized retry"
+  assert_no_grep '^recovery_marker=retain-me$' "$w/home/state/sm1.meta" \
+    "successful recovery retained the superseded endpoint record"
+  pass "sweep: a clean pre-Enter recovery abort restores metadata and remains retryable"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
@@ -545,6 +608,8 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
+test_direct_secondmate_respawn_cannot_bypass_retained_metadata
+test_clean_recovery_abort_restores_retained_metadata
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate

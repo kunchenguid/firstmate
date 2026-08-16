@@ -191,12 +191,14 @@ test_guard_warnings() {
 }
 
 test_lock_single_winner_under_concurrency() {
-  local dir state lockdir marker i pids pid wins
+  local dir state lockdir marker done_file i pids pid wins attempts
   dir=$(make_case lock-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  done_file="$dir/done"
   : > "$marker"
+  : > "$done_file"
   pids=
   i=1
   while [ "$i" -le 40 ]; do
@@ -204,11 +206,20 @@ test_lock_single_winner_under_concurrency() {
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "$$" >> "$3"
-        # Stay alive so the held lock names a live pid for the whole window;
-        # otherwise a late contender could legitimately reclaim a dead-pid lock.
-        sleep 1
+        won=1
+      else
+        won=0
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+      printf "done\n" >> "$4"
+      if [ "$won" = 1 ]; then
+        attempt=0
+        while [ "$(awk "NF { c++ } END { print c + 0 }" "$4")" -lt 40 ] \
+          && [ "$attempt" -lt 500 ]; do
+          sleep 0.01
+          attempt=$((attempt + 1))
+        done
+      fi
+    ' _ "$LIB" "$lockdir" "$marker" "$done_file" &
     pids="$pids $!"
     i=$((i + 1))
   done
@@ -216,6 +227,8 @@ test_lock_single_winner_under_concurrency() {
     wait "$pid" 2>/dev/null || true
   done
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  attempts=$(awk 'NF { c++ } END { print c + 0 }' "$done_file")
+  [ "$attempts" -eq 40 ] || fail "expected 40 completed lock attempts, got $attempts"
   [ "$wins" -eq 1 ] || fail "expected exactly one lock winner under concurrency, got $wins"
   pass "concurrent fm_lock_try_acquire yields exactly one winner"
 }
@@ -239,16 +252,54 @@ test_lock_steals_dead_pid_lock() {
   pass "dead-pid stale lock is reclaimed by a single acquirer"
 }
 
+test_lock_supports_no_symlink_fallback() {
+  local dir state lockdir fakebin dead
+  dir=$(make_case lock-msys-directory-copy)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ln"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 10
+    [ -d "$2" ] && [ ! -L "$2" ] || exit 11
+    fm_lock_release "$2"
+    [ ! -e "$2" ] || exit 12
+  ' _ "$LIB" "$lockdir" \
+    || fail "direct-directory lock fallback could not be acquired and released"
+
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 20
+    [ "$(cat "$2/pid")" != "$3" ] || exit 21
+    fm_lock_release "$2"
+    [ ! -e "$2" ] || exit 22
+  ' _ "$LIB" "$lockdir" "$dead" \
+    || fail "direct-directory lock fallback could not reclaim a dead owner"
+  pass "locks acquire, release, and reclaim stale owners without symlink support"
+}
+
 test_lock_stale_steal_single_winner_under_concurrency() {
-  local dir state lockdir dead marker i pids pid wins
+  local dir state lockdir dead marker done_file i pids pid wins attempts
   dir=$(make_case lock-stale-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  done_file="$dir/done"
   dead=$(dead_pid)
   mkdir "$lockdir"
   printf '%s\n' "$dead" > "$lockdir/pid"
   : > "$marker"
+  : > "$done_file"
   pids=
   i=1
   while [ "$i" -le 40 ]; do
@@ -256,9 +307,20 @@ test_lock_stale_steal_single_winner_under_concurrency() {
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "${BASHPID:-$$}" >> "$3"
-        sleep 1
+        won=1
+      else
+        won=0
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+      printf "done\n" >> "$4"
+      if [ "$won" = 1 ]; then
+        attempt=0
+        while [ "$(awk "NF { c++ } END { print c + 0 }" "$4")" -lt 40 ] \
+          && [ "$attempt" -lt 500 ]; do
+          sleep 0.01
+          attempt=$((attempt + 1))
+        done
+      fi
+    ' _ "$LIB" "$lockdir" "$marker" "$done_file" &
     pids="$pids $!"
     i=$((i + 1))
   done
@@ -266,6 +328,8 @@ test_lock_stale_steal_single_winner_under_concurrency() {
     wait "$pid" 2>/dev/null || true
   done
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  attempts=$(awk 'NF { c++ } END { print c + 0 }' "$done_file")
+  [ "$attempts" -eq 40 ] || fail "expected 40 completed stale-lock attempts, got $attempts"
   [ "$wins" -eq 1 ] || fail "expected exactly one stale-lock stealer, got $wins"
   pass "concurrent stale-lock steal yields exactly one winner"
 }
@@ -359,6 +423,35 @@ test_lock_empty_pid_uses_minimum_grace() {
   pass "empty mid-acquire lock keeps a minimum grace"
 }
 
+test_lock_create_failure_does_not_recurse() {
+  local dir state vanished out pid waited=0 status=0
+  dir=$(make_case lock-create-failure)
+  state="$dir/state"
+  vanished="$dir/vanished"
+  mkdir "$vanished"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    rmdir "$2"
+    if fm_lock_try_acquire "$2/.contend.lock"; then rc=0; else rc=$?; fi
+    printf "rc=%s\n" "$rc"
+  ' _ "$LIB" "$vanished" > "$dir/out" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 100 ]; do
+    sleep 0.01
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "an absent lock path recursed instead of returning its create failure"
+  fi
+  wait "$pid" || status=$?
+  out=$(cat "$dir/out")
+  [ "$status" -eq 0 ] || fail "create-failure probe crashed or failed (rc=$status): $out"
+  [ "$out" = "rc=1" ] || fail "create-failure probe returned an unexpected result: $out"
+  pass "an absent lock path returns its create failure without recursive stale stealing"
+}
+
 test_lock_late_claim_loses_after_recreate() {
   local dir state lockdir out
   dir=$(make_case lock-late-claim)
@@ -367,7 +460,11 @@ test_lock_late_claim_loses_after_recreate() {
   out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     owner1=$(fm_lock_owner_dir "$2") || exit 20
-    ln -s "$owner1" "$2" || exit 21
+    if ! MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ln -s "$owner1" "$2" 2>/dev/null; then
+      fm_lock_discard_owner "$owner1"
+      printf "skip=no-native-symlink\n"
+      exit 0
+    fi
     touch -h -t 200001010000 "$2" 2>/dev/null || sleep 2
     if ! fm_lock_try_acquire "$2"; then exit 22; fi
     before=$(cat "$2/pid" 2>/dev/null || true)
@@ -376,6 +473,10 @@ test_lock_late_claim_loses_after_recreate() {
     current_owner=$(readlink "$2" 2>/dev/null || true)
     printf "late=%s before=%s after=%s owner_changed=%s\n" "$late" "$before" "$after" "$([ "$current_owner" != "$owner1" ] && echo yes || echo no)"
   ' _ "$LIB" "$lockdir")
+  if [ "$out" = skip=no-native-symlink ]; then
+    pass "late-claim symlink race skipped where native symlinks are unavailable"
+    return
+  fi
   case "$out" in
     *"late=lost"*) ;;
     *) fail "late original claimant succeeded after lock recreation: $out" ;;
@@ -399,7 +500,11 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     owner=$(fm_lock_owner_dir "$2") || exit 20
-    ln -s "$owner" "$2" || exit 21
+    if ! MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ln -s "$owner" "$2" 2>/dev/null; then
+      fm_lock_discard_owner "$owner"
+      printf "skip=no-native-symlink\n"
+      exit 0
+    fi
     fm_lock_try_acquire "$2.steal" || exit 22
     steal_owner=${FM_LOCK_OWNER_DIR:-}
     if fm_lock_claim "$2" "$owner"; then late=won; else late=lost; fi
@@ -407,6 +512,10 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
     pid=$(cat "$2/pid" 2>/dev/null || true)
     printf "late=%s stealer=%s pid=%s\n" "$late" "$stealer" "$pid"
   ' _ "$LIB" "$lockdir")
+  if [ "$out" = skip=no-native-symlink ]; then
+    pass "paused-claim symlink race skipped where native symlinks are unavailable"
+    return
+  fi
   case "$out" in
     *"late=lost"*) ;;
     *) fail "paused claimant succeeded while steal mutex was held: $out" ;;
@@ -460,7 +569,7 @@ test_watch_restart_attaches_to_healthy_peer() {
   out="$dir/restart.out"
   peer_ready="$dir/peer.ready"
   mark_pr_check_migration_complete "$state"
-  node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" &
+  bash -c 'trap "" TERM; printf "ready\n" > "$1"; while :; do sleep 300; done' _ "$peer_ready" &
   peer=$!
   i=0
   while [ "$i" -lt 50 ] && [ ! -s "$peer_ready" ]; do
@@ -1108,10 +1217,12 @@ test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
+test_lock_supports_no_symlink_fallback
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
+test_lock_create_failure_does_not_recurse
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid

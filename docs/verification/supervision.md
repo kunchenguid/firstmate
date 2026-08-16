@@ -205,6 +205,59 @@ tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
 ```
 
+## Host-root task integration
+
+Ordinary workers now load target-repository context only, while the primary supervisor alone loads the host instructions and lifecycle.
+The earlier host-cwd evidence that workers loaded the host `AGENTS.md` is superseded by this target-root contract.
+Claude's additive task settings reached the launch project's `SessionStart` hook, but organization policy blocked model access before Stop, so its task completion signal remains focused-test verified.
+Grok's launch-scoped host-root token remains generated and focused-test verified rather than live verified.
+Kimi 0.29.1 launch and global-hook mechanics were live-verified on 2026-07-25, while its launch-scoped host-root token remains focused-test verified rather than live lifecycle verified.
+The reusable deterministic entry points are:
+
+```sh
+tests/fm-host-root-mode.test.sh
+tests/fm-grok-harness.test.sh
+tests/fm-kimi-harness.test.sh
+```
+
+The integrated path was reverified on 2026-08-01 through Herdr 0.7.5 and Treehouse 2.0.0.
+The worker emitted its completion status and turn-end signal and retained the report.
+The supervisor-side acceptance then completed the decision inventory before cleanup.
+Because the Codex worker has no verified semantic state source, `fm-crew-state` remained `unknown` instead of treating those notification artifacts as current-state truth.
+[`runtime-backends.md`](runtime-backends.md#host-root-task-routing) owns the spawn shape and path-routing evidence.
+
+Pi 0.82.1 verified the one-host global activator on 2026-07-29 and the host-root worker exclusion on 2026-07-30.
+The focused real-runtime entry point was:
+
+```sh
+pi --version
+bin/fm-test-run.sh tests/fm-host-setup.test.sh
+```
+
+Observed output:
+
+```text
+0.82.1
+ok - install is host-read-only, PI_CODING_AGENT_DIR-aware, and idempotent
+ok - host-root Pi workers do not load FirstMate supervisor policy or extensions
+ok - install refuses ambient FM conflicts and unmanaged files
+ok - install rejects physical ancestor and descendant host/home overlap
+ok - real Pi preserves host resources, loads FirstMate resources, and stays dormant elsewhere
+ok - uninstall removes only its owned file
+```
+
+A credentialed print-mode probe installed into the regular Pi home, ran this command from the temporary host, and uninstalled immediately afterward:
+
+```sh
+pi -p --approve --no-session --model openai-codex/gpt-5.6-sol --thinking low \
+  'Reply exactly HOST_ACTIVATION_OK.'
+```
+
+The later-loaded probe observed the original host `AGENTS.md` sentinel followed by the FirstMate supervisor-policy marker and FirstMate `AGENTS.md`, while both tracked guard/watch load markers were present.
+The model returned `HOST_ACTIVATION_OK`.
+A separate isolated tmux run invoked plain `pi` with no Pi flags from the configured host and observed `FirstMate active` plus both guard/watch load markers.
+`PI_CODING_AGENT_DIR` pointed that smoke at a temporary Pi home, and the installed activator remained dormant in a second cwd.
+
 ## Turn-end guard
 
 The blocking and bounded-follow-up mechanisms were validated across six harnesses on 2026-07-08 through 2026-08-13, with Claude's replacement Stop-owned path revalidated on 2026-07-24 and Cursor's stop-hook park validated on 2026-08-13.

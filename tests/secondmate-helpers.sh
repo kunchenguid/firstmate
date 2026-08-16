@@ -25,8 +25,19 @@ make_fake_tmux() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+stopped="${0}.stopped"
 case "${1:-}" in
-  has-session|new-session|new-window|send-keys|kill-window)
+  has-session|new-session|send-keys)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    exit 0
+    ;;
+  new-window)
+    rm -f "$stopped"
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    exit 0
+    ;;
+  kill-window)
+    : > "$stopped"
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
     exit 0
     ;;
@@ -37,10 +48,16 @@ case "${1:-}" in
     exit 0
     ;;
   display-message)
+    [ ! -e "$stopped" ] || exit 1
     case "$*" in
       *'#{cursor_y}'*) printf '0\n' ;;
       *) printf 'firstmate\n' ;;
     esac
+    exit 0
+    ;;
+  list-panes)
+    [ -e "$stopped" ] && exit 0
+    printf '%%1\n'
     exit 0
     ;;
   capture-pane)

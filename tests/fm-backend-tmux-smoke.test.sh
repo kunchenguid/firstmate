@@ -75,6 +75,16 @@ pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a dupl
 
 # --- send text + Enter -------------------------------------------------------
 
+# The operator's tmux default-command may be fish/zsh; make this Bash behavior
+# test explicit instead of assuming the login shell understands Bash syntax.
+tmux send-keys -t "$TARGET" "exec bash --noprofile --norc" Enter
+for _ in $(seq 1 30); do
+  [ "$(tmux display-message -p -t "$TARGET" '#{pane_current_command}')" = bash ] && break
+  sleep 0.1
+done
+[ "$(tmux display-message -p -t "$TARGET" '#{pane_current_command}')" = bash ] \
+  || fail "real tmux: task window did not enter the explicit Bash test shell"
+
 # A newly-created interactive shell can exist before its startup files and line
 # editor are ready to accept Enter. Prove command execution with an output token
 # that does not appear contiguously in the command, retrying the harmless probe

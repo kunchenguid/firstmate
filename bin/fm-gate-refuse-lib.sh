@@ -67,7 +67,7 @@ FM_GATE_REFUSE_EXIT=3
 # no-mistakes gate agent. An optional root anchors the git-common-dir check;
 # callers that omit it retain the historical current-worktree behavior.
 fm_is_gate_agent() {
-  local anchor=${1:-.} common
+  local anchor=${1:-.} anchor_real common candidate
   if [ "${FM_GATE_REFUSE_BYPASS:-}" = 1 ]; then
     return 1
   fi
@@ -75,15 +75,23 @@ fm_is_gate_agent() {
     FM_GATE_REFUSE_REASON='env'
     return 0
   fi
-  common=$(cd "$anchor" 2>/dev/null \
-    && cd "$(git rev-parse --git-common-dir 2>/dev/null || echo /nonexistent)" 2>/dev/null \
-    && pwd -P || true)
-  case "$common" in
-    */.no-mistakes/repos/*.git)
-      FM_GATE_REFUSE_REASON='path'
-      FM_GATE_REFUSE_COMMON=$common
-      return 0 ;;
-  esac
+  # Check both the physical absolute FirstMate code root and the process cwd.
+  # Host mode needs the former so changing cwd cannot hide a gate around FM_ROOT;
+  # normal and gate-validation callers retain the latter backstop.
+  anchor_real=$(cd "$anchor" 2>/dev/null && pwd -P || true)
+  for candidate in "$anchor_real" .; do
+    [ -n "$candidate" ] || continue
+    common=$(cd "$candidate" 2>/dev/null \
+      && cd "$(git rev-parse --git-common-dir 2>/dev/null || echo /nonexistent)" 2>/dev/null \
+      && pwd -P || true)
+    case "$common" in
+      */.no-mistakes/repos/*.git)
+        FM_GATE_REFUSE_REASON='path'
+        FM_GATE_REFUSE_COMMON=$common
+        return 0 ;;
+    esac
+    [ "$candidate" = . ] && break
+  done
   return 1
 }
 

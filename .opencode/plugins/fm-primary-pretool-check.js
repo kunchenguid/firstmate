@@ -40,6 +40,7 @@ async function resolveRoot(anchor) {
 }
 
 export const FmPrimaryPretoolCheck = async ({ directory, worktree }) => {
+  if (process.env.FM_TARGET_WORKTREE) return {};
   const root = worktree ? (() => {
     try {
       return realpathSync(worktree);

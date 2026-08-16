@@ -152,6 +152,8 @@ test_stale_is_terminal_classifier() {
   fm_write_meta "$state/herdr-term.meta" "window=default:w1:p2" "backend=herdr"
   printf 'done: ready in branch fm/herdr\n' > "$state/herdr-term.status"
   stale_is_terminal "default:w1:p2" "$state" || fail "terminal herdr stale status not resolved through metadata"
+  printf 'done: ready in branch fm/prefixed\n' > "$state/fm-prefixed.status"
+  stale_is_terminal "fm-prefixed" "$state" "fm-prefixed" || fail "terminal stale status lost an explicit fm-prefixed task id"
   printf 'working: compiling\n' > "$state/nonterm.status"
   stale_is_terminal "sess:fm-nonterm" "$state" && fail "non-terminal stale classified terminal"
   stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified terminal"
@@ -1925,6 +1927,42 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+test_host_tmux_socket_collisions_stay_task_scoped() {
+  local dir state fakebin log out
+  dir=$(make_case host-tmux-socket-collision)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  log="$dir/tmux.log"
+  fm_write_meta "$state/one.meta" \
+    'window=@1' 'host_root=/host/one' 'tmux_socket_path=/one.sock' 'tmux_window_marker=one'
+  fm_write_meta "$state/two.meta" \
+    'window=@1' 'host_root=/host/two' 'tmux_socket_path=/two.sock' 'tmux_window_marker=two'
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+socket=ambient
+if [ "${1:-}" = -S ]; then
+  socket=$2
+  shift 2
+fi
+printf '%s\n' "$socket" >> "$FM_SOCKET_LOG"
+[ "${1:-}" = capture-pane ] && printf '%s\n' "$socket"
+SH
+  chmod +x "$fakebin/tmux"
+  out=$(PATH="$fakebin:$PATH" FM_SOCKET_LOG="$log" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-watch.sh"
+    while IFS=$(printf "\t") read -r ref task window; do
+      pane=$( ( window_bind_context "$window" "$task" \
+        && fm_backend_capture "$(window_backend "$window" "$task")" "$window" 1 ) )
+      printf "%s|%s\n" "$ref" "$pane"
+      window_is_busy "$window" "$pane" "$task" || true
+    done < <(recorded_windows)
+  ' _ "$ROOT")
+  assert_contains "$out" 'one|/one.sock' "watcher did not bind the first colliding task to its socket"
+  assert_contains "$out" 'two|/two.sock' "watcher did not bind the second colliding task to its socket"
+  assert_no_grep '^ambient$' "$log" "watcher probed ambient tmux for colliding host tasks"
+  pass "watcher keys colliding host tmux windows by task and creating socket"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1974,3 +2012,4 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_host_tmux_socket_collisions_stay_task_scoped

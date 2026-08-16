@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Bind an intentional custom watcher check to its current bytes.
+# Host-root tasks bind to their recorded physical host cwd before trust-file mutation.
 # Usage: fm-check-register.sh <id>
 set -u
 
@@ -12,6 +13,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-host-root-lib.sh
+. "$SCRIPT_DIR/fm-host-root-lib.sh"
 
 if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
   echo "error: invalid custom check registration" >&2
@@ -19,6 +22,12 @@ if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
 fi
 
 ID=$1
+META="$STATE/$ID.meta"
+if [ -f "$META" ]; then
+  fm_host_root_assert_task_cwd "$FM_ROOT" "$META" || exit $?
+else
+  fm_host_root_assert_session_cwd "$FM_ROOT" || exit $?
+fi
 CHECK="$STATE/$ID.check.sh"
 TRUST="$STATE/$ID.check-trust"
 [ -d "$STATE" ] && [ ! -L "$STATE" ] || { echo "error: state directory is unavailable" >&2; exit 1; }

@@ -139,10 +139,9 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
   terminal=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-terminal-handle 2>/dev/null || true)
   wt_path=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path) || {
     echo "error: orca worktree create did not return a path for $name" >&2
-    [ -z "$terminal" ] || fm_backend_orca_kill "$terminal" >/dev/null 2>&1 || true
-    if fm_backend_orca_remove_worktree "$wt_id" >/dev/null; then
-      return 1
-    fi
+    # The worktree exists, but pathless creation is not safe to clean up here:
+    # a terminal must be confirmed absent before its owning worktree can be
+    # removed. Return the recoverable ids to fm-spawn's verified rollback path.
     if [ -n "$terminal" ]; then
       printf '%s\t\t%s' "$wt_id" "$terminal"
     else
@@ -169,6 +168,47 @@ fm_backend_orca_send_text_line() {  # <terminal-id> <text>
   local terminal=$1 text=$2
   fm_backend_orca_tool_check || return 1
   fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$text" --enter --json
+}
+
+# Active marker probe used only by spawn-time cwd verification. Orca exposes no
+# structured live foreground cwd, so submit one harmless command and bound the
+# reads waiting for its unique marker pair. One invocation never injects the
+# command more than once, which prevents overlapping probes in a slow terminal.
+fm_backend_orca_current_path() {  # <terminal-id>
+  local terminal=$1 out line candidate in_block path_lines attempt
+  local attempts=${FM_ORCA_CWD_PROBE_ATTEMPTS:-10} delay=${FM_ORCA_CWD_PROBE_DELAY:-0.1}
+  local nonce="${BASHPID:-$$}_${RANDOM:-0}"
+  local begin="__FM_ORCA_CWD_BEGIN_${nonce}__" end="__FM_ORCA_CWD_END_${nonce}__"
+  case "$attempts" in ''|*[!0-9]*|0) attempts=10 ;; esac
+  fm_backend_orca_send_text_line "$terminal" "printf '%s\\n' '$begin'; pwd -P; printf '%s\\n' '$end'" || return 0
+  for ((attempt = 0; attempt < attempts; attempt += 1)); do
+    out=$(fm_backend_orca_read_text_paged "$terminal" 200 2>/dev/null || true)
+    in_block=0
+    candidate=
+    path_lines=0
+    while IFS= read -r line; do
+      if [ "$line" = "$begin" ]; then
+        in_block=1
+        candidate=
+        path_lines=0
+        continue
+      fi
+      if [ "$line" = "$end" ]; then
+        if [ "$path_lines" -eq 1 ]; then
+          case "$candidate" in
+            /*) printf '%s' "$candidate"; return 0 ;;
+          esac
+        fi
+        in_block=0
+        continue
+      fi
+      [ "$in_block" -eq 1 ] || continue
+      candidate=$line
+      path_lines=$((path_lines + 1))
+    done < <(printf '%s\n' "$out")
+    [ "$attempt" -ge $((attempts - 1)) ] || sleep "$delay"
+  done
+  return 0
 }
 
 fm_backend_orca_send_literal() {  # <terminal-id> <text>
@@ -201,6 +241,27 @@ fm_backend_orca_capture() {  # <terminal-id> <lines>
   fm_backend_orca_tool_check || return 1
   out=$(orca terminal read --terminal "$terminal" --limit "$lines" --json) || return 1
   fm_backend_orca_json_text "$out"
+}
+
+# Tri-state endpoint probe for destructive cleanup. Only Orca's typed stale
+# handle response proves absence; every transport, parse, or other API error is
+# unknown and therefore cannot license worktree removal.
+fm_backend_orca_target_state() {  # <terminal-id> -> present|absent|unknown
+  local out
+  fm_backend_orca_tool_check || { printf 'unknown'; return 0; }
+  out=$(orca terminal read --terminal "$1" --limit 1 --json 2>&1)
+  printf '%s' "$out" | node -e '
+const fs = require("fs");
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); }
+catch { process.stdout.write("unknown"); process.exit(0); }
+if (data && data.ok === false) {
+  const code = data.error && data.error.code;
+  process.stdout.write(code === "terminal_handle_stale" ? "absent" : "unknown");
+} else {
+  process.stdout.write("present");
+}
+'
 }
 
 fm_backend_orca_json_text() {  # <json>

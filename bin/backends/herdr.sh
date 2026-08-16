@@ -675,13 +675,37 @@ fm_backend_herdr_presentation_lock_namespace_uid() {
   fi
 }
 
+fm_backend_herdr_presentation_lock_namespace_is_noacl_usertemp() {
+  local dir=$1 temp_root
+  case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*) ;;
+    *) return 1 ;;
+  esac
+  temp_root=${TEMP:-/tmp}
+  case "$temp_root" in
+    [A-Za-z]:[\\/]*) temp_root=$(cygpath -u "$temp_root" 2>/dev/null) || return 1 ;;
+  esac
+  temp_root=$(cd "$temp_root" 2>/dev/null && pwd -P) || return 1
+  [ "$dir" = "$temp_root/firstmate-herdr-presentation" ] || return 1
+  mount | awk -v want="$temp_root" '
+    $2 == "on" && $3 == want && $4 == "type" &&
+      $0 ~ /[(,]noacl([,)]|$)/ &&
+      $0 ~ /[(,]usertemp([,)]|$)/ { found = 1 }
+    END { exit !found }
+  '
+}
+
 fm_backend_herdr_presentation_lock_namespace_valid() {
   local dir=$1 expected_uid owner mode
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   expected_uid=$(id -u 2>/dev/null) || return 1
   owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$dir") || return 1
   mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir") || return 1
-  [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
+  [ "$owner" = "$expected_uid" ] || return 1
+  [ "$mode" = 700 ] || {
+    [ "$mode" = 755 ] \
+      && fm_backend_herdr_presentation_lock_namespace_is_noacl_usertemp "$dir"
+  }
 }
 
 # Resolve the one verified running named-session socket path as an absolute
@@ -699,6 +723,9 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   local socket=$1 sock_dir sock_base
   [ -n "$socket" ] || return 1
+  case "$socket" in
+    [A-Za-z]:[\\/]*) socket=$(cygpath -u "$socket" 2>/dev/null) || return 1 ;;
+  esac
   case "$socket" in
     /*) ;;
     *) return 1 ;;
@@ -1846,6 +1873,64 @@ fm_backend_herdr_workspace_presence_state() {  # <session> <workspace_id>
   esac
 }
 
+# Verify that a present pane still belongs to the exact workspace/tab/task
+# recorded at creation. Herdr IDs can be reused after a named session is
+# recreated, so pane presence alone is never cleanup authority.
+fm_backend_herdr_task_binding_state() {  # <session> <workspace> <tab> <pane> <task-label>
+  local session=$1 workspace=$2 tab=$3 pane=$4 task_label=$5 pane_out tab_out spaces code matches
+  [ -n "$session" ] && [ -n "$workspace" ] && [ -n "$tab" ] \
+    && [ -n "$pane" ] && [ -n "$task_label" ] || { printf 'unknown'; return 0; }
+
+  pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>&1)
+  code=$(printf '%s' "$pane_out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ -n "$code" ]; then
+    [ "$code" = pane_not_found ] && printf 'dead' || printf 'unknown'
+    return 0
+  fi
+  if ! printf '%s' "$pane_out" | jq -e --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+    .result.pane.pane_id == $pane
+    and .result.pane.tab_id == $tab
+    and .result.pane.workspace_id == $workspace
+  ' >/dev/null 2>&1; then
+    if printf '%s' "$pane_out" | jq -e '.result.pane | type == "object"' >/dev/null 2>&1; then
+      printf 'mismatch'
+    else
+      printf 'unknown'
+    fi
+    return 0
+  fi
+
+  tab_out=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>&1)
+  code=$(printf '%s' "$tab_out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ -n "$code" ]; then
+    case "$code" in tab_not_found) printf 'mismatch' ;; *) printf 'unknown' ;; esac
+    return 0
+  fi
+  if ! printf '%s' "$tab_out" | jq -e --arg tab "$tab" --arg workspace "$workspace" --arg label "$task_label" '
+    .result.tab.tab_id == $tab
+    and .result.tab.workspace_id == $workspace
+    and .result.tab.label == $label
+  ' >/dev/null 2>&1; then
+    if printf '%s' "$tab_out" | jq -e '.result.tab | type == "object"' >/dev/null 2>&1; then
+      printf 'mismatch'
+    else
+      printf 'unknown'
+    fi
+    return 0
+  fi
+
+  spaces=$(fm_backend_herdr_cli "$session" workspace list 2>&1)
+  matches=$(printf '%s' "$spaces" | jq -r --arg workspace "$workspace" '
+    select((.result.workspaces | type) == "array")
+    | [.result.workspaces[] | select(.workspace_id == $workspace)] | length
+  ' 2>/dev/null) || matches=
+  case "$matches" in
+    1) printf 'match' ;;
+    0|[2-9]|[1-9][0-9]*) printf 'mismatch' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_herdr_explicit_close_pane_confirmed: issue one explicit close and
 # succeed only when a structured follow-up proves the exact pane is gone.
 fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
@@ -1990,8 +2075,14 @@ fm_backend_herdr_agent_alive() {  # <target>
 # the safety argument). An ADOPTED workspace's caller always passes an empty
 # 4th arg, so this function never even queries for a prune candidate in that
 # case. Echoes "<tab_id> <pane_id>" on success.
+# Creation-state globals are consumed by fm-spawn after direct function calls.
+# shellcheck disable=SC2034
 fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_tab_id>
   local container=$1 label=$2 cwd=$3 seeded_tab_id=${4:-} session wsid list dup_tabs dup dup_pane dup_tab_ids out tab_id pane_id remaining_dup_tabs
+  FM_BACKEND_CREATE_OCCURRED=0
+  FM_BACKEND_CREATED_TARGET=
+  FM_BACKEND_CREATED_HERDR_TAB_ID=
+  FM_BACKEND_CREATED_HERDR_PANE_ID=
   session=${container%%:*}
   wsid=${container#*:}
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -2014,8 +2105,12 @@ $dup_tabs
 EOF
   fi
   out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
+  FM_BACKEND_CREATE_OCCURRED=1
   tab_id=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   pane_id=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  FM_BACKEND_CREATED_HERDR_TAB_ID=$tab_id
+  FM_BACKEND_CREATED_HERDR_PANE_ID=$pane_id
+  [ -z "$pane_id" ] || FM_BACKEND_CREATED_TARGET="$session:$pane_id"
   if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
     echo "error: could not parse tab/pane id from herdr tab create output" >&2
     return 1
@@ -2524,10 +2619,69 @@ fm_backend_herdr_target_ready() {  # <target>
 # `.result.pane.foreground_cwd` tracks the ACTUALLY RUNNING foreground
 # process's cwd instead, which is what changes when `treehouse get` enters its
 # worktree subshell - confirmed live against a real treehouse acquisition.
+# Native Windows Herdr omits `foreground_cwd`, and its drive-absolute `cwd`
+# follows the top-level PowerShell but not the cmd.exe subshell entered by
+# `treehouse get`. In that platform-specific shape, try marked PowerShell and
+# cmd.exe cwd probes and read the last complete path block from the pane.
 fm_backend_herdr_current_path() {  # <target>
+  local path out line probe marker_begin marker_end in_block chunk last="" nonce
+  local probe_index=0 attempt attempts=${FM_BACKEND_HERDR_CWD_PROBE_ATTEMPTS:-10}
+  local delay=${FM_BACKEND_HERDR_CWD_PROBE_DELAY:-0.1}
+  case "$attempts" in ''|*[!0-9]*|0) attempts=10 ;; esac
   fm_backend_herdr_target_ready "$1" || return 0
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
-    | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+  path=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+    | jq -r '.result.pane | (.foreground_cwd // (.cwd | strings | select(test("^[A-Za-z]:[\\\\/]")))) // empty' 2>/dev/null)
+  case "$path" in
+    [A-Za-z]:[\\/]*)
+      for probe in powershell cmd; do
+        probe_index=$((probe_index + 1))
+        nonce="${BASHPID:-$$}_${RANDOM:-0}_${probe_index}"
+        marker_begin="__FM_HERDR_CWD_BEGIN_${nonce}__"
+        marker_end="__FM_HERDR_CWD_END_${nonce}__"
+        case "$probe" in
+          powershell) probe="echo $marker_begin; pwd; echo $marker_end" ;;
+          cmd) probe="echo $marker_begin & cd & echo $marker_end" ;;
+        esac
+        fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" \
+          "$probe" >/dev/null 2>&1 || return 0
+        for ((attempt = 0; attempt < attempts; attempt += 1)); do
+          out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" \
+            --source recent --lines 200 2>/dev/null) || return 0
+          in_block=0
+          chunk=""
+          while IFS= read -r line; do
+            line=${line%$'\r'}
+            if [ "$line" = "$marker_begin" ]; then
+              in_block=1
+              chunk=""
+              continue
+            fi
+            if [ "$line" = "$marker_end" ]; then
+              case "$chunk" in /*|[A-Za-z]:[\\/]*) last=$chunk ;; esac
+              in_block=0
+              continue
+            fi
+            [ "$in_block" -eq 1 ] || continue
+            case "$line" in ''|Path|---*) continue ;; esac
+            if [ -n "$chunk" ]; then
+              chunk="$chunk$line"
+            else
+              case "$line" in /*|[A-Za-z]:[\\/]*) chunk=$line ;; esac
+            fi
+          done <<EOF
+$out
+EOF
+          [ -z "$last" ] || break 2
+          [ "$attempt" -ge $((attempts - 1)) ] || sleep "$delay"
+        done
+      done
+      case "$last" in
+        [A-Za-z]:[\\/]*) cygpath -u "$last" 2>/dev/null || printf '%s\n' "$last" ;;
+        *) printf '%s\n' "$last" ;;
+      esac
+      ;;
+    *) printf '%s\n' "$path" ;;
+  esac
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,
@@ -2655,7 +2809,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
   verdict=$(fm_composer_classify_screen "$caps" "$cap")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || [ -z "$identity" ]; then
-      identity=probe-absent
+      identity='probe-absent'
     fi
     verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
@@ -2796,6 +2950,22 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
   done
+}
+
+# Tri-state endpoint probe for destructive cleanup. Only Herdr's typed
+# pane_not_found response proves absence; malformed, unreachable, or other
+# error responses stay unknown.
+fm_backend_herdr_target_state() {  # <target> -> present|absent|unknown
+  local out code pane_id
+  fm_backend_herdr_parse_target "$1" || { printf 'unknown'; return 0; }
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>&1)
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ -n "$code" ]; then
+    [ "$code" = pane_not_found ] && printf 'absent' || printf 'unknown'
+    return 0
+  fi
+  pane_id=$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
+  [ "$pane_id" = "$FM_BACKEND_HERDR_PANE" ] && printf 'present' || printf 'unknown'
 }
 
 # fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors

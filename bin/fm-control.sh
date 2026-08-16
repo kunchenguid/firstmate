@@ -126,6 +126,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-host-root-lib.sh
+. "$SCRIPT_DIR/fm-host-root-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -283,10 +285,13 @@ if [ -n "$(fm_meta_get "$META" remote_host)" ]; then
   die "task $ID is a remotely placed secondmate on $(fm_meta_get "$META" remote_host); its agent runs outside this home, so no lifecycle action here could verify that it interrupted, stopped, or came back. Drive its lifecycle on that host, and reconcile it through the secondmate recovery path rather than this plane"
 fi
 
+fm_host_root_assert_task_cwd "$FM_ROOT" "$META" || exit $?
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 LABEL="fm-$ID"
+TMUX_WINDOW_MARKER=$(fm_meta_get "$META" tmux_window_marker)
+TMUX_SOCKET_PATH=$(fm_meta_get "$META" tmux_socket_path)
 RECORDED_HARNESS=$(fm_meta_get "$META" harness)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
@@ -298,11 +303,13 @@ fm_control_harness_supported "$HARNESS" \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
 
 fm_backend_validate "$BACKEND" || exit 1
+fm_backend_assert_recorded_endpoint_identity "$META" || exit $?
+[ "$BACKEND" != herdr ] || fm_backend_assert_recorded_herdr_endpoint_identity "$META" "$ID" || exit $?
 
 # --- shared helpers ---------------------------------------------------------
 
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T"
+  fm_backend_agent_state "$BACKEND" "$T" "$TMUX_WINDOW_MARKER" "$TMUX_SOCKET_PATH"
 }
 
 busy_verdict() {
@@ -335,6 +342,14 @@ require_state_verified_backend() {  # <verb>
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
 }
 
+require_recorded_endpoint_identity() {
+  fm_backend_assert_recorded_endpoint_identity "$META" \
+    || die "task $ID's recorded endpoint identity no longer matches the live endpoint; no lifecycle command was delivered"
+  [ "$BACKEND" != herdr ] \
+    || fm_backend_assert_recorded_herdr_endpoint_identity "$META" "$ID" \
+    || die "task $ID's recorded Herdr endpoint identity no longer matches the live endpoint; no lifecycle command was delivered"
+}
+
 # send_interrupt_keys: deliver the harness's interrupt key the verified number
 # of times, then the composer-clear key when the adapter needs one. Refuses
 # before sending anything when the backend cannot deliver either key, because
@@ -342,6 +357,7 @@ require_state_verified_backend() {  # <verb>
 # composer would make the next submitted line concatenate onto it.
 send_interrupt_keys() {
   local key repeat clear i=0
+  require_recorded_endpoint_identity
   key=$(fm_control_interrupt_key "$HARNESS")
   repeat=$(fm_control_interrupt_repeat "$HARNESS")
   clear=$(fm_control_interrupt_clear_key "$HARNESS")
@@ -469,6 +485,7 @@ do_exit() {
   # authoritative proof is the agent-state wait below. The retried Enter still
   # matters, because a slash command opens a completion popup on some TUIs that
   # swallows the first Enter.
+  require_recorded_endpoint_identity
   verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \

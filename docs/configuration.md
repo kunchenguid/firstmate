@@ -69,14 +69,17 @@ A cmux spawn additionally version-gates against the installed `cmux` binary's ve
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
+A host-root tmux task additionally records `tmux_window_marker=` and `tmux_socket_path=` so lifecycle operations stay bound to the task-owned window on its creating tmux server.
+That socket-bound identity is compatibility and cleanup-safety hardening, not host-root acceptance evidence.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
 Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.
-A selector containing `:` is passed through as an explicit backend endpoint escape hatch.
-Otherwise an exact task id matching `state/<id>.meta` wins before the legacy `fm-<id>` label fallback, so task ids that themselves start with `fm-` route to their own metadata instead of being stripped.
+An exact task id matching `state/<id>.meta` wins before the legacy `fm-<id>` label fallback, so task ids that themselves start with `fm-` route to their own metadata instead of being stripped.
+Before external fallback, an exact recorded target or equivalent explicit tmux handle, including a colon-containing host-root alias, routes through its owning metadata.
 A metadata-routed selector returns the recorded backend target (`terminal=` for Orca, otherwise `window=`), and matching explicit targets can still recover the recorded backend when metadata contains the same endpoint.
+Only an unmatched selector containing `:` passes through as an explicit backend endpoint escape hatch.
 Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
 These five sentences are the single owner of the task-selector vocabulary; backend guides and other documents point here instead of restating the resolution order.
 `fm-teardown.sh <id>` takes a task id directly and validates the complete metadata-only endpoint identity before any runtime dispatch or cleanup mutation.
@@ -205,6 +208,52 @@ The full zellij home label also includes a short hash of the resolved `FM_ROOT` 
 For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
 
+## Host-root mode (FM_HOST_ROOT)
+
+`FM_HOST_ROOT` is an optional physical instruction root and startup cwd for a primary FirstMate supervisor.
+Unset or empty preserves the normal behavior in which FirstMate runs from its tracked code root.
+For Pi, run `bin/fm-host-setup.sh install <host-root> --backend herdr` once, then run plain `pi` from that exact physical host root.
+Use `--home <firstmate-home>` when operational state belongs outside this tracked FirstMate root, and use the script's `status` and `uninstall` actions to inspect or remove the managed activation.
+The setup writes only one owned global Pi extension under `${PI_CODING_AGENT_DIR:-~/.pi/agent}`, never edits the host, and refuses unmanaged target files or conflicting ambient FirstMate root, home, host, or backend variables.
+For a primary Pi session at the configured host, the global extension sets the four root/backend variables, loads FirstMate's existing Pi guard and watcher extensions, exposes FirstMate's internal skills, appends the supervisor policy after the host context, and displays `FirstMate active` in Pi's status line.
+Outside that exact physical host, or in a host-root worker carrying `FM_TARGET_WORKTREE`, it contributes no environment, policy, skills, tools, or lifecycle behavior.
+The host's normal Pi project trust decision still controls its project-local instructions, skills, and extensions.
+Other harness integrations must provide the same additive policy and adapter loading before setting `FM_HOST_ROOT`; setting the variable alone is still only the low-level runtime contract.
+When set, the value must resolve to an existing directory containing the cross-harness `AGENTS.md` instruction surface, it must not physically overlap `FM_ROOT` or `FM_HOME`, and the supervisor must run with its physical cwd at that directory.
+`bin/fm-session-start.sh` validates that contract before lock acquisition or any bootstrap mutation.
+
+Host mode separates four roots:
+
+- `FM_ROOT` is the tracked FirstMate code, skill, documentation, and script root.
+- `FM_HOME` is the private FirstMate operational home that owns `data/`, `state/`, `config/`, and `projects/`.
+- `FM_HOST_ROOT` is the host repository whose instructions, native lifecycle, and cwd remain authoritative for the primary supervisor.
+- `FM_TARGET_WORKTREE` is the per-task isolated target repository and ordinary worker cwd where target instructions, code changes, Git operations, tests, builds, forge operations, and no-mistakes run.
+
+The physical target worktree must differ from the target project's primary checkout and must not overlap `FM_HOST_ROOT`.
+Ordinary ship and scout endpoints acquire and validate their isolated target worktree, retain it as `worktree=` metadata, and launch the harness there.
+An overlap refusal stops the endpoint but never returns or removes the overlapping path automatically.
+An unconfirmed final launch submission retains the endpoint, worktree, task safeguards, and metadata because the worker may already be running.
+The child receives exact `FM_HOST_ROOT` and `FM_TARGET_WORKTREE` values, while the worker stays rooted in the target and supervisor task actions bind to the recorded physical `host_root=` before reading or changing task data.
+For legacy task metadata without `host_root=`, an enabled host-root supervisor instead binds those actions to its validated physical `FM_HOST_ROOT` cwd.
+Review, merge, evidence, and teardown continue to use the recorded `worktree=` path.
+Teardown stops and verifies the recorded worker endpoint before changing or returning its isolated copy.
+Before deleting a host-root task's volatile metadata, teardown persists its recorded host owner with the task data so post-teardown decision actions remain bound to the same physical host.
+Every non-forced host-root ship teardown repeats worktree safety checks after the endpoint is confirmed stopped and before branch deletion or worktree return.
+Host-root briefs carry `<!-- firstmate-execution-mode: host-root -->`, require the worker to verify its target cwd and read applicable target instructions, and keep the unrelated host context out of the worker session.
+Spawn rejects a legacy brief without that marker rather than weakening the contract silently.
+Host-root ship brief generation and spawn support `no-mistakes` and `direct-PR` delivery but reject `local-only` because its guarded landing path changes the target project's primary checkout.
+Host-root scouts may inspect `local-only` targets and record no delivery posture; promotion requires an explicit mode, rejects `local-only`, and replaces any legacy posture fields with that explicit contract.
+
+Harness integration is additive for the primary supervisor and target-native for ordinary workers.
+The [`harness-adapters` skill](../.agents/skills/harness-adapters/SKILL.md#host-root-task-integration) owns each harness's task-signal shape, and each signal is installed once.
+The host repository's lifecycle hooks remain limited to the supervisor session; target project hooks load from the worker cwd.
+Host-root ordinary tasks reject raw launch commands because an unverified command cannot guarantee the required task completion safeguard.
+
+Secondmates are intentionally outside host-root mode.
+Creating or relaunching a secondmate from a host-mode primary still requires the physical host cwd before brief or spawn mutation.
+A secondmate still launches and relaunches from its isolated FirstMate home, receives neither `host_root=` metadata nor host-root brief semantics, and every such launch explicitly clears inherited `FM_HOST_ROOT` and `FM_TARGET_WORKTREE`.
+A secondmate's own ordinary crews can opt in only through that home's own independently configured primary environment; the main home's roots never leak across the boundary.
+
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, kimi, and cursor are empirically verified for crewmate and secondmate launches; [README requirements](../README.md#requirements) own the set supported for the primary session.
@@ -239,8 +288,9 @@ When `config/crew-dispatch.json` exists, crewmate and scout spawns require an ex
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
 `config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
-For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
-For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a per-task `.fm-kimi-turnend` pointer in the worktree, and records the matching private registry token for teardown.
+For Grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and records a private registry token for teardown.
+For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install` and records the same kind of private registry token.
+The [`harness-adapters` skill](../.agents/skills/harness-adapters/SKILL.md#host-root-task-integration) owns the default worktree-pointer and host-root launch-token delivery split for both harnesses.
 Kimi continues to use the captain's normal Kimi home, including the existing config, skills, and memory; Firstmate does not create an isolated Kimi home.
 The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
@@ -512,6 +562,8 @@ Runtime tuning via environment variables (defaults shown):
 
 ```sh
 FM_HOME=                 # optional operational home for most scripts, unset means this repo root; fm-send requires it explicitly
+FM_HOST_ROOT=            # optional physical host instruction root and primary-supervisor cwd; unset preserves normal behavior
+FM_TARGET_WORKTREE=      # spawn-owned exact isolated target path and ordinary-worker cwd; secondmates clear it
 FM_ROOT_OVERRIDE=        # override firstmate repo root, tangle-guard target, and zellij/cmux home-title hash; also legacy whole-root override when FM_HOME is unset
 FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests

@@ -56,6 +56,12 @@ make_tmux_stub() {  # <dir>
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
+socket=ambient
+if [ "${1:-}" = -S ]; then
+  socket=$2
+  shift 2
+fi
+[ -z "${FM_FAKE_TMUX_SCOPE_LOG:-}" ] || printf '%s\t%s\n' "$socket" "$*" >> "$FM_FAKE_TMUX_SCOPE_LOG"
 case "${1:-}" in
   send-keys)
     shift
@@ -111,6 +117,15 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  list-panes)
+    marker=$(cat "$D/marker" 2>/dev/null || true)
+    case "$*" in
+      *'#{pane_id}|#{window_id}'*)
+        printf '%%1|@1|fmses:fm-rlhost|fmses:fm-rlhost.0|fmses:1|fmses:1.0|%s\n' "$marker"
+        ;;
+      *) printf '@1|%s\n' "$marker" ;;
+    esac
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -178,6 +193,7 @@ run_spawn() {  # <case-dir> <args...>
   local dir=$1; shift
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_FAKE_TMUX_SCOPE_LOG="${FM_FAKE_TMUX_SCOPE_LOG:-}" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -603,9 +619,12 @@ test_turnend_auth_paths_are_owned_by_the_control_adapter() {
 }
 
 test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
-  local dir home out rc
+  local dir home host out rc
   dir=$(new_case smpin sm3)
   home="$dir/home"
+  host="$dir/ambient-host"
+  mkdir -p "$host"
+  printf '# host\n' > "$host/AGENTS.md"
   mkdir -p "$home/config"
   printf 'codex some-model high\n' > "$home/config/secondmate-harness"
   mkdir -p "$home/data/sm3"
@@ -630,7 +649,7 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   printf '%s\n' "fm-sm3" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
-  out=$(run_control "$dir" sm3 relaunch); rc=$?
+  out=$(cd "$host" && FM_HOST_ROOT="$host" FM_TARGET_WORKTREE=/ambient-target run_control "$dir" sm3 relaunch); rc=$?
   expect_code 0 "$rc" "a configured secondmate harness should relaunch"$'\n'"$out"
   [ "$(journal_field "$dir" sm3 to_harness)" = codex ] \
     || fail "a secondmate relaunch should pick up the configured harness pin, got '$(journal_field "$dir" sm3 to_harness)'"
@@ -638,8 +657,12 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
     || fail "the configured model token should come with the pin"
   [ "$(journal_field "$dir" sm3 to_effort)" = high ] \
     || fail "the configured effort token should come with the pin"
+  ! grep -q '^host_root=' "$home/state/sm3.meta" \
+    || fail "a secondmate relaunch inherited ambient host ownership without a durable host_root"
+  assert_grep 'FM_HOST_ROOT= FM_TARGET_WORKTREE=' "$dir/fake/literal" \
+    "a secondmate relaunch did not clear the host primary's ambient roots"
   assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
-  pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
+  pass "fm-control relaunch: durable metadata overrides ambient host mode while the configured harness pin is re-resolved"
 }
 
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
@@ -1262,6 +1285,63 @@ test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
 
 # --- 6. fm-spawn --relaunch's own refusals -----------------------------------
 
+test_spawn_relaunch_adopts_recorded_host_root_and_tmux_identity() {
+  local dir host socket scope out rc key value wrong fake_root before after
+  dir=$(new_case host-root-relaunch rlhost)
+  add_ship_task "$dir" rlhost claude
+  host="$dir/host"
+  socket="$dir/recorded.sock"
+  scope="$dir/tmux-scope.log"
+  mkdir -p "$host"
+  printf '# Host instructions\n' > "$host/AGENTS.md"
+  sed -i.bak 's/^window=.*/window=@1/' "$dir/home/state/rlhost.meta"
+  rm -f "$dir/home/state/rlhost.meta.bak"
+  printf 'host_root=%s\ntmux_window_marker=owned-marker\ntmux_socket_path=%s\n' \
+    "$host" "$socket" >> "$dir/home/state/rlhost.meta"
+  printf 'owned-marker' > "$dir/fake/marker"
+  printf 'zsh' > "$dir/fake/command"
+  printf '<!-- firstmate-execution-mode: host-root -->\n' >> "$dir/home/data/rlhost/brief.md"
+  : > "$scope"
+
+  wrong="$dir/wrong-host"
+  fake_root="$dir/guard-root"
+  mkdir -p "$wrong" "$fake_root/bin"
+  cat > "$fake_root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_GUARD_MUTATION"
+SH
+  chmod +x "$fake_root/bin/fm-guard.sh"
+  before=$(cd "$dir/home" && { find . -mindepth 1 -print | sort; find . -type f -exec cksum {} \; | sort; })
+  out=$(cd "$wrong" && env -u FM_HOST_ROOT PATH="$dir/fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$fake_root" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_GUARD_MUTATION="$dir/guard-ran" "$SPAWN" rlhost --relaunch --harness claude 2>&1); rc=$?
+  expect_code 2 "$rc" "wrong-cwd host-root relaunch should fail before mutation"
+  assert_contains "$out" 'requires the recorded host root cwd' \
+    "wrong-cwd relaunch did not identify its recorded host authority"
+  assert_absent "$dir/guard-ran" "wrong-cwd relaunch ran the supervision guard before host validation"
+  after=$(cd "$dir/home" && { find . -mindepth 1 -print | sort; find . -type f -exec cksum {} \; | sort; })
+  [ "$before" = "$after" ] || fail "wrong-cwd relaunch mutated the home before rejecting host authority"
+
+  out=$(cd "$host" && env -u FM_HOST_ROOT PATH="$dir/fakebin:$PATH" \
+    FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" FM_SPAWN_NO_GUARD=1 \
+    FM_FAKE_TMUX_SCOPE_LOG="$scope" GROK_HOME="$dir/grokhome" \
+    "$SPAWN" rlhost --relaunch --harness claude 2>&1); rc=$?
+  expect_code 0 "$rc" "direct host-root relaunch should adopt its retained record"$'\n'"$out"
+  assert_contains "$out" "spawned rlhost" "host-root relaunch did not launch the replacement"
+  for key in host_root tmux_window_marker tmux_socket_path; do
+    value=$(meta_field "$dir" rlhost "$key")
+    case "$key" in
+      host_root) [ "$value" = "$host" ] || fail "host-root relaunch changed its recorded owner" ;;
+      tmux_window_marker) [ "$value" = owned-marker ] || fail "host-root relaunch changed its tmux marker" ;;
+      tmux_socket_path) [ "$value" = "$socket" ] || fail "host-root relaunch changed its tmux socket" ;;
+    esac
+  done
+  while IFS=$'\t' read -r value _; do
+    [ "$value" = "$socket" ] || fail "host-root relaunch escaped to tmux socket '$value'"
+  done < "$scope"
+  pass "fm-spawn relaunch: retained host-root tasks reuse their recorded owner, endpoint, marker, and socket"
+}
+
 test_spawn_relaunch_refuses_a_live_agent() {
   local dir out rc
   dir=$(new_case live rl15)
@@ -1296,7 +1376,7 @@ test_spawn_relaunch_refuses_an_unrecorded_task() {
   add_ship_task "$dir" rl17 claude
   out=$(run_spawn "$dir" nosuchtask --relaunch); rc=$?
   expect_code 1 "$rc" "an unrecorded task should refuse"
-  assert_contains "$out" "needs an existing task record" "the refusal should name the missing record"
+  assert_contains "$out" "needs an existing regular task record" "the refusal should name the missing record"
   pass "fm-spawn --relaunch: an unrecorded task is refused"
 }
 
@@ -1354,6 +1434,7 @@ test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
+test_spawn_relaunch_adopts_recorded_host_root_and_tmux_identity
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task

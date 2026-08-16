@@ -33,6 +33,14 @@ The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and
 Those script headers own release assets, checksums, download bounds, and post-install gates.
 Real harness credential tests remain opt-in rather than part of default CI.
 
+## Native Windows
+
+Herdr is the verified native-Windows runtime backend.
+Run Firstmate commands from GNU Bash with `cygpath` available so drive-absolute Herdr paths can be normalized for shell helpers.
+On Windows, Herdr can omit `foreground_cwd` and keep its top-level `cwd` bound to PowerShell while Treehouse enters a `cmd.exe` subshell.
+The adapter therefore probes the live nested cwd before starting FirstMate's POSIX launch contract through Git Bash instead of typing that contract into `cmd.exe`.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#host-root-task-routing) owns the dated native-Windows runtime evidence.
+
 ## Watching and task containers
 
 The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.
@@ -325,6 +333,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 ```sh
 tests/fm-backend-herdr.test.sh
 tests/fm-backend-herdr-smoke.test.sh
+tests/fm-backend-herdr-host-root-e2e.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
@@ -339,3 +348,4 @@ tests/fm-afk-pi-herdr-return-e2e.test.sh
 
 Real Herdr tests use the named lab helper and default-session tripwire.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) records the active version, CLI, projection, event, and lifecycle evidence without task-specific chronology.
+`tests/fm-host-root-mode.test.sh` covers the backend-independent host-root contract with fake adapters.

@@ -2,6 +2,8 @@
 # Render the primary-harness supervision operating block for session start and
 # the short repair line used by guards and turn-end hooks.
 set -eu
+# Rendered paths are literal replacement data; never expand '&' as the matched placeholder.
+shopt -u patsub_replacement 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -9,6 +11,9 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$REPO_ROOT}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DOC_DIR="$REPO_ROOT/docs/supervision-protocols"
+# shellcheck source=bin/fm-host-root-lib.sh
+. "$SCRIPT_DIR/fm-host-root-lib.sh"
+FM_BIN_PREFIX=bin
 
 HARNESS=
 READ_ONLY=0
@@ -98,6 +103,7 @@ shell_quote() {
   printf "'"
 }
 
+fm_host_root_enabled && FM_BIN_PREFIX=$(shell_quote "$FM_ROOT/bin")
 x_mode_env_sh=$(shell_quote "$x_mode_env")
 
 if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
@@ -111,6 +117,9 @@ render_snippet() {
     line=${line//__FM_PI_TURNEND_EXT__/$pi_turnend_ext}
     line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
     line=${line//__FM_X_MODE_ENV__/$x_mode_env}
+    if fm_host_root_enabled; then
+      line=${line//bin\/fm-/$FM_BIN_PREFIX/fm-}
+    fi
     printf '%s\n' "$line"
   done < "$SNIPPET"
 }
@@ -138,16 +147,16 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.'
       ;;
     codex)
-      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
+      printf '%srepair missing watcher supervision with a foreground checkpoint: %s/fm-watch-checkpoint.sh --seconds %s.\n' "$prefix" "$FM_BIN_PREFIX" "$checkpoint_seconds"
       ;;
     pi|pi-signed)
       printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extensions are not loaded.'
       ;;
     opencode)
-      printf '%s%s\n' "$prefix" 'repair missing watcher supervision by letting the OpenCode TUI plugin arm after idle; use bin/fm-watch-arm.sh only as a manual recovery probe if the plugin reports failure.'
+      printf '%srepair missing watcher supervision by letting the OpenCode TUI plugin arm after idle; use %s/fm-watch-arm.sh only as a manual recovery probe if the plugin reports failure.\n' "$prefix" "$FM_BIN_PREFIX"
       ;;
     grok)
-      printf '%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own Grok tracked background task, never shell &.'
+      printf '%srepair missing watcher supervision with %s/fm-watch-arm.sh as its own Grok tracked background task, never shell &.\n' "$prefix" "$FM_BIN_PREFIX"
       ;;
     cursor)
       printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
@@ -161,10 +170,10 @@ repair_line() {
 ordinary_wake_line() {
   case "$HARNESS" in
     claude)
-      printf '%s\n' '- Ordinary wake: the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      printf '%s%s%s\n' '- Ordinary wake: the Stop-owned auto-arm (' "$FM_BIN_PREFIX" '/fm-claude-stop-autoarm.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     codex)
-      printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
+      printf '%s%s%s\n' '- Ordinary wake: take the next foreground ' "$FM_BIN_PREFIX" '/fm-watch-checkpoint.sh checkpoint as directed below.'
       ;;
     pi|pi-signed)
       printf '%s\n' '- Ordinary wake: the Pi extension already owns watcher continuity; do not arm another cycle.'
@@ -173,7 +182,7 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: the OpenCode TUI plugin already owns watcher continuity; do not arm manually.'
       ;;
     grok)
-      printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Grok tracked background task as directed below.'
+      printf '%s%s%s\n' '- Ordinary wake: re-arm exactly one ' "$FM_BIN_PREFIX" '/fm-watch-arm.sh Grok tracked background task as directed below.'
       ;;
     cursor)
       printf '%s\n' '- Ordinary wake: the stop-hook park (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'

@@ -146,7 +146,7 @@ Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `
 
 ### Cleanup endpoint identity
 
-The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
+The cleanup identity boundary was validated on 2026-07-29 with tmux 3.7b and metadata fixtures for every supported backend.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -161,10 +161,10 @@ Bounded output from the incident regression:
 
 ```text
 ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
-ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses
+ok - cleanup identity: valid endpoints pass while ambiguous host ownership and empty backend targets refuse
 ok - tmux backend: direct empty target returns nonzero without invoking tmux
 ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
-ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and valid cleanup removes only the exact target
+ok - fm-teardown: exact tmux cleanup preserves invalid and prefix-matched neighbors while removing only the recorded target
 ```
 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
@@ -205,10 +205,62 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### Host-root task routing
+
+The host-root path was verified on 2026-08-01 with Herdr 0.7.5 and Treehouse 2.0.0 through the real isolated acceptance.
+It was reverified natively on Windows on 2026-08-03 with Herdr 0.7.5-preview.2026-07-29-44b3adb12552 and Treehouse 2.1.1 through GNU Bash 5.3.9 and Git for Windows 2.54.0.
+The test's supervisor-side spawn shape was:
+
+```sh
+cd "$host"
+PATH="$fakebin:$PATH" \
+FM_SPAWN_NO_GUARD=1 \
+FM_ROOT_OVERRIDE="$firstmate_root" \
+FM_HOME="$firstmate_home" \
+FM_HOST_ROOT="$host" \
+  "$firstmate_root/bin/fm-spawn.sh" "$task_id" "$target_primary" \
+    --harness codex --backend herdr --scout
+```
+
+The worker observed its physical cwd, target Git root, and `FM_TARGET_WORKTREE` all equal to the detached isolated target worktree, distinct from the clean primary checkout and `FM_HOST_ROOT`.
+It read the target `AGENTS.md` natively from that cwd and wrote the scout report outside both repositories.
+After the lifecycle gate, `bin/fm-teardown.sh` closed the exact Herdr pane and returned the isolated worktree.
+The supervisor remained rooted in the host repository, which stayed clean and did not enter the worker context.
+[`supervision.md`](supervision.md#host-root-task-integration) owns the completion-signal and decision-inventory evidence from this acceptance.
+
+Current entry point and observed output:
+
+```sh
+bash tests/fm-backend-herdr-host-root-e2e.test.sh
+# ok - real Herdr host-root spawn, completion, decision inventory, and teardown
+```
+
+The native-Windows version probes and real-runtime entry points were:
+
+```sh
+herdr --version
+treehouse --version
+bash --version | head -1
+git --version
+bash tests/fm-backend-herdr-smoke.test.sh
+bash tests/fm-backend-herdr-host-root-e2e.test.sh
+```
+
+Observed bounded output:
+
+```text
+herdr 0.7.5-preview.2026-07-29-44b3adb12552
+v2.1.1
+GNU bash, version 5.3.9(1)-release (x86_64-pc-cygwin)
+git version 2.54.0.windows.1
+ok - real herdr: current_path reads the pane's live cwd
+ok - real Herdr host-root spawn, completion, decision inventory, and teardown
+```
+
 ## Herdr
 
 The compatibility floor is protocol 14.
-The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 protocol 16 and Herdr 0.8.0 protocol 19 on macOS aarch64, while focused Herdr 0.7.5 protocol 17, earlier protocol-16, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
+The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 protocol 16 and Herdr 0.8.0 protocol 19 on macOS aarch64; the native-Windows task-routing verification uses the preview build recorded above. Focused Herdr 0.7.5 protocol 17, earlier protocol-16, protocol-14, and 0.7.3 evidence is retained where it defines current behavior or fallbacks.
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
 Default-on presentation projection has its own floor at Herdr 0.8.0, protocol 19, verified below.
 
@@ -242,6 +294,10 @@ The CLI matrix was checked directly:
 
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
+
+### Host-root acceptance
+
+Current Herdr host-root commands, topology, and output are owned by the shared [host-root task-routing evidence](#host-root-task-routing).
 
 ### Prune and respawn
 

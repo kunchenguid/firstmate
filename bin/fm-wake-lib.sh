@@ -348,6 +348,9 @@ fm_lock_link_owner() {
 
 fm_lock_points_to_owner() {
   local lockdir=$1 ownerdir=$2 actual
+  if [ "$lockdir" = "$ownerdir" ] && [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    return 0
+  fi
   actual=$(readlink "$lockdir" 2>/dev/null) || return 1
   [ "$actual" = "$ownerdir" ]
 }
@@ -404,7 +407,7 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir mypid back
   FM_LOCK_OWNER_DIR=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
@@ -415,7 +418,11 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  # Git Bash otherwise emulates `ln -s` by copying directories when native
+  # symlink creation is unavailable. Force a real symlink attempt so failure
+  # can use the existing direct-directory lock contract instead.
+  if MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ln -s "$ownerdir" "$lockdir" 2>/dev/null \
+    && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0
@@ -425,6 +432,22 @@ fm_lock_try_create() {
     fi
   else
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
+  fi
+  if mkdir "$lockdir" 2>/dev/null; then
+    mypid=${BASHPID:-$$}
+    printf '%s\n' "$mypid" > "$lockdir/pid" 2>/dev/null || {
+      fm_lock_remove_path "$lockdir" || true
+      fm_lock_discard_owner "$ownerdir"
+      return 1
+    }
+    back=$(cat "$lockdir/pid" 2>/dev/null || true)
+    if [ "$back" = "$mypid" ] \
+      && ! fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
+      fm_lock_discard_owner "$ownerdir"
+      FM_LOCK_OWNER_DIR=$lockdir
+      return 0
+    fi
+    fm_lock_remove_path "$lockdir" || true
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
@@ -731,6 +754,12 @@ fm_lock_try_acquire() {
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  fi
+  # A failed create with no lock to contend on is an I/O/path failure, not a
+  # stale owner. Recursing through .steal suffixes here can exhaust Bash when a
+  # lock's parent disappears while a detached worker is still settling.
+  if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    return 1
   fi
 
   # Compare against ${BASHPID:-$$} inline, never via a command substitution:

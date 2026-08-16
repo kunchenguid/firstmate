@@ -179,10 +179,11 @@
 # the digest never runs without the same hard bound and process-group cleanup.
 #
 # Usage: fm-session-start.sh [--reemit] [--source <source>]
-#   Prints the full ordered digest to stdout and always exits 0: this is a
-#   reporting command, not a gate. A lock refusal is reported as a loud
-#   banner inline, never a silent failure or a non-zero exit that would make
-#   an agent skip the rest of the digest.
+#   Prints the full ordered digest to stdout and normally exits 0: this is a
+#   reporting command, not a gate. Explicit host-root mode is the one preflight
+#   exception and exits 2 before mutation when its physical cwd contract fails.
+#   A lock refusal is reported as a loud banner inline, never a silent failure
+#   or a non-zero exit that would make an agent skip the rest of the digest.
 #
 #   --reemit  This process ALREADY took the helm at its own startup and has
 #             only lost its context (a /clear or a compaction). Skip the
@@ -248,6 +249,12 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+# shellcheck source=bin/fm-host-root-lib.sh
+. "$SCRIPT_DIR/fm-host-root-lib.sh"
+# Host ownership must be validated before the bounded child, lock acquisition,
+# or any bootstrap mutation so its preflight exit remains observable to the hook.
+fm_host_root_assert_session_authority "$FM_ROOT" "$STATE" || exit $?
 
 # --- 0. runtime bound ---------------------------------------------------------
 # The ordered stage list is the contract behind the truncation banner: the child
@@ -320,7 +327,6 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
   rm -f "$SESSION_START_STAGE_FILE" 2>/dev/null || true
   exit 0
 fi
-
 PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 
 # shellcheck source=bin/fm-backend.sh
@@ -800,7 +806,8 @@ for meta in "$STATE"/*.meta; do
   target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
-    if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
+    if ( fm_backend_bind_meta_context "$meta" >/dev/null 2>&1 \
+      && fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id" ); then
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
     else
       printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"

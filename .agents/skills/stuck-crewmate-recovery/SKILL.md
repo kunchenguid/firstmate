@@ -36,6 +36,7 @@ Do not sweep another home's endpoints or infer ownership from a matching window 
 
 Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
 Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
+For a host-root task, relaunch the harness from the existing recorded worktree, pass it as `FM_TARGET_WORKTREE`, and retain the recorded physical `host_root=` only as the supervisor authority; [`docs/configuration.md`](../../../docs/configuration.md#host-root-mode-fm_host_root) owns that four-root contract.
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 

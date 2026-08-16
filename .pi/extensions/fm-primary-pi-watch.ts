@@ -46,6 +46,19 @@ type WatchToolRenderContext = {
   isPartial: boolean;
 };
 
+type WakeQueueToken = {
+  seq: string;
+  kind: string;
+  key: string;
+};
+
+type DeferredWake = {
+  cycle: number;
+  message: string;
+  tokens: WakeQueueToken[] | null;
+  recovery?: { generation: string; watcherPid: string };
+};
+
 type SessionGeneration = {
   id: number;
   stopping: boolean;
@@ -54,6 +67,8 @@ type SessionGeneration = {
   retryFailures: number;
   restoring: boolean;
   seq: number;
+  latestActionableCycle: number;
+  pendingWake: DeferredWake | null;
 };
 
 function refreshWatchToolShell(
@@ -194,6 +209,8 @@ function createGeneration(): SessionGeneration {
     retryFailures: 0,
     restoring: false,
     seq: 0,
+    latestActionableCycle: 0,
+    pendingWake: null,
   };
 }
 
@@ -209,6 +226,7 @@ function stopGeneration(generation: SessionGeneration): void {
   generation.stopping = true;
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
   generation.retryTimer = null;
+  generation.pendingWake = null;
   if (generation.child) generation.child.kill("SIGTERM");
   generation.child = null;
 }
@@ -219,7 +237,10 @@ const cleanupOnProcessExit = () => {
 process.once("exit", cleanupOnProcessExit);
 
 export default function (pi: ExtensionAPI) {
+  if (process.env.FM_TARGET_WORKTREE) return;
+
   let generation = createGeneration();
+  let agentActive = false;
   activateGeneration(generation);
 
   let calmPresentation: CalmPresentationState = {
@@ -237,6 +258,46 @@ export default function (pi: ExtensionAPI) {
     calmPresentation.active &&
     !calmPresentation.stockExportRendering &&
     !calmTranscriptClassIsVisible(itemClass);
+
+  function wakeQueueRows(): string[][] | null {
+    const result = spawnSync(
+      "bash",
+      [
+        "-lc",
+        '. "$FM_ROOT_OVERRIDE/bin/fm-wake-lib.sh"; trap \'fm_lock_release "$FM_WAKE_QUEUE_LOCK"\' EXIT; fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"; [ ! -e "$FM_WAKE_QUEUE" ] || cat -- "$FM_WAKE_QUEUE"',
+      ],
+      {
+        cwd: fmRoot,
+        encoding: "utf8",
+        env: { ...process.env, FM_HOME: fmHome, FM_ROOT_OVERRIDE: fmRoot, FM_STATE_OVERRIDE: state },
+      },
+    );
+    if (result.status !== 0 || typeof result.stdout !== "string") return null;
+    return result.stdout
+      .split(/\r?\n/)
+      .map((line: string) => line.split("\t"))
+      .filter((fields: string[]) => fields.length >= 5);
+  }
+
+  function wakeQueueTokens(message: string): WakeQueueToken[] | null {
+    const rows = wakeQueueRows();
+    if (rows === null) return null;
+    const tokens: WakeQueueToken[] = [];
+    for (const fields of rows) {
+      if (fields.slice(4).join("\t") === message) {
+        tokens.push({ seq: fields[1], kind: fields[2], key: fields[3] });
+      }
+    }
+    return tokens;
+  }
+
+  function deferredWakeIsQueued(wake: DeferredWake): boolean {
+    if (wake.tokens === null || wake.tokens.length === 0) return false;
+    const rows = wakeQueueRows();
+    if (rows === null) return false;
+    const keys = new Set(rows.map((fields) => `${fields[1]}\t${fields[2]}\t${fields[3]}`));
+    return wake.tokens.some((token) => keys.has(`${token.seq}\t${token.kind}\t${token.key}`));
+  }
 
   async function sendWake(
     owner: SessionGeneration,
@@ -260,6 +321,28 @@ export default function (pi: ExtensionAPI) {
       );
       if (result.status !== 0) throw new Error("watcher recovery delivery could not be confirmed");
     }
+  }
+
+  async function flushDeferredWake(owner: SessionGeneration): Promise<void> {
+    const wake = owner.pendingWake;
+    owner.pendingWake = null;
+    if (!wake || !generationIsLive(owner) || wake.cycle !== owner.latestActionableCycle) return;
+    if (!deferredWakeIsQueued(wake)) return;
+    await sendWake(owner, wake.message, wake.recovery);
+  }
+
+  async function deliverActionableWake(
+    owner: SessionGeneration,
+    wake: DeferredWake,
+    busyAtClose: boolean,
+  ): Promise<void> {
+    if (!generationIsLive(owner) || wake.cycle !== owner.latestActionableCycle) return;
+    if (!busyAtClose && !agentActive) {
+      await sendWake(owner, wake.message, wake.recovery);
+      return;
+    }
+    owner.pendingWake = wake;
+    if (!agentActive) await flushDeferredWake(owner);
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
@@ -448,6 +531,9 @@ export default function (pi: ExtensionAPI) {
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
+        const busyAtClose = agentActive;
+        const tokens = wakeQueueTokens(classification.message);
+        owner.latestActionableCycle = id;
         owner.retryFailures = 0;
         owner.restoring = true;
         void (async () => {
@@ -455,7 +541,11 @@ export default function (pi: ExtensionAPI) {
           if (generationIsLive(owner)) owner.restoring = false;
           if (!generationIsLive(owner)) return;
           const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
-          await sendWake(owner, message, restoration.recovery);
+          await deliverActionableWake(
+            owner,
+            { cycle: id, message, tokens, recovery: restoration.recovery },
+            busyAtClose,
+          );
         })().catch(() => {
         });
         return;
@@ -479,12 +569,21 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  pi.on?.("agent_start", () => {
+    agentActive = true;
+  });
+  pi.on?.("agent_settled", async () => {
+    agentActive = false;
+    await flushDeferredWake(generation);
+  });
   pi.on?.("session_start", () => {
     if (generation.stopping) generation = createGeneration();
+    agentActive = false;
     activateGeneration(generation);
     markLoaded();
   });
   pi.on?.("session_shutdown", () => {
+    agentActive = false;
     stopGeneration(generation);
   });
 

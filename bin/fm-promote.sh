@@ -12,6 +12,7 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
+# Host-root tasks bind to their recorded physical host cwd before guard or metadata mutation.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
 set -eu
 
@@ -19,6 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-host-root-lib.sh
+. "$SCRIPT_DIR/fm-host-root-lib.sh"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -99,13 +102,19 @@ fm_lock_try_acquire "$CONTROL_LOCK" || {
   exit 1
 }
 CONTROL_LOCK_HELD=1
-"$FM_ROOT/bin/fm-guard.sh" || true
 META="$STATE/$ID.meta"
 [ -d "$STATE" ] || { echo "error: state dir not found: $STATE" >&2; exit 1; }
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+fm_host_root_assert_task_cwd "$FM_ROOT" "$META" || exit $?
+if grep -q '^host_root=.' "$META" && [ "$MODE" = local-only ]; then
+  echo "error: host-root mode does not support promoting local-only scout $ID" >&2
+  exit 1
+fi
+# The recorded host binding is established before this guard can repair state.
+"$FM_ROOT/bin/fm-guard.sh" || true
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
@@ -121,5 +130,13 @@ fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
 HOME_Q=$(printf '%q' "$FM_HOME")
+SEND=bin/fm-send.sh
+SHIP_INSTRUCTIONS="review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done"
+if grep -q '^host_root=.' "$META"; then
+  FM_ROOT_REAL=$(cd "$FM_ROOT" && pwd -P)
+  SEND=$(fm_host_root_shell_quote "$FM_ROOT_REAL/bin/fm-send.sh")
+  # shellcheck disable=SC2016  # These variables are literal worker instructions.
+  SHIP_INSTRUCTIONS='review scratch state with git -C "$FM_TARGET_WORKTREE" status and git -C "$FM_TARGET_WORKTREE" log; reset "$FM_TARGET_WORKTREE" to a clean default-branch base using git -C "$FM_TARGET_WORKTREE"; carry over only intended fix changes under "$FM_TARGET_WORKTREE"; create branch fm/'"$ID"' with git -C "$FM_TARGET_WORKTREE" checkout -b fm/'"$ID"'; implement under "$FM_TARGET_WORKTREE"; run every remaining Git command with git -C "$FM_TARGET_WORKTREE" and every test, build, and validation command through (cd "$FM_TARGET_WORKTREE" && ...); report done'
+fi
 echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
-echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID '<ship instructions for mode=$MODE: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/$ID; implement; report done>'"
+echo "next: FM_HOME=$HOME_Q $SEND fm-$ID '<ship instructions for mode=$MODE: $SHIP_INSTRUCTIONS>'"

@@ -8,9 +8,9 @@
 # marked, or otherwise surprising config is refused without a config write.
 #
 # The installed Stop hook always exits 0 and stays silent. It reads cwd from the
-# hook payload, checks for a .fm-kimi-turnend pointer before registry work, and
-# touches a task turn-end marker only when the pointer names a Firstmate-created
-# token in $HOME/.kimi-code/fm-turn-end.d/.
+# hook payload, accepts a launch-scoped FM_KIMI_TURNEND_TOKEN or checks for a
+# .fm-kimi-turnend pointer, and touches a task turn-end marker only when the token
+# names a Firstmate-created entry in $HOME/.kimi-code/fm-turn-end.d/.
 #
 # Usage:
 #   fm-kimi-turnend-hook.sh install
@@ -80,11 +80,14 @@ payload=
 IFS= read -r payload || [ -n "$payload" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 workspace=$(jq -er 'select(.hook_event_name == "Stop") | .cwd | strings | select(length > 0)' <<< "$payload" 2>/dev/null) || exit 0
-pointer="$workspace/.fm-kimi-turnend"
-[ -f "$pointer" ] || exit 0
-first=
-IFS= read -r -n 256 first < "$pointer" 2>/dev/null || [ -n "$first" ] || exit 0
-case "$first" in token=*) token=${first#token=} ;; *) exit 0 ;; esac
+token=${FM_KIMI_TURNEND_TOKEN:-}
+if [ -z "$token" ]; then
+  pointer="$workspace/.fm-kimi-turnend"
+  [ -f "$pointer" ] || exit 0
+  first=
+  IFS= read -r -n 256 first < "$pointer" 2>/dev/null || [ -n "$first" ] || exit 0
+  case "$first" in token=*) token=${first#token=} ;; *) exit 0 ;; esac
+fi
 case "$token" in fm.????????????) : ;; *) exit 0 ;; esac
 case "$token" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
 auth_dir=${HOME:-}/.kimi-code/fm-turn-end.d

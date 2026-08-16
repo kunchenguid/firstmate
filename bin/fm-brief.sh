@@ -56,6 +56,8 @@
 # self-governance section when a touched project AGENTS.md lacks it.
 # Refuses to overwrite an existing brief.
 set -eu
+# Paths and names are literal replacement data; never expand '&' as the matched placeholder.
+shopt -u patsub_replacement 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -75,6 +77,8 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-host-root-lib.sh
+. "$SCRIPT_DIR/fm-host-root-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -166,6 +170,21 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   exit 1
 fi
 
+HOST_MODE=0
+HOST_ROOT=
+if fm_host_root_enabled; then
+  fm_host_root_assert_session_cwd "$FM_ROOT" || exit $?
+  if [ "$KIND" != secondmate ]; then
+    HOST_ROOT=$(fm_host_root_resolve "$FM_ROOT") || exit $?
+    HOST_MODE=1
+  fi
+fi
+
+if [ "$HOST_MODE" -eq 1 ] && [ "$KIND" = ship ] && [ "$MODE" = local-only ]; then
+  echo "error: host-root mode does not support local-only project ${POS[1]:-target}" >&2
+  exit 1
+fi
+
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$DATA/$ID"
@@ -177,6 +196,31 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+CREW_INTRO='You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.'
+EXECUTION_MARKER=
+EXECUTION_SECTION=
+SETUP_LOCATION="You are in a disposable git worktree of __REPO__, at a detached HEAD on a clean default branch."
+STAY_RULE="Stay inside this worktree; modify nothing outside it."
+SCOUT_STAY_RULE="Stay inside this worktree; the only files you may write outside it are the report and the status file below."
+BRANCH_COMMAND="\`git checkout -b fm/$ID\`"
+PROJECT_MEMORY_TARGET="."
+PROJECT_MEMORY_CONTEXT='in the worktree'
+SCOUT_DECISION_GATE="Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review."
+if [ "$HOST_MODE" -eq 1 ]; then
+  EXECUTION_MARKER='<!-- firstmate-execution-mode: host-root -->'
+  IFS= read -r -d '' EXECUTION_SECTION <<'EOF' || true
+# External-supervisor execution contract
+Your supervisor runs from the physical host instruction root `__HOST_ROOT__`, but your process starts inside the isolated target worktree.
+Before any edit, verify `pwd -P`, `git rev-parse --show-toplevel`, and the physical `$FM_TARGET_WORKTREE` path all identify this same isolated worktree.
+Read the target repository's root instructions and every applicable nested instruction file before editing; those target instructions are authoritative for this focused task.
+Do not read or modify `$FM_HOST_ROOT` unless the task explicitly names it as the target repository.
+EOF
+  EXECUTION_SECTION=${EXECUTION_SECTION%$'\n'}
+  EXECUTION_SECTION=${EXECUTION_SECTION//__HOST_ROOT__/$HOST_ROOT}
+  CREW_INTRO="$CREW_INTRO"$'\n'"$EXECUTION_MARKER"$'\n'"$EXECUTION_SECTION"
+  SCOUT_DECISION_GATE="$SCOUT_DECISION_GATE
+Run each command required by that skill in a host-scoped subshell through the FirstMate code root, for example \`(cd $(shell_quote "$HOST_ROOT") && $(shell_quote "$FM_ROOT/bin/fm-decision-hold.sh") complete $(shell_quote "$ID") --none)\`. The subshell leaves your worker in the isolated target cwd; replace \`--none\` with unresolved decision keys when required by the skill."
+fi
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -265,6 +309,13 @@ exit 0
 fi
 
 REPO=${POS[1]}
+SETUP_LOCATION=${SETUP_LOCATION//__REPO__/$REPO}
+IFS= read -r -d '' ISOLATION_SECTION <<'EOF' || true
+**Verify isolation before anything else.** Run `pwd -P` and `git rev-parse --show-toplevel`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
+The path check is authoritative: `git rev-parse --git-dir` and `git rev-parse --git-common-dir` can help inspect the repo, but they do not prove you are outside the primary checkout.
+If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append `blocked: launched in primary checkout, not an isolated worktree` to the status file and stop.
+EOF
+ISOLATION_SECTION=${ISOLATION_SECTION%$'\n'}
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -300,7 +351,7 @@ fi
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
-You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+$CREW_INTRO
 
 # Task
 {TASK}
@@ -308,14 +359,14 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+$SETUP_LOCATION
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+2. $SCOUT_STAY_RULE
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -339,7 +390,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
-Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
+$SCOUT_DECISION_GATE
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
@@ -377,7 +428,7 @@ When it is implemented and committed, append \`done: ready in branch fm/$ID\` to
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
-  *)  # no-mistakes
+  *)  # no-mistakes (default)
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     RULE1='1. Never push to the default branch. Never merge a PR.'
@@ -410,7 +461,7 @@ esac
 DOD=${DOD%$'\n'}
 
 cat > "$BRIEF" <<EOF
-You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+$CREW_INTRO
 
 # Task
 {TASK}
@@ -418,17 +469,15 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+$SETUP_LOCATION
 
-**Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
-The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
-If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+$ISOLATION_SECTION
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: $BRANCH_COMMAND$SETUP2
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. $STAY_RULE
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -453,7 +502,7 @@ $RULE1
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
 # Project memory
-If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
+If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh $PROJECT_MEMORY_TARGET\` $PROJECT_MEMORY_CONTEXT.
 Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.

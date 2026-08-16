@@ -54,6 +54,7 @@ The composer read is one bounded tail of the live terminal and never pages backw
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
 The watcher has no native Orca busy signal, so each harness adapter's semantic lifecycle supplies worker state.
 Grok alone retains its isolated rendered-tail fallback.
+In host-root mode, spawn keeps the terminal in the verified Orca worktree and launches with that cwd retained as `FM_TARGET_WORKTREE`; only the primary supervisor runs from `FM_HOST_ROOT`.
 
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.

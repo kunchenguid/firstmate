@@ -1175,9 +1175,10 @@ signal_crew_provably_working() {  # <file> ...
 # captain-relevant; 1 otherwise, including the no-status case. A 1 only means
 # "non-terminal"; the always-on watcher then applies crew_is_provably_working,
 # while the away-mode daemon applies its persistence recheck.
-stale_is_terminal() {  # <window> <state>
-  local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
+stale_is_terminal() {  # <window> <state> [task]
+  local win=$1 state=$2 task=${3:-} last
+  [ -n "$task" ] || task=$(window_to_task "$win" "$state")
+  last=$(last_status_line "$state/$task.status")
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }
 

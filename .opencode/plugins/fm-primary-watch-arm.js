@@ -430,6 +430,7 @@ async function ensureArm(paths, sessionID, client, predecessorArmPid = "", inclu
 }
 
 export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
+  if (process.env.FM_TARGET_WORKTREE) return {};
   const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
   const paths = effectivePaths(root);
   globalThis[COORDINATOR_KEY] = {

@@ -127,6 +127,40 @@ test_classify_check_and_unknown_escalate() {
   pass "check + unknown escalate; heartbeat self-handles"
 }
 
+test_daemon_host_tmux_collision_uses_task_socket() {
+  local dir state fakebin log status=0
+  dir=$(make_supercase daemon-host-tmux-collision)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  log="$dir/tmux.log"
+  fm_write_meta "$state/one.meta" \
+    'window=@1' 'host_root=/host/one' 'tmux_socket_path=/one.sock' 'tmux_window_marker=one'
+  fm_write_meta "$state/two.meta" \
+    'window=@1' 'host_root=/host/two' 'tmux_socket_path=/two.sock' 'tmux_window_marker=two'
+  printf 'idle\n' > "$dir/pane"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+socket=ambient
+if [ "${1:-}" = -S ]; then
+  socket=$2
+  shift 2
+fi
+printf '%s\n' "$socket" >> "$FM_SOCKET_LOG"
+case "${1:-}" in
+  capture-pane) cat "$FM_FAKE_TMUX_CAPTURE" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_SOCKET_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/pane" \
+    stale_window_is_busy two "$state" || status=$?
+  expect_code 1 "$status" "idle task-scoped daemon probe returned an unexpected state"
+  assert_grep '/two.sock' "$log" "daemon did not probe the selected task's creating socket"
+  assert_no_grep '/one.sock' "$log" "daemon probed the other colliding task's socket"
+  assert_no_grep '^ambient$' "$log" "daemon probed ambient tmux for a colliding host task"
+  pass "daemon probes colliding host tmux windows through task-owned sockets"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -1839,6 +1873,7 @@ test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
+test_daemon_host_tmux_collision_uses_task_socket
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates

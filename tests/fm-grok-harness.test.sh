@@ -15,13 +15,16 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+stopped="${0}.stopped"
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*) [ ! -e "$stopped" ] && printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit $? ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message) [ ! -e "$stopped" ] && printf 'firstmate\n'; exit $? ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys|kill-window) exit 0 ;;
+  new-window) rm -f "$stopped"; exit 0 ;;
+  kill-window) : > "$stopped"; exit 0 ;;
+  has-session|new-session|send-keys) exit 0 ;;
 esac
 exit 0
 SH

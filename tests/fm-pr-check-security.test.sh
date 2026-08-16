@@ -47,6 +47,20 @@ file_mode() {
   fi
 }
 
+write_stop_aware_tmux() {
+  local path=$1
+  cat > "$path" <<'SH'
+#!/usr/bin/env bash
+stopped="${0}.stopped"
+case "${1:-}" in
+  kill-window) : > "$stopped" ;;
+  display-message) [ ! -e "$stopped" ] ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod 0700 "$path"
+}
+
 state_snapshot() {
   local state=$1 file
   (
@@ -590,11 +604,7 @@ test_valid_recording_and_merge_derivation() {
   fm_pr_poll_artifacts_valid "$dir/home/state" Task_A.1 "$POLL" \
     || fail "safe lifecycle-compatible task ID did not publish an authenticated poll"
   rm -rf "$dir/wt"
-  cat > "$dir/fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod 0700 "$dir/fakebin/tmux"
+  write_stop_aware_tmux "$dir/fakebin/tmux"
   touch "$dir/home/state/.last-watcher-beat"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
     "$TEARDOWN" Task_A.1 --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
@@ -616,11 +626,7 @@ SH
     printf 'reserved migration evidence\n' \
       > "$dir/home/state/.pr-check-quarantine/!noncanonical.check.evidence"
     chmod 0600 "$dir/home/state/.pr-check-quarantine/!noncanonical.check.evidence"
-    cat > "$dir/fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-    chmod 0700 "$dir/fakebin/tmux"
+    write_stop_aware_tmux "$dir/fakebin/tmux"
     touch "$dir/home/state/.last-watcher-beat"
     mkdir "$dir/home/state/$id.check.sh"
     set +e
@@ -1857,11 +1863,7 @@ test_obligation_namespace_compatibility() {
     "project=$dir/project" \
     'kind=ship' \
     'mode=local-only'
-  cat > "$dir/fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod 0700 "$dir/fakebin/tmux"
+  write_stop_aware_tmux "$dir/fakebin/tmux"
   touch "$state/.last-watcher-beat"
   set +e
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
@@ -2635,11 +2637,7 @@ test_teardown_removes_poll_artifacts() {
   chmod 0700 "$dir/home/state/.pr-check-quarantine"
   printf 'legacy\n' > "$dir/home/state/.pr-check-quarantine/task-a.check.abc123"
   chmod 0600 "$dir/home/state/.pr-check-quarantine/task-a.check.abc123"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  write_stop_aware_tmux "$fakebin/tmux"
   touch "$dir/home/state/.last-watcher-beat"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
@@ -2695,11 +2693,7 @@ SH
   printf 'noncanonical evidence\n' > "$dir/home/state/.pr-check-quarantine/!noncanonical.check.abc123"
   chmod 0600 "$dir/home/state/.pr-check-quarantine/invalid.check.abc123" \
     "$dir/home/state/.pr-check-quarantine/!noncanonical.check.abc123"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  write_stop_aware_tmux "$fakebin/tmux"
   touch "$dir/home/state/.last-watcher-beat"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \

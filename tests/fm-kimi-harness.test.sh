@@ -12,8 +12,10 @@ TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
 KIMI_RUNTIME_TASK_TMP=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
+NODE_BIN=$(command -v node) || fail "test needs node"
+NODE_BIN_DIR=$(dirname "$NODE_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
-BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
+BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 cleanup_kimi_harness() {
   [ -z "$KIMI_RUNTIME_TASK_TMP" ] || rm -rf "$KIMI_RUNTIME_TASK_TMP"
@@ -27,8 +29,10 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-printf '%s\n' "$*" >> "$FM_FAKE_TMUX_CALL_LOG"
-state=$(cat "$FM_FAKE_KIMI_STATE" 2>/dev/null || true)
+call_log=${FM_FAKE_TMUX_CALL_LOG:-/dev/null}
+state_file=${FM_FAKE_KIMI_STATE:-/dev/null}
+printf '%s\n' "$*" >> "$call_log"
+state=$(cat "$state_file" 2>/dev/null || true)
 fake_screen() {
   case "$state" in
     ready)
@@ -379,6 +383,14 @@ test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
   [ "$snapshot_before" = "$snapshot_after" ] || fail "Kimi hook wrote inside a tokenless workspace"
   assert_absent "$target" "tokenless Kimi hook invocation touched a task marker"
 
+  out=$(printf '{"hook_event_name":"Stop","session_id":"host-root-crew","cwd":"%s","stop_hook_active":false}\n' "$no_token" \
+    | HOME="$HOME_DIR" FM_KIMI_TURNEND_TOKEN="$token" bash "$hook" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "launch-scoped Kimi hook invocation did not exit zero"
+  [ -z "$out" ] || fail "launch-scoped Kimi hook invocation printed output: $out"
+  assert_present "$target" "launch-scoped Kimi token did not touch the turn-end marker"
+  rm "$target"
+
   printf 'token=%s\n' "$token" > "$WT_DIR/.fm-kimi-turnend"
   out=$(printf '{"hook_event_name":"Stop","session_id":"crew","cwd":"%s","stop_hook_active":false}\n' "$WT_DIR" \
     | HOME="$HOME_DIR" bash "$hook" 2>&1)
@@ -396,7 +408,7 @@ test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
   expect_code 0 "$rc" "Kimi hook without jq must still exit zero"
   [ -z "$out" ] || fail "Kimi hook without jq printed output: $out"
   assert_absent "$target" "Kimi hook without jq touched the turn-end marker"
-  pass "Kimi hook stays silent and inert without a Firstmate registry token"
+  pass "Kimi hook accepts launch-scoped or workspace tokens and stays inert without either"
 }
 
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation() {
@@ -425,11 +437,11 @@ test_kimi_teardown_removes_pointer_and_registry_token() {
   expect_code 0 "$rc" "Kimi spawn should succeed before teardown"
   token=$(sed -n 's/^token=//p' "$WT_DIR/.fm-kimi-turnend")
 
-  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
-    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "Kimi teardown failed"
+    "$TEARDOWN" "$id" --force 2>&1) || fail "Kimi teardown failed: $out"
   assert_absent "$WT_DIR/.fm-kimi-turnend" "Kimi token pointer survived teardown"
   assert_absent "$HOME_DIR/.kimi-code/fm-turn-end.d/$token" "Kimi registry token survived teardown"
   assert_absent "$HOME_DIR/state/$id.kimi-turnend-token" "Kimi token state survived teardown"

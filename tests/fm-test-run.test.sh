@@ -101,6 +101,8 @@ init_changed_fixture_repo() {
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
+    fm-sessionstart-nudge.test.sh \
+    fm-host-root-mode.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
     fm-pr-merge.test.sh \
@@ -116,15 +118,26 @@ init_changed_fixture_repo() {
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/fm-spawn.sh"
+  : >"$repo/bin/fm-host-root-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
-  mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" "$repo/src"
+  mkdir -p "$repo/.agents/skills/example" "$repo/.claude" "$repo/.pi/extensions" \
+    "$repo/.opencode/plugins" "$repo/src"
   : >"$repo/.agents/skills/example/SKILL.md"
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  for script in \
+    fm-primary-cd-check.js \
+    fm-primary-pretool-check.js \
+    fm-primary-sessionstart-nudge.js \
+    fm-primary-turnend-guard.js \
+    fm-primary-watch-arm.js; do
+    : >"$repo/.opencode/plugins/$script"
+  done
   : >"$repo/src/unmapped.ts"
   git -C "$repo" init -q
   git -C "$repo" add .
@@ -132,7 +145,7 @@ init_changed_fixture_repo() {
 }
 
 test_changed_dependency_selection_and_unmapped_failure() {
-  local tmp repo listed rc
+  local tmp repo listed rc script
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
@@ -169,6 +182,25 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  printf '\n' >>"$repo/bin/fm-spawn.sh"
+  printf '\n' >>"$repo/bin/fm-host-root-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" \
+    "spawn source selects SecondMate recovery coverage"
+  assert_contains "$listed" "tests/fm-host-root-mode.test.sh" \
+    "host-root authority source selects host-root behavior coverage"
+  git -C "$repo" add bin/fm-spawn.sh bin/fm-host-root-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm lifecycle-source-change
+
+  for script in "$repo"/.opencode/plugins/fm-primary-*.js; do
+    printf '\n' >>"$script"
+    listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+    assert_contains "$listed" "tests/fm-sessionstart-nudge.test.sh" \
+      "$(basename "$script") selects shared target-worker activation coverage"
+    git -C "$repo" add "$script"
+    git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm "$(basename "$script")-change"
+  done
 
   printf '\n' >>"$repo/src/unmapped.ts"
   set +e

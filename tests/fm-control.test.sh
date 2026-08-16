@@ -79,6 +79,16 @@ make_tmux_stub() {  # <dir> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
+socket=ambient
+if [ "${1:-}" = -S ]; then
+  socket=$2
+  shift 2
+fi
+if [ -n "${FM_FAKE_RECORDED_SOCKET:-}" ] \
+   && [ "$socket" != "$FM_FAKE_RECORDED_SOCKET" ]; then
+  D=$FM_FAKE_AMBIENT_DIR
+fi
+[ -z "${FM_FAKE_TMUX_SCOPE_LOG:-}" ] || printf '%s\t%s\n' "$socket" "$*" >> "$FM_FAKE_TMUX_SCOPE_LOG"
 case "${1:-}" in
   send-keys)
     shift
@@ -129,6 +139,15 @@ case "${1:-}" in
     exit 0 ;;
   list-windows)
     if [ -f "$D/windows" ]; then cat "$D/windows"; fi
+    exit 0 ;;
+  list-panes)
+    marker=$(cat "$D/marker" 2>/dev/null || true)
+    case "$*" in
+      *'#{pane_id}|#{window_id}'*)
+        printf '%%1|@1|fmses:fm-t1|fmses:fm-t1.0|fmses:1|fmses:1.0|%s\n' "$marker"
+        ;;
+      *) printf '@1|%s\n' "$marker" ;;
+    esac
     exit 0 ;;
 esac
 exit 0
@@ -197,6 +216,9 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_RECORDED_SOCKET="${FM_FAKE_RECORDED_SOCKET:-}" \
+    FM_FAKE_AMBIENT_DIR="${FM_FAKE_AMBIENT_DIR:-}" \
+    FM_FAKE_TMUX_SCOPE_LOG="${FM_FAKE_TMUX_SCOPE_LOG:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -827,6 +849,43 @@ test_grok_idle_footer_does_not_confirm_cancellation() {
   pass "fm-control interrupt: grok's idle footer does not confirm cancellation"
 }
 
+test_host_root_control_uses_recorded_tmux_identity() {
+  local dir host ambient socket scope out rc line
+  dir=$(new_case host-root-control)
+  host="$dir/host"
+  ambient="$dir/ambient"
+  socket="$dir/recorded.sock"
+  scope="$dir/tmux-scope.log"
+  mkdir -p "$host" "$ambient"
+  printf '# Host instructions\n' > "$host/AGENTS.md"
+  add_task "$dir" t1 codex ship tmux @1
+  printf 'host_root=%s\ntmux_window_marker=owned-marker\ntmux_socket_path=%s\n' \
+    "$host" "$socket" >> "$dir/home/state/t1.meta"
+  printf 'owned-marker' > "$dir/fake/marker"
+  printf 'codex' > "$dir/fake/command"
+  : > "$scope"
+  : > "$ambient/literal"
+  : > "$ambient/keys"
+  printf 'codex' > "$ambient/command"
+  printf '%s' "$dir/wt-t1" > "$ambient/cwd"
+  printf 'foreign-marker' > "$ambient/marker"
+
+  out=$(cd "$host" && env -u FM_HOST_ROOT PATH="$dir/fakebin:$PATH" \
+    FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_FAKE_RECORDED_SOCKET="$socket" FM_FAKE_AMBIENT_DIR="$ambient" \
+    FM_FAKE_TMUX_SCOPE_LOG="$scope" FM_CONTROL_POLL=0.01 \
+    FM_CONTROL_SETTLE_WAIT=0.05 "$CONTROL" t1 interrupt 2>&1); rc=$?
+  expect_code 0 "$rc" "host-root interrupt should use the recorded tmux server"$'\n'"$out"
+  [ "$(cat "$dir/fake/keys")" = Escape ] \
+    || fail "the recorded endpoint did not receive the interrupt key"
+  [ ! -s "$ambient/keys" ] || fail "the ambient colliding endpoint received lifecycle input"
+  while IFS=$'\t' read -r line _; do
+    [ "$line" = "$socket" ] \
+      || fail "a host-root tmux read or write escaped to socket '$line'"
+  done < "$scope"
+  pass "fm-control: host-root lifecycle reads and writes stay on the recorded tmux socket and marker"
+}
+
 # --- 6. marker non-regression -----------------------------------------------
 
 test_secondmate_control_command_carries_no_marker() {
@@ -903,5 +962,6 @@ test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
+test_host_root_control_uses_recorded_tmux_identity
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task

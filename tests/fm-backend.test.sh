@@ -910,8 +910,13 @@ make_teardown_fakebin() {  # <dir> -> echoes fakebin dir; logs tmux+treehouse ca
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+stopped="${0}.stopped"
 { printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
-exit 0
+case "${1:-}" in
+  kill-window) : > "$stopped" ;;
+  display-message) [ ! -e "$stopped" ] ;;
+  *) exit 0 ;;
+esac
 SH
   cat > "$fb/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -939,7 +944,7 @@ run_teardown_case() {
 }
 
 test_teardown_conformance_old_vs_new() {
-  local old_bin fb proj wt id old_tmux_ref saved_base_ref
+  local old_bin fb proj wt id old_tmux_ref saved_base_ref kill_line return_line old_kill_line old_return_line
   local state_old state_new config_old config_new data log_old log_new out_old out_new rc_old rc_new
   # Force the post-squash topology inside this case: merge-base with main may
   # equal HEAD on default-branch CI, and that must not make the legacy kill
@@ -995,8 +1000,365 @@ test_teardown_conformance_old_vs_new() {
     "legacy teardown fixture did not exercise tmux window cleanup for the task"
   assert_contains "$(cat "$log_new")" "tmux"$'\x1f''kill-window'$'\x1f''-t'$'\x1f'"=firstmate:=fm-$id" \
     "teardown did not call tmux kill-window with exact session and window selectors"
+  kill_line=$(grep -n $'^tmux\x1fkill-window\x1f' "$log_new" | head -1 | cut -d: -f1)
+  return_line=$(grep -n $'^treehouse\x1freturn\x1f' "$log_new" | head -1 | cut -d: -f1)
+  old_kill_line=$(grep -n $'^tmux\x1fkill-window\x1f' "$log_old" | head -1 | cut -d: -f1)
+  old_return_line=$(grep -n $'^treehouse\x1freturn\x1f' "$log_old" | head -1 | cut -d: -f1)
+  [ -n "$kill_line" ] && [ -n "$return_line" ] && [ "$return_line" -lt "$kill_line" ] \
+    && [ -n "$old_kill_line" ] && [ -n "$old_return_line" ] && [ "$old_return_line" -lt "$old_kill_line" ] \
+    || fail "unset teardown no longer returns the isolated copy before best-effort endpoint cleanup"
 
-  pass "fm-teardown.sh: treehouse return remains compatible while tmux cleanup uses exact selectors"
+  pass "fm-teardown.sh preserves unset-mode cleanup ordering and exact endpoint selectors"
+}
+
+test_adapter_post_create_failure_records_ownership() {
+  local out counter="$TMP_ROOT/cmux-create-counter"
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    fm_tmux_cli() {
+      case "$1" in
+        list-windows) return 0 ;;
+        new-window) printf "@7\n" ;;
+        set-window-option) return 1 ;;
+        kill-window) printf killed ;;
+      esac
+    }
+    fm_backend_tmux_create_task firstmate fm-task /tmp marker >/dev/null 2>&1
+    rc=$?
+    printf "%s|%s|%s" "$rc" "$FM_BACKEND_CREATE_OCCURRED" "$FM_BACKEND_CREATED_TARGET"
+  ' _ "$ROOT")
+  [ "$out" = "1|1|@7" ] || fail "tmux did not retain partial post-create ownership: '$out'"
+
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source herdr
+    fm_backend_herdr_cli() {
+      case "$*" in
+        *"tab list"*) printf "%s" "{\"result\":{\"tabs\":[]}}" ;;
+        *"tab create"*) printf "%s" "{\"result\":{\"tab\":{\"tab_id\":\"tab-7\"}}}" ;;
+      esac
+    }
+    fm_backend_herdr_create_task session:ws fm-task /tmp "" >/dev/null 2>&1
+    rc=$?
+    printf "%s|%s|%s|%s" "$rc" "$FM_BACKEND_CREATE_OCCURRED" "$FM_BACKEND_CREATED_HERDR_TAB_ID" "$FM_BACKEND_CREATED_TARGET"
+  ' _ "$ROOT")
+  [ "$out" = "1|1|tab-7|" ] || fail "herdr did not retain partial post-create ownership: '$out'"
+
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source zellij
+    fm_backend_zellij_session_exists() { return 0; }
+    fm_backend_zellij_cli() {
+      case "$*" in
+        *"list-tabs"*) printf "%s" "[]" ;;
+        *"new-tab"*) printf "7\n" ;;
+        *"list-panes"*) printf "%s" "[]" ;;
+      esac
+    }
+    fm_backend_zellij_create_task firstmate fm-task /tmp >/dev/null 2>&1
+    rc=$?
+    printf "%s|%s|%s|%s" "$rc" "$FM_BACKEND_CREATE_OCCURRED" "$FM_BACKEND_CREATED_ZELLIJ_TAB_ID" "$FM_BACKEND_CREATED_TARGET"
+  ' _ "$ROOT")
+  [ "$out" = "1|1|7|" ] || fail "zellij did not retain partial post-create ownership: '$out'"
+
+  printf '0\n' > "$counter"
+  out=$(FM_CMUX_CREATE_COUNTER="$counter" bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source cmux
+    fm_backend_cmux_cli() {
+      case "$*" in
+        *"workspace list"*)
+          n=$(cat "$FM_CMUX_CREATE_COUNTER"); n=$((n + 1)); printf "%s" "$n" > "$FM_CMUX_CREATE_COUNTER"
+          if [ "$n" -eq 1 ]; then printf "%s" "{\"workspaces\":[]}"; else printf "%s" "{\"workspaces\":[{\"id\":\"ws-7\",\"title\":\"fm-task\"}]}"; fi
+          ;;
+        *"new-workspace"*) return 0 ;;
+        *"list-panes"*) printf "%s" "{\"panes\":[]}" ;;
+      esac
+    }
+    fm_backend_cmux_scoped_title() { printf fm-task; }
+    fm_backend_cmux_create_task fm-task /tmp >/dev/null 2>&1
+    rc=$?
+    printf "%s|%s|%s|%s" "$rc" "$FM_BACKEND_CREATE_OCCURRED" "$FM_BACKEND_CREATED_CMUX_WORKSPACE_ID" "$FM_BACKEND_CREATED_TARGET"
+  ' _ "$ROOT")
+  [ "$out" = "1|1|ws-7|" ] || fail "cmux did not retain partial post-create ownership: '$out'"
+  pass "post-create adapter failures retain partial endpoint ownership for verified spawn rollback"
+}
+
+test_adapter_target_state_matrices() {
+  local out
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    tmux() {
+      case "$CASE:${1:-}" in
+        present:list-panes) printf "%%7|@3|session:fm-task|session:3.0\n"; return 0 ;;
+        absent:list-panes) printf "%%1|@1|session:captain|session:1.0\n"; return 0 ;;
+        unknown:list-panes) printf "transport failure\n" >&2; return 1 ;;
+      esac
+    }
+    for CASE in present absent unknown; do fm_backend_tmux_target_state session:fm-task; printf " "; done
+  ' _ "$ROOT")
+  [ "$out" = "present absent unknown " ] || fail "tmux exact-inventory tri-state matrix drifted: '$out'"
+
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source herdr
+    fm_backend_herdr_cli() {
+      case "$CASE" in
+        present) printf "%s" "{\"result\":{\"pane\":{\"pane_id\":\"w:p\"}}}" ;;
+        absent) printf "%s" "{\"error\":{\"code\":\"pane_not_found\"}}" ;;
+        unknown) printf "%s" "not-json" ;;
+      esac
+    }
+    for CASE in present absent unknown; do fm_backend_herdr_target_state session:w:p; printf " "; done
+  ' _ "$ROOT")
+  [ "$out" = "present absent unknown " ] || fail "herdr tri-state matrix drifted: '$out'"
+
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source zellij
+    zellij() {
+      if [ "$CASE" = absent ]; then printf "No active zellij sessions found\n"; return 1; fi
+      printf "firstmate\n"
+    }
+    fm_backend_zellij_cli() {
+      case "$CASE" in
+        present) printf "%s" "[{\"id\":7,\"is_plugin\":false}]" ;;
+        unknown) printf "%s" "{\"malformed\":true}" ;;
+      esac
+    }
+    for CASE in present absent unknown; do fm_backend_zellij_target_state firstmate:7; printf " "; done
+  ' _ "$ROOT")
+  [ "$out" = "present absent unknown " ] || fail "zellij tri-state matrix drifted: '$out'"
+
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source orca
+    fm_backend_orca_tool_check() { return 0; }
+    orca() {
+      case "$CASE" in
+        present) printf "%s" "{\"ok\":true,\"result\":{}}" ;;
+        absent) printf "%s" "{\"ok\":false,\"error\":{\"code\":\"terminal_handle_stale\"}}" ;;
+        unknown) printf "%s" "not-json" ;;
+      esac
+    }
+    for CASE in present absent unknown; do fm_backend_orca_target_state term-7; printf " "; done
+  ' _ "$ROOT")
+  [ "$out" = "present absent unknown " ] || fail "orca tri-state matrix drifted: '$out'"
+
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source cmux
+    fm_backend_cmux_ping_state() { printf ok; }
+    fm_backend_cmux_cli() {
+      if [ "$1" = list-windows ]; then
+        case "$CASE" in
+          present|absent) printf "%s" "[{\"id\":\"window-1\"}]" ;;
+          unknown) printf "%s" "not-json" ;;
+        esac
+      else
+        case "$CASE" in
+          present) printf "%s" "{\"workspaces\":[{\"id\":\"ws-7\"}]}" ;;
+          absent) printf "%s" "{\"workspaces\":[]}" ;;
+        esac
+      fi
+    }
+    for CASE in present absent unknown; do fm_backend_cmux_target_state ws-7:surface-7; printf " "; done
+  ' _ "$ROOT")
+  [ "$out" = "present absent unknown " ] || fail "cmux tri-state matrix drifted: '$out'"
+  pass "all five backend adapters distinguish present, typed absent, and unreadable control planes"
+}
+
+test_stop_and_verify_requires_confirmed_absence() {
+  local out status=0
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"
+    fm_backend_kill() { printf called; }
+    fm_backend_stop_and_verify tmux ""
+  ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "a missing endpoint id must refuse destructive cleanup"
+  assert_contains "$out" 'missing backend endpoint id' "missing endpoint refusal did not explain the unsafe metadata"
+  assert_not_contains "$out" 'called' "missing endpoint refusal invoked a backend kill"
+
+  status=0
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    fm_backend_tmux_canonical_window() { return 2; }
+    fm_backend_kill() { printf called; }
+    fm_backend_stop_and_verify tmux session:renamed "" "" 1 marker /owner.sock
+  ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "an unresolved legacy tmux alias must not prove absence"
+  assert_contains "$out" 'could not be resolved to a stable tmux window' \
+    "unresolved legacy tmux alias did not explain the refusal"
+  assert_not_contains "$out" 'called' "unresolved legacy tmux alias invoked a backend kill"
+
+  status=0
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    fm_backend_tmux_canonical_window() { return 2; }
+    fm_backend_kill() { printf called; }
+    fm_backend_stop_and_verify tmux session:renamed
+  ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 0 "$status" "unset-mode teardown must preserve legacy missing-alias behavior"
+  [ -z "$out" ] || fail "unset-mode legacy missing alias emitted unexpected output: $out"
+
+  status=0
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    fm_backend_tmux_canonical_window() { return 2; }
+    fm_backend_kill() { printf called; }
+    fm_backend_stop_and_verify tmux @7
+  ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 0 "$status" "a missing immutable tmux window id should prove absence"
+  [ -z "$out" ] || fail "missing immutable tmux window id emitted unexpected output: $out"
+
+  status=0
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    fm_backend_kill() { printf called; }
+    fm_backend_stop_and_verify tmux @7 "" "" 1
+  ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "host-root teardown must require a task-owned tmux marker"
+  assert_contains "$out" 'has no task-owned tmux window marker' "missing tmux marker refusal was not explicit"
+  assert_not_contains "$out" 'called' "missing tmux marker invoked a backend kill"
+
+  status=0
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    fm_backend_kill() { printf called; }
+    fm_backend_stop_and_verify tmux @7 "" "" 1 expected-task
+  ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "host-root teardown must require its creating tmux socket"
+  assert_contains "$out" 'has no creating tmux socket path' "missing tmux socket refusal was not explicit"
+  assert_not_contains "$out" 'called' "missing tmux socket invoked a backend kill"
+
+  status=0
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    tmux() {
+      printf "%%7|@7|session:task|session:task.0|session:7|session:7.0|other-task\n"
+    }
+    fm_backend_kill() { printf called; }
+    fm_backend_stop_and_verify tmux @7 "" "" 1 expected-task /owner.sock
+  ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "host-root teardown trusted a reused tmux window id"
+  assert_contains "$out" 'could not be resolved to a stable tmux window' "reused tmux id refusal was not explicit"
+  assert_not_contains "$out" 'called' "reused tmux id invoked a backend kill"
+
+  status=0
+  bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    tmux() {
+      printf "%s\n" \
+        "%1|@1|session:duplicate|session:duplicate.0|session:1|session:1.0" \
+        "%2|@2|session:duplicate|session:duplicate.0|session:2|session:2.0"
+    }
+    fm_backend_tmux_canonical_window session:duplicate >/dev/null
+  ' _ "$ROOT" || status=$?
+  expect_code 1 "$status" "duplicate tmux names must not resolve to an arbitrary window"
+
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    tmux() {
+      case "$1" in
+        list-panes) printf "@7\n" ;;
+        display-message) printf "codex\n" ;;
+      esac
+    }
+    fm_backend_agent_state tmux @7
+  ' _ "$ROOT")
+  [ "$out" = alive ] || fail "stable tmux window id agent state drifted: '$out'"
+
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    tmux() {
+      [ "${1:-}" != -S ] || shift 2
+      case "$1" in
+        list-panes) printf "@7|other-task\n" ;;
+        display-message) printf "codex\n" ;;
+      esac
+    }
+    fm_backend_agent_state tmux @7 expected-task /owner.sock
+  ' _ "$ROOT")
+  [ "$out" = unreadable ] || fail "tmux agent state trusted a reused server-local window id: '$out'"
+
+  local socket_dir="$TMP_ROOT/tmux-owner-socket"
+  mkdir -p "$socket_dir"
+  status=0
+  out=$(FM_BACKEND_STOP_ATTEMPTS=1 FM_BACKEND_STOP_DELAY=0 bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    tmux() {
+      local socket=ambient
+      if [ "${1:-}" = -S ]; then
+        socket=$2
+        shift 2
+      fi
+      { printf "%s" "$socket"; for arg in "$@"; do printf "\037%s" "$arg"; done; printf "\n"; } >> "$FM_SOCKET_TEST_LOG"
+      case "$1" in
+        list-panes)
+          if [ "$socket" = /owner.sock ] && [ ! -e "$FM_SOCKET_TEST_STOPPED" ]; then
+            case "$*" in
+              *"#{pane_id}"*) printf "%%7|@7|session:task|session:task.0|session:7|session:7.0|expected-task\n" ;;
+              *) printf "@7|expected-task\n" ;;
+            esac
+          fi
+          ;;
+        kill-window) : > "$FM_SOCKET_TEST_STOPPED" ;;
+      esac
+    }
+    export FM_SOCKET_TEST_LOG=$2 FM_SOCKET_TEST_STOPPED=$3
+    fm_backend_stop_and_verify tmux @7 "" "" 1 expected-task /owner.sock
+  ' _ "$ROOT" "$socket_dir/log" "$socket_dir/stopped" 2>&1) || status=$?
+  expect_code 0 "$status" "host-root teardown did not use the creating tmux socket: $out"
+  assert_present "$socket_dir/stopped" "creating-socket teardown left the owning tmux window alive"
+  assert_no_grep '^ambient' "$socket_dir/log" "creating-socket teardown consulted ambient tmux"
+
+  status=0
+  out=$(FM_BACKEND_STOP_ATTEMPTS=1 FM_BACKEND_STOP_DELAY=0 bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    fm_backend_tmux_canonical_window() { printf @1; }
+    fm_backend_kill() { return 0; }
+    fm_backend_target_state() { printf unknown; }
+    fm_backend_stop_and_verify tmux session:fm-task
+  ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "an unknown post-stop probe must refuse destructive cleanup"
+  assert_contains "$out" 'could not be confirmed absent' "unknown stop verification did not explain the refusal"
+
+  status=0
+  out=$(FM_BACKEND_STOP_ATTEMPTS=1 FM_BACKEND_STOP_DELAY=0 bash -c '
+    . "$1/bin/fm-backend.sh"; fm_backend_source tmux
+    fm_backend_tmux_canonical_window() { printf @1; }
+    fm_backend_kill() { return 0; }
+    fm_backend_target_state() { printf absent; }
+    fm_backend_stop_and_verify tmux session:fm-task
+  ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 0 "$status" "a confirmed absent endpoint should permit cleanup"
+  [ -z "$out" ] || fail "confirmed absence emitted unexpected output: $out"
+
+  status=0
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_parse_target() {
+      FM_BACKEND_HERDR_SESSION=lab
+      FM_BACKEND_HERDR_PANE=w1:p2
+    }
+    fm_backend_herdr_task_binding_state() { printf mismatch; }
+    fm_backend_kill() { printf called; }
+    fm_backend_stop_and_verify herdr lab:w1:p2 w1:t2 fm-task 0 "" "" w1
+  ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "Herdr stop must reject a reused pane id"
+  assert_contains "$out" 'no longer matches its recorded workspace, tab, and task label' \
+    "Herdr reused-pane refusal did not explain the ownership mismatch"
+  assert_not_contains "$out" called "Herdr reused-pane refusal invoked a backend kill"
+
+  status=0
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_parse_target() {
+      FM_BACKEND_HERDR_SESSION=lab
+      FM_BACKEND_HERDR_PANE=w1:p2
+    }
+    fm_backend_herdr_task_binding_state() { printf dead; }
+    fm_backend_kill() { printf called; }
+    fm_backend_stop_and_verify herdr lab:w1:p2 w1:t2 fm-task 0 "" "" w1
+  ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 0 "$status" "an already-absent Herdr pane should be idempotent success"
+  [ -z "$out" ] || fail "an absent Herdr pane invoked cleanup: $out"
+  pass "fm_backend_stop_and_verify distinguishes confirmed absence and exact Herdr task ownership"
 }
 
 # --- backend selection loudly refuses an unknown backend --------------------
@@ -1113,6 +1475,31 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
+test_tmux_missing_socket_is_authoritatively_absent() {
+  local out status=0
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"
+    fm_backend_source tmux
+    fm_tmux_cli() {
+      printf "error connecting to /gone.sock (No such file or directory)\n" >&2
+      return 1
+    }
+    fm_backend_tmux_canonical_window @1 >/dev/null
+  ' _ "$ROOT" 2>&1) || status=$?
+  expect_code 2 "$status" "a vanished recorded tmux socket must prove its window absent: $out"
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"
+    fm_backend_source tmux
+    fm_tmux_cli() {
+      printf "error connecting to /gone.sock (Connection refused)\n" >&2
+      return 1
+    }
+    fm_backend_tmux_target_state @1
+  ' _ "$ROOT")
+  [ "$out" = absent ] || fail "a refused recorded tmux socket stayed unknown: $out"
+  pass "vanished recorded tmux sockets authoritatively prove endpoint absence"
+}
+
 test_backend_name_precedence
 test_backend_detect_precedence
 test_backend_detect_cmux_fallback_bundle_id
@@ -1134,9 +1521,13 @@ test_send_tmux_contract
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_teardown_conformance_old_vs_new
+test_adapter_post_create_failure_records_ownership
+test_adapter_target_state_matrices
+test_stop_and_verify_requires_confirmed_absence
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
 test_spawn_refuses_unknown_fm_backend_env
 test_spawn_default_backend_writes_no_meta_field
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
 test_spawn_autodetect_nesting_resolves_tmux_silently
+test_tmux_missing_socket_is_authoritatively_absent

@@ -24,6 +24,7 @@ Use raw `orca` only when the helper surface cannot answer the inspection questio
 ## Preflight
 
 Work from the current firstmate home or repo root.
+In host-root mode, work instead from the physical `FM_HOST_ROOT` and invoke FirstMate helpers by their absolute `FM_ROOT/bin/` paths under the [four-root contract](../../../docs/configuration.md#host-root-mode-fm_host_root).
 If `FM_HOME` is set, remember that operational state lives under `$FM_HOME` while the helper scripts still run from this repo's `bin/`.
 
 Before switching or spawning against Orca:
