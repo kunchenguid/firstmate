@@ -2583,6 +2583,11 @@ def reviewer_candidates(
     allowed_profiles = {
         ("codex", "gpt-5.6-sol", "xhigh"),
         ("pi", "gpt-5.6-sol", "xhigh"),
+        # The claude lane exists for cross-provider review independence; it
+        # executes only through the Azure compartment adapter, whose model
+        # guest owns the schema-bound claude launch (run_reviewer below
+        # fails over rather than launching claude locally).
+        ("claude", "claude-opus-5", "xhigh"),
     }
     allowed_profiles_message = " or ".join(
         f"{harness} {model} {effort}"
@@ -3112,6 +3117,11 @@ def run_reviewer(
         environment.pop(provider_variable, None)
     account_home = Path(config["account_home"])
     config["executing_account_home"] = str(account_home)
+    if config["harness"] == "claude":
+        tool_fail(
+            "claude reviewers execute only through the Azure compartment lane; "
+            "enable config/crosscheck-azure.json or configure a codex/pi reviewer"
+        )
     if config["harness"] == "codex":
         execution_home = account_home
         credential_source, credential_identifier = inspect_codex_credential(

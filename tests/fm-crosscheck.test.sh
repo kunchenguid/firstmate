@@ -1066,6 +1066,7 @@ os.environ["FM_CROSSCHECK_REVIEWER_CONFIG"] = str(config_path)
 profiles = [
     ("codex", "gpt-5.6-sol", "xhigh", "codex-home"),
     ("pi", "gpt-5.6-sol", "xhigh", "pi-home"),
+    ("claude", "claude-opus-5", "xhigh", "claude-home"),
 ]
 
 
@@ -1116,6 +1117,7 @@ write_config(
 )
 unlisted = expect_refused(validation_author, "must be")
 for accepted in (
+    "claude claude-opus-5 xhigh",
     "codex gpt-5.6-sol xhigh",
     "pi gpt-5.6-sol xhigh",
 ):
@@ -1127,12 +1129,22 @@ claude_author = {
     "model": "claude-opus-5",
     "account_home": str(homes["author-home"]),
 }
+# A claude reviewer profile is valid, but a claude author on the same model
+# still trips the model-separation gate: the claude lane widens provider
+# coverage without weakening reviewer independence.
 write_config([reviewer("claude", "claude-opus-5", "xhigh", "claude-home")])
-claude_refusal = expect_refused(claude_author, "must be")
-assert "codex gpt-5.6-sol xhigh" in claude_refusal, claude_refusal
-assert "pi gpt-5.6-sol xhigh" in claude_refusal, claude_refusal
-assert "claude claude-opus-5 xhigh" not in claude_refusal, claude_refusal
-print(f"REFUSED Claude reviewer: {claude_refusal}")
+claude_same_model = expect_refused(claude_author, "different model")
+print(f"REFUSED same-model claude reviewer: {claude_same_model}")
+
+codex_author = {
+    "harness": "codex",
+    "model": "gpt-5.6-sol",
+    "account_home": str(homes["author-home"]),
+}
+write_config([reviewer("claude", "claude-opus-5", "xhigh", "claude-home")])
+selected = module.reviewer_candidates(root, codex_author)[0]
+assert selected["harness"] == "claude", selected
+print(f"SELECTED claude reviewer for codex author: {selected['model']}")
 
 write_config([reviewer("pi", "gpt-5.6-sol", "xhigh", "pi-home")])
 selected = module.reviewer_candidates(root, claude_author)[0]
@@ -1163,7 +1175,7 @@ assert selected["account_home"] == str(homes["author-home"].resolve()), selected
 assert set(selected) == {"harness", "model", "effort", "account_home"}, selected
 print("SELECTED without author account comparison")
 PY
-  pass "supported profiles enforce the model policy, exclude Claude, and ignore author identity"
+  pass "supported profiles enforce the model policy across all three harness lanes and ignore author identity"
 }
 
 test_same_model_relaxation_does_not_require_author_identity() {
@@ -1676,9 +1688,9 @@ PY
   pass "missing author identity reaches a normal Crosscheck verdict"
 }
 
-test_claude_reviewer_is_never_selected() {
+test_claude_reviewer_requires_the_azure_lane() {
   local record case_dir base head rc
-  record=$(make_case claude-reviewer-ineligible)
+  record=$(make_case claude-reviewer-azure-only)
   IFS=$'\t' read -r case_dir base head <<< "$record"
   cat > "$case_dir/reviewer.json" <<EOF
 {"reviewers":[{"harness":"claude","model":"claude-opus-5","effort":"xhigh","account_home":"$case_dir/reviewer-home"}]}
@@ -1688,11 +1700,11 @@ EOF
     > "$case_dir/out" 2> "$case_dir/err"
   rc=$?
   set -e
-  expect_code 1 "$rc" "Claude reviewer profile"
-  assert_grep 'must be codex gpt-5.6-sol xhigh or pi gpt-5.6-sol xhigh' \
-    "$case_dir/err" "Claude reviewer profile was not rejected"
+  expect_code 1 "$rc" "local-lane claude reviewer"
+  assert_grep 'Azure compartment lane' \
+    "$case_dir/err" "the local lane did not name the Azure-only claude contract"
   assert_absent "$case_dir/fakebin/claude" "Claude reviewer machinery was installed by the fixture"
-  pass "Claude is never selected as a Crosscheck reviewer"
+  pass "a claude reviewer is profile-valid but executes only through the Azure lane"
 }
 
 test_same_model_review_is_adversarial_and_durable() {
@@ -3840,7 +3852,7 @@ if [ -n "${FM_TEST_CASE:-}" ]; then
     test_pi_reviewer_failures_are_tool_failures|\
     test_clear_review_uses_policy_contract|\
     test_missing_author_identity_reaches_normal_verdict|\
-    test_claude_reviewer_is_never_selected|\
+    test_claude_reviewer_requires_the_azure_lane|\
     test_same_model_review_is_adversarial_and_durable|\
     test_empty_runtime_overrides_use_home_defaults|\
     test_empty_environment_fallback_is_generic|\
@@ -3906,7 +3918,7 @@ if [ "${FM_TEST_FOCUSED:-}" = review-safety-findings ]; then
     || fail "Pi launch identity snapshot regressions failed"
   test_same_model_relaxation_does_not_require_author_identity
   test_missing_author_identity_reaches_normal_verdict
-  test_claude_reviewer_is_never_selected
+  test_claude_reviewer_requires_the_azure_lane
   test_same_model_review_is_adversarial_and_durable
   test_typescript_jest_mutation_proof_can_clear
   test_preexisting_jest_runner_cannot_certify
@@ -3946,7 +3958,7 @@ test_pi_reviewer_executes_bound_policy_profile
 test_pi_reviewer_failures_are_tool_failures
 test_clear_review_uses_policy_contract
 test_missing_author_identity_reaches_normal_verdict
-test_claude_reviewer_is_never_selected
+test_claude_reviewer_requires_the_azure_lane
 test_same_model_review_is_adversarial_and_durable
 test_empty_runtime_overrides_use_home_defaults
 test_empty_environment_fallback_is_generic
