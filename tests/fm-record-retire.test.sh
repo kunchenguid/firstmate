@@ -1173,12 +1173,13 @@ test_live_metadata_keeps_marker_consumers_audible() {
 }
 
 test_surface_artifact_paths_are_producer_owned() {
-  local home id actual expected
+  local home id window actual expected expected_path
   home=$(make_home producer-owned-surface-paths)
   id=task.a_b
+  window='a:b:c/d/e.f.g'
   actual=$(FM_STATE_OVERRIDE="$home/state" bash -c \
-    '. "$1"; fm_wake_task_surface_paths "$2" "$3"' _ \
-    "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$id")
+    '. "$1"; fm_record_retire_artifact_paths "$2" "$3" "$4"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$id" "$window")
   expected=$(FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"
     fm_wake_signal_seen_path "$2" "$2/$3.status"
@@ -1187,24 +1188,51 @@ test_surface_artifact_paths_are_producer_owned() {
     printf "\n"
     fm_wake_hb_surfaced_path "$2" "$3"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$id")
-  [ "$actual" = "$expected" ] \
-    || fail "retirement surface-artifact inventory diverged from its producers"
+  while IFS= read -r expected_path; do
+    [ -n "$expected_path" ] || continue
+    printf '%s\n' "$actual" | grep -Fqx "$expected_path" \
+      || fail "retirement surface-artifact inventory omitted producer path $expected_path"
+  done <<EOF
+$expected
+EOF
   printf '%s\n' "$actual" | grep -q '/.seen-task_a_b_status$' \
     || fail "producer-owned status marker path did not collapse the dotted id"
   printf '%s\n' "$actual" | grep -q '/.seen-task_a_b_turn-ended$' \
     || fail "producer-owned turn-end marker path did not collapse the dotted id"
   printf '%s\n' "$actual" | grep -q '/.hb-surfaced-task_a_b$' \
     || fail "producer-owned heartbeat marker path did not collapse the dotted id"
+  printf '%s\n' "$actual" | grep -q '/.hash-a_b_c_d_e_f_g$' \
+    || fail "artifact inventory did not use the fully collapsed watcher key"
+  printf '%s\n' "$actual" | grep -q '/.seen-task\.a_b_status$' \
+    && fail "artifact inventory re-derived the raw dotted task id"
   pass "retirement obtains seen and heartbeat surface paths from their producers"
 }
 
 test_watcher_key_collapses_every_occurrence() {
-  local actual
+  local actual collision
   actual=$(bash -c '. "$1"; fm_record_retire_watcher_state_key "$2"' _ \
     "$RETIRE_LIB" 'a:b:c/d/e.f.g')
   [ "$actual" = 'a_b_c_d_e_f_g' ] \
     || fail "watcher state key did not collapse every punctuation occurrence: $actual"
-  pass "watcher state keys collapse every colon, slash, and dot"
+  collision=$(bash -c '. "$1"; fm_record_retire_window_collision "$2" "$3"' _ \
+    "$RETIRE_LIB" 'a:b:c/d/e.f.g' 'a_b_c_d_e_f_g') \
+    || fail "collapsed watcher-key collision was not detected"
+  [ "$collision" = collapsed ] \
+    || fail "collapsed watcher-key collision was misclassified: $collision"
+  collision=$(bash -c '. "$1"; fm_record_retire_window_collision "$2" "$3"' _ \
+    "$RETIRE_LIB" 'a_b_c_d_e_f_g' 'a:b:c/d/e.f.g') \
+    || fail "reverse-direction collapsed watcher-key collision was not detected"
+  [ "$collision" = collapsed ] \
+    || fail "reverse-direction watcher-key collision was misclassified: $collision"
+  collision=$(bash -c '. "$1"; fm_record_retire_window_collision "$2" "$3"' _ \
+    "$RETIRE_LIB" 'same:window' 'same:window') \
+    || fail "raw runtime-slot collision was not detected"
+  [ "$collision" = raw ] || fail "raw runtime-slot collision was misclassified: $collision"
+  if bash -c '. "$1"; fm_record_retire_window_collision "$2" "$3"' _ \
+    "$RETIRE_LIB" 'different:one' 'different:two'; then
+    fail "noncolliding runtime windows were classified as a collision"
+  fi
+  pass "watcher keys fully collapse and classify raw and collapsed runtime-slot collisions"
 }
 
 test_muted_wake_releases_queue_lock() {

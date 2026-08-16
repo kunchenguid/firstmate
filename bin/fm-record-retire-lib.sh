@@ -83,6 +83,49 @@ fm_record_retire_watcher_state_key() {  # <window>
   printf '%s' "$key"
 }
 
+fm_record_retire_window_collision() {  # <target-window> <other-window>
+  local target=$1 other=$2 target_key other_key
+  if [ "$other" = "$target" ]; then
+    printf 'raw'
+    return 0
+  fi
+  target_key=$(fm_record_retire_watcher_state_key "$target")
+  other_key=$(fm_record_retire_watcher_state_key "$other")
+  [ "$other_key" = "$target_key" ] || return 1
+  printf 'collapsed'
+}
+
+fm_record_retire_artifact_paths() {  # <state-dir> <task-id> <window>
+  local state=$1 id=$2 window=$3 key prefix
+  printf '%s\n' \
+    "$state/$id.status" \
+    "$state/$id.turn-ended" \
+    "$state/$id.pi-ext.ts" \
+    "$state/$id.grok-turnend-token" \
+    "$state/$id.kimi-turnend-token" \
+    "$state/$id.muse-session" \
+    "$state/$id.muse-session-current" \
+    "$state/$id.cursor-session" \
+    "$state/$id.control-relaunch" \
+    "$state/$id.control-relaunch.meta-prior" \
+    "$state/$id.control-relaunch.brief-prior" \
+    "$state/$id.control-relaunch.note" \
+    "$state/$id.herdr-presentation" \
+    "$state/$id.busy-gen" \
+    "$state/$id.busy-state" \
+    "$state/$id.check.sh" \
+    "$state/$id.check-trust" \
+    "$state/$id.pr-poll" \
+    "$state/$id.pr-poll-registration" \
+    "$state/$id.pr-poll-retirement" \
+    "$state/.$id.open-decisions-cursor"
+  fm_wake_task_surface_paths "$state" "$id"
+  key=$(fm_record_retire_watcher_state_key "$window")
+  for prefix in hash count stale stale-since paused paused-rechecked paused-resurfaced wedge-escalations; do
+    printf '%s/.%s-%s\n' "$state" "$prefix" "$key"
+  done
+}
+
 fm_record_retire_marker_publish() {  # <state-dir> <task-id> <window> <meta-sha256>
   local state=$1 id=$2 window=$3 digest=$4 marker tmp old_umask
   fm_record_retire_id_valid "$id" || return 1

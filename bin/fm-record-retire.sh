@@ -229,8 +229,7 @@ case "$KIND" in
 esac
 
 lock_and_verify_runtime_slot_exclusive() {
-  local other other_id other_window other_key other_lock target_key
-  target_key=$(fm_record_retire_watcher_state_key "$WINDOW")
+  local other other_id other_window other_lock collision
   for other in "$STATE"/*.meta; do
     [ -e "$other" ] || [ -L "$other" ] || continue
     [ "$other" != "$META" ] || continue
@@ -249,12 +248,12 @@ lock_and_verify_runtime_slot_exclusive() {
       || refuse "runtime-slot exclusivity found a mismatched task binding in $other"
     other_window=$(meta_file_exact "$other" window) \
       || refuse "runtime-slot exclusivity requires one exact window in $other"
-    if [ "$other_window" = "$WINDOW" ]; then
-      refuse "runtime slot is also recorded by $other_id; no record state was retired"
-    fi
-    other_key=$(fm_record_retire_watcher_state_key "$other_window")
-    if [ "$other_key" = "$target_key" ]; then
-      refuse "watcher state key is also recorded by $other_id; no record state was retired"
+    if collision=$(fm_record_retire_window_collision "$WINDOW" "$other_window"); then
+      case "$collision" in
+        raw) refuse "runtime slot is also recorded by $other_id; no record state was retired" ;;
+        collapsed) refuse "watcher state key is also recorded by $other_id; no record state was retired" ;;
+        *) refuse "runtime-slot collision classification failed for $other_id" ;;
+      esac
     fi
   done
 }
@@ -333,36 +332,10 @@ refuse_bound_records "$STATE/terminal-outcomes" task_id
 refuse_bound_records "$STATE/procevent" task_id
 refuse_bound_records "$STATE/pending-replies" task_id
 
-ARTIFACTS=(
-  "$STATE/$ID.status"
-  "$STATE/$ID.turn-ended"
-  "$STATE/$ID.pi-ext.ts"
-  "$STATE/$ID.grok-turnend-token"
-  "$STATE/$ID.kimi-turnend-token"
-  "$STATE/$ID.muse-session"
-  "$STATE/$ID.muse-session-current"
-  "$STATE/$ID.cursor-session"
-  "$STATE/$ID.control-relaunch"
-  "$STATE/$ID.control-relaunch.meta-prior"
-  "$STATE/$ID.control-relaunch.brief-prior"
-  "$STATE/$ID.control-relaunch.note"
-  "$STATE/$ID.herdr-presentation"
-  "$STATE/$ID.busy-gen"
-  "$STATE/$ID.busy-state"
-  "$STATE/$ID.check.sh"
-  "$STATE/$ID.check-trust"
-  "$STATE/$ID.pr-poll"
-  "$STATE/$ID.pr-poll-registration"
-  "$STATE/$ID.pr-poll-retirement"
-  "$STATE/.$ID.open-decisions-cursor"
-)
+ARTIFACTS=()
 while IFS= read -r artifact; do
   [ -n "$artifact" ] && ARTIFACTS+=("$artifact")
-done < <(fm_wake_task_surface_paths "$STATE" "$ID")
-WINDOW_KEY=$(fm_record_retire_watcher_state_key "$WINDOW")
-for prefix in hash count stale stale-since paused paused-rechecked paused-resurfaced wedge-escalations; do
-  ARTIFACTS+=("$STATE/.$prefix-$WINDOW_KEY")
-done
+done < <(fm_record_retire_artifact_paths "$STATE" "$ID" "$WINDOW")
 for artifact in "${ARTIFACTS[@]}"; do
   regular_state_artifact_if_present "$artifact"
 done
