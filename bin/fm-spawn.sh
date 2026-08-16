@@ -2210,7 +2210,7 @@ claude_capture() {
 }
 
 claude_wait_for_activity() {
-  local pane failure dialog tokens prior_tokens='' tools baseline_tools i=0
+  local pane muted dialog tokens prior_tokens='' tools baseline_tools i=0
   local baseline_failure='' baseline_busy=0
   local max=${FM_CLAUDE_VERIFY_POLLS:-40}
   local interval=${FM_CLAUDE_VERIFY_INTERVAL:-0.5}
@@ -2226,11 +2226,10 @@ claude_wait_for_activity() {
     pane=$(claude_capture)
     if [ -n "$pane" ]; then
       CLAUDE_VERIFY_SNAPSHOT=$pane
-      if failure=$(fm_control_claude_startup_failure "$pane"); then
-        if [ -z "$baseline_failure" ] || [ "$failure" != "$baseline_failure" ]; then
-          CLAUDE_VERIFY_RESULT=$failure
-          return 2
-        fi
+      muted=$(fm_control_claude_startup_failure "$pane" || true)
+      if [ -n "$muted" ] && [ "$muted" != "$baseline_failure" ]; then
+        CLAUDE_VERIFY_RESULT=$muted
+        return 2
       fi
       if dialog=$(fm_control_claude_startup_dialog "$pane"); then
         if [ "$dialog_accepts" -ge "$dialog_max" ]; then
@@ -2244,20 +2243,26 @@ claude_wait_for_activity() {
         dialog_accepts=$((dialog_accepts + 1))
       elif [ "$baseline_busy" -eq 0 ] && fm_control_claude_busy_visible "$pane"; then
         CLAUDE_VERIFY_RESULT='activity-visible'
-        return 0
       else
         tools=$(fm_control_claude_tool_activity "$pane")
         if [ -n "$tools" ] && [ "$tools" != "$baseline_tools" ]; then
           CLAUDE_VERIFY_RESULT='tool-activity-visible'
-          return 0
+        else
+          tokens=$(fm_control_claude_token_counter "$pane")
+          if [ -n "$tokens" ] && [ -n "$prior_tokens" ] \
+             && [ "$tokens" != "$prior_tokens" ]; then
+            CLAUDE_VERIFY_RESULT='token-counter-moving'
+          else
+            [ -z "$tokens" ] || prior_tokens=$tokens
+          fi
         fi
-        tokens=$(fm_control_claude_token_counter "$pane")
-        if [ -n "$tokens" ] && [ -n "$prior_tokens" ] \
-           && [ "$tokens" != "$prior_tokens" ]; then
-          CLAUDE_VERIFY_RESULT='token-counter-moving'
-          return 0
+      fi
+      if [ -n "$CLAUDE_VERIFY_RESULT" ]; then
+        if [ -n "$muted" ]; then
+          CLAUDE_VERIFY_RESULT=$muted
+          return 2
         fi
-        [ -z "$tokens" ] || prior_tokens=$tokens
+        return 0
       fi
     fi
     i=$((i + 1))

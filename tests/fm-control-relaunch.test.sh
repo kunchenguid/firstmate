@@ -420,6 +420,20 @@ test_claude_relaunch_waits_out_a_stale_muted_banner_before_succeeding() {
   pass "Claude relaunch ignores a pre-launch muted banner and verifies the fresh activity instead"
 }
 
+test_claude_relaunch_fails_when_a_stale_muted_banner_persists_beside_activity() {
+  local dir out rc
+  dir=$(new_case claude-stale-muted-active rl40)
+  add_ship_task "$dir" rl40 claude
+  out=$(FM_FAKE_CLAUDE_BASELINE=muted FM_FAKE_CLAUDE_SCREEN=muted \
+    run_control "$dir" rl40 relaunch --note "continue only when working and not muted"); rc=$?
+  expect_code 1 "$rc" "a stale muted banner beside post-launch activity must still fail"$'\n'"$out"
+  assert_contains "$out" "transcript-saving-off" \
+    "a muted banner still on screen beside fresh activity must be reported as a failure"
+  assert_not_contains "$out" "activity-visible" \
+    "the busy affordance must not mask a still-present muted banner"
+  pass "Claude relaunch fails when a pre-launch muted banner persists beside fresh activity"
+}
+
 test_relaunch_preserves_durable_task_metadata() {
   local dir out rc
   dir=$(new_case durable-meta rl19)
@@ -1475,6 +1489,7 @@ test_claude_relaunch_retries_empty_captures_and_accepts_each_activity_proof
 test_claude_relaunch_times_out_instead_of_returning_unverified_success
 test_claude_relaunch_ignores_a_stale_busy_affordance_in_the_baseline
 test_claude_relaunch_waits_out_a_stale_muted_banner_before_succeeding
+test_claude_relaunch_fails_when_a_stale_muted_banner_persists_beside_activity
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
