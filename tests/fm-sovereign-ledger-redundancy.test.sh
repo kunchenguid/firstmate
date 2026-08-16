@@ -8,16 +8,44 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOL=${TOOL:-"$ROOT/bin/fm-sovereign-ledger-redundancy.sh"}
 FIXTURE="$ROOT/tests/fixtures/sovereign-ledger-redundancy"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+bind_mount_active=0
+bind_mount_target=
+directory_hardlink_active=0
+directory_hardlink_target=
+cleanup() {
+  local cleanup_failed=0
+  if [ "$bind_mount_active" -eq 1 ]; then
+    if ! umount "$bind_mount_target" >/dev/null 2>&1; then
+      printf '  FAIL  cleanup could not detach fixture bind mount; retained scratch at %s\n' "$TMP" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [ "$directory_hardlink_active" -eq 1 ]; then
+    if ! unlink "$directory_hardlink_target" >/dev/null 2>&1; then
+      printf '  FAIL  cleanup could not unlink fixture directory hard link; retained scratch at %s\n' "$TMP" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [ "$cleanup_failed" -eq 0 ]; then
+    rm -rf "$TMP"
+  fi
+  return "$cleanup_failed"
+}
+trap cleanup EXIT
 SAME_VOLUME_TOOL="$TMP/fm-sovereign-ledger-same-volume"
 export TOOL
 printf '%s\n' '#!/usr/bin/env bash' 'exec "$TOOL" --allow-same-volume-without-device-redundancy "$@"' > "$SAME_VOLUME_TOOL"
 chmod +x "$SAME_VOLUME_TOOL"
 pass=0
 fail=0
+not_verifiable=0
 
 ok() { printf '  PASS  %s\n' "$1"; pass=$((pass + 1)); }
 bad() { printf '  FAIL  %s\n' "$1"; fail=$((fail + 1)); }
+not_verifiable() {
+  printf '  NOT_VERIFIABLE  %s\n' "$1"
+  not_verifiable=$((not_verifiable + 1))
+}
 
 check_ok() {
   local description=$1
@@ -431,8 +459,42 @@ if cp -c "$R5_PRIMARY/CONTRACT.md" "$TMP/r5-clone-probe" 2>/dev/null; then
   done
   check_fails_with 'verify REFUSES an APFS clone bundle by the device predicate' 'primary and replica must be on different devices' "$TOOL" verify "$R5_PRIMARY" "$R5_CLONE"
 else
-  ok 'APFS clone attack is unavailable on this filesystem and is not simulated'
+  not_verifiable 'APFS clone attack: cp -c is unavailable on this filesystem; no nearby copy case substituted'
 fi
+
+R5_BIND_TARGET="$TMP/r5-bind-target"
+mkdir "$R5_BIND_TARGET"
+bind_mount_target=$R5_BIND_TARGET
+if mount --bind "$R5_PRIMARY" "$R5_BIND_TARGET" >/dev/null 2>&1 \
+  || mount -t nullfs "$R5_PRIMARY" "$R5_BIND_TARGET" >/dev/null 2>&1; then
+  bind_mount_active=1
+  check_fails_with 'verify REFUSES a bind-mounted replica by the admitted identity set' 'shares storage with primary' \
+    "$TOOL" --allow-same-volume-without-device-redundancy verify "$R5_PRIMARY" "$R5_BIND_TARGET"
+  if umount "$R5_BIND_TARGET" >/dev/null 2>&1; then
+    bind_mount_active=0
+  else
+    bad 'bind-mount fixture could not be detached; scratch will be retained without recursive deletion'
+  fi
+else
+  not_verifiable 'bind-mount attack: this host grants no unprivileged bind or nullfs mount; no nearby mount case substituted'
+fi
+
+R5_DIRECTORY_HARDLINK="$TMP/r5-directory-hardlink"
+if ln "$R5_PRIMARY" "$R5_DIRECTORY_HARDLINK" >/dev/null 2>&1; then
+  directory_hardlink_active=1
+  directory_hardlink_target=$R5_DIRECTORY_HARDLINK
+  check_fails_with 'verify REFUSES a directory hard link by the admitted directory identity' 'primary and replica directories must differ' \
+    "$TOOL" --allow-same-volume-without-device-redundancy verify "$R5_PRIMARY" "$R5_DIRECTORY_HARDLINK"
+  if unlink "$R5_DIRECTORY_HARDLINK" >/dev/null 2>&1; then
+    directory_hardlink_active=0
+  else
+    bad 'directory-hard-link fixture could not be unlinked; scratch will be retained without recursive deletion'
+  fi
+else
+  not_verifiable 'directory-hard-link attack: this host refuses unprivileged directory hard-link creation; no symlink case substituted'
+fi
+
+not_verifiable 'firmlink attack: this host exposes no unprivileged fixture-creation API for OS-managed firmlinks; no symlink case substituted'
 
 R5_CASE="$TMP/r5-case"
 mkdir "$R5_CASE"
@@ -625,5 +687,5 @@ else
   bad 'TERM deleted or replaced the created partial replica directory'
 fi
 
-printf '\n%s passed, %s failed\n' "$pass" "$fail"
+printf '\n%s passed, %s failed, %s not verifiable\n' "$pass" "$fail" "$not_verifiable"
 [ "$fail" -eq 0 ]
