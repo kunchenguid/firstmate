@@ -34,7 +34,9 @@ sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
 reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
-    "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
+    "$STATE_DIR"/.herdr-escalated-* "$STATE_DIR"/.record-retired-* \
+    "$STATE_DIR"/.seen-* "$STATE_DIR"/.hb-surfaced-* \
+    "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
   _event_cap_key=""
@@ -45,6 +47,45 @@ reset_state() {
 mkrec() {  # <pane_id> <status>
   fm_transition_record "$1" "wG" "" "$2" claude
 }
+
+# A published marker is inert until canonical metadata disappears. The watcher
+# must therefore keep scanning the status file during a post-publication
+# refusal, when both marker and metadata are durably reachable together.
+reset_state
+LIVE_ID=watch-live-after-marker
+printf 'window=default:wG:pQ\nkind=ship\n' > "$STATE_DIR/$LIVE_ID.meta"
+printf 'blocked: still live\n' > "$STATE_DIR/$LIVE_ID.status"
+printf 'schema=fm-record-retired.v1\ntask_id=%s\nwindow=default:wG:pQ\nmeta_sha256=%064d\n' \
+  "$LIVE_ID" 0 > "$STATE_DIR/.record-retired-$LIVE_ID"
+SIGNALS=$(scan_signals)
+printf '%s\n' "$SIGNALS" | grep -q "$LIVE_ID.status" \
+  || fail "scan_signals hid a live task after marker publication"
+pass "scan_signals keeps a marker-bearing task audible while canonical metadata exists"
+
+# Push and poll writers share the same heartbeat surfaced-path producer that
+# retirement consumes, including its punctuation collapse.
+reset_state
+SURFACE_ID=surface.task
+printf 'blocked: needs captain\n' > "$STATE_DIR/$SURFACE_ID.status"
+mark_surfaced "$STATE_DIR/$SURFACE_ID.status"
+SURFACE_PATH=$(fm_wake_hb_surfaced_path "$STATE_DIR" "$SURFACE_ID")
+[ "$(cat "$SURFACE_PATH" 2>/dev/null)" = 'blocked: needs captain' ] \
+  || fail "mark_surfaced did not write through the shared heartbeat path producer"
+[ ! -e "$STATE_DIR/.hb-surfaced-$SURFACE_ID" ] \
+  || fail "mark_surfaced re-derived the raw dotted task id"
+pass "heartbeat surfacing writes through the shared punctuation-collapsing path producer"
+
+reset_state
+SURFACE_ID=watch.surface.task
+printf 'blocked: needs captain\n' > "$STATE_DIR/$SURFACE_ID.status"
+mark_all_captain_relevant_surfaced
+SURFACE_PATH=$(fm_wake_hb_surfaced_path "$STATE_DIR" "$SURFACE_ID")
+[ "$(cat "$SURFACE_PATH" 2>/dev/null)" = 'blocked: needs captain' ] \
+  || fail "watcher heartbeat writer did not use the shared surfaced-path producer"
+if heartbeat_scan_finds_actionable; then
+  fail "watcher heartbeat reader did not find the producer-owned surfaced marker"
+fi
+pass "watcher heartbeat reader and writer share the punctuation-collapsing path producer"
 
 # --- handle_push_transition: enqueue + wake for a non-paused blocked crew -----
 

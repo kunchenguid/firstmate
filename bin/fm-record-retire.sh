@@ -196,14 +196,6 @@ meta_file_exact() {  # <metadata-path> <key>
   printf '%s' "$value"
 }
 
-watcher_state_key() {  # <window>
-  local key=$1
-  key=${key//:/_}
-  key=${key//\//_}
-  key=${key//./_}
-  printf '%s' "$key"
-}
-
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || refuse "state device cannot be established"
 DATA_DEVICE=$(fm_pr_file_device "$DATA") || refuse "data device cannot be established"
 
@@ -238,7 +230,7 @@ esac
 
 lock_and_verify_runtime_slot_exclusive() {
   local other other_id other_window other_key other_lock target_key
-  target_key=$(watcher_state_key "$WINDOW")
+  target_key=$(fm_record_retire_watcher_state_key "$WINDOW")
   for other in "$STATE"/*.meta; do
     [ -e "$other" ] || [ -L "$other" ] || continue
     [ "$other" != "$META" ] || continue
@@ -260,7 +252,7 @@ lock_and_verify_runtime_slot_exclusive() {
     if [ "$other_window" = "$WINDOW" ]; then
       refuse "runtime slot is also recorded by $other_id; no record state was retired"
     fi
-    other_key=$(watcher_state_key "$other_window")
+    other_key=$(fm_record_retire_watcher_state_key "$other_window")
     if [ "$other_key" = "$target_key" ]; then
       refuse "watcher state key is also recorded by $other_id; no record state was retired"
     fi
@@ -363,11 +355,11 @@ ARTIFACTS=(
   "$STATE/$ID.pr-poll-registration"
   "$STATE/$ID.pr-poll-retirement"
   "$STATE/.$ID.open-decisions-cursor"
-  "$STATE/.seen-${ID}_status"
-  "$STATE/.seen-${ID}_turn-ended"
-  "$STATE/.hb-surfaced-$ID"
 )
-WINDOW_KEY=$(watcher_state_key "$WINDOW")
+while IFS= read -r artifact; do
+  [ -n "$artifact" ] && ARTIFACTS+=("$artifact")
+done < <(fm_wake_task_surface_paths "$STATE" "$ID")
+WINDOW_KEY=$(fm_record_retire_watcher_state_key "$WINDOW")
 for prefix in hash count stale stale-since paused paused-rechecked paused-resurfaced wedge-escalations; do
   ARTIFACTS+=("$STATE/.$prefix-$WINDOW_KEY")
 done

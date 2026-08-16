@@ -1138,6 +1138,91 @@ test_retired_marker_hides_status_snapshot() {
   pass "status presentation snapshots omit validly retired tasks"
 }
 
+test_live_metadata_keeps_marker_consumers_audible() {
+  local home id digest decisions snapshot queue
+  home=$(make_home marker-with-live-metadata)
+  id='live-after-marker-publication'
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  printf 'window=firstmate:fm-%s\nkind=ship\n' "$id" > "$home/state/$id.meta"
+  printf 'needs-decision: [key=still-live] captain review remains open\n' \
+    > "$home/state/$id.status"
+  write_retirement_marker "$home/state" "$id" "firstmate:fm-$id" "$digest"
+  : > "$home/state/.wake-queue"
+
+  if bash -c '. "$1"; fm_record_retire_marker_active "$2" "$3"' _ \
+    "$RETIRE_LIB" "$home/state" "$id"; then
+    fail "a retirement marker became active while canonical metadata still existed"
+  fi
+  decisions=$(FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1"; scan_open_decisions "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$home/state")
+  printf '%s\n' "$decisions" | grep -q "$id" \
+    || fail "full decision scan hid a live task after marker publication"
+  snapshot=$(FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1"; status_presentation_snapshot "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state")
+  printf '%s\n' "$snapshot" | grep -q "$id" \
+    || fail "status snapshot hid a live task after marker publication"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    bash -c '. "$1"; fm_wake_append check "$2" "check: still live"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state/$id.check.sh" \
+    || fail "live task check wake could not be appended"
+  queue=$(cat "$home/state/.wake-queue")
+  printf '%s\n' "$queue" | grep -q "$id.check.sh" \
+    || fail "check wake was muted while canonical metadata still existed"
+  pass "live metadata keeps full decisions, snapshots, and check wakes audible after marker publication"
+}
+
+test_surface_artifact_paths_are_producer_owned() {
+  local home id actual expected
+  home=$(make_home producer-owned-surface-paths)
+  id=task.a_b
+  actual=$(FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1"; fm_wake_task_surface_paths "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$id")
+  expected=$(FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_wake_signal_seen_path "$2" "$2/$3.status"
+    printf "\n"
+    fm_wake_signal_seen_path "$2" "$2/$3.turn-ended"
+    printf "\n"
+    fm_wake_hb_surfaced_path "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$id")
+  [ "$actual" = "$expected" ] \
+    || fail "retirement surface-artifact inventory diverged from its producers"
+  printf '%s\n' "$actual" | grep -q '/.seen-task_a_b_status$' \
+    || fail "producer-owned status marker path did not collapse the dotted id"
+  printf '%s\n' "$actual" | grep -q '/.seen-task_a_b_turn-ended$' \
+    || fail "producer-owned turn-end marker path did not collapse the dotted id"
+  printf '%s\n' "$actual" | grep -q '/.hb-surfaced-task_a_b$' \
+    || fail "producer-owned heartbeat marker path did not collapse the dotted id"
+  pass "retirement obtains seen and heartbeat surface paths from their producers"
+}
+
+test_watcher_key_collapses_every_occurrence() {
+  local actual
+  actual=$(bash -c '. "$1"; fm_record_retire_watcher_state_key "$2"' _ \
+    "$RETIRE_LIB" 'a:b:c/d/e.f.g')
+  [ "$actual" = 'a_b_c_d_e_f_g' ] \
+    || fail "watcher state key did not collapse every punctuation occurrence: $actual"
+  pass "watcher state keys collapse every colon, slash, and dot"
+}
+
+test_muted_wake_releases_queue_lock() {
+  local home id digest
+  home=$(make_home muted-wake-lock-release)
+  id=retired-lock-release
+  digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  write_retirement_marker "$home/state" "$id" "firstmate:fm-$id" "$digest"
+  : > "$home/state/.wake-queue"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    bash -c '. "$1"; fm_wake_append signal "$2.status" "signal: late"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$id" || fail "muted wake append failed"
+  [ ! -e "$home/state/.wake-queue.lock" ] && [ ! -L "$home/state/.wake-queue.lock" ] \
+    || fail "muted wake returned while still owning the queue lock"
+  [ ! -s "$home/state/.wake-queue" ] || fail "muted wake was appended to the queue"
+  pass "muted wakes release the queue lock before returning"
+}
+
 test_partial_wake_library_fails_open() {
   local home id rc
   home=$(make_home partial-wake-library)
@@ -1999,6 +2084,10 @@ run_test test_marker_does_not_mute_unknown_wake_kind
 run_test test_retired_marker_hides_full_open_decision_scan
 run_test test_retired_marker_hides_incremental_open_decision_scan
 run_test test_retired_marker_hides_status_snapshot
+run_test test_live_metadata_keeps_marker_consumers_audible
+run_test test_surface_artifact_paths_are_producer_owned
+run_test test_watcher_key_collapses_every_occurrence
+run_test test_muted_wake_releases_queue_lock
 run_test test_partial_wake_library_fails_open
 run_test test_partial_classify_library_fails_open
 run_test test_watcher_key_collision_refuses

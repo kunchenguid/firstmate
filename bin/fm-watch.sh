@@ -613,7 +613,7 @@ mark_all_captain_relevant_surfaced() {
   local f task last
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
-    printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
+    printf '%s' "$last" > "$(fm_wake_hb_surfaced_path "$STATE" "$task")"
   done < <(scan_captain_relevant_statuses "$STATE")
 }
 
@@ -629,7 +629,7 @@ heartbeat_scan_finds_actionable() {
   local f task last surfaced
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
-    surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
+    surfaced=$(cat "$(fm_wake_hb_surfaced_path "$STATE" "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
     return 0
   done < <(scan_captain_relevant_statuses "$STATE")

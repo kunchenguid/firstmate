@@ -1057,6 +1057,20 @@ fm_wake_signal_seen_path() {  # <state> <file>
   printf '%s/.seen-%s' "$1" "$(basename "$2" | tr '.' '_')"
 }
 
+fm_wake_hb_surfaced_path() {  # <state> <task-id>
+  printf '%s/.hb-surfaced-%s' "$1" "$(printf '%s' "$2" | tr ':/.' '___')"
+}
+
+fm_wake_task_surface_paths() {  # <state> <task-id>
+  local state=$1 task=$2
+  fm_wake_signal_seen_path "$state" "$state/$task.status"
+  printf '\n'
+  fm_wake_signal_seen_path "$state" "$state/$task.turn-ended"
+  printf '\n'
+  fm_wake_hb_surfaced_path "$state" "$task"
+  printf '\n'
+}
+
 # 0 when <file>'s current signature exactly matches its recorded seen marker,
 # meaning every byte in it was already surfaced or deliberately absorbed.
 # A missing marker or unreadable signature is NOT a match, so uncertainty reads

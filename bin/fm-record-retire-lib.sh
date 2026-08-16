@@ -75,6 +75,14 @@ fm_record_retire_marker_active() {  # <state-dir> <task-id>
   [ ! -e "$meta" ] && [ ! -L "$meta" ]
 }
 
+fm_record_retire_watcher_state_key() {  # <window>
+  local key=$1
+  key=${key//:/_}
+  key=${key//\//_}
+  key=${key//./_}
+  printf '%s' "$key"
+}
+
 fm_record_retire_marker_publish() {  # <state-dir> <task-id> <window> <meta-sha256>
   local state=$1 id=$2 window=$3 digest=$4 marker tmp old_umask
   fm_record_retire_id_valid "$id" || return 1
