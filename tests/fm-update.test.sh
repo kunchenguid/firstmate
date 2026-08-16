@@ -141,6 +141,19 @@ configure_github_world() {
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+sync_fork_from_upstream() {
+  local upstream_ref=refs/fm-test/upstream
+  git --git-dir="$FM_TEST_FORK_REPO" fetch -q "$FM_TEST_UPSTREAM_REPO" \
+    "refs/heads/$FM_TEST_DEFAULT:$upstream_ref"
+  if git --git-dir="$FM_TEST_FORK_REPO" merge-base --is-ancestor \
+    "$upstream_ref" "refs/heads/$FM_TEST_DEFAULT"; then
+    git --git-dir="$FM_TEST_FORK_REPO" update-ref -d "$upstream_ref"
+    return 0
+  fi
+  git --git-dir="$FM_TEST_FORK_REPO" update-ref -d "$upstream_ref"
+  git --git-dir="$FM_TEST_UPSTREAM_REPO" push -q "$FM_TEST_FORK_REPO" \
+    "refs/heads/$FM_TEST_DEFAULT:refs/heads/$FM_TEST_DEFAULT"
+}
 case "${1:-} ${2:-}" in
   "repo view")
     case "${FM_TEST_GH_MODE:-fork}" in
@@ -154,17 +167,35 @@ case "${1:-} ${2:-}" in
     esac
     ;;
   "repo sync")
-    upstream_ref=refs/fm-test/upstream
-    git --git-dir="$FM_TEST_FORK_REPO" fetch -q "$FM_TEST_UPSTREAM_REPO" \
-      "refs/heads/$FM_TEST_DEFAULT:$upstream_ref"
-    if git --git-dir="$FM_TEST_FORK_REPO" merge-base --is-ancestor \
-      "$upstream_ref" "refs/heads/$FM_TEST_DEFAULT"; then
-      git --git-dir="$FM_TEST_FORK_REPO" update-ref -d "$upstream_ref"
-      exit 0
+    if [ "${FM_TEST_GH_MODE:-fork}" = encoded-ref-404 ]; then
+      echo "GET https://api.github.com/repos/acme/firstmate/git/refs/heads%2Fmain: HTTP 404: Not Found" >&2
+      exit 1
     fi
-    git --git-dir="$FM_TEST_FORK_REPO" update-ref -d "$upstream_ref"
-    git --git-dir="$FM_TEST_UPSTREAM_REPO" push -q "$FM_TEST_FORK_REPO" \
-      "refs/heads/$FM_TEST_DEFAULT:refs/heads/$FM_TEST_DEFAULT"
+    sync_fork_from_upstream
+    ;;
+  "api --method")
+    [ "${3:-}" = POST ] && [ "${4:-}" = repos/acme/firstmate-fork/merge-upstream ] \
+      || { echo "unexpected gh invocation: $*" >&2; exit 2; }
+    case "${FM_TEST_GH_MODE:-fork}" in
+      merge-upstream-api-fail)
+        echo "upstream sync unavailable" >&2
+        exit 1
+        ;;
+      merge-upstream-malformed)
+        printf 'not-a-parent-branch\n'
+        ;;
+      merge-upstream-parent-mismatch)
+        printf 'acme/not-the-parent:main\n'
+        ;;
+      merge-upstream-conflict)
+        echo "merge conflict" >&2
+        exit 1
+        ;;
+      *)
+        sync_fork_from_upstream
+        printf 'acme/firstmate:main\n'
+        ;;
+    esac
     ;;
   "api repos/"*)
     case "${2:-}" in
@@ -481,11 +512,124 @@ test_github_fork_ahead_sync_and_convergence_order() {
   [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$expected" ] \
     || fail "secondmate did not reach synchronized fork tip"
   grep -q '^repo view ' "$w/gh.log" || fail "GitHub metadata inspection was not invoked"
-  grep -q '^repo sync acme/firstmate-fork --branch main$' "$w/gh.log" \
+  grep -q '^api --method POST repos/acme/firstmate-fork/merge-upstream -f branch=main --jq .base_branch$' "$w/gh.log" \
     || fail "guarded GitHub fork sync was not invoked"
   assert_not_contains "$(cat "$w/gh.log")" "api repos/acme/firstmate-fork --jq" \
     "GraphQL parent path unexpectedly requested REST metadata"
   pass "T12 GitHub fork sync precedes local, secondmate, and config convergence"
+}
+
+test_github_fork_sync_survives_cli_encoded_ref_fallback_refusal() {
+  local w out expected gh_log rc
+  w=$(new_world github-encoded-ref-fallback)
+  configure_github_world "$w"
+  bump_upstream "$w" encoded-ref-fallback
+  expected=$(git --git-dir="$w/upstream.git" rev-parse refs/heads/main)
+
+  out=$(FM_TEST_GH_MODE=encoded-ref-404 run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || fail "encoded-ref fallback made fork update refuse: $out"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$expected" ] \
+    || fail "corrected fork sync did not advance the firstmate checkout"
+  gh_log=$(cat "$w/gh.log")
+  assert_contains "$gh_log" \
+    "api --method POST repos/acme/firstmate-fork/merge-upstream -f branch=main --jq .base_branch" \
+    "fork sync did not use the guarded merge-upstream endpoint"
+  assert_not_contains "$gh_log" "repo sync" \
+    "fork sync still invoked the CLI encoded-ref fallback"
+  assert_not_contains "$gh_log" "git/refs" \
+    "fork sync directly mutated a Git ref"
+  assert_not_contains "$gh_log" "--force" \
+    "fork sync used a forced update"
+  pass "T35 fork sync avoids the CLI encoded-ref fallback while preserving fast-forward updates"
+}
+
+test_github_fork_merge_upstream_api_failure_refused() {
+  local w out local_before fork_before rc
+  w=$(new_world github-merge-upstream-api-failure)
+  configure_github_world "$w"
+  bump_upstream "$w" merge-upstream-api-failure
+  local_before=$(git -C "$w/main" rev-parse HEAD)
+  fork_before=$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)
+
+  out=$(FM_TEST_GH_MODE=merge-upstream-api-fail run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "merge-upstream API failure unexpectedly succeeded"
+  assert_contains "$out" \
+    "update refused: GitHub fork sync failed; unresolved downstream divergence requires a reviewed upstream-integration branch/PR before retry: upstream sync unavailable" \
+    "merge-upstream API failure was not refused clearly"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$local_before" ] \
+    || fail "local checkout moved after merge-upstream API failure"
+  [ "$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)" = "$fork_before" ] \
+    || fail "fork changed after merge-upstream API failure"
+  [ ! -e "$w/order.log" ] || fail "config convergence ran after merge-upstream API failure"
+  pass "T36 merge-upstream API failure refuses before local or fork mutation"
+}
+
+test_github_fork_merge_upstream_malformed_response_refused() {
+  local w out local_before fork_before rc
+  w=$(new_world github-merge-upstream-malformed)
+  configure_github_world "$w"
+  local_before=$(git -C "$w/main" rev-parse HEAD)
+  fork_before=$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)
+
+  out=$(FM_TEST_GH_MODE=merge-upstream-malformed run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "malformed merge-upstream response unexpectedly succeeded"
+  assert_contains "$out" \
+    "update refused: GitHub fork sync returned malformed base branch: not-a-parent-branch" \
+    "malformed merge-upstream response was not refused"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$local_before" ] \
+    || fail "local checkout moved after malformed merge-upstream response"
+  [ "$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)" = "$fork_before" ] \
+    || fail "fork changed after malformed merge-upstream response"
+  pass "T37 malformed merge-upstream response refuses before local or fork mutation"
+}
+
+test_github_fork_merge_upstream_response_disagreement_refused() {
+  local w out local_before fork_before rc
+  w=$(new_world github-merge-upstream-disagreement)
+  configure_github_world "$w"
+  local_before=$(git -C "$w/main" rev-parse HEAD)
+  fork_before=$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)
+
+  out=$(FM_TEST_GH_MODE=merge-upstream-parent-mismatch run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "merge-upstream parent disagreement unexpectedly succeeded"
+  assert_contains "$out" \
+    "update refused: GitHub fork sync parent acme/not-the-parent differs from GitHub parent acme/firstmate" \
+    "merge-upstream parent disagreement was not refused"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$local_before" ] \
+    || fail "local checkout moved after merge-upstream parent disagreement"
+  [ "$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)" = "$fork_before" ] \
+    || fail "fork changed after merge-upstream parent disagreement"
+  pass "T38 merge-upstream parent disagreement refuses before local or fork mutation"
+}
+
+test_github_fork_merge_upstream_conflict_refused() {
+  local w out local_before fork_before rc
+  w=$(new_world github-merge-upstream-conflict)
+  configure_github_world "$w"
+  bump_upstream "$w" merge-upstream-conflict
+  local_before=$(git -C "$w/main" rev-parse HEAD)
+  fork_before=$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)
+
+  out=$(FM_TEST_GH_MODE=merge-upstream-conflict run_github_update "$w" 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "merge-upstream conflict unexpectedly succeeded"
+  assert_contains "$out" \
+    "update refused: GitHub fork sync failed; unresolved downstream divergence requires a reviewed upstream-integration branch/PR before retry: merge conflict" \
+    "merge-upstream conflict did not retain the guarded refusal"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$local_before" ] \
+    || fail "local checkout moved after merge-upstream conflict"
+  [ "$(git --git-dir="$w/origin.git" rev-parse refs/heads/main)" = "$fork_before" ] \
+    || fail "fork changed after merge-upstream conflict"
+  pass "T39 merge-upstream conflict refuses before local or fork mutation"
 }
 
 test_github_fork_already_current() {
@@ -545,7 +689,7 @@ test_github_fork_missing_graphql_parent_rest_missing_parent_refused() {
     "missing REST parent was not refused clearly"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "local checkout moved after missing REST parent"
-  assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
+  assert_not_contains "$(cat "$w/gh.log")" "merge-upstream" \
     "fork sync ran despite missing REST parent"
   pass "T29 GraphQL-missing fork parent refuses when REST has no valid parent"
 }
@@ -567,7 +711,7 @@ test_github_rest_parent_keeps_configured_upstream_validation() {
     "configured upstream mismatch was not refused after REST fallback"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "local checkout moved after configured upstream mismatch via REST"
-  assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
+  assert_not_contains "$(cat "$w/gh.log")" "merge-upstream" \
     "fork sync ran despite configured upstream mismatch via REST"
   pass "T31 REST parent preserves configured-upstream identity validation"
 }
@@ -588,7 +732,7 @@ test_github_fork_missing_graphql_parent_rest_not_fork_refused() {
     "GraphQL and REST fork-state disagreement was not refused"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "local checkout moved after REST fork-state disagreement"
-  assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
+  assert_not_contains "$(cat "$w/gh.log")" "merge-upstream" \
     "fork sync ran despite REST fork-state disagreement"
   pass "T32 GraphQL fork and REST direct metadata disagreement refuses"
 }
@@ -630,7 +774,7 @@ test_github_fork_missing_graphql_parent_rest_self_parent_refused() {
     "REST self-parent identity was not refused"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "local checkout moved after REST self-parent identity"
-  assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
+  assert_not_contains "$(cat "$w/gh.log")" "merge-upstream" \
     "fork sync ran despite REST self-parent identity"
   pass "T34 REST self-parent identity is refused before fork sync"
 }
@@ -730,7 +874,7 @@ test_github_api_failure_refused() {
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "local checkout moved after GitHub API failure"
   [ ! -e "$w/order.log" ] || fail "config convergence ran after GitHub API failure"
-  assert_not_contains "$(cat "$w/gh.log")" "repo sync" "fork sync not attempted after API failure"
+  assert_not_contains "$(cat "$w/gh.log")" "merge-upstream" "fork sync not attempted after API failure"
   pass "T15 GitHub authentication/API failure stops before mutation"
 }
 
@@ -812,7 +956,7 @@ test_configured_upstream_must_match_github_parent() {
     "configured upstream mismatch was not refused"
   [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
     || fail "local checkout moved after configured upstream mismatch"
-  assert_not_contains "$(cat "$w/gh.log")" "repo sync" \
+  assert_not_contains "$(cat "$w/gh.log")" "merge-upstream" \
     "fork sync ran despite configured upstream mismatch"
   pass "T25 configured upstream must match the GitHub-reported parent"
 }
@@ -833,7 +977,7 @@ test_direct_github_origin_bypasses_fork_sync() {
   assert_contains "$out" "firstmate: updated " "direct GitHub origin fast-forwarded normally"
   gh_log=$(cat "$w/gh.log")
   assert_contains "$gh_log" "repo view" "direct GitHub origin inspected"
-  assert_not_contains "$gh_log" "repo sync" "direct GitHub origin did not invoke fork sync"
+  assert_not_contains "$gh_log" "merge-upstream" "direct GitHub origin did not invoke fork sync"
   pass "T17 direct GitHub origin retains ordinary fast-forward behavior"
 }
 
@@ -941,6 +1085,11 @@ test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_github_fork_ahead_sync_and_convergence_order
+test_github_fork_sync_survives_cli_encoded_ref_fallback_refusal
+test_github_fork_merge_upstream_api_failure_refused
+test_github_fork_merge_upstream_malformed_response_refused
+test_github_fork_merge_upstream_response_disagreement_refused
+test_github_fork_merge_upstream_conflict_refused
 test_github_fork_already_current
 test_github_fork_missing_graphql_parent_uses_rest_metadata
 test_github_fork_missing_graphql_parent_rest_missing_parent_refused

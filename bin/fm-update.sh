@@ -194,7 +194,7 @@ sync_github_fork_if_needed() {
   local local_default=$1 origin_slug=$2 upstream_url=$3
   local metadata api_origin is_fork api_default api_parent configured_parent
   local rest_is_fork rest_parent _rest_source
-  local before_oid after_oid
+  local before_oid after_oid sync_base sync_parent sync_default
 
   command -v gh >/dev/null 2>&1 \
     || refuse "origin is on github.com but gh is unavailable"
@@ -257,9 +257,23 @@ sync_github_fork_if_needed() {
   case "$before_oid" in
     ''|*[!0-9a-fA-F]*) refuse "GitHub fork tip inspection returned an invalid commit ID" ;;
   esac
-  if ! metadata=$(gh repo sync "$api_origin" --branch "$api_default" 2>&1); then
-    refuse "GitHub fork sync failed; unresolved downstream divergence requires a reviewed upstream-integration branch/PR before retry: $(first_line "$metadata")"
+  if ! sync_base=$(gh api --method POST "repos/$api_origin/merge-upstream" \
+    -f "branch=$api_default" --jq .base_branch 2>&1); then
+    refuse "GitHub fork sync failed; unresolved downstream divergence requires a reviewed upstream-integration branch/PR before retry: $(first_line "$sync_base")"
   fi
+  case "$sync_base" in
+    *:*)
+      sync_parent=${sync_base%:*}
+      sync_default=${sync_base##*:}
+      ;;
+    *) refuse "GitHub fork sync returned malformed base branch: $sync_base" ;;
+  esac
+  github_repo_identity_is_valid "$sync_parent" \
+    || refuse "GitHub fork sync returned an invalid parent identity: $sync_parent"
+  same_repo_identity "$sync_parent" "$api_parent" \
+    || refuse "GitHub fork sync parent $sync_parent differs from GitHub parent $api_parent"
+  [ "$sync_default" = "$api_default" ] \
+    || refuse "GitHub fork sync returned base branch $sync_default, expected $api_default"
   if ! after_oid=$(gh api "repos/$api_origin/commits/$api_default" --jq .sha 2>&1); then
     refuse "GitHub fork post-sync inspection failed: $(first_line "$after_oid")"
   fi
