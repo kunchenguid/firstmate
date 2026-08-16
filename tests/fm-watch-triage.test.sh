@@ -776,9 +776,11 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
 # bounded pause handling.
-# A still-live agent at an external-decision gate is the disconfirming case: it
-# must surface once, while the unchanged hash must not append the same wake on
-# every watcher re-arm.
+# A still-live agent at an external-decision gate is the ordinary case (AGENTS.md's
+# paused: contract - a live crew deliberately idling): it gets the identical
+# bounded cadence from the first poll, never an immediate surface just because
+# the agent happens to be alive, and the unchanged hash must not append the same
+# wake on every watcher re-arm either.
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
@@ -848,38 +850,126 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
 
-  # First sight must surface promptly so a live external-decision gate is not
-  # hidden behind the pause cadence.
+  # First sight is absorbed on the bounded cadence, exactly like a dead-agent
+  # pause - a live agent is the ordinary case for a declared pause, not a
+  # disconfirming one, so it must not surface just because it is alive.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "live external-decision gate did not surface immediately"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the immediate external-decision surface"
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "live external-decision gate surfaced immediately instead of absorbing on the bounded cadence: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live external-decision gate did not record the pause cadence marker"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional live-gate absorb"
 
-  # Re-arm with the stale timer already beyond the wedge threshold. This is the
-  # exact unchanged-hash fallback after the immediate surface: it must retain
-  # the pause cadence and discard any residual wedge timer instead of emitting
-  # a second possible-wedge wake.
-  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  # Re-arm with the pause re-surface threshold already elapsed. This is the
+  # exact unchanged-hash cadence recheck: it must resurface exactly once (the
+  # bounded paused recheck, never a bare stale or a possible-wedge escalation).
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"
-    fail "live external-decision gate escalated on the wedge timer after its immediate surface: $(cat "$out")"
-  fi
-  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live external-decision gate lost its pause cadence marker"; }
-  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "live external-decision gate retained the wedge timer"; }
-  reap "$pid"
+  wait_for_exit "$pid" 40 || fail "live external-decision gate did not re-surface on the bounded cadence"
+  grep -F "awaiting external" "$out" >/dev/null || fail "live external-decision gate re-surface omitted its reason"
+  grep -F "possible wedge" "$out" >/dev/null && fail "live external-decision gate was mislabeled a possible wedge"
+  [ ! -e "$state/.stale-since-$key" ] || fail "live external-decision gate retained a wedge timer"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
   bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
-  [ "$wakes" -eq 0 ] || fail "acknowledged external-decision surface replayed $wakes wakes"
-  [ "$bare" -eq 0 ] || fail "acknowledged external-decision bare stale remained queued"
-  pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
+  [ "$wakes" -eq 1 ] || fail "live external-decision gate produced $wakes wakes instead of exactly one bounded resurface"
+  [ "$bare" -eq 0 ] || fail "live external-decision gate surfaced as $bare bare stale wakes"
+  pass "exited declared-pause, captain-held, and live decision-gate panes all use the identical bounded pause cadence"
+}
+
+# --- a churny pane must not defeat the pause re-surface cadence -------------
+# Root cause of a live 2026-08 incident: a live, actively-retrying paused crew
+# (iutubi-reprocessar-lote-18-07) whose visible retry counter changed the pane
+# hash on roughly every retry fired a stale: wake every 60-125s instead of once
+# per PAUSE_RESURFACE_SECS. pause_state_class used to demote an already-paused
+# verdict to "none" whenever the underlying agent was alive - the NORMAL case
+# for a declared pause - which routed each freshly-stabilized churny hash
+# through the cadence-blind immediate-surface path instead of the bounded
+# recheck. A single continuous watcher process churns the pane across several
+# poll cycles while the pause stays fresh (must stay silent throughout, proving
+# the churn itself cannot trigger a wake), then the status is aged past
+# PAUSE_RESURFACE_SECS (must re-surface exactly once, not once per churn), then
+# one more churn cycle right after must not immediately re-fire.
+test_nonterminal_stale_paused_churny_pane_bounded_cadence() {
+  local dir state fakebin out capture_file statusf window key pid i wakes bare
+  dir=$(make_case paused-churny-pane); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/churn.status"
+  window="test:fm-churn"
+  printf 'idle, retrying (attempt 1)\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/churn.meta"
+  printf 'paused: retrying the upstream call\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-churn_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "idle, retrying (attempt 1)")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · retrying the upstream call'
+
+  # Phase 1: the pause is fresh (well under PAUSE_RESURFACE_SECS), but the pane
+  # visibly churns (a retry counter) every couple of polls - the exact shape of
+  # the live incident. The watcher must stay alive and silent throughout.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=15 FM_STALE_ESCALATE_SECS=999 FM_POLL=0.3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=2
+  while [ "$i" -le 5 ]; do
+    sleep 0.9
+    kill -0 "$pid" 2>/dev/null || { fail "watcher exited during churny-pane phase 1 (round $i, no threshold crossed yet): $(cat "$out")"; }
+    printf 'idle, retrying (attempt %s)\n' "$i" > "$capture_file"
+    i=$((i + 1))
+  done
+  sleep 0.5
+  kill -0 "$pid" 2>/dev/null || { fail "watcher exited after churny-pane phase 1 finished: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || fail "churny pane produced a wake before PAUSE_RESURFACE_SECS elapsed"
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "churny pane lost its pause cadence marker"; }
+
+  # Phase 2: age the pause past the threshold. The SAME running watcher must
+  # re-surface on its very next poll - exactly once, on the bounded cadence,
+  # never a possible-wedge escalation.
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-churn_status"
+  wait_for_exit "$pid" 40 || fail "churny pane did not re-surface once PAUSE_RESURFACE_SECS elapsed"
+  grep -F "awaiting external" "$out" >/dev/null || fail "churny-pane re-surface omitted its paused/awaiting-external reason"
+  grep -F "possible wedge" "$out" >/dev/null && fail "churny pane was mislabeled a possible wedge"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "churny pane produced $wakes wakes instead of exactly one bounded resurface"
+  [ "$bare" -eq 0 ] || fail "churny pane surfaced as $bare bare stale wakes (the cadence-blind immediate-surface path)"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the genuine churny-pane resurface"
+
+  # Phase 3: one more churn cycle right after the resurface must not
+  # immediately re-fire - the resurface throttle just recorded "now" must
+  # survive a fresh watcher launch, not just the process that set it.
+  printf 'idle, retrying (attempt 6)\n' > "$capture_file"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=15 FM_STALE_ESCALATE_SECS=999 FM_POLL=0.3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if ! wait_live "$pid" 20; then
+    reap "$pid"; fail "churn immediately after the resurface re-fired instead of respecting the fresh throttle: $(cat "$out")"
+  fi
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue" 2>/dev/null)
+  [ "${wakes:-0}" -eq 0 ] || fail "churn right after the acknowledged resurface produced $wakes new wakes instead of zero"
+  pass "a churny paused pane never fires faster than PAUSE_RESURFACE_SECS, no matter how often the hash changes"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -1955,6 +2045,7 @@ test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_nonterminal_stale_paused_churny_pane_bounded_cadence
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
