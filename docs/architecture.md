@@ -44,8 +44,9 @@ This home's answerer close, pending-reply escalation close, and captain-held tra
 A turn-ended-only queue row omits its historical status annotation when that status file exactly matches the same seen marker.
 Any direct or remaining historical annotation prints every status line unread at the presentation cursor instead of replaying only the latest line.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes a parked or terminal no-mistakes run only when it matches the crew's branch and current code identity, then keeps that run-step authoritative even if the pane has closed.
-A run the pipeline is executing right now is attributed on branch alone, because it cannot be a historical run on a reused branch, and it outranks any older terminal run for the same branch, so a cancelled or failed run that a newer running one replaced is never reported as the current state.
-The script header owns the exact run-head ancestry rules and that supersession precedence.
+A run the pipeline is executing right now is attributed on branch alone, because it cannot be a historical run on a reused branch, and it outranks any older terminal run for the same branch, so a done, cancelled or failed run that a newer running one replaced is never reported as the current state.
+The done half matters because the long-inactive scan above raises its terminal-outcome record off `done` exactly as off `failed`.
+The script header owns the exact run-head ancestry rules, that supersession precedence, and the bounded negative cache that keeps an unreplaced terminal run from re-probing on every read.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.

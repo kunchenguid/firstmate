@@ -91,6 +91,7 @@ case "${1:-}" in
     esac
     ;;
   runs)
+    printf 'runs\n' >> "${FM_FAKE_RUNS_CALL_LOG:-/dev/null}"
     printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
 esac
 exit 0
@@ -165,6 +166,14 @@ new_case() {  # <name> -> echoes case dir with an empty state/
   printf '%s\n' "$d"
 }
 
+# `no-mistakes runs` invocations recorded by the fake, for the supersession
+# probe's cost assertions.
+assert_runs_calls() {  # <expected> <log> <msg>
+  local actual=0
+  [ -f "$2" ] && actual=$(awk 'END { print NR + 0 }' "$2")
+  [ "$actual" = "$1" ] || fail "$3 (expected $1 runs calls, got $actual)"
+}
+
 arm_idle_record() {  # <state-dir> <id>
   local state=$1 id=$2 gen
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
@@ -186,6 +195,8 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_RUNS_CALL_LOG=/dev/null
+  export FM_FAKE_RUNS_CALL_LOG
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
@@ -1501,6 +1512,130 @@ EOF
   pass "an older running row loses to a newer terminal row in the coarse runs list"
 }
 
+# The same ordering rule where a row DOES bind, which the two-halves formulation
+# got wrong: newest row terminal and not binding (the pipeline rebased off the
+# local line), middle row stuck at running and not binding, oldest row terminal
+# and binding. The branch's newest record is not running, so the stuck row must
+# not supersede anything and the binding row's own verdict is the answer.
+test_coarse_stuck_running_row_below_newer_terminal_does_not_win() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-stuck-middle)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-stuck
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/coarse-stuck.meta" \
+    "window=fm:fm-coarse-stuck" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  completed  fm/feat-coarse-stuck ffffff3  2026-08-16 09:10
+  running    fm/feat-coarse-stuck ffffff2  2026-08-16 08:30
+  failed     fm/feat-coarse-stuck ${short}  2026-08-16 08:00
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" coarse-stuck
+  out=$(run_crew_state "$d" coarse-stuck)
+  assert_contains "$out" "state: failed" "the binding row's own terminal verdict is the answer"
+  assert_contains "$out" "source: run-step" "the binding row is still a run-step verdict"
+  assert_not_contains "$out" "state: working" "a stuck running row below a newer terminal row must not win"
+  pass "a stuck running row below a newer terminal row does not supersede the binding verdict"
+}
+
+# The done half of the terminal set bin/fm-inactive-reconcile.sh consumes: it
+# raises its inactive-terminal-outcome record off `state: done ` exactly as off
+# `state: failed `. Evidence 2026-08-16 10:35, lensclash-datenschutz-loeschung:
+# supervision surfaced a terminal outcome while `axi status` showed running.
+# A done run that a newer running one replaced must not be reported as terminal.
+test_replaced_done_run_not_reported_as_current() {
+  local outcome short d out
+  for outcome in passed checks-passed; do
+    reset_fakes
+    d=$(new_case "replaced-done-$outcome")
+    make_repo_on_branch "$d/wt" "fm/feat-replaced-$outcome"
+    short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/replaced-$outcome.meta" \
+      "window=fm:fm-replaced-$outcome" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_AXI_STATUS="$(run_outcome "fm/feat-replaced-$outcome" "$outcome")"
+    FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-replaced-$outcome ${short}  2026-08-16 10:35
+  completed  fm/feat-replaced-$outcome ${short}  2026-08-16 10:02
+EOF
+)"
+    out=$(run_crew_state "$d" "replaced-$outcome")
+    assert_contains "$out" "state: working" "a $outcome run replaced by a running one is not the current state"
+    assert_contains "$out" "superseded" "the superseded done run is named in the detail"
+    assert_not_contains "$out" "state: done" "the replaced $outcome run must not be reported as done"
+  done
+  pass "a done run replaced by a running one is not reported as the current state"
+}
+
+# The ci-green override is NOT a terminal verdict: that run is still executing
+# and is its own newest row, so it must never be handed to the supersession
+# probe and a green PR must keep surfacing as done.
+test_ci_green_override_is_not_probed_for_supersession() {
+  reset_fakes
+  local d out
+  d=$(new_case ci-green-no-probe)
+  make_repo_on_branch "$d/wt" fm/feat-ci-green-probe
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/ci-green-probe.meta" \
+    "window=fm:fm-ci-green-probe" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci-green-probe)"
+  FM_FAKE_CI_LOGS='CI checks passed'
+  FM_FAKE_RUNS_CALL_LOG="$d/runs-calls.log"
+  out=$(run_crew_state "$d" ci-green-probe)
+  assert_contains "$out" "state: done" "a green PR still surfaces as done"
+  assert_runs_calls 0 "$FM_FAKE_RUNS_CALL_LOG" "the ci-green override pays no supersession probe"
+  pass "the ci-green override is never handed to the supersession probe"
+}
+
+# The probe's cost damping. A terminal run nothing ever replaces answers "not
+# superseded" forever, and re-asking the runs list on every read is what made
+# bin/fm-inactive-reconcile.sh's per-child budget worse for exactly the children
+# it exists to report. The negative answer is remembered per task and worktree
+# head for FM_RUN_SUPERSEDED_TTL seconds; a positive one never is.
+test_terminal_supersession_probe_is_damped_but_never_caches_a_positive() {
+  reset_fakes
+  local d short out
+  d=$(new_case supersession-damping)
+  make_repo_on_branch "$d/wt" fm/feat-damping
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/damping.meta" "window=fm:fm-damping" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_outcome fm/feat-damping failed)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-damping ${short}  2026-08-16 08:43"
+  FM_FAKE_RUNS_CALL_LOG="$d/runs-calls.log"
+
+  out=$(run_crew_state "$d" damping)
+  assert_contains "$out" "state: failed" "an unreplaced failed run is still failed on the first read"
+  assert_runs_calls 1 "$FM_FAKE_RUNS_CALL_LOG" "the first read probes the runs list once"
+
+  out=$(run_crew_state "$d" damping)
+  assert_contains "$out" "state: failed" "the cached negative keeps the terminal verdict"
+  assert_runs_calls 1 "$FM_FAKE_RUNS_CALL_LOG" "the second read is damped by the cached negative"
+
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_RUN_SUPERSEDED_TTL=0 \
+    "$CREW_STATE" damping)
+  assert_contains "$out" "state: failed" "an expired entry still reports the terminal verdict"
+  assert_runs_calls 2 "$FM_FAKE_RUNS_CALL_LOG" "an expired entry re-probes"
+
+  : > "$FM_FAKE_RUNS_CALL_LOG"
+  rm -f "$d/state/.run-superseded-damping"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-damping ${short}  2026-08-16 08:56
+  failed     fm/feat-damping ${short}  2026-08-16 08:43
+EOF
+)"
+  out=$(run_crew_state "$d" damping)
+  assert_contains "$out" "state: working" "a replacement is detected"
+  out=$(run_crew_state "$d" damping)
+  assert_contains "$out" "state: working" "the positive verdict is re-derived, not cached"
+  assert_runs_calls 2 "$FM_FAKE_RUNS_CALL_LOG" "a positive supersession is never served from cache"
+  pass "the supersession probe is damped for a negative answer and never caches a positive"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1556,5 +1691,9 @@ test_executing_run_with_diverged_head_is_current
 test_terminal_run_with_diverged_head_still_not_attributed
 test_coarse_running_row_outranks_older_matching_terminal_row
 test_coarse_older_running_row_loses_to_newer_terminal_row
+test_coarse_stuck_running_row_below_newer_terminal_does_not_win
+test_replaced_done_run_not_reported_as_current
+test_ci_green_override_is_not_probed_for_supersession
+test_terminal_supersession_probe_is_damped_but_never_caches_a_positive
 
 echo "all fm-crew-state tests passed"

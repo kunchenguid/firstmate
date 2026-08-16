@@ -54,8 +54,11 @@
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
-# Read-only and side-effect free. Always exits 0 on a successful read regardless
-# of state; exit 2 only on a usage error (no id).
+# Read-only towards the crew, its worktree and its pipeline: nothing here can
+# start, resume, answer or abort a run. The one write is the bounded negative
+# cache state/.run-superseded-<id> described at nm_supersession_absent_cached.
+# Always exits 0 on a successful read regardless of state; exit 2 only on a
+# usage error (no id).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,6 +90,8 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
+FM_RUN_SUPERSEDED_TTL=${FM_RUN_SUPERSEDED_TTL:-120}
+case "$FM_RUN_SUPERSEDED_TTL" in ''|*[!0-9]*) FM_RUN_SUPERSEDED_TTL=120 ;; esac
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
@@ -343,27 +348,36 @@ nm_ci_checks_state() {
 # word (running/completed/cancelled/failed), or empty when the branch has no
 # usable run within FM_CREW_STATE_RUNS_LIMIT rows.
 #
-# Rows are newest-first, and a still-running row for this branch outranks any
-# OLDER terminal row the head rule would otherwise match - never a newer one.
-# Both halves of that ordering are enforced: inside the loop a running row can
-# only have been seen strictly above (newer than) the terminal row it
-# supersedes, and when no row binds to the worktree at all the loop-end fallback
-# reports 'running' only when the branch's NEWEST row is itself the running one.
-# A newer terminal row therefore still beats an older row left stuck at running,
-# which is what keeps a genuinely dead run escalating. Without that precedence a
-# crew whose cancelled or failed run was immediately replaced by a fresh one
-# kept reporting the dead run as its current state (2026-08-16: snacksuite run
-# 01M03RWN cancelled and replaced by 01M0492M running still read as "failed:
-# run cancelled"; lensclash run 01M0490J failed and replaced by 01M04KJJ still
-# read as "failed: run failed" while `axi status` showed running/fixing), and
-# the watcher turned that into an inactive-crew false alarm. A running row also
-# needs no head match: the head rule exists to stop a HISTORICAL run on a
-# reused branch from being attributed, and a run that is still executing cannot
-# be history. A pipeline that rebased or rewrote its head (what `no-mistakes
-# rerun` from a preserved head does) is exactly the case that must still be
-# attributed to the crew whose branch it holds.
+# Rows are newest-first, and the precedence among them is ONE rule, stated here
+# and nowhere else. A still-running row wins if and only if the branch's NEWEST
+# row is itself running, and such a row needs no head match. Otherwise the answer
+# is the first row that binds to this worktree, by its own status word. Otherwise
+# the answer is empty.
+#
+# Why a running newest row needs no head match: the head rule exists to stop a
+# HISTORICAL run on a reused branch from being attributed, and a run that is
+# still executing cannot be history. A pipeline that rebased or rewrote its head
+# (what `no-mistakes rerun` from a preserved head does) is exactly the case that
+# must still be attributed to the crew whose branch it holds. A terminal or
+# parked row still has to bind, exactly as before.
+#
+# Why the newest row decides: without running-wins, a crew whose cancelled or
+# failed run was immediately replaced by a fresh one kept reporting the dead run
+# as its current state (2026-08-16: snacksuite run 01M03RWN cancelled and
+# replaced by 01M0492M running still read as "failed: run cancelled"; lensclash
+# run 01M0490J failed and replaced by 01M04KJJ still read as "failed: run
+# failed" while `axi status` showed running/fixing), and the watcher turned that
+# into an inactive-crew false alarm. In both cases the branch's newest row IS the
+# running replacement. Without the newest-row condition, an OLDER row left stuck
+# at running would suppress a newer real terminal verdict, and a genuinely dead
+# crew would read as working forever.
+#
+# Accepted residual risk: a row stuck at running at the TOP of the list is still
+# read as working. The counterweight is the wedge-escalation progress probe
+# (crew_run_progressed in bin/fm-classify-lib.sh), which goes through `axi
+# status` and absorbs only on actual movement.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha running_seen=0 newest_st=""
+  local branch=$1 out row st rest br sha newest=1
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -377,22 +391,65 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     [ "$br" = "$branch" ] || continue
-    [ -n "$newest_st" ] || newest_st=$st
-    # Same code-identity rule as axi status: a same-branch row whose short-sha
-    # does not match this worktree (rewritten or advanced tip) is not this
-    # crew's code - unless it is still running, which supersedes anything older.
-    if ! nm_coarse_head_matches_worktree "$sha"; then
-      [ "$st" = running ] && running_seen=1
-      continue
+    if [ "$newest" = 1 ]; then
+      newest=0
+      if [ "$st" = running ]; then
+        printf 'running'
+        return 0
+      fi
     fi
-    if [ "$running_seen" = 1 ] && [ "$st" != running ]; then
-      printf 'running'
+    if nm_coarse_head_matches_worktree "$sha"; then
+      printf '%s' "$st"
       return 0
     fi
-    printf '%s' "$st"
-    return 0
   done <<< "$out"
-  [ "$running_seen" = 1 ] && [ "$newest_st" = running ] && printf 'running'
+  return 0
+}
+
+# Damping for the terminal-run supersession probe in the run-step path below. A
+# terminal run that nothing ever
+# replaces answers "not superseded" forever, and without a memory every single
+# state read would pay another bounded `no-mistakes runs` call - worst for
+# bin/fm-inactive-reconcile.sh, which calls this helper on exactly the done and
+# failed children it exists to report, under a shared scan budget.
+#
+# Only the NEGATIVE answer is remembered, in state/.run-superseded-<id> holding
+# the worktree head and the epoch it was written; a positive supersession is
+# never served from cache. A recorded head other than the current one
+# invalidates the entry outright, and an entry older than
+# FM_RUN_SUPERSEDED_TTL is re-probed, so a real replacement is still detected
+# well inside a heartbeat.
+nm_supersession_cache_file() {
+  printf '%s/.run-superseded-%s' "$STATE" "$ID"
+}
+
+# 0 when a still-valid "not superseded" answer is on record for this worktree head.
+nm_supersession_absent_cached() {
+  local file head recorded_head recorded_epoch now
+  file=$(nm_supersession_cache_file)
+  [ -f "$file" ] || return 1
+  head=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 1
+  [ -n "$head" ] || return 1
+  read -r recorded_head recorded_epoch < "$file" || return 1
+  [ "$recorded_head" = "$head" ] || return 1
+  case "${recorded_epoch:-}" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s 2>/dev/null) || return 1
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$(( now - recorded_epoch ))" -lt "$FM_RUN_SUPERSEDED_TTL" ]
+}
+
+nm_supersession_record_absent() {
+  local file head now tmp
+  head=$(git -C "$WT" rev-parse HEAD 2>/dev/null) || return 0
+  [ -n "$head" ] || return 0
+  now=$(date +%s 2>/dev/null) || return 0
+  file=$(nm_supersession_cache_file)
+  tmp=$(umask 077; mktemp "$file.XXXXXX") || return 0
+  if printf '%s %s\n' "$head" "$now" > "$tmp"; then
+    mv -f -- "$tmp" "$file" || rm -f -- "$tmp"
+  else
+    rm -f -- "$tmp"
+  fi
   return 0
 }
 
@@ -470,6 +527,10 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
+  # 1 only when the run OBJECT itself reported a terminal verdict, which the
+  # supersession probe below needs to tell apart from the ci-green override -
+  # that one reads done off a run that is still executing.
+  RUN_TERMINAL=0
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
     # true/working, done, or failed. A crew genuinely parked at a gate still
@@ -496,10 +557,10 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
-        failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
-        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
+        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed"; RUN_TERMINAL=1 ;;
+        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review"; RUN_TERMINAL=1 ;;
+        failed)        RUN_STATE=failed; RUN_DETAIL="run failed"; RUN_TERMINAL=1 ;;
+        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled"; RUN_TERMINAL=1 ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
     elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
@@ -521,9 +582,9 @@ if [ "$HAVE_RUN" = 1 ]; then
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
-        completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
-        failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
-        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
+        completed)      RUN_STATE="done"; RUN_DETAIL="run completed"; RUN_TERMINAL=1 ;;
+        failed)         RUN_STATE=failed;  RUN_DETAIL="run failed"; RUN_TERMINAL=1 ;;
+        cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled"; RUN_TERMINAL=1 ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
       esac
@@ -562,19 +623,29 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  # A cancelled or failed run is the crew's current state only while nothing has
-  # replaced it. The worker's own supersession sequence (abort or crash, recover
-  # custody, start again) leaves the dead run as the most recent record for a
-  # while, and reporting it as current is what produced the 2026-08-16
-  # inactive-crew false alarms documented on nm_runs_status_for_branch. That
-  # function is the ONE owner of the newer-active-run-wins rule; consult it
-  # before letting a terminal verdict stand. Only the failed verdict pays this
-  # extra bounded call, and only until the replacement run answers `axi status`
-  # itself. The coarse path already applied the same rule when it resolved.
-  if [ "$RUN_STATE" = failed ] && [ "$RUN_SOURCE" = full ] \
-     && [ "$(nm_runs_status_for_branch "$CREW_BRANCH")" = running ]; then
-    RUN_DETAIL="validating (background run)${SEP}superseded $RUN_DETAIL"
-    RUN_STATE=working
+  # A terminal run is the crew's current state only while nothing has replaced
+  # it. The worker's own supersession sequence (abort or crash, recover custody,
+  # start again) leaves the dead run as the most recent record for a while, and
+  # reporting it as current is what produced the 2026-08-16 inactive-crew false
+  # alarms documented on nm_runs_status_for_branch. That function is the ONE
+  # owner of the newer-active-run-wins rule; consult it before letting a
+  # terminal verdict stand. Both the failed and the done half are checked,
+  # because bin/fm-inactive-reconcile.sh raises its inactive-terminal-outcome
+  # record off either one (evidence 2026-08-16 10:35, lensclash-datenschutz-
+  # loeschung: state=failed surfaced while `axi status` showed running). The
+  # ci-green override is deliberately excluded via RUN_TERMINAL - that run is
+  # still executing and is its own newest row. The coarse path already applied
+  # the same rule when it resolved, and nm_supersession_absent_cached damps the
+  # repeat cost for a terminal run nothing ever replaces.
+  if [ "$RUN_TERMINAL" = 1 ] && [ "$RUN_SOURCE" = full ] \
+     && { [ "$RUN_STATE" = failed ] || [ "$RUN_STATE" = "done" ]; } \
+     && ! nm_supersession_absent_cached; then
+    if [ "$(nm_runs_status_for_branch "$CREW_BRANCH")" = running ]; then
+      RUN_DETAIL="validating (background run)${SEP}superseded $RUN_DETAIL"
+      RUN_STATE=working
+    else
+      nm_supersession_record_absent
+    fi
   fi
 
   if [ "$RUN_HEAD_DIVERGED" = 1 ]; then
