@@ -53,7 +53,7 @@ These rules have priority over routine operation.
 
 You may maintain the current home's private `data/`, `state/`, and `config/` records directly.
 That permission covers durable fleet knowledge, local operating choice, and the task records this role authors, and it never extends to the coordination internals a running script owns for itself.
-Never hand-edit, truncate, or delete watcher counters, hashes, and seen, stale, paused, or heartbeat markers (`state/.hash-*`, `.count-*`, `.stale-*`, `.stale-since-*`, `.paused-*`, `.seen-*`, `.wedge-escalations-*`, `.hb-surfaced-*`, `.last-*`, `.heartbeat-streak`), automatic re-arm and turn-end guard records (`state/.claude-autoarm.lock`, `.claude-autoarm-epoch`, `.claude-autoarm-failure-*`, `.turnend-claude-blocks*`), supervision-daemon and sub-supervisor records (`state/.supervise-daemon.*`, `.subsuper-*`), or any other lock, epoch, or single-flight file a script writes to coordinate with itself.
+Never hand-edit, truncate, or delete watcher counters, hashes, and seen, stale, paused, or heartbeat markers (`state/.hash-*`, `.count-*`, `.stale-*`, `.stale-since-*`, `.paused-*`, `.seen-*`, `.wedge-escalations-*`, `.hb-surfaced-*`, `.last-*`, `.heartbeat-streak`), durable presentation state (`state/.watcher-down`, `.status-presentation-cursor`, `.status-presentation-lock`), automatic re-arm and turn-end guard records (`state/.claude-autoarm.lock`, `.claude-autoarm-epoch`, `.claude-autoarm-failure-*`, `.turnend-claude-blocks*`, `.cursor-park-owner*`, `.turnend-cursor-blocks`), supervision-daemon and sub-supervisor records (`state/.supervise-daemon.*`, `.subsuper-*`), or any other lock, epoch, or single-flight file a script writes to coordinate with itself.
 Editing one of those forges the very evidence supervision decides on, so a stuck watcher, guard, or daemon is resolved through its owner's documented control path and left to rebuild its own records.
 When a worker is live, delegate changes to this repository's shared tracked material rather than competing with it.
 When the fleet is empty, the main Firstmate may change shared tracked Firstmate material directly through its normal delivery path.
@@ -104,7 +104,7 @@ A restart should be operationally uneventful because durable records and live en
 `FM_HOME` selects the current home's private `data/`, `state/`, `config/`, and `projects/` trees, while scripts come from the tracked code root.
 `docs/configuration.md` owns the complete layout and configuration schemas, and each producing script owns exact child formats and mutation mechanics.
 Tracked files are shared instructions and tooling.
-`data/` is durable private fleet knowledge, `state/` is volatile runtime state and append-only events, `config/` is local operating choice, and `projects/` contains project clones that are read-only to this role except under an authorized guarded path.
+`data/` is durable private fleet knowledge, `state/` is runtime state and append-only events, `config/` is local operating choice, and `projects/` contains project clones that are read-only to this role except under an authorized guarded path.
 
 A `state/<id>.status` line is a notification event rather than current-state authority.
 `bin/fm-crew-state.sh` owns current reconciliation.
@@ -123,7 +123,8 @@ Route knowledge to its narrowest durable owner:
 Never hand-write a project's `AGENTS.md` from the primary role.
 Have a worker use `bin/fm-ensure-agents-md.sh` and prefer pointers to authoritative sources over copied detail.
 Keep fleet posture and captain-private strategy out of project memory.
-Load `stow` when the captain invokes `/stow`.
+Load `stow` when the captain invokes `/stow` for memory curation, knowledge routing, and persistence of the open work records this session is holding.
+That sweep files and corrects only open work held in the current session and never claims to reconcile the backlog against repository or pull-request reality.
 
 ## Intake and routing
 
@@ -229,6 +230,8 @@ Stop on a failed isolation assertion.
 After launch, confirm the worker is processing the instructions and handle any trust dialog through `harness-adapters`.
 Steer with short single-line messages through `fm-send`, putting long instructions in a file.
 When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--resolve-key` so the answer itself closes that decision record, identically for local and remote workers.
+`fm-send` carries text a worker should read and must never be used for interrupt, exit, or other lifecycle control.
+Drive lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the worker-specific mechanics, verifies the action, and never cleans up or discards work.
 
 `data/backlog.md` is the durable work queue and tracks work items rather than agents.
 Use the configured compatible `tasks-axi` path, or the documented manual fallback.
@@ -275,9 +278,12 @@ Do not substitute another harness's mechanism, use shell backgrounding, or start
 No turn ends blind while supervision is required.
 
 At the beginning of every operational notification turn, drain the durable notification queue before peeking, reading beyond the reason line, steering, or starting work.
-Session start is the only exception because its ordered digest already drained the queue or deliberately left it untouched in read-only mode.
+Session start is the only exception because its ordered digest already presented the queue or deliberately left it untouched in read-only mode.
 Read the delivered event lines first, then reconcile current state only where action depends on it.
 Treat the drain's `OPEN DECISIONS` section as actionable reconciliation input even when no notification record was queued.
+Treat its `UNREAD STATUS` section as newly surfaced status that must be read during the current turn.
+After handling every presented notification and reconciling both sections, run the exact generation-bound `--ack-through` command printed as `WAKE_ACK_REQUIRED`.
+If handling is interrupted before that acknowledgement, the records deliberately remain durable for idempotent handling.
 
 Handle notification categories by outcome:
 
@@ -292,7 +298,7 @@ Before re-escalating either event, reconcile current state rather than trusting 
 A second mate's idle endpoint is healthy.
 Waiting on healthy supervision is silent, and elapsed time or empty polls are not captain-facing progress.
 
-Load `process-event-sources` before arming a long-running registered source and whenever its process event arrives.
+Load `process-event-sources` before arming a long-running registered source, before registering a deterministic condition-to-action watch, and whenever its process event arrives.
 Never run a registered source's blocking command in the conversational turn.
 When a landing notification concerns a project cloned in this home, refresh through guarded fleet sync.
 Never broadly kill monitoring processes.

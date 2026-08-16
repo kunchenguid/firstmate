@@ -170,9 +170,11 @@ jobs:
   tests-herdr:
     name: Behavior tests (Herdr)
     runs-on: ubuntu-latest
-    # Real Herdr is slower than the portable suite; this is a hang tripwire,
-    # not the expected healthy end of the lane (estimate 15-40 min first cut).
-    timeout-minutes: 40
+    # Healthy runs finish around 7 minutes. This job cap is a last-resort hang
+    # tripwire, not the expected end of the lane. The family-run step owns the
+    # tighter bound so a wedged suite fails fast with always() cleanup and
+    # timing artifacts still uploaded (docs/fm-test-portable-shards.md).
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
         with:
@@ -252,6 +254,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/fm-herdr"
           bin/fm-herdr-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-herdr/sessions-before.json"
       - name: Run real-Herdr family (serial, required)
+        # Comfortably above the ~7 min healthy wall and far below the 75 min
+        # job backstop. A hang must fail this step so cleanup still runs.
+        timeout-minutes: 20
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"

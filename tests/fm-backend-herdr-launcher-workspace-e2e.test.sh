@@ -87,6 +87,8 @@ make_scratch_project() {  # <dir>
   printf '# scratch\n' > "$dir/README.md"
   git -C "$dir" add README.md
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' -c commit.gpgsign=false commit -qm initial
+  git clone --quiet --bare "$dir" "$dir.origin.git"
+  git -C "$dir" remote add origin "file://$dir.origin.git"
 }
 
 # make_workspace <label> -> "<workspace_id> <tab_id> <root_pane_id>"

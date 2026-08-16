@@ -312,13 +312,17 @@ done
 pass "every harness, backend, and spawn kind reuses one recorded carrier verbatim and otherwise roots its own fresh trace"
 
 # --- no prompt / task-prose influence (executable, not a source scan) --------
-# Resolve two records that differ only in task prose through the public entry
-# point while its entropy source returns identical bytes. Byte-identical output
-# proves that prose cannot alter even a field such as the sampling decision.
+# Resolve a production-shaped home through the public entry point while its
+# metadata and entropy remain byte-identical. Change each real prose path alone;
+# an identical complete carrier proves none can alter even the sampling flags.
 
-PROSE_DIR="$WORK/prose"
-mkdir -p "$PROSE_DIR"
-PROSE_META="$PROSE_DIR/task.meta"
+PROSE_HOME="$WORK/prose-home"
+PROSE_ID=trace-prose-z1
+PROSE_META="$PROSE_HOME/state/$PROSE_ID.meta"
+PROSE_STATUS="$PROSE_HOME/state/$PROSE_ID.status"
+PROSE_BRIEF="$PROSE_HOME/data/$PROSE_ID/brief.md"
+PROSE_REPORT="$PROSE_HOME/data/$PROSE_ID/report.md"
+mkdir -p "$PROSE_HOME/state" "$PROSE_HOME/data/$PROSE_ID"
 
 resolve_with_fixed_entropy() {  # <meta-file>
   local meta=$1
@@ -335,18 +339,36 @@ resolve_with_fixed_entropy() {  # <meta-file>
   )
 }
 
-printf 'kind=ship\nbrief=prose-alpha\nprompt=prompt-alpha\nreport=report-alpha\nstatus=status-alpha\n' > "$PROSE_META"
-prose_a=$(resolve_with_fixed_entropy "$PROSE_META")
-printf 'kind=ship\nbrief=prose-beta\nprompt=prompt-beta\nreport=report-beta\nstatus=status-beta\n' > "$PROSE_META"
-prose_b=$(resolve_with_fixed_entropy "$PROSE_META")
+printf 'window=trace-prose-z1\nendpoint_task_id=%s\nworktree=/fixture/worktree\nproject=/fixture/project\nharness=codex\nkind=ship\nmode=no-mistakes\nyolo=off\ntasktmp=/tmp/fm-%s\nmodel=default\neffort=default\nspawn_gen=fixed-generation\n' \
+  "$PROSE_ID" "$PROSE_ID" > "$PROSE_META"
+cp "$PROSE_META" "$WORK/prose-meta.expected"
+printf '# Brief\n\nPrompt prose alpha.\n' > "$PROSE_BRIEF"
+printf '# Report\n\nReport prose alpha.\n' > "$PROSE_REPORT"
+printf 'working: status prose alpha\n' > "$PROSE_STATUS"
+
 expected_prose_carrier='00-11111111111111111111111111111111-2222222222222222-01'
-[ "$prose_a" = "$expected_prose_carrier" ] \
-  || fail "the first prose record changed the fixed-entropy carrier (expected='$expected_prose_carrier' got='$prose_a')"
-[ "$prose_b" = "$expected_prose_carrier" ] \
-  || fail "the second prose record changed the fixed-entropy carrier (expected='$expected_prose_carrier' got='$prose_b')"
-[ "$prose_a" = "$prose_b" ] \
-  || fail "task prose influenced a traceparent field (a='$prose_a' b='$prose_b')"
-pass "brief, prompt, report, and status prose cannot influence any field of a fixed-entropy carrier"
+prose_baseline=$(resolve_with_fixed_entropy "$PROSE_META")
+[ "$prose_baseline" = "$expected_prose_carrier" ] \
+  || fail "the production-shaped prose fixture changed the fixed-entropy carrier (expected='$expected_prose_carrier' got='$prose_baseline')"
+
+for prose_case in \
+  "brief:$PROSE_BRIEF" \
+  "report:$PROSE_REPORT" \
+  "status:$PROSE_STATUS"; do
+  prose_label=${prose_case%%:*}
+  prose_path=${prose_case#*:}
+  cp "$prose_path" "$WORK/$prose_label.alpha"
+  printf 'prose-beta:%s\n' "$prose_label" > "$prose_path"
+  prose_changed=$(resolve_with_fixed_entropy "$PROSE_META")
+  [ "$prose_changed" = "$expected_prose_carrier" ] \
+    || fail "real $prose_label prose changed the fixed-entropy carrier (expected='$expected_prose_carrier' got='$prose_changed')"
+  [ "$prose_changed" = "$prose_baseline" ] \
+    || fail "real $prose_label prose influenced a traceparent field (baseline='$prose_baseline' changed='$prose_changed')"
+  cmp -s "$PROSE_META" "$WORK/prose-meta.expected" \
+    || fail "the production metadata bytes changed while varying only $prose_label prose"
+  cp "$WORK/$prose_label.alpha" "$prose_path"
+done
+pass "real brief, report, and status prose cannot influence any field of a fixed-entropy carrier"
 
 # --- secondmate inheritance wires the nested chain ---------------------------
 

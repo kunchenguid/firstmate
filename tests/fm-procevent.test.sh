@@ -349,8 +349,23 @@ case "${1-}" in
   *) exit 2 ;;
 esac
 SH
+cat > "$ADAPTER_ROOT/bin/fm-procevent-selfann.sh" <<'SH'
+#!/usr/bin/env bash
+# Fixture adapter that declares a durable downstream announcement of its own.
+# FM_HOME/state/selfann-fail makes its application fail so the fallback
+# publication path stays provable.
+case "${1-}" in
+  self-announcing) exit 0 ;;
+  autohandle)
+    [ ! -e "$FM_HOME/state/selfann-fail" ] || exit 1
+    printf '%s %s\n' "$2" "$3" >> "$FM_HOME/state/applied"
+    "$FM_PROCEVENT_UNDER_TEST" handled "$2" "$3" >/dev/null
+    ;;
+  *) exit 2 ;;
+esac
+SH
 chmod +x "$ADAPTER_ROOT/bin/fm-procevent-endnow.sh" "$ADAPTER_ROOT/bin/fm-procevent-openended.sh" \
-  "$ADAPTER_ROOT/bin/fm-procevent-applying.sh"
+  "$ADAPTER_ROOT/bin/fm-procevent-applying.sh" "$ADAPTER_ROOT/bin/fm-procevent-selfann.sh"
 
 pe_adapter() {  # <home> <command>...: run the runner against the fixture adapters
   local home=$1
@@ -377,6 +392,41 @@ FM_HOME="$HPUBLISH" FM_PROCEVENT_UNDER_TEST="$ROOT/bin/fm-procevent.sh" \
 assert_grep 'publish-src 1' "$HPUBLISH/state/applied" "the handler could not apply the later announcement"
 assert_present "$HPUBLISH/state/procevent-inbox/publish-src.1.handled" "the later handler application was not acknowledged"
 pass "automatic application waits for durable publication and failed publication remains recoverable"
+
+# A self-announcing adapter inverts that order on its own declaration: the
+# runner applies first and publishes nothing for a capture the adapter fully
+# applied and acknowledged, because the adapter's own durable downstream
+# channel is the announcement. The declaration never silences a capture the
+# adapter could NOT apply - that one still publishes for the handler.
+HSELF="$TMP_ROOT/hself"; new_home "$HSELF"
+PE_TRACKED+=("$HSELF|self-src")
+pe_adapter "$HSELF" register selfann self-src -- /bin/echo "self announced" >/dev/null
+out=$(pe_adapter "$HSELF" start self-src 2>&1)
+assert_contains "$out" "autohandled: self-src" "the self-announcing adapter did not apply its own capture"
+assert_grep 'self-src 1' "$HSELF/state/applied" "the self-announcing capture was not applied"
+assert_present "$HSELF/state/procevent-inbox/self-src.1.handled" "the self-announcing application was not acknowledged"
+if [ -e "$HSELF/state/.wake-queue" ] && grep -q 'procevent selfann self-src 1' "$HSELF/state/.wake-queue"; then
+  fail "a fully autohandled self-announcing capture still published a duplicate check wake"
+fi
+# This self-announcing source's child returns instantly, so reconcile would
+# restart it and that detached poll would race the failing-path start below for
+# the source claim - non-deterministically stealing its sequence or the claim
+# itself. Retire it before the re-announcement check so reconcile starts no
+# competing poll, then re-register for the failing-path capture, the same
+# retire-before-reconcile discipline the blocker-backed sources rely on.
+pe_adapter "$HSELF" retire self-src >/dev/null
+out=$(pe_adapter "$HSELF" reconcile)
+assert_contains "$out" "published=0" "reconcile re-announced a capture its adapter already acknowledged"
+assert_contains "$out" "started=0" "reconcile restarted an always-ready acknowledged source and raced the next start"
+pe_adapter "$HSELF" register selfann self-src -- /bin/echo "self announced" >/dev/null
+: > "$HSELF/state/selfann-fail"
+out=$(pe_adapter "$HSELF" start self-src 2>&1)
+assert_contains "$out" "not-autohandled: self-src" "a failed self-announcing application was reported as applied"
+assert_absent "$HSELF/state/procevent-inbox/self-src.2.handled" "a failed self-announcing application was acknowledged anyway"
+assert_contains "$(wake_payloads "$HSELF")" "procevent selfann self-src 2" \
+  "a capture the self-announcing adapter could not apply lost its check-wake announcement"
+rm -f "$HSELF/state/selfann-fail"
+pass "a self-announcing adapter applies quietly and still publishes what it could not apply"
 
 HTERM="$TMP_ROOT/hterm"; new_home "$HTERM"
 PE_TRACKED+=("$HTERM|ends-src")

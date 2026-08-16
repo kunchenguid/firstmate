@@ -78,10 +78,14 @@ build_remote_root() {
   git -C "$root" commit -qm 'remote job fixture'
 }
 
+pid_is_numeric() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+}
+
 # start_worker <remote-root> <account-home> <state-root>: start the worker
 # through the shared library start path and echo the supervisor pid.
 start_worker() {
-  local root=$1 account_home=$2 state_root=$3 pid
+  local root=$1 account_home=$2 state_root=$3 pid deadline
   pid=$(
     export FM_REMOTE_JOB_STATE_ROOT="$state_root"
     export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
@@ -89,7 +93,16 @@ start_worker() {
     # shellcheck source=bin/fm-remote-job-lib.sh
     . "$ROOT/bin/fm-remote-job-lib.sh"
     fm_remote_job_start_linux_worker "$root" "$account_home" >&2 || exit 1
-    pgrep -f "^/bin/bash $root/bin/fm-remote-job-worker.sh\$" | head -n 1
+    deadline=$(( $(date +%s) + 10 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      pid=$(pgrep -f "^/bin/bash $root/bin/fm-remote-job-worker.sh\$" | head -n 1)
+      if pid_is_numeric "$pid"; then
+        printf '%s\n' "$pid"
+        exit 0
+      fi
+      sleep 0.1
+    done
+    exit 1
   ) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\n' "$pid"

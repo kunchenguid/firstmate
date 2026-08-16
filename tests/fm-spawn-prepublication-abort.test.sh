@@ -436,8 +436,8 @@ SH
 # make_abort_case <backend> <name> <id>: a home, a real project with a real worktree,
 # and the fake toolchain that backend's spawn drives. Trace context is frozen on for
 # the home session so the TRACEPARENT delivery the second abort needs actually happens.
-make_abort_case() {  # <backend> <name> <id>
-  local backend=$1 name=$2 id=$3 case_dir home proj wt fakebin runtime
+make_abort_case() {  # <backend> <name> <id> [harness]
+  local backend=$1 name=$2 id=$3 harness=${4:-codex} case_dir home proj wt fakebin runtime
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -446,11 +446,14 @@ make_abort_case() {  # <backend> <name> <id>
   fakebin=$(fm_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" \
     "$case_dir/gone" "$case_dir/live" "$runtime"
-  printf 'codex\n' > "$home/config/crew-harness"
+  [ ! -e "/tmp/fm-$id" ] && [ ! -L "/tmp/fm-$id" ] \
+    || fail "$backend: test task temp root already exists before spawn: /tmp/fm-$id"
+  printf '%s\n' "$harness" > "$home/config/crew-harness"
   : > "$home/config/trace-context"
   printf '%s\n' "$$" > "$home/state/.lock"
   printf '%s on\n' "$$" > "$home/state/.trace-context-effective"
   fm_fake_exit0 "$fakebin" treehouse
+  fm_fake_exit0 "$fakebin" pi
   case "$backend" in
     tmux) write_fake_tmux "$fakebin" ;;
     zellij)
@@ -472,6 +475,15 @@ make_abort_case() {  # <backend> <name> <id>
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
   printf '%s\n' "$home|$proj|$wt|$fakebin|$case_dir/kill-log|$case_dir/gone|$case_dir/live|$runtime"
+}
+
+assert_unpublished_resources_clean() {  # <backend> <id>
+  local backend=$1 id=$2 leftovers
+  leftovers=$(find "$HOME_DIR/state" -maxdepth 1 -name "$id*" -print 2>/dev/null || true)
+  [ -z "$leftovers" ] \
+    || fail "$backend: aborted spawn left task state behind: $leftovers"
+  [ ! -e "/tmp/fm-$id" ] && [ ! -L "/tmp/fm-$id" ] \
+    || fail "$backend: aborted spawn left its task temporary root behind: /tmp/fm-$id"
 }
 
 read_abort_record() {
@@ -518,6 +530,7 @@ assert_discarded_endpoint() {  # <backend> <id> <output>
     *"was not confirmed gone"*)
       fail "$backend: a close that demonstrably worked was reported as a stranded endpoint: $out" ;;
   esac
+  assert_unpublished_resources_clean "$backend" "$id"
 }
 
 # assert_stranded_endpoint <backend> <id> <output>: the close returned success while the
@@ -538,7 +551,7 @@ assert_stranded_endpoint() {  # <backend> <id> <output>
 
 test_gotmpdir_failure_discards_the_endpoint() {  # <backend>
   local backend=$1 rec id out
-  id="preabort-gotmp-$backend-z1"
+  id="preabort-gotmp-$backend-$$-z1"
   rec=$(make_abort_case "$backend" "preabort-gotmp-$backend" "$id")
   read_abort_record "$rec"
 
@@ -551,7 +564,7 @@ test_gotmpdir_failure_discards_the_endpoint() {  # <backend>
 
 test_gotmpdir_failure_reports_a_surviving_endpoint() {  # <backend>
   local backend=$1 rec id out
-  id="preabort-gotmp-strand-$backend-z2"
+  id="preabort-gotmp-strand-$backend-$$-z2"
   rec=$(make_abort_case "$backend" "preabort-gotmp-strand-$backend" "$id")
   read_abort_record "$rec"
 
@@ -564,7 +577,7 @@ test_gotmpdir_failure_reports_a_surviving_endpoint() {  # <backend>
 
 test_unsafe_trace_delivery_discards_the_endpoint() {  # <backend>
   local backend=$1 rec id out
-  id="preabort-trace-$backend-z3"
+  id="preabort-trace-$backend-$$-z3"
   rec=$(make_abort_case "$backend" "preabort-trace-$backend" "$id")
   read_abort_record "$rec"
 
@@ -577,7 +590,7 @@ test_unsafe_trace_delivery_discards_the_endpoint() {  # <backend>
 
 test_unsafe_trace_delivery_reports_a_surviving_endpoint() {  # <backend>
   local backend=$1 rec id out
-  id="preabort-trace-strand-$backend-z4"
+  id="preabort-trace-strand-$backend-$$-z4"
   rec=$(make_abort_case "$backend" "preabort-trace-strand-$backend" "$id")
   read_abort_record "$rec"
 
@@ -586,13 +599,53 @@ test_unsafe_trace_delivery_reports_a_surviving_endpoint() {  # <backend>
   pass "$backend: an endpoint surviving an uncleared TRACEPARENT input is reported as stranded"
 }
 
-for BACKEND in tmux zellij cmux herdr; do
-  test_gotmpdir_failure_discards_the_endpoint "$BACKEND"
-  test_gotmpdir_failure_reports_a_surviving_endpoint "$BACKEND"
-done
-for BACKEND in zellij cmux; do
-  test_unsafe_trace_delivery_discards_the_endpoint "$BACKEND"
-  test_unsafe_trace_delivery_reports_a_surviving_endpoint "$BACKEND"
-done
+if [ "${FM_PREABORT_PI_ONLY:-0}" != 1 ]; then
+  for BACKEND in tmux zellij cmux herdr; do
+    test_gotmpdir_failure_discards_the_endpoint "$BACKEND"
+    test_gotmpdir_failure_reports_a_surviving_endpoint "$BACKEND"
+  done
+  for BACKEND in zellij cmux; do
+    test_unsafe_trace_delivery_discards_the_endpoint "$BACKEND"
+    test_unsafe_trace_delivery_reports_a_surviving_endpoint "$BACKEND"
+  done
+fi
+
+test_pi_gotmpdir_failure_retires_sidecars() {
+  local rec id out
+  id="preabort-gotmp-pi-$$-z5"
+  rec=$(make_abort_case tmux preabort-gotmp-pi "$id" pi)
+  read_abort_record "$rec"
+
+  out=$(FM_FAKE_GOTMPDIR_SEND_FAIL=1 run_abort_spawn tmux "$id") || true
+  assert_contains "$out" "temporary-directory environment could not be delivered" \
+    "pi: the aborted spawn did not reach the expected pre-publication failure: $out"
+  assert_discarded_endpoint tmux "$id" "$out"
+  pass "pi: a failed GOTMPDIR delivery retires its busy generation, extension, and task temporary root"
+}
+
+test_preexisting_task_tmp_is_preserved() {
+  local rec id out task_tmp leftovers
+  id="preabort-gotmp-unowned-$$-z6"
+  rec=$(make_abort_case tmux preabort-gotmp-unowned "$id")
+  read_abort_record "$rec"
+  task_tmp="/tmp/fm-$id"
+  mkdir -p "$task_tmp"
+  printf 'pre-existing\n' > "$task_tmp/owner-marker"
+  FM_TEST_CLEANUP_DIRS+=("$task_tmp")
+
+  out=$(FM_FAKE_GOTMPDIR_SEND_FAIL=1 run_abort_spawn tmux "$id") || true
+  assert_contains "$out" "preserving the pre-existing task temporary root for $id because this spawn did not create it" \
+    "tmux: unproved task-temp ownership was not diagnosed honestly: $out"
+  [ -f "$task_tmp/owner-marker" ] \
+    || fail "tmux: abort cleanup removed a task temporary root it did not create"
+  leftovers=$(find "$HOME_DIR/state" -maxdepth 1 -name "$id*" -print 2>/dev/null || true)
+  [ -z "$leftovers" ] \
+    || fail "tmux: ownership-preserving abort left task state behind: $leftovers"
+  rm -rf -- "$task_tmp"
+  pass "tmux: abort cleanup preserves an unowned task temporary root with an exact diagnostic"
+}
+
+test_pi_gotmpdir_failure_retires_sidecars
+test_preexisting_task_tmp_is_preserved
 
 echo "# all fm-spawn-prepublication-abort tests passed"
