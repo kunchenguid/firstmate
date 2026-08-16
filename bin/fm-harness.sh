@@ -13,6 +13,10 @@
 #                                        config/secondmate-harness, or empty when absent.
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
+#        fm-harness.sh escalate <id> --class <substantive|injection|mechanical>
+#                                        resolve the relaunch routing tuple for a failed
+#                                        ordinary direct report through the classifying
+#                                        escalation ladder (see below).
 # config/secondmate-harness format: a single line "<harness> [<model>] [<effort>]",
 # whitespace-separated. A bare "<harness>" (today's format) behaves exactly as before:
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
@@ -20,12 +24,66 @@
 # name and is never parsed for a model.
 # Detection layers: verified environment markers first, then process ancestry.
 # Record each newly verified env marker here.
+#
+# Escalation ladder (the `escalate` subcommand)
+#
+# This script owns routing resolution, so the relaunch-routing decision for a
+# failed ordinary direct report lives here too - never in a second resolver.
+# The ladder is CLASSIFYING, and the caller (the stuck-crewmate-recovery skill)
+# owns the classification judgment; this command owns the mechanics:
+#   substantive  - capability evidence (wrong answer, looped after redirect,
+#                  failed the same gate twice): raise effort ONE rung
+#                  (default/low -> medium -> high -> xhigh), same harness/model.
+#   injection    - the worker refused its brief as suspected injection: rotate
+#                  the harness one step along the fixed vendor-diverse order
+#                  claude -> codex -> opencode -> pi|pi-signed -> grok -> kimi
+#                  -> cursor-agent -> (wrap), preserving effort and resetting
+#                  model to default (model ids are harness-local).
+#   mechanical   - environment evidence (worktree acquisition timeout, network
+#                  or API error, denied permission, machine memory pressure):
+#                  relaunch the identical tuple.
+# Ceilings, all fail-closed:
+#   - the effort ladder NEVER selects max; at xhigh a further substantive
+#     failure resolves verdict=escalate-captain reason=effort-ceiling when the
+#     adapter verifiably carried that tier - a top rung recorded onto an
+#     adapter that never expressed it (an injection rotation preserves the
+#     requested effort onto effortless adapters) resolves the truthful
+#     reason=effort-capped or reason=effort-unsupported instead.
+#   - a substantive rung the current harness cannot express resolves
+#     verdict=escalate-captain reason=effort-capped (the adapter has an effort
+#     flag but not at that level) or reason=effort-unsupported (no effort flag
+#     at all), read from the shared table in bin/fm-launch-axis-lib.sh so the
+#     ladder and the launch command can never disagree.
+#   - at most 3 ladder attempts per task (any class or verdict mix); the next
+#     request resolves verdict=escalate-captain reason=attempt-budget.
+#   - a current harness outside the rotation list resolves
+#     verdict=escalate-captain reason=harness-not-rotatable.
+# Precedence (AGENTS.md section 4) is enforced through the routing_source=
+# field fm-spawn.sh records from --routing-source: the ladder acts only on
+# routing_source=fallback. A captain or profile source resolves
+# verdict=report reason=routing-pinned, and an absent field resolves
+# verdict=report reason=unknown-provenance; both leave routing untouched but
+# still consume budget, because the caller relaunches the unchanged tuple by
+# the ordinary path and that loop needs the same ceiling. kind=secondmate metas
+# are refused (exit 1): secondmate recovery belongs to secondmate-provisioning.
+# Output is stable and parseable. A relaunch verdict prints:
+#   verdict=relaunch / class=<class> / attempts=<n> / harness= / model= / effort=
+# A report or escalate-captain verdict prints verdict=, reason=, attempts=, and
+# the current (unchanged) tuple. All verdicts exit 0; usage errors, unreadable or
+# nonstandard metadata, refused kinds, and an attempt log that cannot be
+# appended to exit 1 with the error on stderr - an escalation the budget cannot
+# record is never emitted.
+# Every verdict appends one line to the append-only log state/<id>.escalation,
+# owned by this command:
+#   <epoch>\t<class>\t<verdict>\t<reason|none>\t<old harness,model,effort>\t<new harness,model,effort>
+# The line count IS the attempt budget; teardown removes the file.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
@@ -149,10 +207,206 @@ resolve_secondmate_effort() {
   secondmate_field 3
 }
 
+# --- escalation ladder --------------------------------------------------------
+
+# Fixed vendor-diverse rotation order for the injection class. A slot may list
+# several harness identities of one vendor, separated by "|": any of them
+# matches that slot, and a rotation always lands on the slot's FIRST identity.
+# That is how pi-signed rotates off the Pi vendor entirely instead of onto plain
+# pi (same vendor, so it could not remedy a pi-family refusal) or straight to a
+# human, while a rotation into the Pi slot still picks the identity that needs
+# no extra signed wrapper on PATH.
+ESCALATION_ROTATION="claude codex opencode pi|pi-signed grok kimi cursor-agent"
+ESCALATION_MAX_RELAUNCHES=3
+
+# esc_meta_get <meta-file> <key>: last-wins read of one key= field.
+esc_meta_get() {
+  grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-
+}
+
+# esc_tuple <harness> <model> <effort>: canonical single-field log spelling.
+esc_tuple() {
+  printf '%s,%s,%s' "$1" "$2" "$3"
+}
+
+escalate_usage() {
+  echo "usage: fm-harness.sh escalate <task-id> --class <substantive|injection|mechanical>" >&2
+  exit 1
+}
+
+escalate_task() {
+  local id=$1 class=$2
+  local meta="$STATE/$id.meta" log="$STATE/$id.escalation"
+  if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+    echo "error: escalate $id: no readable task metadata at $meta" >&2
+    exit 1
+  fi
+  local kind harness model effort source
+  kind=$(esc_meta_get "$meta" kind)
+  harness=$(esc_meta_get "$meta" harness)
+  model=$(esc_meta_get "$meta" model)
+  effort=$(esc_meta_get "$meta" effort)
+  source=$(esc_meta_get "$meta" routing_source)
+  case "$kind" in
+    ship|scout) ;;
+    secondmate)
+      echo "error: escalate $id: kind=secondmate is recovered through secondmate-provisioning, never the routing ladder" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: escalate $id: metadata records no ordinary kind=ship|scout (found '${kind:-none}')" >&2
+      exit 1
+      ;;
+  esac
+  [ -n "$harness" ] || { echo "error: escalate $id: metadata records no harness=" >&2; exit 1; }
+  model=${model:-default}
+  effort=${effort:-default}
+
+  local verdict='' reason='' new_harness=$harness new_model=$model new_effort=$effort
+  # Precedence guard: the ladder acts only where the generic fallback acted.
+  # A captain or profile source keeps its routing and gets a report instead;
+  # an absent field is unknown provenance and fails closed the same way.
+  if [ "$source" != fallback ]; then
+    verdict=report reason=routing-pinned
+    [ -n "$source" ] || reason=unknown-provenance
+  else
+    case "$class" in
+      substantive)
+        case "$effort" in
+          default|low) new_effort=medium ;;
+          medium) new_effort=high ;;
+          high) new_effort=xhigh ;;
+          # xhigh (or a max that only a captain could have set) is the top of
+          # the ladder: stop and escalate to a human. Never select max here.
+          # The recorded tier is the REQUESTED axis, not proof the launch
+          # carried it: an injection rotation preserves effort onto adapters
+          # with no flag for it, so name effort-ceiling only when this
+          # adapter verifiably expressed the tier, else the axis truth.
+          *)
+            verdict=escalate-captain
+            case "$(fm_effort_axis_state "$harness" "$effort")" in
+              supported) reason='effort-ceiling' ;;
+              capped) reason='effort-capped' ;;
+              *) reason='effort-unsupported' ;;
+            esac
+            ;;
+        esac
+        # A rung the harness cannot express is not a weaker relaunch, it is the
+        # SAME launch: fm-spawn omits an effort flag the adapter has no verified
+        # support for. Spending a budget slot on that identical relaunch buys
+        # nothing, so stop on the harness's own limit instead.
+        if [ -z "$verdict" ]; then
+          case "$(fm_effort_axis_state "$harness" "$new_effort")" in
+            supported) ;;
+            capped) verdict=escalate-captain reason=effort-capped ;;
+            *) verdict=escalate-captain reason=effort-unsupported ;;
+          esac
+        fi
+        ;;
+      injection)
+        local found='' slot
+        for slot in $ESCALATION_ROTATION; do
+          if [ -n "$found" ]; then new_harness=${slot%%|*}; break; fi
+          case "|$slot|" in *"|$harness|"*) found=1 ;; esac
+        done
+        if [ -z "$found" ]; then
+          verdict=escalate-captain reason=harness-not-rotatable
+        else
+          if [ "$new_harness" = "$harness" ]; then
+            new_harness=${ESCALATION_ROTATION%% *}
+            new_harness=${new_harness%%|*}
+          fi
+          # Model ids are harness-local; a rotation never carries one across.
+          new_model=default
+        fi
+        ;;
+      mechanical) ;;
+    esac
+    [ -n "$verdict" ] || verdict=relaunch
+  fi
+  if [ "$verdict" != relaunch ]; then
+    new_harness=$harness new_model=$model new_effort=$effort
+  fi
+
+  # Serialize the fold-and-append so concurrent escalations of one task cannot
+  # both spend the same budget slot.
+  local lock="$STATE/.$id.escalation.lock"
+  fm_lock_acquire_wait "$lock"
+  # Attempt budget: EVERY escalate invocation appends one line and every line
+  # counts, folded under the lock so this read is the single authority. A report
+  # verdict relaunches the unchanged tuple by the ordinary path, so it consumes
+  # the same budget a ladder relaunch does; otherwise a pinned or legacy task
+  # could report-and-relaunch forever with nothing ever reaching a human.
+  # Class-specific ceilings above win over the budget because they name the more
+  # precise reason; all of them are terminal and emit no relaunch.
+  local attempts=0
+  if [ -f "$log" ]; then
+    attempts=$(awk 'END { print NR + 0 }' "$log")
+  fi
+  if [ "$attempts" -ge "$ESCALATION_MAX_RELAUNCHES" ] && [ "$verdict" != escalate-captain ]; then
+    verdict=escalate-captain reason=attempt-budget
+    new_harness=$harness new_model=$model new_effort=$effort
+  fi
+  # The append IS the budget, so an unrecorded attempt must never resolve to a
+  # relaunch or a report: either keeps the task going while spending no slot.
+  if ! printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date +%s)" "$class" "$verdict" "${reason:-none}" \
+    "$(esc_tuple "$harness" "$model" "$effort")" \
+    "$(esc_tuple "$new_harness" "$new_model" "$new_effort")" >> "$log"; then
+    fm_lock_release "$lock"
+    echo "error: escalate $id: could not append the attempt to $log; refusing an unbudgeted escalation" >&2
+    exit 1
+  fi
+  attempts=$((attempts + 1))
+  fm_lock_release "$lock"
+
+  if [ "$verdict" = relaunch ]; then
+    printf 'verdict=relaunch\nclass=%s\nattempts=%s\nharness=%s\nmodel=%s\neffort=%s\n' \
+      "$class" "$attempts" "$new_harness" "$new_model" "$new_effort"
+    return 0
+  fi
+  printf 'verdict=%s\nreason=%s\nattempts=%s\nharness=%s\nmodel=%s\neffort=%s\n' \
+    "$verdict" "$reason" "$attempts" "$harness" "$model" "$effort"
+}
+
+escalate_main() {
+  local id='' class=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --class)
+        [ $# -ge 2 ] && [ -n "$2" ] || escalate_usage
+        class=$2; shift 2 ;;
+      --class=*)
+        class=${1#--class=}
+        [ -n "$class" ] || escalate_usage
+        shift ;;
+      --*) escalate_usage ;;
+      *)
+        if [ -z "$id" ]; then id=$1; shift; else escalate_usage; fi ;;
+    esac
+  done
+  case "$id" in
+    ''|*/*|*..*) escalate_usage ;;
+  esac
+  case "$class" in
+    substantive|injection|mechanical) ;;
+    *) escalate_usage ;;
+  esac
+  # Only the ladder needs the lock helpers, and sourcing the wake library has
+  # side effects (state dir creation, a uname fork), so the bare detection
+  # query - which fm-wake-lib.sh itself shells out to - stays free of them.
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  # shellcheck source=bin/fm-launch-axis-lib.sh
+  . "$SCRIPT_DIR/fm-launch-axis-lib.sh"
+  escalate_task "$id" "$class"
+}
+
 case "${1:-}" in
   crew) resolve_crew ;;
   secondmate) resolve_secondmate ;;
   secondmate-model) resolve_secondmate_model ;;
   secondmate-effort) resolve_secondmate_effort ;;
+  escalate) shift; escalate_main "$@" ;;
   *) detect_own ;;
 esac

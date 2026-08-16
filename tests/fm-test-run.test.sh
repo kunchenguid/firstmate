@@ -118,6 +118,7 @@ init_changed_fixture_repo() {
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/bin/fm-launch-axis-lib.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
   printf '# .claude/settings.json\n# .pi/extensions/fm-primary-turnend-guard.ts\n' \
@@ -161,6 +162,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
   git -C "$repo" add bin/fm-supervisor-target-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
+
+  printf '\n' >>"$repo/bin/fm-launch-axis-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend.test.sh" "launch-axis changes select backend coverage"
+  assert_contains "$listed" "tests/fm-brief.test.sh" "launch-axis changes select pure contract coverage"
+  git -C "$repo" add bin/fm-launch-axis-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm launch-axis-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"
@@ -286,7 +294,7 @@ SH
   pass "aggregate exit reflects any script failure"
 }
 
-test_gate_skip_accounting() {
+test_gate_skip_accounting_under_unsupported_inherited_locale() {
   local tmp skip_f out json
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-skip.XXXXXX")
   skip_f="$tmp/skip.test.sh"
@@ -298,7 +306,8 @@ echo "skip: herdr not found"
 exit 0
 SH
   chmod +x "$skip_f"
-  "$RUNNER" --json "$json" "$skip_f" >"$out" 2>"$tmp/err.txt" \
+  LC_ALL=fm_TEST_INVALID_LOCALE LANG=fm_TEST_INVALID_LOCALE \
+    "$RUNNER" --json "$json" "$skip_f" >"$out" 2>"$tmp/err.txt" \
     || fail "gate-skip fixture must exit 0 from the runner"
   grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=true$' "$out" \
     || fail "END must mark gate_skip=true: $(grep '^FM_TEST_END' "$out")"
@@ -312,7 +321,7 @@ assert doc["summary"]["skipped_gate"] == 1
 assert doc["summary"]["failed"] == 0
 ' "$json" || { rm -rf "$tmp"; fail "JSON gate_skip accounting is wrong"; }
   rm -rf "$tmp"
-  pass "gate-skip accounting is honest and non-failing"
+  pass "gate-skip accounting survives an unsupported inherited locale"
 }
 
 test_fail_on_gate_skip_token() {
@@ -680,7 +689,7 @@ test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
-test_gate_skip_accounting
+test_gate_skip_accounting_under_unsupported_inherited_locale
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard

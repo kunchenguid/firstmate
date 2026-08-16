@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--model <name>] [--effort <level>] [--task-class <class>] [--exploration] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--model <name>] [--effort <level>] [--task-class <class>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--model <name>] [--effort <level>] [--task-class <class>] [--exploration] [--backend <name>] [--routing-source <captain|profile|fallback>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--model <name>] [--effort <level>] [--task-class <class>] [--backend <name>] [--routing-source <captain|profile|fallback>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -28,7 +28,18 @@
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   from that harness's launch rather than guessed. Both axes also accept the
+#   literal "default", the task meta's spelling for an unset axis, and treat it
+#   as exactly that, so a recorded tuple - the escalation ladder's relaunch
+#   verdict (bin/fm-harness.sh escalate) - can be re-passed verbatim.
+#   --routing-source <captain|profile|fallback> records how this task's routing
+#   tuple was authorized at intake: an explicit per-task captain instruction, a
+#   configured dispatch profile or pin, or the generic fallback. The value lands
+#   in the task meta as routing_source= and is the escalation ladder's
+#   precedence guard (bin/fm-harness.sh escalate acts only on fallback); an
+#   absent value is unknown provenance and fails closed there. A ladder-driven
+#   relaunch re-passes --routing-source fallback so the task stays
+#   ladder-eligible across respawns.
 #   --task-class records the intake classification in model telemetry; absent stays
 #   unresolved for compatibility. --exploration records firstmate's deliberate
 #   model/effort rotation, requires both axes explicitly, and is accepted only
@@ -256,6 +267,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-launch-axis-lib.sh
+. "$SCRIPT_DIR/fm-launch-axis-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -272,6 +285,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+ROUTING_SOURCE=
 TELEMETRY_TASK_ROOT=
 TELEMETRY_PARENT=
 ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA=0
@@ -286,6 +300,7 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+ROUTING_SOURCE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -302,6 +317,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      routing-source) ROUTING_SOURCE=$a; ROUTING_SOURCE_SET=1 ;;
       telemetry-task-root) TELEMETRY_TASK_ROOT=$a ;;
       telemetry-parent) TELEMETRY_PARENT=$a ;;
       dispatch-override-reason) DISPATCH_OVERRIDE_REASON=$a; DISPATCH_OVERRIDE_REASON_SET=1 ;;
@@ -331,6 +347,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --routing-source) want_value=routing-source ;;
+    --routing-source=*) ROUTING_SOURCE=${a#--routing-source=}; ROUTING_SOURCE_SET=1 ;;
     --telemetry-task-root) want_value=telemetry-task-root ;;
     --telemetry-task-root=*) TELEMETRY_TASK_ROOT=${a#--telemetry-task-root=} ;;
     --telemetry-parent) want_value=telemetry-parent ;;
@@ -350,6 +368,11 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$ROUTING_SOURCE_SET" -eq 0 ] || [ -n "$ROUTING_SOURCE" ] || { echo "error: --routing-source requires a non-empty value" >&2; exit 1; }
+case "$ROUTING_SOURCE" in
+  ''|captain|profile|fallback) ;;
+  *) echo "error: --routing-source must be one of captain, profile, fallback" >&2; exit 1 ;;
+esac
 [ -z "$TELEMETRY_TASK_ROOT" ] || printf '%s' "$TELEMETRY_TASK_ROOT" | grep -Eq '^mrt_[0-9a-f-]{36}$' || { echo "error: --telemetry-task-root requires an opaque mrt UUID" >&2; exit 1; }
 [ -z "$TELEMETRY_PARENT" ] || printf '%s' "$TELEMETRY_PARENT" | grep -Eq '^mra_[0-9a-f-]{36}$' || { echo "error: --telemetry-parent requires an opaque mra UUID" >&2; exit 1; }
 [ -z "$TELEMETRY_PARENT" ] || [ -n "$TELEMETRY_TASK_ROOT" ] || { echo "error: --telemetry-parent requires --telemetry-task-root" >&2; exit 1; }
@@ -383,9 +406,20 @@ if [ "$TRACEPARENT_SET" -eq 1 ]; then
     exit 1
   }
 fi
+case "$MODEL" in
+  # Same sentinel on the model axis: leaving the literal through would record a
+  # second spelling of one tuple in the routing ledger (tuple.model="default"
+  # beside the null an omitted axis writes), which the rotation precondition
+  # reads as two different attempts.
+  default) MODEL= ;;
+esac
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
-  *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
+  # "default" is how the task meta spells an unset effort, so normalize it back
+  # to unset here rather than carrying a sentinel through every downstream
+  # effort check (remote secondmate validation, the per-harness flag builder).
+  default) EFFORT= ;;
+  *) echo "error: --effort must be one of low, medium, high, xhigh, max, or default" >&2; exit 1 ;;
 esac
 case "$TASK_CLASS" in
   rote-reversible-edit|bounded-implementation-proven-root-fix|unknown-root-diagnosis|adversarial-review-security-review|evidence-heavy-research|long-horizon-repository-work|visual-browser-sensitive-work|documentation-specification-decision-extraction|external-wait-integration-work|unresolved) ;;
@@ -552,7 +586,7 @@ if [ "$EXPLORATION" = deliberate ]; then
     echo "error: --exploration requires a no-mistakes ship classified as bounded-implementation-proven-root-fix" >&2
     exit 1
   }
-  [ "$MODEL_SET" -eq 1 ] && [ "$EFFORT_SET" -eq 1 ] || {
+  [ "$MODEL_SET" -eq 1 ] && [ -n "$MODEL" ] && [ "$EFFORT_SET" -eq 1 ] && [ -n "$EFFORT" ] || {
     echo "error: --exploration requires explicit --model and --effort values" >&2
     exit 1
   }
@@ -981,6 +1015,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$TASK_CLASS_SET" -eq 0 ] || shared_args+=(--task-class "$TASK_CLASS")
   [ "$EXPLORATION" = none ] || shared_args+=(--exploration)
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ "$ROUTING_SOURCE_SET" -eq 0 ] || shared_args+=(--routing-source "$ROUTING_SOURCE")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.
@@ -1194,12 +1229,6 @@ secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
 }
 
-shell_quote() {
-  printf "'"
-  printf '%s' "$1" | sed "s/'/'\\\\''/g"
-  printf "'"
-}
-
 resolve_kimi_binary() {
   local candidate dir fallback
   candidate=$(command -v kimi 2>/dev/null || true)
@@ -1231,49 +1260,6 @@ model_flag_for_harness() {
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor-agent)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
-  esac
-}
-
-effort_flag_for_harness() {
-  local harness=$1 effort=$2
-  [ -n "$effort" ] && [ "$effort" != default ] || return 0
-  case "$harness" in
-    claude)
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
-      case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
-      esac
-      ;;
-    grok)
-      # grok exposes both --effort and --reasoning-effort; firstmate's profile
-      # axis is the reasoning knob. As of grok 0.2.99, --reasoning-effort accepts
-      # only low|medium|high and rejects both xhigh and max, so omit those rather
-      # than passing a known-bad value.
-      case "$effort" in
-        low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    pi|pi-signed)
-      # Pi 0.80.6 accepts the full shared effort vocabulary, including max, through
-      # its --thinking flag.
-      case "$effort" in
-        low|medium|high|xhigh|max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
-      esac
-      ;;
-    # opencode's interactive `opencode --prompt` launch has a verified --model
-    # flag but no verified effort flag. Its `opencode run --variant` flag belongs
-    # to a different, non-interactive launch mode, so fm-spawn does not pass it.
-    # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command. Cursor Agent expresses
-    # effort in the selected model id or its bracket parameters, so firstmate
-    # records the separate effort axis but emits no second CLI flag.
   esac
 }
 
@@ -2374,6 +2360,10 @@ TELEMETRY_TASK_ROOT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.taskRootId | se
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # routing_source= is written only when the caller declared it, so a legacy
+  # meta stays byte-identical and the escalation ladder (fm-harness.sh
+  # escalate) reads absent as unknown provenance and fails closed.
+  [ -z "$ROUTING_SOURCE" ] || echo "routing_source=$ROUTING_SOURCE"
   echo "telemetry_attempt=$TELEMETRY_ATTEMPT"
   echo "telemetry_task_root=$TELEMETRY_TASK_ROOT"
   [ -z "$TASK_BASE_COMMIT" ] || echo "base_commit=$TASK_BASE_COMMIT"

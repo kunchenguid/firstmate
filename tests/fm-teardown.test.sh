@@ -1723,6 +1723,30 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+test_teardown_reaps_escalation_log_and_abandoned_lock_owner() {
+  local case_dir lock owner
+  case_dir=$(make_case escalation-cleanup)
+  write_meta "$case_dir" local-only ship
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' 1700000000 mechanical relaunch none \
+    codex,default,low codex,default,low > "$case_dir/state/task-x1.escalation"
+  lock="$case_dir/state/.task-x1.escalation.lock"
+  # Exactly the lock an `escalate` process killed between acquire and release
+  # leaves behind: the real helper's symlink plus its sibling owner directory.
+  FM_STATE_OVERRIDE="$case_dir/state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_try_create "$2"
+  ' _ "$ROOT" "$lock" || fail "escalation-cleanup: could not create the escalation lock"
+  owner=$(readlink "$lock") || fail "escalation-cleanup: the escalation lock is not the helper's symlink"
+  [ -d "$owner" ] || fail "escalation-cleanup: the escalation lock has no owner directory"
+
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "escalation-cleanup: forced teardown failed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.escalation" "escalation-cleanup: teardown left the attempt-budget log"
+  assert_absent "$lock" "escalation-cleanup: teardown left the escalation lock"
+  assert_absent "$owner" "escalation-cleanup: teardown left the escalation lock's owner directory in state/"
+  pass "teardown removes the ladder's budget log and reaps an abandoned escalation lock with its owner dir"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -3444,6 +3468,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_teardown_reaps_escalation_log_and_abandoned_lock_owner
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

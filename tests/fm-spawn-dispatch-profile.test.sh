@@ -130,6 +130,62 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+test_routing_source_recorded_only_when_declared() {
+  local rec id out status
+  id=profile-routing-source-z29
+  rec=$(make_spawn_case routing-source codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort medium --routing-source fallback)
+  status=$?
+  expect_code 0 "$status" "spawn with --routing-source fallback should succeed"
+  assert_grep "routing_source=fallback" "$HOME_DIR/state/$id.meta" "meta missing routing_source=fallback"
+
+  id=profile-routing-source-z30
+  rec=$(make_spawn_case routing-source-absent codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5 --effort medium)
+  status=$?
+  expect_code 0 "$status" "spawn without --routing-source should succeed"
+  assert_no_grep "routing_source=" "$HOME_DIR/state/$id.meta" "undeclared routing source must stay absent (unknown provenance fails closed)"
+
+  id=profile-routing-source-z31
+  rec=$(make_spawn_case routing-source-invalid codex "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --routing-source vibes)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted an unrecognized --routing-source"
+  assert_contains "$out" "--routing-source must be one of captain, profile, fallback" "invalid routing source refusal did not name the contract"
+  [ ! -s "$LAUNCH_LOG" ] || fail "invalid routing source reached launch submission"
+  assert_absent "$HOME_DIR/state/$id.meta" "invalid routing source published task metadata"
+  pass "--routing-source records provenance in meta, stays absent when undeclared, and refuses unknown values"
+}
+
+test_recorded_default_axes_respawn_as_unset() {
+  local rec id out status launch expected ledger
+  id=profile-default-sentinel-z32
+  rec=$(make_spawn_case default-sentinel claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model default --effort default --routing-source fallback)
+  status=$?
+  expect_code 0 "$status" "a relaunch re-passing the meta's recorded tuple should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+
+  launch=$(cat "$LAUNCH_LOG")
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  [ "$launch" = "$expected" ] || fail "recorded default axes did not launch identically to unset axes"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  jq -es 'map(select(.eventType=="attempt-intake")) | length==1 and .[0].intake.tuple.model==null and .[0].intake.tuple.effort=="default"' "$ledger" >/dev/null \
+    || fail "the recorded default tuple entered the routing ledger under a second spelling instead of one unset model axis"
+  pass "a tuple recorded as model=default/effort=default respawns verbatim, launches as unset axes, and enters the ledger once"
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -761,7 +817,7 @@ test_telemetry_precedes_submission_and_metadata_is_opaque() {
 }
 
 test_exploration_requires_an_explicit_rotated_model_and_effort() {
-  local rec id out status
+  local rec id id2 out status
   id=profile-exploration-missing-model-z24
   rec=$(make_spawn_case profile-exploration-missing-model pi "$id")
   read_case_record "$rec"
@@ -783,7 +839,42 @@ test_exploration_requires_an_explicit_rotated_model_and_effort() {
   assert_contains "$out" "--exploration requires explicit --model and --effort values" "missing-effort exploration refusal did not name the tuple contract"
   [ ! -s "$LAUNCH_LOG" ] || fail "missing-effort exploration reached launch submission"
   assert_absent "$HOME_DIR/data/routing-outcomes.jsonl" "missing-effort exploration recorded an attempt"
-  pass "deliberate exploration requires an explicit rotated model and effort before intake or submission"
+
+  id=profile-exploration-default-effort-z26
+  rec=$(make_spawn_case profile-exploration-default-effort pi "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model gpt-5.6-sol --effort default --task-class bounded-implementation-proven-root-fix --exploration)
+  status=$?
+  [ "$status" -ne 0 ] || fail "exploration accepted the unset-effort sentinel as a rotated effort"
+  assert_contains "$out" "--exploration requires explicit --model and --effort values" "default-effort exploration refusal did not name the tuple contract"
+  [ ! -s "$LAUNCH_LOG" ] || fail "default-effort exploration reached launch submission"
+  assert_absent "$HOME_DIR/data/routing-outcomes.jsonl" "default-effort exploration recorded an attempt"
+
+  id=profile-exploration-default-model-z27
+  rec=$(make_spawn_case profile-exploration-default-model pi "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --model default --effort high --task-class bounded-implementation-proven-root-fix --exploration)
+  status=$?
+  [ "$status" -ne 0 ] || fail "exploration accepted the unset-model sentinel as a rotated model"
+  assert_contains "$out" "--exploration requires explicit --model and --effort values" "default-model exploration refusal did not name the tuple contract"
+  [ ! -s "$LAUNCH_LOG" ] || fail "default-model exploration reached launch submission"
+  assert_absent "$HOME_DIR/data/routing-outcomes.jsonl" "default-model exploration recorded an attempt"
+
+  id=profile-exploration-batch-default-model-z28
+  id2=profile-exploration-batch-default-model-z29
+  rec=$(make_spawn_case profile-exploration-batch-default-model pi "$id" "$id2")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id=$PROJ_DIR" "$id2=$PROJ_DIR" \
+    --model default --effort high --task-class bounded-implementation-proven-root-fix --exploration)
+  status=$?
+  [ "$status" -ne 0 ] || fail "batch exploration accepted the unset-model sentinel as a rotated model"
+  assert_not_contains "$out" "batch: FAILED to spawn" "batch exploration dispatched pairs the parent should have refused up front"
+  assert_absent "$HOME_DIR/state/$id.meta" "refused batch exploration published task metadata"
+  assert_absent "$HOME_DIR/state/$id2.meta" "refused batch exploration published second-pair metadata"
+  pass "deliberate exploration requires an explicit rotated model and effort before intake or submission, on single and batch dispatch"
 }
 
 test_no_mistakes_spawn_requires_one_quota_eligible_reviewer() {
@@ -1093,6 +1184,8 @@ test_active_profile_batch_refuses_without_attestation() {
   pass "batch dispatch refuses a shared harness with no attestation before any pair spawns"
 }
 
+test_routing_source_recorded_only_when_declared
+test_recorded_default_axes_respawn_as_unset
 test_no_profile_keeps_claude_profile_defaults
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
