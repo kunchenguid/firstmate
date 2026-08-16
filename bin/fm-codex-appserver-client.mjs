@@ -197,6 +197,7 @@ class AppServerRun {
     this.threadId = priorThreadId;
     this.turnId = "";
     this.turnResponseId = "";
+    this.startupComplete = false;
     this.turnStarted = false;
     this.activeSeen = false;
     this.busyPublished = false;
@@ -363,7 +364,8 @@ class AppServerRun {
   }
 
   maybePublishBusy() {
-    if (this.busyPublished || !this.turnStarted || !this.activeSeen) return;
+    if (this.busyPublished || !this.startupComplete
+        || !this.turnStarted || !this.activeSeen) return;
     try {
       this.owner.applyBusy(this.deadlineAt);
       this.busyPublished = true;
@@ -438,7 +440,7 @@ class AppServerRun {
   }
 
   startupTimeout() {
-    if (this.turnId || this.terminalStatus || this.childExited) return;
+    if (this.startupComplete || this.childExited) return;
     this.forcedOutcome = "startup-timeout";
     try {
       this.child?.stdin.end();
@@ -519,7 +521,8 @@ class AppServerRun {
       outcome = "failure";
       event = "process-error";
     } else if (this.terminalStatus === "completed") {
-      if (!this.turnStarted || !this.activeSeen || !this.busyPublished) {
+      if (!this.startupComplete || !this.turnStarted
+          || !this.activeSeen || !this.busyPublished) {
         outcome = "failure";
         event = "protocol-incomplete";
       } else {
@@ -546,7 +549,8 @@ class AppServerRun {
       deadlineAt: this.deadlineAt,
       startedAt: this.startedAt,
       endedAt: Math.floor(Date.now() / 1000),
-      preserveThread: event !== "timeout" && !event.startsWith("protocol-") && event !== "terminal-missing",
+      preserveThread: event !== "timeout" && event !== "startup-timeout"
+        && !event.startsWith("protocol-") && event !== "terminal-missing",
     };
   }
 
@@ -587,7 +591,9 @@ class AppServerRun {
     if (!TOKEN_RE.test(responseId)) throw new Error("turn-response-invalid");
     this.turnResponseId = responseId;
     if (this.turnId && this.turnId !== responseId) throw new Error("turn-response-id-mismatch");
+    if (this.forcedOutcome || this.childExited) throw new Error("startup-already-failed");
     this.turnId = responseId;
+    this.startupComplete = true;
     if (this.startupTimer) clearTimeout(this.startupTimer);
     this.startupTimer = null;
     this.deadlineAt = Math.floor(Date.now() / 1000) + this.options.deadlineSecs;

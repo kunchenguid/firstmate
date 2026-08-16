@@ -22,7 +22,8 @@ mkdir -p "$STATE" "$WORK" "$FAKEBIN"
 cleanup() {
   local suffix
   for suffix in success exit-mismatch terminal-missing interrupt timeout log-failure delayed-evidence \
-    log-init-failure sync-send-failure reaped-pipe-holder startup-timeout; do
+    log-init-failure sync-send-failure reaped-pipe-holder startup-timeout \
+    startup-notification-timeout; do
     rm -rf -- "/tmp/fm-codex-appserver-test-$suffix"
   done
   fm_test_cleanup
@@ -82,6 +83,12 @@ input.on("line", (line) => {
     return;
   }
   if (message.method === "turn/start") {
+    if (mode === "startup-notification-timeout") {
+      write({ method: "turn/started", params: { turn: { id: turnId, status: "inProgress", items: [] } } });
+      write({ method: "thread/status/changed", params: { threadId, status: { type: "active" } } });
+      setTimeout(() => writeFileSync(marker, readFileSync(busyRecord)), 50);
+      return;
+    }
     write({ id: message.id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });
     if (mode === "log-failure") {
       renameSync(stderrLog, `${stderrLog}.removed`);
@@ -409,6 +416,32 @@ EOF
   pass "startup timeout publishes a bounded refusal before the turn deadline"
 }
 
+test_startup_notifications_cannot_complete_handshake() {
+  local id gen task_tmp out rc=0 started_at ended_at elapsed observed_state
+  IFS=$'\t' read -r id gen task_tmp <<EOF
+$(new_case startup-notification-timeout)
+EOF
+  started_at=$(date +%s)
+  out=$(FM_TEST_STARTUP_TIMEOUT_MS=500 FM_TEST_DEADLINE_SECS=30 \
+    run_case startup-notification-timeout "$id" "$gen" "$task_tmp" 2>&1) || rc=$?
+  ended_at=$(date +%s)
+  elapsed=$((ended_at - started_at))
+  [ "$rc" -ne 0 ] || fail "notification-only startup returned success: $out"
+  [ "$elapsed" -le 8 ] \
+    || fail "notification-only startup inherited the 30-second turn deadline and took ${elapsed}s"
+  observed_state=$(cat "$task_tmp/descendant-survived")
+  assert_contains "$observed_state" "state=unknown" \
+    "early turn notifications published busy before the turn/start response"
+  [ "$(classify "$id")" = "unknown codex-startup-timeout" ] \
+    || fail "notification-only startup was not surfaced concretely: $(classify "$id")"
+  assert_contains "$(cat "$STATE/$id.codex-appserver-result")" \
+    "outcome=failure event=startup-timeout" \
+    "notification-only startup receipt omitted its concrete refusal"
+  assert_contains "$(cat "$STATE/$id.codex-appserver-result")" "deadline=none" \
+    "notification-only startup incorrectly started the long turn deadline"
+  pass "turn notifications cannot replace the validated startup handshake"
+}
+
 test_terminal_and_clean_exit_are_joint_success
 test_terminal_without_clean_exit_refuses_success
 test_clean_exit_without_terminal_refuses_success
@@ -420,5 +453,6 @@ test_bounded_log_initialization_failure_publishes_unknown
 test_sync_send_failure_retains_cleanup_ownership
 test_reaped_child_pid_is_never_signalled
 test_startup_timeout_surfaces_before_turn_deadline
+test_startup_notifications_cannot_complete_handshake
 
 echo "all fm-codex-appserver-client tests passed"
