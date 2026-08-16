@@ -21,7 +21,7 @@ Remote Herdr is not part of this path.
 Later Herdr proxy tabs may display state, but validation submission, ask-user responses, recovery, evidence collection, and cleanup use Azure Resource Manager, Managed Run Command, and the private storage endpoint.
 
 No Azure resource was created while implementing this feature.
-Live Azure acceptance of these cells remains unperformed; it happens later from released public main under separate explicit billable authorization.
+Live Azure acceptance of these cells runs from released public main under separate explicit billable authorization; the first live Stage C pipeline acceptance has occurred and is recorded in the Live acceptance record section, while the full multi-leg checklist in the Live acceptance section remains unperformed.
 The released private foundation, its PR 136 inventory correction, and the released whole-fleet allocator are the integration base, and the dispatcher consumes the released runner's exact foundation/controller-identity contract rather than a partial parallel proof.
 
 ## Capacity and cost shape
@@ -367,8 +367,9 @@ A missing ETag, changed instance, foreign tag, foreign principal, extra role ass
 
 ## Live acceptance
 
-Focused fake-cloud and static tests do not claim real Azure usability, and no live acceptance of these cells has been performed.
-After this stack is released to public main and the operator has explicit billable authorization, the first live acceptance must run from that released main and record all of these results:
+Focused fake-cloud and static tests do not claim real Azure usability.
+The first live Stage C pipeline acceptance has occurred, as described in the Live acceptance record section, while the full multi-leg acceptance checklist below remains unperformed.
+After this stack is released to public main and the operator has explicit billable authorization, the full checklist acceptance must run from that released main and record all of these results:
 
 1. Record Mac wall time, CPU, memory, swap, process count, and interactive latency before admission.
 2. Queue more work than the configured processor/concurrency limit and prove saturation remains queued with no oversubscription.
@@ -391,3 +392,9 @@ After this stack is released to public main and the operator has explicit billab
 
 A failed acceptance leg means Azure validation is not the default and does not authorize local fallback, weakened identity proof, shared daemon use, retained-cost deletion, or credential broadening.
 The exact failed leg, retained resources, and recovery action must be reported.
+
+## Live acceptance record
+
+The first complete no-mistakes pipeline run inside an isolated Azure `validation-standard` cell executed on 2026-08-14 against this repository: run `01M00YX1QS5H608DPH6DFV7CDN`, validation generation `azv-stage-c-013`, lease task `azure-stage-c-validation`, task generation `spawn:558423dc544ebe5c`, validating exact head `126b60419613938c055b41447f9a65c76c31923a` through the pushed `codex/azure-stage-c-validation` branch.
+Generations `azv-stage-c-014` and `azv-stage-c-015` (same head, branch, and lease coordinates) then ground-truthed the guest's outcome derivation until the authenticated result recorded that success end to end.
+Those cells validated an already-merged head, so their pipeline completed at pre-push with nothing to publish; this section, submitted on the `fm/stage-c-live-acceptance` branch under the same lease coordinates in one isolated Azure `validation-standard` cell, is itself the first change validated by a cell through the full push, pull request, and CI-green proof path.
