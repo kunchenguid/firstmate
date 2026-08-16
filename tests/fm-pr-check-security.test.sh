@@ -2616,6 +2616,62 @@ SH
   pass "returned custom check descendants are drained on installed and fallback timeout paths"
 }
 
+# bin/fm-pr-check.sh moves pr= to the end of the metadata, so every later append
+# by another subsystem lands after the armed record. Each declared appendable key
+# must therefore leave the poll authorized, and an undeclared one must be refused
+# at the write rather than silently disarming the poll it never knew about.
+test_armed_metadata_appends_keep_the_poll_authorized() {
+  local dir state meta record before
+  dir=$(make_case armed-metadata-appends)
+  state="$dir/home/state"
+  meta="$state/task-a.meta"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/10 >/dev/null 2>/dev/null \
+    || fail "could not arm the merge poll fixture"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "freshly armed poll did not authorize"
+
+  # Every key some subsystem records after arming: bin/fm-decision-hold.sh's
+  # completion attestation, bin/fm-spawn.sh's relaunch carrier, and
+  # bin/fm-x-lib.sh's relay link.
+  for record in decisions_reviewed=1 decision_keys= decision_keys=access,route \
+    traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01 \
+    x_request=r1 x_request_ts=1750000000 x_followups=0 x_platform=x x_reply_max_chars=280; do
+    fm_pr_meta_append_records "$meta" "$record" \
+      || fail "guarded append refused a declared appendable record: $record"
+    fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "an armed poll was disarmed by a declared appendable record: $record"
+  done
+
+  # An undeclared key is the second-writer case: it must be refused before the
+  # file changes, so the poll cannot be disarmed by a writer that never extended
+  # the parser's declared set.
+  before=$(shasum -a 256 "$meta" | awk '{print $1}')
+  for record in future_subsystem=1 window=unexpected-after-pr pr=https://github.com/o/r/pull/11 \
+    x_requests=1 decision_keysx=1 pr_headx=1 'decision_keys=a
+future_subsystem=1' bare-line =novalue; do
+    ! fm_pr_meta_append_records "$meta" "$record" \
+      || fail "guarded append accepted an undeclared or malformed record: $record"
+    [ "$(shasum -a 256 "$meta" | awk '{print $1}')" = "$before" ] \
+      || fail "a refused append still changed task metadata: $record"
+  done
+  ! fm_pr_meta_append_records "$meta" decisions_reviewed=1 future_subsystem=1 \
+    || fail "guarded append accepted a batch carrying an undeclared record"
+  [ "$(shasum -a 256 "$meta" | awk '{print $1}')" = "$before" ] \
+    || fail "a refused batch append still changed task metadata"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "refused appends disarmed the poll"
+
+  # A writer that bypasses the guarded append must still not be tolerated: the
+  # parser's strictness about unknown records after pr= is what stops an appended
+  # record being read as part of the pull request identity.
+  printf 'future_subsystem=1\n' >> "$meta"
+  ! fm_pr_metadata_identity_parse "$meta" \
+    || fail "parser tolerated an undeclared record appended after the pull request"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "poll authorization tolerated an undeclared record after the pull request"
+  pass "declared metadata appends keep an armed poll authorized and undeclared ones are refused"
+}
+
 test_teardown_removes_poll_artifacts() {
   local dir fakebin kind artifact counterpart rc
   dir=$(make_case teardown-cleanup)
@@ -3391,4 +3447,5 @@ test_bootstrap_migrates_before_other_mutations
 test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
+test_armed_metadata_appends_keep_the_poll_authorized
 test_teardown_removes_poll_artifacts

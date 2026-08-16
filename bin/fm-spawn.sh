@@ -2771,9 +2771,12 @@ spawn_record_traceparent() {
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
+  # The carrier is re-appended last, so on a task whose pull request is already
+  # armed it lands after that record; bin/fm-pr-lib.sh's guarded append keeps this
+  # key declared alongside the poll's parser rather than quietly invalidating it.
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] \
      || ! awk -F= '$1 != "traceparent"' "$meta" > "$SPAWN_META_TMP" \
-     || ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >> "$SPAWN_META_TMP" \
+     || ! fm_pr_meta_append_records "$SPAWN_META_TMP" "traceparent=$SPAWN_TRACEPARENT" \
      || ! mv -f "$SPAWN_META_TMP" "$meta"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true

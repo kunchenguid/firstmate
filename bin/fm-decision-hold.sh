@@ -77,6 +77,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 DECISION_META_LOCK=
 DECISION_META_LOCK_HELD=0
@@ -436,8 +439,13 @@ $open
 EOF
 
   if [ "$has_meta" = 1 ]; then
+    # The attestation is appended, so on a task whose pull request is already
+    # armed it lands after that record. bin/fm-pr-lib.sh's guarded append is what
+    # keeps these two keys declared alongside the poll's parser rather than
+    # quietly invalidating it.
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+      fm_pr_meta_append_records "$meta" decisions_reviewed=1 "decision_keys=$keys" \
+        || fail "could not record the completion attestation in $meta"
     fi
     fm_lock_release "$DECISION_META_LOCK"
     DECISION_META_LOCK_HELD=0

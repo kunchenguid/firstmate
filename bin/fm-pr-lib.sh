@@ -16,6 +16,14 @@
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
+#
+# bin/fm-pr-check.sh rewrites task metadata with pr= and any pr_head= last, so
+# every later append to that file lands after the armed pull request record.
+# fm_pr_meta_key_appendable is therefore the single owner of which keys any
+# subsystem may add to state/<id>.meta once a poll is armed, and
+# fm_pr_meta_append_records is the write path that enforces it: an appending
+# writer whose key is not declared there is refused at its own write instead of
+# silently disarming the poll it never knew about.
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -285,6 +293,47 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# The keys a subsystem may append to state/<id>.meta after a poll is armed. A
+# key is declared here only because some writer records it after bin/fm-pr-check.sh
+# has moved pr= to the end: pr_head= is the arming owner's own second record,
+# the x_ keys are bin/fm-x-lib.sh's relay link, decisions_reviewed= and
+# decision_keys= are bin/fm-decision-hold.sh's completion attestation, and
+# traceparent= is bin/fm-spawn.sh's relaunch carrier. pr= is deliberately absent:
+# the arming owner rewrites that record and never appends it, so an appended pr=
+# is exactly the ambiguity the parser refuses.
+fm_pr_meta_key_appendable() {
+  case "${1-}" in
+    pr_head|x_request|x_request_ts|x_followups|x_platform|x_reply_max_chars) ;;
+    decisions_reviewed|decision_keys|traceparent) ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_pr_meta_append_records <meta> <key=value>...: append the given records to an
+# existing task metadata file, refusing the whole write when any key is not
+# declared appendable above. Appending is the one write shape that can land after
+# an armed pr= record, so a writer that wants a new key extends
+# fm_pr_meta_key_appendable in the same change or is refused here. Every record is
+# validated before any is written, so a refusal leaves the file untouched. The
+# caller owns the metadata lock (fm_meta_lock_path) across its read-modify-write.
+fm_pr_meta_append_records() {
+  local meta=$1 record
+  shift
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ "$#" -gt 0 ] || return 1
+  for record in "$@"; do
+    case "$record" in
+      *$'\n'*|*$'\r'*) return 1 ;;
+      ?*=*) ;;
+      *) return 1 ;;
+    esac
+    fm_pr_meta_key_appendable "${record%%=*}" || return 1
+  done
+  for record in "$@"; do
+    printf '%s\n' "$record" >> "$meta" || return 1
+  done
+}
+
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=
@@ -315,10 +364,13 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
       *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
+        if [ "$seen_pr" -eq 1 ]; then
+          case "$line" in
+            ?*=*) fm_pr_meta_key_appendable "${line%%=*}" || post_pr_invalid=1 ;;
+            *) post_pr_invalid=1 ;;
+          esac
+        fi
         ;;
     esac
   done < "$file"

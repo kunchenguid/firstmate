@@ -11,6 +11,9 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TMP_ROOT=$(fm_test_tmproot fm-decision-hold)
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$ROOT/bin/fm-pr-lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
@@ -420,6 +423,44 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   pass "terminal single-owner stale status decisions do not block empty inventory"
 }
 
+# The live sequence that lost merge notifications: a ship task's pull request is
+# armed, its decision inventory is completed afterwards, and the completion
+# attestation is appended to the same metadata the merge poll authorizes against.
+# The poll must survive that append, because the watcher stops executing a poll it
+# cannot authorize and the merged pull request then never wakes supervision.
+test_completion_attestation_keeps_an_armed_merge_poll_authorized() {
+  local home id url state
+  home=$(make_home armed-poll-completion)
+  id=sample-armed-ship
+  url=https://github.com/sample-org/sample-repo/pull/10
+  state="$home/state"
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Ship a sample change" --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the armed-poll backlog fixture"
+  write_origin_meta "$home" "$id" ship
+  printf 'done: change implemented and reviewed\n' > "$state/$id.status"
+
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-pr-check.sh" "$id" "$url" >/dev/null 2> "$home/arm.err" \
+    || fail "could not arm the merge poll: $(cat "$home/arm.err")"
+  fm_pr_poll_snapshot_capture "$state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the freshly armed merge poll did not authorize"
+
+  run_decisions "$home" complete "$id" --none >/dev/null 2> "$home/complete.err" \
+    || fail "completion failed on a task with an armed merge poll: $(cat "$home/complete.err")"
+  assert_grep "decisions_reviewed=1" "$state/$id.meta" "completion attestation missing"
+  assert_grep "pr=$url" "$state/$id.meta" "completion attestation displaced the pull request record"
+  fm_pr_poll_snapshot_capture "$state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "recording a decision inventory disarmed the task's merge poll"
+
+  # A second completion re-appends the attestation when the inventory changes.
+  run_decisions "$home" complete "$id" --none >/dev/null 2> "$home/complete-again.err" \
+    || fail "repeat completion failed: $(cat "$home/complete-again.err")"
+  fm_pr_poll_snapshot_capture "$state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "a repeated decision inventory disarmed the task's merge poll"
+  pass "recording a decision inventory leaves an armed merge poll authorized"
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate origin hold json
   parent=$(make_home main-routing)
@@ -782,4 +823,5 @@ test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_completion_attestation_keeps_an_armed_merge_poll_authorized
 test_resolve_matches_quoted_blocked_by_edges
