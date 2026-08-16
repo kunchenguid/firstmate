@@ -243,12 +243,16 @@ fm_control_claude_tool_activity() {  # <plain-pane-capture>
 }
 
 fm_control_claude_token_counter() {  # <plain-pane-capture>
-  local pane=${1-} matches
-  matches=$(printf '%s\n' "$pane" \
+  local pane=${1-} matches standalone frac
+  frac=$(printf '%s\n' "$pane" \
+    | sed -nE 's/.*(^|[^0-9,.A-Za-z])([0-9][0-9,]*([.][0-9]+)?)([kKM])?[[:space:]]*\/[[:space:]]*[0-9][0-9,]*([.][0-9]+)?[kKM]?[[:space:]]+tokens?([^[:alnum:]_]|$).*/\2|\4/p')
+  standalone=$(printf '%s\n' "$pane" \
+    | sed -E 's/[0-9][0-9,]*([.][0-9]+)?[kKM]?[[:space:]]*\/[[:space:]]*[0-9][0-9,]*([.][0-9]+)?[kKM]?[[:space:]]+tokens?//g' \
     | sed -nE 's/.*(^|[^0-9,.A-Za-z/])([0-9][0-9,]*([.][0-9]+)?)([kKM])?[[:space:]]+tokens?([^[:alnum:]_]|$).*/\2|\4/p')
-  if [ -z "$matches" ]; then
-    matches=$(printf '%s\n' "$pane" \
-      | sed -nE 's/.*(^|[^0-9,.A-Za-z])([0-9][0-9,]*([.][0-9]+)?)([kKM])?[[:space:]]*\/[0-9][0-9,]*([.][0-9]+)?[kKM]?[[:space:]]+tokens?([^[:alnum:]_]|$).*/\2|\4/p')
+  if [ -n "$standalone" ]; then
+    matches=$standalone
+  else
+    matches=$frac
   fi
   printf '%s\n' "$matches" \
     | awk -F'|' '$1 != "" { n=$1; gsub(/,/, "", n); u=$2; if (u=="k" || u=="K") n=n*1000; else if (u=="M") n=n*1000000; printf "%.0f\n", n }' \
