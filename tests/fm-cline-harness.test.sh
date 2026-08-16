@@ -301,8 +301,15 @@ test_cline_model_and_effort_flags() {
   rec=$(make_spawn_case flags-max)
   IFS='|' read -r case_dir home proj wt fakebin id <<<"$rec"
   out=$(run_cline_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" \
-    --mode no-mistakes --yolo off --effort max) && status=0 || status=$?
+    --mode no-mistakes --yolo off --model sonnet-4-6 --effort max) && status=0 || status=$?
   expect_code 0 "$status" "cline spawn should succeed: $out"
+  # Anchor the absence against a launch that positively happened: grep over an
+  # empty log succeeds, so the negative assertion alone would also pass when
+  # nothing whatsoever reached the pane.
+  assert_grep "cline -i --tui" "$home/launch.log" \
+    "cline max-effort launch did not reach the pane at all"
+  assert_grep "--model 'sonnet-4-6'" "$home/launch.log" \
+    "cline max-effort launch did not carry the flags it does support"
   assert_no_grep "--thinking" "$home/launch.log" \
     "cline has no max thinking tier, so max must reach the pane as no flag at all"
   pass "fm-spawn: cline gets --model and effort->--thinking (low|medium|high|xhigh)"
@@ -590,6 +597,56 @@ test_a_corrupt_unrelated_session_does_not_blind_the_scan() {
   pass "fm-busy-lib: a corrupt unrelated cline session record skips only itself"
 }
 
+# --- gap 3 on herdr: the structural fold must actually be reachable ----------
+#
+# herdr reports a native agent_status per pane, but it has no cline integration,
+# so for a cline pane that status is a guess that sticks at busy forever. The
+# staleness bound (fm_busy_native_bounded, cline-only) exists for exactly that.
+# Once it fires the classifier must consult cline's own session record rather
+# than reporting unknown, or the structural source Gap 3 was opened for is dead
+# code on this backend. Only fm_backend_busy_state is stubbed, so this drives
+# the shipped classifier rather than a copy of it.
+classify_stale_herdr() {  # <harness> <state-dir> <id>
+  local _fm_stub_native=busy harness=$1 state=$2 id=$3 now
+  now=${EPOCHSECONDS:-$(date +%s)}
+  printf '%s\n' "$((now - 100000))" > "$state/.busy-since-$id"
+  (
+    # shellcheck disable=SC2329  # invoked indirectly by fm_busy_classify
+    fm_backend_busy_state() { printf '%s' "$_fm_stub_native"; }
+    fm_busy_classify herdr win:0 "$harness" "$id" "$state" "idle pane tail"
+  )
+}
+
+test_a_stale_herdr_guess_hands_off_to_the_structural_fold() {
+  local root="$TMP_ROOT/herdr/sessions" state="$TMP_ROOT/herdr/state"
+  mkdir -p "$root" "$state"
+
+  write_session "$root" h_run /wt-run running
+  bind_task "$state" running_task "$root" /wt-run
+  [ "$(classify_stale_herdr cline "$state" running_task)" = "busy cline-session" ] \
+    || fail "a stale herdr guess must yield the record's own busy verdict on herdr"
+
+  write_session "$root" h_done /wt-done completed assistant
+  bind_task "$state" settled_task "$root" /wt-done
+  [ "$(classify_stale_herdr cline "$state" settled_task)" = "idle cline-session" ] \
+    || fail "a settled record must read idle from the structural source on herdr"
+
+  # No sidecar at all: still unknown, never idle.
+  [ "$(classify_stale_herdr cline "$state" unbound_task)" = "unknown cline-session" ] \
+    || fail "an unresolvable binding on herdr must stay unknown, never idle"
+  pass "fm_busy_classify: a stale herdr native guess hands cline off to its session record"
+}
+
+# The bound is cline-only, so no other harness may reach the fall-through: a
+# long-running claude turn on herdr must keep reading busy however long it runs.
+test_the_herdr_handoff_does_not_widen_past_cline() {
+  local state="$TMP_ROOT/herdr-other/state"
+  mkdir -p "$state"
+  [ "$(classify_stale_herdr claude "$state" other_task)" = "busy herdr-native" ] \
+    || fail "an integrated harness must keep its unbounded native busy verdict on herdr"
+  pass "fm_busy_classify: the herdr structural handoff is scoped to cline alone"
+}
+
 test_cline_source_cannot_classify_another_adapter() {
   local root="$TMP_ROOT/isolation/sessions" state="$TMP_ROOT/isolation/state"
   mkdir -p "$root" "$state"
@@ -732,6 +789,8 @@ test_classify_reports_cline_verdicts_with_their_source
 test_classify_is_unknown_when_the_binding_cannot_be_resolved
 test_prior_session_is_excluded_from_the_binding
 test_a_corrupt_unrelated_session_does_not_blind_the_scan
+test_a_stale_herdr_guess_hands_off_to_the_structural_fold
+test_the_herdr_handoff_does_not_widen_past_cline
 test_cline_source_cannot_classify_another_adapter
 test_cline_install_path_classifies_as_an_agent
 test_an_unrelated_node_process_is_still_not_an_agent

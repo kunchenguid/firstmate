@@ -286,6 +286,7 @@ cline -i --tui --auto-approve true __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ enc
 | `bin/fm-tmux-lib.sh` | `FM_TMUX_CLINE_BUSY_REGEX_DEFAULT` + `case` arm |
 | `bin/fm-composer-lib.sh` + `bin/backends/{herdr,cmux,orca}.sh` | shared `FM_COMPOSER_IDLE_RE_DEFAULT` covers cline placeholders (tmux + all backends); cmux/orca bare agent-glyph promotion reaches the borderless `❯` row |
 | `bin/fm-busy-lib.sh` | `cline-session` pull source: binding, session resolution, and the two-signal fold |
+| `bin/fm-busy-lib.sh` (herdr arm) | the cline-only native staleness bound falls through to that fold, so the structural source is reachable on herdr rather than shadowed by herdr's own guess |
 | `bin/fm-control-lib.sh` + `bin/fm-control.sh` | cline control mechanics; the exit-key table and its delivery path |
 | `.agents/skills/harness-adapters/SKILL.md` | cline knowledge section |
 | `tests/fm-cline-harness.test.sh` | 24 portable behavior checks (all green) |
@@ -297,6 +298,10 @@ The facts above are verified against the real binary and covered by both a porta
 regression and the opt-in live guard. The closing acceptance is still a **full live
 crewmate dispatch through the herdr backend**: `config/crew-harness=cline` (or a
 `--harness cline` dispatch), observing the supervisor drive ready-gate →
-brief-inject → busy → turn-end on a real cline pane under supervision. Not yet run
+brief-inject → busy → turn-end on a real cline pane under supervision.
+The herdr classification path itself is now pinned by a portable regression
+(`tests/fm-cline-harness.test.sh`), which is what proves the structural fold is
+reached there and not shadowed by herdr's own cline-less guess; the live dispatch
+remains outstanding for the supervisor drive as a whole. Not yet run
 here (needs a full firstmate home + a real project). The optional `--hooks-dir`
 turn-end Stop-hook (only for cline-as-PRIMARY) is a separate future item.

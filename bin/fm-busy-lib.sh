@@ -39,7 +39,7 @@
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, native-stale, grok-regex, muse-session-log,
+#   endpoint-gone, herdr-native, grok-regex, muse-session-log,
 #   cursor-transcript, cline-session, cline-session-stalled, missing, malformed,
 #   gen-mismatch, source-mismatch, kimi-unverified, codex-unverified,
 #   capture-failed, no-target
@@ -50,10 +50,12 @@
 #   2. standalone Kimi before verification       -> unknown kimi-unverified
 #   3. a valid, gen-matching, source-trusted record -> its state and source
 #   4. no record at all: herdr's native busy verdict is trusted as busy
-#      (generation state is sufficient for busy, not for idle), then the
-#      muse session-log, cursor transcript, and cline session-record pull
-#      sources, then the Grok-only temporary regex fallback classifies a grok
-#      task from its rendered tail, then unknown missing
+#      (generation state is sufficient for busy, not for idle) UNLESS the
+#      staleness bound has fired for a harness herdr does not integrate with,
+#      in which case the uninformative guess is skipped and the harness arms
+#      below decide; then the muse session-log, cursor transcript, and cline
+#      session-record pull sources, then the Grok-only temporary regex fallback
+#      classifies a grok task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
 # The Grok arm is the ONLY rendered-text classification that survives the
 # redesign, because Grok's structured lifecycle was not credited-live-verified
@@ -1094,12 +1096,16 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
     case "$native" in
       busy)
-        if fm_busy_native_bounded "$harness" && fm_busy_native_stale "$state" "$id"; then
-          printf 'unknown native-stale'
+        # A native busy verdict herdr can actually produce is trusted outright.
+        # Once the bound marks it stale the guess carries no information, so this
+        # falls THROUGH to the harness arms below rather than giving up: for the
+        # one bounded harness that arm is a structural source that can answer
+        # exactly this question. Only the bounded harness reaches the
+        # fall-through, so every other harness keeps the unbounded hot path.
+        if ! fm_busy_native_bounded "$harness" || ! fm_busy_native_stale "$state" "$id"; then
+          printf 'busy herdr-native'
           return 0
         fi
-        printf 'busy herdr-native'
-        return 0
         ;;
       *) fm_busy_native_clear "$state" "$id" ;;
     esac
@@ -1123,9 +1129,12 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       ;;
     cline*)
       # Semantic, on demand: fold this task's bound session record. This arm sits
-      # AFTER the herdr native arm on purpose, so a native busy verdict and this
+      # AFTER the herdr native arm so a live native busy verdict and this
       # structural fold are two independent signals either of which can carry a
-      # positive busy verdict, and losing one does not blind the classifier.
+      # positive busy verdict. It is still REACHED on herdr, because herdr has no
+      # cline integration and its guess sticks at busy forever: once the
+      # staleness bound fires the native arm falls through to here rather than
+      # reporting unknown, so the informative source is never dead code.
       # Every unresolvable outcome - no sidecar, no unique record, no jq, an
       # unreadable or status-free record - is unknown, never idle.
       if ! log=$(fm_busy_cline_session_record "$state" "$id"); then

@@ -8,9 +8,12 @@
 # pane is a guess that sticks at "working" forever; trusting it unbounded would
 # leave supervision waiting on an already-finished task indefinitely. Past
 # FM_BUSY_NATIVE_MAX_SECONDS (default 120) of continuous native busy for the
-# same task, the classifier stops trusting the native signal and reports
-# "unknown native-stale". For claude/codex/pi/copilot, whose native signals are
-# correct, trust is unbounded and the hot path is unchanged.
+# same task, the classifier stops trusting the native signal and falls through
+# to the harness arm, which for cline is its own structural session record - so
+# the bound hands the question to an informative source rather than answering
+# it. With no record bound the verdict is "unknown cline-session": still never
+# idle. For claude/codex/pi/copilot, whose native signals are correct, trust is
+# unbounded and the hot path is unchanged.
 #
 # These tests call the real classifier directly with only fm_backend_busy_state
 # stubbed, so they exercise the shipped guard rather than a copy of it.
@@ -92,13 +95,17 @@ test_first_native_busy_arms_the_window_without_reporting_stale() {
 
 test_stale_native_busy_stops_being_trusted_for_cline() {
   # The guard itself: past the threshold a never-flipping cline native busy
-  # must stop being trusted, so supervision can reap the finished task.
+  # must stop being trusted, so supervision can reap the finished task. With no
+  # session record bound, the structural arm it falls through to has nothing to
+  # read, so the verdict is unknown - and unknown is what names the source.
   local tmpd out
   tmpd=$(fm_test_tmproot busy-stale); mkdir -p "$tmpd"
   age_marker "$tmpd" 200
   out=$(classify busy cline "$tmpd")
-  [ "$out" = "unknown native-stale" ] \
-    || fail "stale cline native busy must report 'unknown native-stale', got '$out'"
+  [ "${out%% *}" = unknown ] \
+    || fail "stale cline native busy must not stay trusted as busy, got '$out'"
+  [ "$out" = "unknown cline-session" ] \
+    || fail "a stale native reading must hand off to the structural source, got '$out'"
   pass "fm_busy_classify: stale cline native busy is no longer trusted as busy"
 }
 
