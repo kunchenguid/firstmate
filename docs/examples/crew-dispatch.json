@@ -2,7 +2,7 @@
   "rules": [
     {
       "when": "The task depends on fresh news, current events, live public facts, or recent market and product changes.",
-      "use": { "harness": "grok" },
+      "use": { "harness": "grok", "model": "default" },
       "why": "Grok is the preferred dispatch when current web-connected context is central to the work."
     },
     {
