@@ -1367,6 +1367,33 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+# The pull-source adapters each leave a per-task sidecar in the state dir, and
+# the removal list is enumerated rather than wildcarded, so every adapter has to
+# be named in it. cline leaves two: the session binding and a verbatim copy of
+# the operator's own cline settings, which must not outlive the task it was made
+# for.
+test_teardown_removes_cline_pull_source_sidecars() {
+  local case_dir rc
+  case_dir=$(make_case cline-sidecars)
+  write_meta "$case_dir" local-only ship
+  printf 'sessions_root=%s\nworkspace_root=%s\n' \
+    "$case_dir/clinedata/sessions" "$case_dir/wt" > "$case_dir/state/task-x1.cline-session"
+  printf '{"planActMode":"act","telemetryOptOut":true}\n' \
+    > "$case_dir/state/task-x1.cline-settings.json"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "cline-sidecars: teardown should complete"
+  assert_absent "$case_dir/state/task-x1.cline-session" \
+    "cline-sidecars: teardown left the cline session binding behind"
+  assert_absent "$case_dir/state/task-x1.cline-settings.json" \
+    "cline-sidecars: teardown left the firstmate-owned cline settings copy behind"
+  pass "teardown removes the per-task cline session binding and settings copy"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -2642,6 +2669,7 @@ test_teardown_returns_worktree_under_project_pool_home
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
+test_teardown_removes_cline_pull_source_sidecars
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

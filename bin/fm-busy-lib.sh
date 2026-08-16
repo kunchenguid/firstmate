@@ -881,15 +881,41 @@ fm_busy_cline_session_workspace() {  # <record>
 # with bin/fm-spawn.sh so the pre-existing set recorded at launch and the set
 # resolved at classification time are produced by one owner and cannot drift.
 # Exact-match only: a prefix comparison would bind a nested worktree to its
-# parent.
+# parent, and the comparison stays inside jq so no field delimiter can collide
+# with a path.
+#
+# The scan covers the operator's WHOLE cline session history, because the
+# workspace filter is what it computes, and it runs on the supervision poll
+# (bin/fm-watch.sh, bin/fm-supervise-daemon.sh, bin/fm-crew-state.sh) once per
+# task per tick. One jq reads the whole candidate set, and xargs bounds each
+# invocation's argument list, so the cost is a couple of processes rather than
+# one per accumulated session. A record that does not parse still aborts jq, so
+# the per-record path below is kept as the fallback: one corrupt record from an
+# unrelated session must skip only itself, exactly as it did before, rather
+# than blinding every cline task on the machine.
 fm_busy_cline_matching_sessions() {  # <sessions-root> <workspace-root>
-  local root=$1 want=$2 dir sid rec
+  local root=$1 want=$2 dir sid rec candidates='' matched rc=0
   [ -d "$root" ] || return 0
   for dir in "$root"/*/; do
     [ -d "$dir" ] || continue
-    sid=$(basename -- "${dir%/}")
+    sid=${dir%/}
+    sid=${sid##*/}
     rec="$dir$sid.json"
     [ -f "$rec" ] || continue
+    candidates=$candidates$rec$'\n'
+  done
+  [ -n "$candidates" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  # shellcheck disable=SC2016  # single quotes are deliberate: $w is jq's own --arg binding, not a shell variable.
+  matched=$(printf '%s' "$candidates" | tr '\n' '\0' \
+    | LC_ALL=C xargs -0 jq -r --arg w "$want" \
+        'select(type == "object" and .workspace_root == $w) | input_filename' 2>/dev/null) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    [ -z "$matched" ] || printf '%s\n' "$matched"
+    return 0
+  fi
+  printf '%s' "$candidates" | while IFS= read -r rec; do
+    [ -n "$rec" ] || continue
     [ "$(fm_busy_cline_session_workspace "$rec" 2>/dev/null)" = "$want" ] || continue
     printf '%s\n' "$rec"
   done

@@ -73,7 +73,7 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" cline gh-axi gh
+  fm_fake_exit0 "$fakebin" cline gh-axi gh claude grok
   printf '%s\n' "$fakebin"
 }
 
@@ -99,8 +99,16 @@ make_spawn_case() {
 }
 
 run_cline_spawn() {  # <case-dir> <home> <proj> <wt> <fakebin> <id> [extra args...]
-  local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
-  shift 6
+  run_spawn_as cline "$@"
+}
+
+# run_spawn_as <harness> <case-dir> <home> <proj> <wt> <fakebin> <id> [extra args...]
+# The same scaffolding for any bare adapter name, so a neighbouring adapter's
+# launch shape and an unverified name's refusal are both observed the same way
+# cline's are - off what fm-spawn hands the backend, never off the template line.
+run_spawn_as() {
+  local harness=$1 case_dir=$2 home=$3 proj=$4 wt=$5 fakebin=$6 id=$7
+  shift 7
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -108,7 +116,7 @@ run_cline_spawn() {  # <case-dir> <home> <proj> <wt> <fakebin> <id> [extra args.
     FM_FAKE_LAUNCH_LOG="$home/launch.log" \
     CLINE_DATA_DIR="$case_dir/clinedata" \
     PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" cline "$@" 2>&1
+    "$SPAWN" "$id" "$proj" "$harness" "$@" 2>&1
 }
 
 # Write a cline session fixture: <sessions-root> <id> <workspace> <status>
@@ -227,38 +235,137 @@ test_spawn_writes_session_binding_excluding_prior_sessions() {
   pass "fm-spawn: cline session binding pins the root, workspace, and prior sessions"
 }
 
+# Adding an adapter must not move its neighbours, so the two adapters that
+# bracket cline in the template table are launched here too and their commands
+# read off the same pane. A template that no longer reaches a pane fails this,
+# which is the whole point of asserting the delivered command instead of the
+# source line.
 test_existing_launch_templates_untouched() {
-  grep -Fq "claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__" "$SPAWN" \
-    || fail "claude launch template changed"
-  grep -Fq "grok --always-approve __MODELFLAG____EFFORTFLAG__" "$SPAWN" \
-    || fail "grok launch template changed"
+  local rec case_dir home proj wt fakebin id out status
+  rec=$(make_spawn_case neighbours)
+  IFS='|' read -r case_dir home proj wt fakebin id <<<"$rec"
+  out=$(run_spawn_as claude "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --mode no-mistakes --yolo off) && status=0 || status=$?
+  expect_code 0 "$status" "claude spawn should succeed: $out"
+  assert_grep "claude --dangerously-skip-permissions" "$home/launch.log" \
+    "claude launch lost its verified autonomy flag"
+
+  rec=$(make_spawn_case neighbours-grok)
+  IFS='|' read -r case_dir home proj wt fakebin id <<<"$rec"
+  out=$(run_spawn_as grok "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --mode no-mistakes --yolo off) && status=0 || status=$?
+  expect_code 0 "$status" "grok spawn should succeed: $out"
+  assert_grep "grok --always-approve" "$home/launch.log" \
+    "grok launch lost its verified autonomy flag"
   pass "fm-spawn: pre-existing adapters' launch templates are untouched"
 }
 
+# A bare adapter name either resolves to a verified template or is refused and
+# told to use the raw-launch hatch. Driving both halves is what proves cline
+# took the first path rather than being launched as an unverified raw command.
 test_cline_is_a_known_bare_adapter_name() {
-  # cline must be accepted as a bare adapter name, not routed to the raw-launch hatch.
-  # (Robust to later adapters appended after cline, e.g. |cline|cursor-agent).)
-  grep -Fq "|kimi|cline" "$SPAWN" \
-    || fail "fm-spawn: cline not added to a known-harness allowlist"
+  local rec case_dir home proj wt fakebin id out status
+  rec=$(make_spawn_case knownname)
+  IFS='|' read -r case_dir home proj wt fakebin id <<<"$rec"
+  out=$(run_cline_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --mode no-mistakes --yolo off) && status=0 || status=$?
+  expect_code 0 "$status" "cline spawn should succeed: $out"
+  assert_grep "cline -i --tui" "$home/launch.log" \
+    "cline did not launch from its own verified template"
+
+  rec=$(make_spawn_case unknownname)
+  IFS='|' read -r case_dir home proj wt fakebin id <<<"$rec"
+  out=$(run_spawn_as notacline "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --mode no-mistakes --yolo off) && status=0 || status=$?
+  [ "$status" -ne 0 ] || fail "an unverified bare adapter name must not launch"
+  assert_contains "$out" "raw launch command" \
+    "an unverified bare adapter name should be refused and pointed at the raw-launch hatch"
   pass "fm-spawn: cline is recognized as a known bare adapter name"
 }
 
+# cline takes --model (the long form of -m) and maps effort onto --thinking. It
+# has no max tier, so max must reach the pane as NO effort flag rather than as a
+# known-bad value - asserted here by what the launch actually carries.
 test_cline_model_and_effort_flags() {
-  # cline takes --model (long form of -m) and maps effort to --thinking (no max).
-  # (Robust to later adapters appended after cline in the --model allowlist.)
-  grep -Fq "|kimi|cline" "$SPAWN" \
-    || fail "fm-spawn: cline not in the --model allowlist"
-  grep -Fq "'--thinking %s '" "$SPAWN" \
-    || fail "fm-spawn: cline effort->--thinking mapping missing"
+  local rec case_dir home proj wt fakebin id out status
+  rec=$(make_spawn_case flags)
+  IFS='|' read -r case_dir home proj wt fakebin id <<<"$rec"
+  out=$(run_cline_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --mode no-mistakes --yolo off --model sonnet-4-6 --effort xhigh) && status=0 || status=$?
+  expect_code 0 "$status" "cline spawn should succeed: $out"
+  # Values reach the pane shell-quoted, which is itself part of the contract.
+  assert_grep "--model 'sonnet-4-6'" "$home/launch.log" "cline launch lost its --model flag"
+  assert_grep "--thinking 'xhigh'" "$home/launch.log" \
+    "cline launch did not map effort onto --thinking"
+
+  rec=$(make_spawn_case flags-max)
+  IFS='|' read -r case_dir home proj wt fakebin id <<<"$rec"
+  out=$(run_cline_spawn "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$id" \
+    --mode no-mistakes --yolo off --effort max) && status=0 || status=$?
+  expect_code 0 "$status" "cline spawn should succeed: $out"
+  assert_no_grep "--thinking" "$home/launch.log" \
+    "cline has no max thinking tier, so max must reach the pane as no flag at all"
   pass "fm-spawn: cline gets --model and effort->--thinking (low|medium|high|xhigh)"
 }
 
 # --- detection --------------------------------------------------------------
 
+# cline runs as a bundled Node script, so the live process is a bare `node`
+# whose install path carries the identity. Each case launches a real renamed
+# executable and asks fm-harness.sh from a child of it, so the ancestry walk is
+# actually executed. The command substitution around the probe is load-bearing:
+# a bare `-c <cmd>` lets the shell exec the probe in place, replacing the very
+# process name the walk is supposed to find.
+# Detection fixtures live under their OWN root, deliberately not TMP_ROOT: this
+# file's temp root is named after the adapter, so a probe placed under it would
+# carry `cline` in every process argument and every case would pass on the path
+# the test itself created rather than on the fixture under test.
+DETECT_ROOT=$(fm_test_tmproot harness-detect)
+
+# write_harness_probe <path>: an executable that asks fm-harness.sh and prints
+# the verdict. Written to a real path so the walk sees that path in the
+# process's arguments, which is where a bundled Node harness's identity lives.
+# shellcheck disable=SC2016  # single quotes are deliberate: the probe's own $(...) and $r must reach the generated script, not expand here.
+write_harness_probe() {
+  mkdir -p "$(dirname -- "$1")"
+  printf '#!/usr/bin/env bash\nr=$("%s"); printf "%%s" "$r"\n' "$HARNESS" > "$1"
+  chmod +x "$1"
+}
+
+harness_under() {  # <executable> [args...]
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT "$@"
+}
+
 test_cline_detection_wired() {
-  grep -Fq '*cline*) echo cline; return ;;' "$HARNESS" \
-    || fail "fm-harness: cline ancestry case missing"
+  local dir out script
+  dir="$DETECT_ROOT/pos"
+  mkdir -p "$dir"
+  cp "$(command -v bash)" "$dir/cline"
+  out=$(harness_under "$dir/cline" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
+  [ "$out" = cline ] || fail "fm-harness.sh under process 'cline' reported '$out', expected cline"
+
+  # The real installed shape: a bare `node` whose script argument is the cline
+  # install path.
+  cp "$(command -v bash)" "$dir/node"
+  script="$dir/node_modules/cline/bin/.cline"
+  write_harness_probe "$script"
+  out=$(harness_under "$dir/node" "$script")
+  [ "$out" = cline ] || fail "fm-harness.sh under a bundled node cline reported '$out', expected cline"
   pass "fm-harness: cline is detected by process ancestry"
+}
+
+# The interpreter arm must not claim an unrelated node process: identity comes
+# from the cline install path, never from running node at all.
+test_unrelated_node_process_is_not_detected_as_cline() {
+  local dir out script
+  dir="$DETECT_ROOT/neg"
+  mkdir -p "$dir"
+  cp "$(command -v bash)" "$dir/node"
+  script="$dir/other/bin/server.js"
+  write_harness_probe "$script"
+  out=$(harness_under "$dir/node" "$script")
+  [ "$out" != cline ] || fail "an unrelated node process must not be claimed as cline"
+  pass "fm-harness: an unrelated node process is not claimed as cline"
 }
 
 # --- busy signature (knowledge half) ----------------------------------------
@@ -322,18 +429,29 @@ test_cline_real_input_reads_pending() {
 
 # --- shared idle default covers cline (tmux + every backend) ----------------
 
+# Each backend is SOURCED and its own idle regex resolved the way the backend
+# resolves it at runtime, then matched against the verified placeholders. That
+# proves the value a backend actually classifies with covers cline, which a
+# source-line assertion cannot: the default could be overridden, renamed, or
+# resolved from somewhere else and the line would still read the same.
 test_shared_idle_default_covers_cline() {
-  local p b bad=0 up
+  local p b bad=0 up re
   for p in 'What can I do for you?' 'Ask anything...'; do
     printf '%s' "$p" | grep -qE "$FM_COMPOSER_IDLE_RE_DEFAULT" \
       || fail "shared FM_COMPOSER_IDLE_RE_DEFAULT does not match cline placeholder '$p'"
   done
   for b in herdr cmux orca; do
     up=$(printf '%s' "$b" | tr '[:lower:]' '[:upper:]')
-    grep -Eq "FM_BACKEND_${up}_IDLE_RE=.*FM_COMPOSER_IDLE_RE_DEFAULT" \
-      "$ROOT/bin/backends/$b.sh" || { echo "  backend $b IDLE_RE does not use the shared default"; bad=1; }
+    re=$(FM_BACKEND_LIB_DIR="$ROOT/bin" bash -c \
+      'set -u; . "$1"; v="FM_BACKEND_${2}_IDLE_RE"; printf "%s" "${!v}"' \
+      _ "$ROOT/bin/backends/$b.sh" "$up") \
+      || { echo "  backend $b did not resolve an idle regex"; bad=1; continue; }
+    for p in 'What can I do for you?' 'Ask anything...'; do
+      printf '%s' "$p" | grep -qE "$re" \
+        || { echo "  backend $b idle regex does not match cline placeholder '$p'"; bad=1; }
+    done
   done
-  [ "$bad" -eq 0 ] || fail "one or more backend IDLE_RE defaults do not use the shared idle default"
+  [ "$bad" -eq 0 ] || fail "one or more backend idle regexes do not cover the cline placeholders"
   pass "shared idle default covers cline placeholders and backs herdr/cmux/orca"
 }
 
@@ -451,6 +569,25 @@ test_prior_session_is_excluded_from_the_binding() {
   [ "$(fm_busy_classify tmux t cline relaunched "$state")" = "busy cline-session" ] \
     || fail "a relaunched cline task must fold its own session, not its predecessor's"
   pass "fm_busy_classify: a relaunched cline task ignores its predecessor's session"
+}
+
+# The scan reads EVERY session on the machine, because the workspace filter is
+# what it computes, so a single unparseable record belonging to some unrelated
+# interactive run must skip only itself. Resolving the whole set in one pass
+# makes that the interesting case: a reader that gives up on the first parse
+# error would report unknown for every cline task until the operator found and
+# deleted the offending record.
+test_a_corrupt_unrelated_session_does_not_blind_the_scan() {
+  local root="$TMP_ROOT/corrupt/sessions" state="$TMP_ROOT/corrupt/state"
+  mkdir -p "$root/c_broken" "$state"
+  write_session "$root" c_mine /wt running
+  printf 'not json {{\n' > "$root/c_broken/c_broken.json"
+  [ "$(fm_busy_cline_matching_sessions "$root" /wt)" = "$root/c_mine/c_mine.json" ] \
+    || fail "a corrupt unrelated session record must not hide this workspace's own record"
+  bind_task "$state" corrupted "$root" /wt
+  [ "$(fm_busy_classify tmux t cline corrupted "$state")" = "busy cline-session" ] \
+    || fail "a corrupt unrelated session record must not take this task's state down with it"
+  pass "fm-busy-lib: a corrupt unrelated cline session record skips only itself"
 }
 
 test_cline_source_cannot_classify_another_adapter() {
@@ -594,6 +731,7 @@ test_busy_fold_never_invents_idle_when_a_signal_is_missing
 test_classify_reports_cline_verdicts_with_their_source
 test_classify_is_unknown_when_the_binding_cannot_be_resolved
 test_prior_session_is_excluded_from_the_binding
+test_a_corrupt_unrelated_session_does_not_blind_the_scan
 test_cline_source_cannot_classify_another_adapter
 test_cline_install_path_classifies_as_an_agent
 test_an_unrelated_node_process_is_still_not_an_agent
@@ -608,6 +746,7 @@ test_existing_launch_templates_untouched
 test_cline_is_a_known_bare_adapter_name
 test_cline_model_and_effort_flags
 test_cline_detection_wired
+test_unrelated_node_process_is_not_detected_as_cline
 test_cline_busy_default_defined
 test_cline_busy_line_matches
 test_cline_idle_line_not_busy
