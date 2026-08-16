@@ -57,7 +57,7 @@ LOCAL_COMMAND_TIMEOUT_SECONDS = 300
 # own generous-but-bounded deadline.
 DEPLOYMENT_TIMEOUT_SECONDS = 900
 # Admission-lock acquisition tries, spaced ten seconds apart.
-LEASE_ACQUIRE_ATTEMPTS = 90
+LEASE_ACQUIRE_ATTEMPTS = 240
 COST_QUERY_TIMEOUT_SECONDS = 60
 COST_RETRY_DEADLINE_SECONDS = 900
 COST_CACHE_MAX_AGE_SECONDS = 4 * 60 * 60
@@ -87,8 +87,14 @@ METER_RATE_CEILINGS_USD = {
     "storage_capacity": 0.02,
     "provisioning_control_interval": 0.01,
 }
-RUNNER_CONTROL_OPERATION_CEILING = 2_000
-RUNNER_STORAGE_OPERATION_CEILING = 2_000
+# Runaway-automation backstops, not budgets: spend is governed by the
+# durable reservations and the dollar limit. The original 2000-op
+# lifetime bootstrap bucket was legitimately exhausted by the
+# multi-generation commissioning campaign (generation 054 ground
+# truth), so the ceilings now sit an order of magnitude above any
+# single campaign while still bounding a runaway loop.
+RUNNER_CONTROL_OPERATION_CEILING = 20_000
+RUNNER_STORAGE_OPERATION_CEILING = 20_000
 STORAGE_OPERATION_RESERVE_USD = 5.0
 CONTROL_OPERATION_RESERVE_USD = 20.0
 BOOTSTRAP_GIB_RATE_CEILING_USD = 0.25
@@ -2428,7 +2434,20 @@ def reserve_budget_management(env, state, lease, limits, admitted_cost=None):
         "identity", "create", "--resource-group", env["resource_group"], "--name", reservation_name(env, state["invocation"]),
         "--location", "eastus", "--tags",
     ] + ["{}={}".format(key, value) for key, value in sorted(tags.items())])
-    lease.renew_and_assert()
+    lease.assert_held()
+    # The lease-critical section ends once the amount-tagged reservation is
+    # visible to every concurrent budgeter's listing. Principal stamping and
+    # RBAC verification harden this one resource and run after the lease in
+    # finalize_budget_reservation, so four concurrent shard transports no
+    # longer stagger behind minutes of per-resource hardening.
+    state["cost_reservation_expected_tags"] = tags
+    return cost
+
+
+def finalize_budget_reservation(env, state):
+    tags = state.pop("cost_reservation_expected_tags", None)
+    if tags is None:
+        return
     reread, _, _ = az_command(env, ["resource", "show", "--ids", reservation_id(env, state["invocation"]), "--api-version", "2023-01-31"])
     principal_id = reread.get("properties", {}).get("principalId") or reread.get("principalId")
     if not principal_id or (reread.get("tags") or {}) != tags:
@@ -2448,8 +2467,6 @@ def reserve_budget_management(env, state, lease, limits, admitted_cost=None):
     ):
         raise RunnerError("durable cost reservation changed before compute admission")
     require_zero_effective_rbac(env, parsed["principal_id"], "new cost reservation principal")
-    lease.assert_held()
-    return cost
 
 
 def mark_management_reservation_cleanup_verified(env, state):
@@ -2756,6 +2773,10 @@ def deployment_parameters(env, state):
             "expiryUtc": {"value": iso_utc(expiry)},
             "expiryTimeOfDay": {"value": expiry.strftime("%H%M")},
             "tags": {"value": tags},
+            # Optional golden image: an empty value keeps the marketplace
+            # base; the guests re-verify every staged archive digest at
+            # boot either way, so the image only caches the bootstrap.
+            "imageId": {"value": os.environ.get("FM_AZURE_VM_IMAGE_ID", "")},
         },
     }
 
@@ -3493,6 +3514,14 @@ def dispatch_prepared(env, state, confirm_subscription, confirm_cost_admission_m
             "scope, SKU, exact foundation, and shared regional/family/actual-forecast cost admission passed",
             cost=cost,
         )
+        # Read-only proofs and per-invocation staging need no shared-state
+        # protection, so they run before the lease: concurrent shard
+        # transports previously serialized their multi-minute snapshot
+        # uploads and GitHub re-proofs behind one holder, and generation
+        # 052's fourth transport timed out waiting on exactly that.
+        reprove_public_request(state)
+        verify_all_reservation_rbac_zero(env)
+        stage_private_snapshot(env, state)
         with ManagementAdmissionLease(env, state) as lease:
             foundation_gate(env)
             sku_quota_gate(env, limits)
@@ -3515,12 +3544,13 @@ def dispatch_prepared(env, state, confirm_subscription, confirm_cost_admission_m
                 sku_quota_gate(env, limits)
             foundation_gate(env)
             validation_capacity_parent_gate(env, state)
-            reprove_public_request(state)
-            verify_all_reservation_rbac_zero(env)
-            stage_private_snapshot(env, state)
-            lease.renew_and_assert()
-            create_vm(env, state)
-            lease.assert_held()
+        # The durable fence-bound reservation recorded above is the shared
+        # capacity claim; VM creation only materializes it and binds the
+        # invocation tags atomically at create, so concurrent transports
+        # may create their own compute in parallel instead of holding the
+        # admission lease through a multi-minute control-plane operation.
+        finalize_budget_reservation(env, state)
+        create_vm(env, state)
         create_run_command(env, state)
         poll_run_command(env, state)
         result = collect_result(env, state)

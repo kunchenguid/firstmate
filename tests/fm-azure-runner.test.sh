@@ -179,13 +179,18 @@ assert 'SAFE_INVOCATION = re.compile(r"^azr-[0-9a-f]{12}(?:-a(?:[2-9]|[1-9][0-9]
 assert '"ttl_schedule_name": "shutdown-computevm-{}".format(vm_name)' in host
 assert "schedules/shutdown-computevm-{}" in host
 assert "DEPLOYMENT_TIMEOUT_SECONDS = 900" in host
-assert "LEASE_ACQUIRE_ATTEMPTS = 90" in host
+assert "LEASE_ACQUIRE_ATTEMPTS = 240" in host
 assert "for _ in range(LEASE_ACQUIRE_ATTEMPTS):" in host
 assert "timeout_seconds=DEPLOYMENT_TIMEOUT_SECONDS" in host
 assert "AZURE_SCHEDULE_MINIMUM_LEAD_SECONDS + DEPLOYMENT_TIMEOUT_SECONDS" in host
 start=host.index("def dispatch_prepared")
 assert host.index("shared_capacity_reserve(env, state, cost)", start) < host.index("create_vm(env, state)", start)
-assert host.index("lease.renew_and_assert()", start) < host.index("create_vm(env, state)", start)
+# Per-invocation staging and read-only proofs run before the shared lease,
+# and compute creation runs after it: the durable fence-bound reservation
+# is the capacity claim, so concurrent transports no longer serialize
+# their snapshot uploads and multi-minute VM creations behind one holder.
+assert host.index("stage_private_snapshot(env, state)", start) < host.index("with ManagementAdmissionLease", start)
+assert host.index("with ManagementAdmissionLease", start) < host.index("create_vm(env, state)", start)
 cleanup=host[host.index("def cleanup(env, state):"):start]
 assert cleanup.index('"run-command-execute"') < cleanup.index('if "vm" in by_key') < cleanup.index('"ttl-schedule" in by_key') < cleanup.index("shared_capacity_release(env, state)")
 PY

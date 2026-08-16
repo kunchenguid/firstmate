@@ -1065,8 +1065,17 @@ def release_shape_constituent(env, state, reservation_id, evidence):
         "--confirm-subscription", env["subscription"],
     ])
     if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        # Release is a cleanup operation and must be idempotent: a
+        # constituent already released under another recorded receipt (an
+        # operator supersede raced a queued dispatch in generation 054)
+        # leaves nothing reserved, so the released end state satisfies
+        # this release instead of wedging close into cleanup-retained.
+        # Both receipts remain in the durable ledger.
+        if "already has a different cleanup receipt" in detail:
+            return
         raise ValidationError("shared capacity release refused for {}: {}".format(
-            reservation_id, (result.stderr or result.stdout or "").strip()[-400:]
+            reservation_id, detail[-400:]
         ))
 
 
@@ -1431,6 +1440,10 @@ def deployment_parameters(env, state, selected, replacement=False):
             "expiryUtc": {"value": expiry},
             "expiryTimeOfDay": {"value": expiry_value.strftime("%H%M")},
             "tags": {"value": expected_tags(state, selected)},
+            # Optional golden image: an empty value keeps the marketplace
+            # base; the guests re-verify every staged archive digest at
+            # boot either way, so the image only caches the bootstrap.
+            "imageId": {"value": os.environ.get("FM_AZURE_VM_IMAGE_ID", "")},
         },
     }
 
@@ -1634,6 +1647,27 @@ def dispatch(env, args):
             0 if item.get("phase") == "starting" else 1,
             item.get("created_at", ""), item.get("cell", ""),
         ))
+        if not candidates:
+            print("AZURE VALIDATION QUEUE empty active=0")
+            return
+        # A queued submission whose shape reservation has been released is
+        # a superseded corpse, not a candidate: dispatching it runs a cell
+        # outside its capacity accounting and every shard transport fails
+        # on its released constituent (generation 054 ground truth, where
+        # an operator supersede raced this FIFO). Skip released fences.
+        controller_path = env["home"] / "state" / "azure-workers" / "controller.json"
+        try:
+            reservations = json.loads(controller_path.read_text(encoding="utf-8")).get("capacity_reservations", {})
+        except (OSError, json.JSONDecodeError):
+            reservations = {}
+        live = []
+        for item in candidates:
+            entry = reservations.get(item.get("cell"))
+            if entry is not None and entry.get("status") == "released":
+                print("AZURE VALIDATION SKIPPED cell={} shape reservation already released".format(item.get("cell")))
+                continue
+            live.append(item)
+        candidates = live
         if not candidates:
             print("AZURE VALIDATION QUEUE empty active=0")
             return
@@ -1841,14 +1875,16 @@ def verify_result_identity(state, result):
         machines = set()
         invocations = set()
         rounds = set()
+        receipt_heads = set()
+        receipt_trees = set()
         for item in shard_receipts:
             if not isinstance(item, dict):
                 raise ValidationError("behavior shard receipt is malformed")
             if (
                 item.get("kind") != "behavior"
                 or item.get("shard_count") != expected_shards
-                or item.get("head") != head
-                or item.get("tree") != tree
+                or not HEX_OBJECT.match(str(item.get("head", "")))
+                or not HEX_OBJECT.match(str(item.get("tree", "")))
                 or not SHA256.match(str(item.get("request_digest", "")))
                 or not SHA256.match(str(item.get("command_digest", "")))
                 or not RUNNER_INVOCATION.match(str(item.get("invocation", "")))
@@ -1856,6 +1892,8 @@ def verify_result_identity(state, result):
                 or not item.get("vm_instance_id")
             ):
                 raise ValidationError("behavior shard receipt identity is incomplete or stale")
+            receipt_heads.add(item["head"])
+            receipt_trees.add(item["tree"])
             artifact = item.get("artifact")
             if (
                 not isinstance(artifact, dict)
@@ -1877,8 +1915,26 @@ def verify_result_identity(state, result):
             or len(invocations) != expected_shards
             or len(rounds) != 1
             or None in rounds
+            or len(receipt_heads) != 1
+            or len(receipt_trees) != 1
         ):
             raise ValidationError("behavior shards did not prove one complete round on independent Azure machines")
+        receipt_head = next(iter(receipt_heads))
+        receipt_tree = next(iter(receipt_trees))
+        if receipt_head != head:
+            # The pipeline commits documentation on top of the tested tree
+            # after the shard round, so the receipts legitimately prove an
+            # exact ancestor of the published head rather than the head
+            # itself. The ancestor and its tree binding are verified in the
+            # controller clone against the fetched published branch; any
+            # receipt head outside the published history still refuses.
+            repo_root = Path(state["repository_root"])
+            git(repo_root, "fetch", "origin", "refs/heads/" + str(result.get("branch", "")))
+            probe = git(repo_root, "merge-base", "--is-ancestor", receipt_head, head, check=False)
+            if probe.returncode != 0:
+                raise ValidationError("behavior shard receipts do not prove an ancestor of the published head")
+            if git(repo_root, "rev-parse", receipt_head + "^{tree}").stdout.strip() != receipt_tree:
+                raise ValidationError("behavior shard receipt tree does not match its receipt head")
     return True
 
 

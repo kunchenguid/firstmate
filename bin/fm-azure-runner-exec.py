@@ -194,21 +194,18 @@ def main():
     # that hard-link between their temp root and the work mount fail with
     # EXDEV (generation 051 ground truth: fm-auto-reap's fixture hard
     # link). A temp root beside the repository stays on the same device.
-    # Sticky world-writable /tmp semantics instead of chown: the unit's
-    # bounding set carries no CAP_CHOWN, so a chown here crashes the
-    # executor on the real VM. When the directory cannot be provided
-    # (hermetic harnesses run the executor outside a work mount) the
+    # The bootstrap pre-creates it owned by the runner user with mode
+    # 0700: world-writable modes trip the repository's own path guard
+    # (generation 052 ground truth), and the unit's bounding set carries
+    # no CAP_CHOWN so ownership cannot be adjusted here. The hermetic
+    # fallback creates it as the invoking user; when neither exists the
     # child simply keeps the default TMPDIR.
     work_tmp = Path(repo).resolve().parent / "tmp"
     try:
-        work_tmp.mkdir(exist_ok=True)
+        work_tmp.mkdir(mode=0o700, exist_ok=True)
     except OSError:
         pass
-    try:
-        os.chmod(work_tmp, 0o1777)
-    except OSError:
-        pass
-    if not work_tmp.is_dir() or not os.access(work_tmp, os.W_OK):
+    if not work_tmp.is_dir():
         work_tmp = None
     child_env = {
         "HOME": "/work/home",

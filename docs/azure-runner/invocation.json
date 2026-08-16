@@ -45,6 +45,10 @@
         "Standard_E4as_v6"
       ]
     },
+    "imageId": {
+      "type": "string",
+      "defaultValue": ""
+    },
     "ubuntuImageVersion": {
       "type": "string",
       "defaultValue": "24.04.202608070"
@@ -143,12 +147,7 @@
           }
         },
         "storageProfile": {
-          "imageReference": {
-            "publisher": "Canonical",
-            "offer": "ubuntu-24_04-lts",
-            "sku": "server",
-            "version": "[parameters('ubuntuImageVersion')]"
-          },
+          "imageReference": "[if(empty(parameters('imageId')), createObject('publisher', 'Canonical', 'offer', 'ubuntu-24_04-lts', 'sku', 'server', 'version', parameters('ubuntuImageVersion')), createObject('id', parameters('imageId')))]",
           "osDisk": {
             "name": "[parameters('osDiskName')]",
             "createOption": "FromImage",

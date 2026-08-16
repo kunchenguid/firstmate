@@ -131,9 +131,12 @@ install -d -m 0700 -o fmrunner -g fmrunner /work/home /work/repo /work/home/.fm-
 # Same-device temp root for the repository command: the executor unit's
 # PrivateTmp puts /tmp on its own tmpfs, which breaks tests that hard-link
 # between their temp root and the work mount (generation 051 ground
-# truth). Created here because the unconfined bootstrap can always
-# guarantee it; the sandboxed executor only points TMPDIR at it.
-install -d -m 1777 -o fmrunner -g fmrunner /work/tmp
+# truth). Owned by the runner user and closed to everyone else: a
+# world-writable mode here trips the repository's own path guard, which
+# requires root sticky protection on world-writable ancestors
+# (generation 052 ground truth). Created here because the unconfined
+# bootstrap can always guarantee it; the executor only points TMPDIR at it.
+install -d -m 0700 -o fmrunner -g fmrunner /work/tmp
 chown fmrunner:fmrunner /work
 
 runuser -u fmrunner -- git -C /work/repo init -q
@@ -208,8 +211,20 @@ if [ "$DEFAULT_REF" != none ] && [ "$DEFAULT_HEAD" != none ]; then
 fi
 
 fetch_exact() { local url=$1 path=$2 bytes=$3 digest=$4 redirects=${5:-no} args=(); [ "$redirects" != yes ] || args+=(--location); run_bootstrap_network curl --fail --silent --show-error "${args[@]}" --connect-timeout 30 --max-time 300 --max-filesize "$bytes" --output "$path" "$url"; [ "$(stat -c %s "$path")" = "$bytes" ] && [ "sha256:$(sha256sum "$path" | awk '{print $1}')" = "$digest" ] || { echo "guest bootstrap: pinned download mismatch" >&2; exit 125; }; }
-fetch_exact https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz "$BASE/shellcheck.tar.xz" 2559196 "$(read_request protocol.shellcheck_archive_digest)" yes
-fetch_exact https://github.com/astral-sh/uv/releases/download/0.9.10/uv-x86_64-unknown-linux-gnu.tar.gz "$BASE/uv.tar.gz" 21427164 "$(read_request protocol.uv_archive_digest)" yes
+# The golden image stages the pinned archives under /opt/fm-tools; a copy
+# whose byte-exact digest matches the admitted request skips the network
+# fetch, and anything else falls through to the pinned download. The
+# digest requirement is identical either way, so the image is a cache of
+# the provenance chain, never a substitute for it.
+staged_or_fetch() { local staged=$1 url=$2 path=$3 bytes=$4 digest=$5 redirects=${6:-no}
+  if [ -f "$staged" ] && [ "$(stat -c %s "$staged")" = "$bytes" ] && [ "sha256:$(sha256sum "$staged" | awk '{print $1}')" = "$digest" ]; then
+    cp "$staged" "$path"
+    return 0
+  fi
+  fetch_exact "$url" "$path" "$bytes" "$digest" "$redirects"
+}
+staged_or_fetch /opt/fm-tools/shellcheck.tar.xz https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz "$BASE/shellcheck.tar.xz" 2559196 "$(read_request protocol.shellcheck_archive_digest)" yes
+staged_or_fetch /opt/fm-tools/uv.tar.gz https://github.com/astral-sh/uv/releases/download/0.9.10/uv-x86_64-unknown-linux-gnu.tar.gz "$BASE/uv.tar.gz" 21427164 "$(read_request protocol.uv_archive_digest)" yes
 tar -xJf "$BASE/shellcheck.tar.xz" -C "$BASE"; tar -xzf "$BASE/uv.tar.gz" -C "$BASE"
 install -m 0755 -o fmrunner -g fmrunner "$BASE/shellcheck-v0.11.0/shellcheck" /work/home/.fm-runner-tools/bin/shellcheck
 install -m 0755 -o fmrunner -g fmrunner "$BASE/uv-x86_64-unknown-linux-gnu/uv" /work/home/.fm-runner-tools/uv/uv
