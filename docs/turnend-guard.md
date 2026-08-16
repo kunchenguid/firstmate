@@ -77,6 +77,9 @@ A live owner counts as that proof only while its decision is open, which the led
 The guard then stops reading it as recovery under way, the terminal check clears it instead of stepping aside for it, and the next Stop-owned firing reclaims it and arms rather than deferring.
 Without that boundary a cycle that armed, delivered one rewake, and exited left both Stop participants deferring to its leftover lock indefinitely, so on 2026-08-14 a home with two tasks in flight and a beacon 40 minutes cold ended every turn blind until an operator intervened.
 An `arming` entry stays in flight however old it is, because the owner foregrounds the arm for the whole watcher cycle.
+The shapes the ledger cannot settle are settled by identity instead: the claim records the same `pid-identity` file every other supervision lock records, before it publishes its `autoarm` role, so a recorded identity that no longer matches the pid holding the lock proves abandonment on its own even while the entry still reads `arming` or no ledger entry exists at all.
+That covers a claim whose process group was killed before it could record any outcome and whose pid the operating system later handed to an unrelated live process.
+A claim carrying no recorded identity keeps the ledger-only boundary, and a failed reclaim re-blocks rather than allowing a blind stop.
 Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure progression instead of acting as unconditional recovery proof.
 The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.

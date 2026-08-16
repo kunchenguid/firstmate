@@ -1323,6 +1323,34 @@ test_hook_claude_mode_blocks_on_abandoned_autoarm_claim() {
   pass "fm-turnend-guard --claude: an abandoned auto-arm claim no longer allows a blind stop (incident regression)"
 }
 
+# The ledger-blind variant of the same lapse: a session teardown killed the claim's
+# process group before it could record any outcome, so its entry still reads
+# "arming" - in flight however old, by contract - while the recorded pid now belongs
+# to an unrelated live process. The identity the claim wrote into its own lock is
+# the only thing that separates that from a real arm still running.
+test_hook_claude_mode_blocks_on_pid_reused_arming_claim() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-reused-pid-claim")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/task2.meta"
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  # The claim recorded ITS OWN identity; this test shell now stands in for the
+  # unrelated process that inherited the number.
+  identity=$(fm_test_pid_identity "$$") || fail "could not compute a claim pid-identity"
+  printf '%s\n' "$identity" > "$dir/state/.claude-autoarm.lock/pid-identity"
+  printf 'epoch=464 owner_pid=%s outcome=arming updated_at=1\n' "$pid" > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a claim whose recorded identity no longer matches its live pid must not pass for recovery under way"
+  assert_contains "$out" "TURN WOULD END BLIND" "reused-pid claim block must carry the blind-turn banner"
+  assert_contains "$out" "2 task(s) in flight" "reused-pid claim block must name the unsupervised work"
+  pass "fm-turnend-guard --claude: a claim whose pid was reused stops counting as recovery even while its entry reads arming"
+}
+
 # The same abandoned claim on the terminal path: stepping aside for it allowed the
 # stop silently AND spent no attended alarm, so a genuinely broken automatic
 # mechanism stayed invisible. The guard must clear the claim and finish instead.
@@ -1703,6 +1731,7 @@ test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open
 test_hook_claude_mode_terminal_boundary_excludes_starting_owner
 test_hook_claude_mode_allows_on_fresh_rewake_epoch
 test_hook_claude_mode_blocks_on_abandoned_autoarm_claim
+test_hook_claude_mode_blocks_on_pid_reused_arming_claim
 test_hook_claude_mode_terminal_fail_open_clears_abandoned_claim
 test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_integrated_monotonic_fail_open

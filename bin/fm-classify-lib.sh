@@ -1157,18 +1157,32 @@ FM_WORKTREE_WRITE_MAXDEPTH=${FM_WORKTREE_WRITE_MAXDEPTH:-6}
 # evidence therefore always leaves the caller's existing escalation schedule
 # untouched, so a crew that writes nothing still escalates exactly as before.
 #
+# A kind=secondmate task records a provisioned firstmate home, not a code tree, and
+# such a home runs its OWN supervision inside it: its state/ directory churns a
+# watcher beacon, pane hashes, and heartbeats whether or not the mate is producing
+# anything, so a walk there would report liveness for a mate that has done nothing.
+# Those homes are excluded outright rather than by pruning "state", which would also
+# hide a legitimate source directory of that name in an ordinary worktree. The
+# exclusion is a negative outcome like any other, so an unproductive mate keeps
+# escalating on the caller's unchanged schedule.
+#
 # The anchor is the caller's own idle-window timer file, whose mtime already marks
 # when the quiet window opened, so `-newer` needs no clock arithmetic, no temp
 # file, and no portable mtime-setting. Not a pure status-file read (see the header):
 # one pruned, depth-bounded walk per call, which callers must reach only when they
 # are otherwise about to escalate, never on every poll.
 crew_worktree_written_since() {  # <id> <state> <anchor-file>
-  local id=$1 state=$2 anchor=$3 wt name hit
+  local id=$1 state=$2 anchor=$3 wt kind name hit
   local -a names=() prune=()
   [ -n "$id" ] || return 1
   [ -f "$anchor" ] || return 1
   wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ "$kind" != secondmate ] || return 1
+  if [ -e "$wt/.fm-secondmate-home" ] || [ -L "$wt/.fm-secondmate-home" ]; then
+    return 1
+  fi
   read -r -a names <<< "$FM_WORKTREE_WRITE_PRUNE"
   for name in ${names[@]+"${names[@]}"}; do
     [ "${#prune[@]}" -eq 0 ] || prune+=( -o )

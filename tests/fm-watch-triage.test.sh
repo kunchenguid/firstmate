@@ -372,9 +372,9 @@ test_crew_absorb_class_classifier() {
 # its existing escalation schedule, and a supervisor-side git read (which touches
 # .git, never tracked files) must not be able to fake a positive.
 test_crew_worktree_written_since_classifier() {
-  local dir state anchor wt
+  local dir state anchor wt home statedir_wt
   dir=$(make_case classify-worktree-writes); state="$dir/state"
-  anchor="$state/anchor"; wt="$dir/wt"
+  anchor="$state/anchor"; wt="$dir/wt"; home="$dir/mate-home"; statedir_wt="$dir/wt-with-state"
   mkdir -p "$wt/src" "$wt/.git/objects"
   printf 'old\n' > "$wt/src/existing.c"
   set_mtime "$(( $(date +%s) - 300 ))" "$wt/src/existing.c"
@@ -407,7 +407,28 @@ test_crew_worktree_written_since_classifier() {
     || fail "a file written after the anchor was not reported as write evidence"
   # An empty id is never evidence.
   ! crew_worktree_written_since "" "$state" "$anchor" || fail "an empty id reported write evidence"
-  pass "crew_worktree_written_since: real writes are evidence; no worktree, no anchor, quiet trees and .git churn are not"
+
+  # A secondmate records a provisioned firstmate home, not a code tree, and such a
+  # home supervises itself: its own watcher beacon, pane hashes, and heartbeats keep
+  # its state/ churning whether or not the mate produced anything.
+  mkdir -p "$home/state"
+  printf 'sm-classify-1\n' > "$home/.fm-secondmate-home"
+  printf 'beat\n' > "$home/state/.last-watcher-beat"
+  printf 'window=remote:sm\nkind=secondmate\nworktree=%s\n' "$home" > "$state/sm.meta"
+  ! crew_worktree_written_since sm "$state" "$anchor" \
+    || fail "a secondmate's own home supervision churn reported crew write evidence"
+  # The home marker alone is enough, even when the record does not say secondmate.
+  printf 'window=test:fm-sm2\nkind=ship\nworktree=%s\n' "$home" > "$state/sm2.meta"
+  ! crew_worktree_written_since sm2 "$state" "$anchor" \
+    || fail "a marked firstmate home reported crew write evidence"
+  # But an ordinary worktree that merely holds a directory named state is real
+  # work: only the home is excluded, never a source directory of that name.
+  mkdir -p "$statedir_wt/state"
+  printf 'machine\n' > "$statedir_wt/state/machine.go"
+  printf 'window=test:fm-d\nkind=ship\nworktree=%s\n' "$statedir_wt" > "$state/d.meta"
+  crew_worktree_written_since d "$state" "$anchor" \
+    || fail "a source directory named state was hidden from the write probe"
+  pass "crew_worktree_written_since: real writes are evidence; no worktree, no anchor, quiet trees, .git churn and a mate's own home are not"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -1794,6 +1815,55 @@ test_write_deferral_resurfaces_on_the_bounded_cadence() {
   pass "a write deferral re-surfaces once on the bounded pause cadence, so a churning worktree cannot stay invisible"
 }
 
+# The worktree recorded for a secondmate is a provisioned firstmate home, and that
+# home runs its OWN supervision inside itself: its watcher beacon, pane hashes and
+# heartbeats keep state/ churning whether or not the mate produced anything. Reading
+# that as crew progress would quietly relax the kind-agnostic busy-turn backstop from
+# the escalation cadence to the hourly recheck for work that produced nothing, so the
+# probe must report no evidence and the unchanged schedule must still fire.
+test_secondmate_home_supervision_churn_is_not_write_evidence() {
+  local dir state fakebin out drain_out capture_file window key sig pid home back
+  dir=$(make_case secondmate-home-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-mate"; home="$dir/mate-home"
+  mkdir -p "$home/state"
+  printf 'sm-mate\n' > "$home/.fm-secondmate-home"
+  printf 'Working... (12.3s)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\nworktree=%s\n' "$window" "$home" > "$state/mate.meta"
+  record_pi_busy "$state" mate
+  # An ordinary crew recording a provisioned mate home is the route that actually
+  # reaches the probe: a kind=secondmate window of its own is triaged only under a
+  # declared pause, and a declared pause takes the bounded recheck cadence instead of
+  # the wedge timer. The home marker alone is what excludes the walk, so the exclusion
+  # is what this asserts. A busy pane is bounded by its completed-turn age; no turn
+  # ever completed here, so the spawn record itself is aged past the bound that routes
+  # it into the wedge timer.
+  printf 'working: implementing\n' > "$state/mate.status"
+  sig=$(seen_sig "$state/mate.status"); printf '%s' "$sig" > "$state/.seen-mate_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  set_mtime "$(( $(date +%s) - 4000 ))" "$state/mate.meta"
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  # The only thing written since the idle window opened is the mate home's own
+  # supervision bookkeeping.
+  printf 'beat\n' > "$home/state/.last-watcher-beat"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_BUSY_TURN_MAX_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a mate home's own supervision churn deferred an escalation it must not defer"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the mate-home escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the mate-home escalation did not flag a possible wedge"
+  [ ! -e "$state/.writing-since-$key" ] || fail "a mate's provisioned home was probed as if it were a code tree"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "the mate escalation was not counted"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the mate escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the mate escalation was not queued"
+  pass "a secondmate's own home supervision churn is not crew write evidence, so a pane recording that home keeps the unchanged escalation schedule"
+}
+
 # --- triage debug log stays size capped -------------------------------------
 
 test_triage_log_size_cap_accepts_spaced_wc_counts() {
@@ -2289,6 +2359,7 @@ test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
 test_write_deferral_resurfaces_on_the_bounded_cadence
+test_secondmate_home_supervision_churn_is_not_write_evidence
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled
