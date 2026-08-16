@@ -238,6 +238,10 @@ The adapter is a thin capture: it hands a bounded ANSI tail plus Herdr's capabil
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
 Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
 
+Without a cursor row the bottom-most shape wins, and an unmatched rule below an already-matched candidate normally proves that candidate is stale scrollback.
+The single exception is a bare agent-glyph row sitting directly between two rules of the same width - what Claude draws when a terminal-title overlay is burned into the composer's top rule - which reads `empty`; a glyph separated from its closing rule by transcript rows, a dead shell glyph, and a blank row in that same shape all still read `unknown`.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#titled-composer-rule) owns the evidence and the title forms that still read `unknown`.
+
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
 If the ANSI capture ever fails, the plain fallback declares itself unstyled and the classifier degrades a glyph row carrying trailing text to `unknown` instead of misreading ghost suggestions as typed input, which safely defers injection and eventually raises the wedge alarm.
