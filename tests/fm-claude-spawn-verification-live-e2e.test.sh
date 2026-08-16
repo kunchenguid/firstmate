@@ -69,7 +69,7 @@ while [ "$i" -lt 240 ]; do
     else
       tools=$(fm_control_claude_tool_activity "$snapshot")
       if [ -n "$tools" ] && [ "$tools" != "$prior_tools" ]; then
-        verified=tool-row
+        verified='tool-row'
         break
       fi
       tokens=$(fm_control_claude_token_counter "$snapshot")

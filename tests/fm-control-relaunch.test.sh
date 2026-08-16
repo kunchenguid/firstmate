@@ -128,6 +128,9 @@ case "${1:-}" in
             printf 'Do you trust the files in this folder?\n  Yes, I trust this folder\n  Enter to confirm\n'
           fi
           ;;
+        dialog-stubborn)
+          printf 'Do you trust the files in this folder?\n  Yes, I trust this folder\n  Enter to confirm\n'
+          ;;
         muted) printf 'Transcript saving is off\n  esc to interrupt\n' ;;
         muted-then-active)
           if [ "$captures" -le 2 ]; then
@@ -344,6 +347,23 @@ test_claude_relaunch_accepts_the_startup_dialog_and_proves_activity() {
   assert_contains "$out" "relaunched rl35 harness=claude" \
     "the control plane should report success only after the launcher observes activity"
   pass "Claude relaunch accepts a simulated trust dialog through the launch send path and waits for real activity"
+}
+
+test_claude_relaunch_fails_loudly_on_an_unresolved_dialog() {
+  local dir out rc
+  dir=$(new_case claude-stubborn-dialog rl41)
+  add_ship_task "$dir" rl41 claude
+  out=$(FM_FAKE_CLAUDE_SCREEN=dialog-stubborn run_control "$dir" rl41 relaunch \
+    --note "continue only after the dialog resolves"); rc=$?
+  expect_code 1 "$rc" "a Claude dialog that never resolves must fail relaunch verification"$'\n'"$out"
+  assert_contains "$out" "unresolved-trust" \
+    "the failure should name the unresolved dialog kind"
+  assert_contains "$out" "Enter to confirm" \
+    "the failure should include the pane snapshot that caused it"
+  assert_grep "failed: claude launch verification: unresolved-trust" \
+    "$dir/home/state/rl41.status" \
+    "the unresolved dialog should leave a durable supervisor wake"
+  pass "Claude relaunch fails loudly when a trust dialog stays unresolved after bounded auto-accepts"
 }
 
 test_claude_relaunch_fails_loudly_when_transcript_saving_is_off() {
@@ -1484,6 +1504,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_claude_relaunch_accepts_the_startup_dialog_and_proves_activity
+test_claude_relaunch_fails_loudly_on_an_unresolved_dialog
 test_claude_relaunch_fails_loudly_when_transcript_saving_is_off
 test_claude_relaunch_retries_empty_captures_and_accepts_each_activity_proof
 test_claude_relaunch_times_out_instead_of_returning_unverified_success
