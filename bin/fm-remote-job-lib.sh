@@ -49,6 +49,11 @@
 # it to stop itself once its root is pruned, and
 # bin/fm-remote-job-reap-orphans.sh uses it to reap workers that were already
 # orphaned that way.
+#
+# Waiting for worker readiness and for a stopped worker tree spends a
+# wall-clock budget rather than an iteration count, tunable with
+# FM_REMOTE_JOB_PROBE_WAIT_SECONDS and FM_REMOTE_JOB_STOP_WAIT_SECONDS.
+# fm_remote_job_wait_until owns that contract and the reasoning behind it.
 
 FM_REMOTE_JOB_LABEL=dev.firstmate.remote-job
 FM_REMOTE_JOB_MAX_BYTES=${FM_REMOTE_JOB_MAX_BYTES:-1048576}
@@ -115,14 +120,13 @@ fm_remote_job_validate_settings() {
 # a healthy machine nothing because every wait still returns on its first
 # successful check.
 #
-# What a wait owes its caller when the clock misbehaves is deliberately narrow,
-# and narrower than several earlier attempts at it. Each of those tried to hold
-# a budget whole across a backwards clock step by re-anchoring the deadline, and
-# each shipped a fresh way to end a wait early instead: the exact "worker did
-# not report ready" failure the deadline exists to prevent. The re-anchor is
-# gone. A backwards reading now simply sits behind the deadline and is not
-# expired, so a backwards step lengthens a wait rather than collapsing its
-# budget, and no arithmetic pretends otherwise.
+# What a wait owes its caller when the clock misbehaves is deliberately narrow.
+# The deadline is anchored once and never re-anchored: a backwards reading
+# simply sits behind it and is not expired, so a backwards step lengthens a wait
+# rather than collapsing its budget, and no arithmetic pretends otherwise. Do
+# not add a re-anchor to hold a budget whole across such a step. Every form of
+# it ends some wait early instead, which is the exact "worker did not report
+# ready" failure the deadline exists to prevent.
 #
 # That leaves termination, which two backstops guarantee unconditionally.
 # FM_REMOTE_JOB_CLOCK_MAX_STALLS bounds consecutive readings that fail to
@@ -159,9 +163,8 @@ fm_remote_job_validate_settings() {
 # fifteen second shutdown wait. The ceiling cannot shorten a budget and cannot
 # be reached in healthy operation, so do not mistake it for a leftover and
 # delete it. Making these waits correct against a clock that is wrong in other
-# ways, a forward step in particular, is deliberately out of scope here and
-# tracked as its own item, so this stays a deadline rather than a clock
-# subsystem.
+# ways, a forward step in particular, is deliberately out of scope, so this
+# stays a deadline rather than a clock subsystem.
 fm_remote_job_clock_now() { # epoch seconds, or nothing when the clock is unreadable
   local now
   now=$(date +%s 2>/dev/null || true)
