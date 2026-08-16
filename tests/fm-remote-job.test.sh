@@ -620,4 +620,74 @@ wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
 RECOVERY_WORKER_PID=
 pass "quarantine clears only after recorded execution has stopped"
 
+# The readiness wait must spend a budget denominated in wall-clock seconds, so
+# that a host slow enough to delay worker startup cannot also change what the
+# budget is worth. A count-bounded wait fails this with an expensive check: its
+# real cost is count x (check + sleep), which on a loaded host stretched the
+# nominal twenty seconds to 33s and 49s across two runs of the same code.
+# Driving each check far past the loop's own sleep is what separates the two
+# designs, so the stub below makes every probe cost a second.
+BUDGET_SCRIPT="$TMP_ROOT/probe-wait-budget.sh"
+cat > "$BUDGET_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_PROBE_WAIT_SECONDS=$2
+fm_remote_job_probe() { sleep 1; return 1; }
+fm_remote_job_worker_identity_matches() { return 1; }
+start=$(date +%s)
+fm_remote_job_wait_for_probe "$1" "$1" && exit 3
+printf '%s\n' "$(($(date +%s) - start))"
+SH
+chmod 700 "$BUDGET_SCRIPT"
+# The outer bound both proves the wait terminates and keeps a count-bounded
+# regression from burning minutes of a probe-per-second loop before it reports.
+BUDGET_ELAPSED=$(timeout 40 bash "$BUDGET_SCRIPT" "$REMOTE_ROOT" 3) \
+  || fail "the readiness wait did not honor a wall-clock budget when every probe was slow"
+case "$BUDGET_ELAPSED" in ''|*[!0-9]*) fail "the readiness wait did not report its elapsed budget" ;; esac
+[ "$BUDGET_ELAPSED" -ge 3 ] || fail "the readiness wait gave up before spending its configured budget"
+[ "$BUDGET_ELAPSED" -le 15 ] || fail "the readiness wait overran its configured budget under a slow probe"
+pass "the readiness wait spends a wall-clock budget regardless of probe cost"
+
+# Same budget, a probe an order of magnitude slower: a wall-clock bound holds
+# where a counted one would scale straight up with the per-check cost.
+cat > "$BUDGET_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_PROBE_WAIT_SECONDS=$2
+fm_remote_job_probe() { sleep 10; return 1; }
+fm_remote_job_worker_identity_matches() { return 1; }
+start=$(date +%s)
+fm_remote_job_wait_for_probe "$1" "$1" && exit 3
+printf '%s\n' "$(($(date +%s) - start))"
+SH
+BUDGET_ELAPSED=$(timeout 60 bash "$BUDGET_SCRIPT" "$REMOTE_ROOT" 3) \
+  || fail "a ten-times slower probe broke the readiness wait's wall-clock budget"
+# One in-flight probe may always finish, so the bound is the budget plus a
+# single check, never a multiple of the check cost.
+[ "$BUDGET_ELAPSED" -le 25 ] || fail "the readiness wait scaled with probe cost instead of holding its budget"
+pass "the readiness wait's budget does not scale with a slower probe"
+
+# A ready worker must still be observed immediately, so the wall-clock bound
+# is a ceiling on failure and never a floor a healthy host has to sit through.
+cat > "$BUDGET_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_PROBE_WAIT_SECONDS=120
+fm_remote_job_probe() { return 0; }
+fm_remote_job_worker_identity_matches() { return 0; }
+start=$(date +%s)
+fm_remote_job_wait_for_probe "$1" "$1" || exit 3
+printf '%s\n' "$(($(date +%s) - start))"
+SH
+BUDGET_ELAPSED=$(timeout 30 bash "$BUDGET_SCRIPT" "$REMOTE_ROOT") \
+  || fail "the readiness wait did not return as soon as the worker reported ready"
+[ "$BUDGET_ELAPSED" -le 5 ] || fail "a ready worker was made to wait out the readiness budget"
+pass "the readiness wait returns immediately once the worker reports ready"
+
 echo "ALL TESTS PASSED"

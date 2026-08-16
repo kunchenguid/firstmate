@@ -57,6 +57,8 @@ FM_REMOTE_JOB_TIMEOUT=${FM_REMOTE_JOB_TIMEOUT:-360}
 FM_REMOTE_JOB_WAIT_GRACE=${FM_REMOTE_JOB_WAIT_GRACE:-30}
 FM_REMOTE_JOB_POLL_SECONDS=${FM_REMOTE_JOB_POLL_SECONDS:-0.05}
 FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
+FM_REMOTE_JOB_PROBE_WAIT_SECONDS=${FM_REMOTE_JOB_PROBE_WAIT_SECONDS:-60}
+FM_REMOTE_JOB_STOP_WAIT_SECONDS=${FM_REMOTE_JOB_STOP_WAIT_SECONDS:-15}
 FM_REMOTE_JOB_OPERATOR_PATH=
 FM_REMOTE_JOB_CHILD_PATH=
 FM_REMOTE_JOB_STATE=
@@ -91,7 +93,27 @@ fm_remote_job_validate_settings() {
   case "$FM_REMOTE_JOB_WAIT_GRACE" in ''|*[!0-9]*) return 1 ;; esac
   [ "$FM_REMOTE_JOB_WAIT_GRACE" -le 300 ] || return 1
   case "$FM_REMOTE_JOB_REAP_SECONDS" in ''|*[!0-9]*|0) return 1 ;; esac
+  case "$FM_REMOTE_JOB_PROBE_WAIT_SECONDS" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$FM_REMOTE_JOB_PROBE_WAIT_SECONDS" -le 300 ] || return 1
+  case "$FM_REMOTE_JOB_STOP_WAIT_SECONDS" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$FM_REMOTE_JOB_STOP_WAIT_SECONDS" -le 300 ] || return 1
   return 0
+}
+
+# Bounded waits below are denominated in wall-clock seconds, never in a fixed
+# iteration count. A counted loop's real budget is count x (check cost + sleep),
+# so it is only the duration it claims to be on the machine it was tuned on:
+# the readiness wait's nominal 20 seconds measured 21s idle but 33s and 49s on
+# a loaded host, because the checks themselves slow down with the startup they
+# are waiting for. Deadlines make each budget the duration it states, and cost
+# a healthy machine nothing because every wait still returns on its first
+# successful check.
+fm_remote_job_wait_deadline() { # <seconds>; absolute epoch bound for a wait
+  printf '%s\n' "$(($(date +%s) + $1))"
+}
+
+fm_remote_job_wait_expired() { # <deadline>
+  [ "$(date +%s)" -ge "$1" ]
 }
 
 fm_remote_job_platform() {
@@ -744,34 +766,45 @@ fm_remote_job_worker_process_group() { # <pid>
 # survivor. Signals the isolated worker group when one is provable and the lone
 # process otherwise. Returns non-zero when any verified worker-group member is
 # still alive afterwards.
+# A provable worker group is signalled and tested as a group; otherwise the
+# lone process is, exactly as fm_remote_job_worker_process_group decides.
+fm_remote_job_worker_tree_alive() { # <pid> <pgid-or-empty>
+  local pid=$1 pgid=$2
+  if [ -n "$pgid" ]; then kill -0 -- "-$pgid" 2>/dev/null; else kill -0 "$pid" 2>/dev/null; fi
+}
+
+fm_remote_job_signal_worker_tree() { # <signal> <pid> <pgid-or-empty>
+  local signal=$1 pid=$2 pgid=$3
+  if [ -n "$pgid" ]; then
+    kill -"$signal" -- "-$pgid" 2>/dev/null || true
+  else
+    kill -"$signal" "$pid" 2>/dev/null || true
+  fi
+}
+
+fm_remote_job_wait_for_tree_exit() { # <pid> <pgid-or-empty>
+  local pid=$1 pgid=$2 deadline
+  deadline=$(fm_remote_job_wait_deadline "$FM_REMOTE_JOB_STOP_WAIT_SECONDS")
+  while fm_remote_job_worker_tree_alive "$pid" "$pgid"; do
+    fm_remote_job_wait_expired "$deadline" && return 1
+    sleep 0.1
+  done
+}
+
+# Stop a worker and every descendant it leaked, TERM first and KILL only for a
+# survivor. Signals the isolated worker group when one is provable and the lone
+# process otherwise. Returns non-zero when any verified worker-group member is
+# still alive afterwards. Each leg is bounded by wall clock, so a loaded host
+# cannot report a still-shutting-down worker as one that refused to stop.
 fm_remote_job_stop_worker_tree() { # <pid>
-  local pid=$1 pgid i=0
+  local pid=$1 pgid
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   pgid=$(fm_remote_job_worker_process_group "$pid" 2>/dev/null || true)
-  if [ -n "$pgid" ]; then kill -TERM -- "-$pgid" 2>/dev/null || true; else kill -TERM "$pid" 2>/dev/null || true; fi
-  while { [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || [ -z "$pgid" ] && kill -0 "$pid" 2>/dev/null; } \
-    && [ "$i" -lt 50 ]; do
-    i=$((i + 1))
-    sleep 0.1
-  done
-  if [ -n "$pgid" ]; then
-    kill -0 -- "-$pgid" 2>/dev/null || return 0
-  else
-    kill -0 "$pid" 2>/dev/null || return 0
-  fi
-  if [ -n "$pgid" ]; then kill -KILL -- "-$pgid" 2>/dev/null || true; else kill -KILL "$pid" 2>/dev/null || true; fi
-  i=0
-  while { [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || [ -z "$pgid" ] && kill -0 "$pid" 2>/dev/null; } \
-    && [ "$i" -lt 50 ]; do
-    i=$((i + 1))
-    sleep 0.1
-  done
-  if [ -n "$pgid" ]; then
-    ! kill -0 -- "-$pgid" 2>/dev/null
-  else
-    ! kill -0 "$pid" 2>/dev/null
-  fi
+  fm_remote_job_signal_worker_tree TERM "$pid" "$pgid"
+  fm_remote_job_wait_for_tree_exit "$pid" "$pgid" && return 0
+  fm_remote_job_signal_worker_tree KILL "$pid" "$pgid"
+  fm_remote_job_wait_for_tree_exit "$pid" "$pgid"
 }
 
 fm_remote_job_read_single_line() {
@@ -882,14 +915,18 @@ fm_remote_job_probe() { # <account-home>; a fresh worker heartbeat or active job
   [ $((now - mtime)) -le 10 ]
 }
 
+# Waits out the worker startup handshake, whose slowest leg is a replacement
+# worker reclaiming ownership from a predecessor: that reclaim cannot finish
+# until the predecessor's readiness heartbeat and lock age past their ten
+# second staleness windows. Those windows are wall clock, so this budget is too.
 fm_remote_job_wait_for_probe() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 i=0
-  while [ "$i" -lt 200 ]; do
+  local root=$1 account_home=$2 deadline
+  deadline=$(fm_remote_job_wait_deadline "$FM_REMOTE_JOB_PROBE_WAIT_SECONDS")
+  while :; do
     fm_remote_job_probe "$account_home" && fm_remote_job_worker_identity_matches "$root" "$account_home" && return 0
-    i=$((i + 1))
+    fm_remote_job_wait_expired "$deadline" && return 1
     sleep 0.1
   done
-  return 1
 }
 
 fm_remote_job_write_launchagent() { # <remote-root> <account-home>
