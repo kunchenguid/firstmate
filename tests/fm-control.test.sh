@@ -98,7 +98,7 @@ case "${1:-}" in
         printf 'zsh' > "$D/command"
       fi
       case "$payload" in
-        *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
+        *'encode launch-brief'*) cat "$D/becomes" > "$D/command"; : > "$D/launched" ;;
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
@@ -125,7 +125,13 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
+    if [ -f "$D/pane" ]; then
+      cat "$D/pane"
+    elif [ -e "$D/launched" ] && [ "$(cat "$D/command")" = claude ]; then
+      printf '✻ Working…\n  esc to interrupt\n'
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
     exit 0 ;;
   list-windows)
     if [ -f "$D/windows" ]; then cat "$D/windows"; fi
@@ -191,7 +197,9 @@ add_task() {
 # the stubbed provider on PATH. Echoes combined output; returns its exit code.
 run_control() {
   local dir=$1; shift
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_FAKE_DIR="$dir/fake" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 \
     FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
@@ -785,6 +793,7 @@ test_agent_that_does_not_stop_fails_closed() {
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
   printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
   out=$(env FM_FAKE_NEVER_DIES=1 PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
     FM_FAKE_DIR="$dir/fake" FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
     "$CONTROL" t1 exit 2>&1); rc=$?
   expect_code 1 "$rc" "an agent that ignores its exit command should fail closed"
@@ -860,6 +869,7 @@ test_fm_send_still_marks_the_same_secondmate_task() {
   log="$dir/fake/sendlog"
   : > "$log"
   out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
     FM_SEND_SETTLE=0 FM_ROOT_OVERRIDE="$dir/home" \
     "$SEND" domain "audit the build" 2>&1); rc=$?
   expect_code 0 "$rc" "fm-send to a secondmate should still succeed"$'\n'"$out"

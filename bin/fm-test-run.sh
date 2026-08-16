@@ -182,6 +182,7 @@ family_for_basename() {
       printf '%s\n' session-bootstrap
       ;;
     fm-afk-pi-herdr-return-e2e.test.sh|\
+    fm-claude-spawn-verification-live-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
@@ -394,6 +395,7 @@ tests/fm-bootstrap.test.sh 21912
 tests/fm-busy-adapter-wiring.test.sh 13962
 tests/fm-busy-state.test.sh 607
 tests/fm-calm-pi-extension.test.sh 203
+tests/fm-claude-spawn-verification-live-e2e.test.sh 19
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 19
 tests/fm-claude-stop-autoarm.test.sh 60521
 tests/fm-codex-continuity-live-e2e.test.sh 19
@@ -946,10 +948,15 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
+    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|bin/fm-control.sh|bin/fm-control-lib.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      case "$path" in
+        bin/fm-spawn.sh|bin/fm-control.sh|bin/fm-control-lib.sh)
+          printf '%s\n' live-harness-optin
+          ;;
+      esac
       ;;
     bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh)
       printf '%s\n' snapshot-bearings

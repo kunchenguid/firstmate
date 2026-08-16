@@ -194,6 +194,62 @@ fm_control_backend_state_verified() {  # <backend>
   return 1
 }
 
+# Classify the two Claude startup failures that must never be mistaken for a
+# running worker. These are deliberately pure pane-text checks so the spawn and
+# relaunch paths share one contract and portable tests can pin vendor wording
+# without launching a credentialed agent.
+fm_control_claude_startup_failure() {  # <plain-pane-capture>
+  local pane=${1-}
+  if printf '%s\n' "$pane" | grep -Fqi 'Transcript saving is off'; then
+    printf 'transcript-saving-off'
+    return 0
+  fi
+  return 1
+}
+
+fm_control_claude_startup_dialog() {  # <plain-pane-capture>
+  local pane=${1-}
+  printf '%s\n' "$pane" | grep -Fqi 'Enter to confirm' || return 1
+  if printf '%s\n' "$pane" \
+      | grep -Eqi 'trust.{0,80}(folder|project|workspace|files)|((folder|project|workspace|files).{0,80}trust)'; then
+    printf 'trust'
+    return 0
+  fi
+  if printf '%s\n' "$pane" \
+      | grep -Eqi 'bypass.{0,80}permission|permission.{0,80}bypass'; then
+    printf 'bypass-permissions'
+    return 0
+  fi
+  return 1
+}
+
+# A static busy affordance or a rendered tool row proves the launch brief has
+# begun processing. The token counter is handled separately because only a
+# change between two captures is proof of progress.
+fm_control_claude_busy_visible() {  # <plain-pane-capture>
+  local pane=${1-}
+  if printf '%s\n' "$pane" \
+      | grep -Eqi '(esc|ctrl[+]c)[[:space:]]+to[[:space:]]+(interrupt|stop)'; then
+    return 0
+  fi
+  return 1
+}
+
+fm_control_claude_tool_activity() {  # <plain-pane-capture>
+  local pane=${1-}
+  printf '%s\n' "$pane" \
+    | grep -E '^[[:space:]]*(⏺|●)[[:space:]]+([A-Za-z][A-Za-z0-9_-]*)(\(|[[:space:]])' \
+    || true
+}
+
+fm_control_claude_token_counter() {  # <plain-pane-capture>
+  local pane=${1-}
+  printf '%s\n' "$pane" \
+    | sed -nE 's/.*(^|[^[:alnum:]_])([0-9][0-9,]*)[[:space:]]+tokens?([^[:alnum:]_]|$).*/\2/p' \
+    | tr -d ',' \
+    | tail -1
+}
+
 # The per-task wiring artifacts a harness leaves behind, so a relaunch that
 # changes harness (or re-arms the same one with a fresh busy generation) can
 # clear the previous incarnation's wiring instead of leaving a stale hook

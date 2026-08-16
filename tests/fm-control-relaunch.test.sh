@@ -77,11 +77,15 @@ case "${1:-}" in
           ;;
         *'encode launch-brief'*)
           cat "$D/becomes" > "$D/command"
+          : > "$D/claude-launched"
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
+      if [ "$payload" = Enter ] && [ -e "$D/claude-launched" ]; then
+        printf 'x\n' >> "$D/claude-enters"
+      fi
       case "$payload" in
         'export GOTMPDIR='*)
           if [ -n "${FM_FAKE_TRACE_PREPARE:-}" ]; then
@@ -109,7 +113,34 @@ case "${1:-}" in
       esac
     done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  capture-pane)
+    if [ "$(cat "$D/command" 2>/dev/null)" = claude ]; then
+      captures=$(cat "$D/claude-captures" 2>/dev/null || printf 0)
+      captures=$((captures + 1))
+      printf '%s\n' "$captures" > "$D/claude-captures"
+      case "${FM_FAKE_CLAUDE_SCREEN:-active}" in
+        active) printf '✻ Working…\n  esc to interrupt\n' ;;
+        dialog)
+          enters=$(wc -l < "$D/claude-enters" 2>/dev/null || printf 0)
+          if [ "$enters" -ge 2 ]; then
+            printf '✻ Working…\n  esc to interrupt\n'
+          else
+            printf 'Do you trust the files in this folder?\n  Yes, I trust this folder\n  Enter to confirm\n'
+          fi
+          ;;
+        muted) printf 'Transcript saving is off\n  esc to interrupt\n' ;;
+        idle) printf '╭────╮\n│    │\n╰────╯\n' ;;
+        empty-once)
+          [ "$captures" -gt 1 ] && printf '✻ Working…\n  esc to interrupt\n'
+          ;;
+        tool) printf '⏺ Read(src/main.sh)\n' ;;
+        tokens) printf 'Context · %s tokens\n' "$((100 + captures))" ;;
+      esac
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0
+    ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
 esac
 exit 0
@@ -128,6 +159,8 @@ new_case() {
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
+  : > "$dir/fake/claude-enters"
+  printf '0\n' > "$dir/fake/claude-captures"
   printf 'claude' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
@@ -162,7 +195,9 @@ add_ship_task() {
 
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
@@ -171,13 +206,21 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_FAKE_CLAUDE_SCREEN="${FM_FAKE_CLAUDE_SCREEN:-active}" \
+    FM_CLAUDE_VERIFY_POLLS="${FM_CLAUDE_VERIFY_POLLS:-4}" \
+    FM_CLAUDE_VERIFY_INTERVAL="${FM_CLAUDE_VERIFY_INTERVAL:-0.01}" \
     "$CONTROL" "$@" 2>&1
 }
 
 run_spawn() {  # <case-dir> <args...>
   local dir=$1; shift
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_FAKE_DIR="$dir/fake" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_FAKE_CLAUDE_SCREEN="${FM_FAKE_CLAUDE_SCREEN:-active}" \
+    FM_CLAUDE_VERIFY_POLLS="${FM_CLAUDE_VERIFY_POLLS:-4}" \
+    FM_CLAUDE_VERIFY_INTERVAL="${FM_CLAUDE_VERIFY_INTERVAL:-0.01}" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -270,7 +313,70 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
     || fail "the transaction journal should end complete"
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  assert_grep "-u CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1" \
+    "$dir/fake/literal" "a Claude replacement must clear child-session mode and force transcript persistence"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_claude_relaunch_accepts_the_startup_dialog_and_proves_activity() {
+  local dir out rc enters
+  dir=$(new_case claude-dialog rl35)
+  add_ship_task "$dir" rl35 claude
+  out=$(FM_FAKE_CLAUDE_SCREEN=dialog run_control "$dir" rl35 relaunch \
+    --note "continue after startup verification"); rc=$?
+  expect_code 0 "$rc" "a Claude relaunch should accept its startup dialog and continue"$'\n'"$out"
+  enters=$(wc -l < "$dir/fake/claude-enters")
+  [ "$enters" -ge 2 ] \
+    || fail "Claude relaunch sent only $enters Enter key(s); it did not accept the post-launch dialog"
+  assert_contains "$out" "relaunched rl35 harness=claude" \
+    "the control plane should report success only after the launcher observes activity"
+  pass "Claude relaunch accepts a simulated trust dialog through the launch send path and waits for real activity"
+}
+
+test_claude_relaunch_fails_loudly_when_transcript_saving_is_off() {
+  local dir out rc
+  dir=$(new_case claude-muted rl36)
+  add_ship_task "$dir" rl36 claude
+  out=$(FM_FAKE_CLAUDE_SCREEN=muted run_control "$dir" rl36 relaunch \
+    --note "continue with durable transcript capture"); rc=$?
+  expect_code 1 "$rc" "a muted Claude transcript must fail relaunch verification"
+  assert_contains "$out" "transcript-saving-off" \
+    "the failure should classify the muted-transcript condition"
+  assert_contains "$out" "Transcript saving is off" \
+    "the failure should include the pane snapshot that caused it"
+  assert_contains "$out" "--- claude pane snapshot" \
+    "the failure should delimit the diagnostic pane snapshot"
+  assert_grep "failed: claude launch verification: transcript-saving-off" \
+    "$dir/home/state/rl36.status" \
+    "the failed launch should leave a durable supervisor wake"
+  pass "Claude relaunch rejects a simulated muted-transcript warning and prints the pane snapshot"
+}
+
+test_claude_relaunch_retries_empty_captures_and_accepts_each_activity_proof() {
+  local dir out rc mode id
+  for mode in empty-once tool tokens; do
+    id="rl-${mode//[^a-z]/}"
+    dir=$(new_case "claude-$mode" "$id")
+    add_ship_task "$dir" "$id" claude
+    out=$(FM_FAKE_CLAUDE_SCREEN="$mode" run_control "$dir" "$id" relaunch \
+      --note "continue after $mode verification"); rc=$?
+    expect_code 0 "$rc" "Claude $mode activity should verify the relaunch"$'\n'"$out"
+  done
+  pass "Claude relaunch retries an empty pane and accepts spinner, tool, or moving-token activity proofs"
+}
+
+test_claude_relaunch_times_out_instead_of_returning_unverified_success() {
+  local dir out rc
+  dir=$(new_case claude-idle rl37)
+  add_ship_task "$dir" rl37 claude
+  out=$(FM_FAKE_CLAUDE_SCREEN=idle FM_CLAUDE_VERIFY_POLLS=2 \
+    run_control "$dir" rl37 relaunch --note "continue only when working"); rc=$?
+  expect_code 1 "$rc" "an idle Claude pane must not pass launch verification"
+  assert_contains "$out" "activity-timeout" \
+    "the refusal should name the bounded activity timeout"
+  assert_contains "$out" "╭────╮" \
+    "the timeout should include the last non-empty pane snapshot"
+  pass "Claude relaunch times out loudly instead of treating process liveness as proof of work"
 }
 
 test_relaunch_preserves_durable_task_metadata() {
@@ -299,6 +405,7 @@ test_relaunch_preserves_durable_task_metadata() {
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare ready exported release
+  local wait_limit=1000
   dir=$(new_case metadata-race rl28)
   add_ship_task "$dir" rl28 claude
   printf '%s\n' "$$" > "$dir/home/state/.lock"
@@ -314,16 +421,20 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     FM_FAKE_TRACE_EXPORTED="$exported" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$prepare" ] && [ "$i" -lt 200 ]; do
+  while [ ! -e "$prepare" ] && [ "$i" -lt "$wait_limit" ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
   [ -e "$prepare" ] || {
     kill "$control_pid" 2>/dev/null || true
     wait "$control_pid" 2>/dev/null || true
-    fail "relaunch did not reach trace delivery"
+    fail "relaunch did not reach trace delivery"$'\n'\
+"control output:"$'\n'"$(cat "$dir/control.out")"$'\n'\
+"sent keys:"$'\n'"$(cat "$dir/fake/keys")"$'\n'\
+"sent literals:"$'\n'"$(cat "$dir/fake/literal")"
   }
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
     FM_REAL_MV="$(command -v mv)" \
     FM_FAKE_META_WRITER_TARGET="$dir/home/state/rl28.meta" \
     FM_FAKE_META_WRITER_READY="$ready" \
@@ -332,7 +443,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
       --carry-platform x --carry-max 280 > "$dir/link.out" 2>&1 &
   link_pid=$!
   i=0
-  while { [ ! -e "$ready" ] || [ ! -e "$exported" ]; } && [ "$i" -lt 200 ]; do
+  while { [ ! -e "$ready" ] || [ ! -e "$exported" ]; } && [ "$i" -lt "$wait_limit" ]; do
     /bin/sleep 0.01
     i=$((i + 1))
   done
@@ -341,7 +452,8 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     kill "$link_pid" "$control_pid" 2>/dev/null || true
     wait "$link_pid" 2>/dev/null || true
     wait "$control_pid" 2>/dev/null || true
-    fail "trace publication did not overlap the concurrent metadata writer"
+    fail "trace publication did not overlap the concurrent metadata writer"$'\n'\
+"$(cat "$dir/control.out")"$'\n'"$(cat "$dir/link.out")"
   }
   : > "$release"
   wait "$link_pid"; rc=$?
@@ -950,6 +1062,7 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
     fail "relaunch did not reach its pre-publication endpoint check"
   }
   link_out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
     "$X_LINK" rl30 request-30 --carry-count 2 --carry-ts 1700000000 \
       --carry-platform x --carry-max 280 2>&1); rc=$?
   expect_code 0 "$rc" "concurrent durable metadata publication should succeed"$'\n'"$link_out"
@@ -1249,7 +1362,9 @@ test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
     i=$((i + 1))
   done
   [ -e "$lock" ] || fail "could not stage the promotion lifecycle lock"
-  out=$(FM_HOME="$dir/home" "$PROMOTE" rl29 --mode direct-PR --yolo on 2>&1); rc=$?
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    FM_DATA_OVERRIDE="$dir/home/data" \
+    "$PROMOTE" rl29 --mode direct-PR --yolo on 2>&1); rc=$?
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
   expect_code 1 "$rc" "promotion should refuse a concurrent lifecycle action"
@@ -1313,6 +1428,10 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_claude_relaunch_accepts_the_startup_dialog_and_proves_activity
+test_claude_relaunch_fails_loudly_when_transcript_saving_is_off
+test_claude_relaunch_retries_empty_captures_and_accepts_each_activity_proof
+test_claude_relaunch_times_out_instead_of_returning_unverified_success
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context

@@ -161,6 +161,14 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+#   A Claude launch clears CLAUDE_CODE_CHILD_SESSION, forces transcript
+#   persistence, and does not return success until a bounded pane loop observes
+#   spinner activity, a new tool row, or a moving token counter.
+#   The loop accepts a recognized trust or bypass-permissions dialog with Enter,
+#   retries empty captures, and fails with the final pane snapshot on a muted
+#   transcript warning, an unresolved dialog, or timeout.
+#   FM_CLAUDE_VERIFY_POLLS (40), FM_CLAUDE_VERIFY_INTERVAL (0.5 seconds), and
+#   FM_CLAUDE_DIALOG_ACCEPTS (3) bound that verification.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -2194,6 +2202,79 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+CLAUDE_VERIFY_SNAPSHOT=
+CLAUDE_VERIFY_BASELINE=
+CLAUDE_VERIFY_RESULT=
+claude_capture() {
+  fm_backend_capture "$BACKEND" "$T" 160 "$W" 2>/dev/null || true
+}
+
+claude_wait_for_activity() {
+  local pane failure dialog tokens prior_tokens='' tools baseline_tools i=0
+  local max=${FM_CLAUDE_VERIFY_POLLS:-40}
+  local interval=${FM_CLAUDE_VERIFY_INTERVAL:-0.5}
+  local dialog_accepts=0 dialog_max=${FM_CLAUDE_DIALOG_ACCEPTS:-3}
+  CLAUDE_VERIFY_SNAPSHOT=
+  CLAUDE_VERIFY_RESULT=
+  baseline_tools=$(fm_control_claude_tool_activity "$CLAUDE_VERIFY_BASELINE")
+  while [ "$i" -lt "$max" ]; do
+    pane=$(claude_capture)
+    if [ -n "$pane" ]; then
+      CLAUDE_VERIFY_SNAPSHOT=$pane
+      if failure=$(fm_control_claude_startup_failure "$pane"); then
+        CLAUDE_VERIFY_RESULT=$failure
+        return 2
+      fi
+      if dialog=$(fm_control_claude_startup_dialog "$pane"); then
+        if [ "$dialog_accepts" -ge "$dialog_max" ]; then
+          CLAUDE_VERIFY_RESULT="unresolved-$dialog"
+          return 3
+        fi
+        spawn_send_key "$T" Enter || {
+          CLAUDE_VERIFY_RESULT="unresolved-$dialog"
+          return 3
+        }
+        dialog_accepts=$((dialog_accepts + 1))
+      elif fm_control_claude_busy_visible "$pane"; then
+        CLAUDE_VERIFY_RESULT='activity-visible'
+        return 0
+      else
+        tools=$(fm_control_claude_tool_activity "$pane")
+        if [ -n "$tools" ] && [ "$tools" != "$baseline_tools" ]; then
+          CLAUDE_VERIFY_RESULT='tool-activity-visible'
+          return 0
+        fi
+        tokens=$(fm_control_claude_token_counter "$pane")
+        if [ -n "$tokens" ] && [ -n "$prior_tokens" ] \
+           && [ "$tokens" != "$prior_tokens" ]; then
+          CLAUDE_VERIFY_RESULT='token-counter-moving'
+          return 0
+        fi
+        [ -z "$tokens" ] || prior_tokens=$tokens
+      fi
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  CLAUDE_VERIFY_RESULT='activity-timeout'
+  return 1
+}
+
+claude_spawn_fail() {  # <reason>
+  local reason=$1
+  printf 'failed: claude launch verification: %s\n' "$reason" >> "$STATE/$ID.status"
+  {
+    echo "error: claude worker $ID failed deterministic launch verification: $reason"
+    echo "--- claude pane snapshot ($T) ---"
+    if [ -n "$CLAUDE_VERIFY_SNAPSHOT" ]; then
+      printf '%s\n' "$CLAUDE_VERIFY_SNAPSHOT"
+    else
+      echo '<empty pane capture>'
+    fi
+    echo '--- end claude pane snapshot ---'
+  } >&2
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -2728,7 +2809,10 @@ case "$HARNESS" in
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+  claude)
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 $LAUNCH"
+    ;;
+  codex|opencode|pi|pi-signed|grok|kimi|muse)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac
@@ -2806,6 +2890,9 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
+if [ "$HARNESS" = claude ]; then
+  CLAUDE_VERIFY_BASELINE=$(claude_capture)
+fi
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
@@ -2813,7 +2900,16 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
-if [ "$HARNESS" = kimi ]; then
+if [ "$HARNESS" = claude ]; then
+  set +e
+  claude_wait_for_activity
+  CLAUDE_VERIFY_STATUS=$?
+  set -e
+  if [ "$CLAUDE_VERIFY_STATUS" -ne 0 ]; then
+    claude_spawn_fail "$CLAUDE_VERIFY_RESULT"
+    exit 1
+  fi
+elif [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
