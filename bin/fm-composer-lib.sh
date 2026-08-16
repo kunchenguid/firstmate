@@ -147,9 +147,15 @@ unset -v _fm_composer_space_octal _fm_composer_space_utf8
 
 # The UTF-8 lead-byte pairs of U+2500..U+25FF - box drawing, block elements, and
 # geometric shapes - built from octal escapes for the same reviewability reason
-# as the space list above. This is a superset of every glyph
-# fm_composer_row_has_edge treats as structural, and it is what
-# fm_composer_column_spaces refuses before it counts anything.
+# as the space list above. What this set covers is exactly that range, which is
+# every NON-ASCII glyph fm_composer_row_has_edge treats as structural, and it is
+# what fm_composer_column_spaces refuses before it counts anything.
+#
+# The two ASCII edges that predicate also recognises, `|` and `+`, are deliberately
+# NOT reached here: each occupies exactly one column, so the ASCII pass counts them
+# width-accurately, and a title containing one is still measured correctly against
+# its partner rule. Pass 1 exists for glyphs whose presence means another
+# container's edge was captured, not to enumerate that predicate's whole set.
 FM_COMPOSER_STRUCTURAL_LEADS=()
 for _fm_composer_lead_octal in '\0342\0224' '\0342\0225' '\0342\0226' '\0342\0227'; do
   printf -v _fm_composer_lead_utf8 '%b' "$_fm_composer_lead_octal"

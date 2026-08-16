@@ -269,22 +269,33 @@ hd_rule_refusal_reason() {  # <trimmed-row> <partner-spaces>
   esac
 }
 
-# hd_composer_row_blank: 0 when a FRESH plain capture still shows this pane's
-# composer row blank, 1 when it carries text now or no longer reads at all.
+# hd_composer_row_state: a FRESH plain read of this pane's composer row, as one of
+# three answers - `blank`, `text`, or `unreadable` when the capture did not come
+# back or carries no agent glyph row at all.
 #
 # The idle loop derives its expectation from one pane read and its verdict from
 # another, inside fm_backend_herdr_composer_state, so a keystroke landing between
-# the two turns a correct `pending` into a false failure on the operator's own
-# fleet. Only the BLANK expectation races: the text branch already accepts `empty`,
-# which is what clearing the row produces.
+# the two turns a correct draft verdict into a false failure on the operator's own
+# fleet. Only a BLANK expectation races, and only a DRAFT verdict can be that race's
+# result: a keystroke on a styled capture yields `pending`, never `unknown` and never
+# an unreadable verdict, so the caller gates on the verdict BEFORE it reads here and
+# this read can never excuse the two verdicts the guard exists to catch.
+#
+# The three answers stay apart because they license different conclusions. `text`
+# confirms the race. `blank` refutes it and leaves a real disagreement, which the
+# caller must fail. `unreadable` establishes neither, so the caller may claim
+# neither a race nor a live pass.
 #
 # Blankness, never the row's TEXT: claude's dim rotating suggestion changes that
 # text on its own, so a comparison would excuse a pane on every rotation and hide
 # real failures behind a race that did not happen.
-hd_composer_row_blank() {  # <target>
+hd_composer_row_state() {  # <target> -> blank|text|unreadable
   local cap line trim glyph draft='' found=0
-  cap=$(fm_backend_herdr_capture "$1" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null) || return 1
-  [ -n "$cap" ] || return 1
+  cap=$(fm_backend_herdr_capture "$1" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null) || cap=''
+  if [ -z "$cap" ]; then
+    printf 'unreadable'
+    return 0
+  fi
   while IFS= read -r line; do
     trim=$line
     fm_composer_normalize_trim_var trim
@@ -296,8 +307,13 @@ hd_composer_row_blank() {  # <target>
   done <<EOF
 $cap
 EOF
-  [ "$found" -eq 1 ] || return 1
-  [ -z "$draft" ]
+  if [ "$found" -eq 0 ]; then
+    printf 'unreadable'
+  elif [ -n "$draft" ]; then
+    printf 'text'
+  else
+    printf 'blank'
+  fi
 }
 
 # hd_documented_unknown: the DOCUMENTED reason a pane's composer reads `unknown`,
@@ -547,8 +563,25 @@ EOF2
              && hd_reason=$(hd_documented_unknown "$hd_cap" "$hd_glyph_row") \
              && [ -n "$hd_reason" ]; then
           note "herdr ($hd_version) + claude ($cl_version): idle pane $hd_pane (focused=$hd_focused) $hd_why and classifies unknown on a documented boundary - $hd_reason; reported, not asserted, and not a live pass"
-        elif [ "$hd_accept" = empty ] && ! hd_composer_row_blank "default:$hd_pane"; then
-          note "herdr ($hd_version): idle pane $hd_pane raced this read - its composer row was blank when the expectation was derived and is not blank (or no longer readable) now, so the verdict describes a different row than the expectation does; skipped, not asserted, and not a live pass"
+        elif [ "$hd_accept" = empty ] \
+             && { [ "$hd_verdict" = pending ] || [ "$hd_verdict" = pending-unproven ]; }; then
+          hd_reread=$(hd_composer_row_state "default:$hd_pane")
+          case "$hd_reread" in
+            text)
+              note "herdr ($hd_version): idle pane $hd_pane raced this read - its composer row was blank when the expectation was derived and carries text now, so the verdict $hd_verdict describes a different row than the expectation does; skipped, not asserted, and not a live pass"
+              ;;
+            unreadable)
+              note "herdr ($hd_version): idle pane $hd_pane classified $hd_verdict against a blank composer row, and the second read did not come back (no capture, or no composer row in it), so neither a read race nor a disagreement was established; inconclusive, skipped, and not a live pass"
+              ;;
+            *)
+              FAILED=1
+              printf '# herdr pane %s tail at failure:\n' "$hd_pane" >&2
+              fm_backend_herdr_capture "default:$hd_pane" 6 2>/dev/null \
+                | grep '[^[:space:]]' | tail -6 | sed 's/^/#   /' >&2
+              printf 'not ok - herdr (%s) + claude (%s): idle pane %s (focused=%s) %s, a second read confirmed that row STILL blank so this is not a read race, and the classifier still returned %s\n' \
+                "$hd_version" "$cl_version" "$hd_pane" "$hd_focused" "$hd_why" "$hd_verdict" >&2
+              ;;
+          esac
         else
           FAILED=1
           printf '# herdr pane %s tail at failure:\n' "$hd_pane" >&2
