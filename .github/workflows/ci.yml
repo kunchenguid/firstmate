@@ -392,9 +392,12 @@ jobs:
             printf '%s\n' "$tracked"
             exit 1
           fi
-      # Backstop for prose this branch publishes into the repository. Blocking
-      # findings (a machine-local path, a private fleet identifier) fail the job;
-      # unresolvable ids are printed for review because a named upstream can make
+      # Backstop for the prose and the commit messages this branch publishes into
+      # the repository. This step runs without --home, so a machine-local path is
+      # the only blocking category that can fail it; private fleet identifiers
+      # (a foreign task id, another project's name) are caught at the worker's
+      # pre-publication check, which runs where a firstmate home exists.
+      # Unresolvable ids are printed for review because a named upstream can make
       # one legitimate, and .fm-outward-allow settles those once.
-      - name: Added prose must not carry foreign identifiers
+      - name: Added prose and commit messages must not carry foreign identifiers
         run: bin/fm-outward-text-check.sh --diff --block-only

@@ -25,12 +25,16 @@ fm_git_identity
 # One repository "under change" with a real commit, plus a second repository
 # whose commits are foreign to it. Both are real git repos so object resolution
 # is exercised for real.
+#
+# Full 40-character ids, never abbreviations: a short id is only treated as an
+# identifier when it happens to mix digits and [a-f], so an abbreviated fixture
+# would make these assertions depend on the commit timestamp of the run.
 REPO="$TMP_ROOT/under-change"
 OTHER="$TMP_ROOT/elsewhere"
 fm_git_init_commit "$REPO"
 fm_git_init_commit "$OTHER"
-OWN_SHA=$(git -C "$REPO" rev-parse --short=12 HEAD)
-FOREIGN_SHA=$(git -C "$OTHER" rev-parse --short=12 HEAD)
+OWN_SHA=$(git -C "$REPO" rev-parse HEAD)
+FOREIGN_SHA=$(git -C "$OTHER" rev-parse HEAD)
 
 # run_check <text> [args...]: scan <text> as one file in $REPO, echo the output,
 # and return the check's own exit status.
@@ -138,6 +142,42 @@ test_allow_file_settles_a_justified_reference() {
   pass ".fm-outward-allow settles a justified reference and nothing more"
 }
 
+# An exemption that could silence a blocking finding would be the leak itself:
+# the value has to be written into a tracked file to silence it there.
+test_allow_file_cannot_settle_a_blocking_finding() {
+  local out status
+  printf '# a machine-local path someone tried to settle here\n%s\n' \
+    "/home/somebody/gate-clone/run.log" > "$REPO/.fm-outward-allow"
+  out=$(run_check "evidence at /home/somebody/gate-clone/run.log" --block-only); status=$?
+  rm -f "$REPO/.fm-outward-allow"
+  expect_code 1 "$status" "an allowed machine-local path must still fail an unattended gate"
+  case "$out" in
+    *"MACHINE_LOCAL_PATH: /home/somebody/gate-clone/run.log"*) : ;;
+    *) fail "an allowed machine-local path must still be reported, got: $out" ;;
+  esac
+  case "$out" in
+    *"cannot settle a blocking finding"*) : ;;
+    *) fail "the refused exemption must be named, not silently dropped, got: $out" ;;
+  esac
+  case "$out" in
+    *"cannot exempt a blocking identifier"*) : ;;
+    *) fail "the remedy for a blocking finding must not offer the allow file, got: $out" ;;
+  esac
+  pass "an allow entry naming a machine-local path is refused and reported"
+}
+
+test_long_digest_is_not_invisible() {
+  local out status digest
+  digest=3f5e1a9b2c4d6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071
+  out=$(run_check "pasted from another run log: $digest"); status=$?
+  expect_code 1 "$status" "a hex id longer than a commit id must still be scanned"
+  case "$out" in
+    *"FOREIGN_OBJECT: $digest"*) : ;;
+    *) fail "expected the 64-character digest to be reported, got: $out" ;;
+  esac
+  pass "a hex run longer than 40 characters is scanned like any other id"
+}
+
 test_private_fleet_names_are_reported_against_a_home() {
   local home out status
   home="$TMP_ROOT/fm-home"
@@ -218,6 +258,30 @@ test_diff_mode_scans_only_what_the_branch_adds() {
   pass "--diff reports what the branch adds and leaves existing prose alone"
 }
 
+# A merged commit message is as public and as permanent as a PR description, so
+# --diff has to cover the messages the branch adds and not just its prose.
+test_diff_scans_the_commit_messages_the_branch_adds() {
+  local out status base sha
+  base=$(git -C "$REPO" rev-parse HEAD)
+  printf 'A note carrying no identifiers of its own.\n' > "$REPO/MSG.md"
+  git -C "$REPO" add MSG.md
+  git -C "$REPO" -c user.name=t -c user.email=t@e \
+    commit -qm "port fix from /home/somebody/projects/other-repo"
+  sha=$(git -C "$REPO" rev-parse HEAD)
+
+  out=$("$CHECK" --repo "$REPO" --diff --base "$base" --block-only 2>&1); status=$?
+  expect_code 1 "$status" "a machine-local path in a commit message must fail the gate"
+  case "$out" in
+    *"MACHINE_LOCAL_PATH: /home/somebody/projects/other-repo"*) : ;;
+    *) fail "expected the path leaked by the commit message, got: $out" ;;
+  esac
+  case "$out" in
+    *"commit ${sha:0:12}"*) : ;;
+    *) fail "expected the finding to be located by its commit, got: $out" ;;
+  esac
+  pass "--diff reports an identifier the branch adds in a commit message"
+}
+
 test_usage_errors_are_loud() {
   local status
   "$CHECK" --repo "$REPO" >/dev/null 2>&1; status=$?
@@ -235,8 +299,11 @@ test_machine_local_path_blocks
 test_placeholder_path_is_not_a_finding
 test_block_only_separates_the_two_severities
 test_allow_file_settles_a_justified_reference
+test_allow_file_cannot_settle_a_blocking_finding
+test_long_digest_is_not_invisible
 test_private_fleet_names_are_reported_against_a_home
 test_missing_home_is_reported_not_silently_passed
 test_stdin_is_scanned_and_not_swallowed
 test_diff_mode_scans_only_what_the_branch_adds
+test_diff_scans_the_commit_messages_the_branch_adds
 test_usage_errors_are_loud

@@ -16,7 +16,9 @@
 #
 # Usage:
 #   bin/fm-outward-text-check.sh [options] <file>...   # scan files ("-" is stdin)
-#   bin/fm-outward-text-check.sh [options] --diff      # scan prose lines this branch adds
+#   bin/fm-outward-text-check.sh [options] --diff      # scan the prose lines and
+#                                                      # the commit messages this
+#                                                      # branch adds
 #
 # Options:
 #   --repo <dir>     repository under change (default: the git toplevel of the cwd)
@@ -29,8 +31,8 @@
 #                    resolvable of origin/HEAD, origin/main, origin/master, main, master)
 #   --include <glob> with --diff, a pathspec to scan instead of the prose default
 #                    (repeatable; default: *.md *.mdx *.rst *.txt docs/examples/*)
-#   --allow <token>  exempt one exact literal token, repeatable, for an
-#                    identifier that is genuinely resolvable to this audience
+#   --allow <token>  exempt one exact literal reviewable token, repeatable, for
+#                    an identifier that is genuinely resolvable to this audience
 #   --block-only     exit non-zero for blocking findings only, still printing
 #                    the reviewable ones; for an unattended gate
 #   --json           machine-readable findings
@@ -40,6 +42,11 @@
 # listing it in the repository's tracked `.fm-outward-allow` file, one token per
 # line with `#` comments. That keeps the exception explicit and reviewable in the
 # same change that introduces the reference, instead of silent.
+#
+# No exemption, from that file or from --allow, can settle a BLOCKING finding.
+# Writing a machine-local path or a private fleet name into a tracked file
+# publishes the exact value this check exists to keep unpublished, so such an
+# entry is reported with the finding rather than honored.
 #
 # Exit status: 0 clean, 1 findings reported, 2 usage or environment error.
 #
@@ -56,7 +63,7 @@
 #
 #   reviewable - a reader can resolve these when the text names the upstream they
 #   come from, which no check can confirm, so they are reported for judgment and
-#   settled once in `.fm-outward-allow`:
+#   are the only findings `.fm-outward-allow` can settle:
 #     foreign-object      a hex object id that does not resolve in this repository
 #     foreign-repo-url    a forge URL naming a repository other than this origin
 #
@@ -64,8 +71,9 @@
 #   - A hex token is treated as an identifier only when it mixes digits and
 #     letters, or is at least 32 characters. A short abbreviation drawn entirely
 #     from [a-f] or entirely from [0-9] reads as a word or a number here.
-#   - --diff scans committed prose only. Functional hashes in code (a pinned
-#     download checksum, a fixture digest) are legitimate and out of scope.
+#   - --diff scans committed prose and the branch's commit messages only.
+#     Functional hashes in code (a pinned download checksum, a fixture digest)
+#     are legitimate and out of scope.
 set -eu
 
 usage() {
@@ -117,8 +125,10 @@ ALLOW_FILE = ".fm-outward-allow"
 BLOCKING = {"machine-local-path", "foreign-task-id", "foreign-project"}
 
 # A hex run bounded by non-identifier characters. "0xdeadbeef" and "v1.2.3" do
-# not match because the preceding character is part of the same word.
-HEX_RE = re.compile(r"(?<![0-9A-Za-z_])([0-9a-fA-F]{7,40})(?![0-9A-Za-z_])")
+# not match because the preceding character is part of the same word. The run
+# has no upper bound, so a 64-character digest is one token rather than a span
+# too long for any window to cover.
+HEX_RE = re.compile(r"(?<![0-9A-Za-z_])([0-9a-fA-F]{7,})(?![0-9A-Za-z_])")
 FORGE_URL_RE = re.compile(
     r"https?://(?:www\.)?(github\.com|gitlab\.com|bitbucket\.org)/"
     r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)"
@@ -187,8 +197,11 @@ class ObjectResolver:
         if not found:
             # An ambiguous prefix fails --verify precisely because several local
             # objects share it, which still makes the id resolvable here.
-            code, out = git(self.repo, "rev-parse", "--disambiguate", token.lower())
-            found = code == 0 and bool(out.strip())
+            # --disambiguate takes its prefix as `=<value>`; passing it as a
+            # separate word makes git read the token as a revision instead and
+            # accept any well-formed full object name, resolvable or not.
+            _, out = git(self.repo, "rev-parse", f"--disambiguate={token.lower()}")
+            found = bool(out.strip())
         self.cache[token] = found
         return found
 
@@ -245,6 +258,10 @@ def literal_re(name: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])")
 
 
+def counted(number: int, noun: str) -> str:
+    return f"{number} {noun}" + ("" if number == 1 else "s")
+
+
 def looks_like_an_id(token: str) -> bool:
     if len(token) >= 32:
         return True
@@ -279,8 +296,15 @@ class Scanner:
             self.skipped.append("foreign-task-id, foreign-project (no firstmate home; pass --home)")
 
     def record(self, category: str, value: str, where: str, why: str) -> None:
+        # Severity is decided before the exemption is consulted, because an
+        # exemption may settle a reviewable finding and must never settle a
+        # blocking one: recording such a value in a tracked file publishes the
+        # identifier this check exists to keep out of published text.
+        severity = "blocking" if category in BLOCKING else "reviewable"
         if value in self.allow:
-            return
+            if severity == "reviewable":
+                return
+            why = f"{why}; the exemption naming it cannot settle a blocking finding"
         key = (category, value, where)
         if key in self.seen:
             return
@@ -288,7 +312,7 @@ class Scanner:
         self.findings.append(
             {
                 "category": category,
-                "severity": "blocking" if category in BLOCKING else "reviewable",
+                "severity": severity,
                 "value": value,
                 "location": where,
                 "reason": why,
@@ -362,10 +386,54 @@ def resolve_base(repo: Path, requested: str | None) -> str:
 
 
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+# Field and record separators git will never emit inside a commit message.
+COMMIT_FIELD = "\x1f"
+COMMIT_END = "\x1e"
 
 
-def scan_diff(scanner: Scanner, repo: Path, base: str | None, include: list[str] | None) -> int:
+def scan_commit_messages(scanner: Scanner, repo: Path, resolved: str) -> int:
+    """Scans the messages of the commits this branch adds over the base.
+
+    A merged commit message is as public and as permanent as a PR description,
+    so it carries the same contract as the prose the branch adds.
+    """
+    code, out = git(
+        repo,
+        "log",
+        "--no-color",
+        "--reverse",
+        f"--format=%H{COMMIT_FIELD}%B{COMMIT_END}",
+        f"{resolved}..HEAD",
+    )
+    if code != 0:
+        raise CheckError(f"could not list the commits HEAD adds over {resolved}")
+    count = 0
+    for entry in out.split(COMMIT_END):
+        if COMMIT_FIELD not in entry:
+            continue
+        commit, body = entry.split(COMMIT_FIELD, 1)
+        commit = commit.strip()
+        if not commit:
+            continue
+        count += 1
+        for number, line in enumerate(body.strip("\n").splitlines(), start=1):
+            scanner.scan_line(line, f"commit {commit[:12]}:{number}")
+    return count
+
+
+def scan_diff(
+    scanner: Scanner, repo: Path, base: str | None, include: list[str] | None
+) -> tuple[int, int]:
     resolved = resolve_base(repo, base)
+    return (
+        scan_added_prose(scanner, repo, resolved, include),
+        scan_commit_messages(scanner, repo, resolved),
+    )
+
+
+def scan_added_prose(
+    scanner: Scanner, repo: Path, resolved: str, include: list[str] | None
+) -> int:
     pathspec = include if include else PROSE_PATHSPEC
     code, out = git(
         repo, "diff", "--no-color", "--unified=0", f"{resolved}...HEAD", "--", *pathspec
@@ -418,13 +486,15 @@ def main() -> int:
     scanner = Scanner(args, repo, home)
 
     if args.diff:
-        inputs = scan_diff(scanner, repo, args.base, args.include)
-        subject = "changed prose file"
+        files, commits = scan_diff(scanner, repo, args.base, args.include)
+        inputs = files + commits
+        scope = f"{counted(files, 'changed prose file')} and {counted(commits, 'commit message')}"
     else:
         inputs = scan_files(scanner, args.files, args.stdin_file)
-        subject = "input"
+        scope = counted(inputs, "input")
 
     blocking = [f for f in scanner.findings if f["severity"] == "blocking"]
+    reviewable = [f for f in scanner.findings if f["severity"] == "reviewable"]
 
     if args.json:
         print(
@@ -432,6 +502,7 @@ def main() -> int:
                 {
                     "repo": str(repo),
                     "inputs": inputs,
+                    "scope": scope,
                     "checked": scanner.checked,
                     "skipped": scanner.skipped,
                     "findings": scanner.findings,
@@ -447,17 +518,24 @@ def main() -> int:
             )
         for note in scanner.skipped:
             print(f"SKIPPED: {note}")
-        plural = "" if inputs == 1 else "s"
         if scanner.findings:
-            counted = f"{len(scanner.findings)} finding(s), {len(blocking)} blocking"
             print(
-                f"outward-text-check: {counted} in {inputs} {subject}{plural}; "
-                f"remove each one from the text, or justify it in {ALLOW_FILE}, before publishing"
+                f"outward-text-check: {len(scanner.findings)} finding(s), "
+                f"{len(blocking)} blocking in {scope}"
             )
+            if blocking:
+                print(
+                    f"  {len(blocking)} blocking: remove each one from the text before publishing; "
+                    f"{ALLOW_FILE} cannot exempt a blocking identifier"
+                )
+            if reviewable:
+                print(
+                    f"  {len(reviewable)} reviewable: remove each one from the text, "
+                    f"or justify it in {ALLOW_FILE}"
+                )
         else:
             print(
-                f"outward-text-check: clean ({inputs} {subject}{plural}; "
-                f"checked {', '.join(scanner.checked)})"
+                f"outward-text-check: clean ({scope}; checked {', '.join(scanner.checked)})"
             )
 
     if args.block_only:
