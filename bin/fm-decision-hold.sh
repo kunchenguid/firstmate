@@ -43,7 +43,12 @@
 # include a `Resolution mode:` naming their path; older routed records remain valid.
 #
 # `resolve` is the routed path. It requires every --routed-to task to exist and to
-# be blocked by the hold. It writes the captain decision and routed identities into
+# be blocked by the hold, with one reconciliation exception: a routed task that
+# already completed out of band (a direct tasks-axi done) is accepted when its own
+# durable blocked-by edge still names the hold, which is the surviving proof the
+# work really was routed behind this decision; a done task without that edge is
+# refused, and decline likewise keeps refusing it, so neither path can close the
+# hold from a guess. It writes the captain decision and routed identities into
 # the hold body, clears those dependency edges, and only then marks the hold Done.
 # A failure before the final step leaves the captain hold open.
 #
@@ -534,9 +539,16 @@ command_resolve() {
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"
     state=$(show_field "$show" state)
-    [ "$state" != "done" ] || [ "$resolution_recorded" = 1 ] \
-      || fail "routed task $dep is already done"
     blocked=$(normalized_blocked_by "$show")
+    # A routed task completed out of band (a direct tasks-axi done) is
+    # reconcilable only while its own durable blocked-by edge still names this
+    # hold: that edge is the surviving evidence the work was routed behind this
+    # decision. Without it, a done task proves nothing and the close is refused
+    # rather than recorded from a guess.
+    if [ "$state" = "done" ] && [ "$resolution_recorded" != 1 ] \
+      && ! list_has_key "$blocked" "$id"; then
+      fail "routed task $dep is already done and no durable blocked-by edge to $id survives"
+    fi
     if ! list_has_key "$blocked" "$id"; then
       case "$hold_body" in
         *"Resolution recorded by fm-decision-hold."*"- $dep"*) : ;;

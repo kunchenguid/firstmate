@@ -30,6 +30,7 @@ An exact retry is idempotent, while a changed decision or, for `resolve`, a chan
 The `resolve` subcommand is the routed path and additionally requires at least one existing dependent task whose structured `blocked-by` edge points to the hold.
 It clears each dependency edge through tasks-axi and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, and a failed intermediate step leaves the hold open.
+A dependent that already completed out of band (a direct `tasks-axi done`) is reconciled when its own `blocked-by` edge still names the hold, which is the surviving evidence the work was routed behind the decision; a done dependent without that edge is refused, so neither close path records a routing from a guess.
 
 The `decline` subcommand closes a hold whose captain answer routes no follow-up work, recording `(none)` as the routed identities.
 It refuses while any task in the same backlog is still blocked by the hold, because releasing routed work without recording it is `resolve`'s job.
@@ -55,6 +56,7 @@ Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
 Unrouted close-path verification date: 2026-08-13.
+Out-of-band routed completion reconciliation verification date: 2026-08-16.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -67,6 +69,9 @@ A hold closed by a direct `tasks-axi done` reproduces the shape that fails `veri
 An unanswered decision still blocks completion and teardown, and neither `decline` nor `repair` can close a hold that is still actively held or supply an answer with a missing or empty decision file.
 `repair` also refuses a closed captain-kind task that was never held for the captain.
 
+A further regression covers the answered-but-unclosable deadlock: routed work completed by a direct `tasks-axi done` before the decision close kept its `blocked-by` edge, so `resolve` refused the done task, `decline` refused the surviving edge, `repair` refused the still-open hold, and the answered decision stayed permanently open.
+`resolve` now reconciles that done dependent from its surviving edge, records the routed resolution, clears the stale edge, and stays idempotent, while a done dependent with no surviving edge is still refused.
+
 The final verification commands and their exact summarized outputs follow.
 
 ```text
@@ -75,6 +80,7 @@ ok - report-only unresolved decision is reproduced and completion refuses before
 ok - non-forced scout teardown always requires durable inventory verification
 ok - a declined decision closes with a recorded answer and no routed work
 ok - a decision closed outside the script is repairable and then clears teardown
+ok - done routed work is reconcilable from its surviving edge and evidence-less done work still refuses
 ok - an unanswered decision still blocks completion and resists both unrouted close paths
 ok - captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close
 ok - completion and verification validate origins before constructing paths

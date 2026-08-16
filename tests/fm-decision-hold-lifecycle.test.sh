@@ -703,6 +703,102 @@ test_out_of_band_close_is_repairable_before_teardown() {
   pass "a decision closed outside the script is repairable and then clears teardown"
 }
 
+# The deadlock: the captain answered, but the routed work was completed out of
+# band with a direct tasks-axi done before the decision close ran, and its
+# durable blocked-by edge survived. The routed close refused the done task, the
+# unrouted close refused the surviving edge, and repair refused the still-open
+# hold, so the answered decision stayed permanently open. resolve now reconciles
+# from that surviving edge as evidence, while a done task without its edge still
+# cannot close the hold from a guess.
+test_done_routed_work_is_reconcilable_from_its_surviving_edge() {
+  local home id hold dep show json
+  home=$(make_home done-routed-work)
+  id=sample-launch-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample launch" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create done-routed origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample launch review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" launch-window \
+    --title "Choose the sample launch window" --reason "captain launch window choice pending" --repo sample) \
+    || fail "could not register the done-routed hold"
+  run_decisions "$home" complete "$id" launch-window >/dev/null \
+    || fail "completion failed for the done-routed hold"
+  dep=sample-launch-work
+  tasks_in "$home" add "$dep" "Apply the sample launch window" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not route work behind the done-routed hold"
+
+  # The routed work completes out of band before the decision close runs; its
+  # durable blocked-by edge survives the direct done.
+  tasks_in "$home" "done" "$dep" >/dev/null || fail "could not reproduce the out-of-band routed completion"
+  show=$(tasks_in "$home" show "$dep" --full)
+  assert_contains "$show" "state: done" "out-of-band routed completion fixture did not close the work"
+  assert_contains "$show" "blocked_by: $hold" "out-of-band completion must keep the durable routing edge"
+  printf 'Launch the sample in the morning window.\n' > "$home/launch-decision.txt"
+  if run_decisions "$home" decline "$id" launch-window --decision-file "$home/launch-decision.txt" \
+    > "$home/deadlocked-decline.out" 2> "$home/deadlocked-decline.err"; then
+    fail "decline closed a hold whose routed work survives"
+  fi
+  if run_decisions "$home" repair "$id" launch-window --decision-file "$home/launch-decision.txt" \
+    > "$home/deadlocked-repair.out" 2> "$home/deadlocked-repair.err"; then
+    fail "repair closed a hold that is still actively held"
+  fi
+  json=$(run_bearings "$home") || fail "Bearings failed for the deadlocked hold"
+  printf '%s' "$json" | jq -e --arg hold "$hold" '
+    .decisions_open | any(.id == $hold and .verb == "captain-hold")
+  ' >/dev/null || fail "the answered-but-unclosable hold was not reproduced as open: $json"
+
+  run_decisions "$home" resolve "$id" launch-window --decision-file "$home/launch-decision.txt" \
+    --routed-to "$dep" >/dev/null \
+    || fail "resolve could not reconcile a done routed task from its surviving edge"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "reconciled hold did not close"
+  assert_contains "$show" "Resolution recorded by fm-decision-hold" "reconciled hold lost the decision record"
+  assert_contains "$show" "Resolution mode: routed" "reconciled hold did not record the routed close path"
+  assert_contains "$show" "Launch the sample in the morning window." \
+    "reconciled hold did not record the captain decision text"
+  assert_contains "$show" "- $dep" "reconciled hold did not record the done routed work"
+  show=$(tasks_in "$home" show "$dep" --full)
+  assert_contains "$show" "blocked: no" "reconciliation did not clear the stale edge from the done work"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "the reconciled decision did not satisfy the completion gate"
+  run_decisions "$home" resolve "$id" launch-window --decision-file "$home/launch-decision.txt" \
+    --routed-to "$dep" >/dev/null || fail "identical reconciliation retry was not idempotent"
+  printf 'Launch the sample in the evening window.\n' > "$home/drifted-launch-decision.txt"
+  if run_decisions "$home" resolve "$id" launch-window --decision-file "$home/drifted-launch-decision.txt" \
+    --routed-to "$dep" > "$home/drifted-reconcile.out" 2> "$home/drifted-reconcile.err"; then
+    fail "reconciliation retry accepted a different captain decision"
+  fi
+  json=$(run_bearings "$home") || fail "Bearings failed after reconciliation"
+  printf '%s' "$json" | jq -e --arg hold "$hold" '
+    .decisions_open | any(.id == $hold) | not
+  ' >/dev/null || fail "a reconciled decision remained an open Captain's Call: $json"
+
+  # A done task with no surviving edge still cannot close the hold: nothing
+  # proves it was ever routed behind this decision.
+  hold=$(run_decisions "$home" hold "$id" launch-cadence \
+    --title "Choose the sample launch cadence" --reason "captain launch cadence choice pending" --repo sample) \
+    || fail "could not register the evidence-less hold"
+  run_decisions "$home" complete "$id" launch-window launch-cadence >/dev/null \
+    || fail "completion failed for the evidence-less hold"
+  dep=sample-unrouted-done-work
+  tasks_in "$home" add "$dep" "Sample work that was never routed" --kind ship --repo sample >/dev/null \
+    || fail "could not create the never-routed fixture"
+  tasks_in "$home" "done" "$dep" >/dev/null || fail "could not close the never-routed fixture"
+  if run_decisions "$home" resolve "$id" launch-cadence --decision-file "$home/launch-decision.txt" \
+    --routed-to "$dep" > "$home/evidence-less.out" 2> "$home/evidence-less.err"; then
+    fail "resolve closed a hold from a done task with no routing evidence"
+  fi
+  assert_grep "no durable blocked-by edge" "$home/evidence-less.err" \
+    "resolve must say why a done task without its edge cannot close the hold"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" "refused evidence-less reconciliation closed the hold"
+  assert_contains "$show" "held: yes" "refused evidence-less reconciliation released the hold"
+  pass "done routed work is reconcilable from its surviving edge and evidence-less done work still refuses"
+}
+
 # The unrouted close paths must not become a way past the gate. An unanswered
 # decision keeps blocking cleanup, and neither new path can manufacture an answer.
 test_unanswered_decision_still_blocks_completion_and_teardown() {
@@ -775,6 +871,7 @@ test_uninventoried_report_decision_refuses_completion
 test_scout_teardown_always_requires_inventory_verification
 test_declined_decision_closes_without_routed_work
 test_out_of_band_close_is_repairable_before_teardown
+test_done_routed_work_is_reconcilable_from_its_surviving_edge
 test_unanswered_decision_still_blocks_completion_and_teardown
 test_structured_holds_survive_teardown_and_route_resolution
 test_origin_slug_validation_precedes_path_construction
