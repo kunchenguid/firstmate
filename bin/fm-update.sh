@@ -134,6 +134,23 @@ github_slug_from_url() {
   printf '%s\n' "$path"
 }
 
+github_repo_identity_is_valid() {
+  local identity=$1 owner repo
+  case "$identity" in
+    */*) ;;
+    *) return 1 ;;
+  esac
+  owner=${identity%%/*}
+  repo=${identity#*/}
+  [ -n "$owner" ] && [ -n "$repo" ] || return 1
+  case "$owner" in
+    *[![:alnum:]-]*) return 1 ;;
+  esac
+  case "$repo" in
+    *[![:alnum:]._-]*) return 1 ;;
+  esac
+}
+
 same_repo_identity() {
   [ "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" = \
     "$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" ]
@@ -176,6 +193,7 @@ preflight_firstmate() {
 sync_github_fork_if_needed() {
   local local_default=$1 origin_slug=$2 upstream_url=$3
   local metadata api_origin is_fork api_default api_parent configured_parent
+  local rest_is_fork rest_parent _rest_source
   local before_oid after_oid
 
   command -v gh >/dev/null 2>&1 \
@@ -207,8 +225,22 @@ sync_github_fork_if_needed() {
     return 0
   fi
 
-  [ -n "$api_parent" ] \
-    || refuse "GitHub reports a fork but did not identify its parent"
+  if [ -z "$api_parent" ]; then
+    if ! metadata=$(gh api "repos/$api_origin" \
+      --jq '[ (.fork|tostring), (.parent.full_name // ""), (.source.full_name // "") ] | @tsv' \
+      2>&1); then
+      refuse "GitHub REST fork inspection failed: $(first_line "$metadata")"
+    fi
+    IFS=$'\t' read -r rest_is_fork rest_parent _rest_source <<< "$metadata"
+    [ "$rest_is_fork" = true ] \
+      || refuse "GitHub REST fork inspection returned invalid fork state: $rest_is_fork"
+    github_repo_identity_is_valid "$rest_parent" \
+      || refuse "GitHub REST fork inspection did not identify a valid parent"
+    if same_repo_identity "$rest_parent" "$api_origin"; then
+      refuse "GitHub REST fork inspection returned malformed self-parent identity"
+    fi
+    api_parent=$rest_parent
+  fi
   if [ -n "$upstream_url" ]; then
     configured_parent=$(github_slug_from_url "$upstream_url" || true)
     [ -n "$configured_parent" ] \
