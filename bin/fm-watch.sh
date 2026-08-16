@@ -462,7 +462,7 @@ scan_signals() {
     task=$(basename "$f")
     task=${task%.status}
     task=${task%.turn-ended}
-    fm_record_retire_marker_valid "$STATE" "$task" && continue
+    fm_record_retire_marker_active "$STATE" "$task" && continue
     sig=$(fm_wake_signal_sig "$f") || continue
     [ -n "$sig" ] || continue
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
