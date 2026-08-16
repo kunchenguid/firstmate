@@ -48,6 +48,18 @@ make_cursor_tree() {  # <root> -> echoes <bindir>
   printf '%s' "$root/bin"
 }
 
+test_cursor_agent_is_only_an_intake_alias() {
+  [ "$(fm_cursor_normalize_harness cursor-agent)" = cursor ] \
+    || fail "cursor-agent must normalize to cursor"
+  [ "$(fm_cursor_normalize_harness cursor)" = cursor ] \
+    || fail "cursor must stay cursor"
+  [ "$(fm_cursor_normalize_harness claude)" = claude ] \
+    || fail "unrelated names must pass through unchanged"
+  [ "$(fm_cursor_normalize_harness cursor-agent-helper)" = cursor-agent-helper ] \
+    || fail "a longer cursor-agent* name must not collapse into cursor"
+  pass "cursor-agent is only an intake alias for cursor"
+}
+
 # --- 1. Process identity, against REAL processes ----------------------------
 
 test_identity_accepts_cursor_shapes_rejects_lookalikes() {
@@ -389,6 +401,7 @@ test_transcript_fold_excludes_prior_conversations() {
   pass "cursor transcript fold: a prior conversation is excluded so a relaunch folds its own turn"
 }
 
+test_cursor_agent_is_only_an_intake_alias
 test_identity_accepts_cursor_shapes_rejects_lookalikes
 test_identity_signals_diverge
 test_verify_executable_refuses_unrelated_agent
