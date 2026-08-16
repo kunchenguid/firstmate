@@ -710,15 +710,19 @@ pass "the readiness wait returns immediately once the worker reports ready"
 # A deadline is only a bound while the clock can be read. Under the memory
 # pressure these waits exist for, the `date` fork is itself a thing that can
 # fail, and the readiness wait runs on the remote side of an ssh invocation that
-# has no client-side bound of its own, so an unreadable clock must end the wait
-# rather than leave it spinning against a deadline it can never reach.
+# has no client-side bound of its own, so an unreadable clock must still end the
+# wait rather than leave it spinning against a deadline it can never reach. It
+# must end it on time, though, and not early: collapsing the budget to nothing
+# would report the same "worker did not report ready" failure these deadlines
+# exist to prevent, so the wait has to spend what it was configured to spend
+# using whatever measure of elapsed time it has left.
 CLOCK_SCRIPT="$TMP_ROOT/probe-wait-clock.sh"
 cat > "$CLOCK_SCRIPT" <<'SH'
 #!/usr/bin/env bash
 set -u
 # shellcheck source=/dev/null
 . "$1/bin/fm-remote-job-lib.sh"
-FM_REMOTE_JOB_PROBE_WAIT_SECONDS=120
+FM_REMOTE_JOB_PROBE_WAIT_SECONDS=$2
 start=$(command date +%s)
 date() { return 1; }
 fm_remote_job_probe() { return 1; }
@@ -727,9 +731,41 @@ fm_remote_job_wait_for_probe "$1" "$1" && exit 3
 printf '%s\n' "$(($(command date +%s) - start))"
 SH
 chmod 700 "$CLOCK_SCRIPT"
-run_wait_script "$CLOCK_SCRIPT" 20 "the readiness wait with an unreadable clock" "$REMOTE_ROOT"
-[ "$WAIT_ELAPSED" -le 10 ] || fail "an unreadable clock let the readiness wait outlast its own budget"
-pass "the readiness wait gives up rather than spin when the clock cannot be read"
+run_wait_script "$CLOCK_SCRIPT" 20 "the readiness wait with an unreadable clock" "$REMOTE_ROOT" 3
+[ "$WAIT_ELAPSED" -ge 2 ] || fail "an unreadable clock collapsed the readiness budget into an instant failure"
+[ "$WAIT_ELAPSED" -le 15 ] || fail "an unreadable clock let the readiness wait outlast its own budget"
+pass "the readiness wait spends its budget and still terminates when the clock cannot be read"
+
+# The realistic clock failure is transient: one `date` fork loses a race for
+# memory and the next one wins. Establishing the bound must survive that, or a
+# single unlucky fork at the start of the wait decides that the worker was never
+# going to be ready.
+cat > "$CLOCK_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_PROBE_WAIT_SECONDS=$2
+start=$(command date +%s)
+FAIL_FILE=$3
+printf '0\n' > "$FAIL_FILE"
+date() { # the first three readings fail, every reading after them succeeds
+  local taken
+  taken=$(($(cat "$FAIL_FILE") + 1))
+  printf '%s\n' "$taken" > "$FAIL_FILE"
+  [ "$taken" -gt 3 ] || return 1
+  command date "$@"
+}
+fm_remote_job_probe() { return 1; }
+fm_remote_job_worker_identity_matches() { return 1; }
+fm_remote_job_wait_for_probe "$1" "$1" && exit 3
+printf '%s\n' "$(($(command date +%s) - start))"
+SH
+run_wait_script "$CLOCK_SCRIPT" 30 "the readiness wait with a briefly unreadable clock" \
+  "$REMOTE_ROOT" 5 "$TMP_ROOT/clock-fails"
+[ "$WAIT_ELAPSED" -ge 4 ] || fail "a transient clock-read failure cut the readiness budget short"
+[ "$WAIT_ELAPSED" -le 20 ] || fail "a recovered clock did not resume bounding the readiness wait"
+pass "a transient clock-read failure does not shorten the readiness budget"
 
 # A clock stepped backwards - an NTP correction on a host that just woke from
 # sleep - is the same hazard in the other direction: the deadline recedes as
@@ -770,7 +806,7 @@ cat > "$CLOCK_SCRIPT" <<'SH'
 set -u
 # shellcheck source=/dev/null
 . "$1/bin/fm-remote-job-lib.sh"
-FM_REMOTE_JOB_STOP_WAIT_SECONDS=120
+FM_REMOTE_JOB_STOP_WAIT_SECONDS=$2
 start=$(command date +%s)
 date() { return 1; }
 fm_remote_job_worker_process_group() { return 1; }
@@ -779,8 +815,64 @@ fm_remote_job_worker_tree_alive() { return 0; }
 fm_remote_job_stop_worker_tree 999999 && exit 3
 printf '%s\n' "$(($(command date +%s) - start))"
 SH
-run_wait_script "$CLOCK_SCRIPT" 20 "the shutdown wait with an unreadable clock" "$REMOTE_ROOT"
-[ "$WAIT_ELAPSED" -le 10 ] || fail "an unreadable clock let the shutdown wait outlast its own budget"
+run_wait_script "$CLOCK_SCRIPT" 30 "the shutdown wait with an unreadable clock" "$REMOTE_ROOT" 3
+[ "$WAIT_ELAPSED" -le 20 ] || fail "an unreadable clock let the shutdown wait outlast its own budget"
 pass "the shutdown wait reports a surviving worker rather than spin on an unreadable clock"
+
+# The shutdown budget needs the same cost asymmetry the readiness tests use, or
+# a counted loop could be put back here and nothing would notice. A liveness
+# check ten times more expensive than the loop's own sleep costs a counted loop
+# fifty checks per leg and costs a deadline nothing beyond one check.
+cat > "$CLOCK_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_STOP_WAIT_SECONDS=$2
+start=$(command date +%s)
+fm_remote_job_worker_process_group() { return 1; }
+fm_remote_job_signal_worker_tree() { return 0; }
+fm_remote_job_worker_tree_alive() { sleep 1; return 0; }
+fm_remote_job_stop_worker_tree 999999 && exit 3
+printf '%s\n' "$(($(command date +%s) - start))"
+SH
+run_wait_script "$CLOCK_SCRIPT" 40 "the shutdown wait under a one-second liveness check" \
+  "$REMOTE_ROOT" 3
+# Two legs, TERM then KILL, each spending its own budget plus at most the one
+# check already in flight when the budget ran out.
+[ "$WAIT_ELAPSED" -ge 5 ] || fail "the shutdown wait gave up before spending its configured budget"
+[ "$WAIT_ELAPSED" -le 20 ] || fail "the shutdown wait scaled with liveness-check cost instead of holding its budget"
+pass "the shutdown wait spends a wall-clock budget regardless of liveness-check cost"
+
+# The wait's collaborator has to fail in the same direction it does. The probe
+# proves readiness by comparing the heartbeat's age against a ten second window,
+# so an unreadable clock leaves it unable to establish freshness at all: it must
+# report a worker that is not ready, never one that is.
+PROBE_CLOCK_SCRIPT="$TMP_ROOT/probe-clock.sh"
+mkdir -p "$TMP_ROOT/probe-clock-home"
+cat > "$PROBE_CLOCK_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+unset FM_REMOTE_JOB_ACTIVE
+export FM_REMOTE_JOB_STATE_ROOT=$3
+start=$(command date +%s)
+fm_remote_job_prepare_state "$2" || exit 4
+ready=$(fm_remote_job_worker_ready_path)
+: > "$ready" || exit 4
+fm_remote_job_probe "$2" || exit 3
+touch -t 200001010000 "$ready" || exit 4
+fm_remote_job_probe "$2" && exit 3
+date() { return 1; }
+fm_remote_job_probe "$2" && exit 3
+: > "$ready" || exit 4
+fm_remote_job_probe "$2" && exit 3
+printf '%s\n' "$(($(command date +%s) - start))"
+SH
+chmod 700 "$PROBE_CLOCK_SCRIPT"
+run_wait_script "$PROBE_CLOCK_SCRIPT" 20 "the readiness probe against an unreadable clock" \
+  "$REMOTE_ROOT" "$TMP_ROOT/probe-clock-home" "$TMP_ROOT/probe-clock-state"
+pass "the readiness probe reports not ready when it cannot establish heartbeat freshness"
 
 echo "ALL TESTS PASSED"

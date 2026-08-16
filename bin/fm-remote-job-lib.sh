@@ -113,9 +113,11 @@ fm_remote_job_validate_settings() {
 # while it can be read. A `date` fork that fails under the very memory pressure
 # these waits exist for, or a clock stepped backwards by an NTP correction on a
 # host that just woke from sleep, must never turn a bounded wait into an
-# unbounded one. Every unreadable, implausible, or backwards reading therefore
-# counts as expired: a wait that cannot prove it still has budget left gives up
-# and reports failure, which callers already handle, rather than spinning.
+# unbounded one. Nor may either one silently shorten a budget: giving up at the
+# first bad reading would end a wait with the very "worker did not report ready"
+# failure these deadlines exist to prevent. So every bound carries two
+# independent measures of elapsed time, and a wait ends only when the measure
+# that can still be trusted says the budget is spent.
 fm_remote_job_clock_now() { # epoch seconds, or nothing when the clock is unreadable
   local now
   now=$(date +%s 2>/dev/null || true)
@@ -123,24 +125,45 @@ fm_remote_job_clock_now() { # epoch seconds, or nothing when the clock is unread
   printf '%s\n' "$now"
 }
 
-# The bound carries its own start, so a reading earlier than the moment the wait
-# began is provably a backwards step and is spent budget rather than fresh time.
-fm_remote_job_wait_deadline() { # <seconds>; "<start>:<deadline>" bound for a wait
-  local now
-  now=$(fm_remote_job_clock_now) || return 0
-  printf '%s:%s\n' "$now" "$((now + $1))"
+# The second measure is bash's own SECONDS, which needs no fork and so still
+# advances on a host that has run out of the resources to run `date` at all. It
+# is the safety net rather than the authority, because it is reset by anything
+# that assigns to it and cannot outlive the shell that owns the wait.
+#
+# Establishing a bound retries, because one transient fork failure must not
+# decide what a whole wait is worth. Both measures start at the same instant, so
+# a reading earlier than the start is provably a backwards step: that is spent
+# budget, not fresh time.
+fm_remote_job_wait_deadline() { # <seconds>; opaque bound token for a wait
+  local seconds=$1 now='' attempt=0
+  while :; do
+    now=$(fm_remote_job_clock_now) && break
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 5 ] || break
+    sleep 0.1
+  done
+  printf '%s:%s:%s:%s\n' "$SECONDS" "$((SECONDS + seconds))" "$now" "${now:+$((now + seconds))}"
+}
+
+# Expired, still running, or 2 for a bound this clock cannot judge at all.
+fm_remote_job_epoch_expired() { # <start> <deadline>
+  local start=$1 deadline=$2 now
+  case "$start" in ''|*[!0-9]*) return 2 ;; esac
+  case "$deadline" in ''|*[!0-9]*) return 2 ;; esac
+  now=$(fm_remote_job_clock_now) || return 2
+  [ "$now" -ge "$start" ] || return 0
+  [ "$now" -ge "$deadline" ]
 }
 
 fm_remote_job_wait_expired() { # <bound from fm_remote_job_wait_deadline>
-  local bound=$1 start deadline now
-  case "$bound" in *:*) ;; *) return 0 ;; esac
-  start=${bound%%:*}
-  deadline=${bound##*:}
-  case "$start" in ''|*[!0-9]*) return 0 ;; esac
-  case "$deadline" in ''|*[!0-9]*) return 0 ;; esac
-  now=$(fm_remote_job_clock_now) || return 0
-  [ "$now" -ge "$start" ] || return 0
-  [ "$now" -ge "$deadline" ]
+  local bound=$1 shell_start shell_deadline epoch_start epoch_deadline verdict=0
+  IFS=: read -r shell_start shell_deadline epoch_start epoch_deadline <<< "$bound"
+  fm_remote_job_epoch_expired "$epoch_start" "$epoch_deadline" || verdict=$?
+  [ "$verdict" -eq 2 ] || return "$verdict"
+  case "$shell_start" in ''|*[!0-9]*) return 0 ;; esac
+  case "$shell_deadline" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$SECONDS" -ge "$shell_start" ] || return 0
+  [ "$SECONDS" -ge "$shell_deadline" ]
 }
 
 fm_remote_job_platform() {
@@ -934,7 +957,7 @@ fm_remote_job_probe() { # <account-home>; a fresh worker heartbeat or active job
   [ -f "$ready" ] && [ ! -L "$ready" ] || return 1
   mtime=$(fm_remote_job_path_mtime "$ready" 2>/dev/null || true)
   case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
-  now=$(date +%s)
+  now=$(fm_remote_job_clock_now) || return 1
   [ $((now - mtime)) -le 10 ]
 }
 
