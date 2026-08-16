@@ -13,17 +13,19 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are two documented exceptions. The absorb classification
+# There are three documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
 # deliberately paused, or neither. Callers run it ONLY on no-verb signal handling
 # and first sighting of a stale hash, never on every wake, so the per-wake triage
-# stays cheap. status_open_decisions_incremental (see "incremental (cursor-backed)
-# open-decisions fold" below) also writes: it persists a per-status-file byte
-# cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
-# stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time.
+# stays cheap. crew_run_progressed (see its own header) makes one bounded
+# read-only run read and persists the run's progress fingerprint, and runs only
+# at wedge-escalation moments. status_open_decisions_incremental (see
+# "incremental (cursor-backed) open-decisions fold" below) also writes: it
+# persists a per-status-file byte cursor and folded open-set as a side effect, so
+# a per-drain fleet-wide scan stays bounded by new appends instead of re-reading
+# each task's whole lifetime log every time.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -34,6 +36,10 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # Overridable so tests can stub the run-step/pane verdict without a real worktree
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
+
+# Run-object attribution and progress primitives, for crew_run_progressed below.
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-nm-run-lib.sh"
 
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
@@ -1131,6 +1137,78 @@ crew_is_provably_working() {  # <id>
 # escalating a possible wedge.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
+}
+
+# Bounded timeout for the read-only run probe below. Its whole cost model rests
+# on running at escalation moments only, so a hung CLI must never hold a
+# supervision cycle open.
+FM_RUN_PROGRESS_TIMEOUT="${FM_RUN_PROGRESS_TIMEOUT:-10}"
+
+_fm_run_progress_path() {  # <state> <id>
+  printf '%s/.run-progress-%s' "$1" "$2"
+}
+
+# 0 when crew <id> has a no-mistakes run that is BOTH executing right now AND
+# further along than the last time this was asked; 1 otherwise, including every
+# case it cannot prove. Records the run's current progress fingerprint as the
+# new baseline whenever it reads one.
+#
+# Why the stale path needs this. Once a wake is absorbed as provably working,
+# the wedge timer ages it and escalates a possible wedge past
+# FM_STALE_ESCALATE_SECS without re-reading anything - deliberately, because the
+# per-poll path must stay cheap. But a crew whose no-mistakes run is executing
+# has nothing to render: it is blocked on the pipeline agent, so a quiet
+# endpoint for many minutes is the NORMAL shape of a healthy validation, not a
+# wedge. On 2026-08-16 that produced repeated "stale persisted / possible
+# wedge" escalations against a lensclash run that was demonstrably advancing
+# (moving head, fixing step, freshly parked gate), in normal mode and again in
+# away mode. Both supervisors therefore ask this before escalating, and reset
+# the aging window instead when the pipeline has moved.
+#
+# Three properties keep it honest:
+#   - cheap: ONE bounded read-only `axi status`, at escalation moments only
+#     (at most once per FM_STALE_ESCALATE_SECS per window), never per poll;
+#   - read-only: it can start, resume, answer, or abort nothing;
+#   - never blinding: absorbing requires MOVEMENT, so a run that is executing
+#     but frozen stops absorbing after one cycle, and a crew with no executing
+#     run of its own - a crew parked at a gate, and the whole no-mistakes-less
+#     population - is unaffected and escalates exactly as before. The
+#     fingerprint owner (fm_nm_run_progress_fingerprint) excludes elapsed
+#     timers for the same reason.
+# The first probe of a series has no baseline to compare and absorbs once,
+# which delays a genuinely frozen active run's wedge escalation by one cycle
+# and costs nothing else.
+crew_run_progressed() {  # <id> <state>
+  local id=$1 state=$2 meta kind wt branch out fingerprint previous file tmp
+  [ -n "$id" ] && [ -n "$state" ] || return 1
+  meta="$state/$id.meta"
+  [ -f "$meta" ] || return 1
+  kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  # Scouts and secondmates never drive a no-mistakes run of their own worktree.
+  [ "${kind:-ship}" = ship ] || return 1
+  wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  command -v no-mistakes >/dev/null 2>&1 || return 1
+  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$branch" ] || return 1
+  out=$(fm_nm_run "$wt" "$FM_RUN_PROGRESS_TIMEOUT" axi status)
+  [ -n "$out" ] || return 1
+  # Attribution is deliberately narrower than fm-crew-state.sh's: only the run
+  # `axi status` itself reports for this exact branch may absorb an escalation.
+  [ "$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")" = "$branch" ] || return 1
+  fm_nm_run_is_executing "$out" || return 1
+  fingerprint=$(fm_nm_run_progress_fingerprint "$out")
+  [ -n "$fingerprint" ] || return 1
+  file=$(_fm_run_progress_path "$state" "$id")
+  previous=$(cat "$file" 2>/dev/null || true)
+  # Atomic replace: the two supervisors and a test harness may read this while
+  # it is rewritten, and a torn baseline would fake movement on the next probe.
+  tmp=$(umask 077; mktemp "$file.XXXXXX") || return 1
+  if ! printf '%s\n' "$fingerprint" > "$tmp" || ! mv -f -- "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  [ "$fingerprint" != "$previous" ]
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably

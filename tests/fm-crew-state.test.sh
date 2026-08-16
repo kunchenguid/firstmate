@@ -49,6 +49,22 @@ make_repo_on_branch() {  # <dir> <branch>
   export FM_FAKE_RUN_HEAD
 }
 
+# A commit that exists in <dir> but is neither the current HEAD nor a descendant
+# of it - the shape a pipeline leaves behind when it rebases its work onto
+# another base while the crew's own copy stays put. Kept reachable by its own
+# branch so the repo can still resolve it; HEAD is restored before returning.
+make_diverged_commit() {  # <dir> -> echoes the diverged commit sha
+  local dir=$1 branch sha
+  branch=$(git -C "$dir" symbolic-ref --quiet --short HEAD)
+  git -C "$dir" checkout -q --orphan fm-test-diverged
+  git -C "$dir" commit -q --allow-empty -m 'pipeline rebased head'
+  sha=$(git -C "$dir" rev-parse HEAD)
+  git -C "$dir" checkout -q "$branch"
+  git -C "$dir" merge-base --is-ancestor HEAD "$sha" 2>/dev/null \
+    && fail "make_diverged_commit produced a descendant, not a diverged head"
+  printf '%s\n' "$sha"
+}
+
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
 # fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
 # command surface the helper uses: `axi status`, `axi status --run <id>` (the
@@ -279,6 +295,11 @@ EOF
 }
 
 run_failed() {  # <branch>
+  run_outcome "$1" failed
+}
+
+# Any terminal run object, by outcome word (failed, cancelled, passed, ...).
+run_outcome() {  # <branch> <outcome>
   cat <<EOF
 run:
   id: "01RUN"
@@ -287,7 +308,7 @@ run:
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: ""
   findings: none
-outcome: failed
+outcome: $2
 EOF
 }
 
@@ -1309,6 +1330,147 @@ test_missing_run_head_falls_back_to_current_state() {
   pass "missing run head falls back instead of matching by branch"
 }
 
+# --- a replaced run is history, not current state ---------------------------
+# 2026-08-16 evidence, twice in one day: a worker's own supersession sequence
+# (the run dies or is aborted, custody comes back, a fresh run starts) leaves
+# the dead run as the most recently written record for a while.
+#   - snacksuite-rag-umbau: run 01M03RWN cancelled, replaced by 01M0492M
+#     running in the test step; this helper still reported "failed: run
+#     cancelled", and the watcher turned that into an inactive-crew false alarm.
+#   - lensclash-fix-runde-golive, 08:56: run 01M0490J failed, replaced by
+#     01M04KJJ running; this helper still reported "failed: run failed" while
+#     `axi status` showed running/fixing at the same moment.
+# The pair below pins both shapes, and the third case pins the safety property
+# they must not cost: a terminal run with NO replacement still reports failed.
+
+# The dead run answers `axi status` (its head still binds), while the runs list
+# already shows the newer running one on top.
+test_replaced_terminal_run_not_reported_as_current() {
+  local terminal detail short d out
+  for terminal in cancelled failed; do
+    reset_fakes
+    d=$(new_case "replaced-$terminal")
+    make_repo_on_branch "$d/wt" "fm/feat-replaced-$terminal"
+    short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/replaced-$terminal.meta" \
+      "window=fm:fm-replaced-$terminal" "worktree=$d/wt" "kind=ship"
+    FM_FAKE_AXI_STATUS="$(run_outcome "fm/feat-replaced-$terminal" "$terminal")"
+    FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-replaced-$terminal ${short}  2026-08-16 08:56
+  $terminal  fm/feat-replaced-$terminal ${short}  2026-08-16 08:43
+EOF
+)"
+    out=$(run_crew_state "$d" "replaced-$terminal")
+    assert_contains "$out" "state: working" "a $terminal run replaced by a running one is not the current state"
+    assert_contains "$out" "source: run-step" "the replacement run is still a run-step verdict"
+    assert_contains "$out" "superseded run $terminal" "the superseded run is named in the detail"
+    detail="run $terminal"
+    assert_not_contains "$out" "state: failed" "the replaced $terminal run must not be reported as failed ($detail)"
+  done
+  pass "a cancelled or failed run replaced by a running one is not reported as the current state"
+}
+
+# The safety property the supersession rule must not cost: with no replacement
+# in the runs list, a terminal run is still exactly as terminal as before.
+test_terminal_run_without_replacement_stays_failed() {
+  reset_fakes
+  local d short out
+  d=$(new_case terminal-no-replacement)
+  make_repo_on_branch "$d/wt" fm/feat-dead
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/dead.meta" "window=fm:fm-dead" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_outcome fm/feat-dead failed)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/feat-dead ${short}  2026-08-16 08:43
+  running    fm/some-other aaaaaaa  2026-08-16 08:56
+EOF
+)"
+  out=$(run_crew_state "$d" dead)
+  assert_contains "$out" "state: failed" "an unreplaced failed run is still failed"
+  assert_contains "$out" "run failed" "the failure detail is preserved"
+  assert_not_contains "$out" "superseded" "nothing superseded an unreplaced run"
+  pass "a terminal run with no replacement still reports failed"
+}
+
+# lensclash's other half: the replacement run was started from a preserved
+# pipeline head after the pipeline had rebased onto another base, so its head
+# is neither the local HEAD nor a descendant of it, and the strict head rule
+# rejected it. An EXECUTING run on this crew's branch is current work whatever
+# its head says - nothing but this crew's own validation runs on this branch -
+# so it is attributed, with its own step detail intact.
+test_executing_run_with_diverged_head_is_current() {
+  reset_fakes
+  local d diverged out
+  d=$(new_case diverged-executing)
+  make_repo_on_branch "$d/wt" fm/feat-diverged
+  diverged=$(make_diverged_commit "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/diverged.meta" "window=fm:fm-diverged" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: restarted validation on the preserved head\n' > "$d/state/diverged.status"
+  FM_FAKE_RUN_HEAD="$diverged"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-diverged)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" diverged
+  out=$(run_crew_state "$d" diverged)
+  assert_contains "$out" "state: working" "an executing run on this branch is current despite a diverged head"
+  assert_contains "$out" "source: run-step" "the diverged executing run is a run-step verdict"
+  assert_contains "$out" "validating (fixing)" "the run's own step detail is preserved"
+  assert_contains "$out" "run head diverged from local copy" "the divergence is recorded in the detail"
+  pass "an executing run whose head diverged from the local copy is still the current state"
+}
+
+# The boundary that relaxation must not cross: a TERMINAL run with a diverged
+# head stays unattributed, exactly as before, so an abandoned run on a reused
+# branch can never masquerade as this crew's state.
+test_terminal_run_with_diverged_head_still_not_attributed() {
+  reset_fakes
+  local d diverged out
+  d=$(new_case diverged-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-diverged-dead
+  diverged=$(make_diverged_commit "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/diverged-dead.meta" "window=fm:fm-diverged-dead" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: current stage still in progress\n' > "$d/state/diverged-dead.status"
+  FM_FAKE_RUN_HEAD="$diverged"
+  FM_FAKE_AXI_STATUS="$(run_outcome fm/feat-diverged-dead failed)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" diverged-dead
+  out=$(run_crew_state "$d" diverged-dead)
+  assert_not_contains "$out" "source: run-step" "a terminal run with a diverged head must stay unattributed"
+  assert_contains "$out" "source: status-log" "falls back to the status log as before"
+  pass "a terminal run with a diverged head is still not attributed"
+}
+
+# The coarse path's own supersession: `axi status` answers for another crew's
+# branch, and in the runs list this branch's newest row is the running
+# replacement (diverged head, so the strict rule skips it) sitting above an
+# older terminal row whose head DOES bind. Newest-first ordering makes the
+# running row the newer one, so it wins.
+test_coarse_running_row_outranks_older_matching_terminal_row() {
+  reset_fakes
+  local d short out
+  d=$(new_case coarse-superseded)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-superseded
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/coarse-superseded.meta" \
+    "window=fm:fm-coarse-superseded" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-coarse-superseded ffffff1  2026-08-16 08:56
+  cancelled  fm/feat-coarse-superseded ${short}  2026-08-16 08:43
+EOF
+)"
+  out=$(run_crew_state "$d" coarse-superseded)
+  assert_contains "$out" "state: working" "a newer running row outranks an older terminal row that binds"
+  assert_contains "$out" "source: run-step" "the coarse replacement is still a run-step verdict"
+  assert_not_contains "$out" "state: failed" "the superseded cancelled row must not win"
+  pass "the coarse runs list prefers a newer running row over an older terminal one"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1358,5 +1520,10 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_replaced_terminal_run_not_reported_as_current
+test_terminal_run_without_replacement_stays_failed
+test_executing_run_with_diverged_head_is_current
+test_terminal_run_with_diverged_head_still_not_attributed
+test_coarse_running_row_outranks_older_matching_terminal_row
 
 echo "all fm-crew-state tests passed"

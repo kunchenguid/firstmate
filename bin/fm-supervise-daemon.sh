@@ -1016,7 +1016,17 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+      *) # Same escalation-moment run probe the always-on watcher applies in
+         # wedge_timer_check: a crew blocked on an ADVANCING no-mistakes run
+         # renders nothing, so reset the aging window instead of calling it a
+         # wedge. crew_run_progressed (fm-classify-lib.sh) owns the rule and
+         # requires movement, so a frozen run still escalates.
+         if crew_run_progressed "$task" "$state"; then
+           _now > "$marker"
+           log "stale absorbed after ${age}s: pipeline advanced since the last check: $win"
+           continue
+         fi
+         escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
          stale_marker_remove "$win" "$state" ;;
     esac
   done

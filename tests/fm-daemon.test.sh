@@ -440,6 +440,70 @@ test_housekeeping_persistent_stale_escalates() {
   pass "persistent stale escalates after threshold and clears its marker"
 }
 
+# Away mode saw the same false alarms the always-on watcher did (2026-08-16
+# lensclash, three escalations between 08:56 and 09:10 while its no-mistakes run
+# was advancing): a crew blocked on the pipeline agent renders nothing, so its
+# quiet endpoint means a healthy validation, not a wedge. Both supervisors ask
+# the same shared question at the escalation moment - crew_run_progressed - so
+# this pins the daemon half of it, including the frozen-run case that must
+# still escalate.
+test_housekeeping_stale_absorbed_while_pipeline_advances() {
+  local dir state fakebin win pane key wt axi head marker
+  dir=$(make_supercase stale-advancing-pipeline)
+  state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-adv-w20"; pane="$dir/pane.txt"
+  wt="$dir/wt"; axi="$dir/axi.out"
+  printf 'working: validation under way\n' > "$state/adv-w20.status"
+  printf 'idle prompt $\n' > "$pane"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  git -C "$wt" commit -q --allow-empty -m init
+  git -C "$wt" checkout -q -b fm/adv-w20
+  head=$(git -C "$wt" rev-parse HEAD)
+  fm_write_meta "$state/adv-w20.meta" "window=$win" "worktree=$wt" "kind=ship" "backend=tmux"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = axi ] && [ "${2:-}" = status ] && cat "$FM_FAKE_AXI_STATUS_FILE" 2>/dev/null
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+  cat > "$axi" <<EOF
+run:
+  id: "01R1"
+  branch: fm/adv-w20
+  status: running
+  head: "$head"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,120
+    review,running,0,90000
+EOF
+  key=$(printf '%s' "adv-w20" | tr ':/.' '___')
+  marker="$state/.subsuper-stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$marker"
+
+  # The pipeline is executing and this is the first probe: absorb, and restart
+  # the aging window instead of escalating.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_FAKE_AXI_STATUS_FILE="$axi" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "an advancing pipeline was escalated as a possible wedge"
+  [ -e "$marker" ] || fail "the absorbed stale marker was dropped instead of re-aged"
+  [ "$(( $(date +%s) - $(cat "$marker") ))" -lt 240 ] || fail "the aging window was not reset on absorb"
+  [ -s "$state/.run-progress-adv-w20" ] || fail "no progress baseline was recorded for the absorbed series"
+
+  # Same run, no movement: the escalation must land exactly as before.
+  echo $(( $(date +%s) - 500 )) > "$marker"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_FAKE_AXI_STATUS_FILE="$axi" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+    || fail "a frozen run did not escalate a possible wedge"
+  [ ! -e "$marker" ] || fail "stale marker not cleared after the escalation"
+  pass "away mode absorbs a stale series while the pipeline advances, and still escalates a frozen run"
+}
+
 test_housekeeping_resumed_stale_cleared() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-resumed)
@@ -1850,6 +1914,7 @@ test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_stale_absorbed_while_pipeline_advances
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared

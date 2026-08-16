@@ -280,10 +280,20 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
 # escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
-# both places a hash can be absorbed this way: the plain non-terminal path,
-# and the stale_is_terminal-overridden path (a captain-relevant status-log
-# line that an active run/busy pane outranked).
+# state on an ordinary poll (the costly check already ran once, at
+# classification time). Shared by both places a hash can be absorbed this way:
+# the plain non-terminal path, and the stale_is_terminal-overridden path (a
+# captain-relevant status-log line that an active run/busy pane outranked), as
+# well as the busy-pane turn-age bound.
+#
+# At the ESCALATION moment only, crew_run_progressed (fm-classify-lib.sh, the
+# ONE owner of that rule) gets to absorb the series instead: a crew blocked on
+# an advancing no-mistakes run renders nothing, so its quiet endpoint is the
+# normal shape of a healthy validation rather than a wedge. Movement is
+# required, so a frozen run, and every crew with no run of its own, escalates
+# exactly as before. An absorb deliberately leaves the escalation counter
+# untouched rather than resetting it, so a pane that already demanded deep
+# inspection still carries that marker into its next escalation.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -295,6 +305,11 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        if crew_run_progressed "$(window_to_task "$win" "$STATE")" "$STATE"; then
+          date +%s > "$since_file"
+          triage_log "absorbed $label (pipeline advanced since the last check, idle ${age}s): $win"
+          return 0
+        fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"

@@ -22,12 +22,19 @@
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
-#      fallback)? Branch name alone is not enough: a historical run on a reused
-#      branch whose head was rewritten or diverged must not be attributed.
-#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
-#      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      fallback)? For a TERMINAL run, branch name alone is not enough: a
+#      historical run on a reused branch whose head was rewritten or diverged
+#      must not be attributed. Such a run matches when its head equals the
+#      worktree HEAD, or the worktree HEAD is an ancestor of the run head
+#      (pipeline fix commits advanced the run on the same line of history).
+#      Local work that advanced past the run head, or diverged from it,
+#      invalidates attribution. An EXECUTING run on this crew's branch is
+#      attributed with no head condition, because a run the pipeline is running
+#      right now cannot be history, and it also outranks any older terminal run
+#      for the branch - a cancelled or failed run that a newer running one
+#      replaced is never the current state (see nm_runs_status_for_branch for
+#      the evidence). A run parked at a gate is waiting, not executing, and
+#      still needs its head to bind.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -212,7 +219,7 @@ nm_gate_status() {
   [ -n "$row" ] && { row=${row#*|}; printf '%s' "${row%%|*}"; }
 }
 nm_has_gate() {
-  printf '%s\n' "$RUN_OUT" | grep -Eq '^[[:space:]]*gate:[[:space:]]*'
+  fm_nm_run_has_gate "$RUN_OUT"
 }
 nm_gate_line_name() {
   local gate step
@@ -326,16 +333,31 @@ nm_ci_checks_state() {
 # dead code and is worth having actually work.)
 #
 # The real run-listing command is the top-level `no-mistakes runs` (verified:
-# `no-mistakes --help` lists it separately from `axi`). It is plain, human-
+# `no-mistakes --help` lists it separately from `axi`; both halves of this split
+# re-confirmed on v1.48.0, 2026-08-16). It is plain, human-
 # oriented text - no run id, no JSON/TOON, newest-first, columns
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
 # is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+# is a run for THIS branch active right now. Echoes the matched row's status
+# word (running/completed/cancelled/failed), or empty when the branch has no
+# usable run within FM_CREW_STATE_RUNS_LIMIT rows.
+#
+# Rows are newest-first, and a still-running row for this branch outranks any
+# older terminal row the head rule would otherwise match. Without that precedence a
+# crew whose cancelled or failed run was immediately replaced by a fresh one
+# kept reporting the dead run as its current state (2026-08-16: snacksuite run
+# 01M03RWN cancelled and replaced by 01M0492M running still read as "failed:
+# run cancelled"; lensclash run 01M0490J failed and replaced by 01M04KJJ still
+# read as "failed: run failed" while `axi status` showed running/fixing), and
+# the watcher turned that into an inactive-crew false alarm. A running row also
+# needs no head match: the head rule exists to stop a HISTORICAL run on a
+# reused branch from being attributed, and a run that is still executing cannot
+# be history. A pipeline that rebased or rewrote its head (what `no-mistakes
+# rerun` from a preserved head does) is exactly the case that must still be
+# attributed to the crew whose branch it holds.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row st rest br sha running_seen=0
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -348,16 +370,22 @@ nm_runs_status_for_branch() {  # <branch>
     rest=${rest#* }
     rest=$(trim "$rest")
     sha=${rest%% *}
-    if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
-      printf '%s' "$st"
+    [ "$br" = "$branch" ] || continue
+    # Same code-identity rule as axi status: a same-branch row whose short-sha
+    # does not match this worktree (rewritten or advanced tip) is not this
+    # crew's code - unless it is still running, which supersedes anything older.
+    if ! nm_coarse_head_matches_worktree "$sha"; then
+      [ "$st" = running ] && running_seen=1
+      continue
+    fi
+    if [ "$running_seen" = 1 ] && [ "$st" != running ]; then
+      printf 'running'
       return 0
     fi
+    printf '%s' "$st"
+    return 0
   done <<< "$out"
+  [ "$running_seen" = 1 ] && printf 'running'
   return 0
 }
 
@@ -388,6 +416,10 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+# 1 when the attributed run is this crew's branch but its head has moved off the
+# local line of history. Recorded in the detail so a reader can tell an ordinary
+# attribution from this one; see the branch that sets it below.
+RUN_HEAD_DIVERGED=0
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -396,10 +428,20 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
+    elif [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && fm_nm_run_is_executing "$RUN_OUT"; then
+      # Same branch, executing right now, head off this line of history. A
+      # pipeline that rebased its work or resumed from a preserved head leaves
+      # exactly this shape, and the run still owns the crew's branch, so it IS
+      # the current state. Attributing it here (rather than falling through to
+      # the coarse list) keeps the run's own step detail instead of a bare
+      # "validating". A parked or terminal run earns no such relaxation
+      # (fm_nm_run_is_executing owns that boundary).
+      HAVE_RUN=1
+      RUN_HEAD_DIVERGED=1
     else
       # The active-or-most-recent run is for another branch, or same branch with
-      # a rewritten/diverged head (the CLI is alive and answered; only the
-      # attribution missed) - try the coarse fallback.
+      # a rewritten/diverged head on an already-terminal run (the CLI is alive
+      # and answered; only the attribution missed) - try the coarse fallback.
       # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
@@ -511,6 +553,25 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ "$CI_LOG_STATE" != not-ready ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
+  fi
+
+  # A cancelled or failed run is the crew's current state only while nothing has
+  # replaced it. The worker's own supersession sequence (abort or crash, recover
+  # custody, start again) leaves the dead run as the most recent record for a
+  # while, and reporting it as current is what produced the 2026-08-16
+  # inactive-crew false alarms documented on nm_runs_status_for_branch. That
+  # function is the ONE owner of the newer-active-run-wins rule; consult it
+  # before letting a terminal verdict stand. Only the failed verdict pays this
+  # extra bounded call, and only until the replacement run answers `axi status`
+  # itself. The coarse path already applied the same rule when it resolved.
+  if [ "$RUN_STATE" = failed ] && [ "$RUN_SOURCE" = full ] \
+     && [ "$(nm_runs_status_for_branch "$CREW_BRANCH")" = running ]; then
+    RUN_DETAIL="validating (background run)${SEP}superseded $RUN_DETAIL"
+    RUN_STATE=working
+  fi
+
+  if [ "$RUN_HEAD_DIVERGED" = 1 ]; then
+    RUN_DETAIL="$RUN_DETAIL${SEP}run head diverged from local copy"
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step

@@ -325,6 +325,108 @@ test_crew_absorb_class_classifier() {
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
+# A no-mistakes run object as `axi status` emits it, with a controllable step
+# status and step duration, so a test can move ONE of them at a time.
+run_object() {  # <branch> <run-id> <run-status> <head> <step-status> <duration-ms>
+  cat <<EOF
+run:
+  id: "$2"
+  branch: $1
+  status: $3
+  head: "$4"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,120
+    review,$5,0,$6
+EOF
+}
+
+# crew_run_progressed: the escalation-moment probe that keeps a healthy
+# validation from being escalated as a wedge. On 2026-08-16 a lensclash crew was
+# escalated as a possible wedge four times in twenty-five minutes (08:43, then
+# three times between 08:56 and 09:10, partly in away mode) while its
+# no-mistakes run was demonstrably advancing: a crew blocked on the pipeline
+# agent renders nothing, so its quiet endpoint is what a HEALTHY validation
+# looks like. The three properties this pins are the whole contract: it absorbs
+# only on real movement, it never treats elapsed time as movement, and every
+# crew it cannot prove is left to escalate exactly as before.
+test_crew_run_progressed_classifier() {
+  local dir state fakebin wt axi head
+  dir=$(make_case run-progressed); state="$dir/state"; fakebin="$dir/fakebin"
+  wt="$dir/wt"; axi="$dir/axi.out"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  git -C "$wt" commit -q --allow-empty -m init
+  git -C "$wt" checkout -q -b fm/progress
+  head=$(git -C "$wt" rev-parse HEAD)
+  # A fake `no-mistakes` whose `axi status` serves whatever the test last wrote,
+  # and which refuses every other subcommand: the probe must only ever READ.
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
+  cat "$FM_FAKE_AXI_STATUS_FILE" 2>/dev/null
+  exit 0
+fi
+printf 'fake no-mistakes refused a non-read call: %s\n' "$*" >> "$FM_FAKE_NM_CALLS"
+exit 1
+SH
+  chmod +x "$fakebin/no-mistakes"
+  export FM_FAKE_AXI_STATUS_FILE="$axi" FM_FAKE_NM_CALLS="$dir/nm-calls.log"
+  : > "$FM_FAKE_NM_CALLS"
+  local PATH="$fakebin:$PATH"
+
+  fm_write_meta "$state/p.meta" "window=t:fm-p" "kind=ship" "worktree=$wt"
+
+  # Nothing to prove: no such task, a scout, and a task with no run at all.
+  ! crew_run_progressed nosuch "$state" || fail "an unknown task reported progress"
+  fm_write_meta "$state/sc.meta" "window=t:fm-sc" "kind=scout" "worktree=$wt"
+  run_object fm/progress 01R1 running "$head" running 500 > "$axi"
+  ! crew_run_progressed sc "$state" || fail "a scout reported progress"
+  : > "$axi"
+  ! crew_run_progressed p "$state" || fail "a task with no run at all reported progress"
+  [ ! -e "$state/.run-progress-p" ] || fail "a task with no run recorded a progress baseline"
+
+  # First probe of an executing run: absorb once and record the baseline.
+  run_object fm/progress 01R1 running "$head" running 500 > "$axi"
+  crew_run_progressed p "$state" || fail "the first probe of an executing run did not absorb"
+  [ -s "$state/.run-progress-p" ] || fail "the first probe recorded no progress baseline"
+
+  # THE safety property: an executing but FROZEN run stops absorbing at once,
+  # so a genuinely wedged validation still reaches its wedge escalation.
+  ! crew_run_progressed p "$state" || fail "an unchanged run reported progress"
+
+  # Elapsed time is not movement. Only the step's duration_ms advances here -
+  # exactly what ticks on its own while a run hangs - and it must not absorb.
+  run_object fm/progress 01R1 running "$head" running 999999 > "$axi"
+  ! crew_run_progressed p "$state" || fail "a growing step duration was mistaken for progress"
+
+  # Real movement, one field at a time: the step advances, then the run head.
+  run_object fm/progress 01R1 running "$head" completed 999999 > "$axi"
+  crew_run_progressed p "$state" || fail "an advancing step was not read as progress"
+  run_object fm/progress 01R1 fixing deadbeef completed 999999 > "$axi"
+  crew_run_progressed p "$state" || fail "a moved head was not read as progress"
+  # A replacement run is progress too.
+  run_object fm/progress 01R2 running deadbeef running 10 > "$axi"
+  crew_run_progressed p "$state" || fail "a newly started run was not read as progress"
+
+  # Not executing: a parked gate is a crew that OWES an answer, and a terminal
+  # run is over. Neither may absorb a wedge escalation, however fresh it looks.
+  { run_object fm/progress 01R3 running deadbeef running 10; printf 'gate: review\n'; } > "$axi"
+  ! crew_run_progressed p "$state" || fail "a run parked at a gate absorbed an escalation"
+  { run_object fm/progress 01R4 completed deadbeef completed 10; printf 'outcome: failed\n'; } > "$axi"
+  ! crew_run_progressed p "$state" || fail "a terminal run absorbed an escalation"
+  # Another crew's run never speaks for this one.
+  run_object fm/other 01R5 running deadbeef running 10 > "$axi"
+  ! crew_run_progressed p "$state" || fail "another branch's run absorbed this crew's escalation"
+
+  [ ! -s "$FM_FAKE_NM_CALLS" ] \
+    || fail "the probe made a non-read no-mistakes call: $(cat "$FM_FAKE_NM_CALLS")"
+  unset FM_FAKE_AXI_STATUS_FILE FM_FAKE_NM_CALLS
+  pass "crew_run_progressed: absorbs only on real movement, never on elapsed time, and only for an executing run of this crew"
+}
+
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
 # task it references is provably working; if any crew has stopped, or no task can be
 # resolved, it surfaces. Files map to ids by stripping .status / .turn-ended.
@@ -661,6 +763,80 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
   pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
+}
+
+# --- wedge escalation vs an ADVANCING pipeline ------------------------------
+# The other half of the same story. Absorbing a stale hash starts a wedge timer
+# that escalates on age alone, so a crew whose no-mistakes run takes longer than
+# FM_STALE_ESCALATE_SECS - the ordinary case for a review or test step - was
+# escalated as a possible wedge over and over while nothing was wrong
+# (2026-08-16 lensclash: 08:43, then three more between 08:56 and 09:10, against
+# a run with a moving head, a fixing step, and a freshly parked gate). At the
+# escalation moment the supervisor now asks whether the pipeline has actually
+# moved, and resets the window instead when it has. Phase B is the half that
+# must never be lost: the same run, frozen, still escalates.
+test_wedge_escalation_absorbed_while_pipeline_advances() {
+  local dir state fakebin out capture_file window key pane_hash sig pid wt head axi since
+  dir=$(make_case wedge-advancing-pipeline); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; wt="$dir/wt"; axi="$dir/axi.out"
+  window="test:fm-advancing"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  git -C "$wt" commit -q --allow-empty -m init
+  git -C "$wt" checkout -q -b fm/advancing
+  head=$(git -C "$wt" rev-parse HEAD)
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = axi ] && [ "${2:-}" = status ] && cat "$FM_FAKE_AXI_STATUS_FILE" 2>/dev/null
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+  printf 'no-mistakes axi run: waiting on the review agent' > "$capture_file"
+  fm_write_meta "$state/advancing.meta" "window=$window" "kind=ship" "worktree=$wt"
+  printf 'working: validation under way\n' > "$state/advancing.status"
+  sig=$(seen_sig "$state/advancing.status"); printf '%s' "$sig" > "$state/.seen-advancing_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "no-mistakes axi run: waiting on the review agent")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Already classified and absorbed as provably working on an earlier poll, with
+  # the wedge timer long past the threshold: the repeat-poll path under test.
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  run_object fm/advancing 01R1 running "$head" running 500 > "$axi"
+
+  # Phase A: the pipeline is executing and this is the first probe of the
+  # series, so the escalation is absorbed and the aging window restarts.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_AXI_STATUS_FILE="$axi" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher escalated a wedge against an advancing pipeline: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an absorbed wedge escalation printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an absorbed wedge escalation enqueued a wake"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "an absorbed wedge escalation counted against the pane"
+  [ -s "$state/.run-progress-advancing" ] || fail "no progress baseline was recorded for the absorbed series"
+  since=$(cat "$state/.stale-since-$key" 2>/dev/null || echo 0)
+  [ "$(( $(date +%s) - since ))" -lt 240 ] || fail "the aging window was not reset on absorb"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+
+  # Phase B: same run, no movement since the baseline. The pipeline may be
+  # executing and still be wedged, so the escalation must land.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_AXI_STATUS_FILE="$axi" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not escalate a frozen run past the threshold"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the frozen run did not escalate a possible wedge"
+  pass "an advancing pipeline absorbs the wedge escalation, and the same run frozen still escalates"
 }
 
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
@@ -1932,6 +2108,7 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_crew_run_progressed_classifier
 test_signal_crew_provably_working_classifier
 test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
@@ -1944,6 +2121,7 @@ test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
+test_wedge_escalation_absorbed_while_pipeline_advances
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
