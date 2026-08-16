@@ -408,8 +408,17 @@ assert_present "$HSELF/state/procevent-inbox/self-src.1.handled" "the self-annou
 if [ -e "$HSELF/state/.wake-queue" ] && grep -q 'procevent selfann self-src 1' "$HSELF/state/.wake-queue"; then
   fail "a fully autohandled self-announcing capture still published a duplicate check wake"
 fi
+# This self-announcing source's child returns instantly, so reconcile would
+# restart it and that detached poll would race the failing-path start below for
+# the source claim - non-deterministically stealing its sequence or the claim
+# itself. Retire it before the re-announcement check so reconcile starts no
+# competing poll, then re-register for the failing-path capture, the same
+# retire-before-reconcile discipline the blocker-backed sources rely on.
+pe_adapter "$HSELF" retire self-src >/dev/null
 out=$(pe_adapter "$HSELF" reconcile)
 assert_contains "$out" "published=0" "reconcile re-announced a capture its adapter already acknowledged"
+assert_contains "$out" "started=0" "reconcile restarted an always-ready acknowledged source and raced the next start"
+pe_adapter "$HSELF" register selfann self-src -- /bin/echo "self announced" >/dev/null
 : > "$HSELF/state/selfann-fail"
 out=$(pe_adapter "$HSELF" start self-src 2>&1)
 assert_contains "$out" "not-autohandled: self-src" "a failed self-announcing application was reported as applied"
