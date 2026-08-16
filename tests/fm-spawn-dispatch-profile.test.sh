@@ -861,6 +861,63 @@ write_spawn_retirement_marker() {  # <state> <task-id>
     "$2" "$2" 0 > "$1/.record-retired-$2"
 }
 
+test_partial_bin_spawn_preserves_marker_compatibility_contract() {
+  local partial_root rec id out status marker target
+  partial_root="$TMP_ROOT/partial-spawn-root"
+  mkdir -p "$partial_root"
+  cp -R "$ROOT/bin" "$partial_root/bin"
+  rm -f "$partial_root/bin/fm-record-retire-lib.sh"
+
+  id=profile-partial-no-marker-z19a
+  rec=$(make_spawn_case profile-partial-no-marker claude "$id")
+  read_case_record "$rec"
+  out=$(SPAWN="$partial_root/bin/fm-spawn.sh" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "partial-bin spawn without a retirement marker should succeed"
+  assert_not_contains "$out" "command not found" \
+    "partial-bin marker-free spawn called an unavailable marker interface"
+  assert_present "$HOME_DIR/state/$id.meta" \
+    "partial-bin marker-free spawn did not publish canonical metadata"
+
+  id=profile-partial-regular-marker-z19b
+  rec=$(make_spawn_case profile-partial-regular-marker claude "$id")
+  read_case_record "$rec"
+  marker="$HOME_DIR/state/.record-retired-$id"
+  write_spawn_retirement_marker "$HOME_DIR/state" "$id"
+  out=$(SPAWN="$partial_root/bin/fm-spawn.sh" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "partial-bin spawn accepted an existing regular retirement marker"
+  assert_contains "$out" "record-retirement support is unavailable" \
+    "partial-bin regular-marker refusal did not name unavailable retirement support"
+  assert_not_contains "$out" "command not found" \
+    "partial-bin regular-marker refusal called an unavailable marker interface"
+  assert_present "$marker" "partial-bin spawn removed an existing regular retirement marker"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "partial-bin regular-marker refusal published canonical metadata"
+
+  id=profile-partial-symlink-marker-z19c
+  rec=$(make_spawn_case profile-partial-symlink-marker claude "$id")
+  read_case_record "$rec"
+  marker="$HOME_DIR/state/.record-retired-$id"
+  target="$HOME_DIR/state/partial-marker-target"
+  printf 'unsupported marker\n' > "$target"
+  ln -s "$target" "$marker"
+  out=$(SPAWN="$partial_root/bin/fm-spawn.sh" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "partial-bin spawn accepted an existing symlink retirement marker"
+  assert_contains "$out" "record-retirement support is unavailable" \
+    "partial-bin symlink-marker refusal did not name unavailable retirement support"
+  assert_not_contains "$out" "command not found" \
+    "partial-bin symlink-marker refusal called an unavailable marker interface"
+  [ -L "$marker" ] || fail "partial-bin spawn removed an existing symlink retirement marker"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "partial-bin symlink-marker refusal published canonical metadata"
+  pass "partial-bin spawns permit no marker and preserve regular or symlink markers"
+}
+
 test_spawn_clears_only_a_valid_inherited_retirement_marker() {
   local rec id out status marker order_log
   id=profile-retired-valid-z20
@@ -941,6 +998,7 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_partial_bin_spawn_preserves_marker_compatibility_contract
 test_spawn_clears_only_a_valid_inherited_retirement_marker
 
 echo "# all fm-spawn-dispatch-profile tests passed"

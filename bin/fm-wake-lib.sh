@@ -17,12 +17,19 @@ else
   # Missing marker support must fail toward surfacing work, never abort every
   # consumer of this core library or leave a fresh incarnation muted.
   fm_record_retire_wake_muted() { return 1; }
-  fm_record_retire_marker_clear_for_spawn() {
-    local marker="$1/.record-retired-$2"
+  fm_record_retire_marker_path() {
+    printf '%s/.record-retired-%s\n' "$1" "$2"
+  }
+  fm_record_retire_marker_validate_for_spawn() {
+    local marker
+    marker=$(fm_record_retire_marker_path "$1" "$2")
     [ ! -e "$marker" ] && [ ! -L "$marker" ] || {
       printf 'error: record-retirement support is unavailable for task %s; refusing spawn\n' "$2" >&2
       return 1
     }
+  }
+  fm_record_retire_marker_clear_for_spawn() {
+    fm_record_retire_marker_validate_for_spawn "$1" "$2"
   }
 fi
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
