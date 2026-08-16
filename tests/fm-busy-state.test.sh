@@ -20,12 +20,18 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-busy-state)
 EV="$ROOT/bin/fm-busy-event.sh"
 CODEX_FAKEBIN="$TMP_ROOT/codex-fakebin"
+CODEX_OVERRIDE="$TMP_ROOT/codex-override"
 mkdir -p "$CODEX_FAKEBIN"
 cat > "$CODEX_FAKEBIN/codex" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "${FM_FAKE_CODEX_VERSION:-codex-cli 0.145.0}"
 SH
 chmod +x "$CODEX_FAKEBIN/codex"
+cat > "$CODEX_OVERRIDE" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_FAKE_CODEX_OVERRIDE_VERSION:-codex-cli 0.145.0}"
+SH
+chmod +x "$CODEX_OVERRIDE"
 PATH="$CODEX_FAKEBIN:$PATH"
 export PATH
 FM_FAKE_CODEX_VERSION='codex-cli 0.145.0'
@@ -282,6 +288,16 @@ test_codex_appserver_gate_and_deadline() {
 
   FM_FAKE_CODEX_VERSION='codex-cli 0.147.0'
   fm_busy_codex_appserver_observable || fail "canonical Codex 0.147.0 must pass the app-server gate"
+
+  FM_FAKE_CODEX_VERSION='codex-cli 0.145.0'
+  FM_FAKE_CODEX_OVERRIDE_VERSION='codex-cli 0.147.0' \
+    FM_CODEX_BIN="$CODEX_OVERRIDE" fm_busy_codex_appserver_observable \
+    || fail "the version gate did not inspect the FM_CODEX_BIN client will launch"
+  FM_FAKE_CODEX_VERSION='codex-cli 0.147.0'
+  FM_FAKE_CODEX_OVERRIDE_VERSION='codex-cli 0.145.0' \
+    FM_CODEX_BIN="$CODEX_OVERRIDE" fm_busy_codex_appserver_observable \
+    && fail "the version gate accepted a different PATH binary than the FM_CODEX_BIN launch target"
+
   "$EV" apply "$state" t1 busy --gen "$gen" --source codex-appserver --event turn-started
   out=$(fm_busy_classify tmux w1 codex t1 "$state")
   [ "$out" = "unknown codex-deadline-missing" ] \

@@ -118,6 +118,7 @@ Each converted adapter reports its own turn lifecycle through a machine-readable
 Kimi behind Pi inherits Pi's lifecycle.
 Codex reports busy only after the owned connection observes both `thread/status/changed(active)` and `turn/started`, and reports idle only when `turn/completed(completed)` agrees with a clean exit from that turn's app-server process group.
 Its absolute turn deadline is the only turn hang detector, and expiry interrupts then terminates only that owned process group before publishing `unknown codex-timeout`.
+The child `exit` event is the process-result and reap boundary, so inherited pipes cannot delay publication and no escalation signal is issued after that boundary.
 Standalone Kimi classifies unknown behind an explicit probe until a semantic source is live-verified for it, and Grok keeps one clearly isolated rendered-tail fallback that can only ever classify a Grok task.
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.

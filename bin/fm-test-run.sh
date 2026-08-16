@@ -397,7 +397,7 @@ tests/fm-calm-pi-extension.test.sh 203
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 19
 tests/fm-claude-stop-autoarm.test.sh 60521
 tests/fm-codex-continuity-live-e2e.test.sh 19
-tests/fm-codex-appserver-client.test.sh 6000
+tests/fm-codex-appserver-client.test.sh 12000
 tests/fm-codex-liveness-live-e2e.test.sh 19
 tests/fm-daemon.test.sh 15140
 tests/fm-documentation-audiences.test.sh 572

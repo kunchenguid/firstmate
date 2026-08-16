@@ -12,7 +12,9 @@
 // through bin/fm-busy-event.sh. The absolute turn deadline is the only turn
 // hang detector; protocol startup also has its own bounded handshake timeout.
 // Timeout escalation targets only the process group whose leader is the child
-// PID created here: turn/interrupt, TERM, then KILL.
+// PID created here: turn/interrupt, TERM, then KILL. The exit event is the reap
+// boundary: it resolves the process result and permanently disables signalling,
+// even when an out-of-group descendant keeps inherited stdio pipes open.
 //
 // The pane interface deliberately uses Codex's established `›` composer glyph
 // so every backend keeps routing submit confirmation through the existing shared
@@ -205,6 +207,8 @@ class AppServerRun {
     this.nextRequestId = 1;
     this.requests = new Map();
     this.child = null;
+    this.protocolLines = null;
+    this.childExited = false;
     this.childClosed = false;
     this.childCode = null;
     this.childSignal = "";
@@ -369,7 +373,8 @@ class AppServerRun {
   }
 
   signalGroup(signal) {
-    if (!this.child?.pid) return;
+    if (!this.child?.pid || this.childExited
+        || this.child.exitCode !== null || this.child.signalCode !== null) return;
     try {
       process.kill(-this.child.pid, signal);
     } catch (error) {
@@ -378,11 +383,11 @@ class AppServerRun {
   }
 
   scheduleEscalation() {
-    if (this.childClosed || this.termTimer || this.killTimer) return;
+    if (this.childExited || this.termTimer || this.killTimer) return;
     const interruptGrace = this.owner.interruptGraceMs;
     const termGrace = this.owner.termGraceMs;
     this.termTimer = setTimeout(() => {
-      if (this.childClosed) return;
+      if (this.childExited) return;
       this.shutdownForced = true;
       try {
         this.signalGroup("SIGTERM");
@@ -390,7 +395,7 @@ class AppServerRun {
         this.forcedOutcome ||= `signal-error-${token(error.message)}`;
       }
       this.killTimer = setTimeout(() => {
-        if (this.childClosed) return;
+        if (this.childExited) return;
         this.shutdownForced = true;
         try {
           this.signalGroup("SIGKILL");
@@ -423,7 +428,7 @@ class AppServerRun {
   }
 
   timeout() {
-    if (this.childClosed || this.terminalStatus) return;
+    if (this.childExited || this.terminalStatus) return;
     if (!this.forcedOutcome.startsWith("protocol-")) this.forcedOutcome = "timeout";
     if (this.threadId && this.turnId) {
       this.request("turn/interrupt", { threadId: this.threadId, turnId: this.turnId })
@@ -433,7 +438,7 @@ class AppServerRun {
   }
 
   interrupt() {
-    if (this.childClosed || this.terminalStatus || !this.threadId || !this.turnId) return false;
+    if (this.childExited || this.terminalStatus || !this.threadId || !this.turnId) return false;
     if (!this.forcedOutcome) this.forcedOutcome = "manual-interrupt";
     this.request("turn/interrupt", { threadId: this.threadId, turnId: this.turnId })
       .catch(() => this.protocolFailure("interrupt-request-failed"));
@@ -442,7 +447,7 @@ class AppServerRun {
   }
 
   async steer(text) {
-    if (!this.threadId || !this.turnId || this.terminalStatus || this.childClosed) return false;
+    if (!this.threadId || !this.turnId || this.terminalStatus || this.childExited) return false;
     try {
       await this.request("turn/steer", {
         threadId: this.threadId,
@@ -456,16 +461,28 @@ class AppServerRun {
     }
   }
 
-  handleClose(code, signal) {
-    if (this.childClosed) return;
-    this.childClosed = true;
+  handleExit(code, signal) {
+    if (this.childExited) return;
+    this.childExited = true;
     this.childCode = code;
     this.childSignal = signal || "";
     for (const timer of [this.startupTimer, this.turnTimer, this.termTimer, this.killTimer]) {
       if (timer) clearTimeout(timer);
     }
-    this.rejectRequests("app-server closed");
-    this.finishResolve(this.result());
+    setImmediate(() => {
+      this.protocolLines?.close();
+      this.child?.stdin.destroy();
+      this.child?.stdout.destroy();
+      this.child?.stderr.destroy();
+      this.rejectRequests("app-server exited");
+      this.finishResolve(this.result());
+    });
+  }
+
+  handleClose(code, signal) {
+    if (this.childClosed) return;
+    this.childClosed = true;
+    if (!this.childExited) this.handleExit(code, signal);
   }
 
   result() {
@@ -571,6 +588,7 @@ class AppServerRun {
       stderrLog = new BoundedLog(stderrPath, this.owner.stderrLimit);
     } catch (error) {
       this.forcedOutcome = `stderr-log-${token(error.message)}`;
+      this.childExited = true;
       this.childClosed = true;
       return this.result();
     }
@@ -583,6 +601,7 @@ class AppServerRun {
       });
     } catch (error) {
       this.forcedOutcome = `spawn-${token(error.message)}`;
+      this.childExited = true;
       this.childClosed = true;
       return this.result();
     }
@@ -599,13 +618,14 @@ class AppServerRun {
         streamFailure("stderr-log", error);
       }
     });
-    const lines = readline.createInterface({ input: this.child.stdout });
-    lines.on("line", (line) => this.handleLine(line));
-    lines.on("error", (error) => streamFailure("stdout-lines", error));
+    this.protocolLines = readline.createInterface({ input: this.child.stdout });
+    this.protocolLines.on("line", (line) => this.handleLine(line));
+    this.protocolLines.on("error", (error) => streamFailure("stdout-lines", error));
     this.child.on("error", (error) => this.protocolFailure(`child-${token(error.message)}`));
+    this.child.on("exit", (code, signal) => this.handleExit(code, signal));
     this.child.on("close", (code, signal) => this.handleClose(code, signal));
     this.startupTimer = setTimeout(() => {
-      if (!this.turnId && !this.terminalStatus && !this.childClosed) {
+      if (!this.turnId && !this.terminalStatus && !this.childExited) {
         this.forcedOutcome = "startup-timeout";
         this.scheduleEscalation();
       }

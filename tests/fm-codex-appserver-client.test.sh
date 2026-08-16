@@ -15,13 +15,14 @@ STATE="$TMP_ROOT/state"
 WORK="$TMP_ROOT/work"
 FAKEBIN="$TMP_ROOT/fakebin"
 SERVER="$TMP_ROOT/fake-appserver.mjs"
+SIGNAL_PRELOAD="$TMP_ROOT/signal-audit.cjs"
 CLIENT="$ROOT/bin/fm-codex-appserver-client.mjs"
 mkdir -p "$STATE" "$WORK" "$FAKEBIN"
 
 cleanup() {
   local suffix
   for suffix in success exit-mismatch terminal-missing interrupt timeout log-failure delayed-evidence \
-    log-init-failure sync-send-failure; do
+    log-init-failure sync-send-failure reaped-pipe-holder; do
     rm -rf -- "/tmp/fm-codex-appserver-test-$suffix"
   done
   fm_test_cleanup
@@ -101,6 +102,16 @@ input.on("line", (line) => {
     }
     write({ method: "turn/started", params: { turn: { id: turnId, status: "inProgress", items: [] } } });
     write({ method: "thread/status/changed", params: { threadId, status: { type: "active" } } });
+    if (mode === "reaped-pipe-holder") {
+      const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], {
+        detached: true,
+        stdio: ["ignore", process.stdout, process.stderr],
+      });
+      holder.unref();
+      writeFileSync(marker, `${holder.pid}\n`);
+      setTimeout(() => process.exit(0), 30);
+      return;
+    }
     if (mode === "sync-send-failure") {
       setTimeout(() => process.stdout.write("{\n"), 30);
       return;
@@ -145,6 +156,19 @@ input.on("close", () => {
 NODE
 chmod +x "$SERVER"
 
+cat > "$SIGNAL_PRELOAD" <<'NODE'
+const fs = require("node:fs");
+const originalKill = process.kill.bind(process);
+process.kill = (pid, signal) => {
+  const audit = process.env.FM_FAKE_SIGNAL_AUDIT || "";
+  if (audit && pid < 0 && (signal === "SIGTERM" || signal === "SIGKILL")) {
+    fs.appendFileSync(audit, `${pid} ${signal}\n`);
+    return true;
+  }
+  return originalKill(pid, signal);
+};
+NODE
+
 new_case() {  # <suffix> -> prints id gen tasktmp
   local suffix=$1 id gen task_tmp
   id="codex-appserver-test-$suffix"
@@ -160,7 +184,7 @@ run_case() {  # <mode> <id> <gen> <tasktmp> [stdin-producer]
   local -a command
   command=("$CLIENT" --state-dir "$STATE" --task-id "$id" --generation "$gen" \
     --cwd "$WORK" --task-tmp "$task_tmp" --turn-ended "$STATE/$id.turn-ended" \
-    --deadline-secs "${FM_TEST_DEADLINE_SECS:-1}" --prompt "fixture prompt" --one-shot)
+    --deadline-secs "${FM_TEST_DEADLINE_SECS:-15}" --prompt "fixture prompt" --one-shot)
   if [ -n "$producer" ]; then
     eval "$producer" | env PATH="$FAKEBIN:$PATH" FM_CODEX_BIN="$FAKEBIN/codex" \
       FM_FAKE_APPSERVER="$SERVER" FM_FAKE_SERVER_MODE="$mode" \
@@ -168,6 +192,8 @@ run_case() {  # <mode> <id> <gen> <tasktmp> [stdin-producer]
       FM_FAKE_BUSY_RECORD="$STATE/$id.busy-state" \
       FM_FAKE_STDERR_LOG="$task_tmp/codex-appserver.stderr.log" \
       FM_FAKE_SERVER_PID_FILE="$task_tmp/server.pid" \
+      FM_FAKE_SIGNAL_AUDIT="${FM_TEST_SIGNAL_AUDIT:-}" \
+      NODE_OPTIONS="${FM_TEST_NODE_OPTIONS:-}" \
       FM_CODEX_APPSERVER_STDERR_MAX_BYTES=4096 \
       FM_CODEX_APPSERVER_STARTUP_TIMEOUT_MS=1000 \
       FM_CODEX_APPSERVER_INTERRUPT_GRACE_MS="${FM_TEST_INTERRUPT_GRACE_MS:-100}" \
@@ -179,6 +205,8 @@ run_case() {  # <mode> <id> <gen> <tasktmp> [stdin-producer]
       FM_FAKE_BUSY_RECORD="$STATE/$id.busy-state" \
       FM_FAKE_STDERR_LOG="$task_tmp/codex-appserver.stderr.log" \
       FM_FAKE_SERVER_PID_FILE="$task_tmp/server.pid" \
+      FM_FAKE_SIGNAL_AUDIT="${FM_TEST_SIGNAL_AUDIT:-}" \
+      NODE_OPTIONS="${FM_TEST_NODE_OPTIONS:-}" \
       FM_CODEX_APPSERVER_STDERR_MAX_BYTES=4096 \
       FM_CODEX_APPSERVER_STARTUP_TIMEOUT_MS=1000 \
       FM_CODEX_APPSERVER_INTERRUPT_GRACE_MS="${FM_TEST_INTERRUPT_GRACE_MS:-100}" \
@@ -248,7 +276,7 @@ test_timeout_kills_only_the_owned_process_group() {
   IFS=$'\t' read -r id gen task_tmp <<EOF
 $(new_case timeout)
 EOF
-  out=$(run_case timeout "$id" "$gen" "$task_tmp" 2>&1) || rc=$?
+  out=$(FM_TEST_DEADLINE_SECS=1 run_case timeout "$id" "$gen" "$task_tmp" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "deadline expiry returned success: $out"
   [ "$(classify "$id")" = "unknown codex-timeout" ] \
     || fail "timeout was not surfaced concretely: $(classify "$id")"
@@ -333,6 +361,29 @@ EOF
   pass "synchronous send failures retain exact-group cleanup and publication"
 }
 
+test_reaped_child_pid_is_never_signalled() {
+  local id gen task_tmp out rc=0 audit holder_pid
+  IFS=$'\t' read -r id gen task_tmp <<EOF
+$(new_case reaped-pipe-holder)
+EOF
+  audit="$task_tmp/signal-audit"
+  out=$(FM_TEST_DEADLINE_SECS=1 FM_TEST_SIGNAL_AUDIT="$audit" \
+    FM_TEST_NODE_OPTIONS="--require=$SIGNAL_PRELOAD" \
+    run_case reaped-pipe-holder "$id" "$gen" "$task_tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "reaped child without terminal returned success: $out"
+  [ ! -s "$audit" ] \
+    || fail "the client signalled a reaped process-group id: $(tr '\n' ' ' < "$audit")"
+  [ "$(classify "$id")" = "unknown codex-terminal-missing" ] \
+    || fail "reaped child did not publish its concrete result: $(classify "$id")"
+  [ -f "$STATE/$id.turn-ended" ] || fail "reaped child omitted its turn-ended wake"
+  holder_pid=$(cat "$task_tmp/descendant-survived")
+  if ! kill -0 "$holder_pid" 2>/dev/null; then
+    fail "the client waited for inherited pipe closure instead of resolving from child reap"
+  fi
+  kill "$holder_pid" 2>/dev/null || true
+  pass "a reaped app-server pid is never signalled even when inherited pipes remain open"
+}
+
 test_terminal_and_clean_exit_are_joint_success
 test_terminal_without_clean_exit_refuses_success
 test_clean_exit_without_terminal_refuses_success
@@ -342,5 +393,6 @@ test_bounded_log_failure_publishes_unknown_and_reaps_group
 test_delayed_evidence_preserves_absolute_deadline
 test_bounded_log_initialization_failure_publishes_unknown
 test_sync_send_failure_retains_cleanup_ownership
+test_reaped_child_pid_is_never_signalled
 
 echo "all fm-codex-appserver-client tests passed"

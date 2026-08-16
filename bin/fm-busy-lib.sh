@@ -121,10 +121,13 @@ fm_busy_kimi_verified() {
 # app-server release exercised end to end by this adapter. Unexpected,
 # prerelease, noncanonical, unreadable, or older output fails closed. A later
 # stable version may enter the client, but its initialize/thread/turn handshake
-# must still succeed before any positive busy verdict is published.
+# must still succeed before any positive busy verdict is published. The gate
+# reads FM_CODEX_BIN when set so it verifies the same executable the client
+# launches rather than whichever codex happens to resolve first on PATH.
 fm_busy_codex_version_supported() {
-  local version major minor patch
-  version=$(codex --version 2>/dev/null) || return 1
+  local codex_bin version major minor patch
+  codex_bin=${FM_CODEX_BIN:-codex}
+  version=$("$codex_bin" --version 2>/dev/null) || return 1
   if [[ ! "$version" =~ ^codex-cli[[:space:]]+(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
     return 1
   fi

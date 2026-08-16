@@ -214,7 +214,7 @@ Claude Code's primary watcher protocol is Stop-owned: the auto-arm hook fires on
 
 | Fact | Value |
 |---|---|
-| Busy state | Firstmate owns one foreground `codex app-server` child process group per turn and its bidirectional protocol pipes. It publishes busy only after `thread/status/changed(active)` and `turn/started`, and idle only after `turn/completed(completed)` agrees with a clean child exit. Failed, interrupted, timed-out, incomplete, or disagreeing results publish a concrete unknown verdict. Older, unreadable, prerelease, or unexpected versions remain `unknown codex-unverified`. |
+| Busy state | Firstmate owns one foreground `codex app-server` child process group per turn and its bidirectional protocol pipes. It publishes busy only after `thread/status/changed(active)` and `turn/started`, and idle only after `turn/completed(completed)` agrees with a clean child exit. The child `exit` event records the process result, disables every later group signal, and resolves without waiting for inherited pipe closure. Failed, interrupted, timed-out, incomplete, or disagreeing results publish a concrete unknown verdict. Older, unreadable, prerelease, or unexpected versions remain `unknown codex-unverified`. |
 | Exit command | `/quit` |
 | Interrupt | single Escape, routed by the owning client to `turn/interrupt` |
 | Skill invocation | `$<skill>` (e.g. `$no-mistakes`) is sent as ordinary turn input through the app-server protocol |

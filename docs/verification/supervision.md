@@ -181,7 +181,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
 | OpenCode | 1.17.18 | Plugin `session.status` | In a real TUI pane: seed, then `busy source=opencode-plugin event=session-busy`, then `idle source=opencode-plugin event=session-status-idle`. |
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` and `SessionEnd` are wired from the four hook names present in the installed binary; only the abnormal paths they cover were not reproduced live. |
-| Codex | codex-cli 0.147.0 | Firstmate-owned `codex app-server` protocol pipes plus the owned child process result | `thread/status/changed(active)` and `turn/started` classify busy. Only `turn/completed(completed)` plus a clean child exit classify idle. Failed, interrupted, timed-out, incomplete, or disagreeing protocol/process results classify a concrete unknown. Strict older or unexpected versions remain `unknown codex-unverified`. |
+| Codex | codex-cli 0.147.0 | Firstmate-owned `codex app-server` protocol pipes plus the owned child process result | `thread/status/changed(active)` and `turn/started` classify busy. Only `turn/completed(completed)` plus a clean child exit classify idle. The child reap disables every later process-group signal and resolves without waiting for inherited pipe closure. Failed, interrupted, timed-out, incomplete, or disagreeing protocol/process results classify a concrete unknown. Strict older or unexpected versions remain `unknown codex-unverified`. |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
 
@@ -218,6 +218,8 @@ Those hook findings establish why hooks cannot own Codex worker liveness: API fa
 The replacement makes Firstmate the client of one foreground `codex app-server` child process group per turn, with JSONL protocol pipes and bounded stderr under the short `/tmp/fm-<id>` task directory.
 It publishes success only after the matching terminal protocol event and child result agree, and it refuses missing, failed, interrupted, or contradictory evidence.
 An explicit absolute turn deadline is the only turn hang detector; expiry requests `turn/interrupt`, then escalates TERM and KILL only to the exact process group the client created, and records `unknown codex-timeout`.
+The 2026-08-16 adversarial reap case starts an out-of-group descendant that holds the child's inherited pipes open, safely audits and swallows any attempted negative-PGID signal, and requires the client to publish while that holder is still alive.
+The fixed client produced `ok - a reaped app-server pid is never signalled even when inherited pipes remain open` under `tests/fm-codex-appserver-client.test.sh`.
 
 Deterministic entry points:
 
