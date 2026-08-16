@@ -24,7 +24,7 @@
 # and tests/wake-helpers.sh (same fake-tmux convention, run against the
 # now-refactored bin/fm-watch.sh); this suite adds one direct old-vs-new
 # diff for the stale-pane path specifically, since that is the one wake path
-# that now calls through fm_backend_capture instead of tmux directly.
+# that now calls through fm_backend_monitor_capture instead of tmux directly.
 # The real tmux smoke test (create session, send text + Enter, capture, list,
 # kill) lives in tests/fm-backend-tmux-smoke.test.sh.
 set -u
@@ -501,6 +501,24 @@ test_backend_source_shell_portable() {
   assert_contains "$out" "unknown backend 'bogus'" \
     "bash: fm_backend_source did not reject bogus with the expected error"
   pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
+}
+
+test_monitor_capture_changes_only_herdr_dispatch() {
+  (
+    _FM_BACKEND_HERDR_SOURCED=1
+    # shellcheck disable=SC2329 # Indirectly invoked by fm_backend_monitor_capture.
+    fm_backend_capture() { printf 'historical:%s:%s:%s:%s' "$1" "$2" "$3" "$4"; }
+    # shellcheck disable=SC2329 # Indirectly invoked by fm_backend_monitor_capture.
+    fm_backend_herdr_monitor_capture() { printf 'herdr-passive:%s:%s' "$1" "$2"; }
+
+    [ "$(fm_backend_monitor_capture tmux t 40 label)" = "historical:tmux:t:40:label" ] || exit 1
+    [ "$(fm_backend_monitor_capture herdr h 40 label)" = "herdr-passive:h:40" ] || exit 1
+    [ "$(fm_backend_capture herdr h 40 label)" = "historical:herdr:h:40:label" ] || exit 1
+    [ "$(fm_backend_monitor_capture zellij z 40 label)" = "historical:zellij:z:40:label" ] || exit 1
+    [ "$(fm_backend_monitor_capture orca o 40 label)" = "historical:orca:o:40:label" ] || exit 1
+    [ "$(fm_backend_monitor_capture cmux c 40 label)" = "historical:cmux:c:40:label" ] || exit 1
+  ) || fail "monitor capture dispatch changed a non-Herdr backend or degraded Herdr historical capture"
+  pass "fm_backend_monitor_capture: only Herdr uses passive capture; every other backend and explicit Herdr history stay unchanged"
 }
 
 test_backend_validate_spawn_accepts_orca() {
@@ -1126,6 +1144,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_monitor_capture_changes_only_herdr_dispatch
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms

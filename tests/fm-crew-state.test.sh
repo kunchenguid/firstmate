@@ -96,6 +96,13 @@ SH
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -n "${FM_FAKE_HERDR_LOG:-}" ]; then
+  {
+    printf 'herdr'
+    for arg in "$@"; do printf '\x1f%s' "$arg"; done
+    printf '\n'
+  } >> "$FM_FAKE_HERDR_LOG"
+fi
 case "${1:-}" in
   status)
     [ "${2:-}" = --json ] && {
@@ -108,7 +115,7 @@ case "${1:-}" in
     case "${2:-}" in
       read)
         [ "${FM_FAKE_HERDR_MISSING:-0}" = 1 ] && exit 1
-        if [ "${FM_FAKE_HERDR_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
+        if [ "${FM_FAKE_HERDR_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
         else printf 'all quiet\n> \n'; fi
         exit 0 ;;
     esac ;;
@@ -169,9 +176,10 @@ reset_fakes() {
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
+  FM_FAKE_HERDR_LOG=""
   FM_FAKE_CI_LOGS=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_LOG FM_FAKE_CI_LOGS
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -845,7 +853,7 @@ test_no_run_grok_uses_isolated_fallback() {
   pass "grok still reads working through its isolated rendered-tail fallback"
 }
 
-test_no_run_herdr_unknown_uses_backend_capture() {
+test_no_run_herdr_native_busy_reads_working() {
   command -v jq >/dev/null 2>&1 || { pass "herdr pane fallback skipped without jq"; return; }
   reset_fakes
   local d; d=$(new_case herdr-busy)
@@ -863,6 +871,41 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   assert_contains "$out" "source: pane" "herdr native busy -> pane source"
   assert_contains "$out" "herdr-native" "the herdr verdict names its native source"
   pass "herdr's native busy verdict reads working with no record present"
+}
+
+# fm-crew-state is called repeatedly by supervision, so both its endpoint
+# readability probe and Grok's rendered-tail fallback must stay on Herdr's
+# passive visible-screen capture rather than the history-bearing recent source.
+test_no_run_herdr_recurring_reads_are_passive() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr passive crew-state capture skipped without jq"; return; }
+  reset_fakes
+  local d out reads count
+  d=$(new_case herdr-passive-crew-state)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-passive
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-passive.meta" "window=default:w1:p5" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=grok"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_BUSY=1
+  FM_FAKE_HERDR_AGENT_STATUS=idle
+  FM_FAKE_BUSY_TEXT='Ctrl+c:cancel'
+  FM_FAKE_HERDR_LOG="$d/herdr.log"
+  : > "$FM_FAKE_HERDR_LOG"
+  out=$(run_crew_state "$d" feat-herdr-passive)
+  assert_contains "$out" "state: working" "the passive visible capture lost Grok's current busy signature"
+  assert_contains "$out" "grok-regex" "the passive visible capture degraded Grok classification"
+  reads=$(grep "$(printf '\x1f')pane$(printf '\x1f')read$(printf '\x1f')w1:p5" "$FM_FAKE_HERDR_LOG" || true)
+  count=$(printf '%s\n' "$reads" | grep -c . || true)
+  [ "$count" -eq 2 ] || fail "fm-crew-state should issue two Herdr pane reads in this fallback, got $count"
+  while IFS= read -r read_call; do
+    assert_contains "$read_call" "$(printf '\x1f')--source$(printf '\x1f')visible" \
+      "fm-crew-state recurring Herdr read did not use the passive visible source"
+    assert_not_contains "$read_call" "$(printf '\x1f')recent" \
+      "fm-crew-state recurring Herdr read requested alternate-screen history"
+  done <<< "$reads"
+  pass "fm-crew-state recurring Herdr reads use passive visible capture without degrading Grok classification"
 }
 
 # Regression (2026-07 herdr false-surface incident, now solved semantically):
@@ -1336,7 +1379,8 @@ test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
-test_no_run_herdr_unknown_uses_backend_capture
+test_no_run_herdr_native_busy_reads_working
+test_no_run_herdr_recurring_reads_are_passive
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log

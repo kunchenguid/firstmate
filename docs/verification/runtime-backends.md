@@ -320,6 +320,84 @@ ok - real herdr E2E: teardown closes only the worker's own pane and leaves the l
 That suite's headline case runs `bin/fm-spawn.sh` inside a real Herdr pane, so the parent identity comes from Herdr's own injection rather than a composed environment.
 Cross-session and contradictory bindings are covered deterministically in `tests/fm-backend-herdr.test.sh`, which can script a second server's socket without provisioning one.
 
+### Pane crew placement
+
+Checked on 2026-08-12 against Herdr 0.8.0 protocol 19 (macOS aarch64, `/opt/homebrew/bin/herdr`) inside a guarded lab.
+
+`pane split` answers with a `pane_info` result whose `.result.pane.pane_id` is the NEW pane, created in the target pane's own tab and workspace, and `--no-focus` leaves it unfocused:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh
+"$HERDR_LAB_HELPER" run "$LAB" pane split w1:p1 --direction right --cwd /tmp --no-focus \
+  | jq -c '{type: .result.type, pane: (.result.pane | {pane_id, tab_id, workspace_id, focused})}'
+```
+
+```text
+{"type":"pane_info","pane":{"pane_id":"w1:p2","tab_id":"w1:t1","workspace_id":"w1","focused":false}}
+```
+
+`pane rename` attaches the `fm-<id>` label the discovery paths read, and `pane list` reports it per pane:
+
+```sh
+"$HERDR_LAB_HELPER" run "$LAB" pane rename w1:p2 fm-evidence
+"$HERDR_LAB_HELPER" run "$LAB" pane list --workspace w1 | jq -c '[.result.panes[] | {pane_id, tab_id, label}]'
+```
+
+```text
+[{"pane_id":"w1:p1","tab_id":"w1:t1","label":null},{"pane_id":"w1:p2","tab_id":"w1:t1","label":"fm-evidence"}]
+```
+
+A tab's own focused pane is `pane layout`'s `focused_pane_id`, which the split does not move, and each pane's rectangle is what the placement chooser reads:
+
+```sh
+"$HERDR_LAB_HELPER" run "$LAB" pane layout --pane w1:p1 \
+  | jq -c '.result.layout | {tab_id, focused_pane_id, panes: [.panes[] | {pane_id, focused, rect}]}'
+```
+
+```text
+{"tab_id":"w1:t1","focused_pane_id":"w1:p1","panes":[{"pane_id":"w1:p1","focused":true,"rect":{"height":23,"width":27,"x":26,"y":1}},{"pane_id":"w1:p2","focused":false,"rect":{"height":23,"width":27,"x":53,"y":1}}]}
+```
+
+A pane's own `focused` field is session-global rather than per-tab: every pane of a workspace that does not hold session focus reports `false`, so only `focused_pane_id` answers which pane its tab would hand keystrokes to.
+
+Closing one pane of a multi-pane tab removes that pane alone and keeps the tab, which is why the workspace-emptying focus-safe plan cannot apply to this placement:
+
+```sh
+"$HERDR_LAB_HELPER" run "$LAB" pane close w1:p2
+"$HERDR_LAB_HELPER" run "$LAB" pane list --workspace w1 | jq -c '[.result.panes[].pane_id]'
+"$HERDR_LAB_HELPER" run "$LAB" tab list --workspace w1 | jq -c '[.result.tabs[].tab_id]'
+```
+
+```text
+["w1:p1"]
+["w1:t1"]
+```
+
+The end-to-end guarantee is owned by:
+
+```sh
+tests/fm-backend-herdr-pane-placement-e2e.test.sh
+```
+
+Observed on 2026-08-12 against Herdr 0.8.0 protocol 19, after the right-half stacking change (the launcher keeps its tab's left half undivided and every worker pane stacks in the right half in spawn order):
+
+```text
+ok - real herdr E2E: a pane-placed worker is created as a new pane inside the launching agent's exact tab and workspace
+ok - real herdr E2E: the first worker takes the right half while the launcher keeps the left
+ok - real herdr E2E: the worker pane carries its fm-<id> label and list-live discovers it there
+ok - real herdr E2E: the split leaves both the focused workspace and the launcher tab's own focused pane alone
+ok - real herdr E2E: the second worker splits within the right half below the first, and the launcher pane is never touched again
+ok - real herdr E2E: a third worker splits the bottom-most pane of the right-hand stack, keeping the launcher and the higher worker panes untouched
+ok - real herdr E2E: an absent config/herdr-crew-placement still produces one task tab per worker
+ok - real herdr E2E: tearing down the bottom-most worker retargets the next spawn onto the new bottom-most surviving worker pane
+ok - real herdr E2E: closing a worker that shares the captain's ACTIVE tab removes only that pane and never the launcher, tab, or workspace
+ok - real herdr E2E: once every worker pane is gone, the next spawn falls back to the first-worker case and takes the right half again
+ok - real herdr E2E: a missing launcher pane and an explicit placement/projection conflict both refuse before any worker endpoint exists
+ok - real herdr E2E: isolated lab session removed and default fleet session unchanged
+```
+
+Deterministic parsing, refusal wording, the bottom-most-pane selection, and rollback bounds are covered without a real binary in `tests/fm-backend-herdr.test.sh`.
+
 ### Per-home and presentation topology
 
 Per-home behavior is owned by:

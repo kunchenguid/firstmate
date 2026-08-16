@@ -835,8 +835,9 @@ fm_busy_grok_tail_busy() {
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
 # process state. <tail40> is optional pre-captured plain output used only by
-# the Grok arm; when absent the Grok arm captures through fm_backend_capture
-# if available, else reports unknown capture-failed.
+# the Grok arm. Recurring supervision callers pass their passive monitor
+# capture here; the absent-tail fallback uses historical fm_backend_capture
+# only for one-shot callers such as explicit control diagnostics.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log

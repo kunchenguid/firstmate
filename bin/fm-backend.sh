@@ -691,7 +691,8 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
 # at every call site. Each verified backend adds its own arm here, without
 # changing call sites.
 
-# fm_backend_capture: bounded plain-text session capture.
+# fm_backend_capture: bounded plain-text historical session capture for explicit
+# diagnosis, including fm-peek.sh. Backends may include scrollback/history.
 fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   local backend=$1
   shift
@@ -704,6 +705,21 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     cmux) fm_backend_cmux_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
+}
+
+# fm_backend_monitor_capture: bounded plain-text capture for recurring passive
+# monitoring. Only Herdr distinguishes this from historical capture because an
+# oversized recent read can drive an idle agent's alternate-screen scroll UI.
+# Every other backend retains its existing capture behavior byte-for-byte.
+fm_backend_monitor_capture() {  # <backend> <target> <lines> [expected-label]
+  local backend=$1
+  shift
+  if [ "$backend" != herdr ]; then
+    fm_backend_capture "$backend" "$@"
+    return
+  fi
+  fm_backend_source herdr || return 1
+  fm_backend_herdr_monitor_capture "$@"
 }
 
 # fm_backend_send_key: one backend-supported named special key.

@@ -35,7 +35,7 @@ Real harness credential tests remain opt-in rather than part of default CI.
 
 ## Watching and task containers
 
-The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.
+The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it, unless the home selects the pane placement in [Crew placement](#crew-placement).
 When the launcher has no Herdr workspace to inherit, the adapter maintains one durable home-labeled workspace instead.
 The primary home label is `firstmate`.
 A secondmate home label is `2ndmate-<secondmate-id>`, derived from its validated `.fm-secondmate-home` marker.
@@ -66,6 +66,40 @@ Recovery and list-live still scan the first workspace matching the home label, b
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
+
+## Crew placement
+
+The endpoint a crewmate or scout gets is a new task tab by default, and can instead be a pane split off inside the launching agent's own tab.
+A home selects that with local gitignored `config/herdr-crew-placement`: an absent file or `tab` keeps the topology above unchanged, and `pane` splits the Firstmate or secondmate pane that launched the worker.
+Values are compared with whitespace stripped and case ignored.
+Unlike the purely visual presentation preference, this file decides where a worker endpoint is created, so an unrecognized or empty value refuses the spawn with an actionable error instead of choosing a placement nobody asked for.
+The setting is inherited into secondmate homes through the normal configuration-convergence owner, so a secondmate's own crewmates split that secondmate agent's tab.
+A `--secondmate` launch itself always uses tab placement, because it stands up another home's own workspace and has no launcher pane there to split.
+
+Pane placement uses the same verified launcher identity as launcher-bound workspace placement and trusts no label.
+It refuses, before any endpoint exists, when this process is not running in a Herdr pane, when the claimed launcher identity is unreadable, contradictory, stale, or from another session, when the running client's own schema does not carry `pane.split` and `pane.rename` in the shape the adapter sends, when the panes or tabs of the launcher's workspace cannot be listed or parsed for the duplicate check, when a live or unreadable same-labeled endpoint already exists anywhere in that workspace, when this id's existing journal or metadata records a live or unknown endpoint, or when the split fails.
+None of those refusals fall back to the tab topology, and none of them publish anything.
+
+Placement inside the tab is a visual nicety rather than a safety boundary, but the shape is deliberate: the launcher keeps its tab's left half undivided no matter how many workers join, and every worker pane stacks in the right half in spawn order, top to bottom.
+Firstmate reads Herdr's own per-tab rectangles to find the bottom-most pane of that right-hand stack and splits it downward for each new worker; the first worker is the exception, splitting the launcher pane itself to the right since no right-hand stack exists yet.
+Reading the bottom-most pane off Herdr's own rectangles rather than tracking spawn order makes this teardown-safe for free: after a worker pane closes, the next spawn still targets whichever surviving worker pane Herdr's own layout now reports lowest, and it behaves like the first worker again once no worker pane remains.
+An unreadable layout falls back to splitting the launcher's pane to the right, which is still pane placement.
+The new pane is identified by diffing the tab's own pane list around the split rather than by trusting one response field: exactly one new pane must appear, a pane id in the split response must be that same pane, and the pane must read back inside the launcher's exact tab and workspace.
+It is then labeled `fm-<id>`, which is what makes it discoverable by list-live and by a bare selector, and a pane that cannot be verified, cannot carry that label, or lands anywhere else is closed again rather than published.
+Recovery, list-live, bare-selector resolution, composer reads, steering, peeking, native agent state, and busy state all work unchanged because the recorded endpoint is still an exact `<session>:<pane-id>`; list-live reads the `fm-<id>` label off the pane for this placement and off the tab for the other one.
+The duplicate scan is fail-closed and covers the launcher's whole workspace for panes and tabs alike, so the refusal scope is never narrower than the workspace-wide scope list-live discovers `fm-<id>` labels in: an unreadable pane or tab listing refuses the spawn instead of passing as no duplicate, and a live or unreadable same-labeled pane in any tab of that workspace, or a same-labeled task tab left behind by the tab topology before the placement changed, refuses too.
+A restored agent-less same-labeled husk of either shape after a Herdr restart is replaced exactly as the tab topology replaces one, with the replacement created before the husk is closed; the launcher's own tab is never a husk candidate and is never closed.
+Before anything is placed, an existing presentation journal or task metadata for the same id passes the same duplicate-launch isolation the projection recovery path applies: a live or unknown recorded endpoint refuses the spawn and publishes nothing, and only a positively dead or agent-free prior endpoint proceeds, exactly as on the flat path.
+
+Pane placement and presentation spaces are two answers to the same question and never compose.
+Pane placement suppresses the projection for an unconfigured or opted-out home, and an explicit `config/herdr-presentation-spaces` value of `on` alongside `config/herdr-crew-placement=pane` is a configuration conflict that refuses the spawn rather than letting one silently win.
+
+Cleanup needs no separate path and gains no new authority.
+Teardown closes the exact recorded worker pane and confirms only that pane gone, so the launcher's own pane and the shared tab are never closed.
+The focus-safe workspace-emptying plan is inapplicable here by construction rather than skipped: it exists only for a close that would empty a workspace, and a pane-placed worker always shares its tab with the launcher's own surviving pane, so the tab keeps at least one pane and the workspace cannot be emptied.
+The close therefore takes the ordinary confirmed explicit-close path, including when the worker's tab is the captain's active tab, which is the normal case for this placement; it moves focus only within that tab and removes nothing else.
+
+`tests/fm-backend-herdr-pane-placement-e2e.test.sh` covers placement, labeling and discovery, focus preservation, repeated spawns, the unchanged tab default, exact-pane cleanup including in the active tab, and both refusals through the guarded lab path; [`verification/runtime-backends.md`](verification/runtime-backends.md#pane-crew-placement) owns the active versioned evidence.
 
 ## Presentation spaces
 
@@ -224,8 +258,9 @@ The composer verdict itself is deliberately unchanged: a right-aligned status to
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed transition can cause only a redundant Enter on an empty composer, never duplicate message text.
 
 `pane read --lines N` can return empty output when N is below the viewport height.
-The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
-This generous floor is required for small composer and peek reads.
+Historical and ANSI capture request at least 200 lines from Herdr and trim locally to the caller's bound.
+This generous floor is required for small composer and explicit peek reads.
+Recurring watcher hashing instead reads the passive `visible` snapshot and trims locally, so routine monitoring never requests alternate-screen history.
 
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
 The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
@@ -329,6 +364,7 @@ tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
+tests/fm-backend-herdr-pane-placement-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh

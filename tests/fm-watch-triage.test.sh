@@ -525,6 +525,49 @@ test_actionable_signal_surfaced() {
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
 }
 
+test_herdr_recurring_capture_is_passive() {
+  local dir state fakebin out log pid i read_call
+  dir=$(make_case herdr-passive-capture); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; log="$dir/herdr.log"; : > "$log"
+  fm_write_meta "$state/herdr-passive.meta" \
+    "window=default:w1:p2" "backend=herdr" "kind=ship" "harness=pi"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+{
+  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
+  for arg in "$@"; do printf '\x1f%s' "$arg"; done
+  printf '\n'
+} >> "${FM_HERDR_LOG:?}"
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.8.0","protocol":19},"server":{"running":true}}\n' ;;
+  "pane read") printf 'passive current screen\n' ;;
+  "agent get") printf '{"error":{"code":"agent_not_found"}}\n' ;;
+  "api schema") printf '{}\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
+
+  FM_HERDR_LOG="$log" watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ]; do
+    grep "$(printf '\x1f')pane$(printf '\x1f')read$(printf '\x1f')w1:p2" "$log" >/dev/null 2>&1 && break
+    kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "watcher exited before reading the Herdr pane"; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  read_call=$(grep "$(printf '\x1f')pane$(printf '\x1f')read$(printf '\x1f')w1:p2" "$log" | head -n 1)
+  reap "$pid"
+  [ -n "$read_call" ] || fail "watcher never read the Herdr pane"
+  assert_contains "$read_call" "$(printf '\x1f')--source$(printf '\x1f')visible" \
+    "recurring Herdr monitoring did not use the passive visible source"
+  assert_not_contains "$read_call" "$(printf '\x1f')recent" \
+    "recurring Herdr monitoring requested alternate-screen history"
+  pass "watcher recurring Herdr capture uses the passive visible source"
+}
+
 test_terminal_stale_surfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
   dir=$(make_case terminal-stale); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1941,6 +1984,7 @@ test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
+test_herdr_recurring_capture_is_passive
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated

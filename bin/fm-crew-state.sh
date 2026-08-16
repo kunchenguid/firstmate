@@ -143,27 +143,28 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 # shell - so a finished crew whose endpoint has closed still reports its run-step
 # state (e.g. done) instead of being masked as unknown. Backend-aware
 # (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
-# herdr task is read through fm_backend_capture instead of a bare tmux probe.
+# Herdr task uses the passive monitoring capture instead of a bare tmux probe.
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
     tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
-    *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
+    *) fm_backend_monitor_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
 # crew_busy_verdict: the crew's semantic busy state from the one contract
 # owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
 # adapter answers from its own lifecycle record; Grok answers from its
-# isolated rendered-tail fallback; a herdr crew's native `busy` is accepted
-# when no record exists, but its native `idle` is NOT, because agent.get
-# reports generation state (idle while a crew blocks on its own long-running
-# foreground tool call) rather than turn state.
+# isolated rendered-tail fallback, whose busy signature is confined to the
+# last 12 lines and therefore needs no history beyond the visible screen; a
+# Herdr crew's native `busy` is accepted when no record exists, but its native
+# `idle` is NOT, because agent.get reports generation state (idle while a crew
+# blocks on its own long-running foreground tool call) rather than turn state.
 crew_busy_verdict() {  # <target>
   local tail40=''
   case "$HARNESS" in
-    grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
+    grok*) tail40=$(fm_backend_monitor_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
   esac
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }

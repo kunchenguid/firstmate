@@ -6,6 +6,7 @@ This record holds reusable version-scoped evidence for the runner's active guara
 `docs/configuration.md` owns the operating contract, each script's header and `--help` own its mechanics, and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
 Verified on 2026-07-31 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.45 installed.
+The file-appearance adapter rows were added and verified on 2026-08-07 on the same platform by `bash tests/fm-procevent.test.sh`, which needs no external tool.
 
 ## The published Lavish poll interface the adapter wraps
 
@@ -84,6 +85,9 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | terminal retirement preserves the result | the retired source's captured output, its announced event, its handled acknowledgement, and later explicit `retire` all still behave normally |
 | registration-generation retirement | an old terminal runner preserves a concurrently replaced registration and releases ownership so the replacement runs independently; injected registration-removal failure retains a terminal claim, performs no second poll, and completes idempotently once removal recovers |
 | one `Send & End`, one result | an armed Lavish source driven against a stand-in for the published poll, which delivers the final `session_ended` feedback once and empty ended sessions afterward, polls exactly once, captures exactly one result, publishes one distinct event, and retires itself |
+| recurring file source, one appearance one wake | an armed `bin/fm-procevent-file.sh` source against a real temp home stays silent while its expected file is absent, publishes exactly one event when the `{date}`-expanded file appears, and stays registered because its adapter never reports terminal |
+| file-appearance cursor | a file this source already reported is not emitted again after the runner starts the next child, while the same path rewritten past the recorded mtime is reported as a new appearance with its own distinct event |
+| per-iteration date expansion | with only the calendar faked, a child armed on one day emits nothing for a date whose file does not exist and then emits for the next day's file without being re-armed, so `{date}` is re-expanded on every poll rather than once at startup |
 | bounded re-announcement until handled | a durably captured result with no handled acknowledgement is re-announced by `reconcile` with the same source and sequence on every call - not only the first restart after a crash - and a presented-but-unacknowledged wake resurfaces identically after a simulated replacement session |
 | handled acknowledgement | `fm-procevent.sh handled <source-id> <sequence>` atomically and idempotently records handling at mode `0600`, fails without leaving a marker when private-mode enforcement fails, reports the first call distinctly from every repeat, stops further re-announcement once recorded, and never authorizes a paired effect twice across repeat calls |
 | publication-and-acknowledgement serialization | a concurrent `reconcile` cannot append a wake after `handled` wins the shared per-source boundary, so an acknowledged result is not re-announced by a publication race |
@@ -146,6 +150,7 @@ Adapters extend the runner through `bin/fm-procevent-<adapter>.sh`; the `when` a
 An adapter's `terminal` command is optional and defaults to keeping the source armed.
 Its `autohandle` command is optional in the same way and defaults to leaving the captured result unacknowledged, so it keeps being announced to a handler exactly as before.
 The optional `self-announcing` declaration changes ordering only for an adapter with its own durable downstream announcement; the operating contract in `docs/configuration.md` owns that boundary.
+`bin/fm-procevent-file.sh` exercises the non-terminal default deliberately: it is recurring, so it always reports non-terminal and the runner starts its next child on the ordinary reconcile cycle, with no change to the runner itself.
 
 Proactive delivery is inside that same boundary.
 The watcher reports a queued process-event result through the one shared actionable-exit path (`wake` in `bin/fm-push-transition-lib.sh`) that every existing signal, stale, and check wake already uses, so it reads no pane, queries no backend, and names no harness.

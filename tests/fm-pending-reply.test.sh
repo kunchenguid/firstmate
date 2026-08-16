@@ -892,6 +892,21 @@ test_unknown_backend_state_uses_capture_fallback() {
   pass "tmux and zellij unknown states use bounded capture fallback"
 }
 
+test_herdr_pending_observation_uses_monitor_capture() (
+  fm_backend_busy_state() { printf 'unknown'; }
+  # shellcheck disable=SC2329 # A historical read here would fail the behavior assertion.
+  fm_backend_capture() { fail "recurring Herdr pending-reply observation used historical capture"; }
+  # shellcheck disable=SC2329 # Invoked through fm_pending_reply_backend_observation.
+  fm_backend_monitor_capture() {
+    [ "$1" = herdr ] || fail "expected Herdr monitor backend, got $1"
+    [ "$2" = "default:w1:p2" ] || fail "expected Herdr monitor target, got $2"
+    printf 'Ctrl+c:cancel\n'
+  }
+  [ "$(fm_pending_reply_backend_observation herdr default:w1:p2 fm-hibit grok)" = busy ] \
+    || fail "Herdr pending-reply observation lost the current-screen busy signature"
+  pass "recurring Herdr pending-reply observation uses monitor capture"
+)
+
 test_kimi_capture_fallback_uses_recorded_harness() (
   local home state corr rec sm_home
   home=$(setup_parent kimi-fallback)
@@ -1112,6 +1127,7 @@ test_document_pointer_resolves
 test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
+test_herdr_pending_observation_uses_monitor_capture
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
 test_correlations_reuse_only_for_matching_open_task

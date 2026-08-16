@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Behavior tests for the generic process-to-event runner and its Lavish adapter.
+# Behavior tests for the generic process-to-event runner and its Lavish and
+# file-appearance adapters.
 #
 # The source under test is a fake blocking process that returns only when its
 # trigger file appears, so completion is a real process event and no test here
 # depends on a discovery timer. The Lavish adapter is exercised through its own
 # public commands against the currently published poll shape; no live Lavish
-# server is started.
+# server is started. The file-appearance adapter runs for real against a temp
+# home, with only the calendar faked so its midnight rollover is deterministic.
 #
 # Delivery is deliberately NOT asserted as at-least-once or lossless: the
 # published Lavish poll clears feedback destructively before returning it, so
@@ -1149,5 +1151,145 @@ assert_contains "$runner_help" "Durability boundary" \
 assert_not_contains "$runner_help" "exactly-once" \
   "the runner's help claims no exactly-once delivery"
 pass "the published interfaces state the loss limitation and claim no lossless delivery"
+
+# --- the file-appearance adapter --------------------------------------------
+# A recurring source: the captured result never ends it, so the registration
+# must survive and the runner must start the next child itself. Exercised
+# through the adapter's own commands and the real runner against a temp home;
+# the only fake anywhere is the calendar, which is what makes the midnight
+# rollover deterministic instead of a wait until tomorrow.
+HFILE="$TMP_ROOT/hfile"; new_home "$HFILE"
+REPORT_DIR="$TMP_ROOT/daily-reports"; mkdir -p "$REPORT_DIR"
+REPORT_TEMPLATE="$REPORT_DIR/{date}.md"
+TODAY_REPORT="$REPORT_DIR/$(date +%Y-%m-%d).md"
+
+file_adapter() {  # <home> <command>...
+  FM_HOME="$1" "$ROOT/bin/fm-procevent-file.sh" "${@:2}"
+}
+
+FILE_ID=$(file_adapter "$HFILE" source-id morning-review)
+[ "$FILE_ID" = file-morning-review ] || fail "unexpected canonical source id: $FILE_ID"
+
+refuse_arm() {  # <template> <expected-reason>
+  local status=0 out
+  out=$(file_adapter "$HFILE" arm rejected --path-template "$1" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "arm accepted an unusable template: $1"
+  assert_contains "$out" "$2" "arm names why it refused: $1"
+}
+refuse_arm 'daily/{date}.md' "must be an absolute path"
+refuse_arm "$REPORT_DIR/{day}.md" "supports only the {date} placeholder"
+bad_status=0
+bad_out=$(file_adapter "$HFILE" arm rejected --path-template "$REPORT_TEMPLATE" --poll-seconds 0 2>&1) || bad_status=$?
+[ "$bad_status" -ne 0 ] || fail "arm accepted a zero poll interval"
+assert_contains "$bad_out" "at least 1" "arm refuses a poll interval that would busy-wait"
+assert_absent "$HFILE/state/procevent/file-rejected.source" "a refused arm registers no source"
+pass "the file adapter refuses an unusable template or poll interval before registering anything"
+
+PE_TRACKED+=("$HFILE|$FILE_ID")
+out=$(file_adapter "$HFILE" arm morning-review --path-template "$REPORT_TEMPLATE" --poll-seconds 1)
+assert_contains "$out" "armed: $FILE_ID" "arm reports the canonical source it registered"
+assert_contains "$(pe "$HFILE" list)" "$FILE_ID" "arm registers through the real runner"
+assert_grep 'adapter=file' "$HFILE/state/procevent/$FILE_ID.source" \
+  "the registration carries this adapter's identity"
+
+out=$(pe "$HFILE" reconcile)
+assert_contains "$out" "started=1" "the runner starts the armed file source"
+sleep 1.5
+[ "$(count_results "$HFILE" "$FILE_ID")" = 0 ] || fail "the source emitted before its expected file existed"
+[ -z "$(wake_payloads "$HFILE")" ] || fail "a waiting file source published a wake: $(wake_payloads "$HFILE")"
+
+printf 'daily report\n' > "$TODAY_REPORT"
+wait_for "$HFILE/state/.wake-queue" || fail "no event was published after today's report appeared"
+assert_contains "$(wake_payloads "$HFILE")" "procevent file $FILE_ID 1" \
+  "the appearance publishes one bounded normalized event"
+assert_not_contains "$(wake_payloads "$HFILE")" "$TODAY_REPORT" "the appeared path never reaches the event line"
+FILE_RESULT=$(first_result "$HFILE" "$FILE_ID" || true)
+[ -n "$FILE_RESULT" ] || fail "no durable result was captured for the appeared file"
+assert_grep "file-appear $TODAY_REPORT" "$FILE_RESULT" \
+  "{date} expanded to the current local date in the captured result"
+assert_contains "$(file_adapter "$HFILE" classify "$FILE_RESULT")" appeared \
+  "the adapter classifies its own captured emit as an appearance"
+pass "an armed file source wakes firstmate exactly once when today's expected file appears"
+
+assert_present "$HFILE/state/procevent/$FILE_ID.source" \
+  "a recurring file source stays armed after producing a result"
+pe "$HFILE" handled "$FILE_ID" 1 >/dev/null
+out=$(pe "$HFILE" reconcile)
+assert_contains "$out" "started=1" "the runner starts the next child for a recurring source"
+sleep 2
+[ "$(count_results "$HFILE" "$FILE_ID")" = 1 ] \
+  || fail "an already-reported file was emitted again: $(count_results "$HFILE" "$FILE_ID") results"
+pass "a file already reported by this source is never re-emitted after the runner re-arms it"
+
+perl -e 'my $t = time + 5; utime($t, $t, $ARGV[0]) or exit 1' "$TODAY_REPORT" \
+  || fail "could not move the report's mtime past the cursor"
+for _ in $(seq 1 100); do
+  case "$(wake_payloads "$HFILE")" in *"procevent file $FILE_ID 2"*) break ;; esac
+  sleep 0.2
+done
+assert_contains "$(wake_payloads "$HFILE")" "procevent file $FILE_ID 2" \
+  "a report written again after the cursor publishes its own distinct event"
+[ "$(count_results "$HFILE" "$FILE_ID")" = 2 ] \
+  || fail "the rewritten report did not capture exactly one further result"
+out=$(file_adapter "$HFILE" retire morning-review)
+assert_contains "$out" "retired: $FILE_ID" "the adapter retires the source it armed"
+pass "a file written again after the recorded cursor is reported as a new appearance"
+
+# The midnight rollover: a child armed on one day must emit for the next day's
+# file without being re-armed, so it has to re-expand {date} on every iteration
+# rather than once at startup.
+DATE_BIN=$(fm_fakebin "$TMP_ROOT/rollover-bin")
+FM_TEST_FAKE_DATE="$TMP_ROOT/fake-date"
+export FM_TEST_FAKE_DATE
+cat > "$DATE_BIN/date" <<'SH'
+#!/usr/bin/env bash
+cat "$FM_TEST_FAKE_DATE"
+SH
+chmod +x "$DATE_BIN/date"
+printf '2026-01-01\n' > "$FM_TEST_FAKE_DATE"
+printf 'tomorrow report\n' > "$REPORT_DIR/2026-01-02.md"
+ROLLOVER_CURSOR="$TMP_ROOT/rollover.cursor"
+ROLLOVER_OUT="$TMP_ROOT/rollover.out"
+PATH="$DATE_BIN:$PATH" FM_HOME="$HFILE" \
+  "$ROOT/bin/fm-procevent-file.sh" poll "$ROLLOVER_CURSOR" 1 "$REPORT_TEMPLATE" > "$ROLLOVER_OUT" &
+rollover_pid=$!
+sleep 1.5
+if [ -s "$ROLLOVER_OUT" ]; then
+  kill "$rollover_pid" 2>/dev/null || true
+  fail "the child emitted for a date whose file does not exist: $(cat "$ROLLOVER_OUT")"
+fi
+printf '2026-01-02\n' > "$FM_TEST_FAKE_DATE"
+if ! wait_for "$ROLLOVER_OUT"; then
+  kill "$rollover_pid" 2>/dev/null || true
+  fail "the child never re-expanded {date} after the day rolled over"
+fi
+wait "$rollover_pid" || fail "the rollover child did not exit cleanly after emitting"
+assert_contains "$(cat "$ROLLOVER_OUT")" "file-appear $REPORT_DIR/2026-01-02.md" \
+  "the child emits the newly expanded path, not the one it started with"
+assert_grep "path=$REPORT_DIR/2026-01-02.md" "$ROLLOVER_CURSOR" \
+  "the emit advances the durable cursor to the file it reported"
+pass "a child armed before midnight emits for the new day without being re-armed"
+
+FILE_VERDICT="$TMP_ROOT/file-verdict"
+printf 'file-appear /reports/daily/2026-08-07.md\n' > "$FILE_VERDICT"
+assert_contains "$("$ROOT/bin/fm-procevent-file.sh" classify "$FILE_VERDICT")" appeared \
+  "a well-formed emit line classifies as an appearance"
+"$ROOT/bin/fm-procevent-file.sh" terminal "$FILE_VERDICT" \
+  && fail "a recurring file source reported its own appearance terminal"
+for junk in 'file-appear relative/path.md' 'file-appeared /abs.md' 'garbage' ''; do
+  printf '%s' "$junk" > "$FILE_VERDICT"
+  [ -z "$junk" ] || printf '\n' >> "$FILE_VERDICT"
+  assert_contains "$("$ROOT/bin/fm-procevent-file.sh" classify "$FILE_VERDICT")" unknown \
+    "an unrecognized result classifies as unknown rather than a guessed appearance: [$junk]"
+  "$ROOT/bin/fm-procevent-file.sh" terminal "$FILE_VERDICT" \
+    && fail "an unreadable result ended a recurring file source: [$junk]"
+done
+pass "the file adapter classifies only its own emit line and never ends its source"
+
+file_help=$("$ROOT/bin/fm-procevent-file.sh" --help 2>&1 || true)
+assert_contains "$file_help" "{date}" "the adapter's help documents the supported placeholder"
+assert_contains "$file_help" "Never describe" \
+  "the adapter's help forbids an at-least-once or lossless description"
+pass "the file adapter's published interface states its own loss limitation"
 
 printf '\nall procevent tests passed\n'

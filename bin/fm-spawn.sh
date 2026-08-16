@@ -67,6 +67,17 @@
 #   outside herdr has no workspace to inherit and uses this home's own labeled
 #   workspace, which must then match exactly one. --secondmate is the deliberate
 #   exception: it stands up that secondmate home's own workspace.
+#   The local config/herdr-crew-placement file selects that endpoint's shape:
+#   tab (absent or "tab") keeps one task tab per worker, while "pane" splits the
+#   launching agent's own pane so the worker appears in the launcher's own tab.
+#   Pane placement requires a verified launcher pane and a client whose schema
+#   carries pane.split; a missing launcher identity, an unsupported client, a
+#   failed split, or an unrecognized value in that file refuses the spawn rather
+#   than falling back to the tab topology. It is mutually exclusive with the
+#   presentation projection below: pane placement suppresses the unconfigured
+#   projection, and an explicit config/herdr-presentation-spaces "on" alongside
+#   it is a configuration conflict that refuses. --secondmate always uses tab
+#   placement, because it creates another home's own workspace.
 #   Herdr additionally uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
@@ -1896,9 +1907,85 @@ case "$BACKEND" in
       HERDR_LABEL_HOME=$PROJ_ABS
       HERDR_LAUNCHER_RELATIONSHIP=other-home
     fi
+    # Endpoint SHAPE, separately from placement: config/herdr-crew-placement
+    # decides whether this worker gets its own task tab (the default) or a pane
+    # split off the launching agent's own pane inside the launcher's own tab
+    # (docs/herdr-backend.md "Crew placement" owns the contract). A --secondmate
+    # launch is excluded for the same reason it is excluded from launcher
+    # placement: it creates a DIFFERENT home's own workspace, and there is no
+    # launcher pane in that home to split.
+    set +e
+    HERDR_CREW_PLACEMENT=$(fm_backend_herdr_crew_placement "$CONFIG")
+    HERDR_PLACEMENT_STATUS=$?
+    set -e
+    [ "$HERDR_PLACEMENT_STATUS" -eq 0 ] || exit 1
+    if [ "$KIND" = secondmate ]; then
+      HERDR_CREW_PLACEMENT=tab
+    fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
-    if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
+    HERDR_PANE_PLACED=0
+    if [ "$HERDR_CREW_PLACEMENT" = pane ]; then
+      # Pane placement and the presentation projection are two different answers
+      # to the same question - where this worker's terminal lives - so they
+      # never compose. An unconfigured (or opted-out) home simply gets no
+      # projection here; two EXPLICIT, contradictory settings refuse instead of
+      # letting one silently win.
+      if [ "$(fm_backend_herdr_presentation_preference "$CONFIG")" = on ]; then
+        echo "error: config/herdr-crew-placement is \"pane\" and config/herdr-presentation-spaces is \"on\", but a worker cannot both share the launcher's tab and get its own workspace; clear one of them" >&2
+        exit 1
+      fi
+      HERDR_SES=$(fm_backend_herdr_session)
+      fm_backend_herdr_version_check || exit 1
+      fm_backend_herdr_server_ensure "$HERDR_SES" || exit 1
+      if ! fm_backend_herdr_split_capable "$HERDR_SES"; then
+        echo "error: this herdr client cannot split panes the way config/herdr-crew-placement=pane requires; update herdr (herdr update) or set that file to \"tab\"" >&2
+        exit 1
+      fi
+      set +e
+      fm_backend_herdr_launcher_identity "$HERDR_SES"
+      HERDR_LAUNCHER_STATUS=$?
+      set -e
+      case "$HERDR_LAUNCHER_STATUS" in
+        0) ;;
+        2)
+          echo "error: config/herdr-crew-placement=pane needs the launching agent's own herdr pane to split, but this process is not running inside one; run firstmate inside herdr or set that file to \"tab\"" >&2
+          exit 1
+          ;;
+        *) exit 1 ;;
+      esac
+      # Pane placement clears the same duplicate-launch isolation the
+      # presentation recovery path applies before anything is placed: an
+      # existing journal or metadata for this id may record a still-live
+      # endpoint from the other placement (the task predates a
+      # config/herdr-crew-placement flip), and publishing a second endpoint
+      # would overwrite that meta and orphan its agent. Only a positively dead
+      # or agent-free prior endpoint may proceed, exactly as on the flat path.
+      if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+          echo "error: herdr pane placement could not acquire its session lock; refusing a concurrent resume" >&2
+          exit 1
+        }
+        if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+          herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
+        fi
+        fm_backend_herdr_projection_recovery_allows_flat \
+          "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+        spawn_herdr_presentation_order_lock_release
+      elif [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+        herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
+      fi
+      HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
+      HERDR_SEEDED_DEFAULT_TAB_ID=""
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_split_task \
+        "$HERDR_SES" "$FM_BACKEND_HERDR_LAUNCHER_PANE_ID" "$FM_BACKEND_HERDR_LAUNCHER_TAB_ID" \
+        "$HERDR_WORKSPACE_ID" "$W" "$PROJ_ABS") || exit 1
+      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+$HERDR_TASK_IDS
+EOF
+      HERDR_PANE_PLACED=1
+    fi
+    if [ "$HERDR_PANE_PLACED" -ne 1 ] && [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
@@ -2015,7 +2102,7 @@ case "$BACKEND" in
         fi
       fi
     fi
-    if [ "$HERDR_PROJECTED" -ne 1 ]; then
+    if [ "$HERDR_PROJECTED" -ne 1 ] && [ "$HERDR_PANE_PLACED" -ne 1 ]; then
       HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace

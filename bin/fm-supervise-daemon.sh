@@ -589,7 +589,7 @@ pane_is_busy() {  # <target> [backend]
   case "$native" in
     busy) return 0 ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
+  tail40=$(fm_backend_monitor_capture "$backend" "$target" 40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
     | fm_busy_lines_match "$harness"
 }
@@ -627,7 +627,7 @@ stale_window_is_busy() {  # <window> <state>
   harness=$(task_window_harness "$win" "$state")
   task=$(window_to_task "$win" "$state")
   label="fm-$task"
-  tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
+  tail40=$(fm_backend_monitor_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
   verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
   [ "${verdict%% *}" = busy ]
 }

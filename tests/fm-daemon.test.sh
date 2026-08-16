@@ -473,7 +473,7 @@ test_housekeeping_herdr_persistent_stale_resolves_meta() {
   key=$(printf '%s' "herdr-w7" | tr ':/.' '___')
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   (
-    fm_backend_capture() {
+    fm_backend_monitor_capture() {
       [ "$1" = herdr ] || fail "expected herdr capture backend, got $1"
       [ "$2" = "default:w1:p2" ] || fail "expected herdr window target, got $2"
       printf 'idle prompt\n'
@@ -483,7 +483,7 @@ test_housekeeping_herdr_persistent_stale_resolves_meta() {
       [ "$2" = "default:w1:p2" ] || fail "expected herdr busy target, got $2"
       printf 'idle'
     }
-    fm_backend_capture herdr default:w1:p2 40 >/dev/null
+    fm_backend_monitor_capture herdr default:w1:p2 40 >/dev/null
     [ "$(fm_backend_busy_state herdr default:w1:p2)" = idle ] || fail "herdr busy stub did not report idle"
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
   ) || fail "herdr persistent stale housekeeping failed"
@@ -508,7 +508,7 @@ test_housekeeping_herdr_idle_busy_record_clears_stale() {
   key=$(printf '%s' "herdr-footer" | tr ':/.' '___')
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   (
-    fm_backend_capture() {
+    fm_backend_monitor_capture() {
       [ "$1" = herdr ] || fail "expected herdr capture backend, got $1"
       [ "$2" = "default:w1:p4" ] || fail "expected herdr window target, got $2"
       printf 'quiet\n'
@@ -518,7 +518,7 @@ test_housekeeping_herdr_idle_busy_record_clears_stale() {
       [ "$2" = "default:w1:p4" ] || fail "expected herdr busy target, got $2"
       printf 'idle'
     }
-    fm_backend_capture herdr default:w1:p4 40 >/dev/null
+    fm_backend_monitor_capture herdr default:w1:p4 40 >/dev/null
     [ "$(fm_backend_busy_state herdr default:w1:p4)" = idle ] || fail "herdr busy stub did not report idle"
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
   ) || fail "herdr idle busy-footer housekeeping failed"
@@ -536,7 +536,7 @@ test_housekeeping_herdr_resumed_stale_cleared() {
   key=$(printf '%s' "herdr-busy" | tr ':/.' '___')
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   (
-    fm_backend_capture() {
+    fm_backend_monitor_capture() {
       [ "$1" = herdr ] || fail "expected herdr capture backend, got $1"
       [ "$2" = "default:w1:p3" ] || fail "expected herdr window target, got $2"
       printf 'unchanged pane\n'
@@ -546,7 +546,7 @@ test_housekeeping_herdr_resumed_stale_cleared() {
       [ "$2" = "default:w1:p3" ] || fail "expected herdr busy target, got $2"
       printf 'busy'
     }
-    fm_backend_capture herdr default:w1:p3 40 >/dev/null
+    fm_backend_monitor_capture herdr default:w1:p3 40 >/dev/null
     [ "$(fm_backend_busy_state herdr default:w1:p3)" = busy ] || fail "herdr busy stub did not report busy"
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
   ) || fail "herdr resumed stale housekeeping failed"
@@ -564,7 +564,7 @@ test_housekeeping_orca_persistent_stale_resolves_terminal() {
   key=$(printf '%s' "orca-w8" | tr ':/.' '___')
   echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
   (
-    fm_backend_capture() {
+    fm_backend_monitor_capture() {
       [ "$1" = orca ] || fail "expected orca capture backend, got $1"
       [ "$2" = "term-orca-w8" ] || fail "expected Orca terminal target, got $2"
       printf 'idle prompt\n'
@@ -574,7 +574,7 @@ test_housekeeping_orca_persistent_stale_resolves_terminal() {
       [ "$2" = "term-orca-w8" ] || fail "expected Orca busy target, got $2"
       printf 'idle'
     }
-    fm_backend_capture orca term-orca-w8 40 >/dev/null
+    fm_backend_monitor_capture orca term-orca-w8 40 >/dev/null
     [ "$(fm_backend_busy_state orca term-orca-w8)" = idle ] || fail "Orca busy stub did not report idle"
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
   ) || fail "Orca persistent stale housekeeping failed"
@@ -1674,7 +1674,7 @@ test_pane_is_busy_herdr_native_busy_state() {
   dir=$(make_supercase primary-herdr-busy)
   (
     fm_backend_busy_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected busy_state args: $1 $2"; printf 'busy'; }
-    fm_backend_capture() { fail "capture should not be consulted when busy_state is conclusive"; }
+    fm_backend_monitor_capture() { fail "capture should not be consulted when busy_state is conclusive"; }
     FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr \
       || fail "pane_is_busy should report busy from herdr's native busy_state"
   ) || fail "herdr native-busy pane_is_busy subshell failed"
@@ -1684,7 +1684,7 @@ test_pane_is_busy_herdr_native_busy_state() {
 test_primary_busy_guard_is_harness_scoped() {
   (
     fm_backend_busy_state() { printf 'unknown'; }
-    fm_backend_capture() { printf 'esc interrupt\n'; }
+    fm_backend_monitor_capture() { printf 'esc interrupt\n'; }
     if FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr; then
       fail "OpenCode's rendered signature must not classify a Claude primary busy"
     fi
