@@ -108,12 +108,39 @@ fm_remote_job_validate_settings() {
 # are waiting for. Deadlines make each budget the duration it states, and cost
 # a healthy machine nothing because every wait still returns on its first
 # successful check.
-fm_remote_job_wait_deadline() { # <seconds>; absolute epoch bound for a wait
-  printf '%s\n' "$(($(date +%s) + $1))"
+#
+# The clock is treated as untrustworthy, because a deadline is only a bound
+# while it can be read. A `date` fork that fails under the very memory pressure
+# these waits exist for, or a clock stepped backwards by an NTP correction on a
+# host that just woke from sleep, must never turn a bounded wait into an
+# unbounded one. Every unreadable, implausible, or backwards reading therefore
+# counts as expired: a wait that cannot prove it still has budget left gives up
+# and reports failure, which callers already handle, rather than spinning.
+fm_remote_job_clock_now() { # epoch seconds, or nothing when the clock is unreadable
+  local now
+  now=$(date +%s 2>/dev/null || true)
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$now"
 }
 
-fm_remote_job_wait_expired() { # <deadline>
-  [ "$(date +%s)" -ge "$1" ]
+# The bound carries its own start, so a reading earlier than the moment the wait
+# began is provably a backwards step and is spent budget rather than fresh time.
+fm_remote_job_wait_deadline() { # <seconds>; "<start>:<deadline>" bound for a wait
+  local now
+  now=$(fm_remote_job_clock_now) || return 0
+  printf '%s:%s\n' "$now" "$((now + $1))"
+}
+
+fm_remote_job_wait_expired() { # <bound from fm_remote_job_wait_deadline>
+  local bound=$1 start deadline now
+  case "$bound" in *:*) ;; *) return 0 ;; esac
+  start=${bound%%:*}
+  deadline=${bound##*:}
+  case "$start" in ''|*[!0-9]*) return 0 ;; esac
+  case "$deadline" in ''|*[!0-9]*) return 0 ;; esac
+  now=$(fm_remote_job_clock_now) || return 0
+  [ "$now" -ge "$start" ] || return 0
+  [ "$now" -ge "$deadline" ]
 }
 
 fm_remote_job_platform() {
@@ -762,10 +789,6 @@ fm_remote_job_worker_process_group() { # <pid>
   printf '%s\n' "$pgid"
 }
 
-# Stop a worker and every descendant it leaked, TERM first and KILL only for a
-# survivor. Signals the isolated worker group when one is provable and the lone
-# process otherwise. Returns non-zero when any verified worker-group member is
-# still alive afterwards.
 # A provable worker group is signalled and tested as a group; otherwise the
 # lone process is, exactly as fm_remote_job_worker_process_group decides.
 fm_remote_job_worker_tree_alive() { # <pid> <pgid-or-empty>

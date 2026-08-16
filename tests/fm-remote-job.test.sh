@@ -620,6 +620,29 @@ wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
 RECOVERY_WORKER_PID=
 pass "quarantine clears only after recorded execution has stopped"
 
+# bin/fm-timeout-lib.sh owns bounded execution for this repo, so the outer
+# bounds below hold on a macOS host that ships no coreutils `timeout`.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+
+# Each wait below runs in a child shell under an outer bound, so a regression to
+# a counted budget reports in seconds instead of burning minutes. fm_run_timed
+# reserves exit 124 for "the bound was hit", and every wait script here exits 3
+# when the wait returns the wrong result, so the three outcomes stay tellable
+# apart. WAIT_ELAPSED is the child's own measure of the wall time it spent.
+run_wait_script() { # <script> <outer bound seconds> <subject> [script args...]
+  local script=$1 bound=$2 subject=$3 status=0
+  shift 3
+  WAIT_ELAPSED=$(fm_run_timed "$bound" bash "$script" "$@") || status=$?
+  case "$status" in
+    0) ;;
+    124) fail "$subject overran its wall-clock bound of ${bound}s" ;;
+    3) fail "$subject reported the wrong outcome" ;;
+    *) fail "$subject failed with exit $status" ;;
+  esac
+  case "$WAIT_ELAPSED" in ''|*[!0-9]*) fail "$subject did not report the time it spent" ;; esac
+}
+
 # The readiness wait must spend a budget denominated in wall-clock seconds, so
 # that a host slow enough to delay worker startup cannot also change what the
 # budget is worth. A count-bounded wait fails this with an expensive check: its
@@ -641,13 +664,9 @@ fm_remote_job_wait_for_probe "$1" "$1" && exit 3
 printf '%s\n' "$(($(date +%s) - start))"
 SH
 chmod 700 "$BUDGET_SCRIPT"
-# The outer bound both proves the wait terminates and keeps a count-bounded
-# regression from burning minutes of a probe-per-second loop before it reports.
-BUDGET_ELAPSED=$(timeout 40 bash "$BUDGET_SCRIPT" "$REMOTE_ROOT" 3) \
-  || fail "the readiness wait did not honor a wall-clock budget when every probe was slow"
-case "$BUDGET_ELAPSED" in ''|*[!0-9]*) fail "the readiness wait did not report its elapsed budget" ;; esac
-[ "$BUDGET_ELAPSED" -ge 3 ] || fail "the readiness wait gave up before spending its configured budget"
-[ "$BUDGET_ELAPSED" -le 15 ] || fail "the readiness wait overran its configured budget under a slow probe"
+run_wait_script "$BUDGET_SCRIPT" 40 "the readiness wait under a one-second probe" "$REMOTE_ROOT" 3
+[ "$WAIT_ELAPSED" -ge 3 ] || fail "the readiness wait gave up before spending its configured budget"
+[ "$WAIT_ELAPSED" -le 15 ] || fail "the readiness wait overran its configured budget under a slow probe"
 pass "the readiness wait spends a wall-clock budget regardless of probe cost"
 
 # Same budget, a probe an order of magnitude slower: a wall-clock bound holds
@@ -664,11 +683,10 @@ start=$(date +%s)
 fm_remote_job_wait_for_probe "$1" "$1" && exit 3
 printf '%s\n' "$(($(date +%s) - start))"
 SH
-BUDGET_ELAPSED=$(timeout 60 bash "$BUDGET_SCRIPT" "$REMOTE_ROOT" 3) \
-  || fail "a ten-times slower probe broke the readiness wait's wall-clock budget"
+run_wait_script "$BUDGET_SCRIPT" 60 "the readiness wait under a ten-second probe" "$REMOTE_ROOT" 3
 # One in-flight probe may always finish, so the bound is the budget plus a
 # single check, never a multiple of the check cost.
-[ "$BUDGET_ELAPSED" -le 25 ] || fail "the readiness wait scaled with probe cost instead of holding its budget"
+[ "$WAIT_ELAPSED" -le 25 ] || fail "the readiness wait scaled with probe cost instead of holding its budget"
 pass "the readiness wait's budget does not scale with a slower probe"
 
 # A ready worker must still be observed immediately, so the wall-clock bound
@@ -685,9 +703,84 @@ start=$(date +%s)
 fm_remote_job_wait_for_probe "$1" "$1" || exit 3
 printf '%s\n' "$(($(date +%s) - start))"
 SH
-BUDGET_ELAPSED=$(timeout 30 bash "$BUDGET_SCRIPT" "$REMOTE_ROOT") \
-  || fail "the readiness wait did not return as soon as the worker reported ready"
-[ "$BUDGET_ELAPSED" -le 5 ] || fail "a ready worker was made to wait out the readiness budget"
+run_wait_script "$BUDGET_SCRIPT" 30 "the readiness wait for a worker already ready" "$REMOTE_ROOT"
+[ "$WAIT_ELAPSED" -le 5 ] || fail "a ready worker was made to wait out the readiness budget"
 pass "the readiness wait returns immediately once the worker reports ready"
+
+# A deadline is only a bound while the clock can be read. Under the memory
+# pressure these waits exist for, the `date` fork is itself a thing that can
+# fail, and the readiness wait runs on the remote side of an ssh invocation that
+# has no client-side bound of its own, so an unreadable clock must end the wait
+# rather than leave it spinning against a deadline it can never reach.
+CLOCK_SCRIPT="$TMP_ROOT/probe-wait-clock.sh"
+cat > "$CLOCK_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_PROBE_WAIT_SECONDS=120
+start=$(command date +%s)
+date() { return 1; }
+fm_remote_job_probe() { return 1; }
+fm_remote_job_worker_identity_matches() { return 1; }
+fm_remote_job_wait_for_probe "$1" "$1" && exit 3
+printf '%s\n' "$(($(command date +%s) - start))"
+SH
+chmod 700 "$CLOCK_SCRIPT"
+run_wait_script "$CLOCK_SCRIPT" 20 "the readiness wait with an unreadable clock" "$REMOTE_ROOT"
+[ "$WAIT_ELAPSED" -le 10 ] || fail "an unreadable clock let the readiness wait outlast its own budget"
+pass "the readiness wait gives up rather than spin when the clock cannot be read"
+
+# A clock stepped backwards - an NTP correction on a host that just woke from
+# sleep - is the same hazard in the other direction: the deadline recedes as
+# fast as the wait approaches it. A reading earlier than the moment the wait
+# began is spent budget, not fresh time.
+cat > "$CLOCK_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_PROBE_WAIT_SECONDS=120
+start=$(command date +%s)
+# A stub reading is taken in a command substitution, so the step it advances
+# has to outlive that subshell to keep the clock moving between readings.
+STEP_FILE=$2
+printf '0\n' > "$STEP_FILE"
+date() { # every reading lands five minutes before the one before it
+  local step
+  step=$(($(cat "$STEP_FILE") + 1))
+  printf '%s\n' "$step" > "$STEP_FILE"
+  printf '%s\n' "$((2000000000 - step * 300))"
+}
+fm_remote_job_probe() { return 1; }
+fm_remote_job_worker_identity_matches() { return 1; }
+fm_remote_job_wait_for_probe "$1" "$1" && exit 3
+printf '%s\n' "$(($(command date +%s) - start))"
+SH
+run_wait_script "$CLOCK_SCRIPT" 20 "the readiness wait with a backwards clock" \
+  "$REMOTE_ROOT" "$TMP_ROOT/clock-step"
+[ "$WAIT_ELAPSED" -le 10 ] || fail "a backwards clock stretched the readiness wait past its budget"
+pass "the readiness wait gives up rather than chase a clock stepping backwards"
+
+# The shutdown wait shares the mechanism, so it needs the same guarantee: a
+# worker that never exits plus a clock that cannot be read must still end in a
+# reported failure, never a hang inside teardown.
+cat > "$CLOCK_SCRIPT" <<'SH'
+#!/usr/bin/env bash
+set -u
+# shellcheck source=/dev/null
+. "$1/bin/fm-remote-job-lib.sh"
+FM_REMOTE_JOB_STOP_WAIT_SECONDS=120
+start=$(command date +%s)
+date() { return 1; }
+fm_remote_job_worker_process_group() { return 1; }
+fm_remote_job_signal_worker_tree() { return 0; }
+fm_remote_job_worker_tree_alive() { return 0; }
+fm_remote_job_stop_worker_tree 999999 && exit 3
+printf '%s\n' "$(($(command date +%s) - start))"
+SH
+run_wait_script "$CLOCK_SCRIPT" 20 "the shutdown wait with an unreadable clock" "$REMOTE_ROOT"
+[ "$WAIT_ELAPSED" -le 10 ] || fail "an unreadable clock let the shutdown wait outlast its own budget"
+pass "the shutdown wait reports a surviving worker rather than spin on an unreadable clock"
 
 echo "ALL TESTS PASSED"
