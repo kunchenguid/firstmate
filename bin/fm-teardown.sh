@@ -820,6 +820,19 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
+# Is the task's recorded PR merged? This telemetry-only predicate uses the
+# durable pr= URL from task metadata and the stable project clone, so a returned
+# or reused pool slot is not mistaken for the task's former branch checkout.
+recorded_pr_is_merged() {  # <pr-url>
+  local target=$1 state
+  [ -n "$target" ] || return 1
+  state=$(cd "$PROJ" && gh pr view "$target" --json state -q '.state' 2>/dev/null) || return 1
+  case "$state" in
+    MERGED|merged) return 0 ;;
+  esac
+  return 1
+}
+
 # Is the branch's content already present in the up-to-date default branch? Fetches
 # first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
 # the default branch does not already contain (e.g. its change landed via squash) the
@@ -1488,7 +1501,8 @@ observe_telemetry_gate_facts() {  # <worktree>
   # local-only ship is accepted only when the merge gate recorded a non-empty
   # commit interval unique to this task at landing time and its exact HEAD
   # reached local main;
-  # a PR ship is accepted only when the forge proves that exact work merged;
+  # a PR ship is accepted only when the forge confirms its recorded PR merged,
+  # independent of the former task checkout;
   # and a scout is accepted only after the report and decision gates above.
   if [ "$FORCE" != --force ]; then
     if [ "$KIND" = scout ]; then
@@ -1518,7 +1532,7 @@ observe_telemetry_gate_facts() {  # <worktree>
       if ! [[ "$BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
         TELEMETRY_GATE_REFUSAL='missing or invalid task base commit'
       fi
-    elif [ "$KIND" = ship ] && [ -n "$PR_URL" ] && [ -d "$wt" ] && pr_is_merged; then
+    elif [ "$KIND" = ship ] && [ -n "$PR_URL" ] && recorded_pr_is_merged "$PR_URL"; then
       TELEMETRY_GATE_RESULT=green
       return 0
     fi

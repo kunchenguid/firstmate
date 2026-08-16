@@ -655,6 +655,24 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# Override the direct GitHub lookup for a recorded PR URL with one exact state.
+add_gh_pr_state_for_url() {
+  local case_dir=$1 state=$2
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *" --json state "*) printf '%s\n' '$state'; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: unsupported gh fixture call" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
 append_pr_meta_for_current_head() {
   local case_dir=$1 head
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -3139,6 +3157,187 @@ test_teardown_notes_gate_observation_branch_mismatch() {
   pass "teardown names a branch mismatch without blocking its incomplete telemetry seal"
 }
 
+test_teardown_finishes_returned_ship_with_recorded_merged_pr() {
+  local case_dir gen ledger rc
+  case_dir=$(make_case telemetry-returned-slot-recorded-pr)
+  write_meta "$case_dir" no-mistakes ship
+  append_pr_meta_url "$case_dir"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed returned-slot teardown telemetry"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$case_dir/state" task-x1)
+  printf 'busy_gen=%s\n' "$gen" >> "$case_dir/state/task-x1.meta"
+  printf 'working: stranded after worktree return\n' > "$case_dir/state/task-x1.status"
+
+  # The task branch is gone and the path now exposes the pool's detached base,
+  # while the stale task metadata and telemetry attempt still need retirement.
+  git -C "$case_dir/wt" checkout -q --detach origin/main
+  git -C "$case_dir/project" branch -D fm/task-x1 >/dev/null
+  add_gh_pr_state_for_url "$case_dir" MERGED
+
+  rc=0
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" \
+    "returned-slot-recorded-pr: teardown should finish from recorded PR evidence: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "returned-slot-recorded-pr: teardown left task metadata behind"
+  assert_absent "$case_dir/state/task-x1.status" \
+    "returned-slot-recorded-pr: teardown left status behind"
+  assert_absent "$case_dir/state/task-x1.busy-gen" \
+    "returned-slot-recorded-pr: teardown left the busy generation behind"
+  assert_absent "$case_dir/state/task-x1.busy-state" \
+    "returned-slot-recorded-pr: teardown left the busy state behind"
+  ledger="$case_dir/data/routing-outcomes.jsonl"
+  jq -e '
+    select(.eventType=="attempt-terminal") and
+    .terminal.classification=="accepted" and
+    .terminal.gateFacts=={source:"delivery",result:"green",stepReruns:null} and
+    .terminal.outcomeLink=={kind:"pull-request",id:"https://github.com/example/repo/pull/7"}
+  ' "$ledger" >/dev/null || fail "returned-slot-recorded-pr: telemetry was not sealed from the merged recorded PR"
+  pass "a returned ship slot with a recorded merged PR seals telemetry and removes stranded task state"
+}
+
+test_returned_ship_with_recorded_unmerged_pr_stays_incomplete() {
+  local case_dir ledger rc
+  case_dir=$(make_case telemetry-returned-slot-unmerged-pr)
+  write_meta "$case_dir" no-mistakes ship
+  append_pr_meta_url "$case_dir"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed unmerged-PR teardown telemetry"
+  git -C "$case_dir/wt" checkout -q --detach origin/main
+  git -C "$case_dir/project" branch -D fm/task-x1 >/dev/null
+  add_gh_pr_state_for_url "$case_dir" OPEN
+
+  rc=0
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" \
+    "returned-slot-unmerged-pr: teardown should clean up without claiming acceptance: $(cat "$case_dir/stderr")"
+  ledger="$case_dir/data/routing-outcomes.jsonl"
+  jq -e '
+    select(.eventType=="attempt-terminal") and
+    .terminal.classification=="incomplete" and
+    .terminal.gateFacts=={source:"delivery",result:"incomplete",stepReruns:null}
+  ' "$ledger" >/dev/null || fail "returned-slot-unmerged-pr: an unmerged PR was accepted as merged"
+  pass "a returned ship slot with a recorded unmerged PR seals incomplete"
+}
+
+make_recorded_pr_teardown_variant() {  # <variant>
+  local variant=$1 variant_root script
+  variant_root="$TMP_ROOT/recorded-pr-variants/$variant"
+  mkdir -p "$variant_root"
+  cp -R "$ROOT/bin" "$variant_root/"
+  script="$variant_root/bin/fm-teardown.sh"
+  python3 - "$script" "$variant" <<'PY' || return 1
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+variant = sys.argv[2]
+mutations = {
+    "control": None,
+    "delete": (
+        "recorded_pr_is_merged() {  # <pr-url>",
+        "recorded_pr_is_merged_deleted() {  # <pr-url>",
+    ),
+    "unreachable": (
+        '    elif [ "$KIND" = ship ] && [ -n "$PR_URL" ] && recorded_pr_is_merged "$PR_URL"; then',
+        '    elif [ "$KIND" = ship ] && [ -n "$PR_URL" ] && false && recorded_pr_is_merged "$PR_URL"; then',
+    ),
+    "weakened-unmerged": (
+        "    MERGED|merged) return 0 ;;",
+        "    MERGED|merged|OPEN|open) return 0 ;;",
+    ),
+    "constant-true": (
+        "recorded_pr_is_merged() {  # <pr-url>\n  local target=$1 state",
+        "recorded_pr_is_merged() {  # <pr-url>\n  local target=$1 state\n  return 0",
+    ),
+}
+
+if variant not in mutations:
+    raise SystemExit(f"unknown recorded-PR predicate variant: {variant}")
+text = path.read_text()
+mutation = mutations[variant]
+if mutation is not None:
+    old, new = mutation
+    if text.count(old) != 1:
+        raise SystemExit(f"recorded-PR predicate mutation {variant} matched {text.count(old)} times")
+    path.write_text(text.replace(old, new))
+PY
+  printf '%s\n' "$script"
+}
+
+probe_returned_ship_recorded_pr_result() {  # <teardown> <case> <forge-state> <accepted|incomplete>
+  local teardown=$1 name=$2 forge_state=$3 expected=$4 case_dir gen ledger rc
+  case_dir=$(make_case "telemetry-recorded-pr-$name") || return 1
+  write_meta "$case_dir" no-mistakes ship
+  append_pr_meta_url "$case_dir"
+  seed_teardown_telemetry "$case_dir" || return 1
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$case_dir/state" task-x1) || return 1
+  printf 'busy_gen=%s\n' "$gen" >> "$case_dir/state/task-x1.meta"
+  printf 'working: stranded after worktree return\n' > "$case_dir/state/task-x1.status"
+  git -C "$case_dir/wt" checkout -q --detach origin/main || return 1
+  git -C "$case_dir/project" branch -D fm/task-x1 >/dev/null || return 1
+  add_gh_pr_state_for_url "$case_dir" "$forge_state"
+
+  rc=0
+  TEARDOWN="$teardown" FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  [ ! -e "$case_dir/state/task-x1.meta" ] || return 1
+  [ ! -e "$case_dir/state/task-x1.status" ] || return 1
+  [ ! -e "$case_dir/state/task-x1.busy-gen" ] || return 1
+  [ ! -e "$case_dir/state/task-x1.busy-state" ] || return 1
+  ledger="$case_dir/data/routing-outcomes.jsonl"
+  case "$expected" in
+    accepted)
+      jq -e '
+        select(.eventType=="attempt-terminal") and
+        .terminal.classification=="accepted" and
+        .terminal.gateFacts=={source:"delivery",result:"green",stepReruns:null}
+      ' "$ledger" >/dev/null
+      ;;
+    incomplete)
+      jq -e '
+        select(.eventType=="attempt-terminal") and
+        .terminal.classification=="incomplete" and
+        .terminal.gateFacts=={source:"delivery",result:"incomplete",stepReruns:null}
+      ' "$ledger" >/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+test_recorded_pr_merge_predicate_kills_required_mutations() {
+  local control delete unreachable weakened constant_true
+  local control_rc delete_rc unreachable_rc weakened_rc constant_true_rc
+  control=$(make_recorded_pr_teardown_variant control) || fail "could not build recorded-PR control"
+  delete=$(make_recorded_pr_teardown_variant delete) || fail "could not build recorded-PR delete mutant"
+  unreachable=$(make_recorded_pr_teardown_variant unreachable) || fail "could not build recorded-PR unreachable mutant"
+  weakened=$(make_recorded_pr_teardown_variant weakened-unmerged) || fail "could not build recorded-PR weakened-unmerged mutant"
+  constant_true=$(make_recorded_pr_teardown_variant constant-true) || fail "could not build recorded-PR constant-true mutant"
+
+  control_rc=0
+  probe_returned_ship_recorded_pr_result "$control" control MERGED accepted || control_rc=$?
+  delete_rc=0
+  probe_returned_ship_recorded_pr_result "$delete" delete MERGED accepted || delete_rc=$?
+  unreachable_rc=0
+  probe_returned_ship_recorded_pr_result "$unreachable" unreachable MERGED accepted || unreachable_rc=$?
+  weakened_rc=0
+  probe_returned_ship_recorded_pr_result "$weakened" weakened-unmerged OPEN incomplete || weakened_rc=$?
+  constant_true_rc=0
+  probe_returned_ship_recorded_pr_result "$constant_true" constant-true OPEN incomplete || constant_true_rc=$?
+
+  printf 'recorded_pr_is_merged mutation exit codes: control=%s delete=%s unreachable=%s weakened-unmerged=%s constant-true=%s\n' \
+    "$control_rc" "$delete_rc" "$unreachable_rc" "$weakened_rc" "$constant_true_rc"
+  expect_code 0 "$control_rc" "recorded-PR predicate control should pass"
+  expect_code 1 "$delete_rc" "recorded-PR predicate delete mutant should be killed"
+  expect_code 1 "$unreachable_rc" "recorded-PR predicate unreachable mutant should be killed"
+  expect_code 1 "$weakened_rc" "recorded-PR predicate weakened-unmerged mutant should be killed"
+  expect_code 1 "$constant_true_rc" "recorded-PR predicate constant-true mutant should be killed"
+  pass "recorded-PR telemetry predicate kills delete, unreachable, weakened-unmerged, and constant-true mutations"
+}
+
 test_teardown_keeps_a_green_gate_accepted_and_a_cancelled_gate_distinct() {
   local case_dir ledger head sheet
   case_dir=$(make_case telemetry-green-without-step-rerun-counts)
@@ -3256,6 +3455,9 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_teardown_derives_quality_and_cost_from_observable_facts
 test_teardown_notes_gate_observation_branch_mismatch
+test_teardown_finishes_returned_ship_with_recorded_merged_pr
+test_returned_ship_with_recorded_unmerged_pr_stays_incomplete
+test_recorded_pr_merge_predicate_kills_required_mutations
 test_teardown_keeps_a_green_gate_accepted_and_a_cancelled_gate_distinct
 test_teardown_seals_explicit_terminal_and_missing_as_incomplete
 test_forced_teardown_still_requires_ledger_repair
