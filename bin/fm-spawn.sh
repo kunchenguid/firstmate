@@ -32,6 +32,19 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   Cloud placement: FM_SPAWN_CLOUD=azure (or a config/spawn-cloud file whose
+#   first line is azure) places a NEW ship/scout crewmate on an elastic Azure
+#   worker through bin/fm-worker-lifecycle.sh instead of creating a local
+#   backend endpoint; the recorded metadata carries placement=azure plus the
+#   account_home and worktree_git_dir_identity bindings that lifecycle derives
+#   its request from, and window= stays empty so local endpoint probes fail
+#   closed. Cloud spawns run ENTIRELY on the pi-codex runtime: harness
+#   dispatch and claude profile routing are bypassed, account_home is the pi
+#   coding-agent directory, and pi's extension owns multi-profile selection on
+#   the worker. With the switch off (default) spawns stay byte-identical to
+#   the local path. Secondmate and account-recovery spawns always stay local,
+#   and --backend, raw launch commands, or a non-pi harness cannot be combined
+#   with cloud placement.
 #   With no harness arg, a crewmate/scout spawn resolves the crewmate harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -151,7 +164,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,92p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -478,6 +491,42 @@ RECOVERY_ACCOUNT=0
   echo "error: --backlog-row-exemption applies only to a genuinely new ship or scout task" >&2
   exit 1
 }
+# Cloud placement switch (Phase 6 activation). FM_SPAWN_CLOUD wins over the
+# durable config/spawn-cloud file; both accept azure (place new ship/scout
+# crewmates on elastic Azure workers through bin/fm-worker-lifecycle.sh) or
+# off/local (default). Any other value fails closed. When the switch is off,
+# spawn behavior and task metadata stay byte-identical to the local-only path.
+# Secondmate and account-recovery spawns always stay on the local backend by
+# design (workers never run secondmates; recovery re-binds a local endpoint).
+SPAWN_CLOUD=off
+SPAWN_CLOUD_VALUE=
+SPAWN_CLOUD_SOURCE=default
+if [ -n "${FM_SPAWN_CLOUD+x}" ]; then
+  SPAWN_CLOUD_VALUE=$FM_SPAWN_CLOUD
+  SPAWN_CLOUD_SOURCE=FM_SPAWN_CLOUD
+elif [ -f "$CONFIG/spawn-cloud" ] && [ ! -L "$CONFIG/spawn-cloud" ]; then
+  SPAWN_CLOUD_VALUE=$(head -n1 "$CONFIG/spawn-cloud" 2>/dev/null | tr -d '[:space:]')
+  SPAWN_CLOUD_SOURCE=config/spawn-cloud
+fi
+case "$SPAWN_CLOUD_VALUE" in
+  ''|off|local) SPAWN_CLOUD=off ;;
+  azure) SPAWN_CLOUD=azure ;;
+  *)
+    echo "error: unknown cloud placement '$SPAWN_CLOUD_VALUE' from $SPAWN_CLOUD_SOURCE (accepted: azure, off, local)" >&2
+    exit 1
+    ;;
+esac
+if [ "$SPAWN_CLOUD" = azure ] && { [ "$KIND" = secondmate ] || [ "$RECOVERY_ACCOUNT" = 1 ]; }; then
+  echo "notice: cloud placement covers new ship/scout spawns only; this spawn stays on the local backend" >&2
+  SPAWN_CLOUD=off
+fi
+if [ "$SPAWN_CLOUD" = azure ] && [ "$STATE" != "$FM_HOME/state" ]; then
+  echo "error: cloud placement requires the home's own state directory ($FM_HOME/state), not an override" >&2
+  exit 1
+fi
+CLOUD_ACCOUNT_HOME=
+CLOUD_PLACEMENT_STATE=
+CLOUD_WORKER_LAUNCH=
 RESUME_META=
 LIFECYCLE_LOCK=
 LIFECYCLE_LOCK_OWNED=0
@@ -824,7 +873,19 @@ if [ "$RECOVERY_ACCOUNT" = 1 ]; then
   BACKEND_SET=1
 fi
 
-if [ "$BACKEND_SET" -eq 1 ]; then
+if [ "$SPAWN_CLOUD" = azure ]; then
+  # Cloud placement replaces the local session backend for the crewmate itself
+  # (it runs on an elastic worker), but every cloud crewmate still registers a
+  # Herdr tracking endpoint so none is ever lost: the fleet supervises through
+  # Herdr only, and an endpoint-less spawn would be invisible to status/reap.
+  # Runtime auto-detection is skipped and an explicit --backend is a
+  # contradiction: the tracking endpoint is Herdr unconditionally.
+  if [ "$BACKEND_SET" -eq 1 ]; then
+    echo "error: --backend cannot be combined with cloud placement ($SPAWN_CLOUD_SOURCE=azure)" >&2
+    exit 1
+  fi
+  BACKEND=herdr
+elif [ "$BACKEND_SET" -eq 1 ]; then
   BACKEND=$BACKEND_ARG
 else
   BACKEND=$(fm_backend_name)
@@ -2550,6 +2611,25 @@ launch_template() {
   esac
 }
 
+if [ "$SPAWN_CLOUD" = azure ]; then
+  # Cloud-placed crewmates run ENTIRELY on the pi-codex runtime: the cloud lane
+  # bypasses local harness dispatch (config/crew-harness, crew-dispatch.json)
+  # and every claude profile-routing mechanism, and pi's own extension owns
+  # multi-profile selection on the worker. A conflicting explicit harness or a
+  # raw launch command is a contradiction, not an override.
+  case "$ARG3" in
+    ''|pi) ;;
+    *' '*)
+      echo "error: cloud placement does not accept raw launch commands; the pi-codex runtime is selected unconditionally" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: cloud placement runs only the pi-codex runtime; drop the '$ARG3' harness or spawn locally" >&2
+      exit 1
+      ;;
+  esac
+  ARG3=pi
+fi
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
@@ -2740,6 +2820,10 @@ if [ "$ACCOUNT_EFFECTIVE_MODE" != off ] && [ -z "$ACCOUNT_POOL" ]; then
 fi
 if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ] && [ "$RAW_LAUNCH" = 1 ]; then
   echo "error: enforced account routing does not accept raw launch commands" >&2
+  exit 1
+fi
+if [ "$SPAWN_CLOUD" = azure ] && [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ]; then
+  echo "error: cloud placement does not support enforced Agent Fleet account routing" >&2
   exit 1
 fi
 if [ "$ACCOUNT_EFFECTIVE_MODE" = enforce ] && [ "$BACKEND" = orca ]; then
@@ -3589,7 +3673,10 @@ persist_worktree_acquisition_phases || {
   echo "error: cannot durably record task temp creation for $ID" >&2
   exit 1
 }
-if [ "$HARNESS" = pi ] && [ "$RAW_LAUNCH" != 1 ]; then
+# A cloud-placed pi crewmate never takes a LOCAL task-private account snapshot:
+# the recorded account_home is the binding the worker lifecycle stages, and
+# pi's own extension owns profile selection on the worker.
+if [ "$HARNESS" = pi ] && [ "$RAW_LAUNCH" != 1 ] && [ "$SPAWN_CLOUD" != azure ]; then
   PI_AUTHOR_SOURCE_HOME=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
   PI_AUTHOR_ACCOUNT_HOME="$TASK_TMP/pi-author-agent"
   if "$SCRIPT_DIR/fm-pi-author-snapshot.py" \
@@ -3879,6 +3966,17 @@ SPAWN_CWD=${WT:-$PROJ_ABS}
 if [ "$DIRECT_ACCOUNT_RECOVERY" = 1 ]; then
   validate_direct_recovery_worktree_identity || exit 1
 fi
+# Cloud placement still creates a local endpoint, but a Herdr TRACKING one:
+# the crewmate entrypoint runs on an elastic worker through
+# bin/fm-worker-lifecycle.sh after metadata install, while the Herdr tab runs
+# the cloud monitor so the crewmate stays visible and reapable in the same
+# workspace as local crewmates. The worker entrypoint is preserved verbatim
+# in CLOUD_WORKER_LAUNCH before the endpoint's own launch string replaces
+# LAUNCH for the tracking pane.
+if [ "$SPAWN_CLOUD" = azure ]; then
+  CLOUD_WORKER_LAUNCH=$LAUNCH
+  LAUNCH="exec $(printf '%q' "$SCRIPT_DIR/fm-spawn-cloud-monitor.sh") $(printf '%q' "$ID") $(printf '%q' "$SPAWN_GENERATION_ID")"
+fi
 case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)
@@ -4098,7 +4196,86 @@ spawn_send_key() {  # <target> <key>
     cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
 }
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" != 1 ]; then
+# Cloud placement helpers. bin/fm-worker-lifecycle.sh reads its own authorities
+# (task metadata, controller state, provider inventory) under $FM_HOME/state,
+# so every call pins FM_HOME to this spawn's home explicitly.
+spawn_cloud_lifecycle() {
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-worker-lifecycle.sh" "$@"
+}
+spawn_cloud_assignment_generation() {
+  python3 - "$STATE/azure-workers/controller.json" "$ID" "$SPAWN_GENERATION_ID" <<'PY'
+import json
+import sys
+
+path, task, generation = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8") as handle:
+        state = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(0)
+item = (state.get("queue") or {}).get("{}@{}".format(task, generation)) or {}
+if item.get("status") == "assigned" and item.get("assignment_generation"):
+    print(item["assignment_generation"])
+PY
+}
+spawn_cloud_record_assignment() {  # <assignment-generation>
+  local assignment=$1 lock
+  lock=$(fm_account_meta_lock_acquire "$STATE" "$ID") || return 1
+  if [ "$(fm_account_meta_value "$STATE/$ID.meta" generation_id)" = "$SPAWN_GENERATION_ID" ] \
+    && [ -z "$(fm_account_meta_value "$STATE/$ID.meta" worker_assignment_generation)" ]; then
+    printf 'worker_assignment_generation=%s\n' "$assignment" >> "$STATE/$ID.meta" || {
+      fm_account_meta_lock_release "$lock" >/dev/null 2>&1 || true
+      return 1
+    }
+  fi
+  fm_account_meta_lock_release "$lock" || return 1
+}
+# spawn_cloud_dispatch: after metadata install, drive the elastic worker
+# lifecycle; the local Herdr endpoint holds only the tracking monitor. The
+# request is durable; if admission leaves it queued (budget/quota/cost
+# evidence), the spawn still succeeds with worker=queued and a later
+# `bin/fm-worker-lifecycle.sh reconcile --apply` converges it. Once assigned,
+# the crewmate entrypoint (CLOUD_WORKER_LAUNCH, the exact launch string every
+# local backend uses) runs on the worker through a detached bounded
+# `execute`, whose digest-bound result lands in state/<id>.worker-result.json.
+spawn_cloud_dispatch() {
+  local owner_kind=primary assignment wall
+  CLOUD_PLACEMENT_STATE=queued
+  [ ! -f "$FM_HOME/$SUB_HOME_MARKER" ] || owner_kind=secondmate
+  spawn_cloud_lifecycle request \
+    --task "$ID" --task-generation "$SPAWN_GENERATION_ID" \
+    --owner-kind "$owner_kind" --eligible >&2 || {
+    echo "error: cloud worker request was refused for $ID" >&2
+    return 1
+  }
+  if ! spawn_cloud_lifecycle reconcile --apply \
+    --confirm-subscription "${FM_AZURE_SUBSCRIPTION_ID:-}" --json \
+    > "$STATE/$ID.worker-reconcile.json" 2>&1; then
+    echo "notice: cloud worker for $ID stays durably queued; reconcile refused (see $STATE/$ID.worker-reconcile.json)" >&2
+    return 0
+  fi
+  assignment=$(spawn_cloud_assignment_generation) || assignment=
+  if [ -z "$assignment" ]; then
+    echo "notice: cloud worker for $ID stays durably queued awaiting admission; re-run bin/fm-worker-lifecycle.sh reconcile --apply" >&2
+    return 0
+  fi
+  spawn_cloud_record_assignment "$assignment" || {
+    echo "error: cloud worker assignment for $ID could not be recorded in task metadata" >&2
+    return 1
+  }
+  CLOUD_PLACEMENT_STATE=assigned
+  wall=${FM_SPAWN_CLOUD_WALL_SECONDS:-3600}
+  case "$wall" in ''|*[!0-9]*) echo "error: invalid FM_SPAWN_CLOUD_WALL_SECONDS '$wall'" >&2; return 1 ;; esac
+  nohup env FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-worker-lifecycle.sh" execute \
+    --task "$ID" --task-generation "$SPAWN_GENERATION_ID" \
+    --assignment-generation "$assignment" --wall-seconds "$wall" \
+    --confirm-execute --confirm-subscription "${FM_AZURE_SUBSCRIPTION_ID:-}" \
+    -- /bin/bash -lc "$CLOUD_WORKER_LAUNCH" \
+    > "$STATE/$ID.worker-result.json" 2> "$STATE/$ID.worker-execute.log" < /dev/null &
+  disown $! 2>/dev/null || true
+  CLOUD_PLACEMENT_STATE=executing
+}
+if [ "$SPAWN_CLOUD" != azure ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RECOVERY_ACCOUNT" != 1 ]; then
   WT_REAL=$(real_path_or_raw "$WT")
   ENDPOINT_READY_STARTED=$(date +%s)
   ENDPOINT_READY_TIMEOUT=60
@@ -4127,6 +4304,29 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+# Cloud placement persists the exact identities the elastic worker lifecycle
+# derives its bindings from (docs/azure-workers.md "Queue request"): the
+# physical worktree Git-dir identity and the provider account home. The cloud
+# lane is pi-codex only, so the account home is always the pi coding-agent
+# directory - never a claude/codex profile home, and never a local
+# account-directory rotation (that machinery is bypassed entirely for cloud).
+if [ "$SPAWN_CLOUD" = azure ]; then
+  [ "$DIRECT_ACCOUNT_ROUTING" != 1 ] || {
+    echo "error: cloud placement must not reach direct account-directory routing; refusing to mix profile machinery into the worker lane" >&2
+    exit 1
+  }
+  if [ -z "${WORKTREE_GIT_DIR:-}" ] || [ -z "${WORKTREE_GIT_DIR_IDENTITY:-}" ]; then
+    capture_worktree_git_physical_identity "$WT" || {
+      echo "error: cannot record exact worktree Git-dir identity for cloud placement of $ID" >&2
+      exit 1
+    }
+  fi
+  CLOUD_ACCOUNT_HOME=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+  [ -d "$CLOUD_ACCOUNT_HOME" ] || {
+    echo "error: cloud placement account home '$CLOUD_ACCOUNT_HOME' is not a directory" >&2
+    exit 1
+  }
+fi
 lifecycle_lock_valid=0
 if [ -n "$LIFECYCLE_LOCK" ]; then
   if [ "$LIFECYCLE_LOCK_OWNED" = 1 ]; then
@@ -4185,6 +4385,14 @@ META_TMP=$(mktemp "$STATE/.$ID.meta.XXXXXX") || exit 1
   [ "$NO_ACCOUNT_ROUTING" != 1 ] || echo "account_routing_emergency_bypass=1"
   [ -z "$BACKLOG_ROW_EXEMPTION" ] || echo "backlog_row_exemption=$BACKLOG_ROW_EXEMPTION"
   [ -z "$DIRECT_ACCOUNT_HOME" ] || echo "account_home=$DIRECT_ACCOUNT_HOME"
+  if [ "$SPAWN_CLOUD" = azure ]; then
+    # Direct account routing was refused above for cloud spawns, so these keys
+    # are written exactly once and account_home is always the pi-codex home.
+    echo "placement=azure"
+    echo "worktree_git_dir=$WORKTREE_GIT_DIR"
+    echo "worktree_git_dir_identity=$WORKTREE_GIT_DIR_IDENTITY"
+    echo "account_home=$CLOUD_ACCOUNT_HOME"
+  fi
   [ "$DIRECT_ACCOUNT_DEGRADED" != 1 ] || echo "account_routing_degraded=1"
   if [ "$RECOVERY_ACCOUNT" = 1 ]; then
     if grep -q '^report_required=' "$RESUME_META"; then
@@ -4293,7 +4501,9 @@ fi
 # herdr already launched the agent natively during endpoint creation, with the
 # same LAUNCH string as its argv and PATH/GOTMPDIR injected via --env, so there is
 # nothing to type into a pane here.
-if [ "$BACKEND" != herdr ]; then
+if [ "$SPAWN_CLOUD" = azure ]; then
+  spawn_cloud_dispatch || exit 1
+elif [ "$BACKEND" != herdr ]; then
   spawn_send_text_line "$T" "export PATH='$CREW_PATH' GOTMPDIR=$TASK_TMP/gotmp"
   sleep 0.3
   spawn_send_literal "$T" "$LAUNCH"
@@ -4381,4 +4591,6 @@ SECONDMATE_HOME_LIFECYCLE_LOCK=
 
 account_summary=
 [ -z "$DIRECT_ACCOUNT_HOME" ] || account_summary=" account_home=$DIRECT_ACCOUNT_HOME"
-echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT$account_summary"
+cloud_summary=
+[ "$SPAWN_CLOUD" != azure ] || cloud_summary=" placement=azure worker=${CLOUD_PLACEMENT_STATE:-queued}"
+echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT$account_summary$cloud_summary"

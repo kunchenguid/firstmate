@@ -82,6 +82,7 @@ fm-send-strict.test.sh	hermetic
 fm-session-start.test.sh	hermetic
 fm-spawn-backlog.test.sh	hermetic
 fm-spawn-batch.test.sh	hermetic
+fm-spawn-cloud.test.sh	hermetic
 fm-spawn-dispatch-profile.test.sh	hermetic
 fm-spawn-provision.test.sh	hermetic
 fm-stow-contract.test.sh	hermetic

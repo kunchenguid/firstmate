@@ -156,7 +156,7 @@ fm_backend_herdr_control_exec() {
   if [ "$name" = sleep ] && fm_backend_herdr_test_lab_enabled \
     && declare -F sleep >/dev/null 2>&1; then
     fm_backend_herdr_scrubbed_exec sleep "$@"
-    return
+    return $?
   fi
   bin=$(PATH="$FM_BACKEND_HERDR_CONTROL_PATH" builtin type -P "$name") || return 127
   case "$bin" in
@@ -2476,8 +2476,13 @@ fm_backend_herdr_identity_from_meta() {  # <target> <expected-label>
       [ "$marker_id" = "$id" ] || return 1
     fi
     workspace_label=$(fm_backend_herdr_workspace_label_for_home "$endpoint_home")
+    # Explicit status: since bash 4.4 a bare `return` executed while an EXIT
+    # trap runs yields the status of the last command BEFORE the trap, so a
+    # spawn-abort cleanup (trap context, entry status 1) would discard this
+    # successful identity and fail the endpoint-absence proof (macOS bash 3.2
+    # predates that POSIX change, which hid the defect off Linux).
     fm_backend_herdr_identity_pack "$expected_label" "$workspace" "$workspace_label" "$tab"
-    return
+    return $?
   done
   return 1
 }
