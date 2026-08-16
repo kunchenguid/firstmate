@@ -103,12 +103,17 @@
 #     alone: no-mistakes drives those against its own gate-repo clone, not the
 #     crew's worktree, so they are not orphaned by removing the worktree.
 #     conclude_task_no_mistakes_run attributes the active-or-most-recent run to
-#     THIS task only when its branch AND code identity (bin/fm-nm-run-lib.sh's
-#     fm_nm_head_matches_worktree, the same rule bin/fm-crew-state.sh uses) both
-#     match this worktree, then runs `no-mistakes axi abort --run <id>` for
-#     that verified run instance. A run already terminal
-#     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
-#     an already-aborted run reads back terminal and is skipped on retry.
+#     THIS task only when its branch matches this worktree's branch and
+#     bin/fm-nm-run-lib.sh's fm_nm_run_matches_worktree confirms the run is this
+#     worktree's current one, then runs `no-mistakes axi abort --run <id>` for
+#     that verified run instance. That shared rule is custody-aware on purpose:
+#     a run that has applied its own gate fixes is parked on a head the worktree
+#     cannot read at all (the pipeline keeps those commits in its private gate
+#     repository until its push step), and binding by readable head alone
+#     silently skipped exactly the parked runs this abort exists to conclude.
+#     A run already terminal (an outcome is set) or not parked at a gate is left
+#     untouched. Idempotent: an already-aborted run reads back terminal and is
+#     skipped on retry.
 #   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
 #     started under the worktree (or its per-task tasktmp) does not receive the
 #     SIGHUP/SIGTERM that closing the backend pane sends to its own foreground
@@ -1217,11 +1222,15 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
   [ -n "$run_id" ] || return 1
   run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
   [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
-  run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
-  fm_nm_head_matches_worktree "$wt" "$run_head" || return 1
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   [ -z "$outcome" ] || return 1
   status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
+  run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
+  # Terminal runs are already excluded above, so the status word here is only
+  # ever asked whether the pipeline still holds this branch - which is what
+  # makes a gate-fixed head the worktree cannot read attributable rather than
+  # invisible.
+  fm_nm_run_matches_worktree "$wt" "$run_head" "$status" || return 1
   awaiting=$(printf '%s\n' "$out" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
   has_gate=$(printf '%s\n' "$out" | grep -Eq '^[[:space:]]*gate:[[:space:]]*' && echo 1 || echo 0)
   case "$status" in

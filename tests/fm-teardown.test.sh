@@ -2203,6 +2203,129 @@ test_own_autonomous_run_is_left_alone() {
   pass "a task-owned autonomous running step is left alone rather than aborted"
 }
 
+# The `axi status` shape a run takes once the pipeline has applied its own gate
+# fixes: still parked at a gate with no outcome, but on a head the crew's
+# worktree cannot read, because those fix commits live in the pipeline's private
+# gate repository until its push step.
+gate_fixed_parked_axi_status_toon() {  # <branch> <head> [run-id]
+  cat <<EOF
+run:
+  id: "${3:-01RUN}"
+  branch: $1
+  status: fix_review
+  awaiting_agent: parked 41m
+  head: "$2"
+  pr: ""
+  findings[1]{id,severity,file,line,action,description}:
+    r1,error,b.go,,fix,unchecked error
+gate: review
+EOF
+}
+
+# A terminal run: history, never something teardown may abort.
+terminal_axi_status_toon() {  # <branch> <head> [run-id]
+  cat <<EOF
+run:
+  id: "${3:-01RUN}"
+  branch: $1
+  status: failed
+  head: "$2"
+  pr: ""
+  findings: none
+outcome: failed
+EOF
+}
+
+# A real commit that exists ONLY in a separate object store, the way a pipeline
+# gate-fix commit does before the run's push step: a descendant of the crew's
+# own branch head that the crew's worktree cannot read at all. Echoes its sha.
+pipeline_gate_fix_head() {  # <case-dir>
+  local case_dir=$1 gate
+  gate="$case_dir/gate-repo"
+  git clone -q "$case_dir/origin.git" "$gate"
+  git -C "$gate" checkout -q fm/task-x1
+  git -C "$gate" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "pipeline gate fix"
+  git -C "$gate" rev-parse HEAD
+}
+
+# A commit the worktree CAN read that is neither its HEAD nor a descendant of
+# it: the rewritten/diverged tip the strict code-identity rule must keep
+# refusing. Made in the project checkout, which shares the worktree's object
+# store. Echoes its sha.
+diverged_readable_head() {  # <case-dir>
+  local case_dir=$1
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "diverged tip"
+  git -C "$case_dir/project" rev-parse HEAD
+}
+
+test_gate_fixed_parked_run_is_aborted_before_teardown() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-gate-fixed)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(pipeline_gate_fix_head "$case_dir")
+  git -C "$case_dir/wt" rev-parse --verify --quiet "$head^{commit}" >/dev/null 2>&1 \
+    && fail "parked-run-gate-fixed: fixture head is readable from the worktree, so it no longer reproduces a gate-fixed run"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(gate_fixed_parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-gate-fixed: teardown should still succeed"
+  assert_present "$case_dir/nm-abort.log" \
+    "parked-run-gate-fixed: a run parked after its own gate fixes was skipped, leaving it parked forever"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "parked-run-gate-fixed: no-mistakes axi abort did not target the verified run id"
+  assert_grep "parked at a gate; aborting" "$case_dir/stderr" \
+    "parked-run-gate-fixed: teardown did not report aborting the gate-fixed parked run"
+  pass "a run parked on a gate-fixed head the worktree cannot read is still aborted, not orphaned"
+}
+
+test_diverged_readable_head_run_is_never_aborted() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-diverged-head)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(diverged_readable_head "$case_dir")
+  git -C "$case_dir/wt" rev-parse --verify --quiet "$head^{commit}" >/dev/null 2>&1 \
+    || fail "parked-run-diverged-head: fixture head is unreadable, so it no longer exercises the code-identity rule"
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-diverged-head: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-diverged-head: teardown aborted a run whose readable head diverged from this worktree"
+  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
+    "parked-run-diverged-head: teardown reported aborting a run it does not own"
+  pass "a same-branch run on a readable but diverged head is still never aborted"
+}
+
+test_terminal_unreadable_head_run_is_never_aborted() {
+  local case_dir rc head
+  case_dir=$(make_case terminal-run-unreadable-head)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(pipeline_gate_fix_head "$case_dir")
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$(terminal_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "terminal-run-unreadable-head: teardown should still succeed"
+  assert_absent "$case_dir/nm-abort.log" \
+    "terminal-run-unreadable-head: teardown aborted a terminal run it cannot bind to this worktree"
+  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
+    "terminal-run-unreadable-head: teardown reported aborting a terminal run"
+  pass "a terminal run on an unreadable head is history, not custody, and is left alone"
+}
+
 test_leaked_worktree_process_is_reaped() {
   local case_dir rc pid
   case_dir=$(make_case leaked-process-reap)
@@ -2639,6 +2762,9 @@ test_empty_status_after_abort_refuses_unconfirmed
 test_not_found_status_after_abort_confirms_completion
 test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
+test_gate_fixed_parked_run_is_aborted_before_teardown
+test_diverged_readable_head_run_is_never_aborted
+test_terminal_unreadable_head_run_is_never_aborted
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
