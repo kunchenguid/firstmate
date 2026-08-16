@@ -47,7 +47,12 @@ RESOURCE_ID = re.compile(r"^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/
 PR_URL = re.compile(r"^https://github\.com/[^/]+/[^/]+/pull/[1-9][0-9]*$")
 NM_RUN_ID = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
 RUNNER_INVOCATION = re.compile(r"^azr-[a-z0-9]{12}(?:-a[2-9][0-9]*)?$")
-LOCAL_TIMEOUT = 300
+# Shard transports legitimately run VM creation plus admission plus command
+# submission in one subprocess: near 300 seconds unloaded and well past it
+# under any operator-host load. The old 300-second cap manufactured
+# failed-retained shards whenever two transports ran concurrently
+# (generations 044/046 ground truth); 900 still bounds a genuine hang.
+LOCAL_TIMEOUT = 900
 REGIONAL_ADMISSION_CEILING_VCPUS = 128
 BUDGET_TARGET_USD = 1000.0
 BUDGET_CEILING_USD = 1500.0
