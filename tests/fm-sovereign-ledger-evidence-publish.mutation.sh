@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Verify evidence-publication containment and each independent enforcing boundary.
+# Mutation anchors and Markdown code spans intentionally preserve shell expressions as literal data.
+# shellcheck disable=SC2016
 set -euo pipefail
 
 MARKDOWN=0
