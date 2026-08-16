@@ -3,15 +3,15 @@
 # lifecycle control plane (bin/fm-control.sh).
 #
 # tmux is the control plane's reference backend and is covered hermetically in
-# tests/fm-control.test.sh. herdr is the OTHER backend whose recovery-grade
+# tests/fm-control.test.sh. Herdr is the OTHER backend whose recovery-grade
 # agent-state classifier the control plane is allowed to trust, so its
-# behavior is pinned here against the REAL binary rather than a stub: whether
-# an agent is running, and therefore whether a lifecycle verb may act at all,
-# comes from herdr's own agent registry.
+# behavior is pinned here against the REAL binary rather than a stub.
 #
-# No real agent is launched. herdr's `pane report-agent` is the same registry
-# the adapter reads, so registering and not registering an agent on a plain
-# shell pane exercises exactly the classification the control plane gates on.
+# No real agent is launched. Herdr's `pane report-agent` exercises the native
+# registration source, while `pane process-info` supplies its independent
+# process-ownership source. A stale Pi registration over the pane's lone idle
+# shell must read stopped, while the same registration with a real non-shell
+# foreground process must stay alive.
 #
 # Always runs on a private, named, throwaway lab session, never the default
 # one (tests/herdr-test-safety.sh; the 2026-07-02 incident). Skips cleanly
@@ -113,37 +113,68 @@ case "$OUT" in
 esac
 pass "real herdr: interrupt refuses when herdr's own agent registry reports no agent"
 
-# --- a registered agent: classification flips, and the verbs follow ---------
+# --- stale registration: a plain shell is not a live agent ------------------
 
-herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
+herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent pi \
   --state idle --session "$SESSION" >/dev/null 2>&1 \
-  || fail "could not register a live agent on the task pane"
+  || fail "could not register the stale Pi fixture on the task pane"
 
 STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
-[ "$STATE" = alive ] || fail "herdr should classify a registered agent as alive, got '$STATE'"
+[ "$STATE" = dead ] \
+  || fail "a stale Pi registration over the pane's idle shell should classify dead, got '$STATE'"
+OUT=$(run_control hsmoke exit) \
+  || fail "exit against a stale Pi registration over a shell should be idempotent success: $OUT"
+case "$OUT" in
+  "already-stopped hsmoke"*) : ;;
+  *) fail "a stale Pi registration over a shell should report already-stopped, got: $OUT" ;;
+esac
+pass "real herdr: a stale Pi registration over the pane's idle shell is already stopped"
 
-OUT=$(run_control hsmoke interrupt) || fail "interrupt against a registered agent should succeed: $OUT"
+# --- registered agent plus non-shell foreground: protection stays active ----
+
+fm_backend_herdr_send_text_line "$SESSION:$PANE_ID" "sleep 30" \
+  || fail "could not start the non-shell foreground fixture"
+NON_SHELL=0
+for _ in $(seq 1 50); do
+  PROCESS_INFO=$(fm_backend_herdr_cli "$SESSION" pane process-info --pane "$PANE_ID" 2>/dev/null || true)
+  if printf '%s' "$PROCESS_INFO" | jq -e '
+      .result.process_info as $process
+      | ($process.foreground_process_group_id != $process.shell_pid)
+        and (($process.foreground_processes | length) >= 1)
+    ' >/dev/null 2>&1; then
+    NON_SHELL=1
+    break
+  fi
+  sleep 0.1
+done
+[ "$NON_SHELL" -eq 1 ] || fail "the real pane never exposed the non-shell foreground fixture"
+
+STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
+[ "$STATE" = alive ] \
+  || fail "a registered agent with a non-shell foreground process must stay alive, got '$STATE'"
+OUT=$(run_control hsmoke interrupt) \
+  || fail "interrupt against a registered non-shell-owned endpoint should succeed: $OUT"
 case "$OUT" in
   *"interrupt-delivered hsmoke harness=claude backend=herdr verified=agent-alive cancel=unconfirmed"*) : ;;
   *) fail "interrupt should report the agent-alive proof on herdr, got: $OUT" ;;
 esac
-pass "real herdr: interrupt delivers the harness's key and proves the agent survived it"
+pass "real herdr: non-shell process ownership keeps a registered agent alive"
 
 herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
   || fail "the control plane must never remove the endpoint it was operating on"
 [ -d "$WT" ] || fail "the control plane must never remove the task's local copy"
 pass "real herdr: no control verb removed the endpoint or the task's local copy"
 
-# Last, because it deliberately types a harness command into a pane that hosts
-# a plain shell: the registered agent cannot actually be stopped that way, and
-# the control plane must say so rather than report a stop it did not achieve.
+# Last, because it deliberately submits an exit command while the non-shell
+# fixture remains foreground-owned. The process proof must preserve `alive`,
+# so the control plane refuses to claim a stop it did not observe.
 if OUT=$(run_control hsmoke exit 2>&1); then
-  fail "exit should fail closed when the agent does not stop: $OUT"
+  fail "exit should fail closed when the registered foreground process does not stop: $OUT"
 fi
 case "$OUT" in
   *"did not stop"*) : ;;
   *) fail "the exit failure should say the agent did not stop, got: $OUT" ;;
 esac
-pass "real herdr: an agent that does not stop fails closed instead of being reported as stopped"
+pass "real herdr: an agent-owned foreground process that does not stop fails closed"
 
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true
