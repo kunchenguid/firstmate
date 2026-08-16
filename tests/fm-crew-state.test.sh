@@ -1471,6 +1471,36 @@ EOF
   pass "the coarse runs list prefers a newer running row over an older terminal one"
 }
 
+# The other half of the newest-first ordering: no row binds to the worktree, the
+# branch's NEWEST row is terminal and an OLDER row is still marked running. The
+# running row is the stale one there - a run that died without its record being
+# terminalized - so it must NOT supersede the newer terminal verdict, and the
+# coarse fallback must attribute nothing. This is what keeps a genuinely dead
+# crew escalating instead of reading as working forever.
+test_coarse_older_running_row_loses_to_newer_terminal_row() {
+  reset_fakes
+  local d out
+  d=$(new_case coarse-stale-running)
+  make_repo_on_branch "$d/wt" fm/feat-coarse-stale-running
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/coarse-stale-running.meta" \
+    "window=fm:fm-coarse-stale-running" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: waiting on the validation run\n' > "$d/state/coarse-stale-running.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
+  failed     fm/feat-coarse-stale-running ffffff2  2026-08-16 09:10
+  running    fm/feat-coarse-stale-running ffffff1  2026-08-16 08:43
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" coarse-stale-running
+  out=$(run_crew_state "$d" coarse-stale-running)
+  assert_not_contains "$out" "source: run-step" "an older stuck-running row must not outrank a newer terminal row"
+  assert_not_contains "$out" "validating" "no coarse row binds, so no run is attributed as active work"
+  assert_contains "$out" "source: status-log" "falls back to the status log so the dead crew still escalates"
+  pass "an older running row loses to a newer terminal row in the coarse runs list"
+}
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
@@ -1525,5 +1555,6 @@ test_terminal_run_without_replacement_stays_failed
 test_executing_run_with_diverged_head_is_current
 test_terminal_run_with_diverged_head_still_not_attributed
 test_coarse_running_row_outranks_older_matching_terminal_row
+test_coarse_older_running_row_loses_to_newer_terminal_row
 
 echo "all fm-crew-state tests passed"

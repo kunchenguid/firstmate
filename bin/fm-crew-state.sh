@@ -344,7 +344,13 @@ nm_ci_checks_state() {
 # usable run within FM_CREW_STATE_RUNS_LIMIT rows.
 #
 # Rows are newest-first, and a still-running row for this branch outranks any
-# older terminal row the head rule would otherwise match. Without that precedence a
+# OLDER terminal row the head rule would otherwise match - never a newer one.
+# Both halves of that ordering are enforced: inside the loop a running row can
+# only have been seen strictly above (newer than) the terminal row it
+# supersedes, and when no row binds to the worktree at all the loop-end fallback
+# reports 'running' only when the branch's NEWEST row is itself the running one.
+# A newer terminal row therefore still beats an older row left stuck at running,
+# which is what keeps a genuinely dead run escalating. Without that precedence a
 # crew whose cancelled or failed run was immediately replaced by a fresh one
 # kept reporting the dead run as its current state (2026-08-16: snacksuite run
 # 01M03RWN cancelled and replaced by 01M0492M running still read as "failed:
@@ -357,7 +363,7 @@ nm_ci_checks_state() {
 # rerun` from a preserved head does) is exactly the case that must still be
 # attributed to the crew whose branch it holds.
 nm_runs_status_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha running_seen=0
+  local branch=$1 out row st rest br sha running_seen=0 newest_st=""
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -371,6 +377,7 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     [ "$br" = "$branch" ] || continue
+    [ -n "$newest_st" ] || newest_st=$st
     # Same code-identity rule as axi status: a same-branch row whose short-sha
     # does not match this worktree (rewritten or advanced tip) is not this
     # crew's code - unless it is still running, which supersedes anything older.
@@ -385,7 +392,7 @@ nm_runs_status_for_branch() {  # <branch>
     printf '%s' "$st"
     return 0
   done <<< "$out"
-  [ "$running_seen" = 1 ] && printf 'running'
+  [ "$running_seen" = 1 ] && [ "$newest_st" = running ] && printf 'running'
   return 0
 }
 
