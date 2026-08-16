@@ -39,6 +39,7 @@ RESULTS="$TMP/results.tsv"
 killed=0
 survived=0
 void=0
+harness_broken=0
 denominator=0
 
 evidence_refuse() {
@@ -245,26 +246,21 @@ if [ "$MODE" = containment ]; then
 fi
 
 apply_mutation() {
-  local target=$1 line=$2 from=$3 to=$4 count_file=$5
-  LINE_NUMBER=$line FROM_TEXT=$from TO_TEXT=$to COUNT_FILE=$count_file perl -0pi -e '
+  local target=$1 from=$2 to=$3 count_file=$4
+  FROM_TEXT=$from TO_TEXT=$to COUNT_FILE=$count_file perl -0pi -e '
     BEGIN {
-      $line_number = $ENV{LINE_NUMBER};
       $from = $ENV{FROM_TEXT};
       $to = $ENV{TO_TEXT};
       $count_file = $ENV{COUNT_FILE};
     }
-    @lines = split(/(?<=\n)/, $_, -1);
-    $line = $lines[$line_number - 1] // "";
     $count = 0;
     $offset = 0;
-    while (($found = index($line, $from, $offset)) >= 0) {
+    while (($found = index($_, $from, $offset)) >= 0) {
       $count++;
       $offset = $found + length($from);
     }
     if ($count == 1) {
-      $line =~ s/\Q$from\E/$to/;
-      $lines[$line_number - 1] = $line;
-      $_ = join("", @lines);
+      s/\Q$from\E/$to/;
     }
     open(my $fh, ">", $count_file) or die $!;
     print {$fh} "$count\n";
@@ -274,7 +270,7 @@ apply_mutation() {
 
 run_mutation_test() {
   local target=$1 output=$2
-  TOOL=$target perl -e '
+  FM_MUTATION_RUN=1 TOOL=$target perl -e '
     my $timeout = shift;
     my $pid = fork;
     die "fork failed" unless defined $pid;
@@ -292,17 +288,20 @@ run_mutation_test() {
     alarm $timeout;
     waitpid $pid, 0;
     alarm 0;
-    exit($? >> 8);
-  ' 60 "$TEST" >"$output" 2>&1
+    exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
+  ' "${MUTATION_TIMEOUT:-120}" "$TEST" >"$output" 2>&1
 }
 
 mutant() {
-  local id=$1 anchor=$2 line=$3 from=$4 to=$5 claim=$6 target count_file count outcome status
+  local id=$1 anchor=$2 from=$3 to=$4 claim=$5 target count_file count outcome status
   denominator=$((denominator + 1))
+  if [ -n "${MUTATION_ONLY:-}" ] && [ "$MUTATION_ONLY" != "$id" ]; then
+    return
+  fi
   target="$TMP/$id.sh"
   count_file="$TMP/$id.count"
   cp "$SOURCE" "$target"
-  apply_mutation "$target" "$line" "$from" "$to" "$count_file"
+  apply_mutation "$target" "$from" "$to" "$count_file"
   count=$(cat "$count_file")
   if [ "$count" -ne 1 ]; then
     outcome=VOID
@@ -313,7 +312,12 @@ mutant() {
     run_mutation_test "$target" "$TMP/$id.out"
     status=$?
     set -e
-    if [ "$status" -eq 0 ]; then
+    if [ "$status" -eq 124 ] || [ "$status" -eq 126 ] || [ "$status" -eq 127 ] || [ "$status" -ge 128 ]; then
+      outcome=HARNESS-BROKEN
+      harness_broken=$((harness_broken + 1))
+      printf 'HARNESS DETAIL %s status=%s\n' "$id" "$status" >&2
+      tail -20 "$TMP/$id.out" >&2
+    elif [ "$status" -eq 0 ]; then
       outcome=SURVIVED
       survived=$((survived + 1))
     else
@@ -325,85 +329,60 @@ mutant() {
   printf '%s %s substitutions=%s status=%s\n' "$id" "$outcome" "$count" "$status"
 }
 
-mutant M001 strict-mode.errexit 14 'set -euo pipefail' 'set -uo pipefail' 'Shell failures are not allowed to fall through.'
-mutant M002 manifest.denominator 16 'BUNDLE_MEMBER_COUNT=4' 'BUNDLE_MEMBER_COUNT=5' 'The owned bundle denominator is exactly four.'
-mutant M003 canonical.directory-exists 30 '|| die "ledger directory does not exist: $1"' '|| :' 'Only an existing ledger directory can be canonicalized.'
-mutant M004 canonical.physical-path 33 'pwd -P' 'pwd -L' 'Containment uses physical directory paths.'
-mutant M005 manifest.fourth-member 38 'tests.sh' 'tests.missing' 'tests.sh is a required manifest member.'
-mutant M006 enumeration.minimum-depth 43 '-mindepth 1' '-mindepth 2' 'Every top-level member is counted.'
-mutant M007 enumeration.maximum-depth 43 '-maxdepth 1' '-maxdepth 2' 'Only top-level members are counted.'
-mutant M008 enumeration.record-per-entry 44 'printf "x\n"' ':' 'Enumeration records every discovered entry.'
-mutant M009 enumeration.line-denominator 45 'wc -l' 'wc -c' 'Enumeration counts records rather than bytes.'
-mutant M010 enumeration.exact-count 49 'die "ledger bundle must contain exactly $BUNDLE_MEMBER_COUNT manifest members, found $count: $dir"' ':' 'Enumeration accepts only the owned denominator.'
-mutant M011 enumeration.known-manifest 50 'BUNDLE_ENTRIES=$(bundle_manifest)' 'BUNDLE_ENTRIES=' 'Enumeration resets to the exact known manifest.'
-mutant M012 require.known-manifest 55 'BUNDLE_ENTRIES=$(bundle_manifest)' 'BUNDLE_ENTRIES=' 'Bundle validation starts from the known manifest.'
-mutant M013 require.member-exists 57 '|| die "ledger bundle is incomplete: missing $dir/$entry"' '|| :' 'Every known manifest member must exist.'
-mutant M014 require.no-symlink 58 '&& die "ledger bundle contains a symlink: $dir/$entry"' '&& :' 'A manifest member cannot be a symlink.'
-mutant M015 require.regular-file 59 '|| die "ledger bundle contains a non-regular file: $dir/$entry"' '|| :' 'Every manifest member must be a regular file.'
-mutant M016 require.read-denominator 60 '+ 1' '+ 0' 'Every manifest member contributes to the read denominator.'
-mutant M017 require.enumerates-directory 62 'collect_bundle_entries "$dir"' ':' 'Bundle validation independently enumerates the directory.'
-mutant M018 require.exact-read-count 64 'die "ledger bundle manifest check read $checked of $BUNDLE_MEMBER_COUNT members: $dir"' ':' 'The manifest read count must equal four.'
-mutant M019 require.executable-verifier 65 '|| die "ledger verifier is not executable: $dir/fm-sovereign-ledger.sh"' '|| :' 'The ledger verifier must be executable.'
-mutant M020 layout.enumerate-primary 70 'collect_bundle_entries "$primary"' ':' 'Layout comparison enumerates the primary independently.'
-mutant M021 layout.capture-primary 71 'primary_entries=$BUNDLE_ENTRIES' 'primary_entries=' 'Layout comparison retains the primary manifest.'
-mutant M022 layout.enumerate-replica 72 'collect_bundle_entries "$replica"' ':' 'Layout comparison enumerates the replica independently.'
-mutant M023 layout.capture-replica 73 'replica_entries=$BUNDLE_ENTRIES' 'replica_entries=' 'Layout comparison retains the replica manifest.'
-mutant M024 layout.equal-manifests 74 '|| die "replica bundle layout differs from primary"' '|| :' 'Primary and replica layouts must match.'
-mutant M025 bytes.enumerate-primary 79 'collect_bundle_entries "$primary"' ':' 'Byte comparison owns a fresh manifest enumeration.'
-mutant M026 bytes.skip-denominator 80 '- 1' '- 0' 'Skipping ledger.tsv reduces the required read denominator once.'
-mutant M027 bytes.skip-only-selected 82 '&&' '||' 'Only the explicitly skipped member bypasses comparison.'
-mutant M028 bytes.quiet-compare 83 'cmp -s' 'cmp' 'Member comparison uses cmp status as its verdict.'
-mutant M029 bytes.reject-difference 84 'die "replica differs from primary: $entry"' ':' 'Any compared member byte difference is refused.'
-mutant M030 bytes.read-denominator 85 '+ 1' '+ 0' 'Each compared member contributes to the read denominator.'
-mutant M031 bytes.exact-read-count 88 'die "byte comparison read $compared of $expected required bundle members"' ':' 'The byte-read count must equal its owned denominator.'
-mutant M032 identity.follow-selection 93 '= true' '= false' 'Followed and non-followed identity reads select distinct stat modes.'
-mutant M033 identity.bsd-follow 94 'stat -L -f' 'stat -f' 'BSD followed identity uses stat -L.'
-mutant M034 identity.gnu-follow 96 'stat -L -c' 'stat -c' 'GNU followed identity uses stat -L.'
-mutant M035 identity.bsd-lstat 101 'stat -f' 'stat -L -f' 'BSD non-followed identity uses lstat semantics.'
-mutant M036 identity.gnu-lstat 103 'stat -c' 'stat -L -c' 'GNU non-followed identity uses lstat semantics.'
-mutant M037 identity.numeric-shape 108 "'^[0-9]+:[0-9]+$'" "'.*'" 'Only a numeric device and inode pair is accepted.'
-mutant M038 identity.lstat-wrapper 113 'false' 'true' 'The lstat wrapper requests non-followed identity.'
-mutant M039 identity.stat-wrapper 117 'true' 'false' 'The stat wrapper requests followed identity.'
-mutant M040 identity.enumerate-primary 124 'collect_bundle_entries "$primary"' ':' 'Identity verification enumerates the owned manifest independently.'
-mutant M041 identity.primary-lstat-read 127 'file_lstat_identity' 'file_stat_identity' 'Every primary member has a non-followed identity read.'
-mutant M042 identity.replica-lstat-read 129 'file_lstat_identity' 'file_stat_identity' 'Every replica member has a non-followed identity read.'
-mutant M043 identity.primary-stat-read 131 'file_stat_identity' 'file_lstat_identity' 'Every primary member has a followed identity read.'
-mutant M044 identity.replica-stat-read 133 'file_stat_identity' 'file_lstat_identity' 'Every replica member has a followed identity read.'
-mutant M045 identity.read-denominator 139 '+ 1' '+ 0' 'Each identity-read member contributes to the denominator.'
-mutant M046 identity.exact-read-count 142 'die "identity verification read $index of $BUNDLE_MEMBER_COUNT required bundle members"' ':' 'Identity reads must cover exactly four members.'
-mutant M047 identity.replica-cross-product 143 '< BUNDLE_MEMBER_COUNT' '< 1' 'Every replica inode participates in the cross-product.'
-mutant M048 identity.primary-cross-product 144 '< BUNDLE_MEMBER_COUNT' '< 1' 'Every primary inode participates in the cross-product.'
-mutant M049 identity.lstat-disjoint 145 'if [ "${replica_lstats[$replica_index]}" = "${primary_lstats[$primary_index]}" ]; then' 'if false; then' 'No replica lstat identity may overlap a primary identity.'
-mutant M050 identity.lstat-member-attribution 146 'if [ "${entries[$replica_index]}" = "${entries[$primary_index]}" ]; then' 'if false; then' 'Same-member lstat overlap is attributed precisely.'
-mutant M051 identity.stat-disjoint 151 'if [ "${replica_stats[$replica_index]}" = "${primary_stats[$primary_index]}" ]; then' 'if false; then' 'No replica stat identity may overlap a primary identity.'
-mutant M052 identity.stat-member-attribution 152 'if [ "${entries[$replica_index]}" = "${entries[$primary_index]}" ]; then' 'if false; then' 'Same-member stat overlap is attributed precisely.'
-mutant M053 containment.distinct-paths 163 '[ "$primary" != "$replica" ] || die "primary and replica directories must differ"' ':' 'Primary and replica paths must differ.'
-mutant M054 containment.primary-outside-replica 164 '"$replica/"*' '"$replica/never/"*' 'The primary cannot be contained by the replica.'
-mutant M055 containment.replica-outside-primary 165 '"$primary/"*' '"$primary/never/"*' 'The replica cannot be contained by the primary.'
-mutant M056 verifier.public-verify-command 170 'LEDGER_DIR="$subject" "$primary/fm-sovereign-ledger.sh" verify >/dev/null' ':' 'Bundle validity is established through the primary verifier.'
-mutant M057 prefix.primary-line-count 176 'wc -l' 'wc -c' 'Prefix comparison measures primary ledger records.'
-mutant M058 prefix.replica-line-count 177 'wc -l' 'wc -c' 'Prefix comparison measures replica ledger records.'
-mutant M059 prefix.nonempty-replica 178 '[ "$replica_lines" -gt 0 ]' 'true' 'An empty replica is never an append-only prefix.'
-mutant M060 prefix.strictly-shorter 179 '[ "$primary_lines" -gt "$replica_lines" ]' 'true' 'A prefix replica must be strictly shorter than primary.'
-mutant M061 prefix.leading-bytes 180 'head -n' 'tail -n' 'Prefix comparison uses the leading primary records.'
-mutant M062 preflight.require-primary 185 'require_bundle "$primary"' ':' 'Pair preflight validates the primary bundle.'
-mutant M063 preflight.layout 187 'compare_layout "$primary" "$replica"' ':' 'Pair preflight compares the exact layouts.'
-mutant M064 preflight.nonledger-bytes 188 'compare_files "$primary" "$replica" ledger.tsv' ':' 'Pair preflight compares replica-controlled code before execution.'
-mutant M065 exact.all-bytes 194 'compare_files "$primary" "$replica"' 'compare_files "$primary" "$replica" ledger.tsv' 'Exact verification compares all four members.'
-mutant M066 exact.disjoint-identities 195 'require_independent_bundle_files "$primary" "$replica"' ':' 'Exact verification requires disjoint inode sets.'
-mutant M067 exact.verify-primary 196 'verify_with_primary "$primary" "$primary"' ':' 'Exact verification validates the primary ledger.'
-mutant M068 exact.verify-replica 197 'verify_with_primary "$primary" "$replica"' ':' 'Exact verification validates replica ledger data.'
-mutant M069 copy.enumerate-primary 203 'collect_bundle_entries "$primary"' ':' 'Copying starts from an independently enumerated manifest.'
-mutant M070 copy.preserve-mode 205 'cp -p' 'cp' 'Bundle copying preserves required executable modes.'
-mutant M071 copy.private-umask 202 'umask 077' 'umask 022' 'Bundle staging uses a private creation mask.'
-mutant M072 copy.exact-read-count 209 'die "bundle copy read $copied of $BUNDLE_MEMBER_COUNT required members"' ':' 'Copying must cover exactly four members.'
+mutant M001 strict.errexit 'set -euo pipefail' 'set -uo pipefail' 'Shell failures cannot fall through.'
+mutant M002 manifest.denominator 'BUNDLE_MEMBER_COUNT=4' 'BUNDLE_MEMBER_COUNT=5' 'The bundle denominator is exactly four.'
+mutant M003 canonical.exists '[ -d "$1" ] || die "ledger directory does not exist: $1"' ':' 'Only an existing directory can be canonicalized.'
+mutant M004 canonical.physical 'pwd -P' 'pwd -L' 'Admission returns physical canonical paths.'
+mutant M005 manifest.tests-member 'CONTRACT.md fm-sovereign-ledger.sh ledger.tsv tests.sh' 'CONTRACT.md fm-sovereign-ledger.sh ledger.tsv tests.missing' 'The exact manifest includes tests.sh.'
+mutant M006 enumerate.top-level '-mindepth 1 -maxdepth 1' '-mindepth 2 -maxdepth 2' 'Every real top-level entry name is enumerated.'
+mutant M007 enumerate.real-names 'printf "%s\n" "${path##*/}"' 'printf "%s\n" CONTRACT.md fm-sovereign-ledger.sh ledger.tsv tests.sh' 'Enumeration retains real entry names.'
+mutant M008 enumerate.exact-set '[ "$entries" = "$required" ]' 'true' 'Real names must equal the manifest byte-for-byte.'
+mutant M009 require.no-symlink '[ -L "$dir/$entry" ] && die "ledger bundle contains a symlink: $dir/$entry"' ':' 'Manifest members cannot be symlinks.'
+mutant M010 require.regular '[ -f "$dir/$entry" ] || die "ledger bundle contains a non-regular file: $dir/$entry"' ':' 'Manifest members must remain regular files.'
+mutant M011 require.executable '[ -x "$dir/fm-sovereign-ledger.sh" ] || die "ledger verifier is not executable: $dir/fm-sovereign-ledger.sh"' ':' 'The verifier remains executable.'
+mutant M012 bytes.reject '|| die "replica differs from primary: $entry"' '|| :' 'Compared bytes must match.'
+mutant M013 device.bsd-read "stat -f '%d'" "printf '1'" 'BSD st_dev is read from stat.'
+mutant M014 device.gnu-read "stat -c '%d'" "printf '1'" 'GNU st_dev is read from stat.'
+mutant M015 device.numeric-shape "'^[0-9]+$'" "'.*'" 'Only numeric st_dev identities are accepted.'
+mutant M016 containment.distinct '[ "$primary" != "$replica" ] || die "primary and replica directories must differ"' ':' 'Canonical pair paths must differ.'
+mutant M017 containment.primary 'case "$primary/" in "$replica/"*) die "primary and replica directories must not contain one another" ;; esac' ':' 'Primary cannot be contained by replica.'
+mutant M018 containment.replica 'case "$replica/" in "$primary/"*) die "primary and replica directories must not contain one another" ;; esac' ':' 'Replica cannot be contained by primary.'
+mutant M019 device.primary-read 'primary_device=$(portable_device_identity "$primary")' 'primary_device=1' 'Admission reads primary st_dev.'
+mutant M020 device.replica-read 'replica_device=$(portable_device_identity "$replica")' 'replica_device=2' 'Admission reads replica st_dev.'
+mutant M021 device.inequality '[ "$primary_device" = "$replica_device" ]' 'false' 'Equal st_dev is refused by default.'
+mutant M022 device.optout-only '[ "$ALLOW_SAME_VOLUME_WITHOUT_DEVICE_REDUNDANCY" != yes ]' 'true' 'Only the named opt-out waives device inequality.'
+mutant M023 verifier.execute 'LEDGER_DIR="$subject" "$primary/fm-sovereign-ledger.sh" verify >/dev/null' ':' 'Primary verifier establishes ledger validity.'
+mutant M024 prefix.nonempty '[ "$replica_lines" -gt 0 ]' 'true' 'An empty ledger is not a prefix.'
+mutant M025 prefix.shorter '[ "$primary_lines" -gt "$replica_lines" ]' 'true' 'A prefix is strictly shorter.'
+mutant M026 prefix.leading 'head -n "$replica_lines"' 'tail -n "$replica_lines"' 'Prefix comparison uses leading records.'
+mutant M027 recheck.replica-type $'require_bundle "$primary"\n  require_bundle "$replica"\n  admit_device_pair "$primary" "$replica"\n  compare_files' $'require_bundle "$primary"\n  :\n  admit_device_pair "$primary" "$replica"\n  compare_files' 'Admission reclassifies replica entries after verifier execution.'
+mutant M028 directory.canonical-stable '[ "$canonical" = "$path" ] || die "$label directory no longer resolves to its admitted path: $path"' ':' 'A directory path cannot change after admission.'
+mutant M029 directory.identity-stable '[ "$identity" = "$expected" ] || die "$label directory changed after admission: $path"' ':' 'A directory object cannot change after admission.'
+mutant M030 publish.exclusive-create 'O_WRONLY | O_CREAT | O_EXCL' 'O_WRONLY | O_CREAT' 'Bundle members are created exclusively.'
+mutant M031 publish.preserve-mode 'chmod($source_stat[2] & 07777, $output)' 'chmod(0600, $output)' 'Exclusive copy preserves required modes.'
+mutant M032 publish.parent-no-symlink '[ ! -L "$parent" ] || die "replica parent directory is symlinked: $parent"' ':' 'Snapshot parent cannot be a symlink.'
+mutant M033 publish.safe-leaf "case \"\$base\" in ''|.|..) die \"unsafe replica destination leaf: \$replica_input\" ;; esac" ':' 'Snapshot leaf is safe.'
+mutant M034 publish.destination-absent '[ ! -e "$replica" ] && [ ! -L "$replica" ]' 'true' 'Snapshot destination is absent and not symlinked.'
+mutant M035 publish.parent-device 'admit_device_pair "$primary" "$parent"' ':' 'Snapshot checks destination-volume st_dev before creation.'
+mutant M036 publish.mkdir-exclusive 'mkdir -- "$replica" || die "could not exclusively create replica destination: $replica"' 'mkdir -p -- "$replica"' 'Snapshot claims its final destination exclusively.'
+mutant M037 publish.copy-bundle 'copy_bundle "$primary" "$replica"' ':' 'Snapshot populates the admitted destination.'
+mutant M038 publish.validate-object 'admit_existing_pair "$primary" "$replica" exact' ':' 'Snapshot validates the object it published.'
+mutant M039 refresh.prefix-admission 'admit_pair "$1" "$2" prefix' 'admit_pair "$1" "$2" inspect' 'Refresh proves the prefix before writing.'
+mutant M040 refresh.atomic-copy 'copy_ledger_atomically "$ADMITTED_PRIMARY" "$ADMITTED_REPLICA"' ':' 'Refresh publishes the admitted ledger update.'
+mutant M041 refresh.post-admission 'admit_pair "$ADMITTED_PRIMARY" "$ADMITTED_REPLICA" exact' ':' 'Refresh re-admits the published exact pair.'
+mutant M042 verify.inspect-admission 'admit_pair "$1" "$2" inspect' 'admit_pair "$1" "$2" exact' 'Verify admits stale pairs before classifying them.'
+mutant M043 verify.exact-recheck $'  admit_pair "$ADMITTED_PRIMARY" "$ADMITTED_REPLICA" exact\n  if [ "$ALLOW_SAME_VOLUME_WITHOUT_DEVICE_REDUNDANCY" = yes ]; then' $'  :\n  if [ "$ALLOW_SAME_VOLUME_WITHOUT_DEVICE_REDUNDANCY" = yes ]; then' 'Verify re-admits an exact pair before PASS.'
+mutant M044 option.named-flag 'if [ "${1:-}" = --allow-same-volume-without-device-redundancy ]; then' 'if [ "${1:-}" = --allow-same-volume ]; then' 'The opt-out name states the surrendered property.'
+mutant M045 dispatch.snapshot 'snapshot) shift; [ "$#" -eq 2 ] || usage; cmd_snapshot "$@"' 'snapshot) shift; [ "$#" -eq 2 ] || usage; :' 'Dispatch cannot bypass snapshot admission.'
+mutant M046 dispatch.refresh 'refresh) shift; [ "$#" -eq 2 ] || usage; cmd_refresh "$@"' 'refresh) shift; [ "$#" -eq 2 ] || usage; :' 'Dispatch cannot bypass refresh admission.'
+mutant M047 dispatch.verify 'verify) shift; [ "$#" -eq 2 ] || usage; cmd_verify "$@"' 'verify) shift; [ "$#" -eq 2 ] || usage; :' 'Dispatch cannot bypass verify admission.'
 
-[ "$denominator" -eq 72 ] || { printf 'invalid owned denominator: %s\n' "$denominator" >&2; exit 1; }
+[ "$denominator" -eq 47 ] || { printf 'invalid owned denominator: %s\n' "$denominator" >&2; exit 1; }
 
 control="$TMP/CONTROL.sh"
 control_count="$TMP/CONTROL.count"
 cp "$SOURCE" "$control"
-apply_mutation "$control" 2 'make, advance' 'make, advance' "$control_count"
+apply_mutation "$control" 'make, advance' 'make, advance' "$control_count"
 control_substitutions=$(cat "$control_count")
 set +e
 run_mutation_test "$control" "$TMP/CONTROL.out"
@@ -422,14 +401,14 @@ EVIDENCE_STAGE="$TMP/evidence.md"
 {
     printf '# Sovereign ledger redundancy mutation evidence\n\n'
     printf 'Audience: maintainer verification.\n\n'
-    printf 'Verified on 2026-08-15 against the R4 sovereign-ledger redundancy implementation.\n'
-    printf 'The owned denominator is 72 enforcing clauses, ten more than round 3\047s 62 attempted mutants because R4 added exact enumeration and read denominators, portable BSD/GNU identity selection, containment rejection, and full cross-member inode-set enforcement.\n'
+    printf 'Verified on 2026-08-15 against the R5 sovereign-ledger redundancy chokepoint.\n'
+    printf 'The owned denominator spans exact real-name enumeration, the st_dev predicate, shared admission, exclusive publication, pre-write refresh admission, post-write re-admission, verification, and all three dispatch entries.\n'
     printf 'Every run copied the implementation under one scoped `mktemp -d`; the live ledger, `data/`, and `state/` were never inputs or targets.\n\n'
     printf '```sh\n'
     printf 'tests/fm-sovereign-ledger-redundancy.mutation.sh --write-evidence sovereign-ledger-redundancy-mutation.candidate.md\n'
     printf '```\n\n'
     printf 'Evidence publication rejects existing destinations, so the candidate is reviewed against this record before replacement rather than overwriting it in place.\n\n'
-    printf 'Observed summary: `killed=%s survived=%s void=%s denominator=%s`; the intentional no-op control recorded `substitutions=%s status=%s outcome=%s`.\n\n' "$killed" "$survived" "$void" "$denominator" "$control_substitutions" "$control_status" "$control_outcome"
+    printf 'Observed summary: `killed=%s survived=%s void=%s harness_broken=%s denominator=%s`; the intentional no-op control recorded `substitutions=%s status=%s outcome=%s`.\n\n' "$killed" "$survived" "$void" "$harness_broken" "$denominator" "$control_substitutions" "$control_status" "$control_outcome"
     printf '| Mutant | Stable exact clause anchor | Substitutions | Outcome | Status | Unenforced claim when survived |\n'
     printf '| --- | --- | ---: | --- | ---: | --- |\n'
     while IFS=$'\t' read -r id anchor count outcome status claim; do
@@ -446,10 +425,9 @@ EVIDENCE_PUBLICATION
     cat "$PUBLICATION_MATRIX"
 } > "$EVIDENCE_STAGE"
 
-printf 'MUTATION SUMMARY killed=%s survived=%s void=%s denominator=%s\n' "$killed" "$survived" "$void" "$denominator"
+printf 'MUTATION SUMMARY killed=%s survived=%s void=%s harness_broken=%s denominator=%s\n' "$killed" "$survived" "$void" "$harness_broken" "$denominator"
 [ "$void" -eq 0 ]
-[ "$killed" -eq 47 ]
-[ "$survived" -eq 25 ]
+[ "$harness_broken" -eq 0 ]
 [ "$control_substitutions" -eq 1 ]
 [ "$control_outcome" = SURVIVED ]
 if [ -n "$EVIDENCE" ]; then

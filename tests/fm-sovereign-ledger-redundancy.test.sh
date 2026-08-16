@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Verify a complete independent replica, append-only refresh, and source-loss recovery through public commands.
+# Generated fixture scripts intentionally keep shell expressions literal.
+# shellcheck disable=SC2016
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -7,6 +9,10 @@ TOOL=${TOOL:-"$ROOT/bin/fm-sovereign-ledger-redundancy.sh"}
 FIXTURE="$ROOT/tests/fixtures/sovereign-ledger-redundancy"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+SAME_VOLUME_TOOL="$TMP/fm-sovereign-ledger-same-volume"
+export TOOL
+printf '%s\n' '#!/usr/bin/env bash' 'exec "$TOOL" --allow-same-volume-without-device-redundancy "$@"' > "$SAME_VOLUME_TOOL"
+chmod +x "$SAME_VOLUME_TOOL"
 pass=0
 fail=0
 
@@ -35,7 +41,44 @@ check_fails_with() {
   if [ "$task_rc" -ne 0 ] && printf '%s\n' "$output" | grep -Fq "$expected"; then
     ok "$description"
   else
-    bad "$description (missing expected refusal: $expected)"
+    bad "$description (missing expected refusal: $expected; output: ${output//$'\n'/ | })"
+  fi
+}
+
+check_refuses_promptly_with() {
+  local description=$1 expected=$2 timeout=$3 output_file task_rc output
+  shift 3
+  output_file="$TMP/bounded-command-$pass-$fail.out"
+  set +e
+  perl -e '
+    my $timeout = shift;
+    my $pid = fork;
+    die "fork failed" unless defined $pid;
+    if (!$pid) {
+      setpgrp(0, 0);
+      exec @ARGV;
+    }
+    local $SIG{ALRM} = sub {
+      kill "TERM", -$pid;
+      select undef, undef, undef, 0.1;
+      kill "KILL", -$pid;
+      waitpid $pid, 0;
+      exit 124;
+    };
+    alarm $timeout;
+    waitpid $pid, 0;
+    alarm 0;
+    exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
+  ' "$timeout" "$@" > "$output_file" 2>&1
+  task_rc=$?
+  set -e
+  output=$(cat "$output_file")
+  if [ "$task_rc" -ne 0 ] && [ "$task_rc" -ne 124 ] && printf '%s\n' "$output" | grep -Fq "$expected"; then
+    ok "$description"
+  elif [ "$task_rc" -eq 124 ]; then
+    bad "$description (timed out without the observed refusal: $expected)"
+  else
+    bad "$description (missing expected refusal: $expected; output: ${output//$'\n'/ | })"
   fi
 }
 
@@ -63,59 +106,60 @@ REPLICA="$TMP/replica"
 make_bundle "$PRIMARY" "$TMP/sources"
 
 echo 'T1 complete, independent bundle preconditions'
-check_fails_with 'verify REFUSES a nonexistent ledger directory' 'ledger directory does not exist' "$TOOL" verify "$TMP/absent-primary" "$TMP/absent-replica"
+check_fails_with 'verify REFUSES a nonexistent ledger directory' 'ledger directory does not exist' "$SAME_VOLUME_TOOL" verify "$TMP/absent-primary" "$TMP/absent-replica"
 mkdir -p "$TMP/missing-primary"
-check_fails_with 'snapshot REFUSES an incomplete primary bundle' 'ledger bundle is incomplete' "$TOOL" snapshot "$TMP/missing-primary" "$TMP/missing-replica"
+check_fails_with 'snapshot REFUSES an incomplete primary bundle' 'ledger bundle manifest differs from the exact required names' "$SAME_VOLUME_TOOL" snapshot "$TMP/missing-primary" "$TMP/missing-replica"
 MISSING_CONTRACT="$TMP/missing-contract"
 mkdir -p "$MISSING_CONTRACT"
 cp "$PRIMARY/ledger.tsv" "$MISSING_CONTRACT/ledger.tsv"
 cp "$PRIMARY/fm-sovereign-ledger.sh" "$MISSING_CONTRACT/fm-sovereign-ledger.sh"
-check_fails_with 'snapshot REFUSES a primary bundle without its contract' 'ledger bundle is incomplete' "$TOOL" snapshot "$MISSING_CONTRACT" "$TMP/missing-contract-replica"
-check_fails_with 'snapshot REFUSES the same primary and replica directory' 'primary and replica directories must differ' "$TOOL" snapshot "$PRIMARY" "$PRIMARY"
-check_ok 'snapshot atomically CREATES the complete second ledger bundle' "$TOOL" snapshot "$PRIMARY" "$REPLICA"
-check_ok 'verify PASSES for the exact independent replica' "$TOOL" verify "$PRIMARY" "$REPLICA"
+check_fails_with 'snapshot REFUSES a primary bundle without its contract' 'ledger bundle manifest differs from the exact required names' "$SAME_VOLUME_TOOL" snapshot "$MISSING_CONTRACT" "$TMP/missing-contract-replica"
+check_fails_with 'snapshot REFUSES the same primary and replica directory' 'primary and replica directories must differ' "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$PRIMARY"
+check_ok 'snapshot atomically CREATES the complete second ledger bundle' "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$REPLICA"
+check_ok 'verify PASSES for the exact independent replica' "$SAME_VOLUME_TOOL" verify "$PRIMARY" "$REPLICA"
 
 EXECUTABLE="$TMP/non-executable-replica"
-check_ok 'snapshot CREATES an executable-bit fixture bundle' "$TOOL" snapshot "$PRIMARY" "$EXECUTABLE"
+check_ok 'snapshot CREATES an executable-bit fixture bundle' "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$EXECUTABLE"
 chmod -x "$EXECUTABLE/fm-sovereign-ledger.sh"
-check_fails_with 'verify REFUSES a non-executable replica verifier' 'ledger verifier is not executable' "$TOOL" verify "$PRIMARY" "$EXECUTABLE"
+check_fails_with 'verify REFUSES a non-executable replica verifier' 'ledger verifier is not executable' "$SAME_VOLUME_TOOL" verify "$PRIMARY" "$EXECUTABLE"
 chmod +x "$EXECUTABLE/fm-sovereign-ledger.sh"
 FAILING_FIND_BIN="$TMP/failing-find-bin"
 mkdir "$FAILING_FIND_BIN"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 71' > "$FAILING_FIND_BIN/find"
 chmod +x "$FAILING_FIND_BIN/find"
-check_fails_with 'verify REFUSES when exact bundle enumeration fails' 'could not enumerate ledger bundle' env PATH="$FAILING_FIND_BIN:$PATH" "$TOOL" verify "$PRIMARY" "$REPLICA"
+check_fails_with 'verify REFUSES when exact bundle enumeration fails' 'could not enumerate ledger bundle' env PATH="$FAILING_FIND_BIN:$PATH" "$SAME_VOLUME_TOOL" verify "$PRIMARY" "$REPLICA"
 
 echo 'T2 staleness is loud and refresh accepts only an append-only prefix'
 add_ruling "$PRIMARY" "$TMP/sources" 5
-check_fails_with 'verify names a verified stale replica and its refresh remedy' 'replica is a verified stale prefix; run refresh' "$TOOL" verify "$PRIMARY" "$REPLICA"
-check_ok 'refresh advances the verified append-only replica' "$TOOL" refresh "$PRIMARY" "$REPLICA"
-check_ok 'verify PASSES after refresh' "$TOOL" verify "$PRIMARY" "$REPLICA"
-check_fails_with 'refresh REFUSES an equal-length replica rather than treating it as stale' 'replica is not a verified byte-exact append-only prefix of primary' "$TOOL" refresh "$PRIMARY" "$REPLICA"
+check_fails_with 'verify names a verified stale replica and its refresh remedy' 'replica is a verified stale prefix; run refresh' "$SAME_VOLUME_TOOL" verify "$PRIMARY" "$REPLICA"
+check_ok 'refresh advances the verified append-only replica' "$SAME_VOLUME_TOOL" refresh "$PRIMARY" "$REPLICA"
+check_ok 'verify PASSES after refresh' "$SAME_VOLUME_TOOL" verify "$PRIMARY" "$REPLICA"
+check_fails_with 'refresh REFUSES an equal-length replica rather than treating it as stale' 'replica is not a verified byte-exact append-only prefix of primary' "$SAME_VOLUME_TOOL" refresh "$PRIMARY" "$REPLICA"
 NONPREFIX="$TMP/non-prefix-replica"
-check_ok 'snapshot CREATES a non-prefix refresh fixture' "$TOOL" snapshot "$PRIMARY" "$NONPREFIX"
+check_ok 'snapshot CREATES a non-prefix refresh fixture' "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$NONPREFIX"
 { sed -n '2p' "$NONPREFIX/ledger.tsv"; sed -n '1p' "$NONPREFIX/ledger.tsv"; sed -n '3,$p' "$NONPREFIX/ledger.tsv"; } > "$NONPREFIX/reordered-ledger.tsv"
 mv "$NONPREFIX/reordered-ledger.tsv" "$NONPREFIX/ledger.tsv"
-check_fails_with 'refresh REFUSES a verifying replica that is not a byte-exact prefix' 'replica is not a verified byte-exact append-only prefix of primary' "$TOOL" refresh "$PRIMARY" "$NONPREFIX"
+check_fails_with 'refresh REFUSES a verifying replica that is not a byte-exact prefix' 'replica is not a verified byte-exact append-only prefix of primary' "$SAME_VOLUME_TOOL" refresh "$PRIMARY" "$NONPREFIX"
 SHORT_NONPREFIX="$TMP/short-non-prefix-replica"
-check_ok 'snapshot CREATES a shorter non-prefix refresh fixture' "$TOOL" snapshot "$PRIMARY" "$SHORT_NONPREFIX"
+check_ok 'snapshot CREATES a shorter non-prefix refresh fixture' "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$SHORT_NONPREFIX"
 { sed -n '2p' "$SHORT_NONPREFIX/ledger.tsv"; sed -n '1p' "$SHORT_NONPREFIX/ledger.tsv"; sed -n '3,4p' "$SHORT_NONPREFIX/ledger.tsv"; } > "$SHORT_NONPREFIX/reordered-ledger.tsv"
 mv "$SHORT_NONPREFIX/reordered-ledger.tsv" "$SHORT_NONPREFIX/ledger.tsv"
-check_fails_with 'refresh REFUSES a shorter verifying replica that is not byte-exact' 'replica is not a verified byte-exact append-only prefix of primary' "$TOOL" refresh "$PRIMARY" "$SHORT_NONPREFIX"
+check_fails_with 'refresh REFUSES a shorter verifying replica that is not byte-exact' 'replica is not a verified byte-exact append-only prefix of primary' "$SAME_VOLUME_TOOL" refresh "$PRIMARY" "$SHORT_NONPREFIX"
 EMPTY_PREFIX_PRIMARY="$TMP/empty-prefix-primary"
 EMPTY_PREFIX_REPLICA="$TMP/empty-prefix-replica"
 make_bundle "$EMPTY_PREFIX_PRIMARY" "$TMP/empty-prefix-sources"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$EMPTY_PREFIX_PRIMARY/fm-sovereign-ledger.sh"
 chmod +x "$EMPTY_PREFIX_PRIMARY/fm-sovereign-ledger.sh"
-check_ok 'snapshot CREATES an empty-prefix guard fixture' "$TOOL" snapshot "$EMPTY_PREFIX_PRIMARY" "$EMPTY_PREFIX_REPLICA"
+check_ok 'snapshot CREATES an empty-prefix guard fixture' "$SAME_VOLUME_TOOL" snapshot "$EMPTY_PREFIX_PRIMARY" "$EMPTY_PREFIX_REPLICA"
 : > "$EMPTY_PREFIX_REPLICA/ledger.tsv"
 GNU_HEAD_BIN="$TMP/gnu-head-bin"
 mkdir "$GNU_HEAD_BIN"
 # shellcheck disable=SC2016
 printf '%s\n' '#!/usr/bin/env bash' 'if [ "${1:-}" = -n ] && [ "${2:-}" = 0 ]; then exit 0; fi' 'exec /usr/bin/head "$@"' > "$GNU_HEAD_BIN/head"
 chmod +x "$GNU_HEAD_BIN/head"
-check_fails_with 'refresh REFUSES an empty replica ledger under GNU head semantics even when the fixture verifier accepts it' 'replica is not a verified byte-exact append-only prefix of primary' env PATH="$GNU_HEAD_BIN:$PATH" "$TOOL" refresh "$EMPTY_PREFIX_PRIMARY" "$EMPTY_PREFIX_REPLICA"
+check_refuses_promptly_with 'refresh promptly REFUSES an empty replica ledger under GNU head semantics even when the fixture verifier accepts it' 'replica is not a verified byte-exact append-only prefix of primary' 3 env PATH="$GNU_HEAD_BIN:$PATH" "$SAME_VOLUME_TOOL" refresh "$EMPTY_PREFIX_PRIMARY" "$EMPTY_PREFIX_REPLICA"
 
+if [ "${FM_MUTATION_RUN:-0}" != 1 ]; then
 echo 'T3 source loss leaves the four required fixture rulings provable'
 for number in 1 2 3 4; do unlink "$TMP/sources/ruling-$number.md"; done
 set +e
@@ -127,7 +171,7 @@ if [ "$recheck_status" -ne 0 ] && [ "$(printf '%s\n' "$recheck_output" | grep -c
 else
   bad 'fixture recheck did not expose all four removed sources'
 fi
-check_ok 'redundancy verify PASSES after the four sources are gone' "$TOOL" verify "$PRIMARY" "$REPLICA"
+check_ok 'redundancy verify PASSES after the four sources are gone' "$SAME_VOLUME_TOOL" verify "$PRIMARY" "$REPLICA"
 for number in 1 2 3 4; do
   expected="$TMP/ruling-$number.expected"
   base64 -d < <(awk -F '\t' -v key="ruling-$number" '$1 == key { print $3 }' "$PRIMARY/ledger.tsv") > "$expected"
@@ -137,41 +181,42 @@ for number in 1 2 3 4; do
     bad "replica did not return exact ruling-$number text after source loss"
   fi
 done
+fi
 
 echo 'T4 every bundle-file symlink is refused before it can masquerade as a copy'
 for entry in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
   symlink_replica="$TMP/symlink-$entry"
-  check_ok "snapshot CREATES a $entry symlink fixture" "$TOOL" snapshot "$PRIMARY" "$symlink_replica"
+  check_ok "snapshot CREATES a $entry symlink fixture" "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$symlink_replica"
   unlink "$symlink_replica/$entry"
   ln -s "$PRIMARY/$entry" "$symlink_replica/$entry"
-  check_fails_with "verify REFUSES a symlinked $entry" 'ledger bundle contains a symlink' "$TOOL" verify "$PRIMARY" "$symlink_replica"
+  check_fails_with "verify REFUSES a symlinked $entry" 'ledger bundle contains a symlink' "$SAME_VOLUME_TOOL" verify "$PRIMARY" "$symlink_replica"
 done
 
 echo 'T5 non-regular bundle members are refused before comparison or execution'
 NONREGULAR="$TMP/non-regular-replica"
-check_ok 'snapshot CREATES a non-regular member fixture bundle' "$TOOL" snapshot "$PRIMARY" "$NONREGULAR"
+check_ok 'snapshot CREATES a non-regular member fixture bundle' "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$NONREGULAR"
 unlink "$NONREGULAR/tests.sh"
 mkfifo "$NONREGULAR/tests.sh"
-check_fails_with 'verify REFUSES a FIFO bundle member' 'ledger bundle contains a non-regular file' "$TOOL" verify "$PRIMARY" "$NONREGULAR"
+check_refuses_promptly_with 'verify promptly REFUSES a FIFO bundle member' 'ledger bundle contains a non-regular file' 3 "$SAME_VOLUME_TOOL" verify "$PRIMARY" "$NONREGULAR"
 
 echo 'T6 replica bytes are compared before replica-controlled code can execute'
 ORDERING="$TMP/ordering-replica"
 ORDERING_PROOF="$TMP/replica-code-ran"
-check_ok 'snapshot CREATES an ordering fixture bundle' "$TOOL" snapshot "$PRIMARY" "$ORDERING"
+check_ok 'snapshot CREATES an ordering fixture bundle' "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$ORDERING"
 printf '%s\n' '#!/usr/bin/env bash' "touch '$ORDERING_PROOF'" 'exit 0' > "$ORDERING/fm-sovereign-ledger.sh"
 chmod +x "$ORDERING/fm-sovereign-ledger.sh"
-check_fails 'verify REFUSES a changed replica verifier' "$TOOL" verify "$PRIMARY" "$ORDERING"
+check_fails 'verify REFUSES a changed replica verifier' "$SAME_VOLUME_TOOL" verify "$PRIMARY" "$ORDERING"
 if [ ! -e "$ORDERING_PROOF" ]; then ok 'changed replica verifier never executed'; else bad 'changed replica verifier executed before byte comparison'; fi
 
 echo 'T7 divergence and extra files are detected and never repaired'
 printf 'tamper\n' >> "$REPLICA/CONTRACT.md"
-check_fails 'verify FAILS when replica contract bytes diverge' "$TOOL" verify "$PRIMARY" "$REPLICA"
-check_fails 'snapshot REFUSES to overwrite a divergent replica' "$TOOL" snapshot "$PRIMARY" "$REPLICA"
+check_fails 'verify FAILS when replica contract bytes diverge' "$SAME_VOLUME_TOOL" verify "$PRIMARY" "$REPLICA"
+check_fails 'snapshot REFUSES to overwrite a divergent replica' "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$REPLICA"
 cp "$PRIMARY/CONTRACT.md" "$REPLICA/CONTRACT.md"
 printf 'planted\n' > "$REPLICA/EXTRA-CONTRACT.md"
-check_fails_with 'verify REFUSES an unexpected replica file' 'must contain exactly 4 manifest members' "$TOOL" verify "$PRIMARY" "$REPLICA"
+check_fails_with 'verify REFUSES an unexpected replica file' 'ledger bundle manifest differs from the exact required names' "$SAME_VOLUME_TOOL" verify "$PRIMARY" "$REPLICA"
 unlink "$REPLICA/EXTRA-CONTRACT.md"
-check_ok 'verify PASSES after fixture restore' "$TOOL" verify "$PRIMARY" "$REPLICA"
+check_ok 'verify PASSES after fixture restore' "$SAME_VOLUME_TOOL" verify "$PRIMARY" "$REPLICA"
 
 echo 'T8 an invalid primary is never copied'
 INVALID="$TMP/invalid-primary"
@@ -180,45 +225,52 @@ cp "$PRIMARY"/* "$INVALID/"
 sed -i.bak '1s/ruling-1/not-a-ruling/' "$INVALID/ledger.tsv"
 unlink "$INVALID/ledger.tsv.bak"
 INVALID_REPLICA="$TMP/invalid-replica"
-check_fails 'snapshot REFUSES a primary rejected by its own verifier' "$TOOL" snapshot "$INVALID" "$INVALID_REPLICA"
+check_fails 'snapshot REFUSES a primary rejected by its own verifier' "$SAME_VOLUME_TOOL" snapshot "$INVALID" "$INVALID_REPLICA"
 if [ ! -e "$INVALID_REPLICA" ]; then ok 'rejected primary leaves no replica directory behind'; else bad 'rejected primary wrote a replica directory'; fi
 
-echo 'T9 each identity check fires independently'
+echo 'T9 the st_dev predicate is portable and fail-closed'
 IDENTITY_PRIMARY="$TMP/identity-primary"
 IDENTITY_REPLICA="$TMP/identity-replica"
 IDENTITY_STAT_BIN="$TMP/identity-stat-bin"
-check_ok 'snapshot CREATES an identity-check fixture bundle' "$TOOL" snapshot "$PRIMARY" "$IDENTITY_PRIMARY"
-check_ok 'snapshot CREATES an identity-check replica bundle' "$TOOL" snapshot "$PRIMARY" "$IDENTITY_REPLICA"
+check_ok 'snapshot CREATES an identity-check fixture bundle' "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$IDENTITY_PRIMARY"
+check_ok 'snapshot CREATES an identity-check replica bundle' "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$IDENTITY_REPLICA"
 mkdir "$IDENTITY_STAT_BIN"
 # shellcheck disable=SC2016
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
   'target="${!#}"' \
-  'follow=false' \
-  'for argument in "$@"; do if [ "$argument" = "-L" ]; then follow=true; fi; done' \
   'case "$target" in' \
-  '  *identity-primary/*) side=primary ;;' \
-  '  *identity-replica/*) side=replica ;;' \
+  '  *identity-primary|*identity-primary/*) side=primary ;;' \
+  '  *identity-replica|*identity-replica/*) side=replica ;;' \
   '  *) exit 70 ;;' \
   'esac' \
-  'case "${IDENTITY_MODE}:${follow}" in' \
-  '  lstat:false|stat:true) printf "1:1\\n" ;;' \
-  '  *) if [ "$side" = primary ]; then printf "1:2\\n"; else printf "1:3\\n"; fi ;;' \
+  'case "$*" in' \
+  '  *%d:%i*) if [ "$side" = primary ]; then printf "1:101\\n"; else printf "2:202\\n"; fi ;;' \
+  '  *%d*)' \
+  '    case "${IDENTITY_MODE:-}" in' \
+  '      same) printf "1\\n" ;;' \
+  '      distinct) if [ "$side" = primary ]; then printf "1\\n"; else printf "2\\n"; fi ;;' \
+  '      invalid) printf "not-a-device\\n" ;;' \
+  '      *) exit 71 ;;' \
+  '    esac ;;' \
+  '  *) exit 72 ;;' \
   'esac' > "$IDENTITY_STAT_BIN/stat"
 chmod +x "$IDENTITY_STAT_BIN/stat"
-check_fails_with 'verify REFUSES a shared lstat identity even when stat identities differ' 'replica CONTRACT.md shares the primary lstat identity' env PATH="$IDENTITY_STAT_BIN:$PATH" IDENTITY_MODE=lstat IDENTITY_PRIMARY="$IDENTITY_PRIMARY" IDENTITY_REPLICA="$IDENTITY_REPLICA" "$TOOL" verify "$IDENTITY_PRIMARY" "$IDENTITY_REPLICA"
-check_fails_with 'verify REFUSES a shared stat identity even when lstat identities differ' 'replica CONTRACT.md resolves to the primary object' env PATH="$IDENTITY_STAT_BIN:$PATH" IDENTITY_MODE=stat IDENTITY_PRIMARY="$IDENTITY_PRIMARY" IDENTITY_REPLICA="$IDENTITY_REPLICA" "$TOOL" verify "$IDENTITY_PRIMARY" "$IDENTITY_REPLICA"
+check_fails_with 'verify REFUSES equal numeric st_dev identities' 'primary and replica must be on different devices' env PATH="$IDENTITY_STAT_BIN:$PATH" IDENTITY_MODE=same "$TOOL" verify "$IDENTITY_PRIMARY" "$IDENTITY_REPLICA"
+check_ok 'verify ACCEPTS distinct numeric st_dev identities' env PATH="$IDENTITY_STAT_BIN:$PATH" IDENTITY_MODE=distinct "$TOOL" verify "$IDENTITY_PRIMARY" "$IDENTITY_REPLICA"
+check_fails_with 'verify REFUSES a nonnumeric st_dev identity' 'could not establish primary st_dev identity' env PATH="$IDENTITY_STAT_BIN:$PATH" IDENTITY_MODE=invalid "$TOOL" verify "$IDENTITY_PRIMARY" "$IDENTITY_REPLICA"
 
-echo 'T10 every bundle member must have separate lstat and stat identities'
+echo 'T10 hard links fall to the one device predicate by default'
 for entry in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
   hardlink_replica="$TMP/hardlink-$entry"
-  check_ok "snapshot CREATES a $entry hard-link fixture" "$TOOL" snapshot "$PRIMARY" "$hardlink_replica"
+  check_ok "snapshot CREATES a $entry hard-link fixture" "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$hardlink_replica"
   unlink "$hardlink_replica/$entry"
   ln "$PRIMARY/$entry" "$hardlink_replica/$entry"
-  check_fails_with "verify REFUSES a hard-linked $entry by lstat identity" "replica $entry shares the primary lstat identity" "$TOOL" verify "$PRIMARY" "$hardlink_replica"
+  check_fails_with "verify REFUSES a same-device pair containing hard-linked $entry" 'primary and replica must be on different devices' "$TOOL" verify "$PRIMARY" "$hardlink_replica"
 done
 
+if [ "${FM_MUTATION_RUN:-0}" != 1 ]; then
 echo 'T11 adversarial ledger paths certify real copies that survive primary destruction'
 exercise_destruction_shape() {
   local label=$1 component=$2 root primary replica sources expected member number all_members all_rulings
@@ -232,8 +284,8 @@ exercise_destruction_shape() {
   for member in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
     cp -p "$primary/$member" "$expected/$member"
   done
-  check_ok "snapshot CREATES an independent replica under a $label path" "$TOOL" snapshot "$primary" "$replica"
-  check_ok "verify CERTIFIES the independent replica under a $label path" "$TOOL" verify "$primary" "$replica"
+  check_ok "snapshot CREATES an independent replica under a $label path" "$SAME_VOLUME_TOOL" snapshot "$primary" "$replica"
+  check_ok "verify CERTIFIES the independent replica under a $label path" "$SAME_VOLUME_TOOL" verify "$primary" "$replica"
   rm -rf -- "$primary"
   all_members=true
   for member in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
@@ -262,6 +314,7 @@ exercise_destruction_shape 'unterminated bracket' 'Ledger [1'
 exercise_destruction_shape 'space' 'Ledger space'
 exercise_destruction_shape 'newline' $'Ledger\nnewline'
 exercise_destruction_shape 'unicode' 'Ledger-船长-⚓'
+fi
 
 echo 'T12 the instrument distinguishes independent and non-independent replicas'
 CONTROL_ROOT="$TMP/control #ledger"
@@ -272,7 +325,7 @@ mkdir -p "$CONTROL_REPLICA"
 for entry in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
   ln -s "$CONTROL_PRIMARY/$entry" "$CONTROL_REPLICA/$entry"
 done
-check_fails_with 'positive control REFUSES a fully symlinked replica under a hash path' 'ledger bundle contains a symlink' "$TOOL" verify "$CONTROL_PRIMARY" "$CONTROL_REPLICA"
+check_fails_with 'positive control REFUSES a fully symlinked replica under a hash path' 'ledger bundle contains a symlink' "$SAME_VOLUME_TOOL" verify "$CONTROL_PRIMARY" "$CONTROL_REPLICA"
 
 echo 'T13 containment is an explicit property'
 CONTAINED_PRIMARY="$TMP/containment-primary"
@@ -282,40 +335,44 @@ mkdir -p "$CONTAINED_REPLICA"
 for entry in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
   cp -p "$CONTAINED_PRIMARY/$entry" "$CONTAINED_REPLICA/$entry"
 done
-check_fails_with 'verify REFUSES a replica contained by the primary explicitly' 'primary and replica directories must not contain one another' "$TOOL" verify "$CONTAINED_PRIMARY" "$CONTAINED_REPLICA"
+check_fails_with 'verify REFUSES a replica contained by the primary explicitly' 'primary and replica directories must not contain one another' "$SAME_VOLUME_TOOL" verify "$CONTAINED_PRIMARY" "$CONTAINED_REPLICA"
 rm -rf -- "$CONTAINED_REPLICA"
-check_fails_with 'snapshot REFUSES a replica target contained by the primary explicitly' 'primary and replica directories must not contain one another' "$TOOL" snapshot "$CONTAINED_PRIMARY" "$CONTAINED_REPLICA"
+check_fails_with 'snapshot REFUSES a replica target contained by the primary explicitly' 'primary and replica directories must not contain one another' "$SAME_VOLUME_TOOL" snapshot "$CONTAINED_PRIMARY" "$CONTAINED_REPLICA"
 OUTER_REPLICA="$TMP/outer-replica"
 INNER_PRIMARY="$OUTER_REPLICA/primary"
 make_bundle "$OUTER_REPLICA" "$TMP/outer-sources"
 make_bundle "$INNER_PRIMARY" "$TMP/inner-sources"
-check_fails_with 'verify REFUSES a primary contained by the replica explicitly' 'primary and replica directories must not contain one another' "$TOOL" verify "$INNER_PRIMARY" "$OUTER_REPLICA"
+check_fails_with 'verify REFUSES a primary contained by the replica explicitly' 'primary and replica directories must not contain one another' "$SAME_VOLUME_TOOL" verify "$INNER_PRIMARY" "$OUTER_REPLICA"
 
-echo 'T14 identity reads are fail-closed under BSD and GNU stat semantics'
+echo 'T14 st_dev reads are fail-closed under BSD and GNU stat semantics'
 DIALECT_PRIMARY="$TMP/dialect-primary"
 DIALECT_REPLICA="$TMP/dialect-replica"
 DIALECT_STAT_BIN="$TMP/dialect-stat-bin"
-check_ok 'snapshot CREATES a stat-dialect primary fixture' "$TOOL" snapshot "$PRIMARY" "$DIALECT_PRIMARY"
-check_ok 'snapshot CREATES a stat-dialect replica fixture' "$TOOL" snapshot "$PRIMARY" "$DIALECT_REPLICA"
+check_ok 'snapshot CREATES a stat-dialect primary fixture' "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$DIALECT_PRIMARY"
+check_ok 'snapshot CREATES a stat-dialect replica fixture' "$SAME_VOLUME_TOOL" snapshot "$PRIMARY" "$DIALECT_REPLICA"
 mkdir "$DIALECT_STAT_BIN"
 cat > "$DIALECT_STAT_BIN/stat" <<'STAT_STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 emit_identity() {
-  local follow=$1 target=$2
-  perl -e '
-    my ($follow, $path) = @ARGV;
-    my @identity = $follow eq "true" ? stat($path) : lstat($path);
-    exit 70 unless @identity;
-    printf "%d:%d\n", $identity[0], $identity[1];
-  ' "$follow" "$target"
+  local format=$1 target=$2 device inode
+  case "$target" in
+    *dialect-primary|*dialect-primary/*) device=11; inode=101 ;;
+    *dialect-replica|*dialect-replica/*) device=22; inode=202 ;;
+    *) exit 70 ;;
+  esac
+  case "$format" in
+    %d) printf '%s\n' "$device" ;;
+    %d:%i) printf '%s:%s\n' "$device" "$inode" ;;
+    *) exit 71 ;;
+  esac
 }
 case "${STAT_FLAVOUR:-}" in
   bsd)
-    if [ "$#" -eq 3 ] && [ "$1" = -f ] && [ "$2" = '%d:%i' ]; then
-      emit_identity false "$3"
-    elif [ "$#" -eq 4 ] && [ "$1" = -L ] && [ "$2" = -f ] && [ "$3" = '%d:%i' ]; then
-      emit_identity true "$4"
+    if [ "$#" -eq 3 ] && [ "$1" = -f ]; then
+      emit_identity "$2" "$3"
+    elif [ "$#" -eq 4 ] && [ "$1" = -L ] && [ "$2" = -f ]; then
+      emit_identity "$3" "$4"
     else
       exit 64
     fi
@@ -324,10 +381,10 @@ case "${STAT_FLAVOUR:-}" in
     if { [ "$#" -eq 3 ] && [ "$1" = -f ]; } || { [ "$#" -eq 4 ] && [ "$1" = -L ] && [ "$2" = -f ]; }; then
       printf '  File: "%s"\n' "${!#}"
       exit 1
-    elif [ "$#" -eq 3 ] && [ "$1" = -c ] && [ "$2" = '%d:%i' ]; then
-      emit_identity false "$3"
-    elif [ "$#" -eq 4 ] && [ "$1" = -L ] && [ "$2" = -c ] && [ "$3" = '%d:%i' ]; then
-      emit_identity true "$4"
+    elif [ "$#" -eq 3 ] && [ "$1" = -c ]; then
+      emit_identity "$2" "$3"
+    elif [ "$#" -eq 4 ] && [ "$1" = -L ] && [ "$2" = -c ]; then
+      emit_identity "$3" "$4"
     else
       exit 64
     fi
@@ -340,25 +397,143 @@ esac
 STAT_STUB
 chmod +x "$DIALECT_STAT_BIN/stat"
 for flavour in bsd gnu; do
-  check_ok "verify PASSES an independent replica with $flavour stat semantics" env PATH="$DIALECT_STAT_BIN:$PATH" STAT_FLAVOUR="$flavour" "$TOOL" verify "$DIALECT_PRIMARY" "$DIALECT_REPLICA"
-  dialect_hardlink="$TMP/dialect-hardlink-$flavour"
-  check_ok "snapshot CREATES the $flavour hard-link fixture" "$TOOL" snapshot "$PRIMARY" "$dialect_hardlink"
-  unlink "$dialect_hardlink/CONTRACT.md"
-  ln "$PRIMARY/CONTRACT.md" "$dialect_hardlink/CONTRACT.md"
-  check_fails_with "verify REFUSES a hard link with $flavour stat semantics" 'replica CONTRACT.md shares the primary lstat identity' env PATH="$DIALECT_STAT_BIN:$PATH" STAT_FLAVOUR="$flavour" "$TOOL" verify "$PRIMARY" "$dialect_hardlink"
+  check_ok "verify PASSES distinct st_dev identities with $flavour stat semantics" env PATH="$DIALECT_STAT_BIN:$PATH" STAT_FLAVOUR="$flavour" "$TOOL" verify "$DIALECT_PRIMARY" "$DIALECT_REPLICA"
 done
-check_fails_with 'verify REFUSES when stat cannot establish a numeric identity' 'could not establish a portable file identity' env PATH="$DIALECT_STAT_BIN:$PATH" STAT_FLAVOUR=invalid "$TOOL" verify "$DIALECT_PRIMARY" "$DIALECT_REPLICA"
+check_fails_with 'verify REFUSES when stat cannot establish a numeric st_dev identity' 'could not establish primary st_dev identity' env PATH="$DIALECT_STAT_BIN:$PATH" STAT_FLAVOUR=invalid "$TOOL" verify "$DIALECT_PRIMARY" "$DIALECT_REPLICA"
 
-echo 'T15 the complete replica and primary inode sets must be disjoint'
+echo 'T15 the complete replica and primary device sets must be disjoint'
 CROSS_PRIMARY="$TMP/cross-primary"
 CROSS_REPLICA="$TMP/cross-replica"
 make_bundle "$CROSS_PRIMARY" "$TMP/cross-sources"
 cp "$CROSS_PRIMARY/CONTRACT.md" "$CROSS_PRIMARY/tests.sh"
 chmod +x "$CROSS_PRIMARY/tests.sh"
-check_ok 'snapshot CREATES a cross-member identity fixture' "$TOOL" snapshot "$CROSS_PRIMARY" "$CROSS_REPLICA"
+check_ok 'snapshot CREATES a cross-member identity fixture' "$SAME_VOLUME_TOOL" snapshot "$CROSS_PRIMARY" "$CROSS_REPLICA"
 unlink "$CROSS_REPLICA/CONTRACT.md"
 ln "$CROSS_PRIMARY/tests.sh" "$CROSS_REPLICA/CONTRACT.md"
-check_fails_with 'verify REFUSES a replica member sharing storage with a different primary member' 'replica CONTRACT.md shares storage with primary member tests.sh' "$TOOL" verify "$CROSS_PRIMARY" "$CROSS_REPLICA"
+check_fails_with 'verify REFUSES cross-member shared storage by the device predicate' 'primary and replica must be on different devices' "$TOOL" verify "$CROSS_PRIMARY" "$CROSS_REPLICA"
+
+echo 'T16 round 5 attacks replace the independence predicate rather than extending it'
+R5_PRIMARY="$TMP/r5-primary"
+R5_COPY="$TMP/r5-copy"
+make_bundle "$R5_PRIMARY" "$TMP/r5-sources"
+mkdir "$R5_COPY"
+for entry in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
+  cp -p "$R5_PRIMARY/$entry" "$R5_COPY/$entry"
+done
+check_fails_with 'verify REFUSES a same-volume real copy by default' 'primary and replica must be on different devices' "$TOOL" verify "$R5_PRIMARY" "$R5_COPY"
+check_ok 'verify explicit opt-out ACCEPTS a same-volume real copy' "$TOOL" --allow-same-volume-without-device-redundancy verify "$R5_PRIMARY" "$R5_COPY"
+
+if cp -c "$R5_PRIMARY/CONTRACT.md" "$TMP/r5-clone-probe" 2>/dev/null; then
+  R5_CLONE="$TMP/r5-clone"
+  mkdir "$R5_CLONE"
+  for entry in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
+    cp -c "$R5_PRIMARY/$entry" "$R5_CLONE/$entry"
+  done
+  check_fails_with 'verify REFUSES an APFS clone bundle by the device predicate' 'primary and replica must be on different devices' "$TOOL" verify "$R5_PRIMARY" "$R5_CLONE"
+else
+  ok 'APFS clone attack is unavailable on this filesystem and is not simulated'
+fi
+
+R5_CASE="$TMP/r5-case"
+mkdir "$R5_CASE"
+for entry in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
+  cp -p "$R5_PRIMARY/$entry" "$R5_CASE/$entry"
+done
+mv "$R5_CASE/CONTRACT.md" "$R5_CASE/contract.md"
+check_fails_with 'verify REFUSES a case-folded manifest collision by its real entry name' 'ledger bundle manifest differs from the exact required names' "$TOOL" --allow-same-volume-without-device-redundancy verify "$R5_PRIMARY" "$R5_CASE"
+
+R5_TRAVERSAL="$R5_PRIMARY/../r5-primary"
+check_fails_with 'verify REFUSES dot-dot traversal that resolves to the primary itself' 'primary and replica directories must differ' "$TOOL" --allow-same-volume-without-device-redundancy verify "$R5_PRIMARY" "$R5_TRAVERSAL"
+R5_PARENT_ALIAS="$TMP/r5-primary-parent-alias"
+ln -s "$TMP" "$R5_PARENT_ALIAS"
+check_fails_with 'verify REFUSES a replica path symlinked to the primary parent' 'primary and replica directories must not contain one another' "$TOOL" --allow-same-volume-without-device-redundancy verify "$R5_PRIMARY" "$R5_PARENT_ALIAS"
+
+R5_REFRESH="$TMP/r5-refresh"
+mkdir "$R5_REFRESH"
+for entry in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
+  cp -p "$R5_PRIMARY/$entry" "$R5_REFRESH/$entry"
+done
+head -n 3 "$R5_PRIMARY/ledger.tsv" > "$R5_REFRESH/ledger.tsv"
+unlink "$R5_REFRESH/tests.sh"
+ln "$R5_PRIMARY/tests.sh" "$R5_REFRESH/tests.sh"
+R5_REFRESH_BEFORE=$(cat "$R5_REFRESH/ledger.tsv")
+check_fails_with 'refresh REFUSES a same-device pair before publication' 'primary and replica must be on different devices' "$TOOL" refresh "$R5_PRIMARY" "$R5_REFRESH"
+if [ "$(cat "$R5_REFRESH/ledger.tsv")" = "$R5_REFRESH_BEFORE" ]; then
+  ok 'refresh refusal leaves the rejected replica byte-exactly unchanged'
+else
+  bad 'refresh wrote ledger.tsv before refusing the pair'
+fi
+
+R5_NONREGULAR="$TMP/r5-nonregular-after-classification"
+mkdir "$R5_NONREGULAR"
+for entry in ledger.tsv CONTRACT.md fm-sovereign-ledger.sh tests.sh; do
+  cp -p "$R5_PRIMARY/$entry" "$R5_NONREGULAR/$entry"
+done
+R5_FIND_BIN="$TMP/r5-find-bin"
+mkdir "$R5_FIND_BIN"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  '  /usr/bin/find "$@"' \
+  'case "$1" in' \
+  '*/r5-nonregular-after-classification)' \
+  '  if [ ! -e "$R5_SWAP_MARKER" ]; then' \
+  '    : > "$R5_SWAP_MARKER"' \
+  '    rm -f "$R5_SWAP_DIR/tests.sh"' \
+  '    mkdir "$R5_SWAP_DIR/tests.sh"' \
+  '  fi ;;' \
+  'esac' > "$R5_FIND_BIN/find"
+chmod +x "$R5_FIND_BIN/find"
+check_fails_with 'verify reclassifies a non-regular member appearing after enumeration' 'ledger bundle contains a non-regular file' env PATH="$R5_FIND_BIN:$PATH" R5_SWAP_DIR="$R5_NONREGULAR" R5_SWAP_MARKER="$TMP/r5-swap-done" "$TOOL" --allow-same-volume-without-device-redundancy verify "$R5_PRIMARY" "$R5_NONREGULAR"
+
+echo 'T17 snapshot publication is bound to the destination created exclusively by admission'
+R5_TOC_PRIMARY="$TMP/r5-toc-primary"
+R5_TOC_DEST="$TMP/r5-toc-destination"
+R5_TOC_OUTSIDE="$TMP/r5-toc-outside"
+R5_TOC_READY="$TMP/r5-toc-ready"
+R5_TOC_COUNT="$TMP/r5-toc-count"
+R5_TOC_REAL="$TMP/r5-toc-real-verifier"
+R5_TOC_OUTPUT="$TMP/r5-toc-output"
+make_bundle "$R5_TOC_PRIMARY" "$TMP/r5-toc-sources"
+mkdir "$R5_TOC_OUTSIDE"
+cp -p "$R5_TOC_PRIMARY/fm-sovereign-ledger.sh" "$R5_TOC_REAL"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'count=0' \
+  '[ ! -e "$R5_TOC_COUNT" ] || count=$(cat "$R5_TOC_COUNT")' \
+  'count=$((count + 1))' \
+  'printf "%s\\n" "$count" > "$R5_TOC_COUNT"' \
+  'if [ "$count" -eq 2 ]; then' \
+  '  : > "$R5_TOC_READY"' \
+  '  sleep 1' \
+  'fi' \
+  'exec "$R5_TOC_REAL" "$@"' > "$R5_TOC_PRIMARY/fm-sovereign-ledger.sh"
+chmod +x "$R5_TOC_PRIMARY/fm-sovereign-ledger.sh"
+set +e
+env R5_TOC_COUNT="$R5_TOC_COUNT" R5_TOC_READY="$R5_TOC_READY" R5_TOC_REAL="$R5_TOC_REAL" \
+  "$TOOL" --allow-same-volume-without-device-redundancy snapshot "$R5_TOC_PRIMARY" "$R5_TOC_DEST" > "$R5_TOC_OUTPUT" 2>&1 &
+R5_TOC_PID=$!
+set -e
+R5_TOC_ATTEMPT=0
+while [ ! -e "$R5_TOC_READY" ] && [ "$R5_TOC_ATTEMPT" -lt 100 ]; do
+  sleep 0.02
+  R5_TOC_ATTEMPT=$((R5_TOC_ATTEMPT + 1))
+done
+if [ ! -e "$R5_TOC_DEST" ] && [ ! -L "$R5_TOC_DEST" ]; then
+  ln -s "$R5_TOC_OUTSIDE" "$R5_TOC_DEST"
+fi
+set +e
+wait "$R5_TOC_PID"
+R5_TOC_STATUS=$?
+set -e
+if [ "$R5_TOC_STATUS" -eq 0 ] && [ -d "$R5_TOC_DEST" ] && [ ! -L "$R5_TOC_DEST" ] \
+  && [ -f "$R5_TOC_DEST/ledger.tsv" ] && [ -z "$(find "$R5_TOC_OUTSIDE" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  ok 'snapshot race cannot redirect publication outside its admitted destination'
+else
+  R5_TOC_DIAGNOSTIC=$(cat "$R5_TOC_OUTPUT")
+  bad "snapshot publication race escaped admission (status=$R5_TOC_STATUS; output: ${R5_TOC_DIAGNOSTIC//$'\n'/ | })"
+fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
