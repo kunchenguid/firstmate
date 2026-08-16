@@ -498,6 +498,8 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
 Use its scaffold as the contract, then replace every `{TASK}` placeholder with a clear task description, acceptance criteria, constraints, and necessary context before dispatch or seeding.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
+A ship brief's `# Task` section is the source of the published PR description, so scope every identifier in it to the repository under change and keep another repository's commit ids, another task's name, and machine-local paths out of it, while keeping the accepted requirements whole.
+[`docs/outward-facing-text.md`](docs/outward-facing-text.md) owns that contract, and the generated brief carries the worker's own pre-publication check.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.

@@ -1,0 +1,10 @@
+# Identifiers that bin/fm-outward-text-check.sh would otherwise report, kept
+# here because a reader of this repository really can resolve them.
+# One token per line; `#` starts a comment. See docs/outward-facing-text.md.
+#
+# Adding a line is the reviewable act that justifies a new outward reference.
+# An identifier that only this machine, another repository, or a private task
+# can resolve does not belong here - it belongs out of the published text.
+
+# A generic illustrative directory in the cd-guard reference, not anyone's home.
+/home/project

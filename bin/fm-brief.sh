@@ -177,6 +177,10 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+# The pre-publication scan for the two ship modes that publish text outward.
+# --task names this task so its own id, already public through the branch name,
+# is not reported back as foreign.
+OUTWARD_CHECK="$FM_ROOT/bin/fm-outward-text-check.sh --home $(shell_quote "$FM_HOME") --task $ID"
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -362,6 +366,10 @@ This task ships **direct-PR**: you raise the PR yourself, without the no-mistake
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+
+Before you open the PR, write its title and description to a file and check that file with \`$OUTWARD_CHECK <file>\`.
+A published PR description stays readable even after the PR is closed, so it may carry only what a reader holding this repository alone could resolve.
+Clear every finding by removing the identifier, never by dropping accepted requirements - the requirements are exactly what the description is for.
 EOF
     ;;
   local-only)
@@ -391,6 +399,8 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
+no-mistakes publishes that intent as the PR description, and a published description stays readable even after the PR is closed, so write the intent to a file and check that file with \`$OUTWARD_CHECK <file>\` BEFORE you start the run.
+The intent may carry only what a reader holding this repository alone could resolve; clear every finding by removing the identifier, never by dropping accepted requirements, which are exactly what the intent is for.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:

@@ -372,7 +372,12 @@ jobs:
     name: Repo invariants
     runs-on: ubuntu-latest
     steps:
+      # Full history: the outward-text check decides whether an id resolves in
+      # THIS repository, so a shallow clone would report the repo's own commits
+      # as foreign.
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Symlinks must stay intact
         run: |
           set -eu
@@ -387,3 +392,9 @@ jobs:
             printf '%s\n' "$tracked"
             exit 1
           fi
+      # Backstop for prose this branch publishes into the repository. Blocking
+      # findings (a machine-local path, a private fleet identifier) fail the job;
+      # unresolvable ids are printed for review because a named upstream can make
+      # one legitimate, and .fm-outward-allow settles those once.
+      - name: Added prose must not carry foreign identifiers
+        run: bin/fm-outward-text-check.sh --diff --block-only

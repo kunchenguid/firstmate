@@ -277,6 +277,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/outward-facing-text.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/remote-secondmates.md",
       "audience": "operator-current"
     },

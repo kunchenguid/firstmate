@@ -316,6 +316,12 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
   assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
     "direct-PR brief must not include the no-mistakes --intent contract"
+  # direct-PR publishes its own description, so it owes the same pre-publication
+  # scan; local-only publishes nothing and must not carry it.
+  assert_grep "bin/fm-outward-text-check.sh --home" "$home/data/$id/brief.md" \
+    "direct-PR brief must check the PR body before it is published"
+  assert_no_grep "bin/fm-outward-text-check.sh" "$home/data/brief-local-authority-a4/brief.md" \
+    "local-only brief publishes nothing outward and must not carry the check"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
@@ -345,6 +351,15 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
   assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
     "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
+  # The intent is published verbatim as the PR description, so the scan of it
+  # has to come before the run starts - after publication there is nothing to
+  # retract, since a closed PR keeps its body.
+  assert_grep "bin/fm-outward-text-check.sh --home" "$brief" \
+    "no-mistakes DOD must have the worker check the intent before publishing it"
+  assert_grep "BEFORE you start the run" "$brief" \
+    "the intent check must run before the pipeline publishes the description"
+  assert_grep "never by dropping accepted requirements" "$brief" \
+    "clearing a finding must not be answered by shortening the intent"
   # The apostrophe in "firstmate's authority check" is now structurally safe
   # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
   # being reworded or escaped away. test_no_heredoc_in_command_substitution

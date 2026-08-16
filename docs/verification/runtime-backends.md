@@ -276,7 +276,7 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh
 HERDR_ENV=1
 HERDR_PANE_ID=w1:p1
 HERDR_SESSION=fm-lab-fm-herdr-env-pro-65961-25535
-HERDR_SOCKET_PATH=/Users/kunchen/.config/herdr/sessions/fm-lab-fm-herdr-env-pro-65961-25535/herdr.sock
+HERDR_SOCKET_PATH=/Users/<user>/.config/herdr/sessions/fm-lab-fm-herdr-env-pro-65961-25535/herdr.sock
 HERDR_TAB_ID=w1:t1
 HERDR_WORKSPACE_ID=w1
 ```
