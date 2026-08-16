@@ -441,7 +441,7 @@ class AppServerRun {
 
   startupTimeout() {
     if (this.startupComplete || this.childExited) return;
-    this.forcedOutcome = "startup-timeout";
+    this.forcedOutcome ||= "startup-timeout";
     try {
       this.child?.stdin.end();
     } catch {

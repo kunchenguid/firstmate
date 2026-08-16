@@ -23,7 +23,7 @@ cleanup() {
   local suffix
   for suffix in success exit-mismatch terminal-missing interrupt timeout log-failure delayed-evidence \
     log-init-failure sync-send-failure reaped-pipe-holder startup-timeout \
-    startup-notification-timeout; do
+    startup-notification-timeout startup-protocol-failure; do
     rm -rf -- "/tmp/fm-codex-appserver-test-$suffix"
   done
   fm_test_cleanup
@@ -65,7 +65,8 @@ const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 let exitCode = 0;
 writeFileSync(serverPidFile, `${process.pid}\n`);
 
-if (mode === "timeout" || mode === "sync-send-failure") {
+if (mode === "timeout" || mode === "sync-send-failure"
+    || mode === "startup-protocol-failure") {
   process.on("SIGTERM", () => {});
 }
 
@@ -74,6 +75,12 @@ input.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
     if (mode === "startup-timeout") return;
+    if (mode === "startup-protocol-failure") {
+      setTimeout(() => process.stdout.write("{\n"), 400);
+      setTimeout(() => writeFileSync(marker, "survived-startup-deadline\n"), 700);
+      setTimeout(() => {}, 10000);
+      return;
+    }
     write({ id: message.id, result: { userAgent: "fixture" } });
     return;
   }
@@ -159,7 +166,9 @@ input.on("line", (line) => {
   }
 });
 input.on("close", () => {
-  if (mode !== "sync-send-failure") setTimeout(() => process.exit(exitCode), 5);
+  if (mode !== "sync-send-failure" && mode !== "startup-protocol-failure") {
+    setTimeout(() => process.exit(exitCode), 5);
+  }
 });
 NODE
 chmod +x "$SERVER"
@@ -442,6 +451,28 @@ EOF
   pass "turn notifications cannot replace the validated startup handshake"
 }
 
+test_startup_timeout_preserves_prior_protocol_failure() {
+  local id gen task_tmp out rc=0
+  IFS=$'\t' read -r id gen task_tmp <<EOF
+$(new_case startup-protocol-failure)
+EOF
+  out=$(FM_TEST_STARTUP_TIMEOUT_MS=500 FM_TEST_INTERRUPT_GRACE_MS=1000 \
+    FM_TEST_DEADLINE_SECS=30 run_case startup-protocol-failure \
+    "$id" "$gen" "$task_tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "malformed startup protocol returned success: $out"
+  assert_contains "$(cat "$task_tmp/descendant-survived")" "survived-startup-deadline" \
+    "malformed-protocol fixture did not remain alive through the startup timer"
+  [ "$(classify "$id")" = "unknown codex-protocol-error" ] \
+    || fail "startup timer displaced the prior protocol failure: $(classify "$id")"
+  assert_contains "$(cat "$STATE/$id.codex-appserver-result")" \
+    "outcome=failure event=protocol-error" \
+    "malformed startup receipt omitted its original protocol refusal"
+  assert_contains "$(cat "$STATE/$id.codex-appserver-result")" "deadline=none" \
+    "malformed startup incorrectly started the long turn deadline"
+  [ -f "$STATE/$id.turn-ended" ] || fail "malformed startup omitted its turn-ended wake"
+  pass "startup timeout preserves an earlier malformed-protocol refusal"
+}
+
 test_terminal_and_clean_exit_are_joint_success
 test_terminal_without_clean_exit_refuses_success
 test_clean_exit_without_terminal_refuses_success
@@ -454,5 +485,6 @@ test_sync_send_failure_retains_cleanup_ownership
 test_reaped_child_pid_is_never_signalled
 test_startup_timeout_surfaces_before_turn_deadline
 test_startup_notifications_cannot_complete_handshake
+test_startup_timeout_preserves_prior_protocol_failure
 
 echo "all fm-codex-appserver-client tests passed"
