@@ -98,7 +98,7 @@ ok - harness liveness: claude 2.1.220 (Claude Code) classifies alive
 ### Claude launch activity verification
 
 The child-session sanitization and rendered activity classifier were verified on 2026-08-16 with Claude Code 2.1.233 and tmux 3.6a on macOS arm64.
-The live guard deliberately injects `CLAUDE_CODE_CHILD_SESSION=1` at the launch boundary, clears it with the production launcher prefix, forces session persistence, submits a prompt that requires the Bash tool, accepts any recognized startup confirmation, refuses the muted-transcript warning, and waits for one production activity proof.
+The live guard injects `CLAUDE_CODE_CHILD_SESSION=1` at the launch boundary, clears it with the production launcher prefix, forces session persistence, submits a prompt that requires the Bash tool, and waits for one live-rendered activity proof (a busy affordance, a tool row, or a moving token counter). The muted-transcript and trust/bypass-dialog classifiers are pinned by the portable simulations in `tests/fm-control-relaunch.test.sh` rather than observed here: clearing the injected child-session flag suppresses the muted banner, and an already-trusted checkout renders no startup dialog.
 
 ```sh
 FM_CLAUDE_SPAWN_VERIFY_LIVE=1 bin/fm-test-run.sh tests/fm-claude-spawn-verification-live-e2e.test.sh

@@ -392,6 +392,32 @@ test_harness_kind_capability() {
   pass "fm-control-lib: adapter capability is per task kind, not per adapter alone"
 }
 
+test_claude_token_counter_normalizes_real_footer_formats() {
+  local input want got
+  while IFS='|' read -r input want; do
+    got=$(fm_control_claude_token_counter "$input")
+    [ "$got" = "$want" ] \
+      || fail "token counter parsed '$input' as '$got', want '$want'"
+  done <<'EOF'
+Context · 59 tokens|59
+Context · 1,234 tokens|1234
+Compacted from 7,697 tokens|7697
+Context · 8.4k tokens|8400
+Context · 8.4K tokens|8400
+Context · 1.2M tokens|1200000
+✢ Pollinating… (16s · ↓ 1.1k tokens · thought for 1s)|1100
+EOF
+  [ "$(fm_control_claude_token_counter 'Context · 8.4k tokens')" \
+    = "$(fm_control_claude_token_counter 'Context · 8400 tokens')" ] \
+    || fail "8.4k and 8400 token renderings must normalize to one value"
+  [ "$(fm_control_claude_token_counter 'Context · 1.2M tokens')" \
+    = "$(fm_control_claude_token_counter 'Context · 1,200,000 tokens')" ] \
+    || fail "1.2M and 1,200,000 token renderings must normalize to one value"
+  [ -z "$(fm_control_claude_token_counter 'esc to interrupt')" ] \
+    || fail "a pane with no token count must yield no token value"
+  pass "fm-control-lib: the Claude token counter normalizes plain, comma, decimal-k/K, and decimal-M footer counts"
+}
+
 test_orca_refuses_an_escape_harness_interrupt() {
   local dir out rc
   dir=$(new_case orca-escape)
@@ -888,6 +914,7 @@ test_harness_family_resolution
 test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability
+test_claude_token_counter_normalizes_real_footer_formats
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_and_herdr
