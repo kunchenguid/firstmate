@@ -79,6 +79,38 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+make_launch_runtime_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/id" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = -u ]; then
+  printf '%s\n' "${FM_FAKE_ID_U:?}"
+  exit 0
+fi
+exit 1
+SH
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+set -u
+{
+  printf 'IS_SANDBOX=%s\n' "${IS_SANDBOX-__unset__}"
+  printf 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=%s\n' "${CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION-__unset__}"
+  printf 'CLAUDE_CONFIG_DIR=%s\n' "${CLAUDE_CONFIG_DIR-__unset__}"
+  printf 'CURSOR_AGENT=%s\n' "${CURSOR_AGENT-__unset__}"
+  printf 'CURSOR_INVOKED_AS=%s\n' "${CURSOR_INVOKED_AS-__unset__}"
+  printf 'argv:'
+  for arg in "$@"; do
+    printf '<%s>' "$arg"
+  done
+  printf '\n'
+} >> "${FM_FAKE_CLAUDE_RUN_LOG:?}"
+SH
+  chmod +x "$fakebin/id" "$fakebin/claude"
+  printf '%s\n' "$fakebin"
+}
+
 make_spawn_case() {
   local name=$1 harness=$2 case_dir home proj wt fakebin launchlog id
   shift 2
@@ -152,6 +184,14 @@ assert_meta_profile() {
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
 }
 
+run_captured_claude_launch() {
+  local launch=$1 uid=$2 runtime_fakebin=$3 runlog=$4
+  : > "$runlog"
+  CURSOR_AGENT=leaked CURSOR_INVOKED_AS=cursor-agent \
+    FM_FAKE_ID_U="$uid" FM_FAKE_CLAUDE_RUN_LOG="$runlog" PATH="$runtime_fakebin:$PATH" \
+    bash -c "$launch"
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -165,7 +205,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \$(if [ \"\$(id -u)\" -eq 0 ]; then printf %s IS_SANDBOX=1; fi) CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -770,7 +810,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \$(if [ \"\$(id -u)\" -eq 0 ]; then printf %s IS_SANDBOX=1; fi) CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -790,6 +830,102 @@ test_claude_omits_config_dir_prefix_when_unset() {
   assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
     "claude launch must not add a config-dir prefix when firstmate has no CLAUDE_CONFIG_DIR set"
   pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
+}
+
+test_claude_root_marker_is_worker_uid_conditioned_for_ship() {
+  local rec id out status launch runtime_fakebin runlog
+  id=profile-claude-root-ship-z20
+  rec=$(make_spawn_case profile-claude-root-ship claude "$id")
+  read_case_record "$rec"
+  runtime_fakebin=$(make_launch_runtime_fakebin "$CASE_DIR/runtime-fakebin")
+  runlog="$CASE_DIR/claude-run.log"
+
+  out=$(CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --model sonnet --effort high)
+  status=$?
+  expect_code 0 "$status" "claude ship spawn with model/effort should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \$(if [ \"\$(id -u)\" -eq 0 ]; then printf %s IS_SANDBOX=1; fi)" \
+    "claude launch did not compose the worker-side UID check after Cursor marker clearing"
+  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
+    "claude launch lost model/effort flags around the root marker"
+
+  run_captured_claude_launch "$launch" 0 "$runtime_fakebin" "$runlog" \
+    || fail "captured root claude ship launch failed"
+  assert_grep "IS_SANDBOX=1" "$runlog" "root worker launch did not set IS_SANDBOX"
+  assert_grep "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false" "$runlog" "root worker launch lost the Claude prompt-suggestion env"
+  assert_grep "CLAUDE_CONFIG_DIR=/opt/test/claude-work" "$runlog" "root worker launch lost CLAUDE_CONFIG_DIR"
+  assert_grep "CURSOR_AGENT=__unset__" "$runlog" "root worker launch did not clear CURSOR_AGENT"
+  assert_grep "CURSOR_INVOKED_AS=__unset__" "$runlog" "root worker launch did not clear CURSOR_INVOKED_AS"
+  assert_grep "argv:<--dangerously-skip-permissions><--model><sonnet><--effort><high><" "$runlog" \
+    "root worker launch did not preserve Claude argv ordering"
+
+  run_captured_claude_launch "$launch" 1000 "$runtime_fakebin" "$runlog" \
+    || fail "captured non-root claude ship launch failed"
+  assert_grep "IS_SANDBOX=__unset__" "$runlog" "non-root worker launch must not set IS_SANDBOX"
+  assert_grep "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false" "$runlog" "non-root worker launch lost the Claude prompt-suggestion env"
+  assert_grep "CLAUDE_CONFIG_DIR=/opt/test/claude-work" "$runlog" "non-root worker launch lost CLAUDE_CONFIG_DIR"
+  pass "claude ship launch scopes IS_SANDBOX to root workers while preserving env cleanup, config, model, effort, and brief argv"
+}
+
+test_claude_root_marker_is_worker_uid_conditioned_for_scout() {
+  local rec id out status launch runtime_fakebin runlog
+  id=profile-claude-root-scout-z21
+  rec=$(make_spawn_case profile-claude-root-scout claude "$id")
+  read_case_record "$rec"
+  runtime_fakebin=$(make_launch_runtime_fakebin "$CASE_DIR/runtime-fakebin")
+  runlog="$CASE_DIR/claude-run.log"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --scout --model opus --effort low)
+  status=$?
+  expect_code 0 "$status" "claude scout spawn with model/effort should succeed"
+  assert_grep "kind=scout" "$HOME_DIR/state/$id.meta" "scout meta missing kind=scout"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus' --effort 'low'" \
+    "claude scout launch lost model/effort flags around the root marker"
+
+  run_captured_claude_launch "$launch" 0 "$runtime_fakebin" "$runlog" \
+    || fail "captured root claude scout launch failed"
+  assert_grep "IS_SANDBOX=1" "$runlog" "root scout launch did not set IS_SANDBOX"
+  run_captured_claude_launch "$launch" 1000 "$runtime_fakebin" "$runlog" \
+    || fail "captured non-root claude scout launch failed"
+  assert_grep "IS_SANDBOX=__unset__" "$runlog" "non-root scout launch must not set IS_SANDBOX"
+  pass "claude scout launch applies the same root-only sandbox marker"
+}
+
+test_claude_root_marker_is_worker_uid_conditioned_for_secondmate() {
+  local rec id sm out status launch runtime_fakebin runlog
+  id=profile-claude-root-secondmate-z22
+  rec=$(make_spawn_case profile-claude-root-secondmate codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' "claude opus low" > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  runtime_fakebin=$(make_launch_runtime_fakebin "$CASE_DIR/runtime-fakebin")
+  runlog="$CASE_DIR/claude-run.log"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "claude secondmate spawn with pinned model/effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude opus low
+  assert_grep "kind=secondmate" "$HOME_DIR/state/$id.meta" "secondmate meta missing kind=secondmate"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_SUPERVISION_MODEL=autoarm CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \$(if [ \"\$(id -u)\" -eq 0 ]; then printf %s IS_SANDBOX=1; fi)" \
+    "claude secondmate launch did not preserve secondmate/config/env/root-marker composition"
+  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus' --effort 'low'" \
+    "claude secondmate launch lost pinned model/effort flags around the root marker"
+
+  run_captured_claude_launch "$launch" 0 "$runtime_fakebin" "$runlog" \
+    || fail "captured root claude secondmate launch failed"
+  assert_grep "IS_SANDBOX=1" "$runlog" "root secondmate launch did not set IS_SANDBOX"
+  assert_grep "CLAUDE_CONFIG_DIR=/opt/test/claude-work" "$runlog" "root secondmate launch lost CLAUDE_CONFIG_DIR"
+  run_captured_claude_launch "$launch" 1000 "$runtime_fakebin" "$runlog" \
+    || fail "captured non-root claude secondmate launch failed"
+  assert_grep "IS_SANDBOX=__unset__" "$runlog" "non-root secondmate launch must not set IS_SANDBOX"
+  pass "claude secondmate launch applies the same root-only sandbox marker with secondmate prefixes intact"
 }
 
 test_non_claude_harness_ignores_config_dir() {
@@ -855,6 +991,9 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
+test_claude_root_marker_is_worker_uid_conditioned_for_ship
+test_claude_root_marker_is_worker_uid_conditioned_for_scout
+test_claude_root_marker_is_worker_uid_conditioned_for_secondmate
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
 

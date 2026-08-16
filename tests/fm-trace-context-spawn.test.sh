@@ -50,7 +50,9 @@ case "${1:-}" in
       for a in "$@"; do
         case "$a" in
           "export TRACEPARENT="*)
-            chmod a-w "$FM_FAKE_META_PATH"
+            # A directory at the meta path fails for root and non-root runners.
+            rm -f "$FM_FAKE_META_PATH"
+            mkdir "$FM_FAKE_META_PATH"
             ;;
         esac
       done
@@ -335,7 +337,7 @@ test_failed_metadata_append_unsets_carrier_and_still_launches() {
   assert_contains "$out" "spawned $CASE_ID" "spawn should report success after failed metadata append"
   meta="$HOME_DIR/state/$CASE_ID.meta"
 
-  ! grep -q '^traceparent=' "$meta" \
+  ! grep -q '^traceparent=' "$meta" 2>/dev/null \
     || fail "failed metadata append must not leave a traceparent= claim in meta"
   grep -q '^unset TRACEPARENT; .*claude' "$LAUNCH_LOG" \
     || fail "failed metadata append must unset TRACEPARENT in the launch command"
