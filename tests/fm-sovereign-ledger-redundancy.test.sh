@@ -483,7 +483,7 @@ R5_DIRECTORY_HARDLINK="$TMP/r5-directory-hardlink"
 if ln "$R5_PRIMARY" "$R5_DIRECTORY_HARDLINK" >/dev/null 2>&1; then
   directory_hardlink_active=1
   directory_hardlink_target=$R5_DIRECTORY_HARDLINK
-  check_fails_with 'verify REFUSES a directory hard link by the admitted directory identity' 'primary and replica directories must differ' \
+  check_fails_with 'verify REFUSES a directory hard link by the admitted member identity set' 'shares storage with primary' \
     "$TOOL" --allow-same-volume-without-device-redundancy verify "$R5_PRIMARY" "$R5_DIRECTORY_HARDLINK"
   if unlink "$R5_DIRECTORY_HARDLINK" >/dev/null 2>&1; then
     directory_hardlink_active=0
