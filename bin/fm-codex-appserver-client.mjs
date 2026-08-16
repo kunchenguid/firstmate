@@ -355,7 +355,7 @@ class AppServerRun {
   maybePublishBusy() {
     if (this.busyPublished || !this.turnStarted || !this.activeSeen) return;
     try {
-      this.owner.applyBusy();
+      this.owner.applyBusy(this.deadlineAt);
       this.busyPublished = true;
     } catch (error) {
       this.protocolFailure(`busy-publish-${token(error.message)}`);
@@ -572,9 +572,22 @@ class AppServerRun {
       this.childClosed = true;
       return this.result();
     }
-    this.child.stderr.on("data", (chunk) => stderrLog.append(chunk));
+    const streamFailure = (name, error) => {
+      this.protocolFailure(`${name}-${token(error?.message || "error")}`);
+    };
+    this.child.stdin.on("error", (error) => streamFailure("stdin", error));
+    this.child.stdout.on("error", (error) => streamFailure("stdout", error));
+    this.child.stderr.on("error", (error) => streamFailure("stderr", error));
+    this.child.stderr.on("data", (chunk) => {
+      try {
+        stderrLog.append(chunk);
+      } catch (error) {
+        streamFailure("stderr-log", error);
+      }
+    });
     const lines = readline.createInterface({ input: this.child.stdout });
     lines.on("line", (line) => this.handleLine(line));
+    lines.on("error", (error) => streamFailure("stdout-lines", error));
     this.child.on("error", (error) => this.protocolFailure(`child-${token(error.message)}`));
     this.child.on("close", (code, signal) => this.handleClose(code, signal));
     this.startupTimer = setTimeout(() => {
@@ -628,7 +641,7 @@ class OwningClient {
     this.renderPrompt();
   }
 
-  apply(state, event, withDeadline = false) {
+  apply(state, event, deadlineAt = 0) {
     const args = [
       BUSY_EVENT,
       "apply",
@@ -642,15 +655,15 @@ class OwningClient {
       "--event",
       event,
     ];
-    if (withDeadline) args.push("--deadline-secs", String(this.options.deadlineSecs));
+    if (deadlineAt) args.push("--deadline-at", String(deadlineAt));
     const result = spawnSync(args[0], args.slice(1), { encoding: "utf8" });
     if (result.status !== 0) {
       throw new Error((result.stderr || result.stdout || "busy event failed").trim());
     }
   }
 
-  applyBusy() {
-    this.apply("busy", "turn-started", true);
+  applyBusy(deadlineAt) {
+    this.apply("busy", "turn-started", deadlineAt);
   }
 
   writeReceipt(result) {

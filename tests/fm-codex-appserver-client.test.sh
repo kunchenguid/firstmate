@@ -20,7 +20,7 @@ mkdir -p "$STATE" "$WORK" "$FAKEBIN"
 
 cleanup() {
   local suffix
-  for suffix in success exit-mismatch terminal-missing interrupt timeout; do
+  for suffix in success exit-mismatch terminal-missing interrupt timeout log-failure delayed-evidence; do
     rm -rf -- "/tmp/fm-codex-appserver-test-$suffix"
   done
   fm_test_cleanup
@@ -48,10 +48,13 @@ chmod +x "$FAKEBIN/codex"
 cat > "$SERVER" <<'NODE'
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import readline from "node:readline";
 
 const mode = process.env.FM_FAKE_SERVER_MODE || "success";
 const marker = process.env.FM_FAKE_DESCENDANT_MARKER || "";
+const busyRecord = process.env.FM_FAKE_BUSY_RECORD || "";
+const stderrLog = process.env.FM_FAKE_STDERR_LOG || "";
 const threadId = "thread-fixture-1";
 const turnId = "turn-fixture-1";
 const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -75,6 +78,24 @@ input.on("line", (line) => {
   }
   if (message.method === "turn/start") {
     write({ id: message.id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });
+    if (mode === "log-failure") {
+      renameSync(stderrLog, `${stderrLog}.removed`);
+      mkdirSync(stderrLog);
+      process.stderr.write("trigger bounded log failure\n");
+      return;
+    }
+    if (mode === "delayed-evidence") {
+      setTimeout(() => {
+        write({ method: "turn/started", params: { turn: { id: turnId, status: "inProgress", items: [] } } });
+        write({ method: "thread/status/changed", params: { threadId, status: { type: "active" } } });
+        setTimeout(() => {
+          writeFileSync(marker, readFileSync(busyRecord));
+          write({ method: "turn/completed", params: { turn: { id: turnId, status: "completed", error: null } } });
+          write({ method: "thread/status/changed", params: { threadId, status: { type: "idle" } } });
+        }, 100);
+      }, 1100);
+      return;
+    }
     write({ method: "turn/started", params: { turn: { id: turnId, status: "inProgress", items: [] } } });
     write({ method: "thread/status/changed", params: { threadId, status: { type: "active" } } });
     if (mode === "success" || mode === "exit-mismatch") {
@@ -130,11 +151,13 @@ run_case() {  # <mode> <id> <gen> <tasktmp> [stdin-producer]
   local -a command
   command=("$CLIENT" --state-dir "$STATE" --task-id "$id" --generation "$gen" \
     --cwd "$WORK" --task-tmp "$task_tmp" --turn-ended "$STATE/$id.turn-ended" \
-    --deadline-secs 1 --prompt "fixture prompt" --one-shot)
+    --deadline-secs "${FM_TEST_DEADLINE_SECS:-1}" --prompt "fixture prompt" --one-shot)
   if [ -n "$producer" ]; then
     eval "$producer" | env PATH="$FAKEBIN:$PATH" FM_CODEX_BIN="$FAKEBIN/codex" \
       FM_FAKE_APPSERVER="$SERVER" FM_FAKE_SERVER_MODE="$mode" \
       FM_FAKE_DESCENDANT_MARKER="$task_tmp/descendant-survived" \
+      FM_FAKE_BUSY_RECORD="$STATE/$id.busy-state" \
+      FM_FAKE_STDERR_LOG="$task_tmp/codex-appserver.stderr.log" \
       FM_CODEX_APPSERVER_STDERR_MAX_BYTES=4096 \
       FM_CODEX_APPSERVER_STARTUP_TIMEOUT_MS=1000 \
       FM_CODEX_APPSERVER_INTERRUPT_GRACE_MS=100 \
@@ -143,6 +166,8 @@ run_case() {  # <mode> <id> <gen> <tasktmp> [stdin-producer]
     env PATH="$FAKEBIN:$PATH" FM_CODEX_BIN="$FAKEBIN/codex" \
       FM_FAKE_APPSERVER="$SERVER" FM_FAKE_SERVER_MODE="$mode" \
       FM_FAKE_DESCENDANT_MARKER="$task_tmp/descendant-survived" \
+      FM_FAKE_BUSY_RECORD="$STATE/$id.busy-state" \
+      FM_FAKE_STDERR_LOG="$task_tmp/codex-appserver.stderr.log" \
       FM_CODEX_APPSERVER_STDERR_MAX_BYTES=4096 \
       FM_CODEX_APPSERVER_STARTUP_TIMEOUT_MS=1000 \
       FM_CODEX_APPSERVER_INTERRUPT_GRACE_MS=100 \
@@ -229,10 +254,43 @@ EOF
   pass "deadline expiry records timeout and reaps the exact owned process group"
 }
 
+test_bounded_log_failure_publishes_unknown_and_reaps_group() {
+  local id gen task_tmp out rc=0 child_pid
+  IFS=$'\t' read -r id gen task_tmp <<EOF
+$(new_case log-failure)
+EOF
+  out=$(run_case log-failure "$id" "$gen" "$task_tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "bounded log failure returned success: $out"
+  [ "$(classify "$id")" = "unknown codex-protocol-error" ] \
+    || fail "bounded log failure was not surfaced concretely: $(classify "$id")"
+  child_pid=$(sed -n 's/.* child_pid=\([0-9][0-9]*\) .*/\1/p' "$STATE/$id.codex-appserver-result")
+  [ -n "$child_pid" ] || fail "bounded log failure receipt omitted the owned child PID"
+  if kill -0 "$child_pid" 2>/dev/null; then
+    fail "owned app-server PID $child_pid survived bounded log failure escalation"
+  fi
+  pass "bounded log failures publish unknown and reap the owned process group"
+}
+
+test_delayed_evidence_preserves_absolute_deadline() {
+  local id gen task_tmp out observed_deadline receipt_deadline
+  IFS=$'\t' read -r id gen task_tmp <<EOF
+$(new_case delayed-evidence)
+EOF
+  out=$(FM_TEST_DEADLINE_SECS=3 run_case delayed-evidence "$id" "$gen" "$task_tmp") \
+    || fail "delayed evidence case exited nonzero: $out"
+  observed_deadline=$(sed -n 's/.* deadline=\([0-9][0-9]*\)$/\1/p' "$task_tmp/descendant-survived")
+  receipt_deadline=$(sed -n 's/.* deadline=\([0-9][0-9]*\) .*/\1/p' "$STATE/$id.codex-appserver-result")
+  [ -n "$observed_deadline" ] && [ "$observed_deadline" = "$receipt_deadline" ] \
+    || fail "delayed evidence rebased deadline $observed_deadline away from authoritative $receipt_deadline"
+  pass "delayed active evidence preserves the turn's absolute deadline"
+}
+
 test_terminal_and_clean_exit_are_joint_success
 test_terminal_without_clean_exit_refuses_success
 test_clean_exit_without_terminal_refuses_success
 test_manual_interrupt_requires_interrupted_terminal_and_exit
 test_timeout_kills_only_the_owned_process_group
+test_bounded_log_failure_publishes_unknown_and_reaps_group
+test_delayed_evidence_preserves_absolute_deadline
 
 echo "all fm-codex-appserver-client tests passed"
