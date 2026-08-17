@@ -40,6 +40,7 @@ while [ "$AMBIENT_CONFIG_INDEX" -lt "$AMBIENT_GIT_CONFIG_COUNT" ]; do
   AMBIENT_CONFIG_INDEX=$((AMBIENT_CONFIG_INDEX + 1))
 done
 unset AMBIENT_CONFIG_INDEX AMBIENT_GIT_CONFIG_COUNT
+unset FM_DATA_OVERRIDE FM_ROOT_OVERRIDE
 
 # shellcheck source=bin/fm-project-layout-lib.sh
 . "$SCRIPT_DIR/fm-project-layout-lib.sh"

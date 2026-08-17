@@ -510,6 +510,25 @@ test_ambient_git_config_injection_cannot_alter_evidence() {
   pass "ambient Git config injection cannot alter reported repository evidence"
 }
 
+test_ambient_home_overrides_cannot_substitute_another_home() {
+  local home="$TMP_ROOT/ambient overrides" decoy clean injected rc
+  setup_home "$home" sample
+  decoy="$TMP_ROOT/ambient-overrides-decoy"
+  mkdir -p "$decoy/data" "$decoy/bin"
+  printf -- '- sample [local-only +yolo] - decoy project (added 2026-08-17)\n' > "$decoy/data/projects.md"
+  printf '#!/bin/sh\necho "local-only on"\n' > "$decoy/bin/fm-project-mode.sh"
+  chmod 0755 "$decoy/bin/fm-project-mode.sh"
+  clean=$(run_json "$home" sample) || fail "ambient override baseline preflight blocked"
+  injected=$(FM_DATA_OVERRIDE="$decoy/data" FM_ROOT_OVERRIDE="$decoy" run_json "$home" sample)
+  rc=$?
+  expect_code 0 "$rc" "ambient home override preflight"
+  [ "$injected" = "$clean" ] \
+    || fail "ambient FM_DATA_OVERRIDE/FM_ROOT_OVERRIDE changed reported home posture"
+  assert_not_contains "$injected" "local-only" "decoy home mode leaked into the report"
+  assert_not_contains "$injected" "\"yolo\":\"on\"" "decoy home yolo posture leaked into the report"
+  pass "ambient home overrides cannot substitute another home's posture"
+}
+
 test_nested_directory_cannot_borrow_ancestor_repository() {
   local home="$TMP_ROOT/nested" out rc
   mkdir -p "$home/data" "$home/state"
@@ -529,6 +548,7 @@ test_nested_directory_cannot_borrow_ancestor_repository() {
 test_help_and_ready_json
 test_ambient_git_environment_cannot_substitute_another_repository
 test_ambient_git_config_injection_cannot_alter_evidence
+test_ambient_home_overrides_cannot_substitute_another_home
 test_nested_directory_cannot_borrow_ancestor_repository
 test_unverifiable_ownership_fails_closed
 test_idempotence_and_byte_invariance
