@@ -67,6 +67,7 @@ Act on the verdict:
 
 - `relaunch` - respawn through `bin/fm-spawn.sh` into the same worktree with the emitted `--harness`, `--model`, and `--effort` values, and pass `--routing-source fallback` again so the task stays ladder-eligible on the respawned meta.
   When `config/crew-dispatch.json` is active, the respawn must also carry `--dispatch-override-reason "escalation-ladder relaunch <class>"`: the routing came from the ladder, not from fresh profile consultation, and the attestation backstop refuses an unattested explicit harness.
+  A relaunch is an ordinary crewmate or scout spawn for the durable routing cooldowns too, so while `data/quota-cooldowns.json` exists it carries the catalog-established `--dispatch-provider` and `--dispatch-model-family` axes like any other spawn (`AGENTS.md` section 4; `docs/configuration.md` "Routing cooldowns").
 - `report` (`routing-pinned` or `unknown-provenance`) - the ladder may not touch this task's routing: an explicit captain instruction or a configured dispatch profile or pin resolved the tuple, or the meta predates provenance recording.
   Relaunch the unchanged tuple by the ordinary path and tell the captain at the next natural report that the failure looked substantive but routing was pinned, so the tier held.
   Never escalate through a pin.

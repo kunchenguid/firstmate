@@ -217,7 +217,7 @@ family_for_basename() {
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-tmux-agent-liveness.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-strict.test.sh|fm-spawn-batch.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|\
+    fm-quota-cooldown.test.sh|fm-spawn-dispatch-profile.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
@@ -439,6 +439,7 @@ tests/fm-pr-check-security.test.sh 199573
 tests/fm-procevent.test.sh 42789
 tests/fm-public-followup.test.sh 23365
 tests/fm-quota-array-dispatch-live-e2e.test.sh 19
+tests/fm-quota-cooldown.test.sh 569
 tests/fm-secondmate-harness.test.sh 87895
 tests/fm-secondmate-lifecycle-e2e.test.sh 4929
 tests/fm-secondmate-liveness.test.sh 12553
@@ -943,8 +944,8 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
       ;;
-    bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|bin/fm-launch-axis-lib.sh|\
-    bin/fm-peek.sh|bin/fm-composer*)
+    bin/fm-quota-cooldown.sh|bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
+    bin/fm-launch-axis-lib.sh|bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       ;;

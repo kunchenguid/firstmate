@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--model <name>] [--effort <level>] [--task-class <class>] [--exploration] [--backend <name>] [--routing-source <captain|profile|fallback>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--model <name>] [--effort <level>] [--task-class <class>] [--backend <name>] [--routing-source <captain|profile|fallback>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--task-class <class>] [--exploration] [--backend <name>] [--routing-source <captain|profile|fallback>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--task-class <class>] [--backend <name>] [--routing-source <captain|profile|fallback>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -118,9 +118,17 @@
 #   explicit harness is refused, because that is the silent hand-pick the guard
 #   exists to catch; the guard checks that resolution HAPPENED, not what it
 #   produced, and never reads crew-dispatch.json
-#   to verify the harness matches (that would be a second resolver). Passing both
-#   attestations is refused as ambiguous. A --secondmate spawn is exempt and
-#   resolves the SECONDMATE harness (config/secondmate-harness -> config/crew-harness
+#   to verify the harness matches (that would be a second resolver).
+#   Passing both attestations is refused as ambiguous.
+#   --dispatch-provider and --dispatch-model-family carry the provider relation
+#   and family established during that consultation. fm-spawn never derives either
+#   from a model string. While data/quota-cooldowns.json exists, this spawn passes
+#   those axes, and any --dispatch-override-reason as the captain authorization,
+#   to bin/fm-quota-cooldown.sh authorize before any endpoint or task metadata
+#   exists, and relays its refusal status verbatim. That script owns which
+#   candidate is refused, which axes it demands, and how an override is recorded.
+#   A --secondmate spawn is exempt and resolves the SECONDMATE harness
+#   (config/secondmate-harness -> config/crew-harness
 #   -> own), so the secondmate-vs-crewmate split is DURABLE across every respawn
 #   (recovery, /updatefirstmate, restart). A bare ordinary-worker adapter name
 #   (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor-agent)
@@ -292,6 +300,10 @@ ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA=0
 DISPATCH_RESOLVED=0
 DISPATCH_OVERRIDE_REASON=
 DISPATCH_OVERRIDE_REASON_SET=0
+DISPATCH_PROVIDER=
+DISPATCH_MODEL_FAMILY=
+DISPATCH_PROVIDER_SET=0
+DISPATCH_MODEL_FAMILY_SET=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -321,6 +333,8 @@ for a in "$@"; do
       telemetry-task-root) TELEMETRY_TASK_ROOT=$a ;;
       telemetry-parent) TELEMETRY_PARENT=$a ;;
       dispatch-override-reason) DISPATCH_OVERRIDE_REASON=$a; DISPATCH_OVERRIDE_REASON_SET=1 ;;
+      dispatch-provider) DISPATCH_PROVIDER=$a; DISPATCH_PROVIDER_SET=1 ;;
+      dispatch-model-family) DISPATCH_MODEL_FAMILY=$a; DISPATCH_MODEL_FAMILY_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -356,6 +370,10 @@ for a in "$@"; do
     --dispatch-resolved) DISPATCH_RESOLVED=1 ;;
     --dispatch-override-reason) want_value=dispatch-override-reason ;;
     --dispatch-override-reason=*) DISPATCH_OVERRIDE_REASON=${a#--dispatch-override-reason=}; DISPATCH_OVERRIDE_REASON_SET=1 ;;
+    --dispatch-provider) want_value=dispatch-provider ;;
+    --dispatch-provider=*) DISPATCH_PROVIDER=${a#--dispatch-provider=}; DISPATCH_PROVIDER_SET=1 ;;
+    --dispatch-model-family) want_value=dispatch-model-family ;;
+    --dispatch-model-family=*) DISPATCH_MODEL_FAMILY=${a#--dispatch-model-family=}; DISPATCH_MODEL_FAMILY_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -377,8 +395,13 @@ esac
 [ -z "$TELEMETRY_PARENT" ] || printf '%s' "$TELEMETRY_PARENT" | grep -Eq '^mra_[0-9a-f-]{36}$' || { echo "error: --telemetry-parent requires an opaque mra UUID" >&2; exit 1; }
 [ -z "$TELEMETRY_PARENT" ] || [ -n "$TELEMETRY_TASK_ROOT" ] || { echo "error: --telemetry-parent requires --telemetry-task-root" >&2; exit 1; }
 [ "$DISPATCH_OVERRIDE_REASON_SET" -eq 0 ] || [ -n "$DISPATCH_OVERRIDE_REASON" ] || { echo "error: --dispatch-override-reason requires a non-empty value" >&2; exit 1; }
+[ "$DISPATCH_PROVIDER_SET" -eq 0 ] || [ -n "$DISPATCH_PROVIDER" ] || { echo "error: --dispatch-provider requires a non-empty value" >&2; exit 1; }
+[ "$DISPATCH_MODEL_FAMILY_SET" -eq 0 ] || [ -n "$DISPATCH_MODEL_FAMILY" ] || { echo "error: --dispatch-model-family requires a non-empty value" >&2; exit 1; }
 case "$DISPATCH_OVERRIDE_REASON" in
   *$'\n'*) echo "error: --dispatch-override-reason must be a single line - state/<id>.meta is one key=value per line and every reader takes the LAST match, so an embedded newline would forge a later worktree=, backend=, or kind= line" >&2; exit 1 ;;
+esac
+case "$DISPATCH_PROVIDER$DISPATCH_MODEL_FAMILY" in
+  *$'\n'*) echo "error: dispatch provider and model family must each be a single line" >&2; exit 1 ;;
 esac
 # Dispatch attestation backstop (AGENTS.md section 4): when config/crew-dispatch.json
 # is active, a crewmate/scout spawn must declare HOW its explicit harness was
@@ -1024,6 +1047,8 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA" -eq 0 ] || shared_args+=(--allow-no-mistakes-without-reviewer-quota)
   [ "$DISPATCH_RESOLVED" -eq 0 ] || shared_args+=(--dispatch-resolved)
   [ "$DISPATCH_OVERRIDE_REASON_SET" -eq 0 ] || shared_args+=(--dispatch-override-reason "$DISPATCH_OVERRIDE_REASON")
+  [ "$DISPATCH_PROVIDER_SET" -eq 0 ] || shared_args+=(--dispatch-provider "$DISPATCH_PROVIDER")
+  [ "$DISPATCH_MODEL_FAMILY_SET" -eq 0 ] || shared_args+=(--dispatch-model-family "$DISPATCH_MODEL_FAMILY")
   if [ -n "$TELEMETRY_TASK_ROOT" ] || [ -n "$TELEMETRY_PARENT" ]; then
     echo "error: linked telemetry identifiers are per-attempt and are not supported by batch dispatch" >&2
     exit 1
@@ -1201,6 +1226,27 @@ esac
 if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
   echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
   exit 1
+fi
+
+# Durable routing cooldown backstop. The owner script compares only explicit
+# catalog-established axes, ignores expired records, refuses an automatic exact
+# match, and records a captain override on the matching record. This runs before
+# endpoint creation or task metadata publication. It also protects the static
+# crew-harness path when a durable record exists, not only profile arrays.
+if [ "$KIND" != secondmate ] && [ -f "$DATA/quota-cooldowns.json" ]; then
+  cooldown_args=(authorize --harness "$HARNESS")
+  [ "$DISPATCH_PROVIDER_SET" -eq 0 ] || cooldown_args+=(--provider "$DISPATCH_PROVIDER")
+  [ "$DISPATCH_MODEL_FAMILY_SET" -eq 0 ] || cooldown_args+=(--model-family "$DISPATCH_MODEL_FAMILY")
+  if [ "$DISPATCH_OVERRIDE_REASON_SET" -eq 1 ]; then
+    cooldown_args+=(--task-id "$ID" --override-reason "$DISPATCH_OVERRIDE_REASON")
+  fi
+  if cooldown_output=$(FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-quota-cooldown.sh" "${cooldown_args[@]}" 2>&1); then
+    [ -z "$cooldown_output" ] || printf '%s\n' "$cooldown_output"
+  else
+    cooldown_status=$?
+    [ -z "$cooldown_output" ] || printf '%s\n' "$cooldown_output" >&2
+    exit "$cooldown_status"
+  fi
 fi
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
@@ -2503,13 +2549,15 @@ TELEMETRY_TASK_ROOT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.taskRootId | se
   # --dispatch-resolved records that the profiles were consulted; --dispatch-override-reason
   # records a deliberate departure and its reason, so the departure is visible
   # rather than silent. The guard above refused the bare-hand-pick case.
-  if [ -f "$CONFIG/crew-dispatch.json" ] && [ "$KIND" != secondmate ]; then
+  if { [ -f "$CONFIG/crew-dispatch.json" ] || [ -f "$DATA/quota-cooldowns.json" ]; } && [ "$KIND" != secondmate ]; then
     if [ "$DISPATCH_RESOLVED" -eq 1 ]; then
       echo "dispatch=resolved"
     elif [ "$DISPATCH_OVERRIDE_REASON_SET" -eq 1 ]; then
       echo "dispatch=override"
       echo "dispatch_override_reason=$DISPATCH_OVERRIDE_REASON"
     fi
+    [ "$DISPATCH_PROVIDER_SET" -eq 0 ] || echo "dispatch_provider=$DISPATCH_PROVIDER"
+    [ "$DISPATCH_MODEL_FAMILY_SET" -eq 0 ] || echo "dispatch_model_family=$DISPATCH_MODEL_FAMILY"
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0

@@ -337,6 +337,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/quota-cooldowns.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
       "audience": "maintainer-verification"
     },

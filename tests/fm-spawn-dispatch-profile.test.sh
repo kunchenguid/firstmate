@@ -12,6 +12,7 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+COOLDOWN="$ROOT/bin/fm-quota-cooldown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
 make_spawn_fakebin() {
@@ -84,6 +85,25 @@ enable_dispatch_profile() {
   local home=$1
   printf '%s\n' '{"rules":[{"when":"current events","use":{"harness":"grok","model":"grok-4","effort":"high"}}],"default":{"harness":"codex","model":"gpt-5","effort":"medium"}}' \
     > "$home/config/crew-dispatch.json"
+}
+
+record_dispatch_family_cooldown() {
+  local home=$1 family=$2 expires=$3
+  FM_HOME="$home" FM_QUOTA_COOLDOWN_NOW=2026-08-16T12:00:00Z \
+    "$COOLDOWN" record --scope model-family --harness cursor-agent \
+    --provider cursor --model-family "$family" \
+    --evidence-kind provider-refusal \
+    --evidence "You've hit your usage limit for $family; resets 9/14/2026" \
+    --expires-at "$expires" >/dev/null
+}
+
+record_dispatch_provider_cooldown() {
+  local home=$1 expires=$2
+  FM_HOME="$home" FM_QUOTA_COOLDOWN_NOW=2026-08-16T12:00:00Z \
+    "$COOLDOWN" record --scope provider --provider cursor \
+    --evidence-kind quota-axi \
+    --evidence "cursor all_models effectivePercentRemaining=0" \
+    --expires-at "$expires" >/dev/null
 }
 
 make_seeded_secondmate_home() {
@@ -1184,6 +1204,131 @@ test_active_profile_batch_refuses_without_attestation() {
   pass "batch dispatch refuses a shared harness with no attestation before any pair spawns"
 }
 
+test_active_quota_cooldown_suppresses_resolved_spawn() {
+  local rec id out status
+  id=profile-cooldown-active-z43
+  rec=$(make_spawn_case profile-cooldown-active claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch_family_cooldown "$HOME_DIR" glm 2026-09-14T00:00:00Z \
+    || fail "could not seed active dispatch cooldown"
+
+  out=$(FM_QUOTA_COOLDOWN_NOW=2026-08-16T12:05:00Z \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness cursor-agent --model glm-4.5 --effort high \
+    --dispatch-provider cursor --dispatch-model-family glm --dispatch-resolved)
+  status=$?
+  expect_code 3 "$status" "automatic resolved spawn should fail closed on an active tuple cooldown"
+  assert_contains "$out" "routing cooldown active" "spawn refusal did not name the durable cooldown"
+  assert_absent "$HOME_DIR/state/$id.meta" "cooled automatic spawn should stop before metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cooled automatic spawn reached harness submission"
+  pass "fm-spawn suppresses an automatic candidate with an active routing cooldown"
+}
+
+test_expired_and_sibling_cooldowns_do_not_suppress_spawn() {
+  local rec expired_id sibling_id out status
+  expired_id=profile-cooldown-expired-z44
+  rec=$(make_spawn_case profile-cooldown-expired claude "$expired_id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch_family_cooldown "$HOME_DIR" glm 2026-08-16T12:01:00Z \
+    || fail "could not seed expired dispatch cooldown"
+
+  out=$(FM_QUOTA_COOLDOWN_NOW=2026-08-16T12:05:00Z \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$expired_id" "$PROJ_DIR" --harness cursor-agent --model glm-4.5 --effort high \
+    --dispatch-provider cursor --dispatch-model-family glm --dispatch-resolved)
+  status=$?
+  expect_code 0 "$status" "expired tuple cooldown should not suppress a normal spawn"
+
+  sibling_id=profile-cooldown-sibling-z45
+  rec=$(make_spawn_case profile-cooldown-sibling claude "$sibling_id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch_family_cooldown "$HOME_DIR" glm 2026-09-14T00:00:00Z \
+    || fail "could not seed sibling dispatch cooldown"
+
+  out=$(FM_QUOTA_COOLDOWN_NOW=2026-08-16T12:05:00Z \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$sibling_id" "$PROJ_DIR" --harness cursor-agent --model kimi-k2.5 --effort high \
+    --dispatch-provider cursor --dispatch-model-family kimi --dispatch-resolved)
+  status=$?
+  expect_code 0 "$status" "family-scoped cooldown should not suppress a sibling family spawn"
+  pass "fm-spawn ignores expired cooldowns and model-family sibling records"
+}
+
+test_captain_override_dispatches_cooled_tuple_and_updates_record() {
+  local rec id out status record meta
+  id=profile-cooldown-override-z46
+  rec=$(make_spawn_case profile-cooldown-override claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch_family_cooldown "$HOME_DIR" kimi 2026-09-14T00:00:00Z \
+    || fail "could not seed override dispatch cooldown"
+
+  out=$(FM_QUOTA_COOLDOWN_NOW=2026-08-16T12:05:00Z \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness cursor-agent --model kimi-k2.5 --effort high \
+    --dispatch-provider cursor --dispatch-model-family kimi \
+    --dispatch-override-reason "captain raised the Cursor spend limit")
+  status=$?
+  expect_code 0 "$status" "captain override should dispatch a cooled tuple"
+  assert_contains "$out" "spawned $id harness=cursor-agent" "cooled override did not reach spawn"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "dispatch_provider=cursor" "$meta" "override meta did not retain dispatch provider"
+  assert_grep "dispatch_model_family=kimi" "$meta" "override meta did not retain dispatch family"
+  record=$(FM_HOME="$HOME_DIR" "$COOLDOWN" list --json)
+  printf '%s' "$record" | jq -e --arg id "$id" \
+    '[.cooldowns[] | select(.scope.model_family == "kimi") | .overrides[]
+      | select(.task_id == $id
+        and .reason == "captain raised the Cursor spend limit")] | length == 1' >/dev/null \
+    || fail "cooldown did not note the overriding spawn and its reason"$'\n'"--- record ---"$'\n'"$record"
+  pass "fm-spawn honors an explicit captain override and records it on the cooldown"
+}
+
+test_missing_axis_refusal_names_the_flags_spawn_accepts() {
+  local rec id out status
+  id=profile-cooldown-axes-z47
+  rec=$(make_spawn_case profile-cooldown-axes claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  record_dispatch_provider_cooldown "$HOME_DIR" 2026-09-14T00:00:00Z \
+    || fail "could not seed provider dispatch cooldown"
+
+  out=$(FM_QUOTA_COOLDOWN_NOW=2026-08-16T12:05:00Z \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model sonnet --effort high \
+    --dispatch-resolved)
+  status=$?
+  expect_code 3 "$status" "a cooldown that could match should fail closed on the missing provider axis"
+  assert_contains "$out" "--dispatch-provider" "relayed refusal did not name the axis flag fm-spawn accepts"
+  assert_absent "$HOME_DIR/state/$id.meta" "fail-closed spawn should stop before metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "fail-closed spawn reached harness submission"
+  pass "fm-spawn's relayed missing-axis refusal names its own dispatch axis flags"
+}
+
+test_cooldown_protects_the_static_crew_harness_path() {
+  local rec id out status
+  id=profile-cooldown-static-z48
+  rec=$(make_spawn_case profile-cooldown-static cursor-agent "$id")
+  read_case_record "$rec"
+  # Deliberately no crew-dispatch.json: a durable cooldown must also suppress the
+  # automatic config/crew-harness path, not only a matched profile array.
+  record_dispatch_family_cooldown "$HOME_DIR" glm 2026-09-14T00:00:00Z \
+    || fail "could not seed static-path dispatch cooldown"
+
+  out=$(FM_QUOTA_COOLDOWN_NOW=2026-08-16T12:05:00Z \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model cursor-glm-4.6 --effort high \
+    --dispatch-provider cursor --dispatch-model-family glm)
+  status=$?
+  expect_code 3 "$status" "a cooled static crew-harness spawn should fail closed without any dispatch profile"
+  assert_contains "$out" "routing cooldown active" "static-path refusal did not name the durable cooldown"
+  assert_absent "$HOME_DIR/state/$id.meta" "cooled static-path spawn should stop before metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "cooled static-path spawn reached harness submission"
+  pass "a durable cooldown suppresses the static crew-harness path with no dispatch profile active"
+}
+
 test_routing_source_recorded_only_when_declared
 test_recorded_default_axes_respawn_as_unset
 test_no_profile_keeps_claude_profile_defaults
@@ -1206,6 +1351,11 @@ test_active_profile_refuses_override_reason_without_explicit_harness
 test_no_profile_does_not_require_attestation
 test_active_profile_batch_forwards_resolved_attestation
 test_active_profile_batch_refuses_without_attestation
+test_active_quota_cooldown_suppresses_resolved_spawn
+test_expired_and_sibling_cooldowns_do_not_suppress_spawn
+test_captain_override_dispatches_cooled_tuple_and_updates_record
+test_missing_axis_refusal_names_the_flags_spawn_accepts
+test_cooldown_protects_the_static_crew_harness_path
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

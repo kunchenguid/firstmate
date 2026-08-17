@@ -289,6 +289,28 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness and its attestation; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Routing cooldowns (data/quota-cooldowns.json)
+
+Provider-refused limits and exhausted measured quota windows become home-local durable routing cooldowns in `data/quota-cooldowns.json`.
+The file is private and gitignored, and `bin/fm-quota-cooldown.sh` is its only writer and the owner of its exact schema, validation, locking, and command syntax.
+
+Each entry preserves the narrowest scope proved by the evidence, the provider refusal or `quota-axi` evidence quote, when it was recorded, the provider-supplied expiry, and any explicit captain override.
+Instants are stored zone-qualified and axis names in one canonical form, so an entry means the same moment and the same scope on every machine and at every later dispatch; the script header owns the accepted forms and refuses the rest.
+A model-family entry binds the established harness, provider, and family without inferring any axis from a model name; a provider entry applies across that proven provider only.
+Expired entries stop suppressing automatically but remain neutral history rather than proof that the route recovered.
+
+Dispatch consultation reads the file alongside current quota evidence.
+Before it creates an endpoint, `fm-spawn.sh` passes the catalog-established `--dispatch-provider` and `--dispatch-model-family` axes, and any `--dispatch-override-reason`, to `bin/fm-quota-cooldown.sh authorize` and relays its status: the operator-visible outcome is that a cooled spawn stops with exit 3 before any task state exists, while a captain-authorized one launches and leaves the departure on the record.
+That script's header owns which candidate is refused, which axes it demands, and how an override is recorded; a provider-scoped entry therefore stops automatic spawns in that home that omit `--dispatch-provider` until it expires.
+While this file exists, a crewmate or scout spawn records the same `dispatch=` attestation block that an active dispatch profile produces, plus `dispatch_provider=` and `dispatch_model_family=` for the axes it was passed (`AGENTS.md` section 2 owns the `state/<id>.meta` key inventory).
+When no active entry could apply, existing dispatches remain backward-compatible and do not need the extra axes.
+There is no daemon and no manual re-enable step.
+
+A store this script cannot read is a fleet-wide spawn outage, because suppression cannot be proven from unreadable bytes.
+The one recovery is `bin/fm-quota-cooldown.sh recover`, which refuses a store that still validates, moves the invalid bytes aside as `data/quota-cooldowns.json.corrupt.<recorded instant>` for diagnosis, and leaves an empty store behind.
+Recovery therefore drops every suppression: read the quarantined file and record each still-active cooldown again from its provider evidence through the owner script.
+Hand-editing the durable file is never the repair, and never routine maintenance.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
