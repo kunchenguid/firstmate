@@ -69,7 +69,7 @@ Persistent secondmates must be assigned when the config is enabled; ordinary tas
 
 The configuration is primary-authoritative and inherited into secondmate homes through the same guarded local-material propagation as crew dispatch.
 After a mid-session edit, run `bin/fm-config-push.sh` to converge live secondmate homes.
-For Herdr homes upgraded while Spaces are already open, run `bin/fm-crew-identity-migrate-herdr.sh <session>` from the lock-owning primary session inside its exact primary Space.
+For Herdr homes upgraded while Spaces are already open, run `bin/fm-crew-identity-migrate-herdr.sh [<session>]`, which falls back to `HERDR_SESSION`, from the lock-owning primary session inside its exact primary Space.
 The migration captures missing active metadata, then renames only exact workspace ids whose current titles match their expected legacy titles; a changed, ambiguous, foreign, duplicate, or incomplete binding is refused.
 It never stops or restarts an agent.
 The Aubrey/Pullings example renders the primary Space as `Lt Pullings`; configured agents use the roster's short canonical labels, such as `Mr Allen`, `Dr Maturin`, and `Lt Mowett`.

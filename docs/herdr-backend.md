@@ -163,7 +163,7 @@ A malformed or missing title or token, duplicate token, zero or multiple journal
 Operational compromises:
 
 - Grouping is best-effort; only an exact same-identity version 2 or version 3 binding survives a Herdr restart in place.
-- `bin/fm-crew-identity-migrate-herdr.sh <session>` safely migrates already-open primary, persistent, and exact projected Spaces after identity config is enabled. It runs only from the lock-owning primary inside its exact Herdr Space, holds the named-session presentation lock, selects by workspace id, and refuses any title that is not the exact expected legacy title.
+- `bin/fm-crew-identity-migrate-herdr.sh [<session>]` (falling back to `HERDR_SESSION`) safely migrates already-open primary, persistent, and exact projected Spaces after identity config is enabled. It runs only from the lock-owning primary inside its exact Herdr Space, holds the named-session presentation lock, selects by workspace id, and refuses any title that is not the exact expected legacy title.
 - A failed journal publication or projected workspace create stops that spawn instead of falling back flat, so a Herdr create failure surfaces as a spawn failure in every Herdr home rather than only in homes that opted in; every earlier degradation on the fresh projected-create path (no session server, contended presentation lock, absent or ambiguous parent) still warns and continues flat.
 - Recovery of an existing presentation journal deliberately refuses the spawn when the shared presentation lock is contended rather than falling back flat, and default-on makes that refusal reachable in any Herdr home.
 - Existing layouts are not force-renamed or rearranged.
