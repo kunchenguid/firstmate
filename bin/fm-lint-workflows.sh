@@ -1,25 +1,33 @@
 #!/usr/bin/env bash
-# fm-lint-workflows.sh - owner of firstmate's GitHub workflow YAML validation.
+# fm-lint-workflows.sh - owner of firstmate's GitHub workflow lint.
 #
-# Parses every .github/workflows/*.{yml,yaml} so a malformed workflow, including
-# a self-broken ci.yml, fails in the local and no-mistakes lint lane before
-# merge. A broken ci.yml cannot report its own breakage, so this check must not
-# live only as a step inside that workflow. bin/fm-lint.sh invokes this owner
-# on its default (no explicit-path) path, which CI and commands.lint both use.
+# Runs pinned actionlint on every .github/workflows/*.{yml,yaml} so a malformed
+# workflow, including a self-broken ci.yml, fails in the local and no-mistakes
+# lint lane before merge. A broken ci.yml cannot report its own breakage, so
+# this check must not live only as a step inside that workflow. bin/fm-lint.sh
+# invokes this owner on its default (no explicit-path) path, which CI and
+# commands.lint both use.
 #
 # Usage:
 #   fm-lint-workflows.sh                 lint workflows under this repo
 #   fm-lint-workflows.sh --root <dir>    lint workflows under <dir>
 #   fm-lint-workflows.sh <path>...       lint explicit workflow files
+#   fm-lint-workflows.sh --required-version
 #   fm-lint-workflows.sh --help
 set -eu
 
+REQUIRED_ACTIONLINT=1.7.12
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/fm-lint-workflows.sh"
 ROOT="$(cd "$SELF_DIR/.." && pwd)"
 
+if [ "${1:-}" = "--required-version" ]; then
+  printf '%s\n' "$REQUIRED_ACTIONLINT"
+  exit 0
+fi
+
 fm_lint_workflows_usage() {
-  sed -n '2,15{s/^# \{0,1\}//;p;}' "$SELF"
+  sed -n '2,16{s/^# \{0,1\}//;p;}' "$SELF"
 }
 
 EXPLICIT_ROOT=
@@ -99,38 +107,25 @@ else
   fi
 fi
 
-if ! command -v ruby >/dev/null 2>&1; then
-  printf 'fm-lint-workflows.sh: ruby is required to parse GitHub workflow YAML.\n' >&2
+if ! command -v actionlint >/dev/null 2>&1; then
+  printf 'fm-lint-workflows.sh: actionlint not found; install actionlint %s for CI parity.\n' \
+    "$REQUIRED_ACTIONLINT" >&2
   exit 127
 fi
+ACTIONLINT_BIN=$(command -v actionlint)
+resolved=$("$ACTIONLINT_BIN" -version | awk 'NR==1 {print; exit}')
+printf 'fm-lint-workflows.sh: actionlint %s (pinned %s)\n' "$resolved" "$REQUIRED_ACTIONLINT" >&2
+if [ "$resolved" != "$REQUIRED_ACTIONLINT" ]; then
+  printf 'fm-lint-workflows.sh: actionlint %s required for CI parity, found %s. Install %s.\n' \
+    "$REQUIRED_ACTIONLINT" "$resolved" "$REQUIRED_ACTIONLINT" >&2
+  exit 1
+fi
 
+# fm-lint.sh owns ShellCheck of the canonical shell set. Disable actionlint's
+# extra shell and Python subprocess linters so this gate is the named workflow
+# linter, not a second shell lint of `run:` blocks.
 set +e
-ruby - "${FILES[@]}" <<'RUBY'
-require 'psych'
-
-status = 0
-ARGV.each do |path|
-  begin
-    doc = Psych.parse_file(path)
-    root = doc && doc.root
-    unless root.is_a?(Psych::Nodes::Mapping)
-      $stderr.puts "fm-lint-workflows.sh: #{path}: workflow YAML root must be a mapping"
-      status = 1
-      next
-    end
-  rescue Psych::SyntaxError => e
-    problem = e.respond_to?(:problem) && e.problem ? e.problem : e.message
-    line = e.respond_to?(:line) ? e.line : '?'
-    column = e.respond_to?(:column) ? e.column : '?'
-    $stderr.puts "fm-lint-workflows.sh: invalid YAML in #{path}: #{problem} at line #{line} column #{column}"
-    status = 1
-  rescue StandardError => e
-    $stderr.puts "fm-lint-workflows.sh: could not parse #{path}: #{e.message}"
-    status = 1
-  end
-end
-exit status
-RUBY
+"$ACTIONLINT_BIN" -no-color -shellcheck= -pyflakes= -- "${FILES[@]}"
 rc=$?
 set -e
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GitHub workflow YAML gate owned by bin/fm-lint-workflows.sh.
+# GitHub workflow lint gate owned by bin/fm-lint-workflows.sh.
 #
 # A malformed .github/workflows/*.yml, including a self-broken ci.yml, must fail
 # in the local/no-mistakes lint path before merge. Regression origin: #2512 put
@@ -12,6 +12,8 @@ set -u
 
 LINT_WF="$ROOT/bin/fm-lint-workflows.sh"
 LINT="$ROOT/bin/fm-lint.sh"
+INSTALLER="$ROOT/bin/fm-install-actionlint.sh"
+REQUIRED=$("$LINT_WF" --required-version)
 
 write_valid_workflow() {
   local path=$1
@@ -67,8 +69,8 @@ test_col0_heredoc_fails_with_clear_error() {
   rc=0
   out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "column-0 heredoc workflow unexpectedly passed"$'\n'"$out"
-  assert_contains "$out" "invalid YAML" \
-    "column-0 heredoc failure did not name invalid YAML"
+  assert_contains "$out" "could not parse as YAML" \
+    "column-0 heredoc failure did not report actionlint's YAML syntax error"
   assert_contains "$out" "ci.yml" \
     "column-0 heredoc failure did not name the workflow file"
   pass "column-0 heredoc workflow fails validation with a clear error"
@@ -107,8 +109,8 @@ test_explicit_broken_path_fails() {
   rc=0
   out=$("$LINT_WF" "$broken" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "explicit broken path unexpectedly passed"$'\n'"$out"
-  assert_contains "$out" "invalid YAML" \
-    "explicit broken path did not report invalid YAML"
+  assert_contains "$out" "could not parse as YAML" \
+    "explicit broken path did not report actionlint's YAML syntax error"
   pass "explicit malformed workflow path fails validation"
 }
 
@@ -120,26 +122,112 @@ test_non_mapping_root_fails() {
   rc=0
   out=$("$LINT_WF" --root "$tmp" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "scalar YAML root unexpectedly passed"$'\n'"$out"
-  assert_contains "$out" "root must be a mapping" \
-    "scalar YAML root did not report the mapping requirement"
+  assert_contains "$out" "mapping node is expected" \
+    "scalar YAML root did not report actionlint's mapping-node error"
   pass "non-mapping workflow YAML root fails"
 }
 
-test_missing_ruby_fails_closed() {
+test_missing_actionlint_fails_closed() {
   local tmp fakebin out rc tool
-  tmp=$(fm_test_tmproot fm-lint-wf-noruby)
+  tmp=$(fm_test_tmproot fm-lint-wf-noactionlint)
   fakebin=$(fm_fakebin "$tmp")
   mkdir -p "$tmp/.github/workflows"
   write_valid_workflow "$tmp/.github/workflows/ci.yml"
-  for tool in bash dirname find sort; do
+  for tool in bash dirname find sort awk; do
     ln -s "$(command -v "$tool")" "$fakebin/$tool"
   done
   rc=0
   out=$(PATH="$fakebin" "$LINT_WF" --root "$tmp" 2>&1) || rc=$?
-  [ "$rc" -eq 127 ] || fail "missing ruby expected exit 127, got $rc"$'\n'"$out"
-  assert_contains "$out" "ruby is required" \
-    "missing ruby did not name the parser requirement"
-  pass "missing ruby fails closed"
+  [ "$rc" -eq 127 ] || fail "missing actionlint expected exit 127, got $rc"$'\n'"$out"
+  assert_contains "$out" "actionlint not found" \
+    "missing actionlint did not name the required linter"
+  assert_contains "$out" "$REQUIRED" \
+    "missing actionlint did not name the pinned version"
+  pass "missing actionlint fails closed"
+}
+
+test_pins_an_explicit_version() {
+  [ -n "$REQUIRED" ] || fail "fm-lint-workflows.sh --required-version printed nothing"
+  assert_contains "$REQUIRED" "1.7.12" "fm-lint-workflows.sh must pin actionlint 1.7.12"
+  pass "fm-lint-workflows.sh pins an explicit actionlint version ($REQUIRED)"
+}
+
+test_rejects_wrong_actionlint_version() {
+  local tmp fakebin out rc
+  tmp=$(fm_test_tmproot fm-lint-wf-ver)
+  fakebin=$(fm_fakebin "$tmp")
+  mkdir -p "$tmp/.github/workflows"
+  write_valid_workflow "$tmp/.github/workflows/ci.yml"
+  cat > "$fakebin/actionlint" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "-version" ]; then
+  printf '0.0.0\n'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/actionlint"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" "$LINT_WF" --root "$tmp" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-lint-workflows.sh accepted an actionlint version other than the pin"$'\n'"$out"
+  assert_contains "$out" "$REQUIRED" "fm-lint-workflows.sh did not name the required version on mismatch"
+  assert_contains "$out" "0.0.0" "fm-lint-workflows.sh did not report the resolved (wrong) version"
+  pass "fm-lint-workflows.sh refuses to lint under a non-pinned actionlint version"
+}
+
+test_installer_retries_transient_download_failure() {
+  local tmp fakebin destination out
+  tmp=$(fm_test_tmproot fm-actionlint-download)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$CURL_COUNT" ] || count=$(cat "$CURL_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$CURL_COUNT"
+[ "$count" -gt 3 ] || exit 22
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    : > "$2"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  cat > "$fakebin/sha256sum" <<'SH'
+#!/usr/bin/env bash
+printf '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  %s\n' "$1"
+SH
+  cat > "$fakebin/tar" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-C" ]; then
+    cat > "$2/actionlint" <<'EOF'
+#!/usr/bin/env bash
+printf '1.7.12\n'
+EOF
+    chmod +x "$2/actionlint"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/tar" "$fakebin/sleep"
+
+  out=$(CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
+    || fail "installer did not recover from a transient download failure"$'\n'"$out"
+  [ "$(cat "$tmp/curl-count")" -eq 4 ] || fail "installer did not recover after three failed downloads"
+  assert_contains "$out" "download attempt 3 failed; retrying" "installer did not disclose its third retry"
+  [ -x "$destination/actionlint" ] || fail "installer did not install actionlint after retrying"
+  pass "actionlint installer retries a transient download failure"
 }
 
 # Prove the no-mistakes/local owner (bin/fm-lint.sh with no paths) catches a
@@ -190,18 +278,21 @@ SH
   out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
     FM_TEST_GIT_DIFF_FILE="$diff_file" "$tmp/bin/fm-lint.sh" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "fm-lint.sh default path missed a broken ci.yml"$'\n'"$out"
-  assert_contains "$out" "invalid YAML" \
+  assert_contains "$out" "could not parse as YAML" \
     "fm-lint.sh default path did not surface the workflow YAML error"
   assert_contains "$out" "ci.yml" \
     "fm-lint.sh default path did not name the broken workflow"
   pass "fm-lint.sh default path catches a self-broken ci.yml"
 }
 
+test_pins_an_explicit_version
 test_current_workflows_pass
 test_col0_heredoc_fails_with_clear_error
 test_valid_fixture_passes
 test_empty_workflows_dir_fails
 test_explicit_broken_path_fails
 test_non_mapping_root_fails
-test_missing_ruby_fails_closed
+test_missing_actionlint_fails_closed
+test_rejects_wrong_actionlint_version
+test_installer_retries_transient_download_failure
 test_fm_lint_default_path_catches_broken_ci_yml
