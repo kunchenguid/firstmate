@@ -86,7 +86,11 @@ def description_span(frontmatter: list[bytes], path: str) -> tuple[int, int]:
         raise Refusal(f"unmapped semantic owner: {path} has ambiguous description")
     start = starts[0]
     end = start + 1
-    if frontmatter[start].rstrip().endswith((b">-", b"|", b">", b"|-")):
+    value = frontmatter[start].split(b":", 1)[1].strip()
+    safe_block_scalars = (b">", b">-", b"|", b"|-")
+    if value.startswith((b">", b"|")) and value not in safe_block_scalars:
+        raise Refusal(f"unmapped semantic owner: {path} has unsupported description block scalar")
+    if value in safe_block_scalars:
         while end < len(frontmatter) and (frontmatter[end].startswith((b" ", b"\t")) or not frontmatter[end].strip()):
             end += 1
     return start, end

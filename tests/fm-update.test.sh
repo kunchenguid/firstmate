@@ -474,6 +474,42 @@ PY
   pass "T14 compact description ownership survives upstream convergence"
 }
 
+test_unsupported_skill_description_scalars_refuse_candidates() {
+  local w form out installed live before_refs after_refs
+  w=$(new_semantic_overlay_world t-description-scalars)
+  installed=$(git -C "$w/main" rev-parse HEAD)
+  live=$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)
+  before_refs=$(git -C "$w/main" for-each-ref --format='%(refname) %(objectname)' refs/firstmate/overlays/candidates)
+
+  for form in '>+' '|2-'; do
+    python3 - "$w/seed/.agents/skills/demo/SKILL.md" "$form" <<'PY'
+from pathlib import Path
+import re, sys
+path, form = Path(sys.argv[1]), sys.argv[2]
+content = path.read_text()
+content = re.sub(
+    r"description:.*?(?=\n---\n)",
+    f"description: {form}\n  Expanded upstream discovery guidance.",
+    content,
+    count=1,
+    flags=re.DOTALL,
+)
+path.write_text(content)
+PY
+    git -C "$w/seed" add -A && git -C "$w/seed" commit -qm "unsupported description scalar $form"
+    git -C "$w/seed" push -q origin main
+
+    out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1)
+    assert_contains "$out" "unsupported description block scalar" "unsupported $form description reports its unmapped semantic"
+    assert_not_contains "$out" "overlay-install: approval-required" "unsupported $form description is not offered"
+    [ "$(git -C "$w/main" rev-parse HEAD)" = "$installed" ] || fail "unsupported $form description moved main"
+    [ "$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)" = "$live" ] || fail "unsupported $form description moved live ref"
+    after_refs=$(git -C "$w/main" for-each-ref --format='%(refname) %(objectname)' refs/firstmate/overlays/candidates)
+    [ "$after_refs" = "$before_refs" ] || fail "unsupported $form description produced a candidate ref"
+  done
+  pass "T15 unsupported YAML description scalars refuse before candidate construction"
+}
+
 test_unrelated_update_refreshes_exact_lineage_bindings() {
   local w out approval candidate upstream installed
   w=$(new_semantic_overlay_world t-unrelated unrelated)
@@ -569,6 +605,7 @@ test_unsafe_secondmate_home_skipped_before_git_update
 test_verified_overlay_requires_explicit_install_approval
 test_semantic_forward_port_reaches_optimized_owners
 test_compact_description_survives_upstream_convergence
+test_unsupported_skill_description_scalars_refuse_candidates
 test_unrelated_update_refreshes_exact_lineage_bindings
 test_hash_bound_overlay_cannot_mask_unmapped_semantics
 test_ambiguous_overlay_refuses_without_ref_moves
