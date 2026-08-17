@@ -67,6 +67,33 @@ make_case() {
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
 
+make_local_only_case() {
+  local name=$1 id=$2 default=${3:-main} case_dir home project pool fakebin initial
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'Delivery contract: mode=local-only\nbrief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b "$default" "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  printf 'must survive a local-only launch\n' > "$project/advanced-local.txt"
+  git -C "$project" add advanced-local.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
+}
+
 read_case_record() {
   IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR INITIAL_SHA DEFAULT_BRANCH <<EOF
 $1
@@ -158,6 +185,26 @@ test_unreachable_origin_refuses_stale_pool_base() {
   pass "an unreachable origin refuses a potentially stale pooled worktree"
 }
 
+test_local_only_without_remote_refreshes_before_launch() {
+  local rec id out status current branch_head
+  id='pool-local-only-r6'
+  rec=$(make_local_only_case local-only "$id")
+  read_case_record "$rec"
+  [ -z "$(git -C "$PROJECT_DIR" remote)" ] || fail "local-only fixture unexpectedly has a remote"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "local-only spawn should refresh a pooled worktree without a remote"
+  assert_contains "$out" "spawned $id" "local-only spawn did not report success"
+  current=$(git -C "$PROJECT_DIR" rev-parse "$DEFAULT_BRANCH")
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$branch_head" = "$current" ] || fail "local-only spawn did not start at the local default branch tip"
+  [ "$branch_head" != "$INITIAL_SHA" ] || fail "fixture did not prove the local default branch advanced past the pool base"
+  assert_grep 'must survive a local-only launch' "$POOL_DIR/advanced-local.txt" \
+    "local-only spawn omitted local default branch content"
+  pass "a local-only spawn without a remote refreshes from the local default branch"
+}
+
 test_direct_pr_and_scout_refresh_before_launch() {
   local rec id out status contract current
   for contract in direct-pr scout; do
@@ -233,5 +280,6 @@ test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_local_only_without_remote_refreshes_before_launch
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
