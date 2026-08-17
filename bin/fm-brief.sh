@@ -14,7 +14,8 @@
 #   --forge selects the forge vocabulary in generated crewmate briefs:
 #   gh-axi and "PR" on GitHub, glab and "merge request" (MR) on GitLab.
 #   It is best-effort by default: the clone's origin remote is read from
-#   $FM_HOME/projects/<repo-name> and its host decides the vocabulary.
+#   <projects-dir>/<repo-name> - $FM_HOME/projects unless FM_PROJECTS_OVERRIDE
+#   moves it - and its host decides the vocabulary.
 #   That directory must itself be the clone's root; a placeholder or partial
 #   directory inside an enclosing repo is treated as no clone at all rather
 #   than inheriting the enclosing repo's origin.
@@ -114,6 +115,7 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -296,7 +298,7 @@ REPO=${POS[1]}
 
 # Forge vocabulary for generated briefs: --forge is the explicit mechanism,
 # and a missing flag falls back to best-effort detection from the project's
-# clone under $FM_HOME/projects/<repo-name>. Detection never guesses: an
+# clone under $PROJECTS/<repo-name>. Detection never guesses: an
 # unrecognized or missing origin scaffolds forge-neutral wording and warns
 # loudly at scaffold time, so a self-hosted GitLab host without "gitlab" in
 # its name is a supported outcome rather than a silent mis-flag.
@@ -306,7 +308,7 @@ REPO=${POS[1]}
 # directory would otherwise report the firstmate repo's own origin.
 if [ "$FORGE" = auto ]; then
   FORGE_ORIGIN=
-  PROJECT_DIR=$(CDPATH='' cd -- "$FM_HOME/projects/$REPO" 2>/dev/null && pwd -P) || PROJECT_DIR=
+  PROJECT_DIR=$(CDPATH='' cd -- "$PROJECTS/$REPO" 2>/dev/null && pwd -P) || PROJECT_DIR=
   if [ -n "$PROJECT_DIR" ]; then
     PROJECT_TOPLEVEL=$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || true)
     if [ -n "$PROJECT_TOPLEVEL" ]; then
@@ -331,7 +333,7 @@ if [ "$FORGE" = auto ]; then
     if [ -n "$FORGE_ORIGIN" ]; then
       echo "warning: could not detect forge for '$REPO' from origin '$FORGE_ORIGIN' (host '${ORIGIN_HOST:-?}'); scaffolded forge-neutral wording - pass --forge <github|gitlab> to choose" >&2
     else
-      echo "warning: no origin remote found for '$REPO' at ${FM_HOME}/projects/$REPO; scaffolded forge-neutral wording - pass --forge <github|gitlab> to choose" >&2
+      echo "warning: no origin remote found for '$REPO' at $PROJECTS/$REPO; scaffolded forge-neutral wording - pass --forge <github|gitlab> to choose" >&2
     fi
   fi
 fi

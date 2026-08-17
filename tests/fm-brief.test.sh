@@ -240,7 +240,7 @@ missing --mode||ship briefs require --mode
 empty --mode value|--mode|requires a value
 unknown mode value|--mode nope|must be one of no-mistakes, direct-PR, local-only
 conditional policy is not a task mode|--mode no-mistakes-prod-only|classify this task's surface
-invalid forge value|brief-refused-b5 some-proj --mode direct-PR --forge bitbucket|--forge must be one of github or gitlab
+invalid forge value|--mode direct-PR --forge bitbucket|--forge must be one of github or gitlab
 internal auto sentinel is not a user value|--mode direct-PR --forge auto|--forge must be one of github or gitlab
 internal auto sentinel is not a user value with =|--mode direct-PR --forge=auto|--forge must be one of github or gitlab
 forge on a secondmate charter|brief-refused-b6 --secondmate --no-projects --forge github|--forge applies only to crewmate ship or scout briefs
@@ -290,6 +290,7 @@ yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yol
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
+forge on a secondmate charter|brief-refused-b5 --secondmate --no-projects --forge github|--forge applies only to crewmate ship or scout briefs
 ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
@@ -834,6 +835,25 @@ test_forge_auto_detection() {
     || fail "explicit --forge should override auto-detection"
   assert_grep "open a merge request with \`glab\`" "$home/data/det-flag-a5/brief.md" \
     "explicit --forge gitlab was overridden by github-host detection"
+
+  # Homes whose clones live elsewhere via FM_PROJECTS_OVERRIDE must detect from
+  # that directory, like every other script that resolves project clones.
+  local elsewhere
+  elsewhere="$TMP_ROOT/forge-elsewhere-clones"
+  mkdir -p "$elsewhere"
+  git init -q -b main "$elsewhere/gl-elsewhere"
+  git -C "$elsewhere/gl-elsewhere" remote add origin https://gitlab.example.com/team/widgets.git
+  out=$(FM_HOME="$home" FM_PROJECTS_OVERRIDE="$elsewhere" "$ROOT/bin/fm-brief.sh" det-override-a6 gl-elsewhere --mode direct-PR 2>&1); status=$?
+  expect_code 0 "$status" "overridden projects dir should scaffold"
+  assert_not_contains "$out" "no origin remote found" \
+    "overridden projects dir was ignored and warned about a missing clone"
+  assert_grep "open a merge request with \`glab\`" "$home/data/det-override-a6/brief.md" \
+    "overridden projects dir did not auto-select gitlab vocabulary"
+  # The warning must name the directory actually searched, not the default one.
+  out=$(FM_HOME="$home" FM_PROJECTS_OVERRIDE="$elsewhere" "$ROOT/bin/fm-brief.sh" det-override-a7 ghost-proj --mode direct-PR 2>&1); status=$?
+  expect_code 0 "$status" "overridden projects dir missing clone should still scaffold"
+  assert_contains "$out" "$elsewhere/ghost-proj" \
+    "missing-clone warning pointed at a directory that holds no clones"
 
   # A projects/<repo> directory that is not the clone's own root must not inherit
   # the enclosing repo's origin. FM_HOME defaults to the firstmate checkout, so a
