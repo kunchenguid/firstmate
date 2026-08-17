@@ -2845,6 +2845,79 @@ test_peace_keeps_the_ghost_half_without_a_backlog_backend() {
   pass "an unreadable strandedness instrument still reports the ghost half"
 }
 
+test_peace_degrades_when_the_ghost_instrument_is_unavailable() {
+  local home fakebin broken_bin out err rc
+  home=$(make_home peace-ghost-unavailable)
+  write_empty_backlog "$home"
+  fakebin=$(make_fakebin "$home")
+  broken_bin="$home/bin"
+  cp -R "$(dirname "$DASHBOARD")" "$broken_bin"
+  rm "$broken_bin/fm-record-contradictions-lib.sh"
+  set +e
+  out=$(NO_COLOR=1 PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z \
+    "$broken_bin/fm-fleet-dashboard.mjs" --section peace 2>"$TMP_ROOT/peace-ghost-unavailable.err")
+  rc=$?
+  set -e
+  err=$(cat "$TMP_ROOT/peace-ghost-unavailable.err")
+  [ "$rc" -eq 0 ] || fail "peace section failed with the ghost instrument unavailable (rc=$rc): $err"
+  assert_contains "$out" "records: unknown (ghost unknown, 0 stranded)" \
+    "an unavailable ghost instrument did not degrade alone on the records value"
+  assert_not_contains "$out" "records: agree" \
+    "an unavailable ghost instrument was reported as agreement"
+  assert_not_contains "$out" "stranded unknown" \
+    "an unavailable ghost instrument took the answering strandedness half down with it"
+  assert_contains "$err" "ghost unknown" \
+    "peace degraded without naming the unavailable ghost instrument"
+  assert_contains "$err" "fm-record-contradictions-lib.sh" \
+    "peace discarded the ghost instrument's own reason for being unavailable"
+  pass "peace degrades when the ghost instrument is unavailable"
+}
+
+test_peace_ranks_a_stranded_finding_above_an_unavailable_ghost_half() {
+  local home fakebin broken_bin out err rc
+  home=$(make_home peace-ghost-unavailable-stranded)
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] stranded-task - Stranded in-flight work (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/stranded-task.meta" "kind=ship"
+  printf 'failed: worker finished without advancing the backlog row\n' \
+    > "$home/state/stranded-task.status"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'liveness: absent · source: fixture\n'
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  broken_bin="$home/bin"
+  cp -R "$(dirname "$DASHBOARD")" "$broken_bin"
+  rm "$broken_bin/fm-record-contradictions-lib.sh"
+  set +e
+  out=$(NO_COLOR=1 PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-02T00:05:00Z \
+    FM_CREW_STATE_OVERRIDE="$fakebin/fm-crew-state.sh" \
+    "$broken_bin/fm-fleet-dashboard.mjs" --section peace \
+    2>"$TMP_ROOT/peace-ghost-unavailable-stranded.err")
+  rc=$?
+  set -e
+  err=$(cat "$TMP_ROOT/peace-ghost-unavailable-stranded.err")
+  [ "$rc" -eq 0 ] || fail "peace section failed with a stranded row and no ghost instrument (rc=$rc): $err"
+  assert_contains "$out" "records: disagree (ghost unknown, 1 stranded)" \
+    "a stranded finding did not outrank the unavailable ghost half"
+  assert_not_contains "$out" "records: unknown" \
+    "an unavailable ghost half buried the answering stranded finding as unknown"
+  assert_not_contains "$out" "stranded-task" "peace section named the stranded id"
+  assert_peace_omits_other_health "$out"
+  pass "a stranded finding outranks unknown when the ghost half cannot run"
+}
+
 test_peace_never_reads_an_unavailable_instrument_as_agreement() {
   local home fakebin out
   home=$(make_home peace-manual-backend-clean)
@@ -3143,6 +3216,8 @@ test_peace_ghost_count_is_the_owners_total_not_its_displayed_entries
 test_peace_records_agree_on_clean_fixture
 test_peace_records_ignore_blocked_worker
 test_peace_keeps_the_ghost_half_without_a_backlog_backend
+test_peace_degrades_when_the_ghost_instrument_is_unavailable
+test_peace_ranks_a_stranded_finding_above_an_unavailable_ghost_half
 test_peace_never_reads_an_unavailable_instrument_as_agreement
 test_peace_names_the_reason_an_instrument_could_not_run
 test_watch_peace_refetches_github_on_the_slow_cadence

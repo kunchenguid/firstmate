@@ -12,11 +12,11 @@
 // That line carries exactly three verdicts:
 //   records: agree                                both instruments ran and are silent
 //   records: disagree (N ghost, M stranded)       at least one instrument found a contradiction
-//   records: unknown (0 ghost, stranded unknown)  nothing found and an instrument could not run
+//   records: unknown (ghost unknown, 0 stranded)  nothing found and an instrument could not run
 // The third verdict, unknown, exists because an instrument that cannot answer
 // has to say so: reading its silence as agreement would report invented health,
-// and failing the whole section would drop the half that did answer. An
-// instrument that could not run spells its own count unknown rather than 0, so
+// and failing the whole section would drop the half that did answer. Either
+// half spells its own count unknown rather than 0 when it could not run, so
 // disagree outranks unknown whenever the answering half found something:
 // `records: disagree (N ghost, stranded unknown)`.
 // Peace skips the cockpit's own forge fetch, but it is not an offline section:
@@ -27,25 +27,23 @@
 // fetch it skips, never on the fast local frame. The strandedness half is
 // bounded by UNADVANCEABLE_WORK_TIMEOUT_MS, which covers the detector's serial
 // per-crew liveness probes (each bounded in turn by fm-crew-state.sh's own
-// no-mistakes timeout). That half is also the only one that degrades: it can be
-// unavailable because the tasks-axi backlog backend is disabled or because the
-// liveness probes outlast their bound, and the reason it gives is carried on
-// the records value so unknown stays diagnosable while the records line itself
-// keeps carrying nothing but the projection. The digest half has no unknown
-// spelling at all, so its unavailability is the one this section does not
-// survive, and it goes unavailable two ways. Quietly: the digest owner
-// swallows its own probe failures, returning a PR check that could not reach
-// GitHub as no contradiction rather than as a refusal, so the total arrives
-// confident and short - and a records line with nothing else to report then
-// prints `records: agree` when the honest value is unknown, which is the
-// invented health this section exists to prevent. Loudly: infrastructure
-// failure or the collect timeout rejects and the whole section exits non-zero,
-// discarding the strandedness answer that did arrive. Both are gaps awaiting a
-// degrade path on this half, not a designed contract. Each mode routes
-// that reason to stderr where stderr is safe to write: a one-shot render emits
-// it as it collects, while watch holds every distinct reason until the
-// alternate screen is torn down, so a diagnostic can never paint over a live
-// frame.
+// no-mistakes timeout). The digest half gets no constant from this file: the
+// owner's own time limits bound its gh-axi calls alone, and the collect as a
+// whole takes run's default 60000 ms bound. Both halves degrade when
+// unavailable. The strandedness half can be unavailable because the tasks-axi
+// backlog backend is disabled or because its liveness probes outlast their
+// bound. The digest half can be unavailable because its collector or a
+// required dependency fails, or because the collect outlasts that bound. Each
+// carries its unknown spelling on the records value, so the line itself is
+// symmetric. Unavailability is still the only digest failure this line can
+// see: inside a collect that does run, the owner swallows its own probe
+// failures, counting a PR check that could not reach GitHub as no
+// contradiction rather than as a refusal, so agree stays optimistic by exactly
+// that much. The reasons are not symmetric yet: a one-shot render emits
+// either half's reason to stderr as it collects, while the watch surface
+// still routes only the strandedness reason, holding every distinct one until
+// the alternate screen is torn down so a diagnostic can never paint over a
+// live frame.
 // The default is a fixed-measure one-line list; --show and watch selection own
 // full context so titles never compete with status prose during a scan.
 //
@@ -267,8 +265,9 @@ function peaceRecordsLine(records) {
     return "records: agree";
   }
   const verdict = records.ghost > 0 || records.stranded > 0 ? "disagree" : "unknown";
+  const ghost = records.ghost === null ? "ghost unknown" : `${records.ghost} ghost`;
   const stranded = records.stranded === null ? "stranded unknown" : `${records.stranded} stranded`;
-  return `records: ${verdict} (${records.ghost} ghost, ${stranded})`;
+  return `records: ${verdict} (${ghost}, ${stranded})`;
 }
 
 function contradictionTotalFromOwner(text) {
@@ -305,14 +304,18 @@ async function collectUnadvanceableWork() {
 
 async function collectPeaceRecords() {
   const [ghost, unadvanceable] = await Promise.all([
-    collectContradictionTotal(),
+    collectContradictionTotal().then(
+      (total) => ({ total }),
+      (error) => ({ reason: error.message }),
+    ),
     collectUnadvanceableWork().then(
       (text) => ({ text }),
       (error) => ({ reason: error.message }),
     ),
   ]);
   return {
-    ghost,
+    ghost: ghost.reason === undefined ? ghost.total : null,
+    ghostReason: ghost.reason ?? null,
     stranded: unadvanceable.reason === undefined
       ? strandedCountFromUnadvanceable(unadvanceable.text)
       : null,
@@ -322,6 +325,10 @@ async function collectPeaceRecords() {
 
 function peaceDegradationLine(reason) {
   return `fm-fleet-dashboard: stranded unknown: ${reason}\n`;
+}
+
+function peaceOneShotDegradationLine(instrument, reason) {
+  return `fm-fleet-dashboard: ${instrument} unknown: ${reason}\n`;
 }
 
 function pathIsWithin(candidate, parent) {
@@ -2986,8 +2993,11 @@ if (!isMainThread && workerData?.operation === "fetch-forge-state") {
       const inputs = await collectLocalInputs();
       if (section === "peace") {
         inputs.peaceRecords = await collectPeaceRecords();
+        if (inputs.peaceRecords.ghostReason) {
+          process.stderr.write(peaceOneShotDegradationLine("ghost", inputs.peaceRecords.ghostReason));
+        }
         if (inputs.peaceRecords.strandedReason) {
-          process.stderr.write(peaceDegradationLine(inputs.peaceRecords.strandedReason));
+          process.stderr.write(peaceOneShotDegradationLine("stranded", inputs.peaceRecords.strandedReason));
         }
       }
       const forgeMode = sectionForgeMode(section);
