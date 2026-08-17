@@ -356,6 +356,13 @@ fm_backend_herdr_crew_identity_config_path() {
   printf '%s' "${FM_CREW_IDENTITY_CONFIG_OVERRIDE:-$FM_HOME/config/crew-identities.json}"
 }
 
+fm_backend_herdr_crew_identity_config_present() {
+  # shellcheck disable=SC2034 # read by the sourced crew-identity library.
+  local FM_CREW_IDENTITY_CONFIG
+  FM_CREW_IDENTITY_CONFIG=$(fm_backend_herdr_crew_identity_config_path)
+  fm_crew_identity_config_present
+}
+
 # The single registered repository slug of this home, or nothing when the home
 # registers no project or more than one.
 fm_backend_herdr_home_project_slug() {
@@ -366,33 +373,46 @@ fm_backend_herdr_home_project_slug() {
   printf '%s' "$(printf '%s' "$names" | tr -d '[:space:]')"
 }
 
-fm_backend_herdr_workspace_label() {
-  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id roster identity label slug
+# fm_backend_herdr_workspace_identity_base_label: this home's assigned
+# name-only identity title, which is stable across registered-project changes.
+# Prints nothing when no crew identity config applies to this home. Exits 3 for
+# a configured but unassigned home, which is an explicit refusal, not a title.
+fm_backend_herdr_workspace_identity_base_label() {
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id roster identity
   local FM_CREW_IDENTITY_CONFIG
+  # shellcheck disable=SC2034 # read by the sourced crew-identity library.
   FM_CREW_IDENTITY_CONFIG=$(fm_backend_herdr_crew_identity_config_path)
-  if fm_crew_identity_config_present; then
-    roster=$(fm_crew_identity_config_roster) || return 1
-    if [ -f "$marker" ]; then
-      id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
-      [ -n "$id" ] || {
-        echo "error: crew identity config is active but the secondmate home marker is empty" >&2
-        return 1
-      }
-      identity=$(fm_crew_identity_assignment agent "$id") || return 1
-    else
-      identity=$(fm_crew_identity_assignment primary) || return 1
-    fi
-    if [ "$identity" = unassigned ]; then
-      printf 'Unassigned crew'
-      return
-    fi
-    label=$(fm_crew_identity_space_label "$roster" "$identity") || return 1
+  fm_crew_identity_config_present || return 0
+  roster=$(fm_crew_identity_config_roster) || return 1
+  if [ -f "$marker" ]; then
+    id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
+    [ -n "$id" ] || {
+      echo "error: crew identity config is active but the secondmate home marker is empty" >&2
+      return 1
+    }
+    identity=$(fm_crew_identity_assignment agent "$id") || return 1
+  else
+    identity=$(fm_crew_identity_assignment primary) || return 1
+  fi
+  [ "$identity" != unassigned ] || return 3
+  fm_crew_identity_space_label "$roster" "$identity"
+}
+
+fm_backend_herdr_workspace_label() {
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id label slug status
+  label=$(fm_backend_herdr_workspace_identity_base_label) && status=0 || status=$?
+  case "$status" in
+    0) ;;
+    3) printf 'Unassigned crew'; return 0 ;;
+    *) return 1 ;;
+  esac
+  if [ -n "$label" ]; then
     if [ -f "$marker" ]; then
       slug=$(fm_backend_herdr_home_project_slug)
       [ -z "$slug" ] || label="$label — $slug"
     fi
     printf '%s' "$label"
-    return
+    return 0
   fi
   if [ -f "$marker" ]; then
     id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
@@ -413,24 +433,47 @@ fm_backend_herdr_workspace_legacy_label() {
   printf 'firstmate'
 }
 
-# Rename only one exact workspace id whose current label is the expected legacy
-# label for this same home. The workspace id comes from launcher ancestry or
-# durable task metadata, never a label search. A changed or unreadable binding
-# refuses without touching another Space.
+# fm_backend_herdr_workspace_label_is_own: does <label> belong to THIS home?
+# The owned set is this home's legacy title plus every title its own assigned
+# identity can currently or previously have carried - name-only, and name plus
+# any syntactically valid registered repository slug. A home's registered
+# project set is mutable, so its durable Space title is not; identity ownership
+# is what stays exact here. Refuses every other label.
+fm_backend_herdr_workspace_label_is_own() {  # <label> [<base-identity-label>]
+  local candidate=$1 base=${2-} remainder
+  [ -n "${2+set}" ] || base=$(fm_backend_herdr_workspace_identity_base_label) || return 1
+  [ "$candidate" = "$(fm_backend_herdr_workspace_legacy_label)" ] && return 0
+  [ -n "$base" ] || return 1
+  [ "$candidate" != "$base" ] || return 0
+  case "$candidate" in
+    "$base — "*) remainder=${candidate#"$base — "} ;;
+    *) return 1 ;;
+  esac
+  case "$remainder" in
+    ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# Rename only one exact workspace id that this same home already owns - its
+# legacy title or any of its own identity titles, including one left behind by
+# an earlier registered-project set. The workspace id comes from launcher
+# ancestry or durable task metadata, never a label search. A foreign or
+# unreadable binding refuses without touching another Space.
 fm_backend_herdr_workspace_identity_rename_exact() { # <session> <workspace-id>
-  local session=$1 workspace=$2 desired legacy out current verify
+  local session=$1 workspace=$2 desired base out current verify
   desired=$(fm_backend_herdr_workspace_label) || return 1
   [ "$desired" != "Unassigned crew" ] || {
     echo "error: crew identity config is active but this persistent home is unassigned; refusing an ambiguous Herdr Space title" >&2
     return 1
   }
-  legacy=$(fm_backend_herdr_workspace_legacy_label)
+  base=$(fm_backend_herdr_workspace_identity_base_label) || return 1
   out=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
   current=$(printf '%s' "$out" | jq -er --arg workspace "$workspace" \
     'select(.result.workspace.workspace_id == $workspace) | .result.workspace.label' 2>/dev/null) || return 1
   [ "$current" != "$desired" ] || return 0
-  [ "$current" = "$legacy" ] || {
-    echo "error: Herdr workspace '$workspace' is labelled '$current', not this home's expected legacy '$legacy'; refusing identity rename" >&2
+  fm_backend_herdr_workspace_label_is_own "$current" "$base" || {
+    echo "error: Herdr workspace '$workspace' is labelled '$current', which is not one of this home's own titles (legacy '$(fm_backend_herdr_workspace_legacy_label)' or identity '$base'); refusing identity rename" >&2
     return 1
   }
   fm_backend_herdr_cli "$session" workspace rename "$workspace" "$desired" >/dev/null 2>&1 || return 1
@@ -1668,9 +1711,25 @@ fm_backend_herdr_server_ensure() {  # <session>
 # which one is the caller's, while the read-only recovery path below keeps its
 # historical first-match behavior.
 fm_backend_herdr_workspace_find_all() {  # <session>
-  local session=$1 label list
+  local session=$1 label list base ids id lbl legacy
   label=$(fm_backend_herdr_workspace_label)
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
+  base=$(fm_backend_herdr_workspace_identity_base_label 2>/dev/null) || base=""
+  if [ -n "$base" ] && [ "$label" != "Unassigned crew" ]; then
+    # A home's registered project set is mutable, so an existing Space of this
+    # same home can still carry an earlier identity title. Ownership, not the
+    # exact current title, decides what belongs to this home.
+    ids=$(printf '%s' "$list" | jq -r \
+      '.result.workspaces[]? | "\(.workspace_id)\t\(.label)"' 2>/dev/null) || return 0
+    legacy=$(fm_backend_herdr_workspace_legacy_label)
+    printf '%s\n' "$ids" | while IFS=$'\t' read -r id lbl; do
+      [ -n "$id" ] || continue
+      [ "$lbl" != "$legacy" ] || continue
+      fm_backend_herdr_workspace_label_is_own "$lbl" "$base" || continue
+      printf '%s\n' "$id"
+    done
+    return 0
+  fi
   # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
   # keyword (label/break), so declaring a jq variable named "label" is a
   # compile error that `2>/dev/null` would silently swallow, making this find
@@ -1949,9 +2008,7 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
     case "$status" in
       0)
         FM_BACKEND_HERDR_WS_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
-        local FM_CREW_IDENTITY_CONFIG
-        FM_CREW_IDENTITY_CONFIG=$(fm_backend_herdr_crew_identity_config_path)
-        if fm_crew_identity_config_present; then
+        if fm_backend_herdr_crew_identity_config_present; then
           fm_backend_herdr_workspace_identity_rename_exact \
             "$session" "$FM_BACKEND_HERDR_WS_ID" || return 3
         fi

@@ -41,6 +41,7 @@ With optional `config/crew-identities.json`, the primary and persistent secondma
 For the Master-and-Commander example these are short canonical title-plus-surname labels such as `Lt Pullings`, `Mr Allen`, `Dr Maturin`, and `Lt Mowett`; neither `Second Mate` nor a mechanical task or project id appears in the Space title.
 A project-owning persistent secondmate appends the exact registered repository slug from its own `data/projects.md`, preserving its lowercase and hyphens: `Mr Allen — developer-setup`, `Dr Maturin — llm-usage-dashboard`, `Lt Mowett — pco-projects-mda`.
 A project-less home, and a home that registers more than one project, stays name-only; routing, restart bindings, and recovery still use the mechanical task id alone.
+Because a home's registered project set is mutable, its own Space is recognised by its assigned identity rather than by one frozen title: an existing Space carrying an earlier name-only or slug title is found and renamed to the current one, while another crew member's title is still refused untouched.
 Without crew identity configuration, the primary home label remains `firstmate`, while a secondmate remains `2ndmate-<secondmate-id>` from its validated `.fm-secondmate-home` marker.
 A secondmate launched by the primary receives a narrowly scoped home override during container creation.
 

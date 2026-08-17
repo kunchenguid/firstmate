@@ -195,33 +195,72 @@ meta_value() {  # <meta-file> <key>
   fm_meta_get "$1" "$2"
 }
 
+CREW_ROSTER_CHECKED=""
+CREW_ROSTER_VALID=""
+CREW_RECORD_KEYS=()
+CREW_RECORD_VALUES=()
+
+# One schema validation per roster per snapshot, and one record lookup per
+# distinct roster/identity pair, instead of both per task meta.
+crew_roster_valid_cached() {  # <roster>
+  local roster=$1
+  case " $CREW_ROSTER_VALID " in *" $roster "*) return 0 ;; esac
+  case " $CREW_ROSTER_CHECKED " in *" $roster "*) return 1 ;; esac
+  CREW_ROSTER_CHECKED="$CREW_ROSTER_CHECKED $roster"
+  fm_crew_identity_validate_roster "$roster" 2>/dev/null || return 1
+  CREW_ROSTER_VALID="$CREW_ROSTER_VALID $roster"
+}
+
+# Publishes the record through CREW_RECORD_JSON rather than stdout so the cache
+# survives: a command substitution would discard every write.
+crew_identity_record_cached() {  # <roster> <identity>
+  local roster=$1 identity=$2 key="$1/$2" i=0 record
+  CREW_RECORD_JSON=""
+  while [ "$i" -lt "${#CREW_RECORD_KEYS[@]}" ]; do
+    if [ "${CREW_RECORD_KEYS[$i]}" = "$key" ]; then
+      CREW_RECORD_JSON=${CREW_RECORD_VALUES[$i]}
+      [ -n "$CREW_RECORD_JSON" ] || return 1
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  record=$(fm_crew_identity_record_json "$roster" "$identity" 2>/dev/null) || record=""
+  CREW_RECORD_KEYS[$i]=$key
+  CREW_RECORD_VALUES[$i]=$record
+  CREW_RECORD_JSON=$record
+  [ -n "$record" ] || return 1
+}
+
+# Publishes through CREW_IDENTITY_META_JSON for the same cache-survival reason
+# as crew_identity_record_cached.
 crew_identity_record_for_meta_json() {  # <meta-file>
-  local meta=$1 roster identity record roster_count identity_count
+  local meta=$1 roster identity roster_count identity_count
+  CREW_IDENTITY_META_JSON=""
   roster_count=$(awk -F= '$1 == "crew_roster" { n++ } END { print n+0 }' "$meta")
   identity_count=$(awk -F= '$1 == "crew_identity" { n++ } END { print n+0 }' "$meta")
   if [ "$roster_count" -eq 0 ] && [ "$identity_count" -eq 0 ]; then
-    jq -n '{status:"absent",assigned:false,roster:null,id:null,space_label:null,full_name:null,shipboard_role:null,affinities:[]}'
+    CREW_IDENTITY_META_JSON=$(jq -n '{status:"absent",assigned:false,roster:null,id:null,space_label:null,full_name:null,shipboard_role:null,affinities:[]}')
     return 0
   fi
   if [ "$roster_count" -ne 1 ] || [ "$identity_count" -ne 1 ]; then
-    jq -n '{status:"invalid",assigned:false,roster:null,id:null,space_label:null,full_name:null,shipboard_role:null,affinities:[],error:"crew_roster and crew_identity must each appear exactly once"}'
+    CREW_IDENTITY_META_JSON=$(jq -n '{status:"invalid",assigned:false,roster:null,id:null,space_label:null,full_name:null,shipboard_role:null,affinities:[],error:"crew_roster and crew_identity must each appear exactly once"}')
     return 0
   fi
   roster=$(fm_crew_identity_meta_value "$meta" crew_roster) || return 1
   identity=$(fm_crew_identity_meta_value "$meta" crew_identity) || return 1
-  if ! fm_crew_identity_validate_roster "$roster" 2>/dev/null; then
-    jq -n --arg roster "$roster" --arg identity "$identity" '{status:"invalid",assigned:false,roster:$roster,id:$identity,space_label:null,full_name:null,shipboard_role:null,affinities:[],error:"recorded crew roster is invalid or unavailable"}'
+  if ! crew_roster_valid_cached "$roster"; then
+    CREW_IDENTITY_META_JSON=$(jq -n --arg roster "$roster" --arg identity "$identity" '{status:"invalid",assigned:false,roster:$roster,id:$identity,space_label:null,full_name:null,shipboard_role:null,affinities:[],error:"recorded crew roster is invalid or unavailable"}')
     return 0
   fi
   if [ "$identity" = unassigned ]; then
-    jq -n --arg roster "$roster" '{status:"unassigned",assigned:false,roster:$roster,id:"unassigned",space_label:"Unassigned crew",full_name:"Unassigned crew identity",shipboard_role:"Unassigned",affinities:[]}'
+    CREW_IDENTITY_META_JSON=$(jq -n --arg roster "$roster" '{status:"unassigned",assigned:false,roster:$roster,id:"unassigned",space_label:"Unassigned crew",full_name:"Unassigned crew identity",shipboard_role:"Unassigned",affinities:[]}')
     return 0
   fi
-  if ! record=$(fm_crew_identity_record_json "$roster" "$identity" 2>/dev/null); then
-    jq -n --arg roster "$roster" --arg identity "$identity" '{status:"invalid",assigned:false,roster:$roster,id:$identity,space_label:null,full_name:null,shipboard_role:null,affinities:[],error:"identity is absent from the recorded roster"}'
+  if ! crew_identity_record_cached "$roster" "$identity"; then
+    CREW_IDENTITY_META_JSON=$(jq -n --arg roster "$roster" --arg identity "$identity" '{status:"invalid",assigned:false,roster:$roster,id:$identity,space_label:null,full_name:null,shipboard_role:null,affinities:[],error:"identity is absent from the recorded roster"}')
     return 0
   fi
-  printf '%s' "$record" | jq --arg roster "$roster" '{status:"assigned",assigned:true,roster:$roster} + .'
+  CREW_IDENTITY_META_JSON=$(printf '%s' "$CREW_RECORD_JSON" | jq --arg roster "$roster" '{status:"assigned",assigned:true,roster:$roster} + .')
 }
 
 crew_identity_config_json() {
@@ -571,7 +610,8 @@ task_json_lines() {
     fi
 
     [ -f "$report_path" ] && report_present=1 || report_present=0
-    identity_json=$(crew_identity_record_for_meta_json "$meta")
+    crew_identity_record_for_meta_json "$meta" || return 1
+    identity_json=$CREW_IDENTITY_META_JSON
     meta_json=$(path_present_json "$meta")
     status_json=$event_json
     report_json=$(path_present_json "$report_path")

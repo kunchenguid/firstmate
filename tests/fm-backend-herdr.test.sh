@@ -374,6 +374,88 @@ test_projection_journal_v2_stays_valid_once_identity_config_appears() {
   pass "Herdr version 2 presentation journals stay valid after a crew identity config appears"
 }
 
+test_workspace_identity_rename_follows_registered_project_transitions() {
+  local base home dir log resp fb out
+  base="$TMP_ROOT/identity-slug-drift"
+  home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/config" "$home/data" "$resp"; : > "$log"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"gentech":"john-allen"}}' \
+    > "$home/config/crew-identities.json"
+  printf 'gentech\n' > "$home/.fm-secondmate-home"
+  fb=$(make_herdr_fakebin "$dir")
+
+  # name-only Space, one project registered later -> rename to the slug title.
+  printf -- '- developer-setup - registered clone (added 2026-01-01)\n' > "$home/data/projects.md"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sm","label":"Mr Allen"}}}' > "$resp/1.out"
+  : > "$resp/2.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sm","label":"Mr Allen — developer-setup"}}}' > "$resp/3.out"
+  rm -f "$resp/.count"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact s w-sm' \
+      "$ROOT" 2>&1) || fail "name-only to slug rename refused: $out"
+  assert_contains "$(cat "$log")" $'workspace\x1frename\x1fw-sm\x1fMr Allen — developer-setup' \
+    "did not rename a name-only Space to its registered slug title"
+
+  # the home's registered project changes -> rename to the new slug title.
+  : > "$log"; rm -f "$resp/.count"
+  printf -- '- npi-brain - registered clone (added 2026-01-01)\n' > "$home/data/projects.md"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sm","label":"Mr Allen — developer-setup"}}}' > "$resp/1.out"
+  : > "$resp/2.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sm","label":"Mr Allen — npi-brain"}}}' > "$resp/3.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact s w-sm' \
+      "$ROOT" 2>&1) || fail "slug-to-slug rename refused: $out"
+  assert_contains "$(cat "$log")" $'workspace\x1frename\x1fw-sm\x1fMr Allen — npi-brain' \
+    "did not rename a stale slug title to the newly registered slug"
+
+  # a second registered project -> name-only again, never a spawn-blocking refusal.
+  : > "$log"; rm -f "$resp/.count"
+  printf -- '- npi-brain - a (added 2026-01-01)\n- developer-setup - b (added 2026-01-01)\n' > "$home/data/projects.md"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sm","label":"Mr Allen — npi-brain"}}}' > "$resp/1.out"
+  : > "$resp/2.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sm","label":"Mr Allen"}}}' > "$resp/3.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact s w-sm' \
+      "$ROOT" 2>&1) || fail "multi-project fallback rename refused: $out"
+  assert_contains "$(cat "$log")" $'workspace\x1frename\x1fw-sm\x1fMr Allen' \
+    "did not rename back to the name-only title once the project set became ambiguous"
+
+  # a foreign Space title is still refused untouched.
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sm","label":"Dr Maturin — npi-brain"}}}' > "$resp/1.out"
+  if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact s w-sm' \
+      "$ROOT" >/dev/null 2>&1; then
+    fail "another crew member's Space title was accepted as this home's own"
+  fi
+  assert_not_contains "$(cat "$log")" "rename" "a foreign Space title was renamed"
+  pass "Herdr identity renames follow registered-project transitions and still refuse foreign titles"
+}
+
+test_workspace_find_all_tolerates_registered_project_drift() {
+  local base home dir log resp fb out
+  base="$TMP_ROOT/identity-find-drift"
+  home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/config" "$home/data" "$resp"; : > "$log"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"gentech":"john-allen"}}' \
+    > "$home/config/crew-identities.json"
+  printf 'gentech\n' > "$home/.fm-secondmate-home"
+  printf -- '- npi-brain - a (added 2026-01-01)\n- developer-setup - b (added 2026-01-01)\n' > "$home/data/projects.md"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-other","label":"Dr Maturin"},{"workspace_id":"w-sm","label":"Mr Allen — developer-setup"},{"workspace_id":"w-legacy","label":"2ndmate-gentech"}]}}' \
+    > "$resp/1.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find_all s' "$ROOT")
+  [ "$out" = "w-sm" ] \
+    || fail "find_all did not resolve this home's own Space across a registered-project change: '$out'"
+  pass "Herdr home Space lookup follows its own identity across registered-project drift"
+}
+
 test_exact_legacy_workspace_identity_rename_is_id_bound() {
   local dir home log resp fb out
   dir="$TMP_ROOT/identity-rename"; home="$dir/home"; log="$dir/log"; resp="$dir/responses"
@@ -4477,6 +4559,8 @@ test_workspace_label_different_secondmates_get_different_labels
 test_workspace_identity_labels_are_exact_and_never_expose_mechanical_ids
 test_workspace_identity_label_uses_the_exact_registered_repository_slug
 test_projection_journal_v2_stays_valid_once_identity_config_appears
+test_workspace_identity_rename_follows_registered_project_transitions
+test_workspace_find_all_tolerates_registered_project_drift
 test_exact_legacy_workspace_identity_rename_is_id_bound
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_launcher_identity_absent_without_a_herdr_pane

@@ -634,6 +634,47 @@ test_identity_labels_render_exactly_in_snapshot_and_view() {
   pass "fleet snapshot and view render exact short canonical crew labels"
 }
 
+test_identity_records_stay_correct_when_rosters_repeat_and_fail() {
+  local home fakebin out
+  home=$(make_home identity-cache)
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{}}' \
+    > "$home/config/crew-identities.json"
+  fm_write_meta "$home/state/dup-a.meta" \
+    "window=firstmate:fm-dup-a" "project=alpha" "harness=codex" "kind=ship" \
+    "crew_roster=master-and-commander" "crew_identity=john-allen"
+  fm_write_meta "$home/state/dup-b.meta" \
+    "window=firstmate:fm-dup-b" "project=beta" "harness=codex" "kind=ship" \
+    "crew_roster=master-and-commander" "crew_identity=john-allen"
+  fm_write_meta "$home/state/other.meta" \
+    "window=firstmate:fm-other" "project=gamma" "harness=codex" "kind=ship" \
+    "crew_roster=master-and-commander" "crew_identity=stephen-maturin"
+  fm_write_meta "$home/state/bad-roster.meta" \
+    "window=firstmate:fm-bad-roster" "project=delta" "harness=codex" "kind=ship" \
+    "crew_roster=no-such-roster" "crew_identity=john-allen"
+  fm_write_meta "$home/state/absent-identity.meta" \
+    "window=firstmate:fm-absent-identity" "project=epsilon" "harness=codex" "kind=ship" \
+    "crew_roster=master-and-commander" "crew_identity=nobody-aboard"
+  fm_write_meta "$home/state/unassigned.meta" \
+    "window=firstmate:fm-unassigned" "project=zeta" "harness=codex" "kind=ship" \
+    "crew_roster=master-and-commander" "crew_identity=unassigned"
+  fm_write_meta "$home/state/plain.meta" \
+    "window=firstmate:fm-plain" "project=eta" "harness=codex" "kind=ship"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot failed with repeated and failing crew rosters"
+  printf '%s' "$out" | jq -e '
+    ([.tasks[] | {key:.id,value:{s:.crew_identity.status,l:.crew_identity.space_label}}] | from_entries) as $t
+    | $t["dup-a"] == {s:"assigned",l:"Mr Allen"}
+    and $t["dup-b"] == {s:"assigned",l:"Mr Allen"}
+    and $t["other"] == {s:"assigned",l:"Dr Maturin"}
+    and $t["bad-roster"] == {s:"invalid",l:null}
+    and $t["absent-identity"] == {s:"invalid",l:null}
+    and $t["unassigned"] == {s:"unassigned",l:"Unassigned crew"}
+    and $t["plain"] == {s:"absent",l:null}
+  ' >/dev/null || fail "reused roster lookups changed captain-facing identity records: $out"
+  pass "fleet snapshot reuses roster lookups without changing identity records"
+}
+
 # A still-open decision must survive a LATER, UNRELATED terminal event on the same
 # append-only stream. This is the fmdev masking bug: last-event-wins read the trailing
 # `done` and reported pending_decision=false while a needs-decision was still open. The
@@ -825,3 +866,4 @@ test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
 test_identity_labels_render_exactly_in_snapshot_and_view
+test_identity_records_stay_correct_when_rosters_repeat_and_fail
