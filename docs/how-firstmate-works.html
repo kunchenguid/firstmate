@@ -38,13 +38,11 @@
     html {
       scroll-behavior: smooth;
       max-width: 100%;
-      overflow-x: hidden;
     }
 
     body {
       margin: 0;
       max-width: 100%;
-      overflow-x: hidden;
       background:
         radial-gradient(circle at 10% 0%, rgb(217 155 36 / 13%), transparent 28rem),
         linear-gradient(180deg, var(--paper) 0%, #f8edd2 100%);
@@ -1648,9 +1646,9 @@ stateDiagram-v2
           <ul class="file-tree" aria-label="Firstmate filesystem and state hierarchy">
             <li>
               <div class="tree-row">
-                <span class="tree-path">Firstmate code root/</span>
-                <span>Tracked instructions, scripts, skills, hook adapters, docs, and tests.</span>
-                <span class="authority">Executable contract</span>
+                <span class="tree-path">Effective Firstmate home/</span>
+                <span>The operational domain selected by <code>FM_HOME</code>, which falls back to the tracked code root when unset.</span>
+                <span class="authority">Home root</span>
               </div>
               <ul>
                 <li>
