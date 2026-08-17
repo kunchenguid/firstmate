@@ -20,17 +20,24 @@
 # link would have carried for that same mismatch.
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
-# Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
+# Usage:
+#   fm-ensure-agents-md.sh [repo-or-worktree-dir]
+#   fm-ensure-agents-md.sh --check-pointer [repo-or-worktree-dir]
 set -eu
 
 usage() {
-  echo "usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]" >&2
+  echo "usage: fm-ensure-agents-md.sh [--check-pointer] [repo-or-worktree-dir]" >&2
 }
 
+MODE=ensure
 case "${1:-}" in
   -h|--help)
     usage
     exit 0
+    ;;
+  --check-pointer)
+    MODE=check-pointer
+    shift
     ;;
 esac
 [ "$#" -le 1 ] || { usage; exit 1; }
@@ -113,6 +120,16 @@ is_canonical_claude_pointer() {
   [ -f "$CLAUDE" ] && [ ! -L "$CLAUDE" ] || return 1
   claude_pointer_content | cmp -s - "$CLAUDE"
 }
+
+if [ "$MODE" = check-pointer ]; then
+  [ ! -L "$CLAUDE" ] \
+    || { echo "error: CLAUDE.md must be a real @AGENTS.md pointer file, not a symlink" >&2; exit 1; }
+  [ -f "$CLAUDE" ] \
+    || { echo "error: CLAUDE.md must be a regular file" >&2; exit 1; }
+  is_canonical_claude_pointer \
+    || { echo "error: CLAUDE.md must be the canonical @AGENTS.md pointer" >&2; exit 1; }
+  exit 0
+fi
 
 # Write the canonical pointer as a regular file. Unlink a symlink first so the
 # write cannot follow it and destroy AGENTS.md. Never overwrite a distinct real
