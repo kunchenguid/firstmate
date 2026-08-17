@@ -358,6 +358,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   case "$since" in
     ''|*[!0-9]*)
       date +%s > "$since_file"
+      clear_write_tracking "$win"
       triage_log "absorbed $label timer reset: $win"
       ;;
     *)
@@ -1160,11 +1161,13 @@ EOF
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
+              clear_write_tracking "$w"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
+              clear_write_tracking "$w"
               mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
               wake "stale: $w"
             fi

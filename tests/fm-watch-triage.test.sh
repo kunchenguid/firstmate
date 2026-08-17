@@ -431,6 +431,40 @@ test_crew_worktree_written_since_classifier() {
   pass "crew_worktree_written_since: real writes are evidence; no worktree, no anchor, quiet trees, .git churn and a mate's own home are not"
 }
 
+# FM_WORKTREE_WRITE_PRUNE is a skip list, so clearing it skips nothing and is the
+# obvious way to widen the probe to the whole depth-bounded tree. An empty list must
+# therefore widen the walk rather than report no evidence at all, which would
+# quietly cost the wedge detector its third liveness input on a home that cleared
+# the knob to get more coverage, not less.
+test_empty_write_prune_widens_the_probe() {
+  local dir state anchor wt saved
+  dir=$(make_case classify-empty-write-prune); state="$dir/state"
+  anchor="$state/anchor"; wt="$dir/wt"
+  mkdir -p "$wt/src" "$wt/.git"
+  : > "$anchor"
+  set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
+  printf 'window=test:fm-e\nkind=ship\nworktree=%s\n' "$wt" > "$state/e.meta"
+  saved=$FM_WORKTREE_WRITE_PRUNE
+  FM_WORKTREE_WRITE_PRUNE=''
+  # A quiet tree is still no evidence, so the caller's schedule is untouched.
+  ! crew_worktree_written_since e "$state" "$anchor" \
+    || fail "an empty prune list reported write evidence for a quiet worktree"
+  printf 'new\n' > "$wt/src/new.c"
+  crew_worktree_written_since e "$state" "$anchor" \
+    || fail "an empty prune list disabled the probe instead of widening it"
+  # Widened means nothing is skipped, including what the default list prunes.
+  set_mtime "$(( $(date +%s) - 900 ))" "$wt/src/new.c"
+  printf 'pack\n' > "$wt/.git/index"
+  crew_worktree_written_since e "$state" "$anchor" \
+    || fail "an empty prune list still skipped a directory the default list prunes"
+  # Restoring the default prunes .git again, so a supervisor's own read-only git
+  # command still cannot fake liveness.
+  FM_WORKTREE_WRITE_PRUNE=$saved
+  ! crew_worktree_written_since e "$state" "$anchor" \
+    || fail "the default prune list stopped keeping .git out of the probe"
+  pass "an empty FM_WORKTREE_WRITE_PRUNE widens the probe to the whole depth-bounded tree instead of disabling it"
+}
+
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
 # task it references is provably working; if any crew has stopped, or no task can be
 # resolved, it surfaces. Files map to ids by stripping .status / .turn-ended.
@@ -1864,6 +1898,137 @@ test_secondmate_home_supervision_churn_is_not_write_evidence() {
   pass "a secondmate's own home supervision churn is not crew write evidence, so a pane recording that home keeps the unchanged escalation schedule"
 }
 
+# A write deferral is a bounded chain, not a permanent one: its .writing-since
+# marker ages the whole chain so a churning worktree still re-surfaces once per
+# PAUSE_RESURFACE_SECS. That only holds while the chain belongs to the CURRENT quiet
+# stretch, so every path that restarts the idle-window timer must drop it too. The
+# reachable case is a pane that deferred on write evidence and later has its timer
+# repaired: a long-finished chain would make the first deferral of the new window
+# re-surface immediately instead of after a fresh window.
+test_timer_repair_drops_a_finished_write_deferral_chain() {
+  local dir state fakebin out capture_file window key pane_hash sig pid wt back
+  dir=$(make_case wedge-write-chain-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-chain-repair"; wt="$dir/wt"
+  mkdir -p "$wt/src"
+  printf 'idle building output' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/chain-repair.meta"
+  printf 'working: implementing\n' > "$state/chain-repair.status"
+  sig=$(seen_sig "$state/chain-repair.status"); printf '%s' "$sig" > "$state/.seen-chain-repair_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle building output")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  # A deferral chain left over from an earlier quiet stretch, already well past the
+  # bounded re-surface window.
+  back=$(( $(date +%s) - 5000 ))
+  : > "$state/.writing-since-$key"
+  set_mtime "$back" "$state/.writing-since-$key"
+  # The idle-window timer is corrupt, so this poll repairs it and opens a NEW quiet
+  # window without probing the worktree at all.
+  printf 'corrupt\n' > "$state/.stale-since-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_numeric_file "$state/.stale-since-$key" 30 \
+    || { reap "$pid"; fail "the corrupt idle-window timer was not repaired"; }
+  [ ! -e "$state/.writing-since-$key" ] \
+    || { reap "$pid"; fail "an idle-window timer repair kept a finished write-deferral chain"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the idle-window timer repair enqueued a wake"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional timer-repair watcher stop"
+
+  # The new quiet window now crosses the escalation threshold while the crew writes
+  # its worktree. That deferral must get a FRESH re-surface window rather than
+  # inheriting the finished chain's age.
+  back=$(( $(date +%s) - 500 ))
+  echo "$back" > "$state/.stale-since-$key"
+  set_mtime "$back" "$state/.stale-since-$key"
+  printf 'int main(void) { return 0; }\n' > "$wt/src/main.c"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "the first deferral of a new quiet window re-surfaced at once, so it inherited a finished chain: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a fresh write deferral printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a fresh write deferral enqueued a wake"; }
+  [ -e "$state/.writing-since-$key" ] || { reap "$pid"; fail "the new deferral recorded no chain marker"; }
+  [ ! -e "$state/.writing-resurfaced-$key" ] \
+    || { reap "$pid"; fail "a fresh write deferral spent its bounded re-surface on the first poll"; }
+  reap "$pid"
+  pass "an idle-window timer repair drops a finished write-deferral chain, so the next deferral gets a fresh re-surface window"
+}
+
+# The same chain must not outlive either first-sight path through a captain-relevant
+# status line, because both also open a new idle window: the provably-working absorb
+# and the plain surface.
+test_terminal_first_sight_drops_a_finished_write_deferral_chain() {
+  local dir state fakebin out capture_file window key pane_hash sig pid wt back
+  dir=$(make_case wedge-write-chain-first-sight); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-chain-firstsight"; wt="$dir/wt"
+  mkdir -p "$wt/src"
+  printf 'no-mistakes axi run: validating...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/chain-first.meta"
+  printf 'done: implementation complete, ready to validate\n' > "$state/chain-first.status"
+  sig=$(seen_sig "$state/chain-first.status"); printf '%s' "$sig" > "$state/.seen-chain-first_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "no-mistakes axi run: validating...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  back=$(( $(date +%s) - 5000 ))
+  : > "$state/.writing-since-$key"
+  set_mtime "$back" "$state/.writing-since-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  # First sight of this hash, absorbed because the active run outranks the stale
+  # captain-relevant line. The absorb opens a new idle window, so the finished chain
+  # must go with it.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "the overridden terminal status was not absorbed on first sight: $(cat "$out")"
+  fi
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || { reap "$pid"; fail "the first-sight absorb did not advance the stale suppressor"; }
+  [ ! -e "$state/.writing-since-$key" ] \
+    || { reap "$pid"; fail "the provably-working first-sight absorb kept a finished write-deferral chain"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional first-sight absorb stop"
+
+  # Same pane, first sight again, but nothing overrides the status line now, so it
+  # surfaces. That path drops the idle-window timer, so it must drop the chain too.
+  rm -f "$state/.stale-$key" "$state/.stale-since-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.writing-since-$key"
+  set_mtime "$back" "$state/.writing-since-$key"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · no run, no busy pane'
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a first-sight captain-relevant status was not surfaced"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the first-sight surface did not print a stale wake"
+  [ ! -e "$state/.writing-since-$key" ] \
+    || fail "the first-sight surface kept a finished write-deferral chain"
+  unset FM_FAKE_CREW_STATE
+  pass "both first-sight paths through a captain-relevant status drop a finished write-deferral chain with the idle window"
+}
+
 # --- triage debug log stays size capped -------------------------------------
 
 test_triage_log_size_cap_accepts_spaced_wc_counts() {
@@ -2326,6 +2491,7 @@ test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
 test_crew_worktree_written_since_classifier
+test_empty_write_prune_widens_the_probe
 test_signal_crew_provably_working_classifier
 test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
@@ -2360,6 +2526,8 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written
 test_write_deferral_resurfaces_on_the_bounded_cadence
 test_secondmate_home_supervision_churn_is_not_write_evidence
+test_timer_repair_drops_a_finished_write_deferral_chain
+test_terminal_first_sight_drops_a_finished_write_deferral_chain
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled
