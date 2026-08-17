@@ -477,7 +477,7 @@ PY
 test_multiline_skill_descriptions_have_proven_boundaries() {
   local w case out approval candidate
   w=$(new_semantic_overlay_world t-description-boundaries)
-  for case in folded-keep literal-keep explicit-indent quoted plain; do
+  for case in folded-keep literal-keep explicit-indent implicit-indent quoted plain; do
     python3 - "$w/seed/.agents/skills/demo/SKILL.md" "$case" <<'PY'
 from pathlib import Path
 import re, sys
@@ -486,6 +486,7 @@ values = {
     "folded-keep": "description: >+\n  Expanded upstream\n  discovery guidance.",
     "literal-keep": "description: |+\n  Expanded upstream\n  discovery guidance.",
     "explicit-indent": "description: |2-\n  Expanded upstream\n  discovery guidance.",
+    "implicit-indent": "description: >\n    Expanded upstream\n    discovery guidance.",
     "quoted": 'description: "Expanded upstream\n  discovery guidance."',
     "plain": "description: Expanded upstream\n  discovery guidance.",
 }
@@ -510,8 +511,8 @@ PY
 }
 
 test_unproven_skill_description_boundaries_refuse_candidates() {
-  local kind w out installed live before_refs after_refs
-  for kind in malformed ambiguous; do
+  local kind expected w out installed live before_refs after_refs
+  for kind in malformed ambiguous lower-indented-block; do
     w=$(new_semantic_overlay_world "t-description-$kind")
     installed=$(git -C "$w/main" rev-parse HEAD)
     live=$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)
@@ -523,12 +524,16 @@ path, kind = Path(sys.argv[1]), sys.argv[2]
 replacement = 'description: "Unterminated upstream\n  discovery guidance.'
 if kind == "ambiguous":
     replacement = "description: First description.\ndescription: Second description."
+elif kind == "lower-indented-block":
+    replacement = "description: >\n    Expanded upstream\n  lower-indented malformed content."
 path.write_text(re.sub(r"description:.*?(?=\n---\n)", replacement, path.read_text(), count=1, flags=re.DOTALL))
 PY
     git -C "$w/seed" add -A && git -C "$w/seed" commit -qm "$kind description boundary"
     git -C "$w/seed" push -q origin main
     out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1)
-    assert_contains "$out" "$kind" "$kind description reports its unmapped semantic"
+    expected=$kind
+    [ "$kind" != lower-indented-block ] || expected=malformed
+    assert_contains "$out" "$expected" "$kind description reports its unmapped semantic"
     assert_not_contains "$out" "overlay-install: approval-required" "$kind description is not offered"
     [ "$(git -C "$w/main" rev-parse HEAD)" = "$installed" ] || fail "$kind description moved main"
     [ "$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)" = "$live" ] || fail "$kind description moved live ref"

@@ -117,7 +117,12 @@ def validate_description_scalar(lines: list[bytes], path: str) -> None:
     if value.startswith((b">", b"|")):
         if not re.fullmatch(rb"[>|](?:[+-]|[1-9]|[+-][1-9]|[1-9][+-])?", value):
             raise Refusal(f"unmapped semantic owner: {path} has malformed description block scalar")
-        indicator = next((byte - ord("0") for byte in value[1:] if ord("1") <= byte <= ord("9")), 1)
+        indicator = next((byte - ord("0") for byte in value[1:] if ord("1") <= byte <= ord("9")), None)
+        if indicator is None:
+            indicator = next(
+                (len(line) - len(line.lstrip(b" ")) for line in lines[1:] if line.strip()),
+                1,
+            )
         for line in lines[1:]:
             if line.strip() and len(line) - len(line.lstrip(b" ")) < indicator:
                 raise Refusal(f"unmapped semantic owner: {path} has malformed description indentation")
