@@ -1,0 +1,429 @@
+{
+  "schema_version": 1,
+  "measurement_date": "2026-08-14",
+  "baseline_git_commit": "a218ebc497af996e04f2aa8d4b8dbd569d4b882a",
+  "comparison_baseline_commit": "88d0f2e2f8474334ed5ba85913d1295ea5fa6251",
+  "python_version": "3.13.7",
+  "selected_environment": {
+    "provider": "openai-codex",
+    "model": "gpt-5.6-sol",
+    "reasoning_level": "medium"
+  },
+  "tokenizer": {
+    "library": "tiktoken",
+    "version": "0.11.0",
+    "encodings": [
+      "o200k_base",
+      "cl100k_base"
+    ],
+    "exact_model_mapping": null,
+    "limitation": "The selected provider-specific model has no tiktoken mapping; o200k_base is an OpenAI-family approximation and cl100k_base is a cross-check."
+  },
+  "definitions": {
+    "physical_lines": "Python str.splitlines() count.",
+    "nonblank_lines": "Physical lines containing non-whitespace.",
+    "words": "Unicode regular-expression \\S+ spans.",
+    "utf8_bytes": "Length after UTF-8 encoding.",
+    "corpus_tokens": "Each included surface encoded independently, then summed.",
+    "generated_path_normalization": "Volatile generated-brief home and root paths are replaced with fixed placeholders."
+  },
+  "initially_loaded_primary": {
+    "included_surfaces": [
+      "AGENTS.md",
+      "compact skill names and descriptions are measured separately below"
+    ],
+    "comparison": {
+      "physical_lines": {
+        "before": 568,
+        "after": 288,
+        "delta": -280,
+        "percent_delta": -49.296
+      },
+      "nonblank_lines": {
+        "before": 463,
+        "after": 223,
+        "delta": -240,
+        "percent_delta": -51.836
+      },
+      "words": {
+        "before": 9078,
+        "after": 4419,
+        "delta": -4659,
+        "percent_delta": -51.322
+      },
+      "utf8_bytes": {
+        "before": 66883,
+        "after": 31397,
+        "delta": -35486,
+        "percent_delta": -53.057
+      },
+      "tokens_o200k_base": {
+        "before": 13805,
+        "after": 6591,
+        "delta": -7214,
+        "percent_delta": -52.256
+      },
+      "tokens_cl100k_base": {
+        "before": 13809,
+        "after": 6595,
+        "delta": -7214,
+        "percent_delta": -52.241
+      }
+    }
+  },
+  "compact_skill_catalog": {
+    "physical_lines": {
+      "before": 19,
+      "after": 19,
+      "delta": 0,
+      "percent_delta": 0.0
+    },
+    "nonblank_lines": {
+      "before": 19,
+      "after": 19,
+      "delta": 0,
+      "percent_delta": 0.0
+    },
+    "words": {
+      "before": 1069,
+      "after": 307,
+      "delta": -762,
+      "percent_delta": -71.282
+    },
+    "utf8_bytes": {
+      "before": 8124,
+      "after": 2495,
+      "delta": -5629,
+      "percent_delta": -69.289
+    },
+    "tokens_o200k_base": {
+      "before": 1689,
+      "after": 499,
+      "delta": -1190,
+      "percent_delta": -70.456
+    },
+    "tokens_cl100k_base": {
+      "before": 1681,
+      "after": 517,
+      "delta": -1164,
+      "percent_delta": -69.244
+    }
+  },
+  "total_directly_reachable_instruction_corpus": {
+    "included_surfaces": [
+      "AGENTS.md",
+      ".agents/skills/*/SKILL.md",
+      "docs/supervision-protocols/*.md",
+      "canonical generated ship/scout/secondmate briefs",
+      "FIRSTMATE_*.md deferred bundles after disclosure"
+    ],
+    "excluded_surfaces": [
+      "vendor prompts",
+      "dynamic private startup data",
+      "general maintainer documentation",
+      "script implementation source",
+      "project-specific context outside Firstmate"
+    ],
+    "comparison": {
+      "physical_lines": {
+        "before": 3594,
+        "after": 3604,
+        "delta": 10,
+        "percent_delta": 0.278
+      },
+      "nonblank_lines": {
+        "before": 2949,
+        "after": 2945,
+        "delta": -4,
+        "percent_delta": -0.136
+      },
+      "words": {
+        "before": 53689,
+        "after": 53577,
+        "delta": -112,
+        "percent_delta": -0.209
+      },
+      "utf8_bytes": {
+        "before": 376714,
+        "after": 376743,
+        "delta": 29,
+        "percent_delta": 0.008
+      },
+      "tokens_o200k_base": {
+        "before": 81754,
+        "after": 81706,
+        "delta": -48,
+        "percent_delta": -0.059
+      },
+      "tokens_cl100k_base": {
+        "before": 81689,
+        "after": 81655,
+        "delta": -34,
+        "percent_delta": -0.042
+      }
+    }
+  },
+  "disclosed_common_paths": {
+    "status_only": {
+      "physical_lines": 288,
+      "nonblank_lines": 223,
+      "words": 4419,
+      "utf8_bytes": 31397,
+      "tokens_o200k_base": 6591,
+      "tokens_cl100k_base": 6595
+    },
+    "ordinary_intake": {
+      "physical_lines": 493,
+      "nonblank_lines": 388,
+      "words": 7715,
+      "utf8_bytes": 55256,
+      "tokens_o200k_base": 11301,
+      "tokens_cl100k_base": 11317
+    },
+    "recovery": {
+      "physical_lines": 393,
+      "nonblank_lines": 321,
+      "words": 6065,
+      "utf8_bytes": 45863,
+      "tokens_o200k_base": 9707,
+      "tokens_cl100k_base": 9703
+    },
+    "merge_or_cleanup": {
+      "physical_lines": 418,
+      "nonblank_lines": 325,
+      "words": 6554,
+      "utf8_bytes": 46338,
+      "tokens_o200k_base": 9533,
+      "tokens_cl100k_base": 9552
+    }
+  },
+  "generated_artifacts": {
+    "canonical_briefs": {
+      "physical_lines": 158,
+      "nonblank_lines": 138,
+      "words": 2238,
+      "utf8_bytes": 14356,
+      "tokens_o200k_base": 3308,
+      "tokens_cl100k_base": 3306
+    },
+    "classification": "Generated outputs are measured separately and are not counted as initially loaded unless their role is launched."
+  },
+  "deferred_bundles": {
+    "operational-home": {
+      "source_lines": "AGENTS.md:54-128",
+      "destination": "FIRSTMATE_OPERATIONAL_HOME.md",
+      "deferred_exact_baseline_volume": {
+        "physical_lines": 75,
+        "nonblank_lines": 74,
+        "words": 1282,
+        "utf8_bytes": 11531,
+        "tokens_o200k_base": 2536,
+        "tokens_cl100k_base": 2522
+      },
+      "trigger_disclosure_cost": {
+        "physical_lines": 85,
+        "nonblank_lines": 82,
+        "words": 1400,
+        "utf8_bytes": 12613,
+        "tokens_o200k_base": 2742,
+        "tokens_cl100k_base": 2729
+      },
+      "runtime_overhead": {
+        "tool_calls_required": 1,
+        "local_process_invocations_visible_to_caller": 1,
+        "output_utf8_bytes": 12613,
+        "timing_runs": 20,
+        "median_local_wall_ms": 16.737,
+        "min_local_wall_ms": 15.155,
+        "max_local_wall_ms": 18.841,
+        "limitation": "Local process time excludes model/tool orchestration latency."
+      }
+    },
+    "dispatch": {
+      "source_lines": "AGENTS.md:181-203",
+      "destination": "FIRSTMATE_DISPATCH.md",
+      "deferred_exact_baseline_volume": {
+        "physical_lines": 23,
+        "nonblank_lines": 21,
+        "words": 540,
+        "utf8_bytes": 4025,
+        "tokens_o200k_base": 794,
+        "tokens_cl100k_base": 787
+      },
+      "trigger_disclosure_cost": {
+        "physical_lines": 31,
+        "nonblank_lines": 27,
+        "words": 611,
+        "utf8_bytes": 4638,
+        "tokens_o200k_base": 900,
+        "tokens_cl100k_base": 894
+      },
+      "runtime_overhead": {
+        "tool_calls_required": 1,
+        "local_process_invocations_visible_to_caller": 1,
+        "output_utf8_bytes": 4638,
+        "timing_runs": 20,
+        "median_local_wall_ms": 18.474,
+        "min_local_wall_ms": 17.726,
+        "max_local_wall_ms": 20.104,
+        "limitation": "Local process time excludes model/tool orchestration latency."
+      }
+    },
+    "recovery": {
+      "source_lines": "AGENTS.md:207-218",
+      "destination": "FIRSTMATE_RECOVERY.md",
+      "deferred_exact_baseline_volume": {
+        "physical_lines": 12,
+        "nonblank_lines": 10,
+        "words": 187,
+        "utf8_bytes": 1309,
+        "tokens_o200k_base": 252,
+        "tokens_cl100k_base": 256
+      },
+      "trigger_disclosure_cost": {
+        "physical_lines": 20,
+        "nonblank_lines": 16,
+        "words": 246,
+        "utf8_bytes": 1853,
+        "tokens_o200k_base": 374,
+        "tokens_cl100k_base": 379
+      },
+      "runtime_overhead": {
+        "tool_calls_required": 1,
+        "local_process_invocations_visible_to_caller": 1,
+        "output_utf8_bytes": 1853,
+        "timing_runs": 20,
+        "median_local_wall_ms": 18.548,
+        "min_local_wall_ms": 17.57,
+        "max_local_wall_ms": 19.239,
+        "limitation": "Local process time excludes model/tool orchestration latency."
+      }
+    },
+    "project-knowledge": {
+      "source_lines": "AGENTS.md:222-247",
+      "destination": "FIRSTMATE_PROJECT_KNOWLEDGE.md",
+      "deferred_exact_baseline_volume": {
+        "physical_lines": 26,
+        "nonblank_lines": 21,
+        "words": 324,
+        "utf8_bytes": 2413,
+        "tokens_o200k_base": 478,
+        "tokens_cl100k_base": 479
+      },
+      "trigger_disclosure_cost": {
+        "physical_lines": 34,
+        "nonblank_lines": 27,
+        "words": 383,
+        "utf8_bytes": 2975,
+        "tokens_o200k_base": 604,
+        "tokens_cl100k_base": 606
+      },
+      "runtime_overhead": {
+        "tool_calls_required": 1,
+        "local_process_invocations_visible_to_caller": 1,
+        "output_utf8_bytes": 2975,
+        "timing_runs": 20,
+        "median_local_wall_ms": 17.244,
+        "min_local_wall_ms": 15.712,
+        "max_local_wall_ms": 19.595,
+        "limitation": "Local process time excludes model/tool orchestration latency."
+      }
+    },
+    "task-lifecycle": {
+      "source_lines": "AGENTS.md:251-372",
+      "destination": "FIRSTMATE_TASK_LIFECYCLE.md",
+      "deferred_exact_baseline_volume": {
+        "physical_lines": 122,
+        "nonblank_lines": 96,
+        "words": 2076,
+        "utf8_bytes": 14385,
+        "tokens_o200k_base": 2816,
+        "tokens_cl100k_base": 2830
+      },
+      "trigger_disclosure_cost": {
+        "physical_lines": 130,
+        "nonblank_lines": 102,
+        "words": 2135,
+        "utf8_bytes": 14941,
+        "tokens_o200k_base": 2942,
+        "tokens_cl100k_base": 2957
+      },
+      "runtime_overhead": {
+        "tool_calls_required": 1,
+        "local_process_invocations_visible_to_caller": 1,
+        "output_utf8_bytes": 14941,
+        "timing_runs": 20,
+        "median_local_wall_ms": 16.295,
+        "min_local_wall_ms": 14.813,
+        "max_local_wall_ms": 17.097,
+        "limitation": "Local process time excludes model/tool orchestration latency."
+      }
+    },
+    "backlog": {
+      "source_lines": "AGENTS.md:475-490",
+      "destination": "FIRSTMATE_BACKLOG.md",
+      "deferred_exact_baseline_volume": {
+        "physical_lines": 16,
+        "nonblank_lines": 14,
+        "words": 247,
+        "utf8_bytes": 1807,
+        "tokens_o200k_base": 355,
+        "tokens_cl100k_base": 358
+      },
+      "trigger_disclosure_cost": {
+        "physical_lines": 24,
+        "nonblank_lines": 20,
+        "words": 306,
+        "utf8_bytes": 2349,
+        "tokens_o200k_base": 477,
+        "tokens_cl100k_base": 481
+      },
+      "runtime_overhead": {
+        "tool_calls_required": 1,
+        "local_process_invocations_visible_to_caller": 1,
+        "output_utf8_bytes": 2349,
+        "timing_runs": 20,
+        "median_local_wall_ms": 16.05,
+        "min_local_wall_ms": 14.673,
+        "max_local_wall_ms": 16.968,
+        "limitation": "Local process time excludes model/tool orchestration latency."
+      }
+    },
+    "briefing": {
+      "source_lines": "AGENTS.md:494-505",
+      "destination": "FIRSTMATE_BRIEFING.md",
+      "deferred_exact_baseline_volume": {
+        "physical_lines": 12,
+        "nonblank_lines": 10,
+        "words": 185,
+        "utf8_bytes": 1387,
+        "tokens_o200k_base": 269,
+        "tokens_cl100k_base": 267
+      },
+      "trigger_disclosure_cost": {
+        "physical_lines": 20,
+        "nonblank_lines": 16,
+        "words": 244,
+        "utf8_bytes": 1931,
+        "tokens_o200k_base": 391,
+        "tokens_cl100k_base": 390
+      },
+      "runtime_overhead": {
+        "tool_calls_required": 1,
+        "local_process_invocations_visible_to_caller": 1,
+        "output_utf8_bytes": 1931,
+        "timing_runs": 20,
+        "median_local_wall_ms": 16.061,
+        "min_local_wall_ms": 15.004,
+        "max_local_wall_ms": 24.54,
+        "limitation": "Local process time excludes model/tool orchestration latency."
+      }
+    }
+  },
+  "assumptions_and_unmeasured": [
+    "No provider cache-read, cache-write, billing, or latency evidence was measured.",
+    "Tokenizer counts approximate prompt volume and do not predict model interpretation.",
+    "Dynamic startup data, vendor base prompts, and tool schemas are excluded."
+  ],
+  "reproduction_command": "uv run --python 3.13 --with tiktoken==0.11.0 bin/fm-instructions-measure.py --output docs/verification/prompt-disclosure-measurements.json"
+}

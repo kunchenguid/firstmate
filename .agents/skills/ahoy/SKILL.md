@@ -1,6 +1,6 @@
 ---
 name: ahoy
-description: Recap visible session events and guide the captain through visibly unanswered decisions when the captain explicitly invokes /ahoy, with a Bearings fallback when /ahoy is the session's first real captain message.
+description: Load when the captain invokes /ahoy to recap visible events and unanswered decisions, with Bearings fallback on the first real message.
 user-invocable: true
 metadata:
   internal: true

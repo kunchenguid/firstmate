@@ -124,6 +124,8 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-operation-disclosure-lib.sh
+. "$SCRIPT_DIR/fm-operation-disclosure-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
@@ -669,7 +671,8 @@ secondmate_liveness_one() {  # <meta> <id>
         ;;
       dead|missing)
         cause="remote endpoint $agent_state on its configured host"
-        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+        spawn_token=$(fm_operation_disclosure_issue spawn "$id" "$id" --secondmate) || spawn_token=
+        if out=$(FM_SPAWN_NO_GUARD=1 FM_DISCLOSURE_TOKEN="$spawn_token" "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
           SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
           report_relaunch "$id" "$cause" "host=$remote_host"
         else
@@ -706,7 +709,8 @@ secondmate_liveness_one() {  # <meta> <id>
       else
         cause="recorded endpoint confidently missing"
       fi
-      if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+      spawn_token=$(fm_operation_disclosure_issue spawn "$id" "$id" --secondmate) || spawn_token=
+      if out=$(FM_SPAWN_NO_GUARD=1 FM_DISCLOSURE_TOKEN="$spawn_token" "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
         SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $id"
         report_relaunch "$id" "$cause" "backend=$backend"
       else

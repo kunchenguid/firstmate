@@ -185,6 +185,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/prompt-roles/secondmate.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
@@ -195,6 +199,34 @@
     {
       "path": "CONTRIBUTING.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "FIRSTMATE_BACKLOG.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "FIRSTMATE_BRIEFING.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "FIRSTMATE_DISPATCH.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "FIRSTMATE_OPERATIONAL_HOME.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "FIRSTMATE_PROJECT_KNOWLEDGE.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "FIRSTMATE_RECOVERY.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "FIRSTMATE_TASK_LIFECYCLE.md",
+      "audience": "agent-runtime"
     },
     {
       "path": "README.md",
@@ -210,6 +242,10 @@
     },
     {
       "path": "docs/architecture.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/prompt-runtime.md",
       "audience": "maintainer-architecture"
     },
     {
@@ -342,6 +378,50 @@
     },
     {
       "path": "docs/verification/process-event-sources.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/prompt-disclosure.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/prompt-preservation/baseline/AGENTS.md.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/prompt-preservation/upstream/AGENTS.md.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/prompt-preservation/transformation/AGENTS.md.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/prompt-preservation/transformation/FIRSTMATE_BACKLOG.md.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/prompt-preservation/transformation/FIRSTMATE_BRIEFING.md.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/prompt-preservation/transformation/FIRSTMATE_DISPATCH.md.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/prompt-preservation/transformation/FIRSTMATE_OPERATIONAL_HOME.md.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/prompt-preservation/transformation/FIRSTMATE_PROJECT_KNOWLEDGE.md.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/prompt-preservation/transformation/FIRSTMATE_RECOVERY.md.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/prompt-preservation/transformation/FIRSTMATE_TASK_LIFECYCLE.md.txt",
       "audience": "maintainer-verification"
     },
     {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for bin/fm-update.sh: fast-forward-only self-update of a running
-# firstmate repo and every registered secondmate home.
+# Tests for bin/fm-update.sh: fast-forward-only ordinary mirror updates plus
+# verified installation of an intentional prompt overlay on a newer upstream.
 #
 # The guarantees under test mirror fm-fleet-sync.sh and prime directive #3:
 #   - The running firstmate repo (on its default branch) fast-forwards from
@@ -269,6 +269,166 @@ test_firstmate_detached_head_skipped() {
   pass "T10 firstmate detached HEAD is skipped"
 }
 
+new_overlay_world() { # <name> <safe|owned|conflict>
+  local w mode=$2 base
+  w=$(new_world "$1")
+  base=$(git -C "$w/main" rev-parse HEAD)
+  cp "$ROOT/bin/fm-prompt-overlay.py" "$w/main/bin/fm-prompt-overlay.py"
+  cp "$ROOT/bin/fm-prompt-semantic-refresh.py" "$w/main/bin/fm-prompt-semantic-refresh.py"
+  cat > "$w/main/bin/fm-operation-disclosure.py" <<'PY'
+#!/usr/bin/env python3
+import sys
+if sys.argv[1] == "disclose":
+    print("FM_DISCLOSURE_TOKEN=" + "0" * 64)
+PY
+  chmod +x "$w/main/bin/fm-operation-disclosure.py"
+  printf 'optimized\n' > "$w/main/AGENTS.md"
+  python3 - "$w/main/docs/verification/prompt-lineage.json" "$base" "$mode" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1]); path.parent.mkdir(parents=True, exist_ok=True)
+value = {"schema_version": 4, "generations": [{"generation": 0}, {"generation": 1, "kind": "live-overlay", "upstream_commit": sys.argv[2]}], "overlay_paths": ["AGENTS.md", "bin/fm-operation-disclosure.py", "bin/fm-prompt-overlay.py", "bin/fm-prompt-semantic-refresh.py", "docs/verification/prompt-lineage.json"]}
+if sys.argv[3] == "owned":
+    value["live_authority_sha256"] = {"AGENTS.md": __import__("hashlib").sha256(path.parents[2].joinpath("AGENTS.md").read_bytes()).hexdigest()}
+path.write_text(json.dumps(value) + "\n")
+PY
+  git -C "$w/main" add -A && git -C "$w/main" commit -qm 'installed optimized overlay'
+  git -C "$w/main" update-ref refs/firstmate/overlays/live "$base"
+  if [ "$mode" = conflict ] || [ "$mode" = owned ]; then
+    printf 'upstream conflict\n' > "$w/seed/AGENTS.md"
+  else
+    printf 'new upstream\n' >> "$w/seed/README.md"
+  fi
+  git -C "$w/seed" add -A && git -C "$w/seed" commit -qm "new-upstream-$mode"
+  git -C "$w/seed" push -q origin main
+  printf '%s\n' "$w"
+}
+
+test_verified_overlay_requires_explicit_install_approval() {
+  local w out approval installed candidate ref plan token
+  w=$(new_overlay_world t12 safe)
+  installed=$(git -C "$w/main" rev-parse HEAD)
+  out=$(run_update "$w")
+  assert_contains "$out" "overlay-install: approval-required" "overlay update reaches explicit approval"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$installed" ] || fail "main moved while overlay only ready"
+  [ "$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)" != "$installed" ] || fail "stale live ref unexpectedly changed before approval"
+  approval=$(printf '%s\n' "$out" | grep '^overlay-install: approval-required')
+  candidate=$(printf '%s\n' "$approval" | sed -n 's/.* candidate=\([^ ]*\).*/\1/p')
+  ref=$(printf '%s\n' "$approval" | sed -n 's/.* ref=\([^ ]*\).*/\1/p')
+  plan=$(printf '%s\n' "$approval" | sed -n 's/.* plan=\([^ ]*\).*/\1/p')
+  token=$(printf '%s\n' "$approval" | sed -n 's/.* token=\([^ ]*\).*/\1/p')
+  if FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" --install-overlay --plan "$plan" --candidate-ref "$ref" --token "$token" --approve-candidate deadbeef >/dev/null 2>&1; then
+    fail "wrong candidate approval installed overlay"
+  fi
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$installed" ] || fail "main moved after wrong approval"
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" --install-overlay --plan "$plan" --candidate-ref "$ref" --token "$token" --approve-candidate "$candidate" >/dev/null
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$candidate" ] || fail "approved candidate was not installed"
+  [ "$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)" = "$candidate" ] || fail "live ref does not name installed candidate"
+  [ "$(git -C "$w/main" rev-parse refs/firstmate/overlays/previous)" = "$installed" ] || fail "rollback ref does not name prior installed overlay"
+  [ -z "$(git -C "$w/main" status --porcelain)" ] || fail "approved overlay installation left a dirty tree"
+  pass "T12 compatible installed overlay is verified before exact approval and atomic installation"
+}
+
+new_semantic_overlay_world() {
+  local w base
+  w=$(new_world "$1")
+  cat > "$w/seed/AGENTS.md" <<'EOF'
+# Firstmate
+Always loaded.
+## Deferred detail
+Existing deferred rule.
+EOF
+  mkdir -p "$w/seed/.agents/skills/demo"
+  cat > "$w/seed/.agents/skills/demo/SKILL.md" <<'EOF'
+---
+name: demo
+description: A deliberately verbose upstream discovery description for the demo skill.
+---
+# Demo
+Old body rule.
+EOF
+  git -C "$w/seed" add -A && git -C "$w/seed" commit -qm semantic-base
+  git -C "$w/seed" push -q origin main
+  git -C "$w/main" pull -q --ff-only
+  base=$(git -C "$w/main" rev-parse HEAD)
+  cp "$ROOT/bin/fm-prompt-overlay.py" "$w/main/bin/fm-prompt-overlay.py"
+  cp "$ROOT/bin/fm-prompt-semantic-refresh.py" "$w/main/bin/fm-prompt-semantic-refresh.py"
+  cat > "$w/main/bin/fm-operation-disclosure.py" <<'PY'
+#!/usr/bin/env python3
+import sys
+if sys.argv[1] == "disclose": print("FM_DISCLOSURE_TOKEN=" + "0" * 64)
+PY
+  chmod +x "$w/main/bin/fm-operation-disclosure.py"
+  cat > "$w/main/AGENTS.md" <<'EOF'
+# Firstmate
+Always loaded.
+Load deferred detail when needed.
+EOF
+  printf '# Deferred detail\nExisting deferred rule.\n' > "$w/main/FIRSTMATE_DETAIL.md"
+  python3 - "$w/main/.agents/skills/demo/SKILL.md" <<'PY'
+from pathlib import Path
+p=Path(__import__('sys').argv[1]); s=p.read_text(); p.write_text(s.replace('A deliberately verbose upstream discovery description for the demo skill.', 'Load for demo work.'))
+PY
+  python3 - "$w/main/docs/verification/prompt-lineage.json" "$base" <<'PY'
+import hashlib,json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); root=p.parents[2]
+owners=['AGENTS.md','FIRSTMATE_DETAIL.md','.agents/skills/demo/SKILL.md']
+v={'schema_version':4,'generations':[{'generation':0},{'generation':1,'kind':'live-overlay','upstream_commit':sys.argv[2]}],
+   'overlay_paths':owners+['bin/fm-operation-disclosure.py','bin/fm-prompt-overlay.py','bin/fm-prompt-semantic-refresh.py','docs/verification/prompt-lineage.json'],
+   'live_authority_sha256':{x:hashlib.sha256((root/x).read_bytes()).hexdigest() for x in owners}}
+p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps(v)+'\n')
+PY
+  git -C "$w/main" add -A && git -C "$w/main" commit -qm optimized-overlay
+  git -C "$w/main" update-ref refs/firstmate/overlays/live HEAD
+  printf 'New upstream semantic rule.\n' >> "$w/seed/AGENTS.md"
+  printf 'New body rule.\n' >> "$w/seed/.agents/skills/demo/SKILL.md"
+  git -C "$w/seed" add -A && git -C "$w/seed" commit -qm semantic-upstream
+  git -C "$w/seed" push -q origin main
+  printf '%s\n' "$w"
+}
+
+test_semantic_forward_port_reaches_optimized_owners() {
+  local w out approval candidate count
+  w=$(new_semantic_overlay_world t-semantic)
+  out=$(run_update "$w")
+  assert_contains "$out" "overlay-install: approval-required" "mapped semantic refresh reaches readiness"
+  approval=$(printf '%s\n' "$out" | grep '^overlay-install: approval-required')
+  candidate=$(printf '%s\n' "$approval" | sed -n 's/.* candidate=\([^ ]*\).*/\1/p')
+  count=$(git -C "$w/main" grep -F 'New upstream semantic rule.' "$candidate" -- AGENTS.md 'FIRSTMATE_*.md' | wc -l | tr -d ' ')
+  [ "$count" -eq 1 ] || fail "upstream AGENTS addition was not represented exactly once"
+  git -C "$w/main" show "$candidate:FIRSTMATE_DETAIL.md" | grep -qF 'New upstream semantic rule.' || fail "AGENTS addition missed deferred owner"
+  git -C "$w/main" show "$candidate:.agents/skills/demo/SKILL.md" | grep -qF 'New body rule.' || fail "skill body change was omitted"
+  git -C "$w/main" show "$candidate:.agents/skills/demo/SKILL.md" | grep -qF 'description: Load for demo work.' || fail "compact skill discovery description was lost"
+  pass "T13 mapped AGENTS and skill semantics forward-port through optimized owners"
+}
+
+test_hash_bound_overlay_cannot_mask_unmapped_semantics() {
+  local w out installed live
+  w=$(new_overlay_world t13 owned)
+  installed=$(git -C "$w/main" rev-parse HEAD)
+  live=$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1)
+  assert_contains "$out" "unmapped" "hash-bound semantic owner reports its unresolved mapping"
+  assert_not_contains "$out" "overlay-install: approval-required" "unmapped semantic change is not ready"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$installed" ] || fail "unmapped overlay preparation moved main"
+  [ "$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)" = "$live" ] || fail "unmapped overlay preparation moved live ref"
+  pass "T13 hash-bound overlay cannot mask an unmapped upstream semantic change"
+}
+
+test_ambiguous_overlay_refuses_without_ref_moves() {
+  local w out installed live
+  w=$(new_overlay_world t14 conflict)
+  installed=$(git -C "$w/main" rev-parse HEAD)
+  live=$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)
+  out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1)
+  assert_contains "$out" "unmapped" "semantic-owner conflict is visible"
+  assert_not_contains "$out" "overlay-install: approval-required" "ambiguous overlay is not ready"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$installed" ] || fail "ambiguous overlay moved main"
+  [ "$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)" = "$live" ] || fail "ambiguous overlay moved live ref"
+  pass "T14 unbound overlapping overlay/upstream change refuses before any installed refs move"
+}
+
 test_unsafe_secondmate_home_skipped_before_git_update() {
   local w out bad before
   w=$(new_world t11)
@@ -300,5 +460,9 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_verified_overlay_requires_explicit_install_approval
+test_semantic_forward_port_reaches_optimized_owners
+test_hash_bound_overlay_cannot_mask_unmapped_semantics
+test_ambiguous_overlay_refuses_without_ref_moves
 
 echo "# all fm-update tests passed"

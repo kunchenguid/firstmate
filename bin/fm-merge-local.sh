@@ -11,13 +11,17 @@
 # project management, and task lifecycle.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
+FM_DISCLOSURE_ARGS=("$@")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-"$FM_ROOT/bin/fm-guard.sh" || true
 ID=${1:?usage: fm-merge-local.sh <task-id>}
+# shellcheck source=bin/fm-operation-disclosure-lib.sh
+. "$SCRIPT_DIR/fm-operation-disclosure-lib.sh"
+fm_operation_disclosure_consume local-merge "$ID" "${FM_DISCLOSURE_ARGS[@]}" || exit 2
+"$FM_ROOT/bin/fm-guard.sh" || true
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 

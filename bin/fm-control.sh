@@ -90,6 +90,7 @@
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
 set -eu
+FM_DISCLOSURE_ARGS=("$@")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -253,6 +254,9 @@ if ! fm_task_id_creation_valid "$RAW_ID"; then
   die "'$RAW_ID' is not a valid task id"
 fi
 ID=$RAW_ID
+# shellcheck source=bin/fm-operation-disclosure-lib.sh
+. "$SCRIPT_DIR/fm-operation-disclosure-lib.sh"
+fm_operation_disclosure_consume control "$ID" "${FM_DISCLOSURE_ARGS[@]}" || exit 2
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 trap control_cleanup EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" \
@@ -814,7 +818,10 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+  handoff_output=$(python3 "$SCRIPT_DIR/fm-operation-disclosure.py" handoff control-relaunch "$ID" -- "${spawn_args[@]}") \
+    || die "the authorized control receipt could not be handed to the replacement launch"
+  spawn_disclosure_token=${handoff_output##*FM_DISCLOSURE_TOKEN=}
+  if FM_DISCLOSURE_TOKEN="$spawn_disclosure_token" FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
   else

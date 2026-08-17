@@ -718,15 +718,93 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
   pass "pi-signed refuses safely and actionably when the selected executable is unavailable"
 }
 
+test_pi_signed_tightens_owner_owned_secondmate_prompt_parent() {
+  local rec id sm out status task_tmp_mode
+  id="profile-pi-tighten-$$"
+  rec=$(make_spawn_case profile-pi-tighten codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' pi-signed > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  mkdir -p "/tmp/fm-$id"
+  printf '%s\n' "/tmp/fm-$id" >> "$FM_TEST_CLEANUP_REGISTRY"
+  chmod 777 "/tmp/fm-$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "pi-signed secondmate spawn should accept an owner-owned legacy task temp directory"
+  if [ "$(uname -s)" = Darwin ]; then
+    task_tmp_mode=$(stat -f %Lp "/tmp/fm-$id")
+  else
+    task_tmp_mode=$(stat -c %a "/tmp/fm-$id")
+  fi
+  [ "$task_tmp_mode" = 700 ] || fail "pi-signed secondmate did not tighten its legacy task temp directory"
+  [ -s "$LAUNCH_LOG" ] || fail "pi-signed secondmate did not launch after tightening its task temp directory"
+  pass "pi-signed tightens an owner-owned legacy secondmate prompt parent"
+}
+
+test_pi_signed_rejects_symlinked_secondmate_prompt_parent() {
+  local rec id sm out status
+  id="profile-pi-symlink-$$"
+  rec=$(make_spawn_case profile-pi-symlink codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' pi-signed > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  mkdir "$CASE_DIR/prompt-target"
+  ln -s "$CASE_DIR/prompt-target" "/tmp/fm-$id"
+  printf '%s\n' "/tmp/fm-$id" >> "$FM_TEST_CLEANUP_REGISTRY"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "pi-signed secondmate spawn should reject a symlinked task temp directory"
+  assert_contains "$out" "task temp path is not a private ordinary directory" \
+    "pi-signed secondmate spawn did not explain its symlinked prompt parent refusal"
+  [ -z "$(find "$CASE_DIR/prompt-target" -mindepth 1 -print -quit)" ] \
+    || fail "pi-signed secondmate wrote through a symlinked prompt parent"
+  pass "pi-signed rejects a symlinked secondmate prompt parent"
+}
+
+test_pi_signed_rejects_foreign_owned_secondmate_prompt_parent() {
+  local rec id sm out status
+  id="profile-pi-foreign-owner-$$"
+  rec=$(make_spawn_case profile-pi-foreign-owner codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' pi-signed > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+  mkdir "/tmp/fm-$id"
+  printf '%s\n' "/tmp/fm-$id" >> "$FM_TEST_CLEANUP_REGISTRY"
+  cat > "$FAKEBIN_DIR/id" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = -u ] || exit 1
+printf '%s\n' 999999
+SH
+  chmod +x "$FAKEBIN_DIR/id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "pi-signed secondmate spawn should reject a foreign-owned task temp directory"
+  assert_contains "$out" "task temp directory is not owned by the current user" \
+    "pi-signed secondmate spawn did not explain its foreign-owned prompt parent refusal"
+  [ -z "$(find "/tmp/fm-$id" -mindepth 1 -print -quit)" ] \
+    || fail "pi-signed secondmate wrote beneath a foreign-owned prompt parent"
+  pass "pi-signed rejects a foreign-owned secondmate prompt parent"
+}
+
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
-  local rec id sm out status launch
-  id=profile-pi-signed-secondmate-z8d
+  local rec id sm out status launch prompt
+  id="profile-pi-secondmate-$$"
   rec=$(make_spawn_case profile-pi-signed-secondmate codex "$id")
   read_case_record "$rec"
   printf '%s\n' pi-signed > "$HOME_DIR/config/secondmate-harness"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
   sm=$(cd "$sm" && pwd -P)
+  printf '%s\n' "/tmp/fm-$id" >> "$FM_TEST_CLEANUP_REGISTRY"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
@@ -737,7 +815,15 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
     "pi-signed secondmate did not force the regular TUI with Pi's primary extension launch shape"
-  pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
+  assert_contains "$launch" "FM_PROMPT_ROLE=secondmate" \
+    "pi-signed secondmate launch did not export its guarded-operation role"
+  prompt=$(printf '%s\n' "$launch" | grep -o "/tmp/fm-$id/prompt\.[^']*/initial-prompt\.md" | head -1)
+  [ -n "$prompt" ] || fail "pi-signed secondmate launch did not consume a private compiled role prompt"
+  assert_grep 'compiled-role: secondmate; harness: pi' "$prompt" \
+    "pi-signed secondmate launch did not emit the compiled role prompt"
+  assert_grep "charter for $id" "$prompt" \
+    "pi-signed secondmate launch dropped its selected charter"
+  pass "pi-signed is a distinct persistent secondmate runtime with compiled role and supervision semantics"
 }
 
 test_batch_forwards_shared_profile_flags() {
@@ -851,6 +937,9 @@ test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
+test_pi_signed_tightens_owner_owned_secondmate_prompt_parent
+test_pi_signed_rejects_symlinked_secondmate_prompt_parent
+test_pi_signed_rejects_foreign_owned_secondmate_prompt_parent
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set

@@ -9,6 +9,7 @@
 # must not include --repo or -R because the repository comes only from the URL.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
+FM_DISCLOSURE_ARGS=("$@")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -65,6 +66,9 @@ reject_repo_overrides "$@" || exit 1
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
+# shellcheck source=bin/fm-operation-disclosure-lib.sh
+. "$SCRIPT_DIR/fm-operation-disclosure-lib.sh"
+fm_operation_disclosure_consume pr-merge "$ID" "${FM_DISCLOSURE_ARGS[@]}" || exit 2
 if [ ! -f "$META" ] || [ -L "$META" ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1

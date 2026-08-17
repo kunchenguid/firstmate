@@ -195,6 +195,7 @@
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
 set -eu
+FM_DISCLOSURE_ARGS=("$@")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -263,9 +264,6 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
-# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
-# set by the batch loop below), so the guard runs once for the batch, not once per pair.
-[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
@@ -868,6 +866,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  # shellcheck source=bin/fm-operation-disclosure-lib.sh
+  . "$SCRIPT_DIR/fm-operation-disclosure-lib.sh"
+  fm_operation_disclosure_consume spawn "$idpart" "${FM_DISCLOSURE_ARGS[@]}" || exit 2
+  [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -878,15 +880,23 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       rc=2
       continue
     elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      child_args=("${pair%%=*}" "${pair#*=}" "${shared_args[@]}" --scout)
+      child_token=$(fm_operation_disclosure_issue spawn "${pair%%=*}" "${child_args[@]}") || { rc=1; continue; }
+      if FM_SPAWN_NO_GUARD=1 FM_DISCLOSURE_TOKEN="$child_token" "$FM_ROOT/bin/fm-spawn.sh" "${child_args[@]}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      child_args=("${pair%%=*}" "${pair#*=}" "${shared_args[@]}")
+      child_token=$(fm_operation_disclosure_issue spawn "${pair%%=*}" "${child_args[@]}") || { rc=1; continue; }
+      if FM_SPAWN_NO_GUARD=1 FM_DISCLOSURE_TOKEN="$child_token" "$FM_ROOT/bin/fm-spawn.sh" "${child_args[@]}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     fi
   done
   exit "$rc"
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+# shellcheck source=bin/fm-operation-disclosure-lib.sh
+. "$SCRIPT_DIR/fm-operation-disclosure-lib.sh"
+fm_operation_disclosure_consume spawn "$ID" "${FM_DISCLOSURE_ARGS[@]}" || exit 2
+[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -2270,7 +2280,47 @@ fi
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
 TASK_TMP="/tmp/fm-$ID"
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = pi ] || [ "$HARNESS" = pi-signed ]; }; then
+  if [ ! -e "$TASK_TMP" ] && [ ! -L "$TASK_TMP" ]; then
+    (umask 077; mkdir "$TASK_TMP") || {
+      echo "error: could not create private task temp directory" >&2
+      exit 1
+    }
+  fi
+  if [ ! -d "$TASK_TMP" ] || [ -L "$TASK_TMP" ]; then
+    echo "error: task temp path is not a private ordinary directory" >&2
+    exit 1
+  fi
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    task_tmp_owner=$(stat -f %u "$TASK_TMP" 2>/dev/null) || exit 1
+  else
+    task_tmp_owner=$(stat -c %u "$TASK_TMP" 2>/dev/null) || exit 1
+  fi
+  if [ "$task_tmp_owner" != "$(id -u)" ]; then
+    echo "error: task temp directory is not owned by the current user" >&2
+    exit 1
+  fi
+  chmod 700 "$TASK_TMP" || {
+    echo "error: could not make task temp directory private" >&2
+    exit 1
+  }
+else
+  mkdir -p "$TASK_TMP"
+fi
 mkdir -p "$TASK_TMP/gotmp"
+PROMPT_INPUT=$BRIEF
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = pi ] || [ "$HARNESS" = pi-signed ]; }; then
+  PROMPT_DIR=$(mktemp -d "$TASK_TMP/prompt.XXXXXX") || {
+    echo "error: could not create private secondmate prompt directory" >&2
+    exit 1
+  }
+  chmod 700 "$PROMPT_DIR" || exit 1
+  PROMPT_INPUT="$PROMPT_DIR/initial-prompt.md"
+  python3 "$FM_ROOT/bin/fm-prompt-compile.py" \
+    --role secondmate --harness pi --runtime "$BACKEND" --root "$FM_ROOT" \
+    --brief "$BRIEF" --output "$PROMPT_INPUT" || exit 1
+  chmod 600 "$PROMPT_INPUT" || exit 1
+fi
 
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
@@ -2705,7 +2755,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
-sq_brief=$(shell_quote "$BRIEF")
+sq_brief=$(shell_quote "$PROMPT_INPUT")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
@@ -2759,7 +2809,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_PROMPT_ROLE=secondmate FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"

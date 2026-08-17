@@ -1,8 +1,6 @@
 ---
 name: ask-user-authority
-description: >-
-  Agent-only decision procedure for ask-user findings.
-  Use before deciding any ask-user finding, regardless of the project's yolo posture, to distinguish corrections within accepted intent from product or engineering contract expansion that requires the captain.
+description: Load before deciding any ask-user finding to separate accepted-intent corrections from contract expansion requiring the captain.
 user-invocable: false
 metadata:
   internal: true

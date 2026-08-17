@@ -1,0 +1,260 @@
+{
+  "schema_version": 4,
+  "authority": "Live authority is the current overlay tree at the exact ready-bound commit; historical generations are provenance only.",
+  "generations": [
+    {
+      "generation": 0,
+      "kind": "upstream-base",
+      "commit": "a218ebc497af996e04f2aa8d4b8dbd569d4b882a",
+      "artifact": "docs/verification/prompt-preservation/baseline/AGENTS.md.txt",
+      "artifact_sha256": "f32cc8e191e8ce352c1ed43e37e8b0a4cdd142bd1ad93ea58afdf194d644d16d",
+      "authoritative": false
+    },
+    {
+      "generation": 1,
+      "kind": "local-transformation",
+      "commit": "1eaf368439465d4338656d760886b8b28b138bc9",
+      "parent": "a218ebc497af996e04f2aa8d4b8dbd569d4b882a",
+      "manifest": "docs/verification/prompt-disclosure-manifest.json",
+      "manifest_object": "ba70241d0024b9d3e1fd5ed72a8b484a6c04d355",
+      "manifest_sha256": "56cf8965e5389a207744ea7278d246ccbdf1e04df1f8d83b67419d5cf30a979d",
+      "source_artifact": "docs/verification/prompt-preservation/transformation/AGENTS.md.txt",
+      "destination_artifacts": {
+        "FIRSTMATE_BACKLOG.md": "docs/verification/prompt-preservation/transformation/FIRSTMATE_BACKLOG.md.txt",
+        "FIRSTMATE_BRIEFING.md": "docs/verification/prompt-preservation/transformation/FIRSTMATE_BRIEFING.md.txt",
+        "FIRSTMATE_DISPATCH.md": "docs/verification/prompt-preservation/transformation/FIRSTMATE_DISPATCH.md.txt",
+        "FIRSTMATE_OPERATIONAL_HOME.md": "docs/verification/prompt-preservation/transformation/FIRSTMATE_OPERATIONAL_HOME.md.txt",
+        "FIRSTMATE_PROJECT_KNOWLEDGE.md": "docs/verification/prompt-preservation/transformation/FIRSTMATE_PROJECT_KNOWLEDGE.md.txt",
+        "FIRSTMATE_RECOVERY.md": "docs/verification/prompt-preservation/transformation/FIRSTMATE_RECOVERY.md.txt",
+        "FIRSTMATE_TASK_LIFECYCLE.md": "docs/verification/prompt-preservation/transformation/FIRSTMATE_TASK_LIFECYCLE.md.txt"
+      },
+      "artifact_sha256": {
+        "docs/verification/prompt-preservation/transformation/AGENTS.md.txt": "e2d1c8be51181a4987fdaaf24af7752fe460ad7f962a7e48a014625e98107ae1",
+        "docs/verification/prompt-preservation/transformation/FIRSTMATE_BACKLOG.md.txt": "7cacd843ffd1fb13a41a6ff389e25b579d3d59603a33bcef6a7ddaa0abe90a9a",
+        "docs/verification/prompt-preservation/transformation/FIRSTMATE_BRIEFING.md.txt": "131af1c9656b6262d24bf1875c62cf7e4d4ba07a4e9f1c11d2f317b32cee5944",
+        "docs/verification/prompt-preservation/transformation/FIRSTMATE_DISPATCH.md.txt": "18f85b73042a094435c2e7729a33073f3a9561badc6ee35c8b68295d02e3d634",
+        "docs/verification/prompt-preservation/transformation/FIRSTMATE_OPERATIONAL_HOME.md.txt": "60f242758e4c51c3f5f1901b4e5298d4e35c2034e4ec1e9c117a3d1ddfa77de4",
+        "docs/verification/prompt-preservation/transformation/FIRSTMATE_PROJECT_KNOWLEDGE.md.txt": "685c48078ece85b4fd314f7369829bd4d32f2a3172911fa761d46d20bbe29dd4",
+        "docs/verification/prompt-preservation/transformation/FIRSTMATE_RECOVERY.md.txt": "9257ba3555ae926d6c34328517cffbc622762e567c831eb6af67e6f0025d7e32",
+        "docs/verification/prompt-preservation/transformation/FIRSTMATE_TASK_LIFECYCLE.md.txt": "6839965e09ac048bfcfd03e801cbe0e5e53a43a95075df3d564f6bbbb3bf2463"
+      },
+      "authoritative": false
+    },
+    {
+      "generation": 2,
+      "kind": "upstream-semantics",
+      "commit": "88d0f2e2f8474334ed5ba85913d1295ea5fa6251",
+      "authoritative": false
+    },
+    {
+      "generation": 3,
+      "kind": "live-overlay",
+      "commit_binding": "verification-token",
+      "paths_binding": "overlay_paths",
+      "authoritative": true,
+      "upstream_binding": "single-parent",
+      "upstream_commit": "bdae21ed09d2cca4f57caed4bda9d30d8f9d9be8",
+      "upstream_artifact": "docs/verification/prompt-preservation/upstream/AGENTS.md.txt",
+      "upstream_artifact_sha256": "77e4c40cb39176cd507bed31c66583391fedcabb441b63f36ab35d41bf75ae2c",
+      "generated_parity_artifact": "docs/verification/prompt-preservation/upstream/generated-parity.tar.gz.b64",
+      "generated_parity_artifact_sha256": "0603f83397ffe26ee9f88dd05a7a9e021beef8f6343edb3f32e4eb3a390731ae",
+      "generated_parity_archive_sha256": "e6882427d240965dbb198cdb2af37f44f22aabdf4dad76f497b1e679db31a5aa"
+    }
+  ],
+  "historical_provenance": [
+    {
+      "commits": [
+        "fecf298e8ec88c0148f5107345e6e64fb07b504b",
+        "445b683f8f5d5e8b05932f2b740910e850808042",
+        "4f6fefeee495f0f4c466c6acc4e5fc157f45a7ed",
+        "b21acdbd126266e6f5e9c0a8235e12e74623b7b8"
+      ],
+      "authoritative": false,
+      "purpose": "immutable prototype evidence; never loaded into a prompt or rebuilt as live prose"
+    }
+  ],
+  "overlay_paths": [
+    ".agents/prompt-roles/secondmate.md",
+    ".agents/skills/afk/SKILL.md",
+    ".agents/skills/ahoy/SKILL.md",
+    ".agents/skills/ask-user-authority/SKILL.md",
+    ".agents/skills/bearings/SKILL.md",
+    ".agents/skills/bootstrap-diagnostics/SKILL.md",
+    ".agents/skills/decision-hold-lifecycle/SKILL.md",
+    ".agents/skills/diagnostic-reasoning/SKILL.md",
+    ".agents/skills/firstmate-codexapp/SKILL.md",
+    ".agents/skills/firstmate-coding-guidelines/SKILL.md",
+    ".agents/skills/firstmate-orca/SKILL.md",
+    ".agents/skills/fmx-respond/SKILL.md",
+    ".agents/skills/harness-adapters/SKILL.md",
+    ".agents/skills/process-event-sources/SKILL.md",
+    ".agents/skills/project-management/SKILL.md",
+    ".agents/skills/quota-array-dispatch/SKILL.md",
+    ".agents/skills/secondmate-provisioning/SKILL.md",
+    ".agents/skills/stow/SKILL.md",
+    ".agents/skills/stuck-crewmate-recovery/SKILL.md",
+    ".agents/skills/updatefirstmate/SKILL.md",
+    "AGENTS.md",
+    "README.md",
+    "FIRSTMATE_BACKLOG.md",
+    "FIRSTMATE_BRIEFING.md",
+    "FIRSTMATE_DISPATCH.md",
+    "FIRSTMATE_OPERATIONAL_HOME.md",
+    "FIRSTMATE_PROJECT_KNOWLEDGE.md",
+    "FIRSTMATE_RECOVERY.md",
+    "FIRSTMATE_TASK_LIFECYCLE.md",
+    "bin/fm-bootstrap.sh",
+    "bin/fm-control.sh",
+    "bin/fm-instructions-generated-parity.sh",
+    "bin/fm-instructions-measure.py",
+    "bin/fm-instructions-verify.py",
+    "bin/fm-instructions.sh",
+    "bin/fm-merge-local.sh",
+    "bin/fm-operation-disclosure-lib.sh",
+    "bin/fm-operation-disclosure.py",
+    "bin/fm-pr-merge.sh",
+    "bin/fm-prompt-compile.py",
+    "bin/fm-prompt-overlay.py",
+    "bin/fm-prompt-semantic-refresh.py",
+    "bin/fm-prompt-pi-offline-check.sh",
+    "bin/fm-remote-secondmate-control.sh",
+    "bin/fm-spawn.sh",
+    "bin/fm-teardown.sh",
+    "bin/fm-test-run.sh",
+    "bin/fm-update.sh",
+    "docs/architecture.md",
+    "docs/documentation-audiences.json",
+    "docs/prompt-runtime.md",
+    "docs/scripts.md",
+    "docs/verification/prompt-disclosure-manifest.json",
+    "docs/verification/prompt-disclosure-measurements.json",
+    "docs/verification/prompt-disclosure.md",
+    "docs/verification/prompt-lineage.json",
+    "docs/verification/prompt-preservation/baseline/AGENTS.md.txt",
+    "docs/verification/prompt-preservation/upstream/AGENTS.md.txt",
+    "docs/verification/prompt-preservation/upstream/generated-parity.tar.gz.b64",
+    "docs/verification/prompt-preservation/transformation/AGENTS.md.txt",
+    "docs/verification/prompt-preservation/transformation/FIRSTMATE_BACKLOG.md.txt",
+    "docs/verification/prompt-preservation/transformation/FIRSTMATE_BRIEFING.md.txt",
+    "docs/verification/prompt-preservation/transformation/FIRSTMATE_DISPATCH.md.txt",
+    "docs/verification/prompt-preservation/transformation/FIRSTMATE_OPERATIONAL_HOME.md.txt",
+    "docs/verification/prompt-preservation/transformation/FIRSTMATE_PROJECT_KNOWLEDGE.md.txt",
+    "docs/verification/prompt-preservation/transformation/FIRSTMATE_RECOVERY.md.txt",
+    "docs/verification/prompt-preservation/transformation/FIRSTMATE_TASK_LIFECYCLE.md.txt",
+    "tests/fm-control-relaunch.test.sh",
+    "tests/fm-instructions.test.sh",
+    "tests/fm-prompt-overlay.test.sh",
+    "tests/fm-prompt-phase2.test.sh",
+    "tests/fm-spawn-dispatch-profile.test.sh",
+    "tests/fm-teardown.test.sh",
+    "tests/fm-update.test.sh",
+    "tests/lib.sh"
+  ],
+  "file_mode_policy": "Every rebuilt tree entry binds the exact Git mode and object id from its semantic owner.",
+  "disjoint_merge_paths": [
+    "README.md",
+    "docs/architecture.md",
+    "docs/scripts.md"
+  ],
+  "live_authority_sha256": {
+    ".agents/prompt-roles/secondmate.md": "c395ced30b0b78e1c92d63db0c8aa8efaa202e77bedb7f9c1782438a6dcdd132",
+    ".agents/skills/afk/SKILL.md": "57b1bdcafb8720326ff3c4ca30ecdeb894893f128bc7e3c54fb63895eed2d886",
+    ".agents/skills/ahoy/SKILL.md": "a63928d72fac844833d394899f2ac4e65ce2da157e900dc03c4ac9982c32d07d",
+    ".agents/skills/ask-user-authority/SKILL.md": "33096a6cafc3560a05ef1de279dae322424b34aaaf55172a000253fffcd1de5f",
+    ".agents/skills/bearings/SKILL.md": "c9ff67e643072dc6d81daf0d4d65f6ac7e13fd64e7b08c266d4c5fc0cdb971f1",
+    ".agents/skills/bootstrap-diagnostics/SKILL.md": "6e91c7054fe94e163a32bd689d0980b461b52c1205167f716a9d00c6428e0440",
+    ".agents/skills/decision-hold-lifecycle/SKILL.md": "22ee2d50ce062b96c9462ddea9a7ff22b0de8d5a91669905187c5b77374e6f34",
+    ".agents/skills/diagnostic-reasoning/SKILL.md": "d530642b85b97a99a0c0d3d57c8afbbdb99749840fd113b9c41e5d76407d11be",
+    ".agents/skills/firstmate-codexapp/SKILL.md": "88be546ea682a6c8fa534d1e73723a92ea4d1b535810039e4a53e643afc3a10d",
+    ".agents/skills/firstmate-coding-guidelines/SKILL.md": "c4b6d5105fcf26435c2c61f82eae601e52291cbda543fbc04c6f8f4eca44c42e",
+    ".agents/skills/firstmate-orca/SKILL.md": "47e5c65f5c421da55cf40b280841d69a40db5d929fef1d87751ed8e4eed2619e",
+    ".agents/skills/fmx-respond/SKILL.md": "ac2dccbc08c3b5f1987c5dd9260a90e15d6a550ac9c20f3dfd314954e10e057c",
+    ".agents/skills/harness-adapters/SKILL.md": "b6475e7be40674c66860d9cd46da7125b1c2376832ce5dfaf5852bd51bb17b12",
+    ".agents/skills/process-event-sources/SKILL.md": "5ca0487c68cc2d95617cfd5c83ff6d034916f7e1ee206ae3c620eba76ddc29c0",
+    ".agents/skills/project-management/SKILL.md": "14d48a6eb175d907c411a83d176e0223fc7df8c02fe6b14ca6882a98edd241eb",
+    ".agents/skills/quota-array-dispatch/SKILL.md": "ed242a5d59156ade6e6fecb11a3a23ef83ff23f966637bc59e3f8b9f3618c3b8",
+    ".agents/skills/secondmate-provisioning/SKILL.md": "3d5d1db8a3d5cc0b7fecfad032eb80452a1ce9b7e4c55587bfcdf866997384d0",
+    ".agents/skills/stow/SKILL.md": "08381d89b85772a541d108c361bb6971807c6cefdf3c0c14313077a1b20604fd",
+    ".agents/skills/stuck-crewmate-recovery/SKILL.md": "14801de512bfda226b41dfbf6dba59deeacb09dc577d0689a57a572d1410064a",
+    ".agents/skills/updatefirstmate/SKILL.md": "d11a885a97417599a023d35507602b95c8764e111b020be327a029a297f2d788",
+    "AGENTS.md": "1901845121aad80a1ef3e02e82aa294881a174f7d57d31db5cf82fb774de7787",
+    "FIRSTMATE_BACKLOG.md": "7cacd843ffd1fb13a41a6ff389e25b579d3d59603a33bcef6a7ddaa0abe90a9a",
+    "FIRSTMATE_BRIEFING.md": "131af1c9656b6262d24bf1875c62cf7e4d4ba07a4e9f1c11d2f317b32cee5944",
+    "FIRSTMATE_DISPATCH.md": "cfa9d93056b4bb2640953295cc4cd47a0ce829a05fdea2250b3deb7d7656b2fd",
+    "FIRSTMATE_OPERATIONAL_HOME.md": "8974b7638cd6ddf601ce2570c512cb15320ed3d535c495a75240204cd583af05",
+    "FIRSTMATE_PROJECT_KNOWLEDGE.md": "bd43a6621055f84c10e07ed6100758dbbf2d4127b9dd7d894c0702c4213fa1e4",
+    "FIRSTMATE_RECOVERY.md": "9257ba3555ae926d6c34328517cffbc622762e567c831eb6af67e6f0025d7e32",
+    "FIRSTMATE_TASK_LIFECYCLE.md": "6839965e09ac048bfcfd03e801cbe0e5e53a43a95075df3d564f6bbbb3bf2463"
+  },
+  "semantic_refresh": {
+    "schema_version": 1,
+    "previous_upstream": "9823ff899c58319e5a09846b18f2958018598b38",
+    "upstream": "bdae21ed09d2cca4f57caed4bda9d30d8f9d9be8",
+    "overlay": "1caaa38c0ed19d5a60a5014b0df6c64527e43674",
+    "transformer_sha256": "12b59cad1b23070e294c5e26ad53a1715316abd9d36caa6f3cc7782ab51a453d",
+    "changes": [
+      {
+        "source_path": "AGENTS.md",
+        "source_lines": [
+          57,
+          57
+        ],
+        "owner": "FIRSTMATE_OPERATIONAL_HOME.md",
+        "kind": "replace"
+      },
+      {
+        "source_path": "AGENTS.md",
+        "source_lines": [
+          110,
+          109
+        ],
+        "owner": "FIRSTMATE_OPERATIONAL_HOME.md",
+        "kind": "insert"
+      },
+      {
+        "source_path": "AGENTS.md",
+        "source_lines": [
+          250,
+          250
+        ],
+        "owner": "FIRSTMATE_PROJECT_KNOWLEDGE.md",
+        "kind": "replace"
+      },
+      {
+        "source_path": ".agents/skills/decision-hold-lifecycle/SKILL.md",
+        "owner": ".agents/skills/decision-hold-lifecycle/SKILL.md",
+        "kind": "skill-body-with-compact-description"
+      },
+      {
+        "source_path": ".agents/skills/fmx-respond/SKILL.md",
+        "owner": ".agents/skills/fmx-respond/SKILL.md",
+        "kind": "skill-body-with-compact-description"
+      },
+      {
+        "source_path": ".agents/skills/process-event-sources/SKILL.md",
+        "owner": ".agents/skills/process-event-sources/SKILL.md",
+        "kind": "skill-body-with-compact-description"
+      },
+      {
+        "source_path": ".agents/skills/secondmate-provisioning/SKILL.md",
+        "owner": ".agents/skills/secondmate-provisioning/SKILL.md",
+        "kind": "skill-body-with-compact-description"
+      },
+      {
+        "source_path": ".agents/skills/stow/SKILL.md",
+        "owner": ".agents/skills/stow/SKILL.md",
+        "kind": "skill-body-with-compact-description"
+      },
+      {
+        "source_path": ".agents/skills/stuck-crewmate-recovery/SKILL.md",
+        "owner": ".agents/skills/stuck-crewmate-recovery/SKILL.md",
+        "kind": "skill-body-with-compact-description"
+      },
+      {
+        "source_path": ".agents/skills/updatefirstmate/SKILL.md",
+        "owner": ".agents/skills/updatefirstmate/SKILL.md",
+        "kind": "skill-body-with-compact-description"
+      }
+    ]
+  }
+}

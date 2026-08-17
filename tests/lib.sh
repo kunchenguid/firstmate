@@ -33,6 +33,10 @@ FM_TEST_LIB_SOURCED=1
 # the boundary against the real hazard is unaffected. tests/fm-gate-refuse.test.sh
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
+# Guarded public mutations require a disclosure receipt in production.
+# Behavior fixtures exercise the operation behind that extra precondition;
+# tests/fm-prompt-phase2.test.sh owns receipt validation and does not source us.
+export FM_TEST_MODE=1
 
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
