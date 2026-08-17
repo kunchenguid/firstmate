@@ -150,7 +150,7 @@ test_crewmate_target_is_not_marked() {
   home=$(setup_home crew)
   fm_write_meta "$home/state/build.meta" \
     "window=sess:fm-build" "worktree=$home/wt" "project=$home/p" \
-    "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
+    "harness=echo" "kind=ship" "mode=no-mistakes" "grants=none"
   run_send "$fb" "$home" "$log" "fm-build" "fix the test"; rc=$?
   expect_code 0 "$rc" "send to a stable-label crewmate target should succeed"
   got=$(cat "$log")

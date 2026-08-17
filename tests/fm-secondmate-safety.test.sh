@@ -55,9 +55,9 @@ test_fm_home_parameterization() {
   printf '%s\n' '- app [local-only +yolo] - test app (added 2026-06-22)' > "$home_one/data/projects.md"
 
   out=$(FM_HOME="$home_one" "$ROOT/bin/fm-project-mode.sh" app)
-  [ "$out" = "local-only on" ] || fail "fm-project-mode did not read projects.md from FM_HOME"
+  [ "$out" = "local-only findings,merge,local-merge" ] || fail "fm-project-mode did not read projects.md from FM_HOME"
   out=$(FM_HOME="$home_two" "$ROOT/bin/fm-project-mode.sh" app 2>/dev/null)
-  [ "$out" = "no-mistakes off" ] || fail "fm-project-mode did not isolate missing registry by home"
+  [ "$out" = "no-mistakes none" ] || fail "fm-project-mode did not isolate missing registry by home"
 
   FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-a app --mode no-mistakes >/dev/null || fail "brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-a/brief.md"
@@ -1536,7 +1536,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -1813,7 +1813,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -1869,7 +1869,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -1904,7 +1904,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -1916,7 +1916,7 @@ project=$childproj
 harness=echo
 kind=ship
 mode=no-mistakes
-yolo=off
+grants=none
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-teardown-fake")
   log="$TMP_ROOT/force-teardown-fake/tmux.log"
@@ -1954,7 +1954,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -1966,7 +1966,7 @@ project=$childproj
 harness=echo
 kind=ship
 mode=no-mistakes
-yolo=off
+grants=none
 EOF
   printf 'child check\n' > "$subhome/state/child.check.sh"
   printf 'external quarantine artifact\n' > "$external/child.check.protected"
@@ -2012,7 +2012,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -2024,7 +2024,7 @@ project=$childproj
 harness=echo
 kind=ship
 mode=no-mistakes
-yolo=off
+grants=none
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-lock-child-fake")
   log="$TMP_ROOT/force-lock-child-fake/tmux.log"
@@ -2098,7 +2098,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -2131,7 +2131,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -2230,7 +2230,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -2241,7 +2241,7 @@ project=$nested
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$nested
 projects=beta
 EOF
@@ -2280,7 +2280,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -2315,7 +2315,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -2327,7 +2327,7 @@ project=$childproj
 harness=echo
 kind=ship
 mode=no-mistakes
-yolo=off
+grants=none
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/prevalidate-teardown-fake")
   log="$TMP_ROOT/prevalidate-teardown-fake/tmux.log"
@@ -2370,7 +2370,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -2382,7 +2382,7 @@ project=$childproj
 harness=echo
 kind=ship
 mode=no-mistakes
-yolo=off
+grants=none
 EOF
   printf '%s|%s\n' "$home" "$subhome"
 }
@@ -2435,7 +2435,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -2653,7 +2653,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -2665,7 +2665,7 @@ project=$childproj
 harness=echo
 kind=ship
 mode=no-mistakes
-yolo=off
+grants=none
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-active-descendant-fake")
   log="$TMP_ROOT/child-active-descendant-fake/tmux.log"
@@ -2704,7 +2704,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -2716,7 +2716,7 @@ project=$childproj
 harness=echo
 kind=ship
 mode=no-mistakes
-yolo=off
+grants=none
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-repo-descendant-fake")
   log="$TMP_ROOT/child-repo-descendant-fake/tmux.log"
@@ -2749,7 +2749,7 @@ project=$subhome
 harness=echo
 kind=secondmate
 mode=secondmate
-yolo=off
+grants=none
 home=$subhome
 projects=alpha
 EOF
@@ -2761,7 +2761,7 @@ project=$childproj
 harness=echo
 kind=ship
 mode=no-mistakes
-yolo=off
+grants=none
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/unregistered-child-fake")
   log="$TMP_ROOT/unregistered-child-fake/tmux.log"

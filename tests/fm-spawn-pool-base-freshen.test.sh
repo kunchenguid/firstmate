@@ -90,7 +90,7 @@ test_stale_pool_base_refreshes_before_branching() {
   rec=$(make_case current-base "$id")
   read_case_record "$rec"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode no-mistakes --grants none)
   status=$?
   expect_code 0 "$status" "spawn should refresh a stale pooled worktree"
   assert_contains "$out" "spawned $id" "spawn did not report success"
@@ -107,7 +107,7 @@ test_stale_pool_base_refreshes_before_branching() {
   id='pool-current-base-repeat-r1'
   mkdir -p "$HOME_DIR/data/$id"
   printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode no-mistakes --grants none)
   status=$?
   expect_code 0 "$status" "repeating the base refresh should be idempotent"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
@@ -127,7 +127,7 @@ test_non_main_default_branch_refreshes_before_branching() {
   rec=$(make_case current-trunk "$id" trunk)
   read_case_record "$rec"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode no-mistakes --grants none)
   status=$?
   expect_code 0 "$status" "spawn should refresh a stale pooled worktree on a non-main default branch"
   current=$(git -C "$POOL_DIR" rev-parse "origin/$DEFAULT_BRANCH")
@@ -145,7 +145,7 @@ test_unreachable_origin_refuses_stale_pool_base() {
   git -C "$POOL_DIR" remote set-url origin "file://$CASE_DIR/missing-origin.git"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode no-mistakes --grants none)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unreachable origin"
   assert_contains "$out" "could not fetch origin" \
@@ -167,7 +167,7 @@ test_direct_pr_and_scout_refresh_before_launch() {
     if [ "$contract" = scout ]; then
       out=$(run_spawn "$id" --scout)
     else
-      out=$(run_spawn "$id" --mode direct-PR --yolo off)
+      out=$(run_spawn "$id" --mode direct-PR --grants none)
     fi
     status=$?
     expect_code 0 "$status" "$contract spawn should refresh a stale pooled worktree"
@@ -191,7 +191,7 @@ test_dirty_pool_refuses_without_discarding_work() {
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode no-mistakes --grants none)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite a dirty pooled worktree"
   assert_contains "$out" "is not clean" "spawn did not clearly refuse a dirty pooled worktree"
@@ -214,7 +214,7 @@ test_unresolved_remote_default_refuses_pool() {
   git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD refs/heads/missing-default
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  out=$(run_spawn "$id" --mode no-mistakes --grants none)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unresolved remote default branch"
   assert_contains "$out" "could not resolve origin's current default branch" \

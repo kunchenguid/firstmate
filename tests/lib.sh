@@ -255,7 +255,7 @@ fm_write_secondmate_meta() {
     "harness=$harness" \
     "kind=secondmate" \
     "mode=secondmate" \
-    "yolo=off" \
+    "grants=none" \
     "home=$home" \
     "projects=$projects"
 }

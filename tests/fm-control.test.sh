@@ -178,7 +178,7 @@ add_task() {
     echo "harness=$harness"
     echo "kind=$kind"
     echo "mode=no-mistakes"
-    echo "yolo=off"
+    echo "grants=none"
     echo "model=default"
     echo "effort=default"
     [ "$backend" = tmux ] || echo "backend=$backend"

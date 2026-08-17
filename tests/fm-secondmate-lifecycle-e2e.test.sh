@@ -101,9 +101,9 @@ phase_seed() {
   assert_no_grep 'owns:' "$HOME_DIR/data/secondmates.md" "registry used the legacy owns field"
 
   # Delivery modes preserved in the subhome registry; validation passes.
-  [ "$(FM_HOME="$SUB" "$ROOT/bin/fm-project-mode.sh" alpha)" = "direct-PR on" ] \
+  [ "$(FM_HOME="$SUB" "$ROOT/bin/fm-project-mode.sh" alpha)" = "direct-PR findings,merge,local-merge" ] \
     || fail "alpha delivery mode not preserved in the subhome"
-  [ "$(FM_HOME="$SUB" "$ROOT/bin/fm-project-mode.sh" beta)" = "direct-PR off" ] \
+  [ "$(FM_HOME="$SUB" "$ROOT/bin/fm-project-mode.sh" beta)" = "direct-PR none" ] \
     || fail "beta delivery mode not preserved in the subhome"
   FM_HOME="$HOME_DIR" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed after seed"
 

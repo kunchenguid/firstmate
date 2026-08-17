@@ -267,7 +267,7 @@ test_ship_mode_is_explicit_not_registry() {
   pass "fm-brief.sh: the explicit ship mode wins over the registered posture"
 }
 
-# yolo is firstmate's approval authority and never reaches the worker, and a scout
+# Autonomy grants are firstmate's approval authority and never reach the worker, and a scout
 # or charter carries no delivery contract. Each must refuse rather than accept and
 # discard the flag, which would look recorded but change nothing.
 test_delivery_flags_are_refused_where_they_do_not_apply() {
@@ -282,12 +282,12 @@ test_delivery_flags_are_refused_where_they_do_not_apply() {
     [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
     assert_contains "$out" "$expect" "$label: refusal did not explain why"
   done <<'ROWS'
-yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yolo is not a brief input
-yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
+grants on a ship brief|brief-refused-b1 some-proj --mode direct-PR --grants findings,merge,local-merge|--grants is not a brief input
+grants=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --grants=none|--grants is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
 ROWS
-  pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
+  pass "fm-brief.sh: --grants and scout/secondmate --mode are refused, never silently dropped"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {

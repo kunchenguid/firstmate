@@ -43,8 +43,9 @@
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
-# There is no --yolo flag here. The worker never owns approval decisions, so yolo is
-# a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# There is no --grants flag here. The worker never owns approval decisions, so the
+# task's autonomy grants are a spawn-time and firstmate-side input only
+# (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -127,10 +128,12 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
-    # yolo never reaches the worker: it is firstmate's approval authority, not a
-    # brief input. Refuse it loudly so it is never silently dropped here and then
-    # believed to have been recorded.
-    --yolo|--yolo=*) echo "error: --yolo is not a brief input; pass it to bin/fm-spawn.sh, which records the task's approval posture" >&2; exit 1 ;;
+    # Grants never reach the worker: they are firstmate's approval authority, not a
+    # brief input. Refuse them loudly so they are never silently dropped here and
+    # then believed to have been recorded. The retired --yolo spelling is refused
+    # by the same arm so an old caller still gets the pointer, not a bare
+    # unknown-flag error.
+    --grants|--grants=*|--yolo|--yolo=*) echo "error: ${a%%=*} is not a brief input; pass the task's autonomy grants to bin/fm-spawn.sh, which records its approval posture" >&2; exit 1 ;;
     *) POS+=("$a") ;;
   esac
 done
