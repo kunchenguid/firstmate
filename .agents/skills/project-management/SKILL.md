@@ -24,6 +24,14 @@ Use the registry format and parser contract owned by the header of `bin/fm-proje
 Keep each registry description useful for identifying the project, but keep delivery posture, captain-private state, and detailed project knowledge in their existing designated homes.
 Do not turn the registry into project documentation.
 
+### Registration gate: production branch required
+
+Every project entering the registry MUST declare its production branch (epic gflow, captain decision Q2: branch AND epic mandatory, no exceptions).
+Register through `bin/fm-project-register.sh`, which is the fail-closed gate for the add, clone, and create paths: it refuses with a clear error and writes nothing when `--production <branch>` is absent, so a missing branch can never produce a partial or branch-less entry.
+Pass `--production <branch>` (the repo's production/default branch in this home) and, when the project uses a gitflow staging branch, `--staging <branch>`; the helper's `--help` owns the exact flags and the resulting `[<mode> production=<p> staging=<s>]` line format, which is the (home, repo)-scoped format owned by `bin/fm-project-mode.sh`.
+Resolve the production (and any staging) branch up front, before cloning, so a refusal costs no state; the same branches are the seed data for a home's per-repo table in the epic-convention doc.
+A home's repo set is a registration too: `bin/fm-home-seed.sh` carries each project's already-gated parent entry forward and refuses to seed a project that has no parent registry entry rather than inventing a branch-less one.
+
 Before adding, cloning, creating, or registering any project in the main home, inspect the authoritative `data/secondmates.md` routing table and judge every existing natural-language `scope:` against the proposed project or domain.
 Apply `AGENTS.md` section 7's authoritative secondmate routing rules; if an existing scope owns that domain, route the new-project operation or work there instead of creating or registering a duplicate main-home clone.
 Absence from the main `data/projects.md` registry is never evidence that no second mate owns the domain.
@@ -54,8 +62,8 @@ Default it off for every project and every posture, and enable it only on the ca
 
 ## Add or clone an existing project
 
-Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
-Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
+Confirm the source URL, local project name, delivery posture, autonomy posture, and production branch (plus any staging branch), stating the resolved default for each rather than asking the captain to invent one.
+Clone into `projects/<name>` and add the registry entry through the production-branch registration gate above only after the destination is known to be unused.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
@@ -65,9 +73,10 @@ A `local-only` project may have no remote and skips no-mistakes initialization.
 Creating a GitHub repository is outward-facing.
 Before making that remote change, propose the repository name, owner or organization, visibility, and delivery posture, defaulting visibility to private and the posture to `no-mistakes-prod-only`, then obtain the captain's explicit consent for those exact values; a stated default never replaces that consent.
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
-After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery posture.
+Before that remote change, also resolve the production branch (and any staging branch) the new repo will use, since the registration gate above requires it.
+After remote creation succeeds, clone it locally, add the registry entry through that gate, and initialize it according to its delivery posture.
 
-For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
+For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry through the registration gate above, and make no GitHub call.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
 
 ## Initialize
