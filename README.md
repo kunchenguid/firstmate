@@ -60,6 +60,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Codex, OpenCode, or Cursor Agent CLI.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
+- Ruby with the Psych YAML library, used to validate skill frontmatter during optimized prompt updates.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
 The first mate detects and offers to install supported missing tools after you approve.

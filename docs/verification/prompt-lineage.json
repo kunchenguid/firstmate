@@ -282,6 +282,29 @@
     "schema_version": 1,
     "candidate": "95d810ee991953755299bba2ab822a4a685e531d",
     "reviewer_overlay": "4d5ddfa049dbb985f34fe0799efad7009af1fbb9",
-    "transformer_sha256": "8376df860bc1e205292da0d4975d601728e8f0c209fb0ee27ffe50fe4e66aa81"
+    "transformer_sha256": "8376df860bc1e205292da0d4975d601728e8f0c209fb0ee27ffe50fe4e66aa81",
+    "lineage_additions": {
+      "compact_skill_description_owners": [
+        ".agents/skills/afk/SKILL.md",
+        ".agents/skills/ahoy/SKILL.md",
+        ".agents/skills/ask-user-authority/SKILL.md",
+        ".agents/skills/bearings/SKILL.md",
+        ".agents/skills/bootstrap-diagnostics/SKILL.md",
+        ".agents/skills/decision-hold-lifecycle/SKILL.md",
+        ".agents/skills/diagnostic-reasoning/SKILL.md",
+        ".agents/skills/firstmate-codexapp/SKILL.md",
+        ".agents/skills/firstmate-coding-guidelines/SKILL.md",
+        ".agents/skills/firstmate-orca/SKILL.md",
+        ".agents/skills/fmx-respond/SKILL.md",
+        ".agents/skills/harness-adapters/SKILL.md",
+        ".agents/skills/process-event-sources/SKILL.md",
+        ".agents/skills/project-management/SKILL.md",
+        ".agents/skills/quota-array-dispatch/SKILL.md",
+        ".agents/skills/secondmate-provisioning/SKILL.md",
+        ".agents/skills/stow/SKILL.md",
+        ".agents/skills/stuck-crewmate-recovery/SKILL.md",
+        ".agents/skills/updatefirstmate/SKILL.md"
+      ]
+    }
   }
 }

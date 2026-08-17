@@ -105,7 +105,7 @@ def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
     ).returncode == 0
 
 
-def check_semantic_refresh(root: Path, lineage: dict, evidence: dict) -> None:
+def check_semantic_refresh(root: Path, lineage: dict, evidence: dict) -> tuple[dict, dict, dict] | None:
     required = ("previous_upstream", "upstream")
     if evidence.get("schema_version") != 1 or not all(isinstance(evidence.get(key), str) for key in required):
         fail("malformed semantic refresh evidence")
@@ -148,6 +148,13 @@ def check_semantic_refresh(root: Path, lineage: dict, evidence: dict) -> None:
         parents = parent_result.stdout.split()
         if recorded_evidence != evidence or parents != [evidence["upstream"]]:
             fail("semantic refresh review does not bind the exact candidate graph and evidence")
+        additions = review.get("lineage_additions")
+        if not isinstance(additions, dict) or set(additions) != {"compact_skill_description_owners"}:
+            fail("malformed semantic refresh review lineage additions")
+        compact_owners = additions["compact_skill_description_owners"]
+        if not isinstance(compact_owners, list) or not compact_owners \
+                or any(not isinstance(path, str) for path in compact_owners) or len(compact_owners) != len(set(compact_owners)):
+            fail("malformed semantic refresh review lineage additions")
         if candidate_record.get("live_authority_sha256") != lineage.get("live_authority_sha256"):
             fail("lineage differs from the fixed live-authority binding")
         if candidate_transformer is None or hashlib.sha256(candidate_transformer).hexdigest() != transformer_hash:
@@ -188,6 +195,40 @@ def check_semantic_refresh(root: Path, lineage: dict, evidence: dict) -> None:
         reconstructed = json.loads(output.read_text())
     if reconstructed.get("changes") != evidence.get("changes"):
         fail("semantic refresh owner evidence differs from reconstruction")
+    lineage_updates = [update for update in reconstructed.get("updates", []) if update.get("path") == LINEAGE_PATH.as_posix()]
+    if len(lineage_updates) != 1:
+        fail("semantic refresh reconstruction has no unique lineage update")
+    try:
+        reconstructed_lineage = json.loads(base64.b64decode(lineage_updates[0]["content_base64"], validate=True))
+    except (KeyError, ValueError, json.JSONDecodeError):
+        fail("semantic refresh reconstruction has malformed lineage output")
+    if review is not None:
+        reconstructed_evidence = reconstructed_lineage.get("semantic_refresh")
+        if not isinstance(reconstructed_evidence, dict) or reconstructed_evidence.get("overlay") != reconstruction_overlay:
+            fail("semantic refresh reconstruction has unexpected overlay provenance")
+        reconstructed_evidence["overlay"] = evidence["overlay"]
+
+        def candidate_generation(record: dict, reviewed: bool) -> dict:
+            normalized = dict(record)
+            normalized.pop("semantic_refresh_review", None)
+            for key, value in additions.items():
+                if reviewed:
+                    if normalized.get(key) != value:
+                        fail("review attestation differs from reviewed lineage additions")
+                    normalized.pop(key)
+                elif key in normalized:
+                    fail("candidate record already contains a reviewed lineage addition")
+            return normalized
+
+        if not isinstance(candidate_record, dict):
+            fail("reviewed candidate has no lineage record")
+        lineage_comparison = (
+            candidate_generation(lineage, True),
+            candidate_generation(reconstructed_lineage, True),
+            candidate_generation(candidate_record, False),
+        )
+    else:
+        lineage_comparison = None
     for update in reconstructed.get("updates", []):
         path = root / update["path"]
         content = base64.b64decode(update["content_base64"], validate=True)
@@ -195,6 +236,7 @@ def check_semantic_refresh(root: Path, lineage: dict, evidence: dict) -> None:
             continue
         if not path.is_file() or path.read_bytes() != content:
             fail(f"semantic refresh output differs from live owner: {update['path']}")
+    return lineage_comparison
 
 
 def changed_baseline_lines(root: Path, baseline: str, transformed: str) -> set[int]:
@@ -219,7 +261,7 @@ def changed_baseline_lines(root: Path, baseline: str, transformed: str) -> set[i
     return changed
 
 
-def check_manifest(root: Path, manifest: dict, lineage: dict) -> tuple[list[dict], list[str]]:
+def check_manifest(root: Path, manifest: dict, lineage: dict) -> tuple[list[dict], list[str], tuple[dict, dict, dict] | None]:
     revision = manifest["baseline_git_commit"]
     source_path = manifest["baseline_path"]
     generations = lineage.get("generations", [])
@@ -251,6 +293,7 @@ def check_manifest(root: Path, manifest: dict, lineage: dict) -> tuple[list[dict
     if not isinstance(live_hashes, dict) or not live_hashes:
         fail("lineage has no current live-authority byte bindings")
     semantic_refresh = lineage.get("semantic_refresh")
+    lineage_comparison = None
     if semantic_refresh is None:
         if tuple(sorted(live_hashes)) != EXPECTED_LIVE_AUTHORITY_PATHS:
             fail("lineage differs from the fixed live-authority inventory")
@@ -258,7 +301,7 @@ def check_manifest(root: Path, manifest: dict, lineage: dict) -> tuple[list[dict
         if hashlib.sha256(live_binding).hexdigest() != EXPECTED_LIVE_AUTHORITY_BINDING_SHA256:
             fail("lineage differs from the fixed live-authority binding")
     else:
-        check_semantic_refresh(root, lineage, semantic_refresh)
+        lineage_comparison = check_semantic_refresh(root, lineage, semantic_refresh)
     for relative, expected in live_hashes.items():
         path = root / relative
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
@@ -363,7 +406,7 @@ def check_manifest(root: Path, manifest: dict, lineage: dict) -> tuple[list[dict
         fail(f"unmapped changed baseline line: {source_path}:{missing[0]}")
     if extra:
         fail(f"manifest maps unchanged baseline line: {source_path}:{extra[0]}")
-    return entries, bundles
+    return entries, bundles, lineage_comparison
 
 
 def check_triggers(root: Path, entries: list[dict], bundles: list[str]) -> None:
@@ -444,13 +487,17 @@ def main() -> int:
     try:
         manifest = json.loads((root / MANIFEST_PATH).read_text(encoding="utf-8"))
         lineage = json.loads((root / LINEAGE_PATH).read_text(encoding="utf-8"))
-        entries, bundles = check_manifest(root, manifest, lineage)
+        entries, bundles, lineage_comparison = check_manifest(root, manifest, lineage)
         check_triggers(root, entries, bundles)
         link_paths = {entry["destination_path"] for entry in entries}
         link_paths.add("docs/verification/prompt-disclosure.md")
         links = check_local_links(root, link_paths)
         if not args.skip_generated:
             check_generated_parity(root)
+        if lineage_comparison is not None:
+            current_lineage, reconstructed_lineage, candidate_lineage = lineage_comparison
+            if current_lineage != candidate_lineage or reconstructed_lineage != candidate_lineage:
+                fail("lineage differs from the reviewed candidate record")
         print(
             "PASS preservation: "
             f"{len(entries)} changed/removed physical lines, "

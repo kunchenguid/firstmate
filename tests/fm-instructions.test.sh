@@ -299,6 +299,20 @@ test_negative_committed_generated_behavior() {
   pass "preservation verifier rejects committed drift behind a later commit"
 }
 
+test_negative_unattested_lineage_drift() {
+  prepare_fixture
+  python3 - "$FIXTURE/docs/verification/prompt-lineage.json" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["overlay_paths"].append("unattested-owner.md")
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+  run_expect_failure "lineage differs from the reviewed candidate record" verify_fixture_without_generated
+  pass "semantic refresh rejects lineage drift outside the review attestation"
+}
+
 test_negative_descendant_semantic_producer() {
   prepare_fixture
   python3 - "$FIXTURE/docs/verification/prompt-lineage.json" <<'PY'
@@ -351,5 +365,6 @@ test_negative_dead_trigger
 test_negative_broken_link
 test_negative_generated_behavior
 test_negative_committed_generated_behavior
+test_negative_unattested_lineage_drift
 test_negative_descendant_semantic_producer
 test_negative_mutable_generated_baseline
