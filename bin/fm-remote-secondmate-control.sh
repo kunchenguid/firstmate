@@ -12,6 +12,8 @@
 #   fm-remote-secondmate-control.sh sync <id>
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
+# Existing endpoint metadata must record tier=standard|fast; a missing legacy
+# tier refuses access instead of being guessed from current defaults.
 #
 # Remote placement ends here, but the second-mate agent always runs on the
 # Herdr backend in the dedicated fm-remote session, so launch refuses any other

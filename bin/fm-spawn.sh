@@ -34,11 +34,11 @@
 #   the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
-#   --model <name>, --effort <low|medium|high|xhigh|max>, and
-#   --tier <standard|fast> are concrete profile axes chosen by firstmate at intake.
-#   The tier defaults to standard and is only threaded into Codex, whose installed
-#   CLI was verified to support the service-tier override; an explicit tier on
-#   another harness is recorded and omitted with a warning.
+#   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
+#   axes chosen by firstmate at intake. --tier <standard|fast> is an optional
+#   per-spawn axis that defaults to standard. The tier is only threaded into Codex,
+#   whose installed CLI was verified to support the service-tier override; an
+#   explicit tier on another harness is recorded and omitted with a warning.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -162,7 +162,7 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
-#     __TIERFLAG__  quoted Codex service-tier override
+#     __TIERFLAG__  quoted Codex per-spawn service-tier override
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.

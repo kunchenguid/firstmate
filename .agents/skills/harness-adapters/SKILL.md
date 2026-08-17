@@ -110,7 +110,7 @@ When changing any primary watcher adapter, update `docs/supervision-protocols/`,
 
 ## Launch profile axes
 
-`bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, `--effort`, and `--tier` values chosen by firstmate at intake.
+`bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, and `--effort` values chosen by firstmate at intake, plus the optional `--tier` axis.
 Do not make the shell scripts parse or match natural-language dispatch rules.
 
 Effort precedence is an explicit per-task captain instruction first, then any applicable standing dispatch profile or secondmate pin, then the generic fallback below.
