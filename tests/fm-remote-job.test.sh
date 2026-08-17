@@ -266,6 +266,52 @@ fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_J
 NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 pass "worker identity binds the canonical configured code root"
 
+# Every replacement stop signals the whole worker tree, and the supervisor in
+# that tree signals the serving child again, so a second delivery always lands
+# on a child that is already shutting down. A child that dies inside its own
+# shutdown leaves ownership behind, and the replacement then has to reclaim it
+# instead of serving.
+STOPPED_WORKER_PID=$NEW_WORKER_PID
+STOPPED_WORKER_PGID=$(fm_remote_job_worker_process_group "$STOPPED_WORKER_PID") \
+  || fail "the repeated-stop fixture could not resolve an isolated worker group"
+kill -TERM -- "-$STOPPED_WORKER_PGID" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  kill -0 "$STOPPED_WORKER_PID" 2>/dev/null || break
+  kill -TERM "$STOPPED_WORKER_PID" 2>/dev/null || true
+  sleep 0.003
+done
+wait "$STOPPED_WORKER_PID" 2>/dev/null || true
+for _ in $(seq 1 200); do
+  kill -0 "$STOPPED_WORKER_PID" 2>/dev/null || break
+  sleep 0.05
+done
+kill -0 "$STOPPED_WORKER_PID" 2>/dev/null && fail "the repeatedly signalled worker did not stop"
+assert_absent "$STATE_ROOT/worker.lock" "a repeatedly signalled shutdown left worker ownership held"
+assert_absent "$STATE_ROOT/worker.ready" "a repeatedly signalled shutdown left a readiness heartbeat behind"
+assert_absent "$STATE_ROOT/worker.pid" "a repeatedly signalled shutdown left a worker pid behind"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+pass "a repeated stop signal never leaves worker ownership behind"
+
+# An owner that died between mktemp and mv leaves one of its own private temp
+# entries inside the ownership lock. rmdir can never reclaim a lock that still
+# holds one, so without residue clearing every replacement worker exits and the
+# account reads as a worker that never becomes ready.
+RESIDUE_WORKER_PID=$NEW_WORKER_PID
+fm_remote_job_stop_worker_tree "$RESIDUE_WORKER_PID" \
+  || fail "the lock residue fixture could not stop the worker"
+mkdir -p "$STATE_ROOT/worker.lock"
+LOCK_RESIDUE="$STATE_ROOT/worker.lock/.pid.aB3xY9"
+printf '%s\n' "$RESIDUE_WORKER_PID" > "$LOCK_RESIDUE"
+touch -t 200001010000 "$STATE_ROOT/worker.lock"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+kill -0 "$NEW_WORKER_PID" 2>/dev/null || fail "the reclaiming worker is not running"
+assert_absent "$LOCK_RESIDUE" "reclaim left a dead owner's private lock residue behind"
+fm_remote_job_worker_identity_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail "the reclaiming worker did not publish the current code identity"
+pass "a lock left with a dead owner's private residue is still reclaimed"
+
 CRASHED_WORKER_PID=$NEW_WORKER_PID
 kill -KILL "$CRASHED_WORKER_PID"
 wait "$CRASHED_WORKER_PID" 2>/dev/null || true
