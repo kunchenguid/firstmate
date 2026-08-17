@@ -15,6 +15,121 @@ LINT="$ROOT/bin/fm-lint.sh"
 INSTALLER="$ROOT/bin/fm-install-actionlint.sh"
 REQUIRED=$("$LINT_WF" --required-version)
 
+# Official sha256 values from actionlint_1.7.12_checksums.txt on the v1.7.12
+# release (https://github.com/rhysd/actionlint/releases/tag/v1.7.12). Tests
+# compare installer behavior against these published digests, not script source.
+ACTIONLINT_SHA_LINUX_AMD64=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+ACTIONLINT_SHA_LINUX_ARM64=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6
+ACTIONLINT_SHA_DARWIN_AMD64=5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644
+ACTIONLINT_SHA_DARWIN_ARM64=aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f
+
+fm_install_stub_uname() {
+  local fakebin=$1
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf '%s\n' "${FM_TEST_UNAME_S:-Linux}" ;;
+  -m) printf '%s\n' "${FM_TEST_UNAME_M:-x86_64}" ;;
+  *) printf '%s\n' "${FM_TEST_UNAME_S:-Linux}" ;;
+esac
+SH
+  chmod +x "$fakebin/uname"
+}
+
+fm_install_stub_curl() {
+  local fakebin=$1
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "${CURL_COUNT:-}" ] || count=$(cat "$CURL_COUNT")
+count=$((count + 1))
+[ -z "${CURL_COUNT:-}" ] || printf '%s\n' "$count" > "$CURL_COUNT"
+url=
+out=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      out=$2
+      shift 2
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      url=$1
+      shift
+      ;;
+  esac
+done
+[ -z "${CURL_URL_LOG:-}" ] || printf '%s\n' "$url" >> "$CURL_URL_LOG"
+fail_until=${CURL_FAIL_UNTIL:-0}
+[ "$count" -gt "$fail_until" ] || exit 22
+: > "$out"
+exit 0
+SH
+  chmod +x "$fakebin/curl"
+}
+
+fm_install_stub_hasher() {
+  local fakebin=$1 name=$2
+  cat > "$fakebin/$name" <<'SH'
+#!/usr/bin/env bash
+self=${0##*/}
+if [ -n "${HASHER_LOG:-}" ]; then
+  printf '%s\n' "$self $*" >> "$HASHER_LOG"
+fi
+file=$1
+if [ "$self" = shasum ]; then
+  algo=
+  file=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -a)
+        algo=$2
+        shift 2
+        ;;
+      *)
+        file=$1
+        shift
+        ;;
+    esac
+  done
+  [ "$algo" = 256 ] || exit 1
+fi
+printf '%s  %s\n' "${SHA256_STUB_HASH:?}" "$file"
+SH
+  chmod +x "$fakebin/$name"
+}
+
+fm_install_stub_tar_actionlint() {
+  local fakebin=$1
+  cat > "$fakebin/tar" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-C" ]; then
+    cat > "$2/actionlint" <<'EOF'
+#!/usr/bin/env bash
+printf '1.7.12\n'
+EOF
+    chmod +x "$2/actionlint"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  chmod +x "$fakebin/tar"
+}
+
+fm_install_stub_sleep() {
+  local fakebin=$1
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/sleep"
+}
+
 write_valid_workflow() {
   local path=$1
   cat > "$path" <<'YAML'
@@ -181,53 +296,165 @@ test_installer_retries_transient_download_failure() {
   fakebin=$(fm_fakebin "$tmp")
   destination="$tmp/bin"
 
-  cat > "$fakebin/curl" <<'SH'
-#!/usr/bin/env bash
-count=0
-[ ! -f "$CURL_COUNT" ] || count=$(cat "$CURL_COUNT")
-count=$((count + 1))
-printf '%s\n' "$count" > "$CURL_COUNT"
-[ "$count" -gt 3 ] || exit 22
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-o" ]; then
-    : > "$2"
-    exit 0
-  fi
-  shift
-done
-exit 2
-SH
-  cat > "$fakebin/sha256sum" <<'SH'
-#!/usr/bin/env bash
-printf '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  %s\n' "$1"
-SH
-  cat > "$fakebin/tar" <<'SH'
-#!/usr/bin/env bash
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-C" ]; then
-    cat > "$2/actionlint" <<'EOF'
-#!/usr/bin/env bash
-printf '1.7.12\n'
-EOF
-    chmod +x "$2/actionlint"
-    exit 0
-  fi
-  shift
-done
-exit 2
-SH
-  cat > "$fakebin/sleep" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/tar" "$fakebin/sleep"
+  fm_install_stub_uname "$fakebin"
+  fm_install_stub_curl "$fakebin"
+  fm_install_stub_hasher "$fakebin" sha256sum
+  fm_install_stub_tar_actionlint "$fakebin"
+  fm_install_stub_sleep "$fakebin"
 
-  out=$(CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
+  out=$(CURL_COUNT="$tmp/curl-count" CURL_FAIL_UNTIL=3 \
+    SHA256_STUB_HASH="$ACTIONLINT_SHA_LINUX_AMD64" \
+    FM_TEST_UNAME_S=Linux FM_TEST_UNAME_M=x86_64 \
+    PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
     || fail "installer did not recover from a transient download failure"$'\n'"$out"
   [ "$(cat "$tmp/curl-count")" -eq 4 ] || fail "installer did not recover after three failed downloads"
   assert_contains "$out" "download attempt 3 failed; retrying" "installer did not disclose its third retry"
   [ -x "$destination/actionlint" ] || fail "installer did not install actionlint after retrying"
   pass "actionlint installer retries a transient download failure"
+}
+
+test_installer_selects_platform_archive_url_and_checksum() {
+  local tmp fakebin destination out url_log uname_s uname_m archive sha
+  tmp=$(fm_test_tmproot fm-actionlint-platform)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+  url_log="$tmp/curl-url.log"
+
+  fm_install_stub_uname "$fakebin"
+  fm_install_stub_curl "$fakebin"
+  fm_install_stub_hasher "$fakebin" sha256sum
+  fm_install_stub_tar_actionlint "$fakebin"
+  fm_install_stub_sleep "$fakebin"
+
+  while IFS=$'\t' read -r uname_s uname_m archive sha; do
+    [ -n "$uname_s" ] || continue
+    rm -rf "$destination"
+    : > "$url_log"
+    out=$(CURL_URL_LOG="$url_log" SHA256_STUB_HASH="$sha" \
+      FM_TEST_UNAME_S="$uname_s" FM_TEST_UNAME_M="$uname_m" \
+      PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
+      || fail "installer failed for ${uname_s}/${uname_m}"$'\n'"$out"
+    assert_contains "$(cat "$url_log")" "$archive" \
+      "installer did not download $archive for ${uname_s}/${uname_m}"
+    assert_contains "$(cat "$url_log")" \
+      "https://github.com/rhysd/actionlint/releases/download/v${REQUIRED}/${archive}" \
+      "installer used the wrong URL for ${uname_s}/${uname_m}"
+    [ -x "$destination/actionlint" ] || fail "installer did not install actionlint for ${uname_s}/${uname_m}"
+  done <<EOF
+Linux	x86_64	actionlint_${REQUIRED}_linux_amd64.tar.gz	$ACTIONLINT_SHA_LINUX_AMD64
+Linux	amd64	actionlint_${REQUIRED}_linux_amd64.tar.gz	$ACTIONLINT_SHA_LINUX_AMD64
+Linux	aarch64	actionlint_${REQUIRED}_linux_arm64.tar.gz	$ACTIONLINT_SHA_LINUX_ARM64
+Linux	arm64	actionlint_${REQUIRED}_linux_arm64.tar.gz	$ACTIONLINT_SHA_LINUX_ARM64
+Darwin	x86_64	actionlint_${REQUIRED}_darwin_amd64.tar.gz	$ACTIONLINT_SHA_DARWIN_AMD64
+Darwin	amd64	actionlint_${REQUIRED}_darwin_amd64.tar.gz	$ACTIONLINT_SHA_DARWIN_AMD64
+Darwin	arm64	actionlint_${REQUIRED}_darwin_arm64.tar.gz	$ACTIONLINT_SHA_DARWIN_ARM64
+Darwin	aarch64	actionlint_${REQUIRED}_darwin_arm64.tar.gz	$ACTIONLINT_SHA_DARWIN_ARM64
+EOF
+  pass "actionlint installer selects the official archive, URL, and checksum per OS/arch"
+}
+
+test_installer_rejects_wrong_checksum() {
+  local tmp fakebin destination out rc
+  tmp=$(fm_test_tmproot fm-actionlint-badsum)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+
+  fm_install_stub_uname "$fakebin"
+  fm_install_stub_curl "$fakebin"
+  fm_install_stub_hasher "$fakebin" sha256sum
+  fm_install_stub_tar_actionlint "$fakebin"
+  fm_install_stub_sleep "$fakebin"
+
+  rc=0
+  out=$(SHA256_STUB_HASH=0000000000000000000000000000000000000000000000000000000000000000 \
+    FM_TEST_UNAME_S=Linux FM_TEST_UNAME_M=x86_64 \
+    PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer accepted a wrong checksum"$'\n'"$out"
+  assert_contains "$out" "checksum mismatch" "installer did not report a checksum mismatch"
+  assert_contains "$out" "actionlint_${REQUIRED}_linux_amd64.tar.gz" \
+    "mismatch did not name the selected archive"
+  assert_contains "$out" "$ACTIONLINT_SHA_LINUX_AMD64" \
+    "mismatch did not name the pinned linux/amd64 checksum"
+  [ ! -e "$destination/actionlint" ] || fail "installer installed actionlint after a checksum mismatch"
+  pass "actionlint installer rejects a wrong checksum"
+}
+
+test_installer_falls_back_to_shasum() {
+  local tmp fakebin destination out hasher_log tool
+  tmp=$(fm_test_tmproot fm-actionlint-shasum)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+  hasher_log="$tmp/hasher.log"
+
+  for tool in bash dirname mktemp rm awk mkdir install cat chmod; do
+    ln -s "$(command -v "$tool")" "$fakebin/$tool"
+  done
+  fm_install_stub_uname "$fakebin"
+  fm_install_stub_curl "$fakebin"
+  fm_install_stub_hasher "$fakebin" shasum
+  fm_install_stub_tar_actionlint "$fakebin"
+  fm_install_stub_sleep "$fakebin"
+
+  : > "$hasher_log"
+  out=$(CURL_URL_LOG="$tmp/curl-url.log" HASHER_LOG="$hasher_log" \
+    SHA256_STUB_HASH="$ACTIONLINT_SHA_LINUX_AMD64" \
+    FM_TEST_UNAME_S=Linux FM_TEST_UNAME_M=x86_64 \
+    PATH="$fakebin" "$INSTALLER" "$destination" 2>&1) \
+    || fail "installer did not fall back to shasum -a 256"$'\n'"$out"
+  assert_grep 'shasum -a 256' "$hasher_log" "installer did not invoke shasum -a 256"
+  [ -x "$destination/actionlint" ] || fail "installer did not install actionlint via shasum"
+  pass "actionlint installer falls back to shasum -a 256 when sha256sum is absent"
+}
+
+test_installer_prefers_sha256sum_over_shasum() {
+  local tmp fakebin destination hasher_log
+  tmp=$(fm_test_tmproot fm-actionlint-sha256sum-pref)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+  hasher_log="$tmp/hasher.log"
+
+  fm_install_stub_uname "$fakebin"
+  fm_install_stub_curl "$fakebin"
+  fm_install_stub_hasher "$fakebin" sha256sum
+  fm_install_stub_hasher "$fakebin" shasum
+  fm_install_stub_tar_actionlint "$fakebin"
+  fm_install_stub_sleep "$fakebin"
+
+  : > "$hasher_log"
+  PATH="$fakebin:$PATH" HASHER_LOG="$hasher_log" \
+    SHA256_STUB_HASH="$ACTIONLINT_SHA_LINUX_AMD64" \
+    FM_TEST_UNAME_S=Linux FM_TEST_UNAME_M=x86_64 \
+    "$INSTALLER" "$destination" >/dev/null \
+    || fail "installer failed when both hashers were present"
+  assert_grep 'sha256sum' "$hasher_log" "installer did not prefer sha256sum"
+  if grep -q 'shasum' "$hasher_log"; then
+    fail "installer invoked shasum even though sha256sum was present"$'\n'"$(cat "$hasher_log")"
+  fi
+  pass "actionlint installer prefers sha256sum when both hashers are present"
+}
+
+test_installer_rejects_unsupported_platform() {
+  local tmp fakebin destination out rc
+  tmp=$(fm_test_tmproot fm-actionlint-unsupported)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+
+  fm_install_stub_uname "$fakebin"
+  fm_install_stub_curl "$fakebin"
+
+  rc=0
+  out=$(FM_TEST_UNAME_S=FreeBSD FM_TEST_UNAME_M=amd64 \
+    PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer accepted an unsupported OS"$'\n'"$out"
+  assert_contains "$out" "unsupported platform" "installer did not name the unsupported platform"
+  assert_contains "$out" "FreeBSD-amd64" "installer did not report the detected OS/arch"
+
+  rc=0
+  out=$(FM_TEST_UNAME_S=Linux FM_TEST_UNAME_M=ppc64le \
+    PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer accepted an unsupported architecture"$'\n'"$out"
+  assert_contains "$out" "unsupported platform" "installer did not reject linux/ppc64le"
+  pass "actionlint installer rejects an unsupported OS or architecture"
 }
 
 # Prove the no-mistakes/local owner (bin/fm-lint.sh with no paths) catches a
@@ -295,4 +522,9 @@ test_non_mapping_root_fails
 test_missing_actionlint_fails_closed
 test_rejects_wrong_actionlint_version
 test_installer_retries_transient_download_failure
+test_installer_selects_platform_archive_url_and_checksum
+test_installer_rejects_wrong_checksum
+test_installer_falls_back_to_shasum
+test_installer_prefers_sha256sum_over_shasum
+test_installer_rejects_unsupported_platform
 test_fm_lint_default_path_catches_broken_ci_yml
