@@ -39,6 +39,8 @@
 #   per-spawn axis that defaults to standard. The tier is only threaded into Codex,
 #   whose installed CLI was verified to support the service-tier override; an
 #   explicit tier on another harness is recorded and omitted with a warning.
+#   A fast Codex launch additionally refuses unless its resolved model advertises
+#   the priority service tier in the installed Codex model catalog.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -1518,6 +1520,40 @@ tier_flag_for_harness() {
   esac
 }
 
+codex_fast_tier_supported() {
+  local worktree=$1 model=$2 codex_bin doctor catalog
+  [ "$HARNESS" = codex ] && [ "$TIER" = fast ] || return 0
+  codex_bin=$(type -P -- codex 2>/dev/null) || {
+    echo "error: Codex executable not found; cannot verify --tier fast support" >&2
+    return 1
+  }
+  if [ -z "$model" ] || [ "$model" = default ]; then
+    if ! doctor=$(cd "$worktree" && "$codex_bin" doctor --json 2>/dev/null); then
+      echo "error: could not resolve Codex's effective model; refusing --tier fast" >&2
+      return 1
+    fi
+    if ! model=$(printf '%s\n' "$doctor" | jq -er '
+      [.checks[]? | select(.id == "config.load") | .details.model
+       | select(type == "string" and length > 0)] | last
+    ' 2>/dev/null); then
+      echo "error: could not resolve Codex's effective model; refusing --tier fast" >&2
+      return 1
+    fi
+  fi
+  if ! catalog=$(cd "$worktree" && "$codex_bin" debug models 2>/dev/null); then
+    echo "error: could not inspect the installed Codex model catalog; refusing --tier fast" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$catalog" | jq -e --arg model "$model" '
+    any(.models[]?;
+      .slug == $model
+      and any(.service_tiers[]?; .id == "priority"))
+  ' >/dev/null 2>&1; then
+    echo "error: Codex model '$model' does not advertise the priority service tier; refusing --tier fast" >&2
+    return 1
+  fi
+}
+
 case "$LAUNCH" in
   *__MUSEBIN__*)
     MUSE_BIN=$(resolve_muse_binary) || exit 1
@@ -2357,6 +2393,7 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
+codex_fast_tier_supported "$WT" "$MODEL" || exit 1
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.

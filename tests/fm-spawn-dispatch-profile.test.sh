@@ -73,7 +73,22 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  'doctor --json')
+    printf '{"checks":[{"id":"config.load","details":{"model":"%s"}}]}\n' \
+      "${FM_FAKE_CODEX_EFFECTIVE_MODEL:-gpt-5.4}"
+    ;;
+  'debug models')
+    [ "${FM_FAKE_CODEX_CATALOG_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CODEX_CATALOG_STATUS}"
+    printf '%s\n' '{"models":[{"slug":"gpt-5.4","service_tiers":[{"id":"priority"}]},{"slug":"gpt-5.4-mini","service_tiers":[]}]}'
+    ;;
+esac
+SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  chmod +x "$fakebin/codex"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -129,6 +144,8 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
+    FM_FAKE_CODEX_EFFECTIVE_MODEL="${FM_TEST_CODEX_EFFECTIVE_MODEL:-gpt-5.4}" \
+    FM_FAKE_CODEX_CATALOG_STATUS="${FM_TEST_CODEX_CATALOG_STATUS:-0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -496,6 +513,53 @@ test_codex_fast_tier_opt_in() {
     "codex fast tier was not threaded as the verified priority override"
   assert_not_contains "$launch" "service_tier=\"default\"" "fast tier launch must not contain the standard override"
   pass "codex fast tier is an explicit opt-in"
+}
+
+test_codex_fast_tier_requires_model_support() {
+  local rec id out status launch
+  id=profile-codex-fast-unsupported-z3b
+  rec=$(make_spawn_case profile-codex-fast-unsupported codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model gpt-5.4-mini --tier fast)
+  status=$?
+  expect_code 1 "$status" "Codex fast tier should refuse an unsupported explicit model"
+  assert_contains "$out" "model 'gpt-5.4-mini' does not advertise the priority service tier" \
+    "unsupported explicit model refusal did not name the missing tier capability"
+  assert_absent "$HOME_DIR/state/$id.meta" "unsupported fast model refusal published metadata"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "service_tier" "unsupported fast model reached Codex launch"
+
+  id=profile-codex-fast-config-unsupported-z3c
+  rec=$(make_spawn_case profile-codex-fast-config-unsupported codex "$id")
+  read_case_record "$rec"
+  out=$(FM_TEST_CODEX_EFFECTIVE_MODEL=gpt-5.4-mini \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --tier fast)
+  status=$?
+  expect_code 1 "$status" "Codex fast tier should refuse an unsupported configured model"
+  assert_contains "$out" "model 'gpt-5.4-mini' does not advertise the priority service tier" \
+    "unsupported configured model refusal did not use Codex's effective model"
+  assert_absent "$HOME_DIR/state/$id.meta" "unsupported configured fast model published metadata"
+  pass "Codex fast tier requires priority support from the resolved model"
+}
+
+test_codex_fast_tier_fails_closed_without_catalog() {
+  local rec id out status
+  id=profile-codex-fast-no-catalog-z3d
+  rec=$(make_spawn_case profile-codex-fast-no-catalog codex "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_CODEX_CATALOG_STATUS=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --model gpt-5.4 --tier fast)
+  status=$?
+  expect_code 1 "$status" "Codex fast tier should refuse an unreadable model catalog"
+  assert_contains "$out" "could not inspect the installed Codex model catalog" \
+    "catalog failure refusal did not identify the unavailable capability evidence"
+  assert_absent "$HOME_DIR/state/$id.meta" "unverified fast model published metadata"
+  pass "Codex fast tier refuses when model capability cannot be verified"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -888,6 +952,8 @@ test_claude_threads_model_and_effort
 test_non_codex_tier_is_omitted_with_warning
 test_codex_threads_model_and_effort
 test_codex_fast_tier_opt_in
+test_codex_fast_tier_requires_model_support
+test_codex_fast_tier_fails_closed_without_catalog
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
