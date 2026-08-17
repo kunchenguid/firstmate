@@ -38,6 +38,10 @@ case "${1:-}" in
         *) printf "Error: unknown mode %s\n" "$MODE" >&2; exit 1 ;;
       esac
       ;;
+    get)
+      [ "$MODE" = empty_project ] && exit 0
+      exit 1
+      ;;
   esac
   ;;
   secret)
@@ -52,6 +56,10 @@ case "${1:-}" in
           ;;
         invalid_id)
           printf '%s\n' '[{"id":null,"key":"ONLY","projectId":"proj-1"}]'
+          ;;
+        empty_project)
+          printf "Error:\n   0: 404 Not Found\n" >&2
+          exit 1
           ;;
         authenticated|read_only)
           printf '%s\n' '[{"id":"only-id","key":"ONLY","value":"secret-value","note":"sensitive-note","projectId":"proj-1"}]'
@@ -209,6 +217,17 @@ test_resolve_invalid_id() {
   pass 'resolve-id rejects invalid secret IDs'
 }
 
+test_resolve_empty_project() {
+  local rc=0 out
+  set +e
+  out=$(run_with_fake empty_project env BWS_ACCESS_TOKEN=ok "$HELPER" resolve-id proj-1 ONLY)
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "empty project should report absent key with exit 1, got $rc"
+  [ -z "$out" ] || fail "empty project must not produce output, got $out"
+  pass 'resolve-id handles empty projects as absent keys'
+}
+
 test_probe_absent
 test_probe_broken_version
 test_probe_no_token
@@ -222,3 +241,4 @@ test_list_metadata_redacts
 test_resolve_duplicate_names
 test_resolve_malformed_json
 test_resolve_invalid_id
+test_resolve_empty_project

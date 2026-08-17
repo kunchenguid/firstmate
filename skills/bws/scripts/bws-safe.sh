@@ -149,7 +149,10 @@ cmd_resolve_id() {
   local project_id=$1 key=$2 json matches count id
   [ -n "$project_id" ] && [ -n "$key" ] || die_usage "resolve-id requires PROJECT_ID and KEY"
   require_jq
-  json=$(run_bws secret list "$project_id" -o json) || exit 3
+  if ! json=$(run_bws secret list "$project_id" -o json); then
+    run_bws project get "$project_id" -o none >/dev/null || exit 3
+    exit 1
+  fi
   matches=$(jq -r --arg key "$key" '
     [.[] | select(.key == $key)] as $items
     | if any($items[]; ((.id | type) != "string") or (.id == "")) then
