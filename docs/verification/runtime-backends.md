@@ -133,7 +133,7 @@ tests/fm-tmux-submit-busy.test.sh
 ```
 
 Expected structural matrix: real text on any content row is pending; all-empty complete boxes are empty; unreadable, incomplete, or unsafe boxes are unknown; and non-bordered panes retain cursor-row compatibility.
-Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; and only a proven empty composer succeeds directly.
+Expected submit matrix: proven pending plus busy is accepted as queued; proven pending plus idle remains pending; ambiguous pending is never converted by the busy exception; only a proven empty composer succeeds directly; a kimi target receives one final bare Enter after the retry budget and reaches the busy exception only while still proven pending; and the busy read there uses the target harness's own registered signature, falling back to the union default only for an unregistered harness.
 
 ### Cleanup endpoint identity
 

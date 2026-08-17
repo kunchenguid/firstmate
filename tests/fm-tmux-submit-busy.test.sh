@@ -185,6 +185,167 @@ test_unrecognized_state_skips_busy_conversion() {
   pass "fm_tmux_submit_enter_core: unrecognized states skip busy conversion"
 }
 
+# Regression: the Kimi final Enter can expand the composer to multiple content
+# rows and break the structural read. The invariant this file documents - only a
+# PROVEN pending may reach the busy exception - must survive that, or a busy pane
+# turns an unproven read into `empty` and the caller treats an unsubmitted
+# message as delivered.
+test_kimi_final_enter_unproven_never_reaches_busy_exception() {
+  local dir="$TMP_ROOT/kimi-unproven" verdict
+  mkdir -p "$dir"
+  printf '0\n' > "$dir/count"
+  : > "$dir/busy-called"
+  (
+    # shellcheck disable=SC2329
+    tmux() { :; }
+    # The retry budget reads proven pending; the final Enter breaks the read.
+    # shellcheck disable=SC2329
+    fm_tmux_composer_state() {
+      local count
+      count=$(cat "$dir/count")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$dir/count"
+      [ "$count" -le 3 ] && printf pending || printf pending-unproven
+    }
+    # shellcheck disable=SC2329
+    fm_pane_is_busy() { printf 'called\n' >> "$dir/busy-called"; return 0; }
+    fm_tmux_submit_enter_core kimi-pane 3 0 kimi > "$dir/verdict"
+  ) || fail "Kimi unproven-after-final-Enter fixture failed"
+  verdict=$(cat "$dir/verdict")
+  [ "$verdict" = pending-unproven ] \
+    || fail "an unproven read after the Kimi final Enter must not be converted, got '$verdict'"
+  [ ! -s "$dir/busy-called" ] \
+    || fail "pending-unproven must never reach the busy exception"
+  pass "fm_tmux_submit_enter_core: the Kimi final Enter keeps pending-unproven out of the busy exception"
+}
+
+# The busy fallback must classify with the TARGET's own signature, so another
+# harness's rendered tokens cannot confirm delivery of an unsubmitted message.
+test_busy_fallback_is_scoped_to_the_target_harness() {
+  local dir="$TMP_ROOT/busy-scope" verdict
+  mkdir -p "$dir"
+  (
+    # Restore the REAL fm_pane_is_busy over this file's blanket override, so the
+    # actual harness-scoped matcher decides the verdict.
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-tmux-lib.sh"
+    # shellcheck disable=SC2329
+    tmux() {
+      case "$1" in
+        # Grok's exact busy token, which is in the cross-harness union default
+        # but is NOT Kimi's registered moon-spinner signature.
+        capture-pane) printf 'Ctrl+c:cancel\n' ;;
+      esac
+    }
+    # shellcheck disable=SC2329
+    fm_tmux_composer_state() { printf pending; }
+    fm_tmux_submit_enter_core kimi-pane 1 0 kimi > "$dir/verdict"
+  ) || fail "harness-scoped busy fallback fixture failed"
+  verdict=$(cat "$dir/verdict")
+  [ "$verdict" = pending ] \
+    || fail "another harness's busy token must not confirm a Kimi submit, got '$verdict'"
+
+  # An unregistered harness keeps the union default this fallback always used,
+  # so scoping does not silently turn queued Enters into genuine swallows.
+  mkdir -p "$dir/unregistered"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-tmux-lib.sh"
+    # shellcheck disable=SC2329
+    tmux() {
+      case "$1" in
+        capture-pane) printf 'Ctrl+c:cancel\n' ;;
+      esac
+    }
+    # shellcheck disable=SC2329
+    fm_tmux_composer_state() { printf pending; }
+    fm_tmux_submit_enter_core other-pane 1 0 some-unregistered-harness \
+      > "$dir/unregistered/verdict"
+  ) || fail "unregistered-harness busy fallback fixture failed"
+  verdict=$(cat "$dir/unregistered/verdict")
+  [ "$verdict" = empty ] \
+    || fail "an unregistered harness should keep the union-default busy read, got '$verdict'"
+  pass "fm_tmux_submit_enter_core: the busy fallback is harness-scoped and keeps the union default when unregistered"
+}
+
+# The final Enter is selected by the explicit harness argument, so the same
+# fixture run without it must keep the pre-existing pending verdict: that is what
+# proves the mitigation is harness-scoped rather than a blanket extra Enter.
+run_final_enter_fixture() {  # <dir> [harness]
+  local dir=$1 harness=${2:-}
+  mkdir -p "$dir"
+  printf '0\n' > "$dir/count"
+  : > "$dir/enters"
+  (
+    tmux() {
+      case "$1" in
+        send-keys) printf 'Enter\n' >> "$dir/enters" ;;
+      esac
+    }
+    fm_tmux_composer_state() {
+      local count
+      count=$(cat "$dir/count")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$dir/count"
+      [ "$count" -lt 4 ] && printf pending || printf empty
+    }
+    fm_tmux_submit_enter_core kimi-pane 3 0 "$harness" > "$dir/verdict"
+  ) || fail "final Enter fixture failed (harness=${harness:-none})"
+}
+
+test_kimi_gets_one_final_enter_after_pending_budget() {
+  local dir="$TMP_ROOT/kimi-final-enter" verdict enter_count
+  run_final_enter_fixture "$dir" kimi
+  verdict=$(cat "$dir/verdict")
+  [ "$verdict" = empty ] || fail "Kimi pending submit did not clear after its final Enter: $verdict"
+  enter_count=$(wc -l < "$dir/enters")
+  [ "$enter_count" -eq 4 ] || fail "Kimi pending submit expected 4 Enter attempts, got $enter_count"
+
+  dir="$TMP_ROOT/other-final-enter"
+  run_final_enter_fixture "$dir"
+  verdict=$(cat "$dir/verdict")
+  [ "$verdict" = pending ] || fail "non-Kimi submit must not get the extra Enter: $verdict"
+  enter_count=$(wc -l < "$dir/enters")
+  [ "$enter_count" -eq 3 ] || fail "non-Kimi submit expected 3 Enter attempts, got $enter_count"
+  pass "fm_tmux_submit_enter_core: the final bare Enter is scoped to the kimi harness argument"
+}
+
+# The mitigation is owned by the submit core, so a caller only has to pass the
+# harness through fm_backend_send_text_submit to inherit it. Driving the real
+# dispatch chain is what keeps the optional-argument positions (expected-label
+# then harness) from drifting between the generic entry point and the adapter.
+test_backend_dispatch_forwards_harness_to_submit_core() {
+  local dir="$TMP_ROOT/backend-harness-forward" verdict sends
+  mkdir -p "$dir"
+  printf '0\n' > "$dir/count"
+  : > "$dir/sends"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-backend.sh"
+    fm_backend_source tmux || fail "could not source the tmux backend adapter"
+    tmux() {
+      case "$1" in
+        send-keys) printf '%s\n' "$*" >> "$dir/sends" ;;
+      esac
+    }
+    fm_tmux_composer_state() {
+      local count
+      count=$(cat "$dir/count")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$dir/count"
+      [ "$count" -lt 4 ] && printf pending || printf empty
+    }
+    fm_backend_send_text_submit tmux kimi-pane "the pointer" 3 0 0 "expected-label" kimi \
+      > "$dir/verdict"
+  ) || fail "backend harness-forwarding fixture failed"
+  verdict=$(cat "$dir/verdict")
+  [ "$verdict" = empty ] || fail "backend dispatch did not forward the harness to the submit core: $verdict"
+  # One literal type, three retried Enters, then the harness-scoped final Enter.
+  sends=$(wc -l < "$dir/sends")
+  [ "$sends" -eq 5 ] || fail "backend dispatch expected 5 send-keys calls, got $sends"
+  pass "fm_backend_send_text_submit: forwards its harness argument through the tmux adapter"
+}
+
 test_claude_busy_signature_uses_real_capture_shapes() {
   local dir fakebin composer
   dir="$TMP_ROOT/claude-signature"
@@ -264,4 +425,8 @@ test_idle_pane_composer_clears_first_try
 test_busy_pane_unknown_stays_unknown
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
+test_kimi_gets_one_final_enter_after_pending_budget
+test_kimi_final_enter_unproven_never_reaches_busy_exception
+test_busy_fallback_is_scoped_to_the_target_harness
+test_backend_dispatch_forwards_harness_to_submit_core
 test_claude_busy_signature_uses_real_capture_shapes

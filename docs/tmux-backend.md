@@ -77,6 +77,7 @@ A task's busy, idle, unknown, or dead verdict comes from the semantic busy-state
 The one remaining rendered-tail reader is Grok's isolated fallback inside that contract, which can only classify a Grok task.
 The submit acknowledgement and away-mode supervisor-pane busy guard below still consult rendered output, but only to decide whether input can be delivered, never to decide recorded task state.
 The supervisor guard selects only the detected primary harness's signature rather than a global union of vendor patterns.
+The submit acknowledgement's busy fallback scopes the same way to the target's recorded harness, and keeps the union default only when that harness is unknown or has no registered signature.
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
 It types a message once and retries Enter only until the composer clears.
@@ -88,7 +89,11 @@ OpenCode 1.18.4 has one busy-queue exception.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
 After the normal retry budget, only structurally proven pending text in a provably busy pane is accepted as queued, while an idle pane remains `pending` as a genuine swallowed Enter.
 Ambiguous pending text never receives the busy-queue conversion.
-`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
+
+Kimi 0.36.1 swallows the first submit while its TUI settles, so a Kimi target receives one final bare Enter after the normal retry budget and before that busy fallback.
+The message is still never retyped, and only a still-proven pending composer may continue to the busy fallback after it.
+[`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) owns the verified Kimi mechanics.
+`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers, plus the harness-scoped busy read and the Kimi final Enter.
 
 ## Limits and regression entry points
 

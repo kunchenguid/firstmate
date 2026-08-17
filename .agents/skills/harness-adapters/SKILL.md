@@ -423,9 +423,12 @@ Never modify Pedro's global Cursor files without his explicit approval.
 Cursor's MCP and skill portability are separate follow-up work.
 The current global Cursor MCP configuration is Pedro's personal file and is never a firstmate write target.
 
-## kimi (VERIFIED 2026-07-25, kimi 0.29.1)
+## kimi (VERIFIED 2026-08-16, kimi 0.36.1; trust and submit paths)
 
 Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back to the executable `$HOME/.kimi-code/bin/kimi`.
+
+Scope of that verification: the trust dialog, the workspace-trust record format, launch, and the composer/submit paths were exercised live on 0.36.1, but a full model turn was NOT, because the Kimi Code CLI credential is expired (`kimi_code_cli_credential_expired`, [`docs/verification/dispatch-auth.md`](../../../docs/verification/dispatch-auth.md)) and no usable Kimi authentication was available.
+Treat everything downstream of an accepted submission — real turn execution, turn-end hook firing under a live model, and busy state during a genuine turn — as still assumed rather than verified until Kimi authentication is restored.
 
 | Fact | Value |
 |---|---|
@@ -437,7 +440,7 @@ Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; firstmate skills are discovered. |
 | Autonomy | `--auto`; `-y` and `--yolo` are weaker and are not used. |
-| Trust dialog | None on a clean first launch in a fresh pooled worktree. |
+| Trust dialog | Kimi 0.36.1 shows a per-root "Trust this folder / Don't trust" dialog in a fresh pooled worktree. `fm-spawn` pre-trusts the validated worktree before launch by writing `~/.kimi-code/workspace-trust/<workspace-id>` in Kimi's native `{"root":"<worktree>","trustedAt":<ms>}` format. The workspace ID is `wd_<lowercase-basename-slug>_<first-12-sha256-of-normalized-root>`. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; detection relies on process ancestry command name `kimi`. |
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
@@ -454,6 +457,8 @@ The startup input-readiness window is the established cause of Kimi's first-Ente
 An early Enter can expand Kimi's composer to multiple content rows, leaving the pointer text on the first row and the cursor on an empty later row, which is the same single-cursor-row reading defect exposed by Grok's bottom-border cursor quirk.
 The shared tmux reader now locates the complete bordered composer and treats real text on any content row as positive evidence that submission is still pending.
 No rendering signal is trustworthy for proving that Kimi will accept input during this window, so delivery retries Enter through the shared submit core and retains the existing postcondition verification rather than relaxing readiness or delivery checks.
+The shared tmux submit core gives a Kimi target one final bare Enter after its normal retry budget when the composer still proves pending, covering the verified first-submit swallow without retyping the message.
+That mitigation is implemented once in the submit core and selected by the harness argument threaded through `fm_backend_send_text_submit`, so `fm-send`, the `fm-spawn` brief-pointer submit, and the away-supervisor daemon all inherit it from the one owner.
 Kimi's footer tip rotates independently and can display `ctrl+c: cancel` while completely idle, which is one reason no Kimi rendered signature is a state source.
 The idle status bar can contain lowercase `thinking`, which is the model's effort label rather than a busy signal.
 The delivery-only spinner match covers the full moon-phase glyph set rather than one frame, but it remains locale- and emoji-font-sensitive because Kimi exposes no stable ASCII busy token.

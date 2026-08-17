@@ -1788,6 +1788,29 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
 }
 
+# The away-supervisor injector is a caller of the shared submit core, so it must
+# hand the supervisor pane's own harness to the dispatch and inherit that
+# harness's verified submit quirks instead of re-implementing them.
+test_inject_msg_forwards_supervisor_harness_to_submit() {
+  local dir state
+  dir=$(make_supercase inject-harness-forward)
+  state="$dir/state"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_daemon_primary_harness() { printf 'kimi'; }
+    fm_backend_send_text_submit() {
+      [ "$8" = kimi ] || fail "inject_msg did not forward the supervisor harness: '${8:-}'"
+      printf 'empty'
+    }
+    inject_msg "hello" "$state" \
+      || fail "inject_msg should succeed when send_text_submit confirms empty"
+  ) || fail "harness-forwarding inject_msg subshell failed"
+  pass "inject_msg: forwards the supervisor pane's harness to the shared submit dispatch"
+}
+
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
 # must NEVER type an escalation into a dead-shell pane. A bare shell prompt
 # classifies `unknown` (not `pending`), and inject_msg now defers on anything
@@ -1924,5 +1947,6 @@ test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
+test_inject_msg_forwards_supervisor_harness_to_submit
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state

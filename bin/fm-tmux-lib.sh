@@ -40,7 +40,13 @@
 # captain instruction. The submit core now falls back to `fm_pane_is_busy` once
 # the Enter-retry budget is spent: a busy pane means the harness accepted and
 # queued the Enter (report `empty` so the caller does not re-send), while an
-# idle pane keeps the `pending` verdict (a genuine swallow). The herdr backend
+# idle pane keeps the `pending` verdict (a genuine swallow). Kimi 0.36.1 has a
+# related first-submit swallow while its TUI settles, so the Kimi adapter gets
+# one final bare Enter after the normal retry budget, using the same proof check.
+# That mitigation lives ONCE here and is selected by the optional `[harness]`
+# argument threaded through the shared submit path (the same explicit-argument
+# mechanism `fm_pane_is_busy` already uses), so every caller of the submit core
+# inherits it instead of each one re-implementing the quirk. The herdr backend
 # observes the same opencode behavior but needs a separate fix; it is recorded
 # as a known gap in `docs/herdr-backend.md` rather than patched here, so the
 # tmux adapter does not paper over a herdr-specific shape.
@@ -90,26 +96,37 @@ FM_TMUX_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
 FM_TMUX_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 FM_TMUX_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
+# fm_busy_regex_for_harness: the ONE owner of the harness -> busy-signature
+# table. Prints the signature for a registered harness, prints the cross-harness
+# union default for the empty harness (the caller has no harness to scope by),
+# and returns 1 with no output for a harness that has no registered signature.
+# That non-zero return is the only way to tell "this harness is idle" apart from
+# "this harness cannot be classified", so callers that need to choose a policy
+# for an unregistered harness ask here instead of restating the case list.
+fm_busy_regex_for_harness() {  # [harness]
+  case "${1:-}" in
+    claude) printf '%s' "$FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT" ;;
+    codex) printf '%s' "$FM_TMUX_CODEX_BUSY_REGEX_DEFAULT" ;;
+    opencode) printf '%s' "$FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT" ;;
+    pi|pi-signed) printf '%s' "$FM_TMUX_PI_BUSY_REGEX_DEFAULT" ;;
+    grok) printf '%s' "$FM_TMUX_GROK_BUSY_REGEX_DEFAULT" ;;
+    kimi) printf '%s' "$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT" ;;
+    '') printf '%s' "$FM_TMUX_BUSY_REGEX_DEFAULT" ;;
+    *)
+      # A supplied harness must never borrow another harness's signature.
+      # Register its verified signature explicitly before classifying it busy.
+      return 1
+      ;;
+  esac
+}
+
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
   IFS= read -r -d '' lines || true
   if [ -n "${FM_BUSY_REGEX:-}" ]; then
     regex=$FM_BUSY_REGEX
   else
-    case "$harness" in
-      claude) regex=$FM_TMUX_CLAUDE_BUSY_REGEX_DEFAULT ;;
-      codex) regex=$FM_TMUX_CODEX_BUSY_REGEX_DEFAULT ;;
-      opencode) regex=$FM_TMUX_OPENCODE_BUSY_REGEX_DEFAULT ;;
-      pi|pi-signed) regex=$FM_TMUX_PI_BUSY_REGEX_DEFAULT ;;
-      grok) regex=$FM_TMUX_GROK_BUSY_REGEX_DEFAULT ;;
-      kimi) regex=$FM_TMUX_KIMI_BUSY_REGEX_DEFAULT ;;
-      '') regex=$FM_TMUX_BUSY_REGEX_DEFAULT ;;
-      *)
-        # A supplied harness must never borrow another harness's signature.
-        # Register its verified signature explicitly before classifying it busy.
-        regex=
-        ;;
-    esac
+    regex=$(fm_busy_regex_for_harness "$harness") || regex=
   fi
   [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
 }
@@ -392,8 +409,10 @@ fm_pane_is_busy() {  # <target> [harness]
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
 # a genuine swallow. Pending-unproven receives the same Enter retry budget but
 # never reaches this exception.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
-  local target=$1 retries=$2 sleep_s=$3 i=0 state
+# The optional <harness> selects harness-specific submit quirks; kimi gets one
+# final bare Enter before the busy fallback (see the header note).
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [harness]
+  local target=$1 retries=$2 sleep_s=$3 harness=${4:-} i=0 state busy_harness
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
@@ -409,21 +428,42 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep>
     printf '%s' "$state"
     return 0
   fi
+  if [ "$harness" = kimi ]; then
+    tmux send-keys -t "$target" Enter 2>/dev/null || true
+    sleep "$sleep_s"
+    state=$(fm_tmux_composer_state "$target")
+    # Same rule as the retry loop's exit above: ONLY a proven `pending` may
+    # continue to the busy exception. The extra Enter can expand Kimi's composer
+    # to multiple content rows and break the structural read, and an unproven
+    # read must never be converted into a delivery confirmation.
+    if [ "$state" != pending ]; then
+      printf '%s' "$state"
+      return 0
+    fi
+  fi
   # Retries exhausted, composer still shows proven pending.
   # If the pane is busy (agent mid-turn), the harness accepted the Enter
   # and queued the message for processing when the current turn ends.
   # Treat it as submitted so the caller does not re-send.
   # On an idle pane, keep reporting pending - a genuine swallow.
-  if fm_pane_is_busy "$target"; then
+  # The busy read is scoped to the target's own harness whenever that harness
+  # has a registered signature, so one harness's rendered tokens can never make
+  # another read busy here. A harness with no registered signature keeps the
+  # cross-harness union default this fallback has always used, because narrowing
+  # it to "never busy" would turn today's queued-Enter `empty` into `pending`
+  # for every harness outside the table.
+  busy_harness=$harness
+  fm_busy_regex_for_harness "$busy_harness" >/dev/null || busy_harness=
+  if fm_pane_is_busy "$target" "$busy_harness"; then
     printf 'empty'
   else
     printf 'pending'
   fi
 }
 
-fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle> [harness]
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 harness=${6:-}
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$harness"
 }

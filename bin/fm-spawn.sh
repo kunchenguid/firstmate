@@ -1253,6 +1253,93 @@ resolve_kimi_binary() {
   return 1
 }
 
+# Kimi's workspace id embeds a real sha256, so a wrong or absent digest keys the
+# record to a path Kimi never reads. There is no usable weaker fallback here:
+# refuse rather than emit a plausible-looking wrong identity.
+kimi_sha256_stdin() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+# Kimi Code keys workspace trust by the same stable workdir id it uses for
+# sessions: wd_<basename-slug>_<first-12-sha256-of-normalized-root>.
+kimi_workspace_id() {  # <absolute-worktree-root>
+  local root=$1 base slug digest
+  root=$(cd "$root" && pwd -P) || return 1
+  base=${root##*/}
+  slug=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/^-*//; s/-*$//' | cut -c1-40 | sed 's/^-*//; s/-*$//')
+  [ -n "$slug" ] && [ "$slug" != . ] && [ "$slug" != .. ] || slug=workspace
+  digest=$(printf '%s' "$root" | kimi_sha256_stdin) || return 1
+  [ "${#digest}" -eq 64 ] || return 1
+  case $digest in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+  printf 'wd_%s_%s\n' "$slug" "${digest:0:12}"
+}
+
+kimi_workspace_trust_path() {  # <absolute-worktree-root>
+  local id
+  id=$(kimi_workspace_id "$1") || return 1
+  printf '%s/.kimi-code/workspace-trust/%s\n' "$HOME" "$id"
+}
+
+# Forwards the predicate owner's three-valued contract unchanged: 0 valid,
+# 1 rejected, 2 the predicate could not be evaluated at all (jq missing).
+# Collapsing 2 into 1 would report a missing dependency as a trust rejection.
+kimi_workspace_trust_is_valid() {  # <absolute-worktree-root> <trust-file>
+  "$SCRIPT_DIR/fm-kimi-trust-check.sh" "$1" "$2" >/dev/null 2>&1
+}
+
+kimi_trust_now_ms() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import time; print(int(time.time() * 1000))'
+  else
+    # Second precision only when python3 is unavailable; `date +%s%N` is GNU-only.
+    echo $(($(date +%s) * 1000))
+  fi
+}
+
+# Returns 0 when the worktree is trusted, 2 when trust could not be EVALUATED
+# (the predicate owner is unusable, so nothing is written), and 1 for every
+# other failure to establish trust.
+kimi_prest_trust_workspace() {  # <absolute-worktree-root>
+  local root=$1 trust_dir trust_file tmp trusted_at status
+  root=$(cd "$root" && pwd -P) || return 1
+  trust_file=$(kimi_workspace_trust_path "$root") || return 1
+  trust_dir=${trust_file%/*}
+  status=0
+  kimi_workspace_trust_is_valid "$root" "$trust_file" || status=$?
+  case $status in
+    0) return 0 ;;
+    2) return 2 ;;
+  esac
+  trusted_at=$(kimi_trust_now_ms) || return 1
+  case $trusted_at in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  mkdir -p "$trust_dir" || return 1
+  chmod 700 "$trust_dir" 2>/dev/null || true
+  tmp=$(mktemp "$trust_dir/.fm-trust.XXXXXX") || return 1
+  if ! printf '{"root":"%s","trustedAt":%s}\n' \
+    "$(json_escape "$root")" "$trusted_at" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$trust_file" || { rm -f "$tmp"; return 1; }
+  # Re-read what actually landed: the write path must prove the same predicate
+  # the pre-existing record had to satisfy, so a malformed emission refuses the
+  # spawn instead of passing as established trust.
+  status=0
+  kimi_workspace_trust_is_valid "$root" "$trust_file" || status=$?
+  return "$status"
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
@@ -2001,6 +2088,18 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
+if [ "$HARNESS" = kimi ]; then
+  KIMI_TRUST_STATUS=0
+  kimi_prest_trust_workspace "$WT" || KIMI_TRUST_STATUS=$?
+  if [ "$KIMI_TRUST_STATUS" = 2 ]; then
+    echo "error: refusing Kimi spawn because workspace trust could not be validated for $WT: fm-kimi-trust-check.sh could not evaluate the trust record (jq is required); install jq and retry" >&2
+    exit 1
+  elif [ "$KIMI_TRUST_STATUS" != 0 ]; then
+    echo "error: refusing Kimi spawn because workspace trust could not be established for $WT" >&2
+    exit 1
+  fi
+fi
+
 TASK_BASE_COMMIT=
 if [ "$KIND" != secondmate ]; then
   EXISTING_META="$STATE/$ID.meta"
@@ -2496,7 +2595,7 @@ if [ "$HARNESS" = kimi ]; then
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
   KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
     "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
-    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || {
+    "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W" "$HARNESS") || {
     kimi_spawn_fail "kimi brief pointer could not be submitted"
     exit 1
   }
