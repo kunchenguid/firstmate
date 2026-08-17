@@ -108,8 +108,10 @@ report() {
   printf 'digest_meta_files=%s bytes=%s estimated_tokens=%s\n' \
     "$meta_files" "$meta_bytes" "$component_tokens"
 
-  status_tail=${FM_SESSION_START_STATUS_TAIL:-5}
-  case "$status_tail" in ''|*[!0-9]*) status_tail=5 ;; esac
+  # Mirrors fm-session-start.sh's STATUS_TAIL default so this line measures
+  # what the digest actually projects: 0 tail lines unless the knob is set.
+  status_tail=${FM_SESSION_START_STATUS_TAIL:-0}
+  case "$status_tail" in ''|*[!0-9]*) status_tail=0 ;; esac
   for file in "$STATE"/*.status; do
     [ -f "$file" ] || continue
     status_files=$((status_files + 1))

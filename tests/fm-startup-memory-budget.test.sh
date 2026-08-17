@@ -180,7 +180,7 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
   printf '1\n2\n3\n4\n5\n6\n' > "$home/state/one.status"
   printf 'x\n' > "$home/state/orphan.status"
 
-  out=$(FM_HOME="$home" "$BUDGET" report)
+  out=$(env -u FM_SESSION_START_STATUS_TAIL FM_HOME="$home" "$BUDGET" report)
   assert_contains "$out" 'estimator=ceil(UTF-8 bytes / 3) conservative-local-estimate' \
     "report did not name the stable estimator"
   assert_contains "$out" 'file=data/captain.md bytes=4 estimated_tokens=2 status=present' \
@@ -201,8 +201,12 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
     "report omitted the bounded backlog component"
   assert_contains "$out" 'digest_meta_files=2 bytes=10 estimated_tokens=4' \
     "report omitted task metadata bytes"
+  assert_contains "$out" 'digest_status_tail_files=2 lines_per_file=0 bytes=0 estimated_tokens=0' \
+    "report default did not match the digest's on-demand status default (no projected tail bytes)"
+
+  out=$(FM_HOME="$home" FM_SESSION_START_STATUS_TAIL=5 "$BUDGET" report)
   assert_contains "$out" 'digest_status_tail_files=2 lines_per_file=5 bytes=12 estimated_tokens=4' \
-    "report omitted bounded status-tail bytes"
+    "FM_SESSION_START_STATUS_TAIL=5 did not restore the bounded status-tail measurement"
 
   printf 'abcdefabcdefabcdefabcdef\n' > "$home/data/learnings.md"
   out=$(FM_HOME="$home" "$BUDGET" report)

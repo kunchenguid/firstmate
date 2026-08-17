@@ -6,10 +6,12 @@
 # instead of the six-plus separate reads the old docs required: run
 # fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
 # data/captain.md, data/captain-shared.md, data/learnings.md, then run
-# fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, every state/*.meta,
-# and every state/*.status.
-# Every one of those reads is UNCONDITIONAL at every session start, so they
-# belong in a script, not in N agent turns.
+# fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md and every state/*.meta,
+# and locate every state/*.status for an on-demand pointer (or read a bounded
+# tail when FM_SESSION_START_STATUS_TAIL is positive).
+# The inventory remains unconditional at every session start while status-log
+# contents stay on demand by default, so both belong in one script rather than
+# N agent turns.
 #
 # COMPOSITION, NOT DUPLICATION: this script calls fm-lock.sh, fm-bootstrap.sh,
 # and fm-wake-drain.sh as real subprocesses and prints their real output. It
@@ -40,7 +42,9 @@
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
 #   5. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail, one
+#                       every state/*.meta, one on-demand status pointer per
+#                       task (or a bounded state/*.status tail when
+#                       FM_SESSION_START_STATUS_TAIL is positive), one
 #                       bounded line of checks without matching task metadata,
 #                       state/.afk, a cheap per-task endpoint-liveness read, and
 #                       a bounded contradiction-only comparison of those same
@@ -118,8 +122,13 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 # shellcheck source=bin/fm-record-contradictions-lib.sh
 . "$SCRIPT_DIR/fm-record-contradictions-lib.sh"
 
-STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-5}
-case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=5 ;; esac
+# STATUS TAIL: state/<id>.status is wake-EVENT history, not current state, and
+# bin/fm-crew-state.sh owns current-state reconciliation, so the default digest
+# prints one on-demand pointer line per task instead of projecting every log
+# tail into startup load. FM_SESSION_START_STATUS_TAIL=<n> (n > 0) restores the
+# bounded tail rendering, so rollback is an env var, not a revert.
+STATUS_TAIL=${FM_SESSION_START_STATUS_TAIL:-0}
+case "$STATUS_TAIL" in ''|*[!0-9]*) STATUS_TAIL=0 ;; esac
 BACKLOG_LIMIT=${FM_SESSION_START_BACKLOG_LIMIT:-80}
 case "$BACKLOG_LIMIT" in ''|*[!0-9]*|0) BACKLOG_LIMIT=80 ;; esac
 STANDING_CHECK_LIMIT=20
@@ -228,10 +237,25 @@ print_backlog_compact() {
   fi
 }
 
-print_status_tail() {
-  local status=$1
-  printf 'status tail (last %s line(s), wake-EVENT history, not current state; full log: %s):\n' "$STATUS_TAIL" "$status"
-  tail -n "$STATUS_TAIL" "$status"
+status_tail_projection_enabled() {
+  [ "$STATUS_TAIL" -gt 0 ]
+}
+
+# print_status_line <status> [<crew-state-id>]: the per-task status surface.
+# Default: one pointer line naming the full wake-event log and, when task
+# metadata exists, the bin/fm-crew-state.sh read that answers current state on
+# demand (without metadata that reader reports unknown, so an orphan log gets
+# the path only). With the tail knob set, the bounded tail renders as before.
+print_status_line() {
+  local status=$1 id=${2:-}
+  if status_tail_projection_enabled; then
+    printf 'status tail (last %s line(s), wake-EVENT history, not current state; full log: %s):\n' "$STATUS_TAIL" "$status"
+    tail -n "$STATUS_TAIL" "$status"
+  elif [ -n "$id" ]; then
+    printf 'status: wake-event log on demand (full log: %s); current state: bin/fm-crew-state.sh %s\n' "$status" "$id"
+  else
+    printf 'status: wake-event log on demand (full log: %s)\n' "$status"
+  fi
 }
 
 file_mtime_epoch() {
@@ -453,9 +477,9 @@ for meta in "$STATE"/*.meta; do
 
   status="$STATE/$id.status"
   if [ -f "$status" ]; then
-    print_status_tail "$status"
+    print_status_line "$status" "$id"
   else
-    printf 'status tail: (no status file yet: %s)\n' "$status"
+    printf 'status: (no status file yet: %s); current state: bin/fm-crew-state.sh %s\n' "$status" "$id"
   fi
   fm_record_contradictions_observe_meta "$meta" "$id" "$endpoint" "$STATE"
 done
@@ -471,7 +495,7 @@ for status in "$STATE"/*.status; do
   [ -f "$STATE/$id.meta" ] && continue
   ORPHAN_STATUS_FOUND=1
   printf '\n--- %s ---\n' "$id"
-  print_status_tail "$status"
+  print_status_line "$status"
   fm_record_contradictions_observe_orphan "$status" "$id"
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
@@ -543,9 +567,22 @@ data/captain-shared.md, data/learnings.md,
 or state/*.meta now - they were just printed in full.
 Do NOT bulk-read data/backlog.md now either: the compact identity/metadata
 listing was just printed with a pointer for targeted full-body follow-up.
+EOF
+if status_tail_projection_enabled; then
+  cat <<'EOF'
 Do NOT bulk-read state/*.status now either: their bounded tails were just
 printed with full log paths for targeted follow-up when older wake-event
-history is actually needed. Re-reading everything defeats the entire point
+history is actually needed.
+EOF
+else
+  cat <<'EOF'
+Do NOT bulk-read state/*.status now either: each task's status line above
+names its full log path, and bin/fm-crew-state.sh <id> answers current state
+on demand.
+EOF
+fi
+cat <<'EOF'
+Re-reading everything defeats the entire point
 of this command. Re-read a file only if this digest flagged it ABSENT (then
 rebuild or create it per AGENTS.md), its contents looked unparseable/corrupt,
 or an individual full status log is needed for older wake-event history.

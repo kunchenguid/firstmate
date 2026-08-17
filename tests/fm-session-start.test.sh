@@ -11,7 +11,8 @@
 #   - output section ordering: diagnostics/banners lead, bulk file dumps follow
 #   - context-aware next-step guidance for read-only, AFK, X mode, and normal
 #     watcher ownership
-#   - status-tail bounding, default and FM_SESSION_START_STATUS_TAIL override
+#   - on-demand status pointer default, FM_SESSION_START_STATUS_TAIL tail
+#     restore and bounding, and the switch-predicate oracle plus mutation kills
 #   - orphan status logs whose task meta has already disappeared
 #   - contradictions across backlog, metadata, status, endpoint, and PR reality
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
@@ -27,6 +28,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
+# An operator's documented rollback export (FM_SESSION_START_STATUS_TAIL=5)
+# would false-red every default-mode assertion below. Dropped here rather than
+# with `env -u` in run_session_start, which would also strip the per-call
+# FM_SESSION_START_STATUS_TAIL=<n> prefixes the tail cases depend on.
+unset FM_SESSION_START_STATUS_TAIL
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 NODE_BIN=$(command -v node) || fail "test needs node"
 JQ_BIN=$(command -v jq) || fail "test needs jq"
@@ -966,22 +972,34 @@ EOF
   make_fake_tmux "$fakebin" "fm-sess:live"
 
   printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-a.meta"
+  printf 'kind=ship\n' > "$home/state/task-b.meta"
   printf 'working: step 1\nworking: step 2\nworking: step 3\nworking: step 4\nworking: step 5\nworking: step 6\nworking: step 7\n' \
     > "$home/state/task-a.status"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "working: step 7" "default status tail missing the most recent line"
-  assert_contains "$out" "working: step 3" "default status tail (5 lines) missing an expected recent line"
-  assert_not_contains "$out" "working: step 1" "default status tail (5 lines) leaked an older line"
-  assert_contains "$out" "$home/state/task-a.status" "digest did not print the full status log path for a deeper read"
-  assert_contains "$out" "Do NOT bulk-read state/*.status now either: their bounded tails were just" "closing reminder does not distinguish bounded status tails"
+  assert_not_contains "$out" "working: step 7" "default digest projected status log content into startup load"
+  assert_not_contains "$out" "status tail (last" "default digest still rendered a status tail"
+  assert_contains "$out" "status: wake-event log on demand (full log: $home/state/task-a.status); current state: bin/fm-crew-state.sh task-a" \
+    "default digest missing the on-demand status pointer line"
+  assert_contains "$out" "status: (no status file yet: $home/state/task-b.status); current state: bin/fm-crew-state.sh task-b" \
+    "metadata-backed task without a status file is missing the current-state pointer"
+  assert_contains "$out" "Do NOT bulk-read state/*.status now either: each task's status line above" \
+    "closing reminder does not describe the on-demand status pointer"
   assert_not_contains "$out" "state/*.status now - they were just" "closing reminder still describes status logs as fully printed"
+
+  out=$(FM_SESSION_START_STATUS_TAIL=5 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "working: step 7" "FM_SESSION_START_STATUS_TAIL=5 tail missing the most recent line"
+  assert_contains "$out" "working: step 3" "FM_SESSION_START_STATUS_TAIL=5 tail missing an expected recent line"
+  assert_not_contains "$out" "working: step 1" "FM_SESSION_START_STATUS_TAIL=5 leaked an older line"
+  assert_contains "$out" "$home/state/task-a.status" "tail rendering did not print the full status log path for a deeper read"
+  assert_contains "$out" "Do NOT bulk-read state/*.status now either: their bounded tails were just" \
+    "tail-mode closing reminder does not describe bounded status tails"
 
   out=$(FM_SESSION_START_STATUS_TAIL=2 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "working: step 7" "FM_SESSION_START_STATUS_TAIL=2 tail missing the most recent line"
   assert_not_contains "$out" "working: step 5" "FM_SESSION_START_STATUS_TAIL=2 did not bound the tail to 2 lines"
 
-  pass "status tail is bounded to the configured line count, with the full log path always printed"
+  pass "status logs are on-demand pointers by default, with FM_SESSION_START_STATUS_TAIL restoring bounded tails"
 }
 
 test_orphan_status_logs_are_printed() {
@@ -1002,6 +1020,13 @@ EOF
 
   assert_contains "$out" "Orphan status logs (state/*.status without matching .meta)" "digest did not label orphan status logs"
   assert_contains "$out" "--- task-orphan ---" "digest did not print the orphan status id"
+  assert_contains "$out" "status: wake-event log on demand (full log: $home/state/task-orphan.status)" \
+    "orphan status line did not name the full log path"
+  assert_not_contains "$out" "bin/fm-crew-state.sh task-orphan" \
+    "orphan status line pointed at fm-crew-state.sh, which reports unknown without task metadata"
+  assert_not_contains "$out" "orphan: step 6" "default digest projected orphan status content"
+
+  out=$(FM_SESSION_START_STATUS_TAIL=5 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "orphan: step 6" "orphan status tail missing the newest line"
   assert_not_contains "$out" "orphan: step 1" "orphan status tail was not bounded"
   assert_contains "$out" "$home/state/task-orphan.status" "orphan status tail did not print the full log path"
@@ -1011,7 +1036,225 @@ EOF
   [ "$matched_count" -eq 1 ] || fail "matched status log was printed $matched_count times: $out"
   [ "$orphan_count" -eq 1 ] || fail "orphan status log was printed $orphan_count times: $out"
 
-  pass "orphan status logs are printed once with bounded tails"
+  pass "orphan status logs surface as on-demand pointers by default and bounded tails on request"
+}
+
+# --- status-tail switch oracle and mutation kills -----------------------------
+#
+# The oracle runs one digest with the default on-demand pointer rendering and
+# one with FM_SESSION_START_STATUS_TAIL=5 against the same fixture home, then
+# asserts that the startup token estimate (ceil(bytes/3), the same estimator as
+# bin/fm-startup-memory-budget.sh) drops by the measured status-tail fraction
+# while the backlog, meta, endpoint-liveness, contradiction, and AFK sections
+# stay byte-equivalent. The mutation harness re-runs that oracle against four
+# mutants of the status_tail_projection_enabled predicate (delete, unreachable,
+# weaken, constant-true) plus an unmutated control, expecting every mutant
+# killed and the control green, with each recorded exit code printed.
+
+status_tail_oracle_section() {  # <output> <start-line-regex> <end-line-regex>
+  printf '%s\n' "$1" | awk -v s="$2" -v e="$3" '
+    !found && $0 ~ s { found=1 }
+    found && $0 ~ e { exit }
+    found { print }
+  '
+}
+
+status_tail_oracle_meta_blocks() {  # <output>: meta contents + endpoint lines only
+  printf '%s\n' "$1" | awk '
+    /^Work under way \(state\/\*\.meta\)$/ { insub=1; next }
+    insub && /^Orphan status logs/ { exit }
+    insub && /^--- / { inblock=1 }
+    inblock && /^status/ { inblock=0; next }
+    inblock { print }
+  '
+}
+
+status_tail_oracle() {  # <session-start-bin> <home> <root> <path>
+  local bin=$1 home=$2 root=$3 path=$4 off on file tail_bytes=0 chunk
+  local bytes_off bytes_on est_off est_on tail_est drop allow=200 side a b
+  # One discarded warm-up run absorbs first-run-only bootstrap output (sweep
+  # markers, config materialization) so the two measured runs differ only in
+  # the status rendering under test.
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u FM_SESSION_START_STATUS_TAIL \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$bin" >/dev/null 2>&1
+  off=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u FM_SESSION_START_STATUS_TAIL \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$bin")
+  on=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_SESSION_START_STATUS_TAIL=5 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$bin")
+
+  case "$off" in
+    *"status: wake-event log on demand (full log: $home/state/task-a.status); current state: bin/fm-crew-state.sh task-a"*) : ;;
+    *) printf 'oracle: default run missing the task-a on-demand pointer line\n'; return 1 ;;
+  esac
+  case "$off" in
+    *"status: wake-event log on demand (full log: $home/state/task-b.status); current state: bin/fm-crew-state.sh task-b"*) : ;;
+    *) printf 'oracle: default run missing the task-b on-demand pointer line\n'; return 1 ;;
+  esac
+  case "$off" in
+    *"status: wake-event log on demand (full log: $home/state/task-orphan.status)"*) : ;;
+    *) printf 'oracle: default run missing the orphan on-demand pointer line\n'; return 1 ;;
+  esac
+  case "$off" in
+    *'bin/fm-crew-state.sh task-orphan'*) printf 'oracle: default run pointed fm-crew-state.sh at a metadata-less orphan\n'; return 1 ;;
+  esac
+  case "$off" in
+    *TAILMARK*) printf 'oracle: default run projected status log content\n'; return 1 ;;
+  esac
+  case "$off" in
+    *'status tail (last'*) printf 'oracle: default run still rendered a status tail\n'; return 1 ;;
+  esac
+  case "$off" in
+    *"each task's status line above"*) : ;;
+    *) printf 'oracle: default run missing the on-demand closing reminder\n'; return 1 ;;
+  esac
+
+  case "$on" in
+    *TAILMARK-a-8*) : ;;
+    *) printf 'oracle: tail run missing the newest status line\n'; return 1 ;;
+  esac
+  case "$on" in
+    *TAILMARK-a-4*) : ;;
+    *) printf 'oracle: tail run missing an expected in-tail line\n'; return 1 ;;
+  esac
+  case "$on" in
+    *TAILMARK-a-3*) printf 'oracle: tail run leaked a line older than the bound\n'; return 1 ;;
+  esac
+  case "$on" in
+    *'status tail (last 5 line(s)'*) : ;;
+    *) printf 'oracle: tail run missing the bounded tail header\n'; return 1 ;;
+  esac
+  case "$on" in
+    *'their bounded tails were just'*) : ;;
+    *) printf 'oracle: tail run missing the bounded-tail closing reminder\n'; return 1 ;;
+  esac
+
+  for side in backlog meta contradictions afk; do
+    case "$side" in
+      backlog)
+        a=$(status_tail_oracle_section "$off" '^data/backlog.md$' '^Work under way')
+        b=$(status_tail_oracle_section "$on" '^data/backlog.md$' '^Work under way')
+        ;;
+      meta)
+        a=$(status_tail_oracle_meta_blocks "$off")
+        b=$(status_tail_oracle_meta_blocks "$on")
+        case "$a" in
+          *'endpoint: alive'*) : ;;
+          *) printf 'oracle: meta/liveness extraction lost the endpoint line (vacuous compare)\n'; return 1 ;;
+        esac
+        ;;
+      contradictions)
+        a=$(status_tail_oracle_section "$off" '^RECORD CONTRADICTIONS$' '^AFK$')
+        b=$(status_tail_oracle_section "$on" '^RECORD CONTRADICTIONS$' '^AFK$')
+        case "$a" in
+          *'RECORD CONTRADICTIONS'*) : ;;
+          *) printf 'oracle: contradiction extraction came back empty (vacuous compare)\n'; return 1 ;;
+        esac
+        ;;
+      afk)
+        a=$(status_tail_oracle_section "$off" '^AFK$' '^==========')
+        b=$(status_tail_oracle_section "$on" '^AFK$' '^==========')
+        ;;
+    esac
+    if [ "$a" != "$b" ]; then
+      printf 'oracle: %s section is not byte-equivalent across the two runs\n--- default ---\n%s\n--- tail ---\n%s\n' "$side" "$a" "$b"
+      return 1
+    fi
+  done
+
+  for file in "$home/state/task-a.status" "$home/state/task-b.status" "$home/state/task-orphan.status"; do
+    chunk=$(tail -n 5 "$file" | wc -c | tr -d '[:space:]')
+    tail_bytes=$((tail_bytes + chunk))
+  done
+  bytes_off=$(printf '%s' "$off" | wc -c | tr -d '[:space:]')
+  bytes_on=$(printf '%s' "$on" | wc -c | tr -d '[:space:]')
+  est_off=$(((bytes_off + 2) / 3))
+  est_on=$(((bytes_on + 2) / 3))
+  tail_est=$(((tail_bytes + 2) / 3))
+  drop=$((est_on - est_off))
+  if [ "$drop" -lt $((tail_est - allow)) ]; then
+    printf 'oracle: startup token estimate dropped by %s, below the status-tail fraction %s\n' "$drop" "$tail_est"
+    return 1
+  fi
+  if [ "$drop" -gt $((tail_est + allow)) ]; then
+    printf 'oracle: startup token estimate dropped by %s, more than the status-tail fraction %s - a non-tail section shrank\n' "$drop" "$tail_est"
+    return 1
+  fi
+  return 0
+}
+
+test_status_tail_switch_oracle_and_mutations() {
+  local rec root home fakebin w n body out rc
+  local class mutant_body mbin killed codes
+  rec=$(new_world status-tail-oracle)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  w=$(dirname "$root")
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" "fm-sess:live"
+  # The mutant bin copies resolve docs/supervision-protocols from their own
+  # parent directory (fm-supervision-instructions.sh REPO_ROOT), so mirror it.
+  mkdir -p "$w/docs"
+  cp -R "$ROOT/docs/supervision-protocols" "$w/docs/"
+
+  printf 'window=fm-sess:live\nkind=ship\n' > "$home/state/task-a.meta"
+  printf 'kind=ship\n' > "$home/state/task-b.meta"
+  body=$(printf 'x%.0s' $(seq 1 180))
+  for id in a b orphan; do
+    : > "$home/state/task-$id.status"
+    for n in 1 2 3 4 5 6 7 8; do
+      printf 'working: TAILMARK-%s-%s %s\n' "$id" "$n" "$body" >> "$home/state/task-$id.status"
+    done
+  done
+
+  codes=''
+  killed=0
+  for class in control delete unreachable weaken constant-true; do
+    case "$class" in
+      control) mutant_body='' ;;
+      delete) mutant_body=':' ;;
+      unreachable) mutant_body='return 1' ;;
+      weaken) mutant_body="[ \"\$STATUS_TAIL\" -ge 0 ]" ;;
+      constant-true) mutant_body='true' ;;
+    esac
+    mbin="$w/mutant-bin-$class"
+    rm -rf "$mbin"
+    cp -R "$ROOT/bin" "$mbin"
+    if [ -n "$mutant_body" ]; then
+      awk -v body="$mutant_body" '
+        /^status_tail_projection_enabled\(\)[[:space:]]*\{/ {
+          print
+          print "  " body
+          replacing=1
+          next
+        }
+        replacing && /^[[:space:]]*}/ { print; replacing=0; next }
+        replacing { next }
+        { print }
+      ' "$ROOT/bin/fm-session-start.sh" > "$mbin/fm-session-start.sh" \
+        || fail "mutation $class: predicate replacement failed"
+      chmod +x "$mbin/fm-session-start.sh"
+    fi
+    rc=0
+    out=$(status_tail_oracle "$mbin/fm-session-start.sh" "$home" "$root" "$fakebin:$BASE_PATH") || rc=$?
+    codes="$codes $class=$rc"
+    if [ "$class" = control ]; then
+      [ "$rc" -eq 0 ] || fail "control (unmutated) oracle failed (exit $rc): $out"
+    else
+      if [ "$rc" -eq 0 ]; then
+        fail "mutant $class survived the oracle (exit 0)"
+      fi
+      killed=$((killed + 1))
+    fi
+  done
+  printf '# status-tail mutation exit codes:%s\n' "$codes"
+  [ "$killed" -eq 4 ] || fail "expected 4 killed mutants, got $killed"
+
+  pass "status-tail switch oracle holds token-drop and byte-equivalence, and kills all four predicate mutants"
 }
 
 contradiction_section() {
@@ -1709,6 +1952,7 @@ test_session_start_preserves_proven_bare_shell_recovery
 test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_orphan_status_logs_are_printed
+test_status_tail_switch_oracle_and_mutations
 test_record_contradictions_are_bounded_and_silent_when_consistent
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr

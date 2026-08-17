@@ -2119,7 +2119,9 @@ if (!promptBody.includes("TURN WOULD END BLIND")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm"
+  # The script reports which invariant broke on stderr, so a bare exit code
+  # would discard the only evidence this failure ever produces.
+  expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm: $out"
   [ -z "$out" ] || fail "OpenCode external-healthy test printed output: $out"
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
