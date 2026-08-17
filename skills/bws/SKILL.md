@@ -63,7 +63,8 @@ bws secret get <SECRET_ID> -o json | "$HELPER" redact-json
 
 `probe` prints `status=`, `version=`, and `token_present=` only.
 Treat `token_present=yes` as "a token or profile may exist", never as proof the token is valid.
-Only `status=authenticated` means read access succeeded.
+Only `status=authenticated` means the project-list authentication probe succeeded.
+It does not prove access to any particular project or permission to write.
 `status=no_token`, `invalid_token`, `forbidden`, `unavailable`, and `indeterminate` are not success.
 
 ## Authentication without exposure
@@ -85,13 +86,13 @@ Do not troubleshoot by echoing token material.
 | `command -v bws` fails | CLI absent |
 | `status=no_token` | No usable access token |
 | `status=invalid_token` | Token present but rejected |
-| `status=authenticated` and read commands succeed | Read access OK for at least one project |
+| `status=authenticated` | The project-list probe succeeded; project-specific access and writes remain unverified |
 | `status=forbidden` on list | Token valid but lacks project access or is read-only beyond list |
 | `resolve-id` exit 1 | Secret key absent in that project |
 | `resolve-id` exit 2 | Duplicate secret names; do not mutate by name alone |
 | Write command non-zero after explicit authority | Write denied, wrong project, or target mismatch; never report success |
 
-Read-only service accounts succeed at `project list` and `secret list` but fail create, edit, or delete.
+Read-only service accounts can succeed at `project list` and `secret list` for accessible projects while create, edit, and delete fail.
 Verify writes by exit code and post-change metadata, never by echoing values.
 
 ## Safe listing and inspection
@@ -105,7 +106,7 @@ bws project get <PROJECT_ID> -o json
 ```
 
 Prefer `-o table` or `list-metadata` for human review.
-Default JSON includes values; pipe through `redact-json` before logging or chat.
+Secret JSON includes values; pipe it through `redact-json` before logging or chat.
 
 Preserve identities separately:
 
@@ -134,9 +135,10 @@ Create or update only with current explicit authority naming the project and sec
 3. Resolve duplicates before create; prefer `secret edit <SECRET_ID>` over ambiguous name-only updates.
 4. Create: `bws secret create <KEY> <VALUE> <PROJECT_ID> [--note <NOTE>]`
 5. Update: `bws secret edit <SECRET_ID> [--key <KEY>] [--value <VALUE>] [--note <NOTE>] [--project-id <PROJECT_ID>]`
-6. Pass values through env vars or stdin wrappers, never through chat or committed files.
-7. Verify with `"$HELPER" list-metadata <PROJECT_ID>` or `bws secret get <SECRET_ID> -o json | "$HELPER" redact-json`.
-8. A non-zero exit code is failure even when partial output appeared; never report success without verification.
+6. The current CLI takes secret values as command arguments, so keep the value in a preconfigured environment variable and invoke the command only through a trusted shell or wrapper that does not record expanded arguments.
+7. Never place the value itself in chat, a tool-call command, a transcript, or a committed file.
+8. Verify with `"$HELPER" list-metadata <PROJECT_ID>` or `bws secret get <SECRET_ID> -o json | "$HELPER" redact-json`.
+9. A non-zero exit code is failure even when partial output appeared; never report success without verification.
 
 Rotation is an edit of `SECRET_ID` with a new value, then the same redacted verification.
 
