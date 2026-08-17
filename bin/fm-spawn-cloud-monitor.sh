@@ -118,10 +118,15 @@ dispatch_converged_execute() {
     wall=${FM_SPAWN_CLOUD_WALL_SECONDS:-3600}
     case "$wall" in ''|*[!0-9]*) wall=3600 ;; esac
     echo "cloud-crewmate $ID: reconcile converged assignment $assignment; dispatching bounded execute"
+    payload_args=()
+    if [ -d "$STATE/$ID.cloud-payload" ] && [ -d "$STATE/$ID.cloud-account" ]; then
+      payload_args=(--payload-dir "$STATE/$ID.cloud-payload" --account-dir "$STATE/$ID.cloud-account")
+    fi
     nohup env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-worker-lifecycle.sh" execute \
       --task "$ID" --task-generation "$GENERATION" \
       --assignment-generation "$assignment" --wall-seconds "$wall" \
+      ${payload_args[@]+"${payload_args[@]}"} \
       --confirm-execute --confirm-subscription "${FM_AZURE_SUBSCRIPTION_ID:-}" \
       -- /bin/bash -lc "$entry" \
       > "$RESULT" 2> "$EXEC_LOG" < /dev/null &

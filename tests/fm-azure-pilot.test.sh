@@ -38,6 +38,37 @@ assert data["parameters"]["reservedLandingVcpus"]["defaultValue"] == 62
 assert data["parameters"]["commissioningBudgetCeilingUsd"]["defaultValue"] == 1500
 assert data["parameters"]["steadyStateBudgetTargetUsd"]["defaultValue"] == 1000
 assert data["parameters"]["runnerValidationSku"]["defaultValue"] == "Standard_D4as_v6"
+
+# Worker runtime image: opt-in gallery image for author workers only, inert
+# by default, threaded through the nested deployment, and never applied to
+# the supervisor's own image reference.
+assert data["parameters"]["workerImageId"]["defaultValue"] == ""
+nested = next(
+    item for item in data["resources"]
+    if item["type"] == "Microsoft.Resources/deployments"
+    and "firstmate-pilot-resources" in json.dumps(item["name"])
+)
+inner = nested["properties"]["template"]
+assert inner["parameters"]["workerImageId"]["defaultValue"] == ""
+assert nested["properties"]["parameters"]["workerImageId"] == {"value": "[parameters('workerImageId')]"}
+def inner_vms(resources):
+    for item in resources:
+        if item.get("type") == "Microsoft.Compute/virtualMachines":
+            yield item
+        yield from inner_vms(item.get("resources", []))
+supervisor_vm = next(
+    item for item in inner_vms(inner["resources"]) if "supervisorVmName" in json.dumps(item["name"])
+)
+worker_vm = next(
+    item for item in inner_vms(inner["resources"]) if "-wkr-" in json.dumps(item["name"])
+)
+supervisor_ref = supervisor_vm["properties"]["storageProfile"]["imageReference"]
+assert supervisor_ref["publisher"] == "Canonical", "the supervisor image must stay marketplace-pinned"
+worker_ref = worker_vm["properties"]["storageProfile"]["imageReference"]
+assert isinstance(worker_ref, str)
+assert "if(equals(parameters('workerImageId'), '')" in worker_ref
+assert "'publisher', 'Canonical'" in worker_ref
+assert "createObject('id', parameters('workerImageId'))" in worker_ref
 reviewed_worker_skus = {
     "Standard_D4as_v6", "Standard_D4as_v7", "Standard_D4s_v6",
     "Standard_D4ads_v7", "Standard_D4ads_v6", "Standard_E4as_v7",

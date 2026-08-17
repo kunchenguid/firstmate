@@ -1544,6 +1544,8 @@ def parser():
     execute.add_argument("--task-generation", required=True)
     execute.add_argument("--assignment-generation", required=True)
     execute.add_argument("--wall-seconds", type=int, default=3600)
+    execute.add_argument("--payload-dir", default=None)
+    execute.add_argument("--account-dir", default=None)
     execute.add_argument("--confirm-execute", action="store_true")
     execute.add_argument("--confirm-subscription", required=True)
     execute.add_argument("argv", nargs=argparse.REMAINDER)
@@ -2010,6 +2012,53 @@ def command_capacity_release(env, args):
     print("specialized capacity reservation released after exact zero-compute proof")
 
 
+PAYLOAD_FILE_BOUNDS = {
+    "repo.bundle": 512 * 1024 * 1024,
+    "brief.md": 256 * 1024,
+}
+ACCOUNT_TOTAL_BOUND = 1024 * 1024
+
+
+def staged_directory_manifest(label, directory, bounds=None, total_bound=None, required=()):
+    """Digest one flat staging directory into {name: {sha256, bytes}}.
+
+    The manifest (not the file paths) enters the digest-bound execution
+    request, so the guest can verify every staged byte; the provider carries
+    the local directory separately for transport.
+    """
+    root = Path(directory)
+    if root.is_symlink() or not root.is_dir():
+        raise LifecycleError("{} staging directory is unavailable: {}".format(label, directory))
+    manifest = {}
+    total = 0
+    for entry in sorted(root.iterdir()):
+        if entry.name.startswith("."):
+            continue
+        if entry.is_symlink() or not entry.is_file():
+            raise LifecycleError("{} staging entry is not a regular file: {}".format(label, entry.name))
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", entry.name):
+            raise LifecycleError("{} staging entry name is unsupported: {}".format(label, entry.name))
+        body = entry.read_bytes()
+        bound = (bounds or {}).get(entry.name)
+        if bounds is not None and bound is None:
+            raise LifecycleError("{} staging entry is not in the reviewed set: {}".format(label, entry.name))
+        if bound is not None and len(body) > bound:
+            raise LifecycleError("{} staging entry exceeds its byte bound: {}".format(label, entry.name))
+        total += len(body)
+        manifest[entry.name] = {
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "bytes": len(body),
+        }
+    if not manifest:
+        raise LifecycleError("{} staging directory is empty: {}".format(label, directory))
+    for name in required:
+        if name not in manifest:
+            raise LifecycleError("{} staging directory lacks required {}".format(label, name))
+    if total_bound is not None and total > total_bound:
+        raise LifecycleError("{} staging directory exceeds its total byte bound".format(label))
+    return manifest
+
+
 def command_execute(env, args):
     if not args.confirm_execute:
         raise LifecycleError("--confirm-execute is required")
@@ -2022,6 +2071,17 @@ def command_execute(env, args):
         raise LifecycleError("execution argv is empty or unbounded")
     if not 1 <= args.wall_seconds <= 6 * 60 * 60:
         raise LifecycleError("execution wall deadline must be between 1 and 21600 seconds")
+    if (args.payload_dir is None) != (args.account_dir is None):
+        raise LifecycleError("payload and account staging directories travel together or not at all")
+    payload_manifest = account_manifest = None
+    if args.payload_dir is not None:
+        payload_manifest = staged_directory_manifest(
+            "payload", args.payload_dir, bounds=PAYLOAD_FILE_BOUNDS,
+            required=("repo.bundle", "brief.md"),
+        )
+        account_manifest = staged_directory_manifest(
+            "account", args.account_dir, total_bound=ACCOUNT_TOTAL_BOUND,
+        )
     with controller_lock(env):
         state = load_state(env)
         key = request_key(require_id("task", args.task), require_id("task generation", args.task_generation))
@@ -2045,6 +2105,9 @@ def command_execute(env, args):
             "argv": argv,
             "wall_seconds": args.wall_seconds,
         }
+        if payload_manifest is not None:
+            request["payload_files"] = payload_manifest
+            request["account_files"] = account_manifest
         request["request_digest"] = digest_value(request)
         existing = state["executions"].get(request["request_digest"])
         if existing is not None:
@@ -2054,6 +2117,9 @@ def command_execute(env, args):
             env, "execute", worker=worker, request=request,
             request_digest=request["request_digest"],
         )
+        if payload_manifest is not None:
+            action["payload_dir"] = str(Path(args.payload_dir).resolve())
+            action["account_dir"] = str(Path(args.account_dir).resolve())
         execute_action(env, state, action)
         result = state["executions"][request["request_digest"]]
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))

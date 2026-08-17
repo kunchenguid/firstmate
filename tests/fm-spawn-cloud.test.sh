@@ -321,6 +321,11 @@ make_cloud_case() {
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" "$home/treehouse-pools" \
     "$case_dir/codex-home" "$case_dir/pi-agent-home"
   chmod 755 "$case_dir"
+  # Cloud dispatch packages the pi provider-account material for the worker's
+  # encrypted account disk; the hermetic account home carries a fixture
+  # credential so the persist step has something real to digest.
+  printf '{"openai-codex":{"accountId":"fixture-account"}}\n' > "$case_dir/pi-agent-home/auth.json"
+  chmod 600 "$case_dir/pi-agent-home/auth.json"
   printf '%s\n' codex > "$home/config/crew-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
   fm_git_init_commit "$project"

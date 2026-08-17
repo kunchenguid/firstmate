@@ -23,6 +23,14 @@ SHELLCHECK_DIGEST=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e2271
 UV_URL=https://github.com/astral-sh/uv/releases/download/0.9.10/uv-x86_64-unknown-linux-gnu.tar.gz
 UV_BYTES=21427164
 UV_DIGEST=440c4215b171e64061d65d16a23753dd25c29a7f7b1b0446c9e9aed0fa372f27
+# Crewmate runtime closure: the pi coding agent, installed globally from its
+# digest-pinned registry tarball at bake time. Dependencies resolve through
+# npm's own integrity metadata; --ignore-scripts keeps every dependency's
+# lifecycle script out of the bake (pi 0.84.1 ships prebuilt natives and
+# declares no install scripts of its own).
+PI_URL=https://registry.npmjs.org/@earendil-works/pi-coding-agent/-/pi-coding-agent-0.84.1.tgz
+PI_BYTES=5103866
+PI_DIGEST=a69a18596017e91955fd0fd677be69fab5b6ea01d5b06207bcee34ee1522bc20
 
 command=${1:-}
 shift || true
@@ -76,12 +84,30 @@ curl -fsSL --max-filesize $SHELLCHECK_BYTES -o /opt/fm-tools/shellcheck.tar.xz "
 echo "$SHELLCHECK_DIGEST  /opt/fm-tools/shellcheck.tar.xz" | sha256sum -c -
 curl -fsSL --max-filesize $UV_BYTES -o /opt/fm-tools/uv.tar.gz "$UV_URL"
 echo "$UV_DIGEST  /opt/fm-tools/uv.tar.gz" | sha256sum -c -
+# Crewmate runtime: pi from the digest-pinned tarball onto the system node 22.
+curl -fsSL --max-filesize $PI_BYTES -o /opt/fm-tools/pi-coding-agent.tgz "$PI_URL"
+echo "$PI_DIGEST  /opt/fm-tools/pi-coding-agent.tgz" | sha256sum -c -
+npm install -g --ignore-scripts /opt/fm-tools/pi-coding-agent.tgz
+test -x "\$(command -v pi)"
+installed=\$(node -p "require('/usr/lib/node_modules/@earendil-works/pi-coding-agent/package.json').version")
+test "\$installed" = 0.84.1
 apt-get clean
 waagent -deprovision+user -force
+echo FM-BAKE-COMPLETE
 EOF
 echo "fm-azure-cell-image: baking (packages + closure)" >&2
-az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$BUILDER" \
-  --command-id RunShellScript --scripts @"$BAKE" --output none
+# The invoke returns rc 0 regardless of the guest script's exit; the
+# terminal marker is the only proof the whole bake actually ran.
+BAKE_MESSAGE=$(az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$BUILDER" \
+  --command-id RunShellScript --scripts @"$BAKE" --query "value[0].message" -o tsv)
+case "$BAKE_MESSAGE" in
+  *FM-BAKE-COMPLETE*) ;;
+  *)
+    printf '%s\n' "$BAKE_MESSAGE" | tail -40 >&2
+    echo "fm-azure-cell-image: guest bake script did not complete; refusing to capture" >&2
+    exit 1
+    ;;
+esac
 
 echo "fm-azure-cell-image: capturing image $IMAGE" >&2
 az vm deallocate --resource-group "$RESOURCE_GROUP" --name "$BUILDER" --output none

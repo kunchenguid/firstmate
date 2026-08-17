@@ -281,11 +281,13 @@ required_parameters = {
     "workerHomeBinding", "workerTaskBinding", "workerInvocationBinding",
     "workerSnapshotDigest", "workerCostAttribution", "requiredRegionalFreeVcpus", "requiredAuthorFamilyFreeVcpus",
     "reservedLandingVcpus", "workerSlots", "commissioningBudgetCeilingUsd",
-    "steadyStateBudgetTargetUsd", "workerHourPlanningThreshold",
+    "steadyStateBudgetTargetUsd", "workerHourPlanningThreshold", "workerImageId",
 }
 missing = sorted(required_parameters - set(data.get("parameters", {})))
 if missing:
     raise SystemExit("template parameters missing: " + ", ".join(missing))
+if data["parameters"]["workerImageId"].get("defaultValue") != "":
+    raise SystemExit("worker image must default to the Canonical marketplace base")
 if data["parameters"]["capacityProfile"].get("defaultValue") != "foundation":
     raise SystemExit("foundation must be the immediate deployment profile")
 if data["parameters"]["authorCapacityMode"].get("defaultValue") != "mixed-current":
@@ -595,6 +597,7 @@ values = {
     "workerInvocationBinding": os.environ.get("FM_AZURE_WORKER_INVOCATION_BINDING", "unbound"),
     "workerSnapshotDigest": os.environ.get("FM_AZURE_WORKER_SNAPSHOT_DIGEST", "unbound"),
     "workerCostAttribution": os.environ.get("FM_AZURE_WORKER_COST_ATTRIBUTION", "author"),
+    "workerImageId": os.environ.get("FM_AZURE_WORKER_IMAGE_ID", ""),
     "protectDurableState": os.environ.get("FM_AZURE_PROTECT_DURABLE_STATE", "0") == "1",
     "herdrRelease": "",
     "herdrArtifactUri": "",

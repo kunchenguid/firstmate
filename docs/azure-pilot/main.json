@@ -207,6 +207,13 @@
       "type": "string",
       "defaultValue": "24.04.202608070"
     },
+    "workerImageId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional gallery image version resource id for author worker VMs; empty keeps the Canonical marketplace base. Supervisor and pilot compute never take this image."
+      }
+    },
     "runnerValidationSku": {
       "type": "string",
       "defaultValue": "Standard_D4as_v6",
@@ -412,6 +419,9 @@
           },
           "operatorDataPlaneIp": {
             "value": "[parameters('operatorDataPlaneIp')]"
+          },
+          "workerImageId": {
+            "value": "[parameters('workerImageId')]"
           }
         },
         "template": {
@@ -474,6 +484,10 @@
             },
             "ubuntuImageVersion": {
               "type": "string"
+            },
+            "workerImageId": {
+              "type": "string",
+              "defaultValue": ""
             },
             "workerHomeBinding": {
               "type": "string"
@@ -1570,12 +1584,7 @@
                   }
                 },
                 "storageProfile": {
-                  "imageReference": {
-                    "publisher": "Canonical",
-                    "offer": "ubuntu-24_04-lts",
-                    "sku": "server",
-                    "version": "[parameters('ubuntuImageVersion')]"
-                  },
+                  "imageReference": "[if(equals(parameters('workerImageId'), ''), createObject('publisher', 'Canonical', 'offer', 'ubuntu-24_04-lts', 'sku', 'server', 'version', parameters('ubuntuImageVersion')), createObject('id', parameters('workerImageId')))]",
                   "osDisk": {
                     "name": "[format('disk-{0}-wkr-{1}-os', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
                     "createOption": "FromImage",

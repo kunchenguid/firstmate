@@ -9,12 +9,16 @@ result.  It has no fleet, secondmate, browser, network, or child-worker API.
 
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import tarfile
 import tempfile
+import urllib.request
 
 
 SCHEMA = "fm.worker-execution/v1"
@@ -104,6 +108,120 @@ def bounded(value):
     if len(value) <= MAX_OUTPUT_BYTES:
         return value, False
     return value[:MAX_OUTPUT_BYTES], True
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise SupervisorError("staging fetch was redirected, which is refused")
+
+
+MAX_ARCHIVE_BYTES = 600 * 1024 * 1024
+SAFE_STAGED_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def fetch_archive(label):
+    """Fetch one staged archive named by the launch environment and verify it
+    byte-for-byte against the digest the digest-bound request carries."""
+    prefix = "FM_WORKER_{}_".format(label.upper())
+    url = os.environ.get(prefix + "URL", "")
+    expected_digest = os.environ.get(prefix + "SHA256", "")
+    expected_bytes = os.environ.get(prefix + "BYTES", "")
+    if not url.startswith("https://") or not HEX.match(expected_digest) or not expected_bytes.isdigit():
+        raise SupervisorError("{} staging environment is incomplete".format(label))
+    size = int(expected_bytes)
+    if not 0 < size <= MAX_ARCHIVE_BYTES:
+        raise SupervisorError("{} staging archive size is unbounded".format(label))
+    local_source = os.environ.get(prefix + "FILE", "")
+    if local_source:
+        # Hermetic test lane: the archive is supplied as a file instead of a
+        # network fetch; every verification below still runs unchanged.
+        body = Path(local_source).read_bytes()
+    else:
+        # A redirect-refusing opener: the staging endpoint never redirects,
+        # and following one could silently downgrade to plaintext before the
+        # digest check.
+        opener = urllib.request.build_opener(_NoRedirect())
+        try:
+            with opener.open(url, timeout=300) as response:
+                body = response.read(size + 1)
+        except OSError as exc:
+            raise SupervisorError("{} staging fetch failed: {}".format(label, exc))
+    if len(body) != size or hashlib.sha256(body).hexdigest() != expected_digest:
+        raise SupervisorError("{} staging archive differs from its bound digest".format(label))
+    return body
+
+
+def extract_staged_archive(body, manifest, target, label):
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(target, 0o700)
+    seen = set()
+    try:
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as archive:
+            for member in archive.getmembers():
+                if not member.isreg() or not SAFE_STAGED_NAME.match(member.name):
+                    raise SupervisorError("{} staging archive member is unsupported: {}".format(label, member.name))
+                expected = manifest.get(member.name)
+                if not isinstance(expected, dict):
+                    raise SupervisorError("{} staging archive member is not in the bound manifest: {}".format(label, member.name))
+                handle = archive.extractfile(member)
+                content = handle.read() if handle else b""
+                if (
+                    len(content) != expected.get("bytes")
+                    or hashlib.sha256(content).hexdigest() != expected.get("sha256")
+                ):
+                    raise SupervisorError("{} staged file differs from its bound manifest: {}".format(label, member.name))
+                destination = target / member.name
+                destination.write_bytes(content)
+                destination.chmod(0o600)
+                seen.add(member.name)
+    except tarfile.TarError as exc:
+        raise SupervisorError("{} staging archive is malformed: {}".format(label, exc))
+    missing = sorted(set(manifest) - seen)
+    if missing:
+        raise SupervisorError("{} staging archive lacks bound files: {}".format(label, ", ".join(missing)))
+
+
+def stage_payload(request, worktree, account_home):
+    """Materialize the crewmate payload: repository from its bundle, task
+    files, and the provider-account material, all digest-verified."""
+    payload_manifest = request.get("payload_files")
+    account_manifest = request.get("account_files")
+    if payload_manifest is None and account_manifest is None:
+        return worktree
+    if not isinstance(payload_manifest, dict) or not isinstance(account_manifest, dict):
+        raise SupervisorError("payload and account manifests travel together or not at all")
+    staging = worktree / ".fm-task"
+    extract_staged_archive(fetch_archive("payload"), payload_manifest, staging, "payload")
+    account_target = account_home / "pi-agent"
+    extract_staged_archive(fetch_archive("account"), account_manifest, account_target, "account")
+    repo = worktree / "repo"
+    if repo.exists():
+        # Staging only runs when no executed marker exists, so anything at
+        # the target is the debris of an interrupted earlier staging; remove
+        # it rather than wedging every future dispatch of this request.
+        if repo.is_symlink() or not repo.is_dir():
+            raise SupervisorError("staged repository target is not a removable directory")
+        shutil.rmtree(repo)
+    bundle = staging / "repo.bundle"
+    clone = subprocess.run(
+        ["git", "clone", "--quiet", str(bundle), str(repo)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=600, check=False,
+    )
+    if clone.returncode != 0:
+        raise SupervisorError(
+            "staged repository bundle clone failed: {}".format(
+                clone.stderr.decode("utf-8", errors="replace")[-500:]
+            )
+        )
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=60, check=False,
+    )
+    if head.returncode != 0 or head.stdout.decode().strip() != request["repository_generation"]:
+        raise SupervisorError("staged repository head differs from the bound repository generation")
+    return repo
 
 
 def write_atomic(path, value):
@@ -255,6 +373,10 @@ def main():
         write_atomic(args.result, recorded)
         print(json.dumps({"result_digest": recorded["result_digest"]}, separators=(",", ":")))
         return
+    # Staging happens only on a first execution: a controller replay above
+    # re-emits the recorded result without touching the staged repository.
+    account_home = Path(os.environ.get("FM_WORKER_ACCOUNT_HOME", "/nonexistent")).resolve()
+    worktree = stage_payload(request, worktree, account_home)
     result = execute(request, worktree)
     write_atomic(marker, result)
     write_atomic(args.result, result)

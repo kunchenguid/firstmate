@@ -3974,7 +3974,15 @@ fi
 # in CLOUD_WORKER_LAUNCH before the endpoint's own launch string replaces
 # LAUNCH for the tracking pane.
 if [ "$SPAWN_CLOUD" = azure ]; then
-  CLOUD_WORKER_LAUNCH=$LAUNCH
+  # The crewmate entrypoint runs on the worker against a FIXED staged layout
+  # (docs/azure-worker-runtime.md D3): the supervisor clones the shipped
+  # repository bundle to /mnt/task/repo (the execution cwd), places the brief
+  # and the pi extension under /mnt/task/.fm-task/, and stages the provider
+  # account at /mnt/account/pi-agent. The local LAUNCH string is therefore
+  # NOT reused - its paths exist only on this machine. --print keeps the run
+  # bounded and non-interactive under the supervisor's device-null stdin.
+  # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands on the worker, not here
+  CLOUD_WORKER_LAUNCH="env PI_CODING_AGENT_DIR=/mnt/account/pi-agent pi --print --approve --exclude-tools ask_question ${MODELFLAG}${EFFORTFLAG}"'"$(cat /mnt/task/.fm-task/brief.md)"'
   # Cloud state files are keyed by task ID while the queue is keyed
   # ID@GENERATION: a re-spawn of the same task must not inherit the previous
   # generation's result (the monitor would exit on it at once), dispatch
@@ -3984,6 +3992,7 @@ if [ "$SPAWN_CLOUD" = azure ]; then
   rm -f "$STATE/$ID.cloud-entrypoint" "$STATE/$ID.cloud-env" \
     "$STATE/$ID.cloud-execute-dispatched" \
     "$STATE/$ID.worker-result.json" "$STATE/$ID.worker-execute.log"
+  rm -rf "$STATE/$ID.cloud-payload" "$STATE/$ID.cloud-account"
   # The Herdr server starts endpoint panes in its closed environment, so the
   # monitor's own FM_HOME (and any state override the spawn ran with) must
   # travel inside the launch string; without FM_HOME the monitor's
@@ -4275,6 +4284,29 @@ spawn_cloud_persist_convergence_artifacts() {
   (
     umask 077
     printf '%s\n' "$CLOUD_WORKER_LAUNCH" > "$STATE/$ID.cloud-entrypoint" || exit 1
+    # Crewmate payload: the repository as a credential-free bundle of the
+    # leased worktree's exact HEAD, plus the two task files the entrypoint
+    # reads; and the provider-account material the worker stages onto its
+    # encrypted account disk. Both directories are digest-manifested into
+    # the execute request by the lifecycle, so every staged byte is verified
+    # on the guest before the entrypoint runs.
+    install -d -m 0700 "$STATE/$ID.cloud-payload" "$STATE/$ID.cloud-account" || exit 1
+    git -C "$WT" bundle create "$STATE/$ID.cloud-payload/repo.bundle" HEAD >/dev/null 2>&1 || {
+      echo "error: cloud payload repository bundle failed for $ID" >&2
+      exit 1
+    }
+    cp "$DATA/$ID/brief.md" "$STATE/$ID.cloud-payload/brief.md" || exit 1
+    CLOUD_ACCOUNT_SOURCE=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+    if [ ! -f "$CLOUD_ACCOUNT_SOURCE/auth.json" ]; then
+      echo "error: cloud account source lacks auth.json at $CLOUD_ACCOUNT_SOURCE" >&2
+      exit 1
+    fi
+    cp "$CLOUD_ACCOUNT_SOURCE/auth.json" "$STATE/$ID.cloud-account/auth.json" || exit 1
+    chmod 0600 "$STATE/$ID.cloud-account/auth.json"
+    if [ -f "$CLOUD_ACCOUNT_SOURCE/settings.json" ]; then
+      cp "$CLOUD_ACCOUNT_SOURCE/settings.json" "$STATE/$ID.cloud-account/settings.json" || exit 1
+      chmod 0600 "$STATE/$ID.cloud-account/settings.json"
+    fi
     {
       printf 'export FM_SPAWN_CLOUD_WALL_SECONDS=%q\n' "$wall"
       [ -z "${FM_WORKER_PROVIDER_COMMAND:-}" ] \
@@ -4303,8 +4335,10 @@ spawn_cloud_dispatch() {
     --task "$ID" --task-generation "$SPAWN_GENERATION_ID" \
     --owner-kind "$owner_kind" --eligible >&2 || {
     # No durable queue entry exists, so the convergence artifacts have no
-    # owner; remove them with the rolled-back spawn.
+    # owner; remove them (including the copied provider credential) with the
+    # rolled-back spawn.
     rm -f "$STATE/$ID.cloud-entrypoint" "$STATE/$ID.cloud-env"
+    rm -rf "$STATE/$ID.cloud-payload" "$STATE/$ID.cloud-account"
     echo "error: cloud worker request was refused for $ID" >&2
     return 1
   }
@@ -4334,6 +4368,7 @@ spawn_cloud_dispatch() {
   nohup env FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-worker-lifecycle.sh" execute \
     --task "$ID" --task-generation "$SPAWN_GENERATION_ID" \
     --assignment-generation "$assignment" --wall-seconds "$wall" \
+    --payload-dir "$STATE/$ID.cloud-payload" --account-dir "$STATE/$ID.cloud-account" \
     --confirm-execute --confirm-subscription "${FM_AZURE_SUBSCRIPTION_ID:-}" \
     -- /bin/bash -lc "$CLOUD_WORKER_LAUNCH" \
     > "$STATE/$ID.worker-result.json" 2> "$STATE/$ID.worker-execute.log" < /dev/null &

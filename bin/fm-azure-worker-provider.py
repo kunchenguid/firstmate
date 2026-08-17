@@ -10,6 +10,7 @@ disk, account, and worktree identity matches the controller action.
 import contextlib
 import datetime as dt
 import email.utils
+import io
 import fcntl
 import hashlib
 import json
@@ -19,6 +20,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.parse
@@ -1233,6 +1235,75 @@ def upload_json_blob(controller, account, container, name, value, tags, overwrit
     return digest
 
 
+def upload_bytes_blob(controller, account, container, name, payload, tags):
+    digest = hashlib.sha256(payload).hexdigest()
+    fd, path = tempfile.mkstemp(prefix="fm-worker-payload-")
+    os.chmod(path, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        metadata = dict(tags_to_metadata(tags))
+        metadata["content_digest"] = digest
+        _, rc, stderr = az(controller, [
+            "storage", "blob", "upload", "--auth-mode", "login", "--account-name", account,
+            "--container-name", container, "--name", name, "--file", path,
+            "--overwrite", "true", "--metadata",
+        ] + ["{}={}".format(key, value) for key, value in sorted(metadata.items())], check=False)
+        if rc != 0:
+            raise ProviderError("exact worker payload upload failed: {}".format(stderr))
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            Path(path).unlink()
+    return digest
+
+
+def blob_read_sas(controller, account, container, name, expiry_seconds):
+    expiry = (
+        dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=expiry_seconds)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    uri, rc, stderr = az(
+        controller,
+        [
+            "storage", "blob", "generate-sas", "--as-user", "--auth-mode", "login",
+            "--https-only", "--account-name", account, "--container-name", container,
+            "--name", name, "--permissions", "r", "--expiry", expiry,
+            "--full-uri",
+        ],
+        check=False,
+    )
+    if rc != 0 or not isinstance(uri, str) or not uri.strip().startswith("https://"):
+        raise ProviderError("exact worker payload SAS creation failed: {}".format(stderr))
+    return str(uri).strip()
+
+
+def staged_directory_archive(directory, manifest, label):
+    """Deterministic tar of one flat staging directory, verified against the
+    digest-bound request manifest before any byte leaves the controller."""
+    root = Path(directory)
+    if root.is_symlink() or not root.is_dir():
+        raise ProviderError("{} staging directory is unavailable".format(label))
+    seen = {}
+    for name, expected in sorted(manifest.items()):
+        entry = root / name
+        if entry.is_symlink() or not entry.is_file():
+            raise ProviderError("{} staging entry is not a regular file: {}".format(label, name))
+        body = entry.read_bytes()
+        if hashlib.sha256(body).hexdigest() != expected["sha256"] or len(body) != expected["bytes"]:
+            raise ProviderError("{} staging entry differs from its bound manifest: {}".format(label, name))
+        seen[name] = body
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+        for name, body in sorted(seen.items()):
+            info = tarfile.TarInfo(name=name)
+            info.size = len(body)
+            info.mode = 0o600
+            info.mtime = 0
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            archive.addfile(info, io.BytesIO(body))
+    return buffer.getvalue()
+
+
 def run_command_instance_view(controller, vm_name, command_name):
     value, rc, stderr = az(controller, [
         "vm", "run-command", "show", "--resource-group", controller["resource_group"],
@@ -1721,6 +1792,19 @@ def mutate_reset(controller, action):
                 raise ProviderError("conditional {} blob deletion failed: {}".format(kind, stderr))
         else:
             conditional_delete(controller, kind, resource)
+    # The payload and account archives are per-execution transport (their
+    # content is bound through the request manifests, never identity-fenced),
+    # and the account archive fronts provider credentials: both are removed
+    # unconditionally at reset, tolerating absence.
+    for blob_name in ("payload.tar.gz", "account.tar.gz"):
+        _, rc, stderr = az(controller, [
+            "storage", "blob", "delete", "--auth-mode", "login",
+            "--account-name", os.environ.get("FM_AZURE_STORAGE_NAME", ""),
+            "--container-name", expected_names(controller, action["slot"])["state-container"],
+            "--name", blob_name,
+        ], check=False)
+        if rc != 0 and "does not exist" not in stderr and "BlobNotFound" not in stderr:
+            raise ProviderError("staging archive deletion failed for {}: {}".format(blob_name, stderr))
     refreshed = worker_by_slot(inventory(controller, include_metrics=False), action["slot"])
     if refreshed is None:
         raise ProviderError("cleanup marker container disappeared before exact reset completed")
@@ -1768,6 +1852,39 @@ def mutate_execute(controller, action):
         controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
         names["staging-request"], request, tags, overwrite=True,
     )
+    # Crewmate payload plane: the digest-bound request carries only manifests;
+    # the archives ride private blobs and reach the guest over short-lived
+    # read-only user-delegation SAS bounded to the wall plus collection slack.
+    # The SAS URLs travel as PROTECTED run-command parameters: ARM GET and
+    # az vm run-command show return source.script but never protected
+    # parameters, so the account-archive SAS is not readable off the control
+    # plane for its validity window. The managed run-command agent delivers
+    # parameters as environment variables for the script process, which the
+    # supervisor inherits.
+    protected_parameters = []
+    if action.get("payload_dir"):
+        storage = os.environ.get("FM_AZURE_STORAGE_NAME", "")
+        sas_seconds = int(request["wall_seconds"]) + 1800
+        for label, directory, manifest in (
+            ("payload", action["payload_dir"], request["payload_files"]),
+            ("account", action["account_dir"], request["account_files"]),
+        ):
+            archive = staged_directory_archive(directory, manifest, label)
+            blob_name = "{}.tar.gz".format(label)
+            archive_digest = upload_bytes_blob(
+                controller, storage, names["state-container"], blob_name, archive, tags,
+            )
+            sas_url = blob_read_sas(
+                controller, storage, names["state-container"], blob_name, sas_seconds,
+            )
+            if not re.fullmatch(r"https://[A-Za-z0-9.:/_?&=%+-]+", sas_url):
+                raise ProviderError("{} staging SAS carries unsupported characters".format(label))
+            prefix = "FM_WORKER_{}_".format(label.upper())
+            protected_parameters += [
+                prefix + "URL=" + sas_url,
+                prefix + "SHA256=" + archive_digest,
+                prefix + "BYTES=" + str(len(archive)),
+            ]
     request_json = json.dumps(request, sort_keys=True, separators=(",", ":"))
     bindings = action["bindings"]
     script = """set -eu
@@ -1790,11 +1907,14 @@ printf 'FM-WORKER-RESULT:%s\\n' "$(cat /var/lib/firstmate-worker/result.json)"
         repository=bindings["repository_binding"], repository_generation=bindings["repository_generation"],
         cloud=action["cloud_instance_id"],
     )
-    _, rc, stderr = az(controller, [
+    update_command = [
         "vm", "run-command", "update", "--resource-group", controller["resource_group"],
         "--vm-name", names["vm"], "--name", names["task-command"],
         "--script", script, "--async-execution", "false",
-    ], check=False)
+    ]
+    if protected_parameters:
+        update_command += ["--protected-parameters"] + protected_parameters
+    _, rc, stderr = az(controller, update_command, check=False)
     if rc != 0:
         raise ProviderError("exact private worker execution failed: {}".format(stderr))
     # The update response body has no instance view; only the explicit
