@@ -150,7 +150,14 @@ cmd_resolve_id() {
   [ -n "$project_id" ] && [ -n "$key" ] || die_usage "resolve-id requires PROJECT_ID and KEY"
   require_jq
   json=$(run_bws secret list "$project_id" -o json) || exit 3
-  matches=$(jq -r --arg key "$key" '[.[] | select(.key == $key) | .id] | @json' <<<"$json") || exit 3
+  matches=$(jq -r --arg key "$key" '
+    [.[] | select(.key == $key)] as $items
+    | if any($items[]; ((.id | type) != "string") or (.id == "")) then
+        error("matching secret has an invalid id")
+      else
+        [$items[].id] | @json
+      end
+  ' <<<"$json") || exit 3
   count=$(jq 'length' <<<"$matches") || exit 3
   case "$count" in
     0) exit 1 ;;

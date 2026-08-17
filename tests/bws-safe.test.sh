@@ -50,6 +50,9 @@ case "${1:-}" in
         malformed)
           printf '%s\n' '{invalid json'
           ;;
+        invalid_id)
+          printf '%s\n' '[{"id":null,"key":"ONLY","projectId":"proj-1"}]'
+          ;;
         authenticated|read_only)
           printf '%s\n' '[{"id":"only-id","key":"ONLY","value":"secret-value","note":"sensitive-note","projectId":"proj-1"}]'
           ;;
@@ -195,6 +198,17 @@ test_resolve_malformed_json() {
   pass 'resolve-id rejects malformed CLI JSON'
 }
 
+test_resolve_invalid_id() {
+  local rc=0 out
+  set +e
+  out=$(run_with_fake invalid_id env BWS_ACCESS_TOKEN=ok "$HELPER" resolve-id proj-1 ONLY 2>"$TMP_ROOT/invalid-id.err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "invalid secret ID should exit 3, got $rc"
+  [ -z "$out" ] || fail "invalid secret ID must not produce output, got $out"
+  pass 'resolve-id rejects invalid secret IDs'
+}
+
 test_probe_absent
 test_probe_broken_version
 test_probe_no_token
@@ -207,3 +221,4 @@ test_redact_metadata
 test_list_metadata_redacts
 test_resolve_duplicate_names
 test_resolve_malformed_json
+test_resolve_invalid_id
