@@ -752,6 +752,42 @@ assert_contains "$invalid_tier_out" "records invalid tier 'burst'" \
 mv -f "$TMP_ROOT/remote-ios-before-invalid-tier.meta" "$remote_route_meta"
 pass "remote endpoint serving tiers are returned, validated, and matched before parent publication"
 
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-missing-tier.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-missing-tier.meta"
+sed '/^tier=/d' "$TMP_ROOT/remote-ios-before-missing-tier.meta" > "$remote_route_meta"
+sed '/^tier=/d' "$TMP_ROOT/parent-ios-before-missing-tier.meta" > "$PARENT/state/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-missing-tier.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-missing-tier.meta"
+cp "$HERDR_LOG" "$TMP_ROOT/herdr-before-missing-tier.log"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios 2>/dev/null)" = unverified ] \
+  || fail "live remote endpoint with missing tier metadata was not classified unverified"
+if missing_tier_route_out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh route ios 2>&1); then
+  fail "remote control synthesized a tier for an endpoint with missing tier metadata"
+fi
+assert_contains "$missing_tier_route_out" "endpoint has no recorded tier" \
+  "remote missing-tier refusal did not identify the absent endpoint tier"
+if missing_tier_launch_out=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - herdr 2>&1); then
+  fail "remote control reused a live endpoint with missing tier metadata"
+fi
+assert_contains "$missing_tier_launch_out" "endpoint has no recorded tier" \
+  "remote live-reuse refusal did not identify the absent endpoint tier"
+if missing_parent_tier_out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1); then
+  fail "parent recovery synthesized a tier for a legacy remote endpoint"
+fi
+assert_contains "$missing_parent_tier_out" "remote secondmate ios has no recorded tier" \
+  "parent missing-tier refusal did not identify the absent remote tier"
+cmp -s "$TMP_ROOT/remote-ios-missing-tier.meta" "$remote_route_meta" \
+  || fail "remote missing-tier refusal changed endpoint metadata"
+cmp -s "$TMP_ROOT/parent-ios-missing-tier.meta" "$PARENT/state/ios.meta" \
+  || fail "parent missing-tier refusal changed route metadata"
+assert_no_grep '^tier=' "$remote_route_meta" "remote missing-tier refusal synthesized endpoint metadata"
+assert_no_grep '^tier=' "$PARENT/state/ios.meta" "parent missing-tier refusal synthesized route metadata"
+cmp -s "$TMP_ROOT/herdr-before-missing-tier.log" "$HERDR_LOG" \
+  || fail "remote missing-tier refusal touched the live endpoint"
+mv -f "$TMP_ROOT/remote-ios-before-missing-tier.meta" "$remote_route_meta"
+mv -f "$TMP_ROOT/parent-ios-before-missing-tier.meta" "$PARENT/state/ios.meta"
+pass "live legacy remote endpoints with missing tiers fail closed"
+
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-tier-warning.meta"
 cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-tier-warning.meta"
 sed 's/^harness=codex$/harness=claude/' "$TMP_ROOT/remote-ios-before-tier-warning.meta" > "$remote_route_meta"

@@ -940,6 +940,11 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = secondmate ] && [ "$TIER_SET" -eq 0 ]; t
   if [ -f "$existing_secondmate_meta" ] && [ ! -L "$existing_secondmate_meta" ] \
      && [ "$(fm_meta_get "$existing_secondmate_meta" kind)" = secondmate ]; then
     recorded_secondmate_tier=$(fm_meta_get "$existing_secondmate_meta" tier)
+    if [ -z "$recorded_secondmate_tier" ] \
+       && [ -n "$(fm_meta_get "$existing_secondmate_meta" remote_host)" ]; then
+      echo "error: remote secondmate $ID has no recorded tier; refusing recovery until it is explicitly migrated or safely replaced" >&2
+      exit 1
+    fi
     [ -n "$recorded_secondmate_tier" ] || recorded_secondmate_tier=standard
     case "$recorded_secondmate_tier" in
       standard|fast) ;;

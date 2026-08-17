@@ -84,9 +84,12 @@ remote_endpoint_load() {
     return 1
   fi
   REMOTE_ENDPOINT_TIER=$(fm_meta_get "$REMOTE_ENDPOINT_META" tier)
-  [ -n "$REMOTE_ENDPOINT_TIER" ] || REMOTE_ENDPOINT_TIER=standard
   case "$REMOTE_ENDPOINT_TIER" in
     standard|fast) ;;
+    '')
+      REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint has no recorded tier; refusing access until it is explicitly migrated or safely replaced"
+      return 1
+      ;;
     *)
       REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint records invalid tier '$REMOTE_ENDPOINT_TIER'; refusing access until it is explicitly migrated"
       return 1
