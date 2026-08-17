@@ -324,6 +324,36 @@ assert doc["summary"]["failed"] == 0
   pass "gate-skip accounting survives an unsupported inherited locale"
 }
 
+# The runner replaces an unusable inherited locale so children never warn into
+# the protocol stream, but the replacement must still decode UTF-8: the suite
+# asserts on multibyte content (composer glyphs, the U+2063 injection sentinel,
+# codepoint-bounded text), and a byte-oriented locale makes every ${#s}/${s:0:1}
+# in those assertions count bytes instead.
+test_inherited_locale_replacement_keeps_utf8_text_semantics() {
+  local tmp probe out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-locale.XXXXXX")
+  probe="$tmp/locale.test.sh"
+  cat >"$probe" <<'SH'
+#!/usr/bin/env bash
+s='❯x'
+printf 'chars=%s first=%s\n' "${#s}" "${s:0:1}"
+SH
+  chmod +x "$probe"
+  out=$(LC_ALL=fm_TEST_INVALID_LOCALE LANG=fm_TEST_INVALID_LOCALE \
+    "$RUNNER" "$probe" 2>/dev/null) \
+    || { rm -rf "$tmp"; fail "the locale probe fixture must run"; }
+  rm -rf "$tmp"
+  if [ "$(env LC_ALL=C.UTF-8 locale charmap 2>/dev/null)" = UTF-8 ] \
+    || [ "$(env LC_ALL=en_US.UTF-8 locale charmap 2>/dev/null)" = UTF-8 ]; then
+    assert_contains "$out" 'chars=2 first=❯' \
+      "the replacement locale must read ❯ as one character"
+  else
+    # No UTF-8 locale exists here, so the documented C fallback is correct.
+    assert_contains "$out" 'chars=4' "the C fallback must still be a working locale"
+  fi
+  pass "an unusable inherited locale is replaced by the host's best UTF-8 locale"
+}
+
 test_fail_on_gate_skip_token() {
   local tmp skip_f out rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-fail-skip.XXXXXX")
@@ -690,6 +720,7 @@ test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
 test_gate_skip_accounting_under_unsupported_inherited_locale
+test_inherited_locale_replacement_keeps_utf8_text_semantics
 test_fail_on_gate_skip_token
 test_exclude_family
 test_portable_shard_union_and_coverage_guard

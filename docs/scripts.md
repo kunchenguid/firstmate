@@ -101,6 +101,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-pr-merge.sh`         | Record PR identity and any missing-Review override, then merge the canonical GitHub URL |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task with an explicit delivery mode |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
+| `fm-worktree-unique-content.sh` | Prove whether a worktree holds content reachable from no surviving ref, so dirty-state refusals judge held content instead of stale-index noise |
 | `fm-model-telemetry.sh`  | Sole validator, writer, sealer, recovery owner, and read-only sheet reader of the private model-attempt ledger |
 | `fm-harness.sh`          | Detect the running harness, resolve crew or secondmate harness, model, and effort, and resolve a failed report's relaunch tuple through the classifying escalation ladder (`escalate`) |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |

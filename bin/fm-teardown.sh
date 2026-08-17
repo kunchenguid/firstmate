@@ -23,7 +23,13 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# Uncommitted changes are never landed.
+# Uncommitted changes refuse UNLESS bin/fm-worktree-unique-content.sh proves
+# every differing path holds only content already reachable from refs that
+# survive teardown - the state a branch ref rewritten beneath a live worktree
+# leaves behind, where "uncommitted changes" are really deletions of landed
+# content plus pre-merge line versions. That consult can only narrow the dirty
+# refusal (its exit 0 is a positive proof; absence or any failure leaves the
+# refusal standing), and a pass never skips the landed-work checks below.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -1293,8 +1299,22 @@ teardown_treehouse_return() {
   return 1
 }
 
+# Single owner of the benign-untracked carve-outs (harness droppings) shared by
+# the dirty computation below and the classifier's untracked exclusion.
+TEARDOWN_BENIGN_UNTRACKED_RE='\.claude/|\.fm-(grok|kimi)-turnend$'
+
+# Bounded excerpt of the classifier's per-path refusal detail. Empty when the
+# classifier could not run at all (its absence changes nothing about refusing).
+print_unique_content_excerpt() {
+  local report=$1 lines
+  [ -n "$report" ] || return 0
+  lines=$(printf '%s\n' "$report" | grep '^unique ' | head -5 || true)
+  [ -n "$lines" ] || return 0
+  printf 'content reachable from no surviving ref:\n%s\n' "$lines" >&2
+}
+
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty dirty_unique unique_report unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1309,7 +1329,22 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE "^\?\? ($TEARDOWN_BENIGN_UNTRACKED_RE)" | head -1 || true)
+
+  # Dirtiness is a proxy: a branch ref rewritten beneath a live worktree leaves
+  # index and working tree at the pre-rewrite state, presenting landed work as
+  # uncommitted changes. Consult the content-reachability classifier; ONLY its
+  # positive proof (exit 0) narrows the refusal, so a missing or failing
+  # classifier leaves the dirty refusal standing exactly as before.
+  dirty_unique=$dirty
+  unique_report=
+  if [ -n "$dirty" ]; then
+    if unique_report=$("$SCRIPT_DIR/fm-worktree-unique-content.sh" "$WT" \
+        --excluded-untracked-regex "^($TEARDOWN_BENIGN_UNTRACKED_RE)" 2>&1); then
+      dirty_unique=
+      echo "teardown: worktree $WT is dirty only with content already reachable from surviving refs (stale index after its branch was rewritten beneath it); continuing to the landed-work checks" >&2
+    fi
+  fi
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -1332,16 +1367,18 @@ validate_worktree_teardown_safety() {
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+    if [ -n "$dirty_unique" ] || [ -n "$unmerged" ]; then
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
+      [ -n "$dirty_unique" ] && echo "uncommitted changes present" >&2
+      [ -n "$dirty_unique" ] && print_unique_content_excerpt "$unique_report"
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
       echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
-  elif [ -n "$dirty" ]; then
+  elif [ -n "$dirty_unique" ]; then
     echo "REFUSED: worktree $WT has uncommitted changes." >&2
     echo "uncommitted changes present" >&2
+    print_unique_content_excerpt "$unique_report"
     echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
     return 1
   elif [ -n "$unpushed" ]; then

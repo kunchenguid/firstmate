@@ -29,7 +29,7 @@
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
 #   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
-#   (i) no-mistakes + dirty worktree, even when work landed     -> REFUSE (dirty wins)
+#   (i) no-mistakes + dirty worktree with new content, landed   -> REFUSE (unique dirt wins)
 #   (j) no-mistakes + gh lookup errors + content not in default -> REFUSE (fail-safe)
 #   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
 #   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
@@ -38,6 +38,18 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#
+# Stale-index shape (bin/fm-worktree-unique-content.sh consult): a branch ref
+# rewritten beneath a live worktree leaves index and working tree at the
+# pre-rewrite state, so plain dirtiness inverts - the "uncommitted changes" are
+# deletions of landed content plus pre-merge line versions. The consult narrows
+# the dirty refusal to worktrees actually holding unique content and can never
+# widen what tears down.
+#   (z1) stale index, all content reachable, commits pushed     -> ALLOW  (proxy fixed)
+#   (z2) stale index + one genuinely new file                   -> REFUSE (safety intact)
+#   (z3) stale index reachable but commits unlanded             -> REFUSE (landed check still runs)
+#   (z4) local-only stale index, work merged into local main    -> ALLOW
+#   (z5) classifier deleted from bin                            -> REFUSE (fail-closed fallback)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -1326,6 +1338,137 @@ test_dirty_worktree_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
   grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
+}
+
+# Build the measured stale-index incident shape inside make_case: branch
+# commits B1 then B2 on the worktree, optionally pushed, then index and working
+# tree rewound to B1's state while HEAD stays at B2 - the state a bare ref
+# rewrite beneath a live worktree leaves behind. Args: case_dir push-all|push-b1|none
+make_stale_index_fixture() {
+  local case_dir=$1 push=${2:-push-all} b1
+  wt_commit_file "$case_dir" feature.txt "hello v1" "B1"
+  b1=$(git -C "$case_dir/wt" rev-parse HEAD)
+  if [ "$push" = push-b1 ]; then
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+  fi
+  wt_commit_file "$case_dir" feature.txt "hello v2" "B2"
+  if [ "$push" = push-all ]; then
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+    git -C "$case_dir/project" fetch -q origin
+  fi
+  git -C "$case_dir/wt" read-tree -u --reset "$b1"
+  git -C "$case_dir/wt" status --porcelain | grep -q '^M  feature.txt' \
+    || fail "stale-index fixture: expected a staged-only modification; got: $(git -C "$case_dir/wt" status --porcelain)"
+}
+
+test_stale_index_reachable_content_allows() {
+  local case_dir rc
+  case_dir=$(make_case stale-index-allow)
+  write_meta "$case_dir" no-mistakes ship
+  make_stale_index_fixture "$case_dir" push-all
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "stale-index-allow: a dirty worktree whose every differing path is reachable from surviving refs should tear down ($(cat "$case_dir/stderr"))"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "stale-index-allow: teardown printed a REFUSED line"
+  grep -qi reachable "$case_dir/stderr" \
+    || fail "stale-index-allow: teardown did not report why the dirty state was not treated as work"
+  pass "stale-index dirt with only reachable content no longer blocks teardown"
+}
+
+test_stale_index_with_new_content_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case stale-index-new-content)
+  write_meta "$case_dir" no-mistakes ship
+  make_stale_index_fixture "$case_dir" push-all
+  printf 'genuinely new line\n' > "$case_dir/wt/newfile.txt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-index-new-content: one genuinely new file among reachable staleness must still refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "stale-index-new-content: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" \
+    || fail "stale-index-new-content: refusal did not cite uncommitted changes"
+  grep -q "newfile.txt" "$case_dir/stderr" \
+    || fail "stale-index-new-content: refusal did not name the path holding unique content"
+  pass "one genuinely new file keeps the dirty refusal exactly as before"
+}
+
+test_stale_index_pass_does_not_bypass_landed_check() {
+  local case_dir rc
+  case_dir=$(make_case stale-index-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  # B1 is pushed (so the rewound index holds only reachable content) but B2 is
+  # not on any remote and its content is not in origin/main: the dirty check
+  # must step aside and the landed-work check must still refuse.
+  make_stale_index_fixture "$case_dir" push-b1
+  "$ROOT/bin/fm-worktree-unique-content.sh" "$case_dir/wt" > /dev/null 2>&1 \
+    || fail "stale-index-unlanded: precondition failed - the classifier itself should pass this worktree"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-index-unlanded: unlanded commits must refuse even when the dirty state is provably reachable"
+  grep -q "not on any remote and not landed" "$case_dir/stderr" \
+    || fail "stale-index-unlanded: refusal did not come from the landed-work check: $(cat "$case_dir/stderr")"
+  pass "a reachable-content pass cannot bypass the landed-work check"
+}
+
+test_stale_index_local_only_merged_allows() {
+  local case_dir rc tip
+  case_dir=$(make_case stale-index-local-only)
+  write_meta "$case_dir" local-only ship
+  make_stale_index_fixture "$case_dir" none
+  tip=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$tip"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "stale-index-local-only: locally merged work with only reachable dirt should tear down ($(cat "$case_dir/stderr"))"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "stale-index-local-only: teardown printed a REFUSED line"
+  pass "local-only stale-index dirt with merged work no longer blocks teardown"
+}
+
+test_missing_classifier_keeps_dirty_refusal() {
+  local case_dir rc binmut
+  case_dir=$(make_case stale-index-no-classifier)
+  write_meta "$case_dir" no-mistakes ship
+  make_stale_index_fixture "$case_dir" push-all
+
+  # Integration halves of the mutation classes "delete it" and "make it
+  # unreachable": with the classifier gone, the exact same fixture that
+  # test_stale_index_reachable_content_allows tears down must refuse again -
+  # the consult can only ever narrow the refusal, never widen what tears down.
+  binmut="$case_dir/binmut"
+  cp -R "$ROOT/bin" "$binmut"
+  rm -f "$binmut/fm-worktree-unique-content.sh"
+
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:$PATH" \
+    "$binmut/fm-teardown.sh" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-index-no-classifier: with the classifier missing the dirty refusal must stand"
+  grep -q REFUSED "$case_dir/stderr" || fail "stale-index-no-classifier: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" \
+    || fail "stale-index-no-classifier: refusal did not cite uncommitted changes"
+  pass "a missing classifier falls back to the plain dirty refusal"
 }
 
 test_gh_error_and_content_absent_refuses() {
@@ -3496,6 +3639,11 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_stale_index_reachable_content_allows
+test_stale_index_with_new_content_still_refuses
+test_stale_index_pass_does_not_bypass_landed_check
+test_stale_index_local_only_merged_allows
+test_missing_classifier_keeps_dirty_refusal
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

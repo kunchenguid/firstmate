@@ -78,6 +78,61 @@ EOF
   pass "the total counts findings the render's display cap withholds"
 }
 
+# A GNU-shaped stat is the case the orphan age silently lost: there `-f` means
+# "filesystem status", so it SUCCEEDS on a plain file and hands back a
+# filesystem dump instead of an mtime. The pinned uname puts the mtime helper on
+# its GNU branch, so this reproduces that host shape on any machine.
+make_gnu_stat_stub() {  # <dir>
+  local dir=$1
+  mkdir -p "$dir"
+  cat > "$dir/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Linux\n'
+SH
+  chmod +x "$dir/uname"
+  cat > "$dir/stat" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -c)
+    [ "${2:-}" = %Y ] || { echo "stat: unsupported format ${2:-}" >&2; exit 1; }
+    python3 -c 'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$3"
+    ;;
+  -f)
+    printf '  File: "%s"\n  ID: 0 Namelen: 255 Type: ext2/ext3\n' "${3:-}"
+    ;;
+  *) echo "stat: unsupported invocation" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$dir/stat"
+}
+
+test_orphan_age_survives_a_gnu_stat() {
+  local home stub render old
+  home="$TMP_ROOT/gnu-stat-orphan"
+  stub="$TMP_ROOT/gnu-stat-bin"
+  mkdir -p "$home/data" "$home/state"
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+## In flight
+## Queued
+## Done
+EOF
+  printf 'resolved: archival candidate\n' > "$home/state/stale-orphan.status"
+  old=$(( $(date +%s) - 5 * 86400 ))
+  python3 -c 'import os,sys; t=float(sys.argv[2]); os.utime(sys.argv[1], (t, t))' \
+    "$home/state/stale-orphan.status" "$old" \
+    || fail "could not age the orphan status log"
+  make_gnu_stat_stub "$stub"
+  render=$(PATH="$stub:$PATH" FM_HOME="$home" /bin/bash -c \
+    '. "$1/fm-backend.sh" && . "$1/fm-pr-lib.sh" && . "$1/fm-record-contradictions-lib.sh" && fm_record_contradictions_render "$2" "$3"' \
+    contradictions-render "$ROOT/bin" "$home/data" "$home/state") \
+    || fail "contradiction render failed under a GNU-shaped stat"
+  assert_contains "$render" "stale-orphan-status (1): stale-orphan(age=5d" \
+    "the orphan age was lost under a GNU-shaped stat"
+  pass "an aged orphan status log is reported under a GNU-shaped stat"
+}
+
 test_total_is_zero_when_records_agree
 test_total_counts_every_finding
 test_total_outlives_the_display_cap
+test_orphan_age_survives_a_gnu_stat

@@ -71,8 +71,31 @@
 set -eu
 
 # Keep child diagnostics out of captured protocol output on hosts that do not
-# provide the caller's inherited locale.
-export LC_ALL=C
+# provide the caller's inherited locale, WITHOUT changing what the suite reads as
+# a character. Pinning plain C would do the first at the cost of the second: the
+# suite asserts on multibyte content (the composer prompt glyphs ❯/›, the U+2063
+# injection sentinel, codepoint-bounded outcome text), and under a byte-oriented
+# locale ${#s}, ${s:0:1} and ${s#?} all count bytes, so those assertions read a
+# split UTF-8 sequence instead of a character. So: take the first candidate that
+# the host actually resolves to UTF-8, and fall back to C only when it has none.
+fm_test_run_utf8_locale() {
+  local candidate
+  for candidate in "${LC_ALL:-}" "${LC_CTYPE:-}" "${LANG:-}" C.UTF-8 en_US.UTF-8; do
+    case "$candidate" in
+      *[Uu][Tt][Ff]-8|*[Uu][Tt][Ff]8) ;;
+      *) continue ;;
+    esac
+    # env, not a shell assignment: assigning an unavailable locale makes the
+    # shell itself warn, which is the very noise this normalization exists to
+    # keep out of the protocol stream.
+    [ "$(env LC_ALL="$candidate" locale charmap 2>/dev/null)" = UTF-8 ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+LC_ALL=$(fm_test_run_utf8_locale || printf C)
+export LC_ALL
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
@@ -149,7 +172,7 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|fm-unadvanceable-work.test.sh|\
-    fm-record-contradictions-lib.test.sh|\
+    fm-record-contradictions-lib.test.sh|fm-worktree-unique-content.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;

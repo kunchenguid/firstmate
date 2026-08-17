@@ -889,6 +889,10 @@ test_firstmate_fork_sync_report() {
   fixture=${fixture#*|}
   remote=${fixture%%|*}
   fakebin=${fixture#*|}
+  # The fixture's own fm_git_identity export died with the command substitution
+  # that captured it, so this commit needs the identity re-exported here or it
+  # fails outright on a host with no git user configured.
+  fm_git_identity
   printf '%s\n' local >> "$repo/README.md"
   git -C "$repo" add README.md
   git -C "$repo" commit -qm local
