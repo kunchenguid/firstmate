@@ -73,17 +73,24 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # hardcoded; FM_CLASSIFY_DECLARED_WORK_VERB overrides it.
 FM_CLASSIFY_DECLARED_WORK_VERB_DEFAULT='working'
 
-# Idle seconds before unresumed declared work counts as stalled. Deliberately far
-# above the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), because an
-# idle endpoint is a healthy default state for a secondmate and it may think for
-# several minutes before its next turn; and below the declared-pause cadence
-# (FM_PAUSE_RESURFACE_SECS, default 3600s), because a declared external wait is a
-# legitimate reason to idle while unresumed declared work is not. It lives beside
-# the decision it bounds so the threshold has one owner: the watcher reads
-# FM_DECLARED_WORK_STALL_SECS with this default, and any later consumer reads the
-# same pair rather than restating the number.
+# Seconds a status stream may stay SILENT after declaring work before that
+# silence is worth reconciling. The measured quantity is the status log's own
+# quiet, not an endpoint reading: a live worker writes status events, and one
+# that declared work and stopped quits writing them. That keeps the decision on
+# a durable record the parent already holds, with nothing to wire at launch and
+# no rendered surface to misread.
+# The default is deliberately generous because AGENTS.md's status contract makes
+# appends SPARSE supervisor-actionable events rather than routine progress, so a
+# working mate is legitimately quiet for long stretches; that is why this sits
+# far above the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), which
+# bounds a pane that should be changing, and below the declared-pause cadence
+# (FM_PAUSE_RESURFACE_SECS, default 3600s), because a declared external wait is
+# a stated reason to go quiet while unresumed declared work is not. It lives
+# beside the decision it bounds so the threshold has one owner: the watcher reads
+# FM_DECLARED_WORK_SILENCE_SECS with this default, and any later consumer reads
+# the same pair rather than restating the number.
 # shellcheck disable=SC2034 # Read by the watcher (fm-watch.sh), not this lib.
-FM_DECLARED_WORK_STALL_SECS_DEFAULT=900
+FM_DECLARED_WORK_SILENCE_SECS_DEFAULT=1500
 
 # Bounded re-surface cadence for a declared pause or a dead-agent captain hold.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
@@ -189,19 +196,20 @@ status_work_declared_unresumed() {  # <status-file>
   status_declares_work "$(last_status_line "$1")"
 }
 
-# 0 if declared work has STALLED: the stream still declares unresumed work AND
-# its endpoint has been continuously idle for at least <threshold> seconds.
-# Neither half is a stall on its own - a declared-work line alone is the healthy
-# state of any worker mid-task, and an idle endpoint alone is the healthy default
-# state of a secondmate - which is exactly why every existing detector let the
-# combination through: the stale path exempts a secondmate's idle endpoint by
-# design, and a working: line is not captain-relevant, so the heartbeat backstop
-# correctly absorbs it.
-# The caller measures <idle-age-secs> because endpoint idleness is a backend read
-# rather than a status-file read, keeping this a pure decision both supervisors
-# share. A caller that cannot measure the age, or has no threshold, passes a
-# non-numeric value and gets no stall rather than a guess.
-status_declared_work_stalled() {  # <status-file> <idle-age-secs> <threshold-secs>
+# 0 if declared work has gone SILENT: the stream still declares unresumed work
+# AND that stream has been quiet for at least <threshold> seconds.
+# Neither half means anything alone - a declared-work line is the healthy state
+# of any worker mid-task, and a quiet stream is the healthy state of a worker
+# with nothing supervisor-actionable to report - which is exactly why every
+# existing detector let the combination through: the stale path exempts a
+# secondmate's idle endpoint by design, and a working: line is not
+# captain-relevant, so the heartbeat backstop correctly absorbs it.
+# The caller measures <silence-age-secs> so this stays a pure decision both
+# supervisors share; status files are append-only (see the cursor contract
+# below), so the file's own age IS the time since its last event. A caller that
+# cannot measure the age, or has no threshold, passes a non-numeric value and
+# gets no verdict rather than a guess.
+status_declared_work_stalled() {  # <status-file> <silence-age-secs> <threshold-secs>
   local f=$1 age=$2 threshold=$3
   case "$age" in ''|*[!0-9]*) return 1 ;; esac
   case "$threshold" in ''|*[!0-9]*) return 1 ;; esac
