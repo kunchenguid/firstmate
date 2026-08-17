@@ -19,7 +19,8 @@
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
 # Logic, in order:
-#   1. Resolve worktree + backend target + kind from state/<id>.meta.
+#   1. Resolve a task id directly or from one recorded window/terminal, then
+#      read worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
@@ -92,6 +93,22 @@ emit() {  # <state> <source> [detail]
 
 # --- meta resolution --------------------------------------------------------
 
+if [ ! -f "$META" ]; then
+  RESOLVED_ID=$(window_to_task "$ID" "$STATE")
+  MATCHES=0
+  for CANDIDATE_META in "$STATE"/*.meta; do
+    [ -e "$CANDIDATE_META" ] || continue
+    CANDIDATE_WINDOW=$(fm_meta_get "$CANDIDATE_META" window)
+    CANDIDATE_TERMINAL=$(fm_meta_get "$CANDIDATE_META" terminal)
+    [ "$CANDIDATE_WINDOW" = "$ID" ] || [ "$CANDIDATE_TERMINAL" = "$ID" ] || continue
+    MATCHES=$((MATCHES + 1))
+  done
+  [ "$MATCHES" -le 1 ] || emit unknown none "ambiguous metadata for $ID"
+  [ "$MATCHES" -eq 1 ] || emit unknown none "no metadata for $ID"
+  ID=$RESOLVED_ID
+  META="$STATE/$ID.meta"
+  LOG="$STATE/$ID.status"
+fi
 [ -f "$META" ] || emit unknown none "no metadata for $ID"
 
 meta_value() {  # <key>

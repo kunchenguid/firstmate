@@ -1162,6 +1162,58 @@ test_missing_meta() {
   pass "missing meta is handled gracefully"
 }
 
+test_window_references_resolve_task() {
+  reset_fakes
+  local d by_id by_window by_terminal
+  d=$(new_case window-reference)
+  make_repo_on_branch "$d/wt" fm/window-reference
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/window-task.meta" "window=default:w38:p2" "terminal=w38" \
+    "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/window-reference)"
+  by_id=$(run_crew_state "$d" window-task)
+  by_window=$(run_crew_state "$d" default:w38:p2)
+  by_terminal=$(run_crew_state "$d" w38)
+  [ "$by_window" = "$by_id" ] || fail "full window reference changed the task state line"
+  [ "$by_terminal" = "$by_id" ] || fail "bare terminal reference changed the task state line"
+  pass "window references resolve to the recorded task"
+}
+
+test_unmatched_window_stays_unknown() {
+  reset_fakes
+  local d out
+  d=$(new_case unmatched-window)
+  make_repo_on_branch "$d/wt" fm/unrelated-p2
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/p2.meta" "window=default:w7:p2" "terminal=w7" \
+    "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/unrelated-p2)"
+  out=$(run_crew_state "$d" default:w404:p2)
+  assert_contains "$out" "state: unknown" "unmatched window -> unknown"
+  assert_contains "$out" "source: none" "unmatched window -> none source"
+  pass "unmatched window remains unknown"
+}
+
+test_ambiguous_windows_stay_unknown() {
+  reset_fakes
+  local d out
+  d=$(new_case ambiguous-window)
+  make_repo_on_branch "$d/wt" fm/ambiguous-window
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/alpha.meta" "window=default:w38:p2" "terminal=w38" \
+    "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/beta.meta" "window=default:w38:p2" "terminal=w38" \
+    "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/ambiguous-window)"
+  out=$(run_crew_state "$d" default:w38:p2)
+  assert_contains "$out" "state: unknown" "ambiguous full window -> unknown"
+  assert_contains "$out" "source: none" "ambiguous full window -> none source"
+  out=$(run_crew_state "$d" w38)
+  assert_contains "$out" "state: unknown" "ambiguous bare terminal -> unknown"
+  assert_contains "$out" "source: none" "ambiguous bare terminal -> none source"
+  pass "ambiguous windows remain unknown"
+}
+
 # (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
 # canned fake verdict, unlike tests/fm-watch-triage.test.sh's classifier
 # coverage). This is the direct regression pair for the 2026-07-02 herdr
@@ -1351,6 +1403,9 @@ test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
+test_window_references_resolve_task
+test_unmatched_window_stays_unknown
+test_ambiguous_windows_stay_unknown
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
 test_usage_error
