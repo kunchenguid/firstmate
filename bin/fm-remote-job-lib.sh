@@ -160,13 +160,27 @@ fm_remote_job_homebrew_prefixes() {
 # Only <name>@<version> kegs are admitted, and only after the system tail, so
 # this recovers the operator's intent without letting an unlinked formula shadow
 # a system or linked-Homebrew executable - the exact shadowing Homebrew unlinks
-# them to prevent. Several versions of one formula are ordered highest-name
-# first so the choice is deterministic rather than glob-arbitrary.
+# them to prevent. Several versions of one formula are ordered highest version
+# first, by version sort rather than by name, so python@3.13 outranks python@3.9
+# and node@24 outranks node@8. Plain byte ordering would silently hand every
+# remote worker the older keg whenever the versions differ in digit count.
+fm_remote_job_sort_versions_desc() { # <newline-separated paths>
+  local lines=$1 sorted
+  [ -n "$lines" ] || return 0
+  # Both BSD and GNU sort implement -V; an implementation without it falls back
+  # to byte order rather than dropping every discovered directory.
+  sorted=$(printf '%s\n' "$lines" | LC_ALL=C sort -rV 2>/dev/null) || sorted=
+  [ -n "$sorted" ] || sorted=$(printf '%s\n' "$lines" | LC_ALL=C sort -r)
+  printf '%s\n' "$sorted"
+}
+
 fm_remote_job_append_keg_only_bins() { # <homebrew-prefix>
-  local prefix=$1 directory
+  local prefix=$1 directory matches
+  matches=$(compgen -G "$prefix/opt/*@*/bin" 2>/dev/null || true)
+  [ -n "$matches" ] || return 0
   while IFS= read -r directory; do
     [ -z "$directory" ] || fm_remote_job_path_append_if_dir "$directory"
-  done < <(compgen -G "$prefix/opt/*@*/bin" 2>/dev/null | LC_ALL=C sort -r || true)
+  done < <(fm_remote_job_sort_versions_desc "$matches")
 }
 
 fm_remote_job_nvm_default_selector() { # <account-home>

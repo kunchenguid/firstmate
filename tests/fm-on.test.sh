@@ -208,6 +208,31 @@ OPTIONAL_DIRS=(
   /opt/homebrew/bin
   /usr/local/bin
 )
+# Homebrew unlinks keg-only versioned formulae from <prefix>/bin, so the
+# contract appends <prefix>/opt/<name>@<version>/bin after the fixed tail,
+# highest version first per prefix. Rebuilt here the same way as the rest of
+# this expectation, so a host with such a formula, a host with only unversioned
+# kegs, and a host with no Homebrew each exercise a real direction.
+BREW_PREFIXES=(/opt/homebrew /usr/local)
+keg_dirs_for_prefix() { # <homebrew-prefix>
+  local matches
+  matches=$(compgen -G "$1/opt/*@*/bin" 2>/dev/null || true)
+  [ -n "$matches" ] || return 0
+  printf '%s\n' "$matches" | LC_ALL=C sort -rV 2>/dev/null \
+    || printf '%s\n' "$matches" | LC_ALL=C sort -r
+}
+KEG_DIRS=()
+for prefix in "${BREW_PREFIXES[@]}"; do
+  while IFS= read -r candidate; do
+    [ -z "$candidate" ] || KEG_DIRS+=("$candidate")
+  done < <(keg_dirs_for_prefix "$prefix")
+done
+UNVERSIONED_KEG_DIRS=()
+for prefix in "${BREW_PREFIXES[@]}"; do
+  while IFS= read -r candidate; do
+    [ -z "$candidate" ] || UNVERSIONED_KEG_DIRS+=("$candidate")
+  done < <(compgen -G "$prefix/opt/*/bin" 2>/dev/null | grep -v '@' || true)
+done
 EXPECTED_PATH=
 expect_dir() {
   case ":$EXPECTED_PATH:" in *":$1:"*) return 0 ;; esac
@@ -232,6 +257,9 @@ for candidate in "${OPTIONAL_DIRS[@]}"; do
   [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
 done
 for fixed in /usr/bin /bin /usr/sbin /sbin; do expect_dir "$fixed"; done
+for candidate in "${KEG_DIRS[@]}"; do
+  [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
+done
 
 [ "$CHILD_PATH" = "$EXPECTED_PATH" ] \
   || fail "composed child PATH did not match the portable contract"$'\n'"expected: $EXPECTED_PATH"$'\n'"actual:   $CHILD_PATH"
@@ -243,7 +271,23 @@ else
   path_has "$CHILD_PATH" "$ACCOUNT_HOME/.local/bin" \
     && fail "the account's absent or symlinked ~/.local/bin was added to the child PATH"
 fi
-case "$CHILD_PATH" in *:/usr/bin:/bin:/usr/sbin:/sbin) ;; *) fail "the child PATH did not end with the portable system tail" ;; esac
+case "$CHILD_PATH" in
+  *:/usr/bin:/bin:/usr/sbin:/sbin|*:/usr/bin:/bin:/usr/sbin:/sbin:*) ;;
+  *) fail "the child PATH did not carry the portable system tail as one contiguous run" ;;
+esac
+CHILD_BEFORE_TAIL=${CHILD_PATH%%:/usr/bin:/bin:/usr/sbin:/sbin*}
+CHILD_AFTER_TAIL=${CHILD_PATH#*:/usr/bin:/bin:/usr/sbin:/sbin}
+for candidate in "${KEG_DIRS[@]}"; do
+  [ -d "$candidate" ] && [ ! -L "$candidate" ] || continue
+  path_has "$CHILD_AFTER_TAIL" "$candidate" \
+    || fail "a keg-only versioned formula bin was dropped from the child PATH: $candidate"
+  path_has "$CHILD_BEFORE_TAIL" "$candidate" \
+    && fail "a keg-only versioned formula bin was placed ahead of the system tail: $candidate"
+done
+for candidate in "${UNVERSIONED_KEG_DIRS[@]}"; do
+  path_has "$CHILD_PATH" "$candidate" \
+    && fail "an unversioned keg-only formula bin was added to the child PATH: $candidate"
+done
 DUPES=$(printf '%s\n' "$CHILD_PATH" | tr ':' '\n' | sort | uniq -d)
 [ -z "$DUPES" ] || fail "the child PATH repeated entries: $DUPES"
 PRESENT_CHECKED=0

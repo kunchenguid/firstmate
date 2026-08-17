@@ -69,7 +69,7 @@ Orca and cmux secondmate launches remain not applicable because those backend-ki
 
 A remote secondmate's host-local `fm-spawn.sh` runs as a remote job child, so its caller `PATH` is the filesystem-composed operator `PATH` rather than an interactive one, and it forwards that same explicit value into its Herdr pane.
 That composition previously stopped at the linked `<prefix>/bin`, which by construction cannot contain a keg-only versioned formula, so the remote axis reproduced the original `node=MISSING` / `npx=MISSING` symptom on any host whose Node came from `brew install node@24`.
-`bin/fm-remote-job-lib.sh` is the earliest shared owner of that value, so the fix lands there: `<prefix>/opt/<name>@<version>/bin` is appended after the system tail for both Homebrew prefixes.
+`bin/fm-remote-job-lib.sh` is the earliest shared owner of that value, so the fix lands there: `<prefix>/opt/<name>@<version>/bin` is appended after the system tail for both Homebrew prefixes, highest version first by version sort.
 Appending only adds directories, so no richer inherited value is replaced and no linked or system command can be shadowed by an unlinked formula.
 The parent-side remote transport remains not applicable because it never creates the remote pane itself.
 
@@ -80,7 +80,19 @@ tests/fm-remote-job.test.sh
 Observed output:
 
 ```text
-ok - operator PATH resolves a keg-only versioned formula only behind the system tail
+ok - operator PATH resolves the highest keg-only formula version only behind the system tail
+```
+
+The byte-exact child-`PATH` contract in `tests/fm-on.test.sh` rebuilds the same discovered keg-only tail from the documented contract, so a host with a versioned formula, a host with only unversioned kegs, and a host with no Homebrew each assert a real direction.
+
+```sh
+tests/fm-on.test.sh
+```
+
+Observed output on a macOS arm64 host carrying versioned Homebrew formulae:
+
+```text
+ok - the entrypoint composes a deduplicated discovered child PATH (kept 4 existing, omitted 7 absent)
 ```
 
 ## tmux

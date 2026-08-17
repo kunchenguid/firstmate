@@ -164,9 +164,21 @@ KEG_LINKED="$KEG_PREFIX/bin"
 KEG_NEW="$KEG_PREFIX/Cellar/node@24/24.14.1/bin"
 KEG_OLD="$KEG_PREFIX/Cellar/node@22/22.9.0/bin"
 KEG_UNVERSIONED="$KEG_PREFIX/opt/libpq/bin"
-mkdir -p "$KEG_HOME" "$KEG_LINKED" "$KEG_NEW" "$KEG_OLD" "$KEG_UNVERSIONED" "$KEG_PREFIX/opt"
+# python@3.9 sorts AHEAD of python@3.13 in byte order, so this pair fails
+# whenever the ordering rule is not a version sort.
+KEG_PY_NEW="$KEG_PREFIX/Cellar/python@3.13/3.13.2/bin"
+KEG_PY_OLD="$KEG_PREFIX/Cellar/python@3.9/3.9.21/bin"
+mkdir -p "$KEG_HOME" "$KEG_LINKED" "$KEG_NEW" "$KEG_OLD" "$KEG_UNVERSIONED" \
+  "$KEG_PY_NEW" "$KEG_PY_OLD" "$KEG_PREFIX/opt"
 ln -s ../Cellar/node@24/24.14.1 "$KEG_PREFIX/opt/node@24"
 ln -s ../Cellar/node@22/22.9.0 "$KEG_PREFIX/opt/node@22"
+ln -s ../Cellar/python@3.13/3.13.2 "$KEG_PREFIX/opt/python@3.13"
+ln -s ../Cellar/python@3.9/3.9.21 "$KEG_PREFIX/opt/python@3.9"
+# A name no system directory provides, so the assertion observes the keg
+# ordering itself rather than the system tail that deliberately outranks it.
+printf '#!/bin/bash\nprintf "keg-python-3.13\\n"\n' > "$KEG_PY_NEW/fm-keg-python"
+printf '#!/bin/bash\nprintf "keg-python-3.9\\n"\n' > "$KEG_PY_OLD/fm-keg-python"
+chmod +x "$KEG_PY_NEW/fm-keg-python" "$KEG_PY_OLD/fm-keg-python"
 printf '#!/bin/bash\ncase "${1:-}" in */npx) printf "keg-npx-ok\\n" ;; *) printf "keg-node-24\\n" ;; esac\n' > "$KEG_NEW/node"
 printf '#!/usr/bin/env node\n' > "$KEG_NEW/npx"
 printf '#!/bin/bash\nprintf "keg-shadow\\n"\n' > "$KEG_NEW/ls"
@@ -175,12 +187,27 @@ printf '#!/bin/bash\nprintf "keg-psql\\n"\n' > "$KEG_UNVERSIONED/psql"
 chmod +x "$KEG_NEW/node" "$KEG_NEW/npx" "$KEG_NEW/ls" "$KEG_OLD/node" "$KEG_UNVERSIONED/psql"
 FM_REMOTE_JOB_HOMEBREW_PREFIXES_OVERRIDE="$KEG_PREFIX"
 fm_remote_job_compose_operator_path "$KEG_HOME" >/dev/null
-KEG_NODE=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" node 2>/dev/null || printf 'MISSING\n')
-[ "$KEG_NODE" = keg-node-24 ] \
-  || fail "the composed PATH did not resolve the highest keg-only versioned formula's node (got '$KEG_NODE')"
-KEG_NPX=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" npx 2>/dev/null || printf 'MISSING\n')
-[ "$KEG_NPX" = keg-npx-ok ] \
-  || fail "a keg-only #!/usr/bin/env node executable did not run through the composed PATH (got '$KEG_NPX')"
+KEG_PYTHON=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" fm-keg-python 2>/dev/null || printf 'MISSING\n')
+[ "$KEG_PYTHON" = keg-python-3.13 ] \
+  || fail "keg-only formula versions were not ordered by version (got '$KEG_PYTHON')"
+# A distribution that ships /usr/bin/node keeps that system copy ahead of an
+# unlinked keg on purpose, so the executable node/npx proof only runs where the
+# system tail is silent. The always-portable proof that a worker resolves node
+# and a #!/usr/bin/env node executable lives in
+# tests/fm-spawn-worker-path.test.sh, where the whole caller PATH is controlled.
+if PATH=/usr/bin:/bin:/usr/sbin:/sbin command -v node >/dev/null 2>&1; then
+  case ":$FM_REMOTE_JOB_OPERATOR_PATH:" in
+    *":$KEG_PREFIX/opt/node@24/bin:"*) ;;
+    *) fail "the composed PATH omitted the keg-only node@24 bin" ;;
+  esac
+else
+  KEG_NODE=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" node 2>/dev/null || printf 'MISSING\n')
+  [ "$KEG_NODE" = keg-node-24 ] \
+    || fail "the composed PATH did not resolve the highest keg-only versioned formula's node (got '$KEG_NODE')"
+  KEG_NPX=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" npx 2>/dev/null || printf 'MISSING\n')
+  [ "$KEG_NPX" = keg-npx-ok ] \
+    || fail "a keg-only #!/usr/bin/env node executable did not run through the composed PATH (got '$KEG_NPX')"
+fi
 KEG_SHADOW=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" ls -d "$TMP_ROOT" 2>/dev/null || printf 'MISSING\n')
 [ "$KEG_SHADOW" != keg-shadow ] || fail "a keg-only formula bin shadowed the system tail"
 PATH="$FM_REMOTE_JOB_OPERATOR_PATH" command -v psql >/dev/null 2>&1 \
@@ -193,7 +220,7 @@ KEG_NODE=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" node 2>/dev/null || printf 'MISSI
   || fail "a linked Homebrew bin lost precedence to a keg-only formula (got '$KEG_NODE')"
 unset FM_REMOTE_JOB_HOMEBREW_PREFIXES_OVERRIDE
 fm_remote_job_compose_operator_path "$ACCOUNT_HOME" >/dev/null
-pass "operator PATH resolves a keg-only versioned formula only behind the system tail"
+pass "operator PATH resolves the highest keg-only formula version only behind the system tail"
 
 NIX_PROFILE="$ACCOUNT_HOME/.nix-profile"
 NIX_BIN="$TMP_ROOT/nix-profile-bin"

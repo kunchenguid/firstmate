@@ -49,7 +49,7 @@ Nvm selection follows the filesystem `alias/default` chain and chooses the highe
 An nvm `system` default adds no nvm version bin, so the later system directories provide Node.
 The Nix and package-manager order after version-manager discovery is `~/.nix-profile/bin`, `/etc/profiles/per-user/<account>/bin`, `/run/current-system/sw/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`.
 Homebrew unlinks keg-only formulae - which includes every versioned formula such as `node@24` - from `<prefix>/bin`, so `<prefix>/opt/<name>@<version>/bin` is appended after the system tail for both the `/opt/homebrew` and `/usr/local` prefixes.
-That position makes an otherwise unresolvable `node`, `npx`, or `#!/usr/bin/env node` executable work without letting an unlinked formula shadow a system or linked-Homebrew command, and several versions of one formula are ordered highest-name first.
+That position makes an otherwise unresolvable `node`, `npx`, or `#!/usr/bin/env node` executable work without letting an unlinked formula shadow a system or linked-Homebrew command, and several versions of one formula are ordered highest version first by version sort, so `python@3.13` outranks `python@3.9`.
 Exact repeated entries are omitted.
 For the three Nix locations, a final `bin` symlink is resolved to its physical directory, while a path reached through symlinked ancestors remains in its documented position.
 Other final-component symlink directories, including `~/.local/bin`, are excluded.
