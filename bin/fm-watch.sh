@@ -490,10 +490,12 @@ clear_pause_tracking() {  # <window-key>
 # pane repaint dropped the window's throttle and rearmed a fresh full-rate bare
 # stale, so the only way to stop the noise was to kill a healthy worker. The
 # bound, not liveness, is what keeps absorbing safe here - the wait still
-# re-surfaces once every PAUSE_RESURFACE_SECS with its age in the reason - and
-# only a window whose crew actually WROTE a declaration reaches this function at
-# all, so a crew that goes quiet having written nothing still escalates on the
-# unchanged wedge schedule.
+# re-surfaces once every PAUSE_RESURFACE_SECS with its age in the reason.
+# Callers run this for EVERY first-sight non-terminal stale pane, declared wait
+# or not; a window with no declaration takes the early return below, which hands
+# back crew_absorb_class's verdict alone and so leaves a crew that goes quiet
+# having written nothing on the unchanged wedge schedule. Only a declared wait
+# reaches the bounded cadence past that early return.
 #
 # .paused-rechecked-<key> throttles the crew_absorb_class read (which may shell
 # out to no-mistakes) to once per STALE_ESCALATE_SECS while the absorb holds.

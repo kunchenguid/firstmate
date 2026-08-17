@@ -76,7 +76,7 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared pause or a dead-agent captain hold.
+# Bounded re-surface cadence for a declared pause or a captain-held transfer.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
 # avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
 # invisibly - it re-surfaces once for a recheck every window. One hour by default;
@@ -148,9 +148,12 @@ status_is_paused() {  # <status-line>
 
 # 0 if a status line declares either an external-wait pause or a verified
 # captain-held transfer.
-# Both declarations can intentionally leave an exited crew's endpoint idle, so
-# the watcher applies its bounded pause cadence when agent death confirms that
-# no live decision gate is being silenced.
+# Both declarations can intentionally leave an endpoint idle whether or not the
+# crew's agent is still live, so the declaration alone - never a backend agent
+# liveness verdict - is what earns the watcher's bounded pause cadence. The
+# guarantee that no live decision gate is silenced comes instead from
+# crew_absorb_class's `actionable` token plus run-step precedence.
+# pause_state_class (bin/fm-watch.sh) owns that reconciliation.
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1 verb
   status_is_paused "$line" && return 0
