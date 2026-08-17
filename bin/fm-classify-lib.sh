@@ -1140,7 +1140,10 @@ crew_is_paused() {  # <id>
 # without the crew doing any work - .git first, so firstmate's own read-only git
 # commands against the worktree can never make the probe self-fulfilling - plus the
 # large generated trees that would make the walk expensive. Both are overridable so
-# a home with an unusual layout can widen or narrow the probe.
+# a home with an unusual layout can widen or narrow the probe. The list is a skip
+# list, so clearing it skips nothing and widens the walk to the whole depth-bounded
+# tree; it never disables the probe, which would quietly cost the wedge detector a
+# liveness input on a home that meant to widen it.
 FM_WORKTREE_WRITE_PRUNE=${FM_WORKTREE_WRITE_PRUNE:-'.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'}
 FM_WORKTREE_WRITE_MAXDEPTH=${FM_WORKTREE_WRITE_MAXDEPTH:-6}
 
@@ -1190,9 +1193,13 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
     [ "${#prune[@]}" -eq 0 ] || prune+=( -o )
     prune+=( -name "$name" )
   done
-  [ "${#prune[@]}" -gt 0 ] || return 1
-  hit=$(find "$wt" -xdev -maxdepth "$FM_WORKTREE_WRITE_MAXDEPTH" \
-    \( "${prune[@]}" \) -prune -o -type f -newer "$anchor" -print -quit 2>/dev/null || true)
+  if [ "${#prune[@]}" -gt 0 ]; then
+    hit=$(find "$wt" -xdev -maxdepth "$FM_WORKTREE_WRITE_MAXDEPTH" \
+      \( "${prune[@]}" \) -prune -o -type f -newer "$anchor" -print -quit 2>/dev/null || true)
+  else
+    hit=$(find "$wt" -xdev -maxdepth "$FM_WORKTREE_WRITE_MAXDEPTH" \
+      -type f -newer "$anchor" -print -quit 2>/dev/null || true)
+  fi
   [ -n "$hit" ]
 }
 
