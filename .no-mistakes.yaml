@@ -24,9 +24,10 @@ document:
 
 # Pin lint to the same owner CI runs instead of leaving it to no-mistakes'
 # default handling, which does not invoke the repository's canonical lint gate.
-# `bin/fm-lint.sh` owns the complete lint definition and
+# `bin/fm-lint.sh` owns the complete lint definition, including GitHub workflow
+# lint via pinned actionlint in `bin/fm-lint-workflows.sh`, and
 # `.github/workflows/ci.yml` invokes it directly, with parity asserted by
-# `tests/fm-lint.test.sh`.
+# `tests/fm-lint.test.sh` and `tests/fm-lint-workflows.test.sh`.
 #
 # Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
 # Test is intent-targeted validation of whether the change meets its brief;
