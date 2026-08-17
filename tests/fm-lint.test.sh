@@ -18,9 +18,14 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LINT="$ROOT/bin/fm-lint.sh"
+LINT_WORKFLOWS="$ROOT/bin/fm-lint-workflows.sh"
 INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
+# A default (no-args) lint also hands the GitHub workflows to their own owner,
+# so the isolated-PATH runs below need that linter too. Read from that owner for
+# the same reason as above: the pin has exactly one source.
+REQUIRED_ACTIONLINT=$("$LINT_WORKFLOWS" --required-version)
 
 # Official GitHub release asset sha256 values for shellcheck v0.11.0 .tar.xz
 # archives (https://github.com/koalaman/shellcheck/releases/tag/v0.11.0). Tests
@@ -256,6 +261,26 @@ SH
   chmod +x "$fakebin/shellcheck"
 }
 
+# fm_lint_stub_actionlint <fakebin-dir>: install an actionlint stub that answers
+# -version with the pinned workflow-lint version and accepts any workflow set.
+# A default (no-args) lint also runs bin/fm-lint-workflows.sh, so a run on an
+# isolated PATH needs that linter present to reach a verdict at all; stubbing it
+# keeps these tests about fm-lint.sh's own contract rather than about actionlint
+# findings, exactly as the ShellCheck stub above does. CI installs the real
+# pinned build in its own step before invoking this owner.
+fm_lint_stub_actionlint() {
+  local fakebin=$1
+  cat > "$fakebin/actionlint" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -version ]; then
+  printf '%s\n' "$REQUIRED_ACTIONLINT"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/actionlint"
+}
+
 # fm_lint_isolated_bin <tmp> <command>...: build a directory of symlinks to the
 # named real commands and report it in FM_TEST_ISOLATED_BIN, for use as a
 # COMPLETE replacement PATH.
@@ -293,6 +318,9 @@ fm_lint_isolated_bin() {
 FM_LINT_REFUSAL_PATH_COMMANDS="env bash dirname"
 # Additionally needed to complete a real lint run once ShellCheck is available.
 FM_LINT_RUN_PATH_COMMANDS="env bash dirname mktemp wc tr sort cat mkdir rm mv perl awk"
+# Additionally needed by a default (no-args) lint, which also hands the GitHub
+# workflows to bin/fm-lint-workflows.sh: that owner collects them itself.
+FM_LINT_WORKFLOW_PATH_COMMANDS="find"
 
 # The status fm-lint.sh exits when it could not run and checked nothing. Pinned
 # here on purpose: the whole point is that it is neither 0 (clean), nor 1
@@ -421,16 +449,17 @@ test_installer_learns_the_pin_with_no_shellcheck_present() {
 }
 
 test_ci_provisioned_shape_never_refuses() {
-  # CI installs the pin in its own step and then runs the lint owner, so the
-  # refusal must be unreachable there. Proven by reproducing that shape rather
-  # than assuming it.
+  # CI installs both pinned linters in their own steps and then runs the lint
+  # owner, so the refusal must be unreachable there. Proven by reproducing that
+  # shape rather than assuming it.
   local tmp isolated log out rc
   tmp=$(fm_test_tmproot fm-lint-ci-shape)
-  # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
-  fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS
+  # shellcheck disable=SC2086 # Deliberate word splitting of the command lists.
+  fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS $FM_LINT_WORKFLOW_PATH_COMMANDS
   isolated=$FM_TEST_ISOLATED_BIN
   log="$tmp/shellcheck.log"
   fm_lint_stub_shellcheck "$isolated" "$log"
+  fm_lint_stub_actionlint "$isolated"
 
   rc=0
   out=$(PATH="$isolated" CI=true FM_LINT_JOBS=1 "$LINT" 2>&1) || rc=$?
@@ -677,12 +706,15 @@ test_changed_mode_verifies_its_selection_before_acting_on_it() {
   # lint. So every direction of that verification is covered here.
   local tmp isolated log diff_file partial_diff empty_diff out rc
   tmp=$(fm_test_tmproot fm-lint-changed-zero)
-  # shellcheck disable=SC2046 # Deliberate word splitting of the command list.
-  fm_lint_isolated_bin "$tmp" $(fm_lint_run_path_without sort)
+  # shellcheck disable=SC2046,SC2086 # Deliberate word splitting of the command lists.
+  fm_lint_isolated_bin "$tmp" $(fm_lint_run_path_without sort) $FM_LINT_WORKFLOW_PATH_COMMANDS
   isolated=$FM_TEST_ISOLATED_BIN
   fm_lint_stub_git "$isolated"
   log="$tmp/shellcheck.log"
   fm_lint_stub_shellcheck "$isolated" "$log"
+  # The empty-selection case below completes a default lint, which also validates
+  # the workflows, so its linter has to be present for that to be a pass.
+  fm_lint_stub_actionlint "$isolated"
   diff_file="$tmp/diff.nul"
   partial_diff="$tmp/partial.nul"
   empty_diff="$tmp/empty.nul"
