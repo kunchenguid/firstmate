@@ -1,0 +1,83 @@
+# Community-visible operating policies for decision reconciliation.
+# Private captain decision records and task-specific evidence stay in the home data/ tree.
+# Each policy id is referenced by bin/fm-decision-reconcile.sh and the decision-reconciliation skill.
+
+[policy.routine-completion]
+summary = "Routine work may close or merge after relevant tests, review, required documentation, and the selected verification gate pass."
+captain_escalation = "privacy, money or new spending, security-sensitive changes, destructive or irreversible actions, product direction, and high-impact releases"
+
+[policy.operational-stewardship]
+summary = "Firstmate owns evaluation operations, the policy record, duplicate-decision cleanup, and exception summaries."
+captain_escalation = "product direction, privacy, money, security, and high-impact releases"
+
+[policy.career-retired]
+summary = "Job Tracker, career-application, resume, and employer-response work is retired and must not resurface as captain decisions."
+captain_escalation = "none"
+
+[policy.dotfiles-normal-repo]
+summary = "Dotfiles are one regular repository: one PR, its verification flow, then rollout only to machines named by that change."
+captain_escalation = "none"
+
+[policy.no-human-recording-library]
+summary = "Do not commission a large human pronunciation recording library now; revisit after the coaching loop is stable and demand is proven."
+captain_escalation = "money"
+
+[policy.intelligibility-not-accent-reduction]
+summary = "Optimize for intelligibility and professional clarity, not accent reduction; a US-English reference may be optional for a lesson."
+captain_escalation = "product-direction"
+
+[policy.coaching-guidance-scores]
+summary = "Describe scores as coaching guidance until human validation supports stronger claims."
+captain_escalation = "high-impact-release"
+
+[policy.public-datasets-first]
+summary = "Use public datasets first for evaluation experiments, with no learner audio and no new provider spend."
+captain_escalation = "money"
+
+[policy.phoneme-first-lessons]
+summary = "Start with a focused phoneme-first learning loop before broader fluency and prosody lessons."
+captain_escalation = "product-direction"
+
+[policy.rule-based-exercise-selection]
+summary = "Keep practice selection rule-based until live personalization is proven through evaluation."
+captain_escalation = "product-direction"
+
+[policy.defer-listener-pilot]
+summary = "Defer a human-listener validation study until internal evaluation and a limited beta justify a scoped, costed proposal."
+captain_escalation = "money"
+
+[policy.no-external-comparator-v1]
+summary = "Do not send live learner audio to outside comparison services in the first version."
+captain_escalation = "privacy,money"
+
+[policy.ios-core-before-personalization]
+summary = "Ship reliable recording, analysis, deletion, error handling, and honest results before personalized home, history, drills, and progress claims."
+captain_escalation = "product-direction"
+
+[policy.result-strength-focus-action]
+summary = "Lead every result with one strength, one focused improvement target, and one next practice action."
+captain_escalation = "product-direction"
+
+[policy.one-target-at-a-time]
+summary = "Recommend one high-impact, confidently detected target at a time; let the learner override the suggested practice target."
+captain_escalation = "product-direction"
+
+[policy.spaced-review-adaptive]
+summary = "Use adaptive spaced review: sooner when uncertain or regressing, later when improvement is stable."
+captain_escalation = "product-direction"
+
+[policy.local-audio-lifecycle]
+summary = "Keep recordings on-device by default; upload only after explicit Analyze; delete the server copy after analysis."
+captain_escalation = "privacy"
+
+[policy.model-release-gate]
+summary = "Require evaluation evidence and human approval before a scoring or learning change reaches users."
+captain_escalation = "high-impact-release,security"
+
+[policy.spending-boundary]
+summary = "Firstmate may use existing approved infrastructure and free or public data; new paid provider, subscription, paid data, or human-recording spend needs a captain proposal."
+captain_escalation = "money"
+
+[policy.telegram-retired]
+summary = "Retire Telegram from product scope; support iPhone, Mac, and browser clients."
+captain_escalation = "product-direction"

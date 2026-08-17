@@ -34,6 +34,7 @@ FM_PR_META_URL=
 FM_PR_META_HOST=
 FM_PR_META_PATH=
 FM_PR_META_NUMBER=
+FM_PR_META_HEAD=
 FM_PR_REG_ID=
 FM_PR_REG_PROVIDER=
 FM_PR_REG_URL=
@@ -292,6 +293,7 @@ fm_pr_metadata_identity_parse() {
   FM_PR_META_HOST=
   FM_PR_META_PATH=
   FM_PR_META_NUMBER=
+  FM_PR_META_HEAD=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -312,10 +314,15 @@ fm_pr_metadata_identity_parse() {
       pr_head=*)
         if [ "$seen_pr" -eq 1 ]; then
           value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
+          if fm_pr_head_valid "$value"; then
+            # shellcheck disable=SC2034 # Consumed by callers that source this library.
+            FM_PR_META_HEAD=$value
+          else
+            post_pr_invalid=1
+          fi
         fi
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*|routine_complete_pr=*|routine_complete_pr_head=*|routine_complete_run_head=*)
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1

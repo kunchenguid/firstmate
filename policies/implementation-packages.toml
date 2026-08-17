@@ -1,0 +1,109 @@
+# Bounded implementation packages group related backlog work by shared policy and code surface.
+# Each package has one owner task; members are reconciled together, not one agent per old question.
+
+[package.invoz-learning-privacy]
+owner = "onboarding-honest-error-n3"
+summary = "Invoz learner privacy, honest errors, encrypted offline queue, ingress guard, and the phoneme-first learning loop through professional pattern expansion."
+members = [
+  "onboarding-honest-error-n3",
+  "ambient-score-scale-b8",
+  "offline-queue-privacy-j6",
+  "public-ingress-guard-m4",
+  "recurring-pattern-loop-v1-z2",
+  "canonical-pattern-history-u7",
+  "spaced-review-proof-c5",
+  "iphone-learning-parity-h9",
+  "ambient-learning-evidence-p6",
+  "professional-pattern-expansion-w3",
+]
+
+[package.invoz-macos-repair]
+owner = "invoz-macos-trigger-correction-diagnosis-s2"
+summary = "Invoz macOS dictation recovery, correction, trigger provenance, caption UX, and related documentation cleanup."
+members = [
+  "invoz-macos-trigger-correction-diagnosis-s2",
+  "invoz-injection-source-marker-composer-q9",
+  "invoz-fn-trigger-provenance-composer-t4",
+  "invoz-caption-latency-composer-n7",
+  "invoz-caption-bubble-errors-composer-p8",
+  "invoz-archive-legacy-ondevice-whisper-spec-r1",
+  "invoz-five-minute-dictation-stall-sol-u5",
+  "invoz-overlay-app-identity-stability-v6",
+  "fix-microphone-capture-q8",
+]
+
+[package.invoz-evaluation-release]
+owner = "invoz-groq-gpt-oss-migration-v1"
+summary = "Invoz internal evaluation, model migration, release gates, and learning-outcome evidence before broader launch claims."
+members = [
+  "invoz-groq-gpt-oss-migration-v1",
+  "invoz-learning-outcome-contract-g7",
+  "invoz-coaching-evaluate-all-u2",
+  "invoz-shadow-model-harness-e5",
+  "benchmark-graphify-long-task-g8",
+]
+
+[package.invoz-coach-platform]
+owner = "articulation-coach-spec-v0-t9"
+summary = "Invoz Coach lesson platform, articulation coach spec and implementation, and pronunciation curriculum ships blocked only by unresolved contract exceptions."
+members = [
+  "articulation-coach-spec-v0-t9",
+  "articulation-coach-v0-macos-x1",
+  "pronunciation-multi-target-lessons-p4",
+  "pronunciation-curriculum-skill-d5",
+  "coach-semantic-lessons-d4",
+  "coach-target-selection-c3",
+  "invoz-confirmed-correction-personalization-h8",
+  "invoz-macos-attribution-shadow-lab-f6",
+]
+
+[package.security-delivery]
+owner = "security-delivery-owner-v1"
+summary = "Security-sensitive delivery work is coordinated through private repositories."
+members = [
+  "security-delivery-owner-v1",
+  "security-delivery-followup-a1",
+  "security-delivery-followup-b2",
+  "security-delivery-followup-c3",
+]
+
+[package.fleet-infrastructure]
+owner = "fleet-gpt-deep-research-persistent-profile-r8"
+summary = "Fleet GPT Deep Research infrastructure, specialist handoff, and deferred Graphify rollouts across non-Invoz repos."
+members = [
+  "fleet-gpt-deep-research-persistent-profile-r8",
+  "fleet-gpt-research-specialist-handoff-v1",
+  "graphify-baby-menu-n7",
+  "graphify-dotfiles-p8",
+  "graphify-fleet-system-q9",
+  "update-graphify-source-fleet-k5",
+  "refresh-invoz-graphify-p2",
+]
+
+[package.gpt-research-campaign]
+owner = "gpt-research-invoz-coach-learning-system-v1"
+summary = "Sequential GPT Deep Research scouts for Coach learning, architecture, and cross-project feature discovery."
+members = [
+  "gpt-research-invoz-coach-learning-system-v1",
+  "gpt-research-invoz-coach-technical-architecture-v1",
+  "gpt-research-pythia-control-plane-v1",
+  "gpt-research-trader-policy-v1",
+  "gpt-research-genpeli-feature-v1",
+  "gpt-research-invoz-feature-v1",
+]
+
+[package.invoz-ios-modernization]
+owner = "invoz-ios-endpoint-audit-sol-m6"
+summary = "Invoz iOS endpoint audit, animation PR finish, and client modernization after macOS repair stabilizes."
+members = [
+  "invoz-ios-endpoint-audit-sol-m6",
+  "finish-invoz-ios-animation-pr16-r3",
+  "invoz-listener-pilot-protocol-d4",
+]
+
+[package.backlog-reconciliation]
+owner = "firstmate-decision-triage-policy-v1"
+summary = "Durable operating policy, decision-to-work links, duplicate-decision cleanup, and routine completion authority."
+members = [
+  "firstmate-decision-triage-policy-v1",
+]

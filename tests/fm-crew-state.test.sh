@@ -660,14 +660,16 @@ test_top_level_fixing_done_log_stays_working() {
 # (d) terminal run-step is authoritative
 test_terminal_passed() {
   reset_fakes
-  local d; d=$(new_case passed)
+  local d head out; d=$(new_case passed)
   make_repo_on_branch "$d/wt" fm/feat-d
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-d.meta" "window=fm:fm-feat-d" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-d)"
-  local out; out=$(run_crew_state "$d" feat-d)
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  out=$(run_crew_state "$d" feat-d)
   assert_contains "$out" "state: done" "passed run -> done"
   assert_contains "$out" "source: run-step" "passed -> run-step source"
+  assert_contains "$out" "run-head: $head" "passed run exposes its resolved code identity"
   pass "terminal passed run is authoritative"
 }
 
