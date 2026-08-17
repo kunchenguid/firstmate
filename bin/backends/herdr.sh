@@ -2900,16 +2900,19 @@ fm_backend_herdr_endpoint_confirmed_gone() {  # <target>
 
 # fm_backend_herdr_classify_agent_status: map a raw `agent get` agent_status
 # value to the adapter's watcher busy|idle|unknown vocabulary. working ->
-# busy (actively generating); idle/done -> idle; blocked -> idle (a blocked
-# agent is stuck waiting on the human, not grinding - the watcher should
-# treat it like a stale pane needing attention, not suppress it as busy);
-# unknown/unparseable/empty -> unknown, the caller's cue to fall back to
-# pane-regex detection.
+# busy (actively generating); done -> idle (terminal); blocked -> idle (a
+# blocked agent is stuck waiting on the human, not grinding - the watcher
+# should treat it like a stale pane needing attention, not suppress it as
+# busy). Herdr's native idle is NOT positive idle evidence: `agent get`
+# reads idle while a harness waits on its own long foreground tool call, so
+# mapping it to idle would misread a busy worker as idle. idle and
+# unknown/unparseable/empty therefore map to unknown, the caller's cue to
+# defer to the task's semantic lifecycle record (bin/fm-busy-lib.sh,
+# agent_start/agent_settled), never to a rendered busy footer.
 fm_backend_herdr_classify_agent_status() {  # <raw-agent_status>
   case "$1" in
     working) printf 'busy' ;;
-    idle|done) printf 'idle' ;;
-    blocked) printf 'idle' ;;
+    done|blocked) printf 'idle' ;;
     *) printf 'unknown' ;;
   esac
 }

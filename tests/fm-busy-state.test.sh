@@ -339,6 +339,21 @@ test_herdr_native_busy_only() {
   pass "herdr's native verdict is trusted for busy only, and records outrank it"
 }
 
+test_busy_pi_record_outranks_hidden_footer_idle() {
+  local state gen out
+  state=$(new_state_dir pi-hidden-footer)
+  # Simulate Calm hiding the Pi "Working..." footer: herdr's native agent
+  # status reads idle even while the Pi worker is mid-turn.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf 'idle'; }
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
+  out=$(fm_busy_classify herdr s:p pi t1 "$state")
+  [ "$out" = "busy pi-ext" ] || fail "a busy Pi record must outrank herdr's hidden-footer idle, got '$out'"
+  unset -f fm_backend_busy_state
+  pass "a busy Pi is classified busy (not stale) even when the Working footer is hidden"
+}
+
 # The record parser runs inside sourcing callers (the watcher, the daemon, the
 # crew-state reader), so it must not disturb their shell: no clobbered
 # positional parameters and no changed glob setting.
@@ -400,6 +415,7 @@ test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
+test_busy_pi_record_outranks_hidden_footer_idle
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
 

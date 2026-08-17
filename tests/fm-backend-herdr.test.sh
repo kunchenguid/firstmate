@@ -2971,6 +2971,17 @@ test_busy_state_done_and_blocked_map_to_idle() {
   pass "fm_backend_herdr_busy_state: done -> idle, blocked -> idle (surfaced like a stale pane, not suppressed as busy)"
 }
 
+test_busy_state_idle_maps_to_unknown() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/busy-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "agent_status=idle should map to unknown (a busy worker on a long foreground tool reads idle), got '$out'"
+  pass "fm_backend_herdr_busy_state: idle -> unknown (native idle never misreads a busy worker as idle)"
+}
+
 test_busy_state_unknown_on_no_agent() {
   local dir log resp fb out
   dir="$TMP_ROOT/busy-unknown"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -2978,8 +2989,8 @@ test_busy_state_unknown_on_no_agent() {
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state default:w1:p2' "$ROOT" )
-  [ "$out" = unknown ] || fail "a failed agent get should report unknown (the fallback-to-regex cue), got '$out'"
-  pass "fm_backend_herdr_busy_state: unparseable/absent agent state reports unknown, the regex-fallback cue"
+  [ "$out" = unknown ] || fail "a failed agent get should report unknown (the semantic-record cue), got '$out'"
+  pass "fm_backend_herdr_busy_state: unparseable/absent agent state reports unknown, the semantic-record cue"
 }
 
 # --- composer_state: structural border-row classification --------------------
@@ -4427,6 +4438,7 @@ test_kill_is_best_effort
 test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
+test_busy_state_idle_maps_to_unknown
 test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
 test_composer_state_styled_placeholder_draft_is_pending
