@@ -32,21 +32,91 @@
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
 #
+# Exit status:
+#   0  the selected file set is clean, or there were no changed lint targets
+#   1  ShellCheck reported findings
+#   2  invalid usage
+#   3  the lint could not run and NOTHING was checked (see the refusal below)
+#
+# This gate refuses instead of passing when it cannot run. A missing ShellCheck,
+# a ShellCheck that is not the pin, one that will not report its version, and a
+# missing perl all print an unmissable "LINT NOT RUN" line naming the tool, the
+# exact version required, and how to get it, then exit 3.
+# 3 is deliberately not 127: 127 is the shell's own "command not found", so a
+# caller that sees it cannot tell whether this script refused or was never found
+# at all, and a gate that reads lint output for actionable findings sees none in
+# a refusal and can record a clean step that in fact checked nothing.
+#
+# Provisioning is opt-in and never a side effect of linting, because a gate that
+# reaches the network to validate is harder to trust and breaks on an offline
+# host. A caller that deliberately wants it passes --provision-shellcheck <dir>
+# (or sets FM_LINT_PROVISION_SHELLCHECK=<dir>); this script then installs the
+# pinned, checksum-verified build there through bin/fm-install-shellcheck.sh and
+# puts it first on PATH for that run only. A provisioning attempt that fails
+# refuses exactly like a missing tool; it never degrades into a pass. CI
+# provisions in its own step (.github/workflows/ci.yml) and never needs this.
+#
+# --required-version and --list-files answer with no ShellCheck present at all,
+# because bin/fm-install-shellcheck.sh asks this script which version to fetch:
+# breaking that would break the installer that repairs a missing tool.
+#
 # Usage:
 #   fm-lint.sh                         lint the context-selected file set (see above)
 #   fm-lint.sh <path>...               lint explicit roots with the same config
 #   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
+#   fm-lint.sh --provision-shellcheck <dir>
+#                                      opt in to installing the pin into <dir>
 #   fm-lint.sh --required-version      print the ShellCheck pin
 #   fm-lint.sh --list-files            print the file set that would be linted
 #   fm-lint.sh --help                  print this usage
 set -u
 
 REQUIRED_SHELLCHECK=0.11.0
+# The "checked nothing" status. Distinct from 0 (clean), 1 (findings), 2 (usage),
+# and 127 (the shell's command-not-found), so no caller can confuse a refusal
+# with a clean lint, a lint failure, or this script being absent.
+REFUSED_EXIT=3
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/fm-lint.sh"
 ROOT="$(cd "$SELF_DIR/.." && pwd)"
 cd "$ROOT" || exit 1
+
+# fm_lint_refuse <reason> [shellcheck]: the single exit for "this gate could not
+# run". Says so unmissably rather than letting a caller read silence as a clean
+# lint, and with the second argument also names the pinned tool, its exact
+# version, and both ways to get it. See the exit-status note in the header.
+fm_lint_refuse() {
+  printf 'fm-lint.sh: LINT NOT RUN: %s\n' "$1" >&2
+  printf 'fm-lint.sh: nothing was checked, so this is a failed lint gate, not a clean one.\n' >&2
+  if [ "${2:-}" = shellcheck ]; then
+    printf 'fm-lint.sh: required tool: ShellCheck, exactly version %s (pinned so local and CI cannot diverge).\n' \
+      "$REQUIRED_SHELLCHECK" >&2
+    printf 'fm-lint.sh: install it: bin/fm-install-shellcheck.sh <dir>, then put <dir> first on PATH.\n' >&2
+    printf 'fm-lint.sh: or provision it for this run only: bin/fm-lint.sh --provision-shellcheck <dir>\n' >&2
+  fi
+  exit "$REFUSED_EXIT"
+}
+
+# fm_lint_provision_shellcheck <dir>: opt-in only, never reached by a default
+# lint. Installs the pinned, checksum-verified build into <dir> and puts it first
+# on PATH for this run. A failed install refuses; it never falls through to a
+# lint that silently used some other ShellCheck, or to no lint at all.
+fm_lint_provision_shellcheck() {
+  local dir=$1 log resolved_dir
+  log=$("$SELF_DIR/fm-install-shellcheck.sh" "$dir" 2>&1) || {
+    printf '%s\n' "$log" >&2
+    fm_lint_refuse "provisioning ShellCheck $REQUIRED_SHELLCHECK into $dir failed" shellcheck
+  }
+  resolved_dir=$(cd "$dir" 2>/dev/null && pwd) \
+    || fm_lint_refuse "provisioning reported success but $dir is not a readable directory" shellcheck
+  [ -x "$resolved_dir/shellcheck" ] \
+    || fm_lint_refuse "provisioning reported success but $resolved_dir/shellcheck is not executable" shellcheck
+  PATH="$resolved_dir:$PATH"
+  export PATH
+  printf 'fm-lint.sh: provisioned ShellCheck %s into %s on request.\n' \
+    "$REQUIRED_SHELLCHECK" "$resolved_dir" >&2
+}
 
 FM_LINT_WORKER_SHELLCHECK_PID=
 # shellcheck disable=SC2329 # Registered by the private worker's signal traps.
@@ -99,8 +169,10 @@ if [ "${1:-}" = "--required-version" ]; then
   exit 0
 fi
 
+# Prints the header block from line 2 up to the first non-comment line, so the
+# usage text cannot drift out of a hardcoded line range when the header changes.
 fm_lint_usage() {
-  sed -n '2,42{s/^# \{0,1\}//;p;}' "$SELF"
+  sed -n '2,${/^#/!q; s/^# \{0,1\}//; p;}' "$SELF"
 }
 
 # Default no-args lint also validates GitHub workflows. Explicit paths stay a
@@ -112,6 +184,7 @@ fm_lint_run_workflows() {
 
 JOBS=${FM_LINT_JOBS:-2}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
+PROVISION_DIR=${FM_LINT_PROVISION_SHELLCHECK:-}
 LIST_FILES=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -131,6 +204,18 @@ while [ "$#" -gt 0 ]; do
       ;;
     --telemetry=*)
       TELEMETRY=${1#*=}
+      shift
+      ;;
+    --provision-shellcheck)
+      [ "$#" -ge 2 ] || {
+        printf 'fm-lint.sh: --provision-shellcheck requires a directory.\n' >&2
+        exit 2
+      }
+      PROVISION_DIR=$2
+      shift 2
+      ;;
+    --provision-shellcheck=*)
+      PROVISION_DIR=${1#*=}
       shift
       ;;
     --list-files)
@@ -229,23 +314,24 @@ if [ "$LIST_FILES" -eq 1 ]; then
   exit 0
 fi
 
+[ -z "$PROVISION_DIR" ] || fm_lint_provision_shellcheck "$PROVISION_DIR"
+
 if ! command -v shellcheck >/dev/null 2>&1; then
-  printf 'fm-lint.sh: ShellCheck not found; install ShellCheck %s for CI parity.\n' \
-    "$REQUIRED_SHELLCHECK" >&2
-  exit 127
+  fm_lint_refuse 'no shellcheck was found on PATH' shellcheck
 fi
 unset SHELLCHECK_OPTS
 SHELLCHECK_BIN=$(command -v shellcheck)
 if ! PERL_BIN=$(command -v perl); then
-  printf 'fm-lint.sh: perl is required for bounded worker cleanup.\n' >&2
-  exit 127
+  fm_lint_refuse 'no perl was found on PATH, and it is required for bounded worker cleanup'
 fi
 resolved=$("$SHELLCHECK_BIN" --version | awk '/^version:/ {print $2; exit}')
 printf 'fm-lint.sh: ShellCheck %s (pinned %s)\n' "$resolved" "$REQUIRED_SHELLCHECK" >&2
+if [ -z "$resolved" ]; then
+  fm_lint_refuse "the shellcheck at $SHELLCHECK_BIN did not report a version" shellcheck
+fi
 if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
-  printf 'fm-lint.sh: ShellCheck %s required for CI parity, found %s. Install %s.\n' \
-    "$REQUIRED_SHELLCHECK" "$resolved" "$REQUIRED_SHELLCHECK" >&2
-  exit 1
+  fm_lint_refuse "the shellcheck at $SHELLCHECK_BIN is version $resolved, not the pinned $REQUIRED_SHELLCHECK" \
+    shellcheck
 fi
 
 if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then

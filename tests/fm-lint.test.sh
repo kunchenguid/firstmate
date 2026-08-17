@@ -244,6 +244,270 @@ SH
   chmod +x "$fakebin/shellcheck"
 }
 
+# fm_lint_isolated_bin <tmp> <command>...: build a directory of symlinks to the
+# named real commands and print it, for use as a COMPLETE replacement PATH.
+#
+# The missing-tool tests need a PATH with provably no shellcheck on it. Trimming
+# the ambient PATH cannot promise that (a contributor may have shellcheck in
+# /usr/bin), and a test that silently stops exercising the missing-tool path is
+# worse than no test. An allowlisted PATH inverts that: shellcheck is absent
+# because nothing was linked, on every host. A command that cannot be resolved
+# fails the test rather than leaving the run to fail later for the wrong reason.
+fm_lint_isolated_bin() {
+  local tmp=$1 dir resolved cmd
+  shift
+  dir="$tmp/isolated-bin"
+  mkdir -p "$dir" || fail "could not create an isolated bin directory"
+  for cmd in "$@"; do
+    resolved=$(command -v "$cmd") \
+      || fail "fm_lint_isolated_bin needs $cmd on the ambient PATH to build an isolated PATH"
+    ln -sf "$resolved" "$dir/$cmd" || fail "could not link $cmd into the isolated PATH"
+  done
+  PATH="$dir" command -v shellcheck >/dev/null 2>&1 \
+    && fail "the isolated PATH resolved a shellcheck, so the missing-tool path would go untested"
+  printf '%s\n' "$dir"
+}
+
+# The commands fm-lint.sh itself needs before it can resolve ShellCheck at all.
+# Its shebang resolves bash through PATH, so env and bash must be present.
+FM_LINT_REFUSAL_PATH_COMMANDS="env bash dirname"
+# Additionally needed to complete a real lint run once ShellCheck is available.
+FM_LINT_RUN_PATH_COMMANDS="env bash dirname mktemp wc tr sort cat mkdir rm mv perl awk"
+
+# The status fm-lint.sh exits when it could not run and checked nothing. Pinned
+# here on purpose: the whole point is that it is neither 0 (clean), nor 1
+# (findings), nor 2 (usage), nor 127 (the shell's own command-not-found, which a
+# caller cannot tell apart from fm-lint.sh being absent).
+FM_LINT_REFUSED_EXIT=3
+
+# fm_lint_assert_refusal <output> <rc> <what>: assert the shared "could not run"
+# contract - an unmissable marker, a non-passing and non-ambiguous status, and a
+# remedy naming the tool, the exact version, and how to get it.
+fm_lint_assert_refusal() {
+  local out=$1 rc=$2 what=$3
+  [ "$rc" -ne 0 ] || fail "$what reported success while checking nothing"$'\n'"$out"
+  [ "$rc" -ne 127 ] \
+    || fail "$what exited 127, which a caller cannot tell apart from fm-lint.sh being missing"$'\n'"$out"
+  [ "$rc" -eq "$FM_LINT_REFUSED_EXIT" ] \
+    || fail "$what exited $rc, not the dedicated could-not-run status $FM_LINT_REFUSED_EXIT"$'\n'"$out"
+  assert_contains "$out" "LINT NOT RUN" "$what did not visibly mark the lint as not run"
+  assert_contains "$out" "ShellCheck" "$what did not name the required tool"
+  assert_contains "$out" "$REQUIRED" "$what did not name the exact required version"
+  assert_contains "$out" "bin/fm-install-shellcheck.sh" "$what did not name how to install the pin"
+  assert_contains "$out" "--provision-shellcheck" "$what did not name the opt-in provisioning path"
+}
+
+test_missing_shellcheck_refuses_instead_of_passing() {
+  # The regression this test exists for: with no ShellCheck resolvable, the lint
+  # gate reported a clean step while having checked nothing, so a real finding
+  # (an SC2016 caught only by running the canonical set by hand) shipped through
+  # local validation. A gate that cannot run must say so, not pass.
+  local tmp isolated out rc
+  tmp=$(fm_test_tmproot fm-lint-missing-tool)
+  # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
+  isolated=$(fm_lint_isolated_bin "$tmp" $FM_LINT_REFUSAL_PATH_COMMANDS)
+
+  rc=0
+  # CI=true selects the full canonical set, so this reaches the tool check
+  # without needing git on the isolated PATH.
+  out=$(PATH="$isolated" CI=true "$LINT" 2>&1) || rc=$?
+  fm_lint_assert_refusal "$out" "$rc" "a lint with no ShellCheck on PATH"
+  pass "fm-lint.sh refuses out loud when no ShellCheck is present instead of passing"
+}
+
+test_wrong_version_and_unversioned_tool_share_the_refusal() {
+  # Both skews are the same class as a missing tool: the pinned rule set was not
+  # applied, so nothing trustworthy was checked.
+  local tmp isolated out rc
+  tmp=$(fm_test_tmproot fm-lint-skew)
+  # The full run set: version resolution happens after the other tool checks, so
+  # a thinner PATH would refuse for the wrong reason and prove nothing.
+  # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
+  isolated=$(fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS)
+
+  cat > "$isolated/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.9.9\n'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$isolated/shellcheck"
+  rc=0
+  out=$(PATH="$isolated" CI=true "$LINT" 2>&1) || rc=$?
+  fm_lint_assert_refusal "$out" "$rc" "a lint under a non-pinned ShellCheck"
+  assert_contains "$out" "0.9.9" "the refusal did not report the version actually resolved"
+
+  # A tool that answers nothing must not be read as a matching version.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$isolated/shellcheck"
+  chmod +x "$isolated/shellcheck"
+  rc=0
+  out=$(PATH="$isolated" CI=true "$LINT" 2>&1) || rc=$?
+  fm_lint_assert_refusal "$out" "$rc" "a lint under a ShellCheck that reports no version"
+  pass "fm-lint.sh refuses a version-skewed or unversioned ShellCheck on the same contract"
+}
+
+test_pin_and_inventory_answer_without_any_shellcheck() {
+  # bin/fm-install-shellcheck.sh asks fm-lint.sh which version to fetch, so
+  # --required-version must keep working when ShellCheck is exactly what is
+  # missing, or the refusal above would break the installer that repairs it.
+  # .github/workflows/ci.yml's stock-macOS-Bash job likewise calls --list-files
+  # on a runner where ShellCheck is never installed.
+  local tmp isolated version listed rc
+  tmp=$(fm_test_tmproot fm-lint-no-tool-queries)
+  # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
+  isolated=$(fm_lint_isolated_bin "$tmp" $FM_LINT_REFUSAL_PATH_COMMANDS)
+
+  rc=0
+  version=$(PATH="$isolated" "$LINT" --required-version 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "--required-version failed with no ShellCheck present, breaking the installer"$'\n'"$version"
+  [ "$version" = "$REQUIRED" ] \
+    || fail "--required-version printed '$version', not the pin '$REQUIRED', with no ShellCheck present"
+
+  rc=0
+  listed=$(PATH="$isolated" CI=true "$LINT" --list-files 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "--list-files failed with no ShellCheck present"$'\n'"$listed"
+  printf '%s\n' "$listed" | grep -Fqx 'bin/fm-lint.sh' \
+    || fail "--list-files did not report the inventory with no ShellCheck present"$'\n'"$listed"
+  pass "fm-lint.sh answers --required-version and --list-files with no ShellCheck present"
+}
+
+test_installer_learns_the_pin_with_no_shellcheck_present() {
+  # End-to-end proof of the same dependency: the installer must be able to run in
+  # exactly the state it exists to repair. Network and archive handling are
+  # stubbed; the pin lookup is the real one.
+  local tmp isolated destination out rc installed
+  tmp=$(fm_test_tmproot fm-shellcheck-install-no-tool)
+  # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
+  isolated=$(fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS install)
+  destination="$tmp/provisioned"
+  fm_lint_stub_download "$isolated"
+
+  rc=0
+  out=$(PATH="$isolated" "$INSTALLER" "$destination" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "the ShellCheck installer could not run with no ShellCheck present"$'\n'"$out"
+  [ -x "$destination/shellcheck" ] || fail "the installer produced no executable"$'\n'"$out"
+  installed=$(PATH="$isolated" "$destination/shellcheck" --version | awk '/^version:/ {print $2; exit}')
+  [ "$installed" = "$REQUIRED" ] \
+    || fail "the installer fetched version '$installed' instead of the pin '$REQUIRED'"
+  pass "the ShellCheck installer still learns the pin when ShellCheck is what is missing"
+}
+
+test_ci_provisioned_shape_never_refuses() {
+  # CI installs the pin in its own step and then runs the lint owner, so the
+  # refusal must be unreachable there. Proven by reproducing that shape rather
+  # than assuming it.
+  local tmp isolated log out rc
+  tmp=$(fm_test_tmproot fm-lint-ci-shape)
+  # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
+  isolated=$(fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS)
+  log="$tmp/shellcheck.log"
+  fm_lint_stub_shellcheck "$isolated" "$log"
+
+  rc=0
+  out=$(PATH="$isolated" CI=true FM_LINT_JOBS=1 "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the CI shape (pin provisioned, then lint) did not pass"$'\n'"$out"
+  assert_not_contains "$out" "LINT NOT RUN" "the CI shape reached the refusal path"
+  [ -s "$log" ] || fail "the CI shape passed without asking ShellCheck to check anything"
+  pass "fm-lint.sh never refuses in CI's provision-then-lint shape"
+}
+
+test_provisioning_is_opt_in_and_never_degrades_to_a_pass() {
+  # Default behavior is refuse, not fetch: a gate that reaches the network as a
+  # side effect of validating is harder to trust and breaks offline. Opting in
+  # provisions the pin; an opt-in that FAILS still refuses rather than passing.
+  local tmp isolated target out rc
+  tmp=$(fm_test_tmproot fm-lint-provision)
+  # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
+  isolated=$(fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS install)
+  target="$tmp/good.sh"
+  printf '#!/usr/bin/env bash\nset -eu\nprintf "ok\\n"\n' > "$target"
+
+  # Without opting in, the same environment must refuse and fetch nothing.
+  fm_lint_stub_download "$isolated"
+  rc=0
+  out=$(PATH="$isolated" CI=true "$LINT" "$target" 2>&1) || rc=$?
+  fm_lint_assert_refusal "$out" "$rc" "a default lint with ShellCheck absent but installable"
+  [ ! -e "$tmp/provisioned" ] \
+    || fail "a default lint provisioned ShellCheck without being asked to"$'\n'"$out"
+
+  # Opting in provisions the pin and completes the lint.
+  rc=0
+  out=$(PATH="$isolated" CI=true FM_LINT_JOBS=1 \
+    "$LINT" --provision-shellcheck "$tmp/provisioned" "$target" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "opt-in provisioning did not produce a working lint"$'\n'"$out"
+  assert_not_contains "$out" "LINT NOT RUN" "opt-in provisioning still refused"
+  [ -x "$tmp/provisioned/shellcheck" ] || fail "opt-in provisioning installed no ShellCheck"$'\n'"$out"
+
+  # The environment variable is the same opt-in.
+  rc=0
+  out=$(PATH="$isolated" CI=true FM_LINT_JOBS=1 \
+    FM_LINT_PROVISION_SHELLCHECK="$tmp/provisioned-env" "$LINT" "$target" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "FM_LINT_PROVISION_SHELLCHECK did not provision the pin"$'\n'"$out"
+  [ -x "$tmp/provisioned-env/shellcheck" ] || fail "FM_LINT_PROVISION_SHELLCHECK installed no ShellCheck"
+
+  # A failed opt-in must refuse, never quietly lint with nothing or pass.
+  printf '#!/usr/bin/env bash\nexit 22\n' > "$isolated/curl"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$isolated/sleep"
+  chmod +x "$isolated/curl" "$isolated/sleep"
+  rc=0
+  out=$(PATH="$isolated" CI=true \
+    "$LINT" --provision-shellcheck "$tmp/failed" "$target" 2>&1) || rc=$?
+  fm_lint_assert_refusal "$out" "$rc" "a failed opt-in provisioning"
+  pass "fm-lint.sh provisions only on request and refuses when that request fails"
+}
+
+# fm_lint_stub_download <dir>: stub the network and archive tools
+# bin/fm-install-shellcheck.sh uses, so provisioning can be exercised without
+# reaching the network. The checksum the installer verifies is the real pinned
+# one, and the extracted binary answers --version with the pinned version, so a
+# provisioning path that installed the wrong thing would still be caught.
+#
+# The installer selects its archive and pinned digest from uname, so the platform
+# is fixed here rather than read from the environment: the digest below must be
+# the one the installer expects for the archive it chooses, on every host. Unlike
+# the shared tar stub, the extracted binary stays silent unless asked for its
+# version, because these tests then use it to lint real files.
+fm_lint_stub_download() {
+  local dir=$1
+  fm_install_stub_curl "$dir"
+  fm_install_stub_sleep "$dir"
+  cat > "$dir/uname" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -m) printf 'x86_64\n' ;;
+  *) printf 'Linux\n' ;;
+esac
+SH
+  cat > "$dir/sha256sum" <<SH
+#!/usr/bin/env bash
+printf '%s  %s\n' "$SHELLCHECK_SHA_LINUX_X86_64" "\$1"
+SH
+  cat > "$dir/tar" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-C" ]; then
+    mkdir -p "$2/shellcheck-v0.11.0"
+    cat > "$2/shellcheck-v0.11.0/shellcheck" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+fi
+exit 0
+EOF
+    chmod +x "$2/shellcheck-v0.11.0/shellcheck"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  chmod +x "$dir/uname" "$dir/sha256sum" "$dir/tar"
+}
+
 test_changed_mode_lints_only_the_changed_file() {
   local tmp fakebin log diff_file out target
   tmp=$(fm_test_tmproot fm-lint-changed)
@@ -532,29 +796,6 @@ test_installer_rejects_unsupported_platform() {
   [ "$rc" -ne 0 ] || fail "installer accepted an unsupported architecture"$'\n'"$out"
   assert_contains "$out" "unsupported platform" "installer did not reject linux/ppc64le"
   pass "ShellCheck installer rejects an unsupported OS or architecture"
-}
-
-test_rejects_wrong_shellcheck_version() {
-  # Version-independent: a fake shellcheck reporting a different version must be
-  # refused before any lint, proving local and CI cannot silently diverge.
-  local tmp fakebin out rc
-  tmp=$(fm_test_tmproot fm-lint-ver)
-  fakebin=$(fm_fakebin "$tmp")
-  cat > "$fakebin/shellcheck" <<'SH'
-#!/usr/bin/env bash
-if [ "$1" = "--version" ]; then
-  printf 'ShellCheck - shell script analysis tool\nversion: 0.9.9\nlicense: x\nwebsite: y\n'
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fakebin/shellcheck"
-  rc=0
-  out=$(PATH="$fakebin:$PATH" "$LINT" 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "fm-lint.sh accepted a shellcheck version other than the pin"$'\n'"$out"
-  assert_contains "$out" "$REQUIRED" "fm-lint.sh did not name the required version on mismatch"
-  assert_contains "$out" "0.9.9" "fm-lint.sh did not report the resolved (wrong) version"
-  pass "fm-lint.sh refuses to lint under a non-pinned ShellCheck version"
 }
 
 test_catches_a_real_lint_defect() {
@@ -866,7 +1107,12 @@ test_installer_rejects_wrong_checksum
 test_installer_falls_back_to_shasum
 test_installer_prefers_sha256sum_over_shasum
 test_installer_rejects_unsupported_platform
-test_rejects_wrong_shellcheck_version
+test_missing_shellcheck_refuses_instead_of_passing
+test_wrong_version_and_unversioned_tool_share_the_refusal
+test_pin_and_inventory_answer_without_any_shellcheck
+test_installer_learns_the_pin_with_no_shellcheck_present
+test_ci_provisioned_shape_never_refuses
+test_provisioning_is_opt_in_and_never_degrades_to_a_pass
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
