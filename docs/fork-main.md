@@ -230,6 +230,7 @@ A clean result creates a two-parent upstream merge, moves each unit whose canoni
 A unit that is equivalent upstream but no longer has exactly one aggregate patch commit stops the merge instead of retiring, because that single commit is the whole proof boundary.
 It does not push or invoke no-mistakes.
 The worker validates through the fork registration, runs health against the actual post-pipeline head, and opens a fork-main pull request.
+The captain merges that pull request with the regular merge method, never squash or rebase, so the upstream merge remains reachable.
 
 A conflict exits with code 3, leaves the merge and rerere result unstaged, identifies affected manifest units, and writes a worktree-private re-justification receipt.
 Decide whether every affected divergence remains worth carrying before resolving it.
