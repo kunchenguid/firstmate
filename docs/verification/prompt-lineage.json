@@ -211,8 +211,8 @@
     "schema_version": 1,
     "previous_upstream": "9823ff899c58319e5a09846b18f2958018598b38",
     "upstream": "bdae21ed09d2cca4f57caed4bda9d30d8f9d9be8",
-    "overlay": "d1b035d69fa86cb93a84413cf6a519a23d1b6b73",
-    "transformer_sha256": "af2f3bf3d09cacd916485e77ecb727e83351b547ee0c93789f561ac6748bdf63",
+    "overlay": "1caaa38c0ed19d5a60a5014b0df6c64527e43674",
+    "transformer_sha256": "12b59cad1b23070e294c5e26ad53a1715316abd9d36caa6f3cc7782ab51a453d",
     "changes": [
       {
         "source_path": "AGENTS.md",
@@ -277,5 +277,11 @@
         "kind": "skill-body-with-compact-description"
       }
     ]
+  },
+  "semantic_refresh_review": {
+    "schema_version": 1,
+    "candidate": "95d810ee991953755299bba2ab822a4a685e531d",
+    "reviewer_overlay": "REVIEWER_COMMIT_PLACEHOLDER",
+    "transformer_sha256": "8376df860bc1e205292da0d4975d601728e8f0c209fb0ee27ffe50fe4e66aa81"
   }
 }

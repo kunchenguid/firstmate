@@ -300,6 +300,20 @@ test_negative_committed_generated_behavior() {
   pass "preservation verifier rejects committed drift behind a later commit"
 }
 
+test_negative_descendant_semantic_producer() {
+  prepare_fixture
+  python3 - "$FIXTURE/docs/verification/prompt-lineage.json" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["semantic_refresh"]["overlay"] = data["semantic_refresh_review"]["reviewer_overlay"]
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+  run_expect_failure "producer is a descendant" verify_fixture_without_generated
+  pass "semantic refresh rejects descendant commits claimed as candidate producers"
+}
+
 test_negative_mutable_generated_baseline() {
   prepare_fixture
   fixture_head=$(git -C "$FIXTURE" rev-parse HEAD)
@@ -338,4 +352,5 @@ test_negative_dead_trigger
 test_negative_broken_link
 test_negative_generated_behavior
 test_negative_committed_generated_behavior
+test_negative_descendant_semantic_producer
 test_negative_mutable_generated_baseline

@@ -512,7 +512,7 @@ PY
 
 test_unproven_skill_description_boundaries_refuse_candidates() {
   local kind expected w out installed live before_refs after_refs
-  for kind in malformed ambiguous lower-indented-block; do
+  for kind in malformed ambiguous lower-indented-block over-indented-leading-blank invalid-block-header; do
     w=$(new_semantic_overlay_world "t-description-$kind")
     installed=$(git -C "$w/main" rev-parse HEAD)
     live=$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)
@@ -526,13 +526,19 @@ if kind == "ambiguous":
     replacement = "description: First description.\ndescription: Second description."
 elif kind == "lower-indented-block":
     replacement = "description: >\n    Expanded upstream\n  lower-indented malformed content."
+elif kind == "over-indented-leading-blank":
+    replacement = "description: >\n      \n    Expanded upstream content."
+elif kind == "invalid-block-header":
+    replacement = "description: >++\n  Expanded upstream content."
 path.write_text(re.sub(r"description:.*?(?=\n---\n)", replacement, path.read_text(), count=1, flags=re.DOTALL))
 PY
     git -C "$w/seed" add -A && git -C "$w/seed" commit -qm "$kind description boundary"
     git -C "$w/seed" push -q origin main
     out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1)
     expected=$kind
-    [ "$kind" != lower-indented-block ] || expected=malformed
+    case $kind in
+      lower-indented-block|over-indented-leading-blank|invalid-block-header) expected=malformed ;;
+    esac
     assert_contains "$out" "$expected" "$kind description reports its unmapped semantic"
     assert_not_contains "$out" "overlay-install: approval-required" "$kind description is not offered"
     [ "$(git -C "$w/main" rev-parse HEAD)" = "$installed" ] || fail "$kind description moved main"

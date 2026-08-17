@@ -92,6 +92,19 @@ def artifact_bytes(root: Path, relative: str, expected_sha256: str) -> bytes:
     return content
 
 
+def git_object(root: Path, revision: str, path: str) -> bytes | None:
+    result = subprocess.run(["git", "show", f"{revision}:{path}"], cwd=root, capture_output=True)
+    return result.stdout if result.returncode == 0 else None
+
+
+def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    return subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=root,
+        capture_output=True,
+    ).returncode == 0
+
+
 def check_semantic_refresh(root: Path, lineage: dict, evidence: dict) -> None:
     required = ("previous_upstream", "upstream")
     if evidence.get("schema_version") != 1 or not all(isinstance(evidence.get(key), str) for key in required):
@@ -100,29 +113,57 @@ def check_semantic_refresh(root: Path, lineage: dict, evidence: dict) -> None:
     transformer_hash = evidence.get("transformer_sha256")
     if not isinstance(overlay, str) or not isinstance(transformer_hash, str):
         fail("semantic refresh evidence has no installed-overlay provenance")
-    transformer = subprocess.run(
-        ["git", "show", f"{overlay}:bin/fm-prompt-semantic-refresh.py"],
-        cwd=root,
-        capture_output=True,
-    )
+
+    review = lineage.get("semantic_refresh_review")
+    reconstruction_overlay = overlay
+    expected_current_hash = transformer_hash
+    if review is not None:
+        if review.get("schema_version") != 1 or not all(
+            isinstance(review.get(key), str)
+            for key in ("candidate", "reviewer_overlay", "transformer_sha256")
+        ):
+            fail("malformed semantic refresh review attestation")
+        candidate = review["candidate"]
+        reviewer = review["reviewer_overlay"]
+        candidate_lineage = git_object(root, candidate, LINEAGE_PATH.as_posix())
+        candidate_transformer = git_object(root, candidate, "bin/fm-prompt-semantic-refresh.py")
+        reviewer_transformer = git_object(root, reviewer, "bin/fm-prompt-semantic-refresh.py")
+        try:
+            recorded_evidence = json.loads(candidate_lineage)["semantic_refresh"] if candidate_lineage else None
+        except (KeyError, json.JSONDecodeError):
+            recorded_evidence = None
+        parents = run(root, "git", "show", "-s", "--format=%P", candidate).split()
+        if recorded_evidence != evidence or parents != [evidence["upstream"]]:
+            fail("semantic refresh review does not bind the exact candidate graph and evidence")
+        if candidate_transformer is None or hashlib.sha256(candidate_transformer).hexdigest() != transformer_hash:
+            fail("candidate differs from original semantic refresh implementation binding")
+        if not is_ancestor(root, candidate, reviewer) or candidate == reviewer:
+            fail("semantic refresh reviewer is not a descendant of the reviewed candidate")
+        if reviewer_transformer is None or hashlib.sha256(reviewer_transformer).hexdigest() != review["transformer_sha256"]:
+            fail("semantic refresh review implementation differs from reviewer provenance")
+        producer_transformer = git_object(root, overlay, "bin/fm-prompt-semantic-refresh.py")
+        if producer_transformer is not None and is_ancestor(root, candidate, overlay):
+            fail("semantic refresh producer is a descendant of the candidate it claims to produce")
+        reconstruction_overlay = candidate
+        expected_current_hash = review["transformer_sha256"]
+    else:
+        producer_transformer = git_object(root, overlay, "bin/fm-prompt-semantic-refresh.py")
+        if producer_transformer is None or hashlib.sha256(producer_transformer).hexdigest() != transformer_hash:
+            fail("semantic refresh implementation differs from installed-overlay provenance")
+
     current_transformer = root / "bin/fm-prompt-semantic-refresh.py"
-    if (
-        transformer.returncode
-        or hashlib.sha256(transformer.stdout).hexdigest() != transformer_hash
-        or not current_transformer.is_file()
-        or hashlib.sha256(current_transformer.read_bytes()).hexdigest() != transformer_hash
-    ):
-        fail("semantic refresh implementation differs from installed-overlay provenance")
+    if not current_transformer.is_file() or hashlib.sha256(current_transformer.read_bytes()).hexdigest() != expected_current_hash:
+        fail("semantic refresh implementation differs from reviewed provenance")
     with tempfile.TemporaryDirectory(prefix="fm-semantic-verify-") as directory:
         output = Path(directory) / "refresh.json"
         result = subprocess.run(
             [
                 sys.executable,
-                str(root / "bin/fm-prompt-semantic-refresh.py"),
+                str(current_transformer),
                 "refresh",
                 "--previous-upstream", evidence["previous_upstream"],
                 "--upstream", evidence["upstream"],
-                "--overlay", overlay,
+                "--overlay", reconstruction_overlay,
                 "--lineage", str(LINEAGE_PATH),
                 "--output", str(output),
             ],
@@ -138,6 +179,8 @@ def check_semantic_refresh(root: Path, lineage: dict, evidence: dict) -> None:
     for update in reconstructed.get("updates", []):
         path = root / update["path"]
         content = base64.b64decode(update["content_base64"], validate=True)
+        if update["path"] == LINEAGE_PATH.as_posix():
+            continue
         if not path.is_file() or path.read_bytes() != content:
             fail(f"semantic refresh output differs from live owner: {update['path']}")
 
