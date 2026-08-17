@@ -822,25 +822,46 @@ test_liveness_window_is_overridable() {
   pass "FM_RUN_STEP_LIVENESS_MAX tunes the step liveness window"
 }
 
-# The needs-decision/blocked reconciliation below keeps trusting an active run
+# The needs-decision/blocked reconciliation below keeps trusting a FRESH run
 # over a stale needs-decision:/blocked: log even with a recorded PR: a gate
 # resolving and the run resuming is the routine case there, unlike the
 # paused/done deferral above. Regression for the review finding that an
 # earlier version of this change inverted that tested invariant.
-test_stale_running_with_recorded_pr_and_blocked_log_stays_working() {
+test_fresh_running_with_recorded_pr_and_blocked_log_stays_working() {
   reset_fakes
-  local d; d=$(new_case stale-running-blocked-pr)
+  local d; d=$(new_case fresh-running-blocked-pr)
   make_repo_on_branch "$d/wt" fm/feat-w20i
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-w20i.meta" "window=fm:fm-feat-w20i" "worktree=$d/wt" "kind=ship" \
     "pr=https://github.com/o/r/pull/16"
   printf 'blocked: waiting on review answer\n' > "$d/state/feat-w20i.status"
-  FM_FAKE_AXI_STATUS="$(run_running_no_active_step fm/feat-w20i)"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-w20i)"
   local out; out=$(run_crew_state "$d" feat-w20i)
   assert_contains "$out" "state: working" "a resumed run stays working despite a blocked log, even with a recorded PR"
   assert_contains "$out" "source: run-step" "blocked is not deferred by the recorded-PR reconciliation"
   assert_contains "$out" "superseded" "the existing needs-decision/blocked supersede reconciliation still applies"
-  pass "a recorded PR does not invert the needs-decision/blocked-over-active-run invariant"
+  pass "a recorded PR does not invert the needs-decision/blocked-over-fresh-run invariant"
+}
+
+# The other half of that invariant, and the one the freshness principle governs:
+# only a run that is still moving can have resolved a gate. A frozen run has
+# resolved nothing, so a declared blocked: line is still the truth about this
+# crew and must surface rather than be written off as superseded by an "active
+# run" that is not running at all.
+test_frozen_run_does_not_supersede_a_blocked_log() {
+  reset_fakes
+  local d; d=$(new_case frozen-run-blocked-log)
+  make_repo_on_branch "$d/wt" fm/feat-w20r
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20r.meta" "window=fm:fm-feat-w20r" "worktree=$d/wt" "kind=ship"
+  printf 'blocked: waiting on review answer\n' > "$d/state/feat-w20r.status"
+  FM_FAKE_AXI_STATUS="$(run_running_frozen_ci_step fm/feat-w20r "quiet 2d14h")"
+  local out; out=$(run_crew_state "$d" feat-w20r)
+  assert_contains "$out" "state: blocked" "a frozen run leaves the declared blocker standing"
+  assert_contains "$out" "source: status-log" "the surviving blocked state comes from the status log"
+  assert_contains "$out" "waiting on review answer" "the blocker's reason is carried in the detail"
+  assert_not_contains "$out" "superseded by active run" "a frozen run must not be called an active run"
+  pass "a frozen run does not supersede a declared blocked log"
 }
 
 test_ci_ready_done_log_beats_monitoring_run() {
@@ -1832,7 +1853,8 @@ test_frozen_ci_fixing_with_stale_activity_defers_to_done_log
 test_frozen_ci_running_with_not_ready_log_defers_to_paused_log
 test_fresh_ci_not_ready_beats_stale_checks_green_log
 test_liveness_window_is_overridable
-test_stale_running_with_recorded_pr_and_blocked_log_stays_working
+test_fresh_running_with_recorded_pr_and_blocked_log_stays_working
+test_frozen_run_does_not_supersede_a_blocked_log
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done

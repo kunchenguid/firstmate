@@ -57,16 +57,19 @@
 #      (a durable fact the run object lacks), the crew's own later paused: or
 #      done: line wins over the frozen reading. This governs EVERY verdict a
 #      stale run would otherwise supply about being mid-work, including what
-#      its ci step row and ci.log tail say about CI: those stopped at the same
-#      instant the run did. A CI regression after a run freezes is the PR
-#      poll's job (fm-pr-check.sh), not this reader's.
-#      Narrower than the needs-decision/blocked reconciliation below, which
-#      still always trusts an active run over those two verbs. Terminal
-#      outcomes and gate parks are exempt by construction - `passed` or a
-#      waiting gate stays true no matter how long ago it was written, so only
-#      claims of CURRENT activity are ever demoted. The coarse runs-list
-#      fallback carries no step detail to judge recency by and keeps its
-#      authority unchanged.
+#      its ci step row and ci.log tail say about CI (those stopped at the same
+#      instant the run did) and its claim below to have superseded a declared
+#      needs-decision/blocked gate: only a fresh run resolves a gate. A
+#      pre-merge CI regression behind an already-reported-green PR is out of
+#      scope for this reader, and nothing else in the fleet watches for one
+#      either - fm-pr-poll.sh emits only `merged`. That gap is pre-existing
+#      rather than opened here, since a stale "done: ... checks green" log
+#      already reported done before any of this, and a run still fresh enough
+#      to describe now does catch such a relapse. Terminal outcomes and gate
+#      parks are exempt by construction - `passed` or a waiting gate stays true
+#      no matter how long ago it was written, so only claims of CURRENT
+#      activity are ever demoted. The coarse runs-list fallback carries no step
+#      detail to judge recency by and keeps its authority unchanged.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -707,13 +710,19 @@ if [ "$HAVE_RUN" = 1 ]; then
   # to any done: report, and applies regardless of pane liveness since run-step
   # precedence itself is pane-liveness-independent by design.
   # Deliberately excludes needs-decision/blocked (map_log_state's parked/
-  # blocked): those keep the OPPOSITE precedence just below - an active run
-  # over a stale needs-decision/blocked log - since a genuine gate resolving
-  # and the run resuming is the routine case there, not the exception.
+  # blocked): a FRESH run keeps the OPPOSITE precedence over those two just
+  # below, since a genuine gate resolving and the run resuming is the routine
+  # case there, not the exception. Only the pr=-backed paused/done pair is
+  # settled here; a frozen run loses to a declared gate down there instead.
   # Nothing else is consulted here, CI state least of all: a frozen run's ci
   # step row and its ci.log tail stopped at the same instant the run did, so
-  # they cannot report on a PR's checks now either. Whether CI has since gone
-  # red belongs to the PR poll fm-pr-check.sh arms, not to this reader.
+  # they cannot report on a PR's checks now either. A pre-merge CI regression
+  # behind an already-reported-green PR is out of scope for this reader, and
+  # and no fleet component watches for one today - fm-pr-poll.sh emits only
+  # `merged` and stays silent otherwise. That gap is pre-existing rather than
+  # opened here (a stale "done: ... checks green" log already reported done
+  # before any of this), and a run object still fresh enough to describe now
+  # does catch such a relapse, through the ci-step reading just above.
   if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE_FRESH" = 0 ] && [ -n "$(meta_value pr)" ]; then
     LOG_OVERRIDE=$(map_log_state "$LOG_LINE")
     case "$LOG_OVERRIDE" in
@@ -725,9 +734,23 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
-  # stale: the gate resolved and the run resumed or finished.
+  # stale: the gate resolved and the run resumed or finished. "Resumed" is the
+  # half that needs a run which is actually moving, so freshness governs it here
+  # exactly as it governs the deferral above - a frozen run resolved nothing, and
+  # calling it an active run would mask a real open gate. A terminal run needs no
+  # such test: reaching done/failed is a durable fact that really did move past
+  # the gate, however long ago it was recorded.
   case "$LOG_VERB" in
     needs-decision|blocked)
+      if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE_FRESH" = 0 ]; then
+        LOG_OVERRIDE=$(map_log_state "$LOG_LINE")
+        case "$LOG_OVERRIDE" in
+          parked|blocked)
+            emit "$LOG_OVERRIDE" status-log \
+              "$(status_line_note "$LOG_LINE")${SEP}run-step stale: gate never resolved"
+            ;;
+        esac
+      fi
       if [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
