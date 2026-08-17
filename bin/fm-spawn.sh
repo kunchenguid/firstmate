@@ -190,6 +190,14 @@
 # configuration. An absent, unqualified, or malformed value refuses the spawn
 # before the watcher guard and before any lock, endpoint, worktree, state,
 # config, registry, metadata, or extension mutation.
+# omp is Orca-only: the backend is resolved read-only before any mutation and
+# retained so the refusal and endpoint creation cannot drift. Any other backend
+# refuses at that same early gate.
+# omp forces effective trace propagation off and strips TRACEPARENT from the
+# child; it does not inherit the home's frozen trace-context decision.
+# A --relaunch binds one read-only regular-file metadata snapshot before every
+# lock so omp's model and backend gates, and any unsafe relaunch record, refuse
+# before mutation. The locked endpoint validation below remains authoritative.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -440,7 +448,144 @@ refuse_omp_secondmate() {
   echo "error: omp is a candidate crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
 }
 
+# omp is an Orca-only worker adapter. Resolve the same backend precedence used
+# by the launch path while the invocation is still read-only, then retain that
+# result so it cannot drift between this refusal and endpoint creation.
+OMP_RESOLVED_BACKEND=
+require_omp_orca_backend() {
+  local recorded_backend
+  if [ "$RELAUNCH" -eq 1 ]; then
+    recorded_backend=$(relaunch_preflight_meta_get backend)
+    OMP_RESOLVED_BACKEND=${recorded_backend:-tmux}
+  elif [ "$BACKEND_SET" -eq 1 ]; then
+    OMP_RESOLVED_BACKEND=$BACKEND_ARG
+  else
+    OMP_RESOLVED_BACKEND=$(fm_backend_name)
+  fi
+  if [ "$OMP_RESOLVED_BACKEND" != orca ]; then
+    echo "error: omp requires backend=orca; resolved backend '$OMP_RESOLVED_BACKEND' is not authorized for this adapter" >&2
+    return 1
+  fi
+  return 0
+}
+
 # --- effective selection, resolved once and before anything mutates ----------
+
+# A relaunch may use its durable record for early adapter policy only after it
+# binds one stable identity and content snapshot. Two independent read-only
+# descriptors must name the same regular inode and yield the same complete byte
+# sequence; the still-nonsymlink path must then name that inode and content too.
+# Downstream pre-lock consumers read the in-memory snapshot, never the path.
+RELAUNCH_PREFLIGHT_ID=
+RELAUNCH_PREFLIGHT_META=
+RELAUNCH_PREFLIGHT_META_CONTENT=
+
+relaunch_preflight_path_signature() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%d:%i:%z:%HT' "$1" 2>/dev/null
+  else
+    LC_ALL=C stat -c '%d:%i:%s:%F' "$1" 2>/dev/null
+  fi
+}
+
+relaunch_preflight_fd_signature() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%i:%z:%HT' "/dev/fd/$1" 2>/dev/null
+  else
+    LC_ALL=C stat -L -c '%i:%s:%F' "/dev/fd/$1" 2>/dev/null
+  fi
+}
+
+relaunch_preflight_content_length() {
+  local LC_ALL=C
+  printf '%s' "${#1}"
+}
+
+relaunch_preflight_meta_get() {
+  local key=$1 line value=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) value=${line#*=} ;;
+    esac
+  done <<EOF
+$RELAUNCH_PREFLIGHT_META_CONTENT
+EOF
+  printf '%s' "$value"
+}
+
+relaunch_preflight_snapshot_refuse() {
+  { exec 8<&-; } 2>/dev/null || true
+  { exec 9<&-; } 2>/dev/null || true
+  echo "error: --relaunch could not bind a stable regular, non-symlink metadata snapshot for $RELAUNCH_PREFLIGHT_ID" >&2
+  exit 1
+}
+
+if [ "$RELAUNCH" -eq 1 ]; then
+  [ "${#POS[@]}" -eq 1 ] || {
+    echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
+    exit 1
+  }
+  RELAUNCH_PREFLIGHT_ID=${POS[0]}
+  fm_task_id_creation_valid "$RELAUNCH_PREFLIGHT_ID" || {
+    echo "error: --relaunch requires a valid task id" >&2
+    exit 2
+  }
+  RELAUNCH_PREFLIGHT_META="$STATE/$RELAUNCH_PREFLIGHT_ID.meta"
+  if [ -L "$RELAUNCH_PREFLIGHT_META" ] || [ ! -f "$RELAUNCH_PREFLIGHT_META" ]; then
+    echo "error: --relaunch needs an existing task record that is a regular, non-symlink metadata file for $RELAUNCH_PREFLIGHT_ID" >&2
+    exit 1
+  fi
+  RELAUNCH_PREFLIGHT_PATH_A=$(relaunch_preflight_path_signature "$RELAUNCH_PREFLIGHT_META") \
+    || relaunch_preflight_snapshot_refuse
+  exec 8< "$RELAUNCH_PREFLIGHT_META" || relaunch_preflight_snapshot_refuse
+  exec 9< "$RELAUNCH_PREFLIGHT_META" || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_FD_A=$(relaunch_preflight_fd_signature 8) \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_FD_B=$(relaunch_preflight_fd_signature 9) \
+    || relaunch_preflight_snapshot_refuse
+  case "$RELAUNCH_PREFLIGHT_FD_A" in
+    *':Regular File'|*':regular file') ;;
+    *) relaunch_preflight_snapshot_refuse ;;
+  esac
+  [ "$RELAUNCH_PREFLIGHT_FD_A" = "$RELAUNCH_PREFLIGHT_FD_B" ] \
+    || relaunch_preflight_snapshot_refuse
+  [ "${RELAUNCH_PREFLIGHT_PATH_A#*:}" = "$RELAUNCH_PREFLIGHT_FD_A" ] \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_META_A=$({ cat <&8 && printf '\034'; }) \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_META_B=$({ cat <&9 && printf '\034'; }) \
+    || relaunch_preflight_snapshot_refuse
+  exec 8<&-
+  exec 9<&-
+  case "$RELAUNCH_PREFLIGHT_META_A:$RELAUNCH_PREFLIGHT_META_B" in
+    *$'\034:'*$'\034') ;;
+    *) relaunch_preflight_snapshot_refuse ;;
+  esac
+  RELAUNCH_PREFLIGHT_META_A=${RELAUNCH_PREFLIGHT_META_A%$'\034'}
+  RELAUNCH_PREFLIGHT_META_B=${RELAUNCH_PREFLIGHT_META_B%$'\034'}
+  [ "$RELAUNCH_PREFLIGHT_META_A" = "$RELAUNCH_PREFLIGHT_META_B" ] \
+    || relaunch_preflight_snapshot_refuse
+  # Strip the trailing type field before comparing the byte count.
+  RELAUNCH_PREFLIGHT_SIZE_AND_TYPE=${RELAUNCH_PREFLIGHT_FD_A#*:}
+  RELAUNCH_PREFLIGHT_SIZE=${RELAUNCH_PREFLIGHT_SIZE_AND_TYPE%%:*}
+  [ "$(relaunch_preflight_content_length "$RELAUNCH_PREFLIGHT_META_A")" = "$RELAUNCH_PREFLIGHT_SIZE" ] \
+    || relaunch_preflight_snapshot_refuse
+  [ ! -L "$RELAUNCH_PREFLIGHT_META" ] && [ -f "$RELAUNCH_PREFLIGHT_META" ] \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_META_CURRENT=$({ cat -- "$RELAUNCH_PREFLIGHT_META" && printf '\034'; }) \
+    || relaunch_preflight_snapshot_refuse
+  case "$RELAUNCH_PREFLIGHT_META_CURRENT" in
+    *$'\034') RELAUNCH_PREFLIGHT_META_CURRENT=${RELAUNCH_PREFLIGHT_META_CURRENT%$'\034'} ;;
+    *) relaunch_preflight_snapshot_refuse ;;
+  esac
+  RELAUNCH_PREFLIGHT_PATH_B=$(relaunch_preflight_path_signature "$RELAUNCH_PREFLIGHT_META") \
+    || relaunch_preflight_snapshot_refuse
+  [ ! -L "$RELAUNCH_PREFLIGHT_META" ] && [ -f "$RELAUNCH_PREFLIGHT_META" ] \
+    && [ "$RELAUNCH_PREFLIGHT_PATH_B" = "$RELAUNCH_PREFLIGHT_PATH_A" ] \
+    && [ "$RELAUNCH_PREFLIGHT_META_CURRENT" = "$RELAUNCH_PREFLIGHT_META_A" ] \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_META_CONTENT=$RELAUNCH_PREFLIGHT_META_A
+fi
 
 # Batch dispatch (see header): an `id=repo` first positional means EVERY positional
 # is a pair, so a batch carries no positional harness argument and resolves its
@@ -456,9 +601,9 @@ fi
 # The positional split for a fresh single-task spawn. This is pure string work, so
 # it happens here rather than after the per-task lock: the harness this invocation
 # would actually launch has to be known before the watcher guard runs and before
-# anything is created. A --relaunch instead adopts every identity axis from the
-# task's own durable record, which cannot be read until that record has been
-# validated under the task's locks, so it fills these in at that point.
+# anything is created. A --relaunch still adopts every identity axis from the
+# task's own durable record under the task's locks; the read-only preflight
+# above only lets omp's model and backend gates precede those locks.
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -501,10 +646,14 @@ spawn_selection_is_omp() {
     '') : ;;
     *) return 1 ;;
   esac
-  # A --relaunch with no explicit --harness adopts the harness recorded for that
-  # task, never this home's configured default, so configuration is not read for
-  # it here; the identical refusals reach it at that adoption point below.
-  [ "$RELAUNCH" -eq 0 ] || return 1
+  # A relaunch with no explicit harness adopts the recorded harness. A bounded
+  # read-only preflight lets omp's model/backend gates still precede every lock;
+  # the normal locked endpoint validation below remains authoritative.
+  if [ "$RELAUNCH" -eq 1 ]; then
+    configured=$(relaunch_preflight_meta_get harness)
+    [ "$configured" = omp ]
+    return
+  fi
   if [ "$KIND" = secondmate ]; then
     configured=$("$FM_ROOT/bin/fm-harness.sh" secondmate 2>/dev/null || true)
   elif [ ! -f "$CONFIG/crew-dispatch.json" ]; then
@@ -528,6 +677,7 @@ if spawn_selection_is_omp; then
     exit 1
   fi
   require_omp_launch_model || exit 1
+  require_omp_orca_backend || exit 1
 fi
 
 # Now the watcher guard, which writes home state. Skipped when re-exec'd for one
@@ -1097,7 +1247,9 @@ fi
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
 # so the default path's meta stays byte-identical.
 if [ "$RELAUNCH" -eq 0 ]; then
-  if [ "$BACKEND_SET" -eq 1 ]; then
+  if [ -n "$OMP_RESOLVED_BACKEND" ]; then
+    BACKEND=$OMP_RESOLVED_BACKEND
+  elif [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
   else
     BACKEND=$(fm_backend_name)
@@ -1325,13 +1477,15 @@ launch_template() {
     # __EFFORTFLAG__: the effort axis stays outside this adapter until the live
     # pilot pins it under its own approval.
     # The env -u prefix clears the foreign primary markers whose detection
-    # precedence would otherwise outrank omp's own, and FM_OMP_HARNESS=1 is the
-    # firstmate-owned launch marker that replaces them. The list must cover
-    # EVERY marker bin/fm-harness.sh tests before FM_OMP_HARNESS, which is why
-    # the cursor pair is here: cursor-agent does not clear its own markers, so
-    # an omp worker launched from a cursor primary would otherwise inherit them
-    # and self-report cursor.
-    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=1 __OMPBIN__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash __MODELFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # precedence would otherwise outrank omp's own, plus TRACEPARENT so an
+    # ambient carrier cannot reach the child after spawn forces effective
+    # trace off. FM_OMP_HARNESS=1 is the firstmate-owned launch marker that
+    # replaces the foreign markers. The list must cover EVERY marker
+    # bin/fm-harness.sh tests before FM_OMP_HARNESS, which is why the cursor
+    # pair is here: cursor-agent does not clear its own markers, so an omp
+    # worker launched from a cursor primary would otherwise inherit them and
+    # self-report cursor.
+    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 __OMPBIN__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash __MODELFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1383,21 +1537,20 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   exit 1
 fi
 
-# Both omp refusals already ran for every fresh-spawn selection shape, and for a
-# --relaunch that named --harness omp explicitly, before the watcher guard and
-# every lock. This is where a --relaunch that adopted omp from the task's own
-# record reaches them, because that record cannot be read until it has been
-# validated under the task's locks. A relaunch creates nothing of its own - it
-# adopts the endpoint, worktree, and state the task already owns - and this
-# refusal still lands before any launch command is built or delivered there.
-# Scoped to a relaunch on purpose: a raw launch command stays outside every
-# adapter contract, exactly as it does for the early gate.
+# Both omp refusals already ran for every fresh-spawn selection shape and for
+# every relaunch the read-only preflight could classify, before the watcher
+# guard and every lock. This is defense in depth for a --relaunch that named
+# --harness omp explicitly after that preflight, and still lands before any
+# launch command is built or delivered. Scoped to a relaunch on purpose: a raw
+# launch command stays outside every adapter contract, exactly as it does for
+# the early gate.
 if [ "$RELAUNCH" -eq 1 ] && [ "$HARNESS" = omp ]; then
   if [ "$KIND" = secondmate ]; then
     refuse_omp_secondmate
     exit 1
   fi
   require_omp_launch_model || exit 1
+  require_omp_orca_backend || exit 1
 fi
 
 case "$HARNESS" in
@@ -2873,7 +3026,13 @@ fi
 # carrier, and this host only delivers it. The validated --traceparent value
 # then IS the decision, so the enablement snapshot handed to the new Secondmate
 # agrees with the carrier it receives exactly as on the local path.
-if [ "$TRACEPARENT_SET" -eq 1 ]; then
+if [ "$HARNESS" = omp ]; then
+  # omp is deliberately outside trace propagation until its live worker path
+  # is approved. This overrides both the frozen home decision and any ambient
+  # carrier; the launch template also removes TRACEPARENT from the child.
+  SPAWN_TRACE_EFFECTIVE=off
+  SPAWN_TRACEPARENT=
+elif [ "$TRACEPARENT_SET" -eq 1 ]; then
   SPAWN_TRACE_EFFECTIVE=on
   SPAWN_TRACEPARENT=$TRACEPARENT_ARG
 else
