@@ -509,11 +509,15 @@ def pr_checks(url):
         cached = SERVER.gh_cache.get(url)
         if cached and (now - cached[0]) < GH_TTL:
             return cached[1]
-        p = subprocess.run([SCRIPT, "--pr-check", url], capture_output=True, text=True, timeout=30)
         try:
-            checks = json.loads(p.stdout or "{}")
-        except json.JSONDecodeError:
-            checks = {"url": url, "error": "pr-check returned invalid JSON"}
+            p = subprocess.run([SCRIPT, "--pr-check", url], capture_output=True, text=True, timeout=30)
+            try:
+                checks = json.loads(p.stdout or "{}")
+            except json.JSONDecodeError:
+                checks = {"url": url, "error": "pr-check returned invalid JSON"}
+        except subprocess.TimeoutExpired:
+            checks = {"url": url, "pr_state": None, "verdict": "unknown", "items": [],
+                      "error": "pr-check timed out after 30 seconds"}
         SERVER.gh_cache[url] = (time.monotonic(), checks)
         return checks
 

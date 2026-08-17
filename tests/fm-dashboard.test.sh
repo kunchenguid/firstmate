@@ -480,6 +480,70 @@ test_concurrent_serve_cache_single_flight() {
   pass "concurrent snapshot requests single-flight PR check refreshes"
 }
 
+test_concurrent_serve_cache_timeout() {
+  serve_tools_available || { pass "cache timeout test skipped (python3 or curl absent)"; return 0; }
+  local home fakebin port pid gh_count out_dir curl_pid i ready
+  home=$(make_home servetimeout)
+  mkdir -p "$home/projects/wt"
+  fm_write_meta "$home/state/ship-task.meta" \
+    "window=firstmate:fm-ship-task" \
+    "worktree=$home/projects/wt" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship" \
+    "pr=https://github.com/o/r/pull/9"
+  printf 'working: building\n' > "$home/state/ship-task.status"
+  record_busy "$home/state" ship-task
+  fakebin=$(make_fakebin "$home")
+  fake_gh "$fakebin" '{"state":"OPEN","statusCheckRollup":[]}'
+  GH_COUNT_FILE=$TMP_ROOT/gh-timeout-count
+  : > "$GH_COUNT_FILE"
+  out_dir=$TMP_ROOT/timeout-responses
+  mkdir -p "$out_dir"
+  port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+
+  GH_COUNT_FILE="$GH_COUNT_FILE" GH_DELAY=31 PATH="$fakebin:$PATH" FM_HOME="$home" \
+    "$DASH" --port "$port" --gh-cache 60 >"$TMP_ROOT/serve-timeout.log" 2>&1 &
+  pid=$!
+  i=0
+  ready=0
+  while [ "$i" -lt 50 ]; do
+    if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then ready=1; break; fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$ready" -ne 1 ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "timeout-cache dashboard server did not come up: $(cat "$TMP_ROOT/serve-timeout.log")"
+  fi
+
+  curl_pid=""
+  i=1
+  while [ "$i" -le 3 ]; do
+    curl -fsS --max-time 40 "http://127.0.0.1:$port/snapshot" > "$out_dir/$i.json" &
+    curl_pid="$curl_pid $!"
+    i=$((i + 1))
+  done
+  for i in $curl_pid; do
+    wait "$i" || fail "concurrent timeout snapshot request failed"
+  done
+  for i in "$out_dir"/*.json; do
+    jq -e '
+      .tasks[0].pr.checks.verdict == "unknown"
+        and .tasks[0].pr.checks.items == []
+        and (.tasks[0].pr.checks.error | test("timed out"))
+    ' "$i" >/dev/null || fail "PR timeout must remain visible in valid snapshot JSON: $(cat "$i")"
+  done
+  gh_count=$(wc -l < "$GH_COUNT_FILE" | tr -d ' ')
+  [ "$gh_count" = "1" ] || fail "timed-out concurrent cache misses must call gh once, got $gh_count calls"
+
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "timed-out PR checks return and cache a visible error"
+}
+
 # Empty fleet served over HTTP must render the explicit empty state.
 test_serve_empty_fleet() {
   serve_tools_available || { pass "empty serve test skipped (python3 or curl absent)"; return 0; }
@@ -562,6 +626,7 @@ test_pr_check_verdicts
 test_html_page
 test_serve_and_cache
 test_concurrent_serve_cache_single_flight
+test_concurrent_serve_cache_timeout
 test_serve_empty_fleet
 test_serve_ipv6_host
 test_usage_and_validation
