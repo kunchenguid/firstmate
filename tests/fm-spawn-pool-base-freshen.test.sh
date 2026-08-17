@@ -16,12 +16,17 @@
 # past the pool base, so neither verdict can be reached by accident: an
 # implementation that fetched unconditionally fails the first, and one that fell
 # back to the local branch whenever a fetch failed fails the second.
+# The remoteless skip must also be loud: these tests assert the spawn's real captured
+# output carries one NOTICE naming the project when the skip fires, and carries none
+# when an origin is configured, so an operator sees a project that lost its remote.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+REMOTELESS_NOTICE='NOTICE: project'
+REMOTELESS_NOTICE_REASON='has no origin remote configured'
 TMP_ROOT=$(fm_test_tmproot fm-spawn-pool-base-freshen)
 
 make_spawn_fakebin() {
@@ -135,6 +140,19 @@ run_spawn() {
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
 }
 
+# The skipped-fetch notice lines from a real spawn's captured output, so presence,
+# count, and contents are asserted against the notice itself rather than any other
+# line that happens to mention the project.
+remoteless_notice_lines() {  # <captured-output>
+  printf '%s\n' "$1" | grep -F "$REMOTELESS_NOTICE" || true
+}
+
+# The project path as the spawn itself renders it: the fixture root can carry a
+# redundant separator, and the spawn normalizes the argument before printing it.
+spawn_rendered_project_path() {
+  (cd "$PROJECT_DIR" && pwd)
+}
+
 test_stale_pool_base_refreshes_before_branching() {
   local rec id out status current branch_head
   id='pool-current-base-r1'
@@ -145,6 +163,10 @@ test_stale_pool_base_refreshes_before_branching() {
   status=$?
   expect_code 0 "$status" "spawn should refresh a stale pooled worktree"
   assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_not_contains "$out" "$REMOTELESS_NOTICE" \
+    "an origin-backed launch printed the no-remote skip notice"
+  assert_not_contains "$out" "$REMOTELESS_NOTICE_REASON" \
+    "an origin-backed launch claimed the project has no origin remote"
   current=$(git -C "$POOL_DIR" rev-parse origin/main)
   branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
   [ "$branch_head" = "$current" ] || fail "spawn left the pooled worktree on stale history"
@@ -207,6 +229,8 @@ test_unreachable_origin_refuses_stale_pool_base() {
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unreachable origin"
   assert_contains "$out" "could not fetch origin" \
     "spawn did not clearly refuse an unreachable origin"
+  assert_not_contains "$out" "$REMOTELESS_NOTICE" \
+    "an unreachable configured origin was reported as no remote configured"
   after=$(git -C "$POOL_DIR" rev-parse HEAD)
   [ "$after" = "$before" ] || fail "spawn changed the pooled worktree after origin became unreachable"
   [ "$after" != "$local_tip" ] \
@@ -218,7 +242,7 @@ test_unreachable_origin_refuses_stale_pool_base() {
 }
 
 test_remoteless_project_launches_from_local_default() {
-  local rec id out status local_tip pool_head
+  local rec id out status local_tip pool_head notice
   id='pool-no-remote-r6'
   rec=$(make_remoteless_case no-remote "$id")
   read_case_record "$rec"
@@ -236,16 +260,26 @@ test_remoteless_project_launches_from_local_default() {
     || fail "spawn launched a remoteless project from its stale pool base"
   assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-main.txt" \
     "the remoteless worktree is missing the local default branch's latest content"
+  notice=$(remoteless_notice_lines "$out")
+  [ "$(printf '%s\n' "$notice" | grep -c .)" = 1 ] \
+    || fail "the remoteless launch printed $(printf '%s\n' "$notice" | grep -c .) skip notices, not exactly one"
+  assert_contains "$notice" "$REMOTELESS_NOTICE_REASON" \
+    "the remoteless NOTICE did not say why the fetch was skipped"
+  assert_contains "$notice" "$(spawn_rendered_project_path)" \
+    "the remoteless NOTICE did not name the project path"
+  assert_contains "$notice" "$DEFAULT_BRANCH" \
+    "the remoteless NOTICE did not name the local default branch launched from"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed remoteless notice: %s\n' "$notice"
     printf '# observed remoteless spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
     printf '# observed remoteless base: HEAD=%s local-%s=%s pool-base=%s\n' \
       "$pool_head" "$DEFAULT_BRANCH" "$local_tip" "$INITIAL_SHA"
   fi
-  pass "a project with no origin remote launches from its local default branch tip"
+  pass "a project with no origin remote launches from its local default branch tip, loudly"
 }
 
 test_remoteless_scout_launches_from_local_default() {
-  local rec id out status local_tip
+  local rec id out status local_tip notice
   id='pool-no-remote-scout-r6'
   rec=$(make_remoteless_case no-remote-scout "$id")
   read_case_record "$rec"
@@ -256,7 +290,12 @@ test_remoteless_scout_launches_from_local_default() {
   expect_code 0 "$status" "a scout should launch into a project with no origin remote"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_tip" ] \
     || fail "the remoteless scout did not start at the local default branch tip"
-  pass "a scout into a remoteless project also starts from the local default branch tip"
+  notice=$(remoteless_notice_lines "$out")
+  [ "$(printf '%s\n' "$notice" | grep -c .)" = 1 ] \
+    || fail "a remoteless scout launch did not print exactly one skip notice"
+  assert_contains "$notice" "$(spawn_rendered_project_path)" \
+    "the remoteless scout's NOTICE did not name the project path"
+  pass "a scout into a remoteless project also starts from the local default branch tip, loudly"
 }
 
 test_remoteless_project_without_a_local_default_refuses() {
@@ -272,6 +311,8 @@ test_remoteless_project_without_a_local_default_refuses() {
     || fail "spawn succeeded with no origin remote and no resolvable local default branch"
   assert_contains "$out" "could not determine the local default branch" \
     "spawn did not clearly refuse a remoteless project with no resolvable default branch"
+  assert_not_contains "$out" "$REMOTELESS_NOTICE" \
+    "spawn announced a local-default launch it then refused"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved the pooled worktree while refusing an unresolvable local default branch"
   pass "a remoteless project with no resolvable default branch still refuses"
@@ -295,6 +336,8 @@ test_direct_pr_and_scout_refresh_before_launch() {
       || fail "$contract spawn did not start at current origin/main"
     assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-main.txt" \
       "$contract spawn omitted advanced-main content"
+    assert_not_contains "$out" "$REMOTELESS_NOTICE" \
+      "$contract spawn printed the no-remote skip notice while origin was configured"
     if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
       printf '# observed %s spawn: %s\n' "$contract" "$(printf '%s\n' "$out" | tail -n 1)"
     fi
