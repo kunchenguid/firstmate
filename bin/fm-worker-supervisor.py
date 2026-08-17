@@ -134,6 +134,38 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 MAX_ARCHIVE_BYTES = 600 * 1024 * 1024
 MAX_OUTCOME_BYTES = 256 * 1024 * 1024
+
+# Every bounded step that runs OUTSIDE the wall, named once and used at the
+# call site, so the budget below is the same number the code actually spends.
+# Reading these back out of the source text instead was tried and was worse
+# than nothing: it silently under-counted the moment a literal became a name,
+# which is the direction that kills a run.
+ARCHIVE_FETCH_TIMEOUT = 300      # per staged archive, and there are two
+REPO_CLONE_TIMEOUT = 600
+GIT_HEAD_TIMEOUT = 60
+GIT_COUNT_TIMEOUT = 120
+GIT_STATUS_TIMEOUT = 120
+BUNDLE_CREATE_TIMEOUT = 600
+OUTCOME_UPLOAD_TIMEOUT = 600
+STAGED_ARCHIVE_COUNT = 2
+
+# The collection tail has two mutually exclusive branches: with no commits the
+# supervisor only asks git whether the tree is dirty; with commits it builds a
+# bundle and uploads it. The budget takes the larger.
+_COLLECTION_TAIL = max(
+    GIT_STATUS_TIMEOUT,
+    BUNDLE_CREATE_TIMEOUT + OUTCOME_UPLOAD_TIMEOUT,
+)
+# What a bound covering a whole guest run must add to the wall. Anything that
+# grows a step here grows this, and bin/fm-azure-worker-provider.py is checked
+# against it by tests/fm-azure-pilot.test.sh.
+NON_WALL_BUDGET_SECONDS = (
+    STAGED_ARCHIVE_COUNT * ARCHIVE_FETCH_TIMEOUT
+    + REPO_CLONE_TIMEOUT
+    + GIT_HEAD_TIMEOUT
+    + GIT_COUNT_TIMEOUT
+    + _COLLECTION_TAIL
+)
 SAFE_STAGED_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -160,7 +192,7 @@ def fetch_archive(label):
         # digest check.
         opener = urllib.request.build_opener(_NoRedirect())
         try:
-            with opener.open(url, timeout=300) as response:
+            with opener.open(url, timeout=ARCHIVE_FETCH_TIMEOUT) as response:
                 body = response.read(size + 1)
         except OSError as exc:
             raise SupervisorError("{} staging fetch failed: {}".format(label, exc))
@@ -234,7 +266,7 @@ def stage_payload(request, worktree, account_home):
     clone = subprocess.run(
         ["git", "clone", "--quiet", str(bundle), str(repo)],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        timeout=600, check=False,
+        timeout=REPO_CLONE_TIMEOUT, check=False,
     )
     if clone.returncode != 0:
         raise SupervisorError(
@@ -245,14 +277,14 @@ def stage_payload(request, worktree, account_home):
     head = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        timeout=60, check=False,
+        timeout=GIT_HEAD_TIMEOUT, check=False,
     )
     if head.returncode != 0 or head.stdout.decode().strip() != request["repository_generation"]:
         raise SupervisorError("staged repository head differs from the bound repository generation")
     return repo
 
 
-def git_in(repo, *arguments, timeout=600):
+def git_in(repo, *arguments, timeout=BUNDLE_CREATE_TIMEOUT):
     return subprocess.run(
         ["git", "-C", str(repo), *arguments],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -298,7 +330,7 @@ def put_outcome_blob(body):
     )
     opener = urllib.request.build_opener(_NoRedirect())
     try:
-        with opener.open(request, timeout=600) as response:
+        with opener.open(request, timeout=OUTCOME_UPLOAD_TIMEOUT) as response:
             status = response.status
     except OSError as exc:
         raise SupervisorError("outcome staging upload failed: {}".format(exc))
@@ -322,7 +354,7 @@ def collect_outcome(request, repo, worktree_root):
             "outcome_commits": 0, "outcome_sink": "",
         }
     base = request["repository_generation"]
-    counted = git_in(repo, "rev-list", "--count", "{}..HEAD".format(base), timeout=120)
+    counted = git_in(repo, "rev-list", "--count", "{}..HEAD".format(base), timeout=GIT_COUNT_TIMEOUT)
     if counted.returncode != 0:
         raise SupervisorError(
             "outcome commit range is unreadable: {}".format(
@@ -336,7 +368,7 @@ def collect_outcome(request, repo, worktree_root):
     if commits == 0:
         # A crewmate that edited without committing looks identical here, so
         # the result says so explicitly rather than reading as "nothing to do".
-        dirty = git_in(repo, "status", "--porcelain", timeout=120)
+        dirty = git_in(repo, "status", "--porcelain", timeout=GIT_STATUS_TIMEOUT)
         if dirty.returncode != 0:
             # Unknown is not clean. Reporting False here would render an
             # unreadable tree as a tidy read-only task, which is the exact
@@ -353,7 +385,10 @@ def collect_outcome(request, repo, worktree_root):
         }
     bundle = outcome_bundle_path(request, worktree_root)
     bundle.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    created = git_in(repo, "bundle", "create", str(bundle), "{}..HEAD".format(base))
+    created = git_in(
+        repo, "bundle", "create", str(bundle), "{}..HEAD".format(base),
+        timeout=BUNDLE_CREATE_TIMEOUT,
+    )
     if created.returncode != 0 or not bundle.is_file():
         raise SupervisorError(
             "outcome bundle creation failed: {}".format(

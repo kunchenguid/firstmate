@@ -54,14 +54,65 @@ OUTCOME_BLOB_PREFIX = "outcome-"
 # two literals are kept in step by a test rather than by runtime coupling.
 MAX_OUTCOME_BYTES = 256 * 1024 * 1024
 # Staging (archive fetches plus the repository clone) runs BEFORE the wall
-# starts, and bundle creation plus upload runs after it ends. Every bound that
-# has to cover a whole guest run measures wall plus this, never wall alone.
-GUEST_RUN_SLACK_SECONDS = 2400
+# starts and collection runs after it ends, so a bound covering a whole guest
+# run is wall plus this, never wall alone. The GUEST gives up first and the
+# client waiting on it gets the extra margin, so a guest timeout is reported
+# rather than raced.
+#
+# The floor is the supervisor's OWN worst case outside the wall, summed from
+# its per-step timeouts: payload fetch 300 + account fetch 300 + clone 600 +
+# rev-parse 60 + rev-list 120 + status 120 + bundle 600 + upload 600 = 2700.
+# Undershooting it is not a slow failure, it is a DESTRUCTIVE one: an Azure
+# kill is not an exception the supervisor can catch, so no executed marker is
+# written, and the next dispatch re-runs the command and rmtrees the staged
+# repository, deleting the commits the killed run had already made.
+# tests/fm-azure-pilot.test.sh derives this floor from the supervisor source so
+# it cannot rot back under the budget.
+GUEST_RUN_SLACK_SECONDS = 3000
+CLIENT_WAIT_SLACK_SECONDS = 3600
 AZ_TIMEOUT_SECONDS = 300
-# A guest run is staging (archive fetches plus the repository clone) BEFORE the
-# wall starts, then the wall, then collection after it ends. Any bound that has
-# to cover a whole guest run measures wall plus this, never wall alone.
-GUEST_RUN_SLACK_SECONDS = 2400
+# The bootstrap run command blocks on the guest too. Its work is bounded and
+# much smaller than a task: a per-disk device wait (60s each), mkfs and the
+# mounts, plus the supervisor install. Same nesting rule as the execute path,
+# the guest gives up first so its timeout is what gets reported.
+BOOTSTRAP_GUEST_TIMEOUT_SECONDS = 1800
+BOOTSTRAP_CLIENT_TIMEOUT_SECONDS = 2400
+
+# What the provider spends AROUND the blocking guest call, each step at its own
+# bound. The controller supervises the WHOLE subprocess, so its bound has to
+# cover the client wait plus both of these; covering only the client wait kills
+# the provider during collection and the task runs a second time. These are
+# named here, next to the bounds they are made of, so bin/fm-worker-lifecycle.py
+# cannot drift away from them unnoticed: tests/fm-azure-pilot.test.sh checks the
+# controller bound against these exact values.
+PRE_GUEST_CALL_BUDGET_SECONDS = (
+    AZ_TIMEOUT_SECONDS        # opening inventory sweep
+    + AZ_TIMEOUT_SECONDS      # payload archive upload
+    + AZ_TIMEOUT_SECONDS      # account archive upload
+    + AZ_TIMEOUT_SECONDS      # request blob upload and SAS mints
+)
+POST_GUEST_CALL_BUDGET_SECONDS = (
+    AZ_TIMEOUT_SECONDS                                          # instance-view read
+    + AZ_TIMEOUT_SECONDS                                        # outcome size probe
+    + AZ_TIMEOUT_SECONDS + MAX_OUTCOME_BYTES // (256 * 1024)    # bounded download at its ceiling
+    + AZ_TIMEOUT_SECONDS                                        # staging-result upload
+    + AZ_TIMEOUT_SECONDS                                        # closing inventory sweep
+)
+# A create does not block on a task, but it does run a long ARM deployment and
+# the blocking bootstrap, plus the lifecycle children and two tag-convergence
+# sweeps. Same rule: the controller bound must cover all of it.
+# A steer also blocks on the guest. RunShellScript is an unmanaged run command
+# and takes no --timeout-in-seconds, so the client bound is the only one there
+# is, and leaving it at the ordinary control-plane default is the same shape
+# called broken for bootstrap and execute above.
+STEER_CLIENT_TIMEOUT_SECONDS = 600
+# The steer is bracketed by two full inventory sweeps.
+STEER_BUDGET_SECONDS = STEER_CLIENT_TIMEOUT_SECONDS + AZ_TIMEOUT_SECONDS * 2
+PILOT_CREATE_DEPLOY_TIMEOUT_SECONDS = 3600
+CREATE_LIFECYCLE_BUDGET_SECONDS = (
+    BOOTSTRAP_CLIENT_TIMEOUT_SECONDS
+    + AZ_TIMEOUT_SECONDS * 16   # instance view, task stub, TTL, blob uploads, sweeps, tagging
+)
 RESOURCE_API = {
     "vm": "2024-03-01",
     "nic": "2023-09-01",
@@ -1229,9 +1280,37 @@ def mark_cleanup_container(controller, action, key, value):
     )
 
 
-def upload_json_blob(controller, account, container, name, value, tags, overwrite=False):
+# What the reservation blob IDENTIFIES is the capacity grant: which slot, for
+# which assignment generation, at which SKU and price. Everything else in it is
+# provenance recorded alongside that grant, and must not be able to wedge a
+# replay.
+#
+# ttl_deadline is recomputed from now() on every attempt, so it is volatile.
+#
+# The supervisor digest is NOT here at all, rather than being listed as
+# volatile: it is the digest of the supervisor the bootstrap script carries,
+# the guest re-proves it from the script it actually received, and a converging
+# replay does not rewrite the blob, so keeping a copy would guarantee a stale
+# one. Carrying it as identity was worse still: any merge touching
+# bin/fm-worker-supervisor.py between a failed create and its replay turned a
+# recoverable wedge into a permanent one whose only exit was hand-deleting the
+# blob. That is not theoretical, it is the state slot 2 is in right now.
+RESERVATION_VOLATILE_FIELDS = ("ttl_deadline",)
+
+
+def blob_identity_digest(value, volatile_fields=()):
+    """Digest of what IDENTIFIES this blob, ignoring fields that legitimately
+    differ between attempts of the same action (a recomputed deadline, say)."""
+    identity = {key: item for key, item in value.items() if key not in volatile_fields}
+    return hashlib.sha256(canonical_bytes(identity) + b"\n").hexdigest()
+
+
+def upload_json_blob(
+    controller, account, container, name, value, tags, overwrite=False, volatile_fields=(),
+):
     payload = canonical_bytes(value) + b"\n"
     digest = hashlib.sha256(payload).hexdigest()
+    identity = blob_identity_digest(value, volatile_fields)
     fd, path = tempfile.mkstemp(prefix="fm-worker-blob-", suffix=".json")
     os.chmod(path, 0o600)
     try:
@@ -1239,12 +1318,32 @@ def upload_json_blob(controller, account, container, name, value, tags, overwrit
             handle.write(payload)
         metadata = dict(tags_to_metadata(tags))
         metadata["content_digest"] = digest
+        metadata["identity_digest"] = identity
         _, rc, stderr = az(controller, [
             "storage", "blob", "upload", "--auth-mode", "login", "--account-name", account,
             "--container-name", container, "--name", name, "--file", path,
             "--overwrite", "true" if overwrite else "false", "--metadata",
         ] + ["{}={}".format(key, value) for key, value in sorted(metadata.items())], check=False)
         if rc != 0:
+            # A create-once blob that already carries exactly these bytes is
+            # this same action replaying after a lost or timed-out response,
+            # which must converge rather than wedge. Different bytes under the
+            # same name still refuse: that is a foreign or newer assignment.
+            if not overwrite and ("BlobAlreadyExists" in stderr or "already exists" in stderr):
+                existing, show_rc, show_stderr = az(controller, [
+                    "storage", "blob", "show", "--auth-mode", "login",
+                    "--account-name", account, "--container-name", container,
+                    "--name", name, "--query", "metadata.identity_digest",
+                ], check=False)
+                if show_rc != 0:
+                    raise ProviderError(
+                        "existing worker staging blob is unreadable: {}".format(show_stderr)
+                    )
+                if existing != identity:
+                    raise ProviderError(
+                        "worker staging blob {} already exists with different content".format(name)
+                    )
+                return digest
             raise ProviderError("exact worker staging upload failed: {}".format(stderr))
     finally:
         with contextlib.suppress(FileNotFoundError):
@@ -1491,11 +1590,21 @@ def create_lifecycle_children(controller, action):
     vm_name = names["vm"]
     tags = action_tags(controller, action)
     script, supervisor_digest = bootstrap_script(action)
+    # This BLOCKS on the guest exactly like the execute path does, and for the
+    # same reason it cannot take the ordinary control-plane bound: the script
+    # waits up to 60s per data disk for the device to appear, then runs mkfs
+    # and the mounts. Under the default 300s the CLI gives up while the guest
+    # carries on, and the controller records a failed create for a VM that is
+    # in fact alive and finishing - the precise outcome
+    # PROVIDER_CREATE_TIMEOUT_SECONDS exists to prevent, which it cannot do
+    # from the outside while the inner bound fires 6900 seconds earlier.
     _, rc, stderr = az(controller, [
         "vm", "run-command", "create", "--resource-group", controller["resource_group"],
         "--vm-name", vm_name, "--name", names["bootstrap-command"],
-        "--script", script, "--async-execution", "false", "--tags",
-    ] + ["{}={}".format(key, value) for key, value in sorted(tags.items())], check=False)
+        "--script", script, "--async-execution", "false",
+        "--timeout-in-seconds", str(BOOTSTRAP_GUEST_TIMEOUT_SECONDS), "--tags",
+    ] + ["{}={}".format(key, value) for key, value in sorted(tags.items())], check=False,
+        timeout=BOOTSTRAP_CLIENT_TIMEOUT_SECONDS)
     if rc != 0:
         raise ProviderError("pinned worker supervisor bootstrap failed: {}".format(stderr))
     # A managed Run Command reports create success even when the guest script
@@ -1538,21 +1647,38 @@ def create_lifecycle_children(controller, action):
         "schema": "fm.worker-global-reservation/v1", "slot": action["slot"],
         "assignment_generation": action["bindings"]["assignment_generation"],
         "sku": action["sku"], "sku_family": action["sku_family"],
-        "reservation_usd": action.get("reservation_usd"), "supervisor_sha256": supervisor_digest,
+        "reservation_usd": action.get("reservation_usd"),
+        # No supervisor_sha256 here. A converging replay returns without
+        # rewriting the blob, so this field would be guaranteed stale after
+        # exactly the event it was kept for, and a record that is reliably
+        # wrong is worse than no record. Nothing reads it: the guest proves its
+        # supervisor against the digest carried by the bootstrap script it was
+        # actually handed, and staging-request keeps the live copy.
         "ttl_deadline": deadline.isoformat().replace("+00:00", "Z"),
     }
     upload_json_blob(
         controller, "st{}ctl01".format(controller["prefix"]), "runner-control",
         "worker/{:02d}/reservation.json".format(action["slot"]), reservation, tags,
+        volatile_fields=RESERVATION_VOLATILE_FIELDS,
     )
     assignment = {
         "schema": "fm.worker-staging-request/v1", "status": "assigned",
         "slot": action["slot"], "bindings": action["bindings"],
         "supervisor_sha256": supervisor_digest,
     }
+    # The staging pair is per-assignment WORKING state, not a claim on the slot.
+    # mutate_execute overwrites both blobs with execution content, so create-once
+    # here never actually guarded anything: after the first execute a resume
+    # finds an fm.worker-execution/v1 body where it expects an assignment and
+    # refuses forever. The reservation blob above is the one arbiter of who owns
+    # this slot, and it stays strictly create-once.
+    #
+    # These must be REWRITTEN rather than converged onto: the guest verifies the
+    # supervisor it was actually handed against this record, so a replay carrying
+    # a newer supervisor has to leave the newer digest here, not the stale one.
     upload_json_blob(
         controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
-        names["staging-request"], assignment, tags,
+        names["staging-request"], assignment, tags, overwrite=True,
     )
     pending_result = {
         "schema": "fm.worker-staging-result/v1", "status": "pending",
@@ -1560,7 +1686,7 @@ def create_lifecycle_children(controller, action):
     }
     upload_json_blob(
         controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
-        names["staging-result"], pending_result, tags,
+        names["staging-result"], pending_result, tags, overwrite=True,
     )
 
 
@@ -1946,7 +2072,7 @@ def mutate_execute(controller, action):
     protected_parameters = []
     if action.get("payload_dir"):
         storage = os.environ.get("FM_AZURE_STORAGE_NAME", "")
-        sas_seconds = int(request["wall_seconds"]) + GUEST_RUN_SLACK_SECONDS
+        sas_seconds = int(request["wall_seconds"]) + CLIENT_WAIT_SLACK_SECONDS
         for label, directory, manifest in (
             ("payload", action["payload_dir"], request["payload_files"]),
             ("account", action["account_dir"], request["account_files"]),
@@ -1977,7 +2103,7 @@ def mutate_execute(controller, action):
         outcome_sas = blob_sas(
             controller, os.environ.get("FM_AZURE_STORAGE_NAME", ""), names["state-container"],
             outcome_blob_name(request["request_digest"]),
-            int(request["wall_seconds"]) + GUEST_RUN_SLACK_SECONDS, permissions="cw",
+            int(request["wall_seconds"]) + CLIENT_WAIT_SLACK_SECONDS, permissions="cw",
         )
         if not re.fullmatch(r"https://[A-Za-z0-9.:/_?&=%+-]+", outcome_sas):
             raise ProviderError("outcome staging SAS carries unsupported characters")
@@ -2008,6 +2134,11 @@ printf 'FM-WORKER-RESULT:%s\\n' "$(cat /var/lib/firstmate-worker/result.json)"
         "vm", "run-command", "update", "--resource-group", controller["resource_group"],
         "--vm-name", names["vm"], "--name", names["task-command"],
         "--script", script, "--async-execution", "false",
+        # Without this the managed run command takes Azure's own default while
+        # the CLI waits out the whole wall, so a long task dies guest-side with
+        # the client still blocked. bin/fm-azure-runner.py and
+        # bin/fm-azure-validation.py both set it for the same reason.
+        "--timeout-in-seconds", str(int(request["wall_seconds"]) + GUEST_RUN_SLACK_SECONDS),
     ]
     if protected_parameters:
         update_command += ["--protected-parameters"] + protected_parameters
@@ -2017,7 +2148,7 @@ printf 'FM-WORKER-RESULT:%s\\n' "$(cat /var/lib/firstmate-worker/result.json)"
     # result, and every smoke that passed before was a sub-second command.
     _, rc, stderr = az(
         controller, update_command, check=False,
-        timeout=int(request["wall_seconds"]) + GUEST_RUN_SLACK_SECONDS,
+        timeout=int(request["wall_seconds"]) + CLIENT_WAIT_SLACK_SECONDS,
     )
     if rc != 0:
         raise ProviderError("exact private worker execution failed: {}".format(stderr))
@@ -2091,7 +2222,7 @@ exec \"$supervisor\" steer --home-binding '{}' --task '{}' --task-generation '{}
         "vm", "run-command", "invoke", "--resource-group", controller["resource_group"],
         "--name", expected_names(controller, action["slot"])["vm"],
         "--command-id", "RunShellScript", "--scripts", script,
-    ], check=False)
+    ], check=False, timeout=STEER_CLIENT_TIMEOUT_SECONDS)
     if rc != 0:
         raise ProviderError("exact guest-supervisor steer failed: {}".format(stderr))
     # RunShellScript never propagates the guest exit code, so only the

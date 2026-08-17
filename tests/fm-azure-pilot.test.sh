@@ -10,7 +10,7 @@ set -u
 SCRIPT="$ROOT/bin/fm-azure-pilot.sh"
 TEMPLATE="$ROOT/docs/azure-pilot/main.json"
 WORKER_PROVIDER="$ROOT/bin/fm-azure-worker-provider.py"
-# A separate handle from TEMPLATE, which later cases reassign in subshells.
+WORKER_LIFECYCLE="$ROOT/bin/fm-worker-lifecycle.py"
 WORKER_TEMPLATE="$ROOT/docs/azure-pilot/main.json"
 DOC="$ROOT/docs/azure-pilot.md"
 
@@ -782,13 +782,24 @@ run_guest_run_bound_check() {
   cat >"$tmp/driver.py" <<'GUESTBOUND'
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
-provider_path, tmp = sys.argv[1:]
+def load_module(name, path):
+    module_spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    return module
+
+
+provider_path, lifecycle_path, tmp = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("fm_provider", provider_path)
 provider = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(provider)
+lifecycle_spec = importlib.util.spec_from_file_location("fm_lifecycle", lifecycle_path)
+lifecycle = importlib.util.module_from_spec(lifecycle_spec)
+lifecycle_spec.loader.exec_module(lifecycle)
 
 root = Path(tmp)
 controller = {
@@ -807,11 +818,35 @@ request.update({
     "schema": "fm.worker-execution/v1", "cloud_instance_id": "vm-instance",
     "argv": ["/usr/bin/true"], "wall_seconds": 3600,
 })
+payload_dir = root / "payload"
+account_dir = root / "account"
+payload_dir.mkdir(parents=True, exist_ok=True)
+account_dir.mkdir(parents=True, exist_ok=True)
+(payload_dir / "repo.bundle").write_bytes(b"bundle fixture")
+(payload_dir / "brief.md").write_text("brief\n")
+(account_dir / "auth.json").write_text("{}\n")
+
+
+def manifest(directory):
+    entries = {}
+    for entry in sorted(directory.iterdir()):
+        blob = entry.read_bytes()
+        entries[entry.name] = {
+            "sha256": provider.hashlib.sha256(blob).hexdigest(), "bytes": len(blob),
+        }
+    return entries
+
+
+# A real execute carries a payload, so protected parameters are built and the
+# guest bound's position relative to that nargs-many flag actually matters.
+request["payload_files"] = manifest(payload_dir)
+request["account_files"] = manifest(account_dir)
 request["request_digest"] = "f" * 64
 action = {
     "type": "execute", "slot": 1, "cloud_instance_id": "vm-instance",
     "bindings": bindings, "request": request,
     "request_digest": request["request_digest"], "idempotency_key": "e" * 64,
+    "payload_dir": str(payload_dir), "account_dir": str(account_dir),
 }
 execution = {
     "schema": "fm.worker-execution-result/v1",
@@ -839,14 +874,28 @@ provider.run_command_instance_view = lambda controller, vm, name: {
 }
 seen = {}
 
+# Substitute run(), NOT az(): monkeypatching provider.az leaves the whole az ->
+# run plumbing untested, so dropping the timeout parameter from az() (a
+# TypeError on every real execute) stayed green. This drives the real az().
+class _Result:
+    returncode = 0
+    stderr = b""
 
-def fake_az(controller, args, check=True, timeout=provider.AZ_TIMEOUT_SECONDS):
-    if "update" in args and "run-command" in args:
+    def __init__(self, payload):
+        self.stdout = payload
+
+
+def fake_run(command, check=True, input_bytes=None, timeout=provider.AZ_TIMEOUT_SECONDS, env=None):
+    if "run-command" in command and "update" in command:
         seen["timeout"] = timeout
-    return {}, 0, ""
+        seen["command"] = list(command)
+    if "generate-sas" in command:
+        # az --full-uri renders a bare JSON string.
+        return _Result(b'"https://fixture.invalid/staging?sig=fake"')
+    return _Result(b"{}")
 
 
-provider.az = fake_az
+provider.run = fake_run  # restored below
 provider.mutate_execute(controller, action)
 
 # The blocking call must clear the wall by far more than the ordinary
@@ -856,41 +905,619 @@ assert seen.get("timeout") is not None, "the run-command update carried no expli
 assert seen["timeout"] >= request["wall_seconds"] + 1800, (
     "the blocking run-command bound does not cover a whole guest run", seen["timeout"],
 )
+
+# The guest side needs its own bound or Azure applies its default while the
+# client waits out the whole wall.
+command = seen.get("command") or []
+assert "--timeout-in-seconds" in command, ("the run command carries no guest bound", command)
+# The call is only blocking because of this, and an async execute returns
+# immediately with the instance view still Running.
+assert "--async-execution" in command, command
+assert command[command.index("--async-execution") + 1] == "false", (
+    "the execute stopped waiting for the guest", command,
+)
+# --protected-parameters is nargs-many, so anything after it is swallowed and
+# the guest bound is silently lost.
+assert "--protected-parameters" in command, (
+    "the fixture built no protected parameters, so the ordering below proves nothing", command,
+)
+assert command.index("--timeout-in-seconds") < command.index("--protected-parameters"), (
+    "the guest bound sits after --protected-parameters and would be swallowed", command,
+)
+guest_bound = int(command[command.index("--timeout-in-seconds") + 1])
+# The floor comes from the supervisor MODULE, not from GUEST_RUN_SLACK_SECONDS
+# and not from a scan of the supervisor's source text. Asserting against the
+# constant under test certifies whatever it holds; scanning the text silently
+# UNDER-counts the moment a literal becomes a named constant, which is the
+# direction that kills a run. fm-worker-supervisor.py sums its own per-step
+# bounds into NON_WALL_BUDGET_SECONDS at the same names its call sites use, so
+# growing a step grows this floor.
+supervisor = load_module("fm_supervisor", str(Path(sys.argv[1]).with_name("fm-worker-supervisor.py")))
+collection_floor = supervisor.NON_WALL_BUDGET_SECONDS
+assert collection_floor > 0, collection_floor
+# An Azure kill is not catchable, so undershooting this does not merely lose the
+# outcome: no executed marker is written and the next dispatch rmtrees the
+# staged repository, deleting the commits the killed run had already made.
+assert guest_bound >= request["wall_seconds"] + collection_floor, (
+    "the guest run-command bound is under the supervisor's own non-wall budget, so a slow "
+    "collection is killed and its commits are destroyed on redispatch",
+    guest_bound, request["wall_seconds"], collection_floor,
+)
+
+# The controller bounds the whole provider process, which does a full inventory
+# sweep, archive builds, uploads and SAS mints BEFORE the blocking call and
+# another inventory sweep plus a result upload AFTER it. If its bound is not
+# strictly greater than the provider's own, it kills the provider during result
+# collection and the task runs a second time.
+controller_bound = lifecycle.provider_action_timeout(action)
+# A bare `>` is not the property: the controller supervises the WHOLE provider
+# subprocess, so it must outlast the client wait plus everything the provider
+# does around it. Those budgets are named in the provider next to the bounds
+# they are summed from, so this reads them rather than restating a number - a
+# one-second margin used to satisfy the old assertion while the controller
+# killed the provider mid-download.
+provider_whole_run = (
+    seen["timeout"]
+    + provider.PRE_GUEST_CALL_BUDGET_SECONDS
+    + provider.POST_GUEST_CALL_BUDGET_SECONDS
+)
+assert controller_bound >= provider_whole_run, (
+    "the controller bound does not cover the provider's work around the blocking call, so a "
+    "long task returning a large outcome is killed during collection and re-runs",
+    controller_bound, seen["timeout"], provider_whole_run,
+)
+assert seen["timeout"] > guest_bound, (
+    "the client hangs up at or before the guest bound it set, so a guest timeout races",
+    seen["timeout"], guest_bound,
+)
 print("OK")
 GUESTBOUND
-  out=$(python3 "$tmp/driver.py" "$WORKER_PROVIDER" "$tmp" 2>&1)
-  expect_code 0 $? "the blocking execute call must cover a whole guest run: $out"
+  # NOT `|| true`: that makes the compound status unconditionally 0, so the
+  # expect_code below can never fail and only assert_contains still guards.
+  if out=$(python3 "$tmp/driver.py" "$WORKER_PROVIDER" "$WORKER_LIFECYCLE" "$tmp" 2>&1); then status=0; else status=$?; fi
+  expect_code 0 "$status" "the blocking execute call must cover a whole guest run: $out"
   assert_contains "$out" "OK" "the guest-run bound driver did not complete: $out"
   pass "the blocking worker execute call is bounded by the whole guest run"
 }
 
 run_worker_os_disk_image_check() {
-  # A captured golden image carries its own OS disk size, and Azure refuses any
-  # smaller pin outright ("disk size 64 GB is smaller than ... 96 GB"), so the
-  # worker template must not assert a size it cannot know.
-  python3 - "$WORKER_TEMPLATE" <<'OSDISK' || fail "the worker OS disk pins a size it cannot know"
+  # A captured golden image carries its own OS disk size and Azure refuses any
+  # smaller pin outright, failing the whole deployment. The first version of
+  # this check was string surgery and stayed green when the condition was
+  # INVERTED, which reproduces that failure verbatim, so it now parses the
+  # expression and evaluates both branches.
+  python3 - "$WORKER_TEMPLATE" <<'OSDISK' || fail "the worker OS disk expression is not exact"
 import json
 import re
 import sys
 
 body = open(sys.argv[1], encoding="utf-8").read()
-template = json.loads(body)
-worker_os_disk = [
-    line for line in body.splitlines()
-    if '"osDisk"' in line and "wkr-{1}-os" in line
-]
-assert len(worker_os_disk) == 1, worker_os_disk
-expression = worker_os_disk[0]
-assert "workerImageId" in expression, "the worker OS disk does not branch on the custom image"
-default_branch, custom_branch = expression.split("createObject", 1)[1], expression.rsplit("createObject('name'", 1)[1]
-assert "diskSizeGB" in default_branch, "the Canonical branch lost its explicit size"
-assert "diskSizeGB" not in custom_branch, "the custom-image branch still pins a size"
-assert isinstance(template, dict)
+json.loads(body)
+lines = [line for line in body.splitlines() if '"osDisk"' in line and "wkr-{1}-os" in line]
+assert len(lines) == 1, lines
+expression = lines[0].split('"osDisk": "', 1)[1].rsplit('",', 1)[0]
+
+assert expression.startswith("[if(equals(parameters('workerImageId'), '')"), (
+    "the branch condition is not the exact empty-image test", expression[:80],
+)
+assert expression.count("(") == expression.count(")"), "unbalanced parentheses"
+
+
+def split_args(text):
+    parts, depth, current, quoted = [], 0, [], False
+    for ch in text:
+        if ch == "'":
+            quoted = not quoted
+        if not quoted:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                parts.append("".join(current).strip())
+                current = []
+                continue
+        current.append(ch)
+    parts.append("".join(current).strip())
+    return parts
+
+
+inner = expression[len("[if("):-2]
+args = split_args(inner)
+assert len(args) == 3, ("if() arity", len(args))
+condition, default_branch, custom_branch = args
+assert "workerImageId" in condition and "equals(" in condition, condition
+
+def keys_of(branch):
+    assert branch.startswith("createObject("), branch[:40]
+    items = split_args(branch[len("createObject("):-1])
+    assert len(items) % 2 == 0, ("createObject arity is odd", len(items))
+    return {items[i].strip("'"): items[i + 1] for i in range(0, len(items), 2)}
+
+# The EMPTY-image branch keeps the explicit size; the custom-image branch must
+# not pin one. Inverting the condition swaps these and fails here.
+default_keys = keys_of(default_branch)
+custom_keys = keys_of(custom_branch)
+assert "diskSizeGB" in default_keys, ("the Canonical branch lost its size", sorted(default_keys))
+assert "diskSizeGB" not in custom_keys, ("the custom-image branch pins a size", sorted(custom_keys))
+
+required = {"name", "createOption", "deleteOption", "managedDisk"}
+for label, keys in (("default", default_keys), ("custom", custom_keys)):
+    missing = required - set(keys)
+    assert not missing, (label + " branch is missing properties", sorted(missing))
+    assert keys["createOption"] == "'FromImage'", (label, keys["createOption"])
+    # Detach leaks an OS disk on every VM delete and breaks the absence proofs.
+    assert keys["deleteOption"] == "'Delete'", (label, keys["deleteOption"])
+    assert keys["managedDisk"] == "createObject('storageAccountType', 'StandardSSD_LRS')", (
+        label, keys["managedDisk"],
+    )
+
+# The size is the whole point of the branch, so pin the value, not its presence.
+assert default_keys["diskSizeGB"] == "64", ("the Canonical OS disk size changed", default_keys["diskSizeGB"])
+
+# The lifecycle matches resources by exact name, so both branches must produce
+# the identical disk name.
+assert default_keys["name"] == custom_keys["name"], (
+    "the two branches build different OS disk names",
+    default_keys["name"], custom_keys["name"],
+)
+assert "disk-{0}-wkr-{1}-os" in default_keys["name"], default_keys["name"]
 OSDISK
-  pass "the worker OS disk inherits a custom image's size instead of pinning one"
+  pass "the worker OS disk expression branches correctly and names one disk"
 }
 
 run_guest_run_bound_check
 run_worker_os_disk_image_check
+
+run_create_replay_idempotence_check() {
+  # A create whose response was lost or timed out replays. Its create-once
+  # blobs already exist, so without content-equal convergence the lane wedges
+  # permanently: observed live as "The specified blob already exists" on the
+  # very first real worker creation.
+  local tmp out
+  fm_test_tmproot_into tmp fm-azure-create-replay
+  cat >"$tmp/driver.py" <<'CREATEREPLAY'
+import importlib.util
+import sys
+from pathlib import Path
+
+provider_path, tmp = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("fm_provider", provider_path)
+provider = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(provider)
+
+controller = {
+    "subscription": "00000000-0000-0000-0000-000000000000",
+    "resource_group": "rg-test", "prefix": "fmtest", "owner": "owner",
+    "deployment_generation": "dep-one", "home_binding": "a" * 64,
+}
+value = {"schema": "fm.worker-global-reservation/v1", "slot": 1}
+digest = provider.hashlib.sha256(provider.canonical_bytes(value) + b"\n").hexdigest()
+calls = []
+
+
+def make_az(existing_digest):
+    def fake_az(controller, args, check=True, timeout=provider.AZ_TIMEOUT_SECONDS):
+        calls.append(list(args))
+        if "upload" in args:
+            return None, 1, "ERROR: The specified blob already exists.\nErrorCode:BlobAlreadyExists"
+        if "show" in args:
+            return existing_digest, 0, ""
+        return {}, 0, ""
+    return fake_az
+
+
+# Replay of the same action: the blob already holds exactly these bytes, so the
+# create must converge instead of wedging the lane forever.
+provider.az = make_az(digest)
+landed = provider.upload_json_blob(
+    controller, "acct", "runner-control", "worker/01/reservation.json", value, {},
+)
+assert landed == digest, landed
+assert any("show" in call for call in calls), "the replay never checked the existing content"
+
+# A DIFFERENT reservation under the same name is a foreign or newer assignment
+# and must still refuse: create-once safety is not weakened.
+calls.clear()
+provider.az = make_az("f" * 64)
+try:
+    provider.upload_json_blob(
+        controller, "acct", "runner-control", "worker/01/reservation.json", value, {},
+    )
+    raise AssertionError("a conflicting create-once blob was accepted")
+except provider.ProviderError as exc:
+    assert "different content" in str(exc), exc
+# The check above drives upload_json_blob with a hand-written value, which
+# cannot see a REAL caller whose payload is not byte-stable across attempts.
+# create_lifecycle_children recomputes a TTL deadline from now() on every call,
+# so replaying it minutes later must still converge.
+store = {}
+now_calls = []
+
+
+def replay_az(controller, args, check=True, timeout=provider.AZ_TIMEOUT_SECONDS):
+    if "upload" in args:
+        name = args[args.index("--name") + 1]
+        meta = {}
+        for item in args[args.index("--metadata") + 1:]:
+            if "=" in item:
+                key, _, item_value = item.partition("=")
+                meta[key] = item_value
+        if name in store:
+            return None, 1, "ErrorCode:BlobAlreadyExists"
+        store[name] = meta
+        return {}, 0, ""
+    if "show" in args:
+        name = args[args.index("--name") + 1]
+        query = args[args.index("--query") + 1].split(".")[-1]
+        return store.get(name, {}).get(query), 0, ""
+    return {}, 0, ""
+
+
+provider.az = replay_az
+reservation_name = "worker/01/reservation.json"
+
+
+def reservation_payload(deadline_hours):
+    return {
+        "schema": "fm.worker-global-reservation/v1", "slot": 1,
+        "assignment_generation": "asg-00000001", "sku": "Standard_D4as_v6",
+        "sku_family": "standardDav6Family", "reservation_usd": 1.0,
+        # Deliberately no supervisor_sha256: the real reservation carries none,
+        # and a fixture richer than its producer proves nothing about it.
+        "ttl_deadline": "2026-08-17T{:02d}:00:00Z".format(deadline_hours),
+    }
+
+
+provider.upload_json_blob(
+    controller, "acct", "runner-control", reservation_name,
+    reservation_payload(18), {}, volatile_fields=provider.RESERVATION_VOLATILE_FIELDS,
+)
+# The replay recomputes a LATER deadline, exactly as create_lifecycle_children
+# does. It must still converge: the deadline is not what identifies the slot.
+provider.upload_json_blob(
+    controller, "acct", "runner-control", reservation_name,
+    reservation_payload(21), {}, volatile_fields=provider.RESERVATION_VOLATILE_FIELDS,
+)
+
+# A different SLOT ASSIGNMENT under the same name is still refused.
+conflicting = reservation_payload(21)
+conflicting["assignment_generation"] = "asg-00000002"
+try:
+    provider.upload_json_blob(
+        controller, "acct", "runner-control", reservation_name,
+        conflicting, {}, volatile_fields=provider.RESERVATION_VOLATILE_FIELDS,
+    )
+    raise AssertionError("a different assignment converged onto an existing reservation")
+except provider.ProviderError as exc:
+    assert "different content" in str(exc), exc
+# A blob written by an older build carries no identity_digest. Converging on
+# that would accept bytes nothing has vouched for.
+store.pop(reservation_name)
+provider.az = lambda controller, args, check=True, timeout=None: (
+    (None, 1, "ErrorCode:BlobAlreadyExists") if "upload" in args else (None, 0, "")
+)
+try:
+    provider.upload_json_blob(
+        controller, "acct", "runner-control", reservation_name,
+        reservation_payload(18), {}, volatile_fields=provider.RESERVATION_VOLATILE_FIELDS,
+    )
+    raise AssertionError("a blob with no recorded identity was converged onto")
+except provider.ProviderError as exc:
+    assert "different content" in str(exc), exc
+
+# Convergence is a create-once affordance. An overwrite upload that somehow
+# reports the blob exists must still fail rather than silently accept it.
+try:
+    provider.upload_json_blob(
+        controller, "acct", "runner-control", reservation_name,
+        reservation_payload(18), {}, overwrite=True,
+    )
+    raise AssertionError("an overwrite upload took the create-once convergence path")
+except provider.ProviderError as exc:
+    assert "staging upload failed" in str(exc), exc
+# The checks above drive upload_json_blob directly and so cannot see the REAL
+# caller dropping volatile_fields, which is what made S1 revertible with a
+# green suite. Capture what create_lifecycle_children actually passes.
+create_bindings = {
+    "home_binding": "a" * 64, "task": "task-one", "task_generation": "gen-1",
+    "assignment_generation": "asg-00000001", "account_binding": "b" * 64,
+    "worktree_binding": "c" * 64, "repository_binding": "d" * 64,
+    "repository_generation": "repo-gen",
+}
+captured_uploads = []
+_real_upload = provider.upload_json_blob
+
+
+def recording_upload(controller, account, container, name, value, tags, **kwargs):
+    captured_uploads.append(
+        (name, kwargs.get("volatile_fields", ()), kwargs.get("overwrite", False), value)
+    )
+    return "0" * 64
+
+
+provider.upload_json_blob = recording_upload
+# Record every az call the REAL create makes, so the bootstrap run command's
+# bounds are asserted from the call site rather than from a fixture.
+captured_az = []
+
+
+def recording_az(controller, args, check=True, timeout=None):
+    captured_az.append((list(args), timeout))
+    return {}, 0, ""
+
+
+provider.az = recording_az
+provider.run_command_instance_view = lambda *a, **k: {"executionState": "Succeeded", "output": "", "error": ""}
+# The real key set, so a rename in expected_names surfaces here rather than
+# being papered over by a short fixture.
+provider.expected_names = lambda controller, slot: {
+    key: key for key in (
+        "vm", "nic", "os-disk", "task-disk", "account-disk", "identity",
+        "state-container", "monitor-extension", "bootstrap-command",
+        "task-command", "ttl-schedule", "global-reservation",
+        "staging-request", "staging-result",
+    )
+}
+provider.action_tags = lambda controller, action: {}
+try:
+    provider.create_lifecycle_children(controller, {
+        "slot": 1, "sku": "Standard_D4as_v6", "sku_family": "standardDav6Family",
+        "reservation_usd": 1.0, "bindings": create_bindings,
+        "cloud_instance_id": "vm-instance", "idempotency_key": "e" * 64,
+    })
+except Exception as exc:  # noqa: BLE001 - the uploads are what this asserts on
+    creation_error = "{}: {}".format(type(exc).__name__, exc)
+finally:
+    provider.upload_json_blob = _real_upload
+
+# The bootstrap run command BLOCKS on the guest exactly like the execute does:
+# it waits up to 60s per data disk for the device node, then runs mkfs and the
+# mounts. Left on the ordinary control-plane bound the CLI hangs up while the
+# guest carries on, and the controller records a failed create for a VM that is
+# alive - which is the failure PROVIDER_CREATE_TIMEOUT_SECONDS is supposed to
+# prevent and cannot, from the outside, if the inner bound fires first.
+run_commands = [
+    (args, timeout) for args, timeout in captured_az
+    if args[:3] == ["vm", "run-command", "create"]
+]
+assert len(run_commands) == 2, ("the create no longer issues the bootstrap and the task stub, "
+                                "so the split below is wrong", [a for a, _ in run_commands])
+# Select by what actually matters - whether the call BLOCKS on the guest -
+# rather than by name, so a renamed command cannot quietly skip these bounds.
+blocking = [
+    (args, timeout) for args, timeout in run_commands
+    if args[args.index("--async-execution") + 1] == "false"
+]
+non_blocking = [
+    (args, timeout) for args, timeout in run_commands
+    if args[args.index("--async-execution") + 1] == "true"
+]
+assert len(blocking) == 1 and len(non_blocking) == 1, (
+    "the blocking/non-blocking split of the create's run commands changed",
+    [(a[a.index("--name") + 1], a[a.index("--async-execution") + 1]) for a, _ in run_commands],
+)
+bootstrap_args, bootstrap_client_timeout = blocking[0]
+# The fire-and-forget stub returns immediately and correctly stays on the
+# ordinary control-plane bound; pinning that keeps this case honest about
+# which call the bounds below are for.
+stub_args, stub_timeout = non_blocking[0]
+assert stub_timeout in (None, provider.AZ_TIMEOUT_SECONDS), (
+    "a non-blocking run command took a long bound it does not need", stub_timeout,
+)
+assert "--timeout-in-seconds" in bootstrap_args, (
+    "the blocking bootstrap carries no guest bound, so Azure applies its own default while "
+    "the CLI waits", bootstrap_args,
+)
+bootstrap_guest = int(bootstrap_args[bootstrap_args.index("--timeout-in-seconds") + 1])
+assert bootstrap_client_timeout is not None and bootstrap_client_timeout > bootstrap_guest, (
+    "the client hangs up at or before the guest bound it set, so a bootstrap timeout races",
+    bootstrap_client_timeout, bootstrap_guest,
+)
+assert bootstrap_client_timeout > provider.AZ_TIMEOUT_SECONDS, (
+    "the bootstrap is still on the ordinary control-plane bound",
+    bootstrap_client_timeout, provider.AZ_TIMEOUT_SECONDS,
+)
+# --tags is nargs-many: anything after it is swallowed as another tag, so the
+# guest bound has to be placed before it or it is silently lost.
+assert "--tags" in bootstrap_args, ("the fixture built no tags, so the ordering below proves "
+                                    "nothing", bootstrap_args)
+assert bootstrap_args.index("--timeout-in-seconds") < bootstrap_args.index("--tags"), (
+    "the bootstrap guest bound sits after --tags and would be swallowed", bootstrap_args,
+)
+
+reservation_uploads = [item for item in captured_uploads if "reservation" in item[0]]
+assert reservation_uploads, (
+    "create_lifecycle_children uploaded no reservation",
+    captured_uploads, locals().get("creation_error"),
+)
+assert "ttl_deadline" in reservation_uploads[0][1], (
+    "the real caller does not declare its recomputed deadline volatile, so a replay "
+    "will never converge", reservation_uploads[0],
+)
+# Stronger than declaring it volatile: the digest is not in the reservation at
+# all, so it can neither wedge a replay nor rot into a stale record. A
+# converging replay never rewrites the blob, so any copy kept here would be
+# guaranteed wrong after exactly the event it was kept for.
+assert "supervisor_sha256" not in reservation_uploads[0][3], (
+    "the reservation carries the supervisor digest again, which either wedges a replay when "
+    "bin/fm-worker-supervisor.py changes or records a digest the worker is not running",
+    reservation_uploads[0][3],
+)
+# It still has to be recorded somewhere live, and staging-request is rewritten
+# on every attempt, so that is where it belongs.
+assert any(
+    "staging-request" in item[0] and "supervisor_sha256" in item[3] for item in captured_uploads
+), ("nothing records the supervisor digest any more", [item[0] for item in captured_uploads])
+assert reservation_uploads[0][2] is False, (
+    "the reservation stopped being create-once, so it no longer arbitrates slot ownership",
+    reservation_uploads[0],
+)
+# The staging pair is per-assignment working state that mutate_execute already
+# overwrites. Leaving it create-once makes a resume after the first execute find
+# an execution body where an assignment belongs and refuse forever.
+# The reservation is what refuses a foreign or newer assignment, and it is
+# create-once. That refusal only protects the staging pair because it happens
+# FIRST: reorder these and an overwrite-mode staging write clobbers a live
+# assignment before anything checks who owns the slot.
+upload_order = [item[0] for item in captured_uploads]
+reservation_index = next(i for i, name in enumerate(upload_order) if "reservation" in name)
+staging_indexes = [i for i, name in enumerate(upload_order) if "staging" in name]
+assert staging_indexes and reservation_index < min(staging_indexes), (
+    "a staging blob is written before the create-once reservation that arbitrates the slot, "
+    "so a foreign assignment overwrites a live one before it is refused", upload_order,
+)
+
+staging_uploads = [item for item in captured_uploads if "staging" in item[0]]
+assert len(staging_uploads) == 2, ("the create no longer writes the staging pair",
+                                   captured_uploads)
+for item in staging_uploads:
+    assert item[2] is True, (
+        "a staging blob is still create-once, so a replay or resume cannot refresh it",
+        item,
+    )
+print("OK")
+CREATEREPLAY
+  if out=$(python3 "$tmp/driver.py" "$WORKER_PROVIDER" "$tmp" 2>&1); then status=0; else status=$?; fi
+  expect_code 0 "$status" "a create replay must converge on identical content: $out"
+  assert_contains "$out" "OK" "the create-replay driver did not complete: $out"
+  pass "a create-once staging blob converges on replay and still refuses different content"
+}
+
+run_provider_action_bound_check() {
+  # The controller bounds the provider subprocess. A flat bound hangs the
+  # controller up mid-deployment while Azure carries on, leaving live resources
+  # the controller never recorded: observed live on the first worker creation.
+  local tmp out
+  fm_test_tmproot_into tmp fm-azure-provider-bound
+  cat >"$tmp/driver.py" <<'PROVIDERBOUND'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_lifecycle", sys.argv[1])
+lifecycle = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lifecycle)
+# The provider module supplies the INNER bounds this file's floors are
+# measured against, so they never restate a lifecycle constant.
+provider_spec = importlib.util.spec_from_file_location("fm_provider", sys.argv[2])
+provider = importlib.util.module_from_spec(provider_spec)
+provider_spec.loader.exec_module(provider)
+
+# A VM create is an ARM deployment measured in minutes and an execute blocks
+# for the whole guest run; neither fits the ordinary control-plane bound.
+# Absolute floors, not the constants under test.
+# The provider's own worker-create step allows 3600s for the ARM deployment
+# ALONE, and a create then runs the blocking bootstrap plus two inventory
+# sweeps. A controller bound below that reproduces the failure this exists to
+# stop, so the floor is the inner budget, not a round number.
+create = lifecycle.provider_action_timeout({"type": "create"})
+assert create >= (provider.PILOT_CREATE_DEPLOY_TIMEOUT_SECONDS
+                  + provider.CREATE_LIFECYCLE_BUDGET_SECONDS), (
+    "the controller create bound does not cover the provider's deployment budget plus its "
+    "blocking bootstrap and lifecycle children, so raising an inner bound just moved the "
+    "same failure one level out",
+    create, provider.PILOT_CREATE_DEPLOY_TIMEOUT_SECONDS,
+    provider.CREATE_LIFECYCLE_BUDGET_SECONDS,
+)
+assert create >= 3600 + 1800, (
+    "a create leaves no headroom over the provider's own 3600s deployment budget for the "
+    "bootstrap run command, the TTL schedule, three uploads and two inventory sweeps", create,
+)
+
+# resume runs through the IDENTICAL provider path (mutate routes create and
+# resume to create_or_resume), and it is the recovery path, so leaving it on
+# the ordinary bound strands a half-built replacement exactly when things have
+# already gone wrong.
+for action_type in ("resume", "reset", "delete-compute", "deallocate"):
+    bound = lifecycle.provider_action_timeout({"type": action_type})
+    assert bound == create, (action_type + " is not bounded like the create it shares a path with", bound)
+
+execute = lifecycle.provider_action_timeout(
+    {"type": "execute", "request": {"wall_seconds": 3600}}
+)
+assert execute >= 3600 + 1800, ("an execute is bounded below its own guest run", execute)
+
+# A steer is not an ordinary read: the provider runs a full inventory sweep,
+# then a BLOCKING run-command invoke at its own bound, then another sweep. A
+# controller bound merely EQUAL to that inner invoke kills the steer whenever
+# the sweeps cost anything, and reports a missed deadline for a steer that may
+# already have landed in the guest. The floor is the provider's inner bound
+# read from the provider module, never the lifecycle constant under test.
+steer = lifecycle.provider_action_timeout({"type": "steer"})
+# Not `> AZ_TIMEOUT_SECONDS`: a one-second margin satisfied that while the steer
+# was still bracketed by two full inventory sweeps. The provider names its own
+# steer budget next to the bounds it is summed from.
+assert steer > provider.STEER_BUDGET_SECONDS, (
+    "the controller bound for a steer does not outlast the blocking invoke plus the two "
+    "inventory sweeps around it", steer, provider.STEER_BUDGET_SECONDS,
+)
+assert provider.STEER_CLIENT_TIMEOUT_SECONDS > provider.AZ_TIMEOUT_SECONDS, (
+    "the blocking steer invoke is still on the ordinary control-plane bound",
+    provider.STEER_CLIENT_TIMEOUT_SECONDS,
+)
+# An ordinary read stays on the ordinary bound.
+assert lifecycle.provider_action_timeout(None) == lifecycle.PROVIDER_TIMEOUT_SECONDS
+# A malformed wall must not produce a shorter bound than a bare guest run.
+assert lifecycle.provider_action_timeout({"type": "execute", "request": {}}) >= 1800
+# The bound above is only real if provider_call USES it. Drive the real
+# provider_call and capture what it actually passes to subprocess.run:
+# asserting the helper alone stays green with the call site reverted.
+import json as _json
+import subprocess as _subprocess
+
+captured = {}
+_real_run = lifecycle.subprocess.run
+
+
+class _Completed:
+    returncode = 0
+    stderr = b""
+
+    def __init__(self, payload):
+        self.stdout = payload
+
+
+def _fake_run(argv, input=None, stdout=None, stderr=None, timeout=None):
+    captured["timeout"] = timeout
+    body = _json.loads(input.decode("utf-8"))
+    response = {
+        "schema": "fm.worker-provider-response/v1",
+        "operation": body["operation"],
+        "controller": body["controller"],
+        "result": {"idempotency_key": "k"},
+    }
+    return _Completed(_json.dumps(response).encode("utf-8"))
+
+
+lifecycle.subprocess.run = _fake_run
+env = {
+    "home_binding": "a" * 64, "subscription": "sub", "deployment_generation": "dep",
+    "owner": "owner", "prefix": "fmtest", "resource_group": "rg",
+    "provider_argv": ["/usr/bin/true"],
+}
+try:
+    lifecycle.provider_call(env, "mutate", {"type": "create"})
+    create_timeout = captured["timeout"]
+    lifecycle.provider_call(
+        env, "mutate", {"type": "execute", "request": {"wall_seconds": 3600}}
+    )
+    execute_timeout = captured["timeout"]
+finally:
+    lifecycle.subprocess.run = _real_run
+
+assert create_timeout >= 900, ("provider_call did not bound a create by its action", create_timeout)
+assert execute_timeout >= 3600 + 1800, (
+    "provider_call did not bound an execute by its guest run", execute_timeout,
+)
+print("OK")
+PROVIDERBOUND
+  if out=$(python3 "$tmp/driver.py" "$WORKER_LIFECYCLE" "$WORKER_PROVIDER" 2>&1); then status=0; else status=$?; fi
+  expect_code 0 "$status" "the provider subprocess bound must cover its action: $out"
+  assert_contains "$out" "OK" "the provider-bound driver did not complete: $out"
+  pass "the provider subprocess bound covers the action it runs"
+}
+
+run_create_replay_idempotence_check
+run_provider_action_bound_check
 
 echo "# fm-azure-pilot.test.sh: all assertions passed"
