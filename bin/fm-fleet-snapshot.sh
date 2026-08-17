@@ -253,6 +253,29 @@ status_event_json() {  # <status-log>
     '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
 }
 
+status_current_json() {  # <status-event-json>
+  local event=$1 raw verb note state=unknown source=none detail
+  raw=$(printf '%s' "$event" | jq -r '.last_event.raw // ""')
+  verb=$(printf '%s' "$event" | jq -r '.last_event.state // ""')
+  note=$(printf '%s' "$event" | jq -r '.last_event.note // ""')
+  detail="remote live state unavailable without probe"
+  if status_is_paused "$raw"; then
+    state=paused
+    source=status-log
+    detail=$note
+  else
+    case "$verb" in
+      working) state=working; source=status-log; detail=$note ;;
+      needs-decision) state=parked; source=status-log; detail=$note ;;
+      blocked) state=blocked; source=status-log; detail=$note ;;
+      done) state=done; source=status-log; detail=$note ;;
+      failed) state=failed; source=status-log; detail=$note ;;
+    esac
+  fi
+  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
+    '{state:$state,source:$source,detail:$detail,raw:$raw}'
+}
+
 first_pr_url_in_file() {  # <file>
   [ -f "$1" ] || return 1
   grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
@@ -452,8 +475,12 @@ task_json_lines() {
       pr_source=absent
     fi
 
-    current_json=$(crew_state_json "$id")
     event_json=$(status_event_json "$status_log")
+    if [ -n "$remote_host" ] && [ "$REMOTE_PROBE" -eq 0 ]; then
+      current_json=$(status_current_json "$event_json")
+    else
+      current_json=$(crew_state_json "$id")
+    fi
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')

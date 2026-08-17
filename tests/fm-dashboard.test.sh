@@ -226,7 +226,7 @@ SH
 }
 
 test_remote_pane_notice_without_capture() {
-  local home fakebin fake_ssh fake_herdr ssh_log backend_log out
+  local home fakebin fake_ssh fake_herdr ssh_log backend_log tmux_log out
   home=$(make_home remote)
   fm_write_meta "$home/state/remote-task.meta" \
     "home=/remote/home" \
@@ -235,19 +235,27 @@ test_remote_pane_notice_without_capture() {
     "model=opus-4" \
     "kind=secondmate" \
     "mode=secondmate" \
+    "window=remote:remote-task" \
     "remote_host=remote-mac" \
     "remote_root=/remote/root" \
     "remote_backend=herdr" \
     "remote_target=fm-remote:remote-task:pane"
   printf '%s\n' '- remote-task - remote delivery (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote work; projects: alpha; added 2026-08-17)' > "$home/data/secondmates.md"
+  printf 'blocked: waiting for remote operator\n' > "$home/state/remote-task.status"
   fakebin=$(make_fakebin "$home")
   fake_ssh="$fakebin/ssh"
   fake_herdr="$fakebin/herdr"
   ssh_log="$home/ssh.log"
   backend_log="$home/backend.log"
+  tmux_log="$home/tmux.log"
   cat > "$fake_ssh" <<'SH'
 #!/usr/bin/env bash
 printf 'invoked\n' >> "${SSH_LOG:?}"
+exit 1
+SH
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'invoked\n' >> "${TMUX_LOG:?}"
 exit 1
 SH
   cat > "$fake_herdr" <<'SH'
@@ -256,16 +264,19 @@ printf 'invoked\n' >> "${BACKEND_LOG:?}"
 exit 1
 SH
   chmod +x "$fake_ssh" "$fake_herdr"
-  out=$(PATH="$fakebin:$PATH" FM_SSH_BIN="$fake_ssh" SSH_LOG="$ssh_log" BACKEND_LOG="$backend_log" FM_HOME="$home" "$DASH" --snapshot)
+  out=$(PATH="$fakebin:$PATH" FM_SSH_BIN="$fake_ssh" SSH_LOG="$ssh_log" BACKEND_LOG="$backend_log" TMUX_LOG="$tmux_log" FM_HOME="$home" "$DASH" --snapshot)
   printf '%s' "$out" | jq -e '
     .tasks[0].model == "opus-4"
       and .tasks[0].remote_host == "remote-mac"
+      and .tasks[0].state == "blocked"
+      and .tasks[0].state_source == "status-log"
       and .tasks[0].endpoint_present == null
       and .tasks[0].pane_tail.error == "remote worker - live view not available from the dashboard; open its remote session"
       and (.tasks[0].pane_tail.lines | length) == 0
   ' >/dev/null || fail "remote workers must carry an explicit unavailable live-view notice: $out"
   [ ! -e "$ssh_log" ] || fail "dashboard must not invoke remote transport: $(cat "$ssh_log")"
   [ ! -e "$backend_log" ] || fail "dashboard must not probe a remote task through the local backend: $(cat "$backend_log")"
+  [ ! -e "$tmux_log" ] || fail "dashboard must not probe a remote task through local tmux: $(cat "$tmux_log")"
   pass "dashboard reports remote live view unavailable without remote probes"
 }
 
