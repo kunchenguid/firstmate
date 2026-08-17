@@ -679,7 +679,7 @@ EOF
 }
 
 sync_project_registry() {
-  local home=$1 sub_reg tmp project line today names
+  local home=$1 sub_reg tmp project line names
   shift
   sub_reg="$home/data/projects.md"
   tmp="$sub_reg.tmp.$$"
@@ -695,11 +695,18 @@ sync_project_registry() {
   else
     : > "$tmp"
   fi
-  today=$(date +%F)
   for project in "$@"; do
     line=$(registry_line_for_project "$project" || true)
     if [ -z "$line" ]; then
-      line="- $project - cloned project (added $today)"
+      # A home's repo set is a registration too: an entry created here brand-new
+      # must declare a production branch (epic gflow, no exceptions), but a seed
+      # cannot invent one. Refuse rather than write a branch-less entry; register
+      # the project (with --production, bin/fm-project-register.sh) in the parent
+      # home first so seeding copies that gated line forward. A legacy branch-less
+      # parent line copied verbatim stays backward-compatible mid-migration.
+      rm -f "$tmp"
+      echo "error: project \"$project\" has no registry entry in the parent home; register it with a production branch before seeding it into a home" >&2
+      return 1
     fi
     printf '%s\n' "$line" >> "$tmp"
   done
