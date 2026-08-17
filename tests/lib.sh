@@ -158,6 +158,17 @@ fm_fakebin() {
   printf '%s\n' "$fakebin"
 }
 
+fm_fake_git_ssh() {
+  local dir=$1 ssh="$1/fake-git-ssh"
+  cat > "$ssh" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_TEST_GIT_SSH_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TEST_GIT_SSH_LOG"
+exec "$FM_TEST_REAL_GIT" upload-pack "$FM_TEST_GIT_REPOSITORY"
+SH
+  chmod +x "$ssh"
+  printf '%s\n' "$ssh"
+}
+
 fm_fake_exit0() {
   local fakebin=$1 tool
   shift

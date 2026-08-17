@@ -9,7 +9,7 @@
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
+# the forge reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
@@ -19,7 +19,7 @@
 # up a merged PR whose head branch matches the worktree's branch, fetching its head
 # via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
+# A forge lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
@@ -778,6 +778,10 @@ pr_number_from_target() {
       n=${target##*/pull/}
       n=${n%%[!0-9]*}
       ;;
+    *"/pulls/"*)
+      n=${target##*/pulls/}
+      n=${n%%[!0-9]*}
+      ;;
     [0-9]*)
       n=${target%%[!0-9]*}
       ;;
@@ -788,11 +792,16 @@ pr_number_from_target() {
 }
 
 ensure_commit_object() {
-  local target=$1 commit=$2 n
+  local target=$1 commit=$2 n source=origin
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
+    source=$(fm_pr_forgejo_project_source "$PROJ" "$FM_PR_HOST" "$FM_PR_PATH" "$WT") || return 1
+    n=$FM_PR_NUMBER
+  else
+    n=$(pr_number_from_target "$target") || return 1
+    git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  fi
+  git -C "$WT" fetch --quiet "$source" "refs/pull/$n/head" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
@@ -829,27 +838,46 @@ EOF
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# PR from the recorded pr= URL first, then from the branch name, and asks its
+# forge for both the PR state and head. Returns non-zero when the PR is not
+# merged, the current work is not contained in the PR head, no PR is found, or
+# any forge lookup fails - the caller then falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state head current
+  local branch=$1 target provider view state head current
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
+    if [[ "$target" =~ ^[1-9][0-9]*$ ]]; then
+      provider=github
+    else
+      fm_pr_url_parse "$target" || return 1
+      provider=$FM_PR_PROVIDER
+    fi
   else
     target=$(pr_number_from_branch "$branch") || return 1
+    provider=github
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  head=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
-  case "$state" in
-    MERGED|merged) ;;
+  case "$provider" in
+    github)
+      view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
+      state=${view%%$'\t'*}
+      head=${view#*$'\t'}
+      [ "$state" != "$view" ] || return 1
+      case "$state" in
+        MERGED|merged) ;;
+        *) return 1 ;;
+      esac
+      ;;
+    forgejo)
+      fm_pr_forgejo_project_authorized "$PROJ" "$FM_PR_HOST" || return 1
+      view=$(forgejo-axi pr merged --base-url "https://$FM_PR_HOST" --repo "$FM_PR_PATH" "$FM_PR_NUMBER" 2>/dev/null) || return 1
+      state=$(printf '%s\n' "$view" | sed -n 's/^[[:space:]]*merged:[[:space:]]*//p' | head -1)
+      [ "$state" = true ] || return 1
+      head=$(printf '%s\n' "$view" | sed -n 's/^[[:space:]]*head_sha:[[:space:]]*//p' | head -1)
+      ;;
     *) return 1 ;;
   esac
-  [ -n "$head" ] || return 1
+  fm_pr_head_valid "$head" || return 1
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0

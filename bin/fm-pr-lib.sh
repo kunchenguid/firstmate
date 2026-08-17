@@ -4,13 +4,11 @@
 # constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# "path" is owner/repository on GitHub and Forgejo, and the full arbitrarily
+# nested group/subgroup/project namespace on GitLab. Self-hosted forge hosts
+# carry their validated host in that identity. Every consumer re-derives the
+# identity from the stored URL and refuses any record whose parts do not
+# reconstruct that exact URL.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -68,6 +66,7 @@ FM_PR_POLL_SNAPSHOT_URL=
 FM_PR_POLL_SNAPSHOT_HOST=
 FM_PR_POLL_SNAPSHOT_PATH=
 FM_PR_POLL_SNAPSHOT_NUMBER=
+FM_PR_POLL_SNAPSHOT_PROJECT=
 FM_PR_POLL_SNAPSHOT_DATA_HASH=
 FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH=
 FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=
@@ -134,6 +133,68 @@ fm_pr_gitlab_host_valid() {
   done
 }
 
+fm_pr_forgejo_host_valid() {
+  local host=${1-}
+  fm_pr_gitlab_host_valid "$host" || return 1
+  case "$host" in
+    github.com|*.github.com|gitlab.com|*.gitlab.com) return 1 ;;
+  esac
+  [[ ! "$host" =~ ^(0x[0-9a-f]+|[0-9]+)(\.(0x[0-9a-f]+|[0-9]+))*$ ]]
+}
+
+fm_pr_forgejo_project_source() {
+  local project=${1-} host=${2-} path=${3-} git_context=${4:-${1-}} remote key url remote_host source effective effective_host lib_dir
+  fm_pr_forgejo_host_valid "$host" || return 1
+  [ -z "$path" ] || fm_pr_forgejo_path_valid "$path" || return 1
+  [ -d "$project" ] && git -C "$project" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  lib_dir=$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd) || return 1
+  # shellcheck source=bin/fm-project-origin-lib.sh
+  . "$lib_dir/fm-project-origin-lib.sh"
+  while IFS= read -r remote; do
+    [ -n "$remote" ] || continue
+    for key in url pushurl; do
+      while IFS= read -r url; do
+        remote_host=$(fm_project_origin_host "$url") || continue
+        [ "$remote_host" = "$host" ] || continue
+        if [ -n "$path" ]; then
+          source=$(fm_project_origin_with_path "$url" "$path.git") || continue
+          effective=$(git -C "$git_context" ls-remote --get-url "$source" 2>/dev/null) || continue
+          effective_host=$(fm_project_origin_host "$effective") || continue
+          [ "$effective_host" = "$remote_host" ] || continue
+          printf '%s' "$source"
+        else
+          printf '%s' "$url"
+        fi
+        return 0
+      done < <(git -C "$project" config --get-all "remote.$remote.$key" 2>/dev/null || true)
+    done
+  done < <(git -C "$project" remote 2>/dev/null || true)
+  return 1
+}
+
+fm_pr_forgejo_project_authorized() {
+  fm_pr_forgejo_project_source "${1-}" "${2-}" >/dev/null
+}
+
+fm_pr_forgejo_path_valid() {
+  local path=${1-} owner repo
+  local LC_ALL=C
+  case "$path" in
+    ''|/*|*/|*/*/*) return 1 ;;
+    */*) ;;
+    *) return 1 ;;
+  esac
+  owner=${path%%/*}
+  repo=${path#*/}
+  [ "${#owner}" -le 100 ] && [ "${#repo}" -le 100 ] || return 1
+  case "$owner" in
+    .|..|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  case "$repo" in
+    .|..|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
 # A GitLab project path is group[/subgroup...]/project, so at least two
 # segments and no fixed depth. GitLab reserves "-" as its route separator and
 # forbids a leading hyphen, ".git", and ".atom", so none of those can name a
@@ -158,15 +219,14 @@ fm_pr_gitlab_path_valid() {
 
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# unchanged, Forgejo gets an exact host/owner/repository shape, and GitLab
+# keeps its own host and nested namespace rules.
 #
-# FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty; teaching the merge path about GitLab is a separate change, and
-# until then it refuses a GitLab URL rather than merging anything.
+# FM_PR_OWNER and FM_PR_REPO are set for GitHub and Forgejo because both merge
+# paths address pull requests by owner/repository. A GitLab URL leaves them
+# empty; GitLab merge support remains out of scope.
 fm_pr_url_parse() {
-  local raw=${1-} pattern host path
+  local raw=${1-} pattern host path owner repo number
   local LC_ALL=C
   FM_PR_PROVIDER=
   FM_PR_URL=
@@ -191,6 +251,26 @@ fm_pr_url_parse() {
     FM_PR_NUMBER=${BASH_REMATCH[3]}
     return 0
   fi
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100})/pulls/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    owner=${BASH_REMATCH[2]}
+    repo=${BASH_REMATCH[3]}
+    number=${BASH_REMATCH[4]}
+    path="$owner/$repo"
+    fm_pr_forgejo_host_valid "$host" || return 1
+    fm_pr_forgejo_path_valid "$path" || return 1
+    FM_PR_PROVIDER=forgejo
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH=$path
+    # shellcheck disable=SC2034
+    FM_PR_OWNER=$owner
+    # shellcheck disable=SC2034
+    FM_PR_REPO=$repo
+    FM_PR_NUMBER=$number
+    return 0
+  fi
   # The path class contains "/" and "-", so this match is greedy to the last
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
@@ -198,13 +278,14 @@ fm_pr_url_parse() {
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
   path=${BASH_REMATCH[2]}
+  number=${BASH_REMATCH[3]}
   fm_pr_gitlab_host_valid "$host" || return 1
   fm_pr_gitlab_path_valid "$path" || return 1
   FM_PR_PROVIDER=gitlab
   FM_PR_URL=$raw
   FM_PR_HOST=$host
   FM_PR_PATH=$path
-  FM_PR_NUMBER=${BASH_REMATCH[3]}
+  FM_PR_NUMBER=$number
 }
 
 fm_pr_head_valid() {
@@ -619,9 +700,10 @@ fm_pr_poll_artifacts_valid() {
 }
 
 fm_pr_poll_snapshot_capture() {
-  local state=$1 id=$2 template=$3 registration
+  local state=$1 id=$2 template=$3 registration meta
   fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
   registration="$state/$id.pr-poll-registration"
+  meta="$state/$id.meta"
   FM_PR_POLL_SNAPSHOT_REG_HASH=$(fm_pr_sha256 "$registration") || return 1
   FM_PR_POLL_SNAPSHOT_REG_IDENTITY=$(fm_pr_file_identity "$registration") || return 1
   FM_PR_POLL_SNAPSHOT_ID=$id
@@ -630,6 +712,7 @@ fm_pr_poll_snapshot_capture() {
   FM_PR_POLL_SNAPSHOT_HOST=$FM_PR_DATA_HOST
   FM_PR_POLL_SNAPSHOT_PATH=$FM_PR_DATA_PATH
   FM_PR_POLL_SNAPSHOT_NUMBER=$FM_PR_DATA_NUMBER
+  FM_PR_POLL_SNAPSHOT_PROJECT=$(sed -n 's/^project=//p' "$meta" | tail -1)
   FM_PR_POLL_SNAPSHOT_DATA_HASH=$FM_PR_REG_DATA_HASH
   FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH=$FM_PR_REG_TEMPLATE_HASH
   FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=$FM_PR_REG_DATA_IDENTITY
@@ -637,17 +720,20 @@ fm_pr_poll_snapshot_capture() {
 }
 
 fm_pr_poll_snapshot_matches() {
-  local state=$1 id=$2 template=$3 registration reg_hash reg_identity
+  local state=$1 id=$2 template=$3 registration meta reg_hash reg_identity project
   [ -n "$FM_PR_POLL_SNAPSHOT_ID" ] && [ "$id" = "$FM_PR_POLL_SNAPSHOT_ID" ] || return 1
   fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
   registration="$state/$id.pr-poll-registration"
+  meta="$state/$id.meta"
   reg_hash=$(fm_pr_sha256 "$registration") || return 1
   reg_identity=$(fm_pr_file_identity "$registration") || return 1
+  project=$(sed -n 's/^project=//p' "$meta" | tail -1)
   [ "$FM_PR_DATA_PROVIDER" = "$FM_PR_POLL_SNAPSHOT_PROVIDER" ] || return 1
   [ "$FM_PR_DATA_URL" = "$FM_PR_POLL_SNAPSHOT_URL" ] || return 1
   [ "$FM_PR_DATA_HOST" = "$FM_PR_POLL_SNAPSHOT_HOST" ] || return 1
   [ "$FM_PR_DATA_PATH" = "$FM_PR_POLL_SNAPSHOT_PATH" ] || return 1
   [ "$FM_PR_DATA_NUMBER" = "$FM_PR_POLL_SNAPSHOT_NUMBER" ] || return 1
+  [ "$project" = "$FM_PR_POLL_SNAPSHOT_PROJECT" ] || return 1
   [ "$FM_PR_REG_DATA_HASH" = "$FM_PR_POLL_SNAPSHOT_DATA_HASH" ] || return 1
   [ "$FM_PR_REG_TEMPLATE_HASH" = "$FM_PR_POLL_SNAPSHOT_TEMPLATE_HASH" ] || return 1
   [ "$FM_PR_REG_DATA_IDENTITY" = "$FM_PR_POLL_SNAPSHOT_DATA_IDENTITY" ] || return 1

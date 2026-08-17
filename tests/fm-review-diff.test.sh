@@ -75,6 +75,11 @@ run_review_diff() {
     "$REVIEW_DIFF" "$@"
 }
 
+authorize_forgejo_host() {
+  local case_dir=$1 host=${2:-forgejo.example}
+  git -C "$case_dir/project" remote add forgejo "https://$host/fork/repo.git"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local() {
   local case_dir out
   case_dir=$(make_case pr-head-sha)
@@ -133,6 +138,156 @@ test_pr_meta_fetches_pull_head_without_recorded_sha() {
   pass "fm-review-diff fetches refs/pull/<n>/head when pr_head= is absent"
 }
 
+test_numeric_pr_meta_fetches_origin_pull_head() {
+  local case_dir out
+  case_dir=$(make_case numeric-pr-fetch)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
+  write_task_meta "$case_dir" "pr=9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "numeric-pr-fetch: diff should use origin pull head"
+  assert_not_contains "$out" 'stale-local' "numeric-pr-fetch: diff must not use the local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "numeric-pr-fetch: origin pull fetch should succeed"
+  pass "fm-review-diff retains origin resolution for numeric PR metadata"
+}
+
+test_forgejo_pr_meta_fetches_pull_head() {
+  local case_dir out git_ssh
+  case_dir=$(make_case forgejo-pr-fetch)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/project" remote add forgejo git@forgejo.example:fork/repo.git
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
+  git_ssh=$(fm_fake_git_ssh "$case_dir")
+  write_task_meta "$case_dir" "pr=https://forgejo.example/owner/repo/pulls/9"
+
+  out=$(FM_TEST_REAL_GIT="$(command -v git)" FM_TEST_GIT_REPOSITORY="$case_dir/origin.git" \
+    GIT_SSH_COMMAND="$git_ssh" GIT_SSH_VARIANT=ssh \
+    run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' "forgejo-pr-fetch: diff should use fetched pull head"
+  assert_not_contains "$out" 'stale-local' "forgejo-pr-fetch: diff must not use the stale local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "forgejo-pr-fetch: should not warn when refs/pull/<n>/head resolves"
+  pass "fm-review-diff resolves a Forgejo /pulls/<n> URL through refs/pull/<n>/head"
+}
+
+test_forgejo_pr_meta_uses_canonical_repository() {
+  local case_dir out git_ssh
+  case_dir=$(make_case forgejo-canonical-repository)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/project" remote add forgejo git@forgejo.example:fork/repo.git
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
+  git clone -q --bare "$case_dir/origin.git" "$case_dir/canonical.git"
+  git -C "$case_dir/wt" checkout -q -b canonical-head-tmp main
+  printf 'canonical-pr\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "canonical Forgejo pull head"
+  git -C "$case_dir/wt" push -q "$case_dir/canonical.git" \
+    "canonical-head-tmp:refs/pull/9/head"
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  git_ssh=$(fm_fake_git_ssh "$case_dir")
+  write_task_meta "$case_dir" "pr=https://forgejo.example/owner/repo/pulls/9"
+
+  out=$(FM_TEST_REAL_GIT="$(command -v git)" FM_TEST_GIT_REPOSITORY="$case_dir/canonical.git" \
+    GIT_SSH_COMMAND="$git_ssh" GIT_SSH_VARIANT=ssh \
+    run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+canonical-pr' \
+    "forgejo-canonical-repository: diff should use the URL repository pull head"
+  assert_not_contains "$out" '+pr-fixed' \
+    "forgejo-canonical-repository: diff must not use origin's same-number pull"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "forgejo-canonical-repository: canonical repository pull fetch should succeed"
+  pass "fm-review-diff preserves registered scp transport for canonical Forgejo pull heads"
+}
+
+test_forgejo_worktree_rewrite_never_fetches() {
+  local case_dir out git_ssh source
+  case_dir=$(make_case forgejo-worktree-rewrite)
+  stale_and_pr_commits "$case_dir"
+  git -C "$case_dir/project" remote add forgejo git@forgejo.example:fork/repo.git
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
+  git -C "$case_dir/project" config extensions.worktreeConfig true
+  git -C "$case_dir/wt" config --worktree \
+    url.ssh://attacker.example/.insteadOf git@forgejo.example:
+  source=git@forgejo.example:owner/repo.git
+  [ "$(git -C "$case_dir/project" ls-remote --get-url "$source")" = "$source" ] \
+    || fail "forgejo-worktree-rewrite: project context unexpectedly rewrote the source"
+  [ "$(git -C "$case_dir/wt" ls-remote --get-url "$source")" = \
+    ssh://attacker.example/owner/repo.git ] \
+    || fail "forgejo-worktree-rewrite: worktree context did not expose the hostile rewrite"
+  git_ssh=$(fm_fake_git_ssh "$case_dir")
+  : > "$case_dir/git-ssh.log"
+  write_task_meta "$case_dir" "pr=https://forgejo.example/owner/repo/pulls/9"
+
+  out=$(FM_TEST_REAL_GIT="$(command -v git)" FM_TEST_GIT_REPOSITORY="$case_dir/origin.git" \
+    FM_TEST_GIT_SSH_LOG="$case_dir/git-ssh.log" GIT_SSH_COMMAND="$git_ssh" GIT_SSH_VARIANT=ssh \
+    run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+stale-local' \
+    "forgejo-worktree-rewrite: review should retain the local branch"
+  assert_not_contains "$out" '+pr-fixed' \
+    "forgejo-worktree-rewrite: review fetched through a cross-host rewrite"
+  [ ! -s "$case_dir/git-ssh.log" ] \
+    || fail "forgejo-worktree-rewrite: review reached the rewritten SSH transport"
+  assert_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "forgejo-worktree-rewrite: review did not report the unavailable head"
+  pass "fm-review-diff rejects worktree-scoped cross-host Git rewrites before fetch"
+}
+
+test_forgejo_unregistered_host_never_fetches() {
+  local case_dir out
+  case_dir=$(make_case forgejo-unregistered-host)
+  stale_and_pr_commits "$case_dir"
+  authorize_forgejo_host "$case_dir"
+  git clone -q --bare "$case_dir/origin.git" "$case_dir/arbitrary.git"
+  git -C "$case_dir/wt" push -q "$case_dir/arbitrary.git" \
+    "pr-head-tmp:refs/pull/9/head"
+  git -C "$case_dir/wt" config \
+    url."$case_dir/arbitrary.git".insteadOf https://arbitrary.example/owner/repo.git
+  write_task_meta "$case_dir" "pr=https://arbitrary.example/owner/repo/pulls/9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+stale-local' \
+    "forgejo-unregistered-host: review should retain the local branch"
+  assert_not_contains "$out" '+pr-fixed' \
+    "forgejo-unregistered-host: review fetched from an unauthorized host"
+  assert_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "forgejo-unregistered-host: review did not report the unavailable head"
+  pass "fm-review-diff refuses Forgejo fetches absent from project remotes"
+}
+
+test_noncanonical_pr_targets_are_rejected() {
+  local name target case_dir out err
+  while IFS='|' read -r name target; do
+    case_dir=$(make_case "rejected-$name")
+    stale_and_pr_commits "$case_dir"
+    git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/pull/9/head"
+    write_task_meta "$case_dir" "pr=$target" "pr_head=$PR_SHA"
+
+    out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+    err=$(cat "$case_dir/stderr")
+
+    assert_contains "$out" '+stale-local' "$name: invalid PR metadata must use the local branch"
+    assert_not_contains "$out" '+pr-fixed' "$name: invalid PR metadata must not resolve a pull head"
+    assert_contains "$err" 'warning: PR head unavailable; diff may lag the open PR' \
+      "$name: invalid PR metadata must warn"
+  done <<'EOF'
+forgejo-extra|https://forgejo.example/owner/repo/pulls/9/extra
+forgejo-slash|https://forgejo.example/owner/repo/pulls/9/
+forgejo-query|https://forgejo.example/owner/repo/pulls/9?x=1
+forgejo-fragment|https://forgejo.example/owner/repo/pulls/9#note
+numeric-zero|0
+numeric-leading-zero|09
+numeric-suffix|9extra
+EOF
+  pass "fm-review-diff rejects noncanonical PR metadata targets"
+}
+
 test_no_pr_meta_uses_local_branch() {
   local case_dir out
   case_dir=$(make_case no-pr-meta)
@@ -171,6 +326,12 @@ test_unreachable_pr_head_falls_back_with_warning() {
 
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
+test_numeric_pr_meta_fetches_origin_pull_head
+test_forgejo_pr_meta_fetches_pull_head
+test_forgejo_pr_meta_uses_canonical_repository
+test_forgejo_worktree_rewrite_never_fetches
+test_forgejo_unregistered_host_never_fetches
+test_noncanonical_pr_targets_are_rejected
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning

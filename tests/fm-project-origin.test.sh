@@ -52,6 +52,12 @@ accepts 'git@github.com:kunchenguid/firstmate.git'
 accepts "file://$TMP_ROOT/source.git"
 accepts "$TMP_ROOT/source.git"
 
+absolute_scp=$(fm_project_origin_with_path \
+  'git@forgejo.example:/srv/fork/repo.git' owner/repo.git) \
+  || fail "an absolute scp origin could not resolve a replacement path"
+[ "$absolute_scp" = 'git@forgejo.example:/owner/repo.git' ] \
+  || fail "an absolute scp origin lost its leading path slash"
+
 # The accepted forms are not just spellings: the two a fixture can reach really
 # do clone with the same plain command the remote host runs.
 git clone --quiet -- "file://$TMP_ROOT/source.git" "$TMP_ROOT/via-file-url" \

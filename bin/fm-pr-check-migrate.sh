@@ -524,6 +524,14 @@ metadata_pr_is_canonical() {
   MIGRATION_NUMBER=$FM_PR_META_NUMBER
 }
 
+forgejo_poll_ready() {
+  local meta=$1 provider=$2 host=$3 project
+  [ "$provider" = forgejo ] || return 0
+  command -v forgejo-axi >/dev/null 2>&1 || return 1
+  project=$(grep '^project=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  fm_pr_forgejo_project_authorized "$project" "$host"
+}
+
 quarantine_artifact() {
   local source=$1 prefix=$2 kind=$3 destination source_device
   [ -e "$source" ] || [ -L "$source" ] || return 0
@@ -806,6 +814,7 @@ canonical_repair_from_pending() {
   host=$MIGRATION_HOST
   path=$MIGRATION_PATH
   number=$MIGRATION_NUMBER
+  forgejo_poll_ready "$meta" "$provider" "$host" || return 1
   quarantine_artifact "$data" "$id" data || return 1
   quarantine_artifact "$registration" "$id" registration || return 1
   [ ! -e "$data" ] && [ ! -L "$data" ] || return 1
@@ -1063,6 +1072,7 @@ if migration_needed; then
         if quarantine_artifact "$check" "$prefix" check \
           && quarantine_artifact "$data" "$prefix" data \
           && quarantine_artifact "$registration" "$prefix" registration \
+          && forgejo_poll_ready "$meta" "$provider" "$host" \
           && fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" \
           && fm_pr_poll_publish_prepared \
           && complete_canonical_outcome "$id"; then

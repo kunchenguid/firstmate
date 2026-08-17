@@ -4,13 +4,21 @@
 # otherwise, including on every error, so a failed lookup can never be read as
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# Each provider is read through its own CLI: gh for GitHub, forgejo-axi for
+# Forgejo, and glab for GitLab.
 set -u
 LC_ALL=C
 export LC_ALL
 
-if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
+project=
+if [ "$#" -eq 7 ] && [ "$1" = --validated ]; then
+  provider=$2
+  url=$3
+  host=$4
+  path=$5
+  number=$6
+  project=$7
+elif [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
   provider=$2
   url=$3
   host=$4
@@ -33,6 +41,11 @@ elif [ "$#" -eq 0 ]; then
     exit 0
   fi
   exec 3<&-
+  if [ "$provider" = forgejo ]; then
+    meta=${data%.pr-poll}.meta
+    [ -f "$meta" ] && [ ! -L "$meta" ] || exit 0
+    project=$(sed -n 's/^project=//p' "$meta" 2>/dev/null | tail -1)
+  fi
 else
   exit 0
 fi
@@ -65,6 +78,26 @@ case "$provider" in
     state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
     [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
+  forgejo)
+    if [ -n "${FM_ROOT_OVERRIDE:-}" ]; then
+      pr_lib="$FM_ROOT_OVERRIDE/bin/fm-pr-lib.sh"
+    else
+      poll_dir=$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 0
+      [ "${poll_dir##*/}" = bin ] || exit 0
+      pr_lib="$poll_dir/fm-pr-lib.sh"
+    fi
+    [ -f "$pr_lib" ] && [ ! -L "$pr_lib" ] || exit 0
+    # shellcheck source=bin/fm-pr-lib.sh
+    . "$pr_lib"
+    fm_pr_url_parse "$url" || exit 0
+    [ "$FM_PR_PROVIDER" = "$provider" ] && [ "$FM_PR_URL" = "$url" ] \
+      && [ "$FM_PR_HOST" = "$host" ] && [ "$FM_PR_PATH" = "$path" ] \
+      && [ "$FM_PR_NUMBER" = "$number" ] || exit 0
+    fm_pr_forgejo_project_authorized "$project" "$host" || exit 0
+    raw=$(forgejo-axi pr merged --base-url "https://$FM_PR_HOST" --repo "$FM_PR_PATH" "$FM_PR_NUMBER" 2>/dev/null) || exit 0
+    state=$(printf '%s\n' "$raw" | sed -n 's/^[[:space:]]*merged:[[:space:]]*//p' | head -1) || exit 0
+    [ "$state" = true ] && printf '%s\n' merged
+    ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
     [ "$host" != github.com ] || exit 0
@@ -78,20 +111,20 @@ case "$provider" in
     # A GitLab project sits under at least one group at no fixed depth, and
     # GitLab reserves the "-" segment as its route separator.
     rest=$path
-    segments=0
+    segment_count=0
     while [ -n "$rest" ]; do
       case "$rest" in
         */*) segment=${rest%%/*}; rest=${rest#*/} ;;
         *) segment=$rest; rest= ;;
       esac
-      segments=$((segments + 1))
-      [ "$segments" -le 20 ] || exit 0
+      segment_count=$((segment_count + 1))
+      [ "$segment_count" -le 20 ] || exit 0
       [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || exit 0
       case "$segment" in
         .|..|-*|*.git|*.atom|*[!A-Za-z0-9._-]*) exit 0 ;;
       esac
     done
-    [ "$segments" -ge 2 ] || exit 0
+    [ "$segment_count" -ge 2 ] || exit 0
     [ "$url" = "https://$host/$path/-/merge_requests/$number" ] || exit 0
     # glab resolves the instance from the project URL passed to -R, so the host
     # comes from the validated record rather than glab's configured default.

@@ -4,9 +4,9 @@
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<default> after fetching
 # the default branch, and local-only projects against the local default branch.
-# When state/<id>.meta records pr= (URL or number) for an open PR, the compare
-# side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
-# current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
+# When state/<id>.meta records a GitHub or Forgejo pr= URL (or a pull number),
+# the compare side is ALWAYS a freshly fetched refs/pull/<n>/head by default so
+# review stays current after no-mistakes fix rounds push to the PR. A pr_head= is
 # only a fallback when fetch fails (stale recorded SHAs must never win over a
 # reachable remote PR head). If neither PR head can be resolved, fall back to
 # the local branch with a warning. Without pr=, compare the local branch.
@@ -18,6 +18,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
@@ -74,29 +77,11 @@ if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; th
   git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $WT" >&2; exit 1; }
 fi
 
-pr_number_from_target() {
-  local target=$1 n
-  case "$target" in
-    '' ) return 1 ;;
-    *"/pull/"*)
-      n=${target##*/pull/}
-      n=${n%%[!0-9]*}
-      ;;
-    [0-9]*)
-      n=${target%%[!0-9]*}
-      ;;
-    *) return 1 ;;
-  esac
-  [ -n "$n" ] || return 1
-  printf '%s' "$n"
-}
-
 fetch_pull_head() {
-  local n=$1 resolved
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  local source=$1 n=$2 resolved
   # Fetch into a private ref so a later base-branch fetch cannot clobber the
   # compare tip via FETCH_HEAD, and so we never review a stale local object.
-  git -C "$WT" fetch --quiet origin \
+  git -C "$WT" fetch --quiet "$source" \
     "+refs/pull/$n/head:refs/fm-review/pull/$n/head" >/dev/null 2>&1 || return 1
   resolved=$(git -C "$WT" rev-parse --verify "refs/fm-review/pull/$n/head^{commit}" 2>/dev/null) || return 1
   [ -n "$resolved" ] || return 1
@@ -104,13 +89,23 @@ fetch_pull_head() {
 }
 
 resolve_pr_head() {
-  local pr_url=$1 recorded_head=$2 n resolved
-  n=$(pr_number_from_target "$pr_url") || true
-  if [ -n "$n" ]; then
-    if resolved=$(fetch_pull_head "$n"); then
-      printf '%s' "$resolved"
-      return 0
-    fi
+  local pr_url=$1 recorded_head=$2 n resolved source=origin
+  if [[ "$pr_url" =~ ^[1-9][0-9]*$ ]]; then
+    n=$pr_url
+  else
+    fm_pr_url_parse "$pr_url" || return 1
+    n=$FM_PR_NUMBER
+    case "$FM_PR_PROVIDER" in
+      github) ;;
+      forgejo)
+        source=$(fm_pr_forgejo_project_source "$PROJ" "$FM_PR_HOST" "$FM_PR_PATH" "$WT") || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  if resolved=$(fetch_pull_head "$source" "$n"); then
+    printf '%s' "$resolved"
+    return 0
   fi
   # Offline / unreachable remote: recorded pr_head is better than the local
   # branch, but never preferred over a successful pull-head fetch above.
