@@ -435,9 +435,10 @@ function tick() {
     var banner = document.getElementById('banner');
     banner.textContent = 'snapshot failed: ' + e.message;
     banner.classList.remove('hidden');
+  }).then(function () {
+    setTimeout(tick, REFRESH * 1000);
   });
 }
-setInterval(tick, REFRESH * 1000);
 tick();
 </script>
 </body>

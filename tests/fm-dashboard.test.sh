@@ -226,7 +226,7 @@ SH
 }
 
 test_remote_pane_notice_without_capture() {
-  local home fakebin fake_ssh ssh_log out
+  local home fakebin fake_ssh fake_herdr ssh_log backend_log out
   home=$(make_home remote)
   fm_write_meta "$home/state/remote-task.meta" \
     "home=/remote/home" \
@@ -242,21 +242,30 @@ test_remote_pane_notice_without_capture() {
   printf '%s\n' '- remote-task - remote delivery (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote work; projects: alpha; added 2026-08-17)' > "$home/data/secondmates.md"
   fakebin=$(make_fakebin "$home")
   fake_ssh="$fakebin/ssh"
+  fake_herdr="$fakebin/herdr"
   ssh_log="$home/ssh.log"
+  backend_log="$home/backend.log"
   cat > "$fake_ssh" <<'SH'
 #!/usr/bin/env bash
 printf 'invoked\n' >> "${SSH_LOG:?}"
 exit 1
 SH
-  chmod +x "$fake_ssh"
-  out=$(PATH="$fakebin:$PATH" FM_SSH_BIN="$fake_ssh" SSH_LOG="$ssh_log" FM_HOME="$home" "$DASH" --snapshot)
+  cat > "$fake_herdr" <<'SH'
+#!/usr/bin/env bash
+printf 'invoked\n' >> "${BACKEND_LOG:?}"
+exit 1
+SH
+  chmod +x "$fake_ssh" "$fake_herdr"
+  out=$(PATH="$fakebin:$PATH" FM_SSH_BIN="$fake_ssh" SSH_LOG="$ssh_log" BACKEND_LOG="$backend_log" FM_HOME="$home" "$DASH" --snapshot)
   printf '%s' "$out" | jq -e '
     .tasks[0].model == "opus-4"
       and .tasks[0].remote_host == "remote-mac"
+      and .tasks[0].endpoint_present == null
       and .tasks[0].pane_tail.error == "remote worker - live view not available from the dashboard; open its remote session"
       and (.tasks[0].pane_tail.lines | length) == 0
   ' >/dev/null || fail "remote workers must carry an explicit unavailable live-view notice: $out"
   [ ! -e "$ssh_log" ] || fail "dashboard must not invoke remote transport: $(cat "$ssh_log")"
+  [ ! -e "$backend_log" ] || fail "dashboard must not probe a remote task through the local backend: $(cat "$backend_log")"
   pass "dashboard reports remote live view unavailable without remote probes"
 }
 
