@@ -583,6 +583,51 @@ test_dead_window_stale_running_with_recorded_pr_defers_to_paused_log() {
   pass "a bare-shell pane on a stale-running + recorded-PR + paused task reports paused, not working"
 }
 
+# A top-level status=running WITH a ci step row (running or fixing) has real
+# corroborating detail even when that ci row does not itself resolve to a
+# confirmed CI-green transition: the CI monitor is genuinely watching this
+# run right now, so it must not be treated as unconfirmed and deferred to a
+# stale paused log, even with a recorded PR. Regression for the review
+# finding that the initial version of this reconciliation bypassed the
+# deliberate not-ready guard already applied to log_reports_ci_ready.
+test_stale_running_with_recorded_pr_and_active_ci_row_stays_working() {
+  reset_fakes
+  local d; d=$(new_case stale-running-active-ci)
+  make_repo_on_branch "$d/wt" fm/feat-w20h
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20h.meta" "window=fm:fm-feat-w20h" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/15"
+  printf 'paused: awaiting external team review/merge\n' > "$d/state/feat-w20h.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-w20h)"
+  # No FM_FAKE_CI_LOGS: the ci log tail does not confirm green, so this is
+  # genuinely still-monitoring, not yet a done-reconciled outcome either.
+  local out; out=$(run_crew_state "$d" feat-w20h)
+  assert_contains "$out" "state: working" "an active ci,running row is corroborating detail, not unconfirmed"
+  assert_contains "$out" "source: run-step" "a corroborated ci-monitoring run is not deferred to the status log"
+  pass "a top-level running status with an active ci step row is not treated as unconfirmed"
+}
+
+# The needs-decision/blocked reconciliation below keeps trusting an active run
+# over a stale needs-decision:/blocked: log even with a recorded PR: a gate
+# resolving and the run resuming is the routine case there, unlike the
+# paused/done deferral above. Regression for the review finding that an
+# earlier version of this change inverted that tested invariant.
+test_stale_running_with_recorded_pr_and_blocked_log_stays_working() {
+  reset_fakes
+  local d; d=$(new_case stale-running-blocked-pr)
+  make_repo_on_branch "$d/wt" fm/feat-w20i
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20i.meta" "window=fm:fm-feat-w20i" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/16"
+  printf 'blocked: waiting on review answer\n' > "$d/state/feat-w20i.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-w20i)"
+  local out; out=$(run_crew_state "$d" feat-w20i)
+  assert_contains "$out" "state: working" "a resumed run stays working despite a blocked log, even with a recorded PR"
+  assert_contains "$out" "source: run-step" "blocked is not deferred by the recorded-PR reconciliation"
+  assert_contains "$out" "superseded" "the existing needs-decision/blocked supersede reconciliation still applies"
+  pass "a recorded PR does not invert the needs-decision/blocked-over-active-run invariant"
+}
+
 test_ci_ready_done_log_beats_monitoring_run() {
   reset_fakes
   local d; d=$(new_case ci-ready)
@@ -1563,6 +1608,8 @@ test_stale_running_without_recorded_pr_stays_working
 test_stale_running_with_recorded_pr_and_working_log_stays_working
 test_stale_fixing_with_recorded_pr_and_paused_log_stays_working
 test_dead_window_stale_running_with_recorded_pr_defers_to_paused_log
+test_stale_running_with_recorded_pr_and_active_ci_row_stays_working
+test_stale_running_with_recorded_pr_and_blocked_log_stays_working
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done

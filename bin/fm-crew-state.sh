@@ -41,7 +41,15 @@
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      green, so a green PR is never silently read as still-validating. A
+#      SECOND exception: a plain top-level status=running reading with no
+#      corroborating detail at all (no outcome, no gate, no ci step row -
+#      RUN_STATE_UNCONFIRMED) can be a stale run object that never advanced.
+#      When that reading is paired with a recorded state/<id>.meta pr= (a
+#      durable fact the run object lacks) and the crew's own last status line
+#      has since moved to paused: or done:, defer to that status-log verb
+#      instead - narrower than the needs-decision/blocked reconciliation
+#      below, which still always trusts an active run over those two verbs.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -549,6 +557,14 @@ if [ "$HAVE_RUN" = 1 ]; then
             CI_LOG_STATE=not-ready
             ;;
         esac
+        # A ci step row (running or fixing) is corroborating detail in its own
+        # right, even when it does not resolve to a confirmed CI-green
+        # transition above: the run object is not just answering "running"
+        # with nothing else behind it. Clearing the flag here keeps the
+        # recorded-PR deferral below from firing over genuinely active CI
+        # monitoring or auto-fixing, matching the not-ready guard already
+        # applied to log_reports_ci_ready just below.
+        [ -n "$CI_STEP_STATUS" ] && RUN_STATE_UNCONFIRMED=0
       fi
     fi
   fi
@@ -575,17 +591,20 @@ if [ "$HAVE_RUN" = 1 ]; then
   # this branch's PR was already recorded in meta (pr=, written once by
   # fm-pr-check.sh after an earlier "done: PR ... checks green" report) and the
   # crew's own most recent status line has since moved to a declared pause or a
-  # captain-relevant terminal verb: the crew already reported past this run, so
-  # the run object is answering for a stale record that never advanced, not a
-  # fresh restart. Defer to the status log instead of letting that reading
-  # supersede it - generalizes log_reports_ci_ready's narrower done+"checks
-  # green" text match to every terminal/paused verb, and applies regardless of
-  # pane liveness since run-step precedence itself is pane-liveness-independent
-  # by design.
+  # done: report: the crew already reported past this run, so the run object is
+  # answering for a stale record that never advanced, not a fresh restart.
+  # Defer to the status log instead of letting that reading supersede it -
+  # generalizes log_reports_ci_ready's narrower done+"checks green" text match
+  # to any done: report, and applies regardless of pane liveness since
+  # run-step precedence itself is pane-liveness-independent by design.
+  # Deliberately excludes needs-decision/blocked (map_log_state's parked/
+  # blocked): those keep the OPPOSITE precedence just below - an active run
+  # over a stale needs-decision/blocked log - since a genuine gate resolving
+  # and the run resuming is the routine case there, not the exception.
   if [ "$RUN_STATE" = working ] && [ "$RUN_STATE_UNCONFIRMED" = 1 ] && [ -n "$(meta_value pr)" ]; then
     LOG_OVERRIDE=$(map_log_state "$LOG_LINE")
     case "$LOG_OVERRIDE" in
-      paused|done|blocked|parked|failed)
+      paused|done)
         emit "$LOG_OVERRIDE" status-log "$(status_line_note "$LOG_LINE")${SEP}run-step stale: PR already recorded"
         ;;
     esac
