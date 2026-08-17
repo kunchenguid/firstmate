@@ -854,8 +854,12 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
   [ "$(meta_field "$meta" model)" = default ] || fail "explicit-harness-no-tokens: meta model should stay default"
   [ "$(meta_field "$meta" effort)" = default ] || fail "explicit-harness-no-tokens: meta effort should stay default"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
-    "explicit-harness-no-tokens: launch did not use codex"
+  # codex is autocompact-capable, so a spawn with no --autocompact still carries
+  # the standing 272k default between the binary and its bypass flag. This test
+  # is about clean model/effort defaults, so it asserts around that flag rather
+  # than against it.
+  assert_contains "$launch" "codex -c auto_compact_token_limit='272000' --dangerously-bypass-approvals-and-sandbox" \
+    "explicit-harness-no-tokens: launch did not use codex with the default autocompact window"
   assert_not_contains "$launch" "--model" "explicit-harness-no-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "model_reasoning_effort" \
     "explicit-harness-no-tokens: launch must not carry a codex effort flag"
