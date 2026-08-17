@@ -227,11 +227,88 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+make_case_no_origin() {
+  local name=$1 id=$2 default=${3:-main} case_dir home project pool fakebin initial
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b "$default" "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
+}
+
+test_no_origin_remote_uses_local_default_branch() {
+  local rec id out status head_before head_after
+  id='pool-no-origin-r6'
+  rec=$(make_case_no_origin no-origin "$id")
+  read_case_record "$rec"
+  head_before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should succeed for a project with no origin remote"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_contains "$out" "no origin remote" "spawn did not emit the no-origin notice"
+  head_after=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$head_after" = "$head_before" ] \
+    || fail "spawn moved HEAD unexpectedly for a no-origin project already at the local default branch tip"
+  pass "a project with no origin remote spawns using the local default branch"
+}
+
+test_no_origin_dirty_pool_still_refuses() {
+  local rec id out status
+  id='pool-no-origin-dirty-r7'
+  rec=$(make_case_no_origin no-origin-dirty "$id")
+  read_case_record "$rec"
+  printf 'keep this\n' > "$POOL_DIR/uncommitted.txt"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a dirty pooled worktree with no origin"
+  assert_contains "$out" "is not clean" "spawn did not refuse a dirty pool even without origin"
+  assert_grep 'keep this' "$POOL_DIR/uncommitted.txt" \
+    "spawn discarded uncommitted work while refusing the no-origin dirty pool"
+  pass "a dirty pooled worktree with no origin is refused without discarding its local work"
+}
+
+test_origin_present_still_fetches() {
+  local rec id out status current
+  id='pool-origin-present-r8'
+  rec=$(make_case origin-present "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should still fetch when origin is present"
+  current=$(git -C "$POOL_DIR" rev-parse origin/main)
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+    || fail "spawn did not refresh to current origin/main when origin is present"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" != "$INITIAL_SHA" ] \
+    || fail "fixture did not prove origin/main advanced"
+  pass "a project with origin still fetches and refreshes as before"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_no_origin_remote_uses_local_default_branch
+test_no_origin_dirty_pool_still_refuses
+test_origin_present_still_fetches
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
