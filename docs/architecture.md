@@ -45,7 +45,8 @@ Any direct or remaining historical annotation prints every status line unread at
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
-A second, narrower exception: an uncorroborated plain "still validating" run-step reading defers to a later `paused:`/`done:` status-log line once the branch's PR is already recorded in meta, so a stale run object that never advanced past `running` cannot mask a declared pause or completion; the script header owns the exact corroboration and recorded-PR conditions.
+A second, narrower exception: an uncorroborated plain "still validating" full-status reading - one where no step of the run is itself running or fixing, so nothing is actually executing behind that status - defers to a later `paused:`/`done:` status-log line once the branch's PR is already recorded in meta, so a stale run object that never advanced past `running` cannot mask a declared pause or completion.
+The coarse runs-list fallback carries no step detail to corroborate against and never takes that deferral; the script header owns the exact corroboration and recorded-PR conditions.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.

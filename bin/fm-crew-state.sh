@@ -42,14 +42,18 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating. A
-#      SECOND exception: a plain top-level status=running reading with no
-#      corroborating detail at all (no outcome, no gate, no ci step row -
-#      RUN_STATE_UNCONFIRMED) can be a stale run object that never advanced.
-#      When that reading is paired with a recorded state/<id>.meta pr= (a
-#      durable fact the run object lacks) and the crew's own last status line
-#      has since moved to paused: or done:, defer to that status-log verb
-#      instead - narrower than the needs-decision/blocked reconciliation
-#      below, which still always trusts an active run over those two verbs.
+#      SECOND exception, confined to the full `axi status` reading: a plain
+#      top-level status=running with no corroborating detail at all (no
+#      outcome, no gate, and no steps[] row of its own reading running or
+#      fixing - RUN_STATE_UNCONFIRMED) means nothing is actually executing
+#      behind that status, so it can be a stale run object that never
+#      advanced. When that reading is paired with a recorded state/<id>.meta
+#      pr= (a durable fact the run object lacks) and the crew's own last
+#      status line has since moved to paused: or done:, defer to that
+#      status-log verb instead - narrower than the needs-decision/blocked
+#      reconciliation below, which still always trusts an active run over
+#      those two verbs. The coarse runs-list fallback carries no step detail
+#      to corroborate against, so it never takes this deferral.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -315,6 +319,27 @@ nm_ci_step_status() {
   strip_quotes "$(trim "${rest%%,*}")"
 }
 
+# True when SOME steps[] row carries its own running/fixing status, whatever
+# the step is named: the run object is not merely answering "running" at the
+# top level with a frozen step table behind it, some step is executing right
+# now. Scoped to the steps table (a row is any `<name>,<status>,...` line
+# following the header) so a findings[] row or a trailing `gate:` block can
+# never be mistaken for a step.
+nm_has_active_step() {
+  printf '%s\n' "$RUN_OUT" | awk '
+    /^[[:space:]]*steps\[/ { in_steps = 1; next }
+    in_steps {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line !~ /^[A-Za-z_][A-Za-z0-9_.-]*,/) { in_steps = 0; next }
+      if (line ~ /^[A-Za-z_][A-Za-z0-9_.-]*,[[:space:]]*"?(running|fixing)"?[[:space:]]*(,|$)/) found = 1
+      next
+    }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
 nm_effective_ci_step_status() {
   local step_status
   if [ "${RUN_STATUS:-}" = fixing ]; then
@@ -479,8 +504,10 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_LOG_STATE=""
   RUN_STATUS=""
   # 1 iff RUN_STATE=working came from the plain "still validating" catch-all
-  # with no corroborating detail (no outcome, no gate, no confirmed CI-green
-  # transition): the run object says "running" and nothing else backs that up.
+  # with no corroborating detail (no outcome, no gate, no steps[] row of its
+  # own reading running or fixing): the run object says "running" and nothing
+  # else backs that up. Only ever set on the full `axi status` path, which is
+  # the only one that carries the detail to corroborate against.
   # Consulted below to decide whether a stale run-step reading may be
   # overridden by a durable, independent fact (meta's recorded pr=) plus the
   # crew's own later status-log verb.
@@ -493,8 +520,13 @@ if [ "$HAVE_RUN" = 1 ]; then
     # needs-decision/blocked status-log append (a captain-relevant VERB) is
     # surfaced through signal_reason_is_actionable regardless of this
     # coarse-vs-full distinction, so a real gate is never silently missed.
+    # For the same reason RUN_STATE_UNCONFIRMED stays 0 here: with no step
+    # detail to corroborate against, "running" on this path can never be
+    # distinguished from a stale record, so the recorded-PR deferral below
+    # would fire on every genuinely-validating crew whose branch simply is not
+    # the one bare `axi status` answered for. This path keeps trusting the run.
     case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)"; RUN_STATE_UNCONFIRMED=1 ;;
+      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
@@ -557,14 +589,18 @@ if [ "$HAVE_RUN" = 1 ]; then
             CI_LOG_STATE=not-ready
             ;;
         esac
-        # A ci step row (running or fixing) is corroborating detail in its own
-        # right, even when it does not resolve to a confirmed CI-green
-        # transition above: the run object is not just answering "running"
-        # with nothing else behind it. Clearing the flag here keeps the
-        # recorded-PR deferral below from firing over genuinely active CI
-        # monitoring or auto-fixing, matching the not-ready guard already
-        # applied to log_reports_ci_ready just below.
-        [ -n "$CI_STEP_STATUS" ] && RUN_STATE_UNCONFIRMED=0
+        # Any step row reading running or fixing is corroborating detail in
+        # its own right, even when a ci row does not resolve to a confirmed
+        # CI-green transition above: some step of this run is executing, so
+        # the run object is not just answering "running" with nothing else
+        # behind it. Clearing the flag here keeps the recorded-PR deferral
+        # below from firing over genuinely active validation - a re-run
+        # started after PR feedback sits in review/test/lint long before it
+        # reaches ci - and matches the not-ready guard already applied to
+        # log_reports_ci_ready just below.
+        if [ -n "$CI_STEP_STATUS" ] || nm_has_active_step; then
+          RUN_STATE_UNCONFIRMED=0
+        fi
       fi
     fi
   fi
@@ -586,8 +622,9 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  # A plain "still validating" run-step reading with no corroborating detail
-  # (RUN_STATE_UNCONFIRMED) is not trustworthy evidence of CURRENT activity once
+  # A plain "still validating" full-status reading with no corroborating detail
+  # (RUN_STATE_UNCONFIRMED, never set on the coarse path) is not trustworthy
+  # evidence of CURRENT activity once
   # this branch's PR was already recorded in meta (pr=, written once by
   # fm-pr-check.sh after an earlier "done: PR ... checks green" report) and the
   # crew's own most recent status line has since moved to a declared pause or a

@@ -1098,6 +1098,11 @@ signal_reason_is_actionable() {  # <file> ...
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
+# One narrow exception, owned by bin/fm-crew-state.sh's header: an
+# uncorroborated full-status reading (nothing in the run actually executing)
+# on a task whose PR is already recorded in meta reports the crew's own later
+# paused:/done: verb instead, so an abandoned run object cannot mask a
+# declared pause forever.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
