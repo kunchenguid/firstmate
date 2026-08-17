@@ -7,6 +7,11 @@
 # the OpenCode plugin) in a plain Node host, so the artifact, the real
 # bin/fm-busy-event.sh writer, and the real classifier are exercised together
 # with no live harness session.
+#
+# The suite also covers the launch-path precondition for that wiring: a spawn
+# that cannot publish its task record must refuse before any agent starts, so
+# no unrecorded worker exists for a busy source to bind to. That case stops at
+# the spawn itself and drives no adapter artifact.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -24,6 +29,11 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+# Opt-in call log: the refusal tests below assert that no agent was ever
+# started, which is only observable as the absence of a send-keys call.
+if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
+  printf 'tmux %s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+fi
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -66,6 +76,7 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_TMUX_LOG="${FM_FAKE_TMUX_LOG:-}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -342,6 +353,57 @@ test_kimi_and_grok_install_no_unverified_wiring() {
   pass "kimi and grok install no unverified semantic wiring and classify through their own gates"
 }
 
+# A spawn creates the endpoint and takes the worktree BEFORE it can publish the
+# task record, because the record names both. So the record write is the last
+# point at which the launch can still be refused cheaply: the agent has not been
+# started, so nothing of value exists in the worktree yet. Publishing failure
+# must therefore abort instead of running on - a launched agent with no record
+# is invisible to supervision and unreachable by the normal teardown and
+# recovery paths, which all key off that record.
+#
+# This is a portability regression as much as a behavior one. Stock macOS Bash
+# 3.2.57 does not apply errexit to a redirection that fails to open on a
+# compound command, so before bin/fm-spawn.sh guarded the write explicitly this
+# spawn ran on, started the agent, and reported success with exit 0 - while the
+# same code aborted correctly under Bash 5.x.
+#
+# The launch is observed through the brief handoff fm-spawn sends into the pane,
+# which no earlier step emits. Both directions are asserted in one case so the
+# absence check cannot pass vacuously against a marker that stopped being sent.
+test_spawn_refuses_when_task_record_cannot_be_published() {
+  local rec id=busy-metaok-1 blocked=busy-metafail-1 out status ok_log blocked_log
+
+  rec=$(make_spawn_case record-writable claude "$id")
+  read_case_record "$rec"
+  ok_log="$CASE_DIR/tmux-calls.log"
+  : > "$ok_log"
+  out=$(FM_FAKE_TMUX_LOG="$ok_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "control spawn should succeed: $out"
+  grep -F 'launch-brief' "$ok_log" >/dev/null \
+    || fail "control spawn sent no brief handoff, so the launch marker proves nothing"
+
+  rec=$(make_spawn_case record-unwritable claude "$blocked")
+  read_case_record "$rec"
+  blocked_log="$CASE_DIR/tmux-calls.log"
+  : > "$blocked_log"
+  # An existing directory at the record path is a write the shell cannot open,
+  # matching a partially synced or hand-damaged home.
+  mkdir -p "$HOME_DIR/state/$blocked.meta"
+  out=$(FM_FAKE_TMUX_LOG="$blocked_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$blocked" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "spawn reported success ($status) although the task record could not be published: $out"
+  assert_contains "$out" "refusing to launch the agent" \
+    "spawn did not explain that it refused before launching"
+  printf '%s\n' "$out" | grep -F "spawned $blocked" >/dev/null \
+    && fail "spawn announced a launch it did not perform"
+  grep -F 'launch-brief' "$blocked_log" >/dev/null \
+    && fail "spawn handed the brief to an agent although its task record was never published"
+  [ -d "$HOME_DIR/state/$blocked.meta" ] \
+    || fail "the refusal replaced the unwritable path instead of leaving it untouched"
+  pass "spawn refuses and starts no agent when the task record cannot be published"
+}
+
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
@@ -350,5 +412,6 @@ test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
 test_codex_unverified_until_a_semantic_source_exists
+test_spawn_refuses_when_task_record_cannot_be_published
 
 echo "all fm-busy-adapter-wiring tests passed"

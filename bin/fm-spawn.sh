@@ -176,6 +176,9 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
+# A launch that cannot write one of its durable records - the task metadata, or
+# a harness busy-source binding such as state/<id>.muse-session - refuses before
+# the agent starts rather than leaving a live worker that no record names.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -2522,6 +2525,12 @@ EOF
       MUSE_SESSIONS_ROOT="${MUSE_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}}/muse/sessions"
       MUSE_BINDING_ID="$$.$RANDOM.$(date +%s)"
       rm -f "$STATE/$ID.muse-session-current"
+      # Simple-command create first; see the task-record publication below for
+      # why the group's own redirection cannot carry this check portably.
+      : > "$STATE/$ID.muse-session" || {
+        echo "error: could not record the muse busy-source binding for $ID; refusing to launch the agent" >&2
+        exit 1
+      }
       {
         printf 'sessions_root=%s\n' "$MUSE_SESSIONS_ROOT"
         printf 'workspace_root=%s\n' "$WT"
@@ -2531,7 +2540,7 @@ EOF
         done <<EOF
 $(fm_busy_muse_matching_logs "$MUSE_SESSIONS_ROOT" "$WT" || true)
 EOF
-      } > "$STATE/$ID.muse-session"
+      } >> "$STATE/$ID.muse-session"
       ;;
     cursor*)
       # Cursor's turn lifecycle is neither a hook nor a launch flag: it writes
@@ -2545,6 +2554,12 @@ EOF
       # conversation instead of its predecessor's. The classifier then accepts
       # only one remaining conversation and never guesses between incarnations.
       CURSOR_PROJECTS_ROOT="${CURSOR_PROJECTS_ROOT_OVERRIDE:-$HOME/.cursor/projects}"
+      # Simple-command create first; see the task-record publication below for
+      # why the group's own redirection cannot carry this check portably.
+      : > "$STATE/$ID.cursor-session" || {
+        echo "error: could not record the cursor busy-source binding for $ID; refusing to launch the agent" >&2
+        exit 1
+      }
       {
         printf 'projects_root=%s\n' "$CURSOR_PROJECTS_ROOT"
         printf 'workspace_root=%s\n' "$WT"
@@ -2554,7 +2569,7 @@ EOF
             printf 'prior_conversation=%s\n' "$(basename -- "${CURSOR_PRIOR_DIR%/}")"
           done
         fi
-      } > "$STATE/$ID.cursor-session"
+      } >> "$STATE/$ID.cursor-session"
       ;;
     kimi*)
       # Kimi's Stop hook is global, but it is inert unless cwd contains this
@@ -2638,6 +2653,24 @@ preserve_relaunch_meta() {
     !($1 in owned)
   ' "$RELAUNCH_META"
 }
+# Create the record with a SIMPLE command before filling it. Stock macOS Bash
+# 3.2 does not apply errexit to a redirection that fails to open on a COMPOUND
+# command, so `{ ...; } > "$path"` would run on and launch the agent against an
+# unwritable path, then report success with exit 0 - while 5.x aborted. A simple
+# command is the construct both versions do abort on, and it keeps the decision
+# off the group's own exit status, which reports its LAST command rather than
+# the redirection (measured on 3.2 AND 5.x, so `|| ...` on the group would
+# misfire on a body that legitimately ends non-zero).
+#
+# Refusing here is the cheap moment: the endpoint and worktree exist because the
+# record names them, but the agent has not started, so the EXIT trap can release
+# them and nothing of value is lost. Running on instead would leave a live agent
+# with no durable record - invisible to supervision and unreachable by the
+# normal teardown and recovery paths, which all key off that record.
+: > "$SPAWN_META_PATH" || {
+  echo "error: could not publish the task record for $ID at $SPAWN_META_PATH; refusing to launch the agent" >&2
+  exit 1
+}
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -2686,7 +2719,7 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
-} > "$SPAWN_META_PATH"
+} >> "$SPAWN_META_PATH"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"

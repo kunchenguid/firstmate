@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Behavior tests for the muse (Muse Code) crewmate adapter: harness detection,
 # spawn launch shape and credential preflight, the secondmate refusal, the
-# session-log busy source, and teardown cleanup of the busy binding.
+# session-log busy source, the spawn refusal when that binding cannot be
+# recorded, and teardown cleanup of the busy binding.
 #
 # The session-log fixtures below reproduce muse 0.1.0-R708.1's real record
 # shapes, including the nested "record":{"kind":"terminal"} cleanup payload that
@@ -414,6 +415,35 @@ EOF
   assert_absent "$binding" "muse session binding survived teardown"
   assert_absent "$home/state/$id.muse-session-current" "muse session cache survived teardown"
   pass "muse spawn writes a session binding that teardown removes"
+}
+
+# The binding is what lets supervision read this task's turn state at all, and
+# it is written before the agent is launched, so a spawn that cannot record it
+# must refuse rather than start an agent nothing can classify.
+#
+# The refusal has to be explicit. Stock macOS Bash 3.2 does not apply errexit to
+# a redirection that fails to open on a compound command, so the write is
+# created with a simple command first; the group's own status cannot carry the
+# check, because it reports its LAST command rather than the redirection.
+test_spawn_refuses_when_busy_binding_cannot_be_recorded() {
+  local rec case_dir home proj wt fakebin id out status
+  rec=$(make_spawn_case binding-unwritable)
+  IFS='|' read -r case_dir home proj wt fakebin id <<EOF
+$rec
+EOF
+  # An existing directory at the binding path is a write the shell cannot open,
+  # matching a partially synced or hand-damaged home.
+  mkdir -p "$home/state/$id.muse-session"
+  out=$(FM_TEST_MUSE_DATA_HOME="$case_dir/xdgdata" \
+    run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "muse spawn reported success although its busy binding could not be recorded: $out"
+  assert_contains "$out" "refusing to launch the agent" \
+    "muse spawn did not explain that it refused before launching"
+  assert_absent "$home/state/$id.meta" \
+    "a spawn that refused before launching must publish no task record"
+  pass "muse spawn refuses when its busy binding cannot be recorded"
 }
 
 # --- interrupt --------------------------------------------------------------
@@ -905,6 +935,7 @@ test_spawn_accepts_stored_credential
 test_spawn_resolves_relative_xdg_roots
 test_spawn_refuses_secondmate
 test_spawn_writes_busy_binding_and_teardown_removes_it
+test_spawn_refuses_when_busy_binding_cannot_be_recorded
 test_muse_escape_aliases_clear_the_composer
 test_non_muse_escape_does_not_clear
 test_failed_clear_is_reported

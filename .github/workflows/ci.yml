@@ -326,12 +326,12 @@ jobs:
           if-no-files-found: warn
 
   macos-stock-bash:
-    name: Stock macOS Bash snapshot compatibility
+    name: Stock macOS Bash compatibility
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - name: Run snapshot consumers with stock Bash
+      - name: Run snapshot consumers and spawn-path suites with stock Bash
         shell: /bin/bash {0}
         env:
           PATH: /bin:/usr/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin
@@ -343,6 +343,7 @@ jobs:
           esac
           /bin/bash --version | head -1
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
+          command -v node >/dev/null || { echo "::error::node is required"; exit 1; }
 
           shell_inventory="$RUNNER_TEMP/fm-shell-inventory"
           bin/fm-lint.sh --list-files > "$shell_inventory"
@@ -367,6 +368,32 @@ jobs:
             echo "::error::expected 41 Bearings tests, got $bearings_count"
             exit 1
           }
+
+          # Bash 3.2 differs from 5.x in what it EXECUTES, not only in what it
+          # parses, so a parse sweep plus snapshot consumers cannot see it. The
+          # suites below drive the real spawn and teardown paths against fake
+          # backends, which is where those divergences have actually landed
+          # (errexit not firing on a compound command's failed redirection).
+          # They are run for their exit status, with a loose floor on the
+          # reported cases so a suite that silently stops running cannot pass
+          # as green; an exact count would only rot as cases are added.
+          for suite in \
+            tests/fm-busy-adapter-wiring.test.sh \
+            tests/fm-backend-orca.test.sh
+          do
+            echo "--- $suite"
+            suite_output=$(/bin/bash "$suite") || {
+              printf '%s\n' "$suite_output"
+              echo "::error::stock macOS Bash 3.2 failed $suite"
+              exit 1
+            }
+            printf '%s\n' "$suite_output"
+            suite_count=$(printf '%s\n' "$suite_output" | grep -c '^ok - ')
+            [ "$suite_count" -ge 5 ] || {
+              echo "::error::$suite reported only $suite_count cases under stock Bash"
+              exit 1
+            }
+          done
 
   invariants:
     name: Repo invariants
