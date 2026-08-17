@@ -142,6 +142,22 @@ After a host restart, the same action and key are replayed.
 The Azure singleton deployment is incremental and receives the same task, home, assignment, and snapshot bindings, so replay converges one generation rather than creating a second assignment.
 A visible VM with another task or assignment binding refuses instead of being adopted.
 
+## Outcome collection and landing
+
+A crewmate on a worker holds no forge or provider credential, so the work comes home as bytes, not as a push: nothing on the worker pushes anywhere, and the local side keeps the landing authority.
+`execute --outcome-dir` records `outcome_expected` inside the digest-bound execution request and the provider mints one short-lived user-delegation SAS with create/write on exactly one blob name, delivered as a protected Run Command parameter.
+That SAS scopes the credential, not the guest: the worker identity already holds Storage Blob Data Contributor on its whole state container, so what makes a landing safe is the digest in the signed result, not the narrowness of the SAS.
+Because the expectation is digest-bound, a stripped parameter cannot silently downgrade a landing task: the guest refuses before the argv runs.
+
+After the bounded execute, the supervisor counts the commits the crewmate added over the bound repository generation, bundles exactly those commits, refuses a bundle over 256 MiB, uploads it, and records `outcome_present`, `outcome_commits`, `outcome_sha256`, `outcome_bytes`, and `outcome_error` inside the signed result.
+A collection failure never aborts the result: the command has already had its effects, so the failure is recorded instead, which both blocks an unverifiable landing and stops a replay from running the command a second time.
+A worker whose pinned supervisor predates this contract answers with no outcome disposition at all, and the controller refuses that result rather than reporting a task whose commits silently never came home.
+
+The controller downloads the blob only after the digest-bound result commits to its bytes, verifies size and SHA-256, and stores it in the requesting task's outcome directory.
+The tracking monitor then fast-forwards the leased local worktree, but only when that worktree still sits on the dispatched generation and is clean; otherwise the verified bundle is kept and its path reported.
+Landing authority, push, and release receipts stay exactly where the ordinary local flow already puts them.
+The blob name carries the request digest, so a later execute against the same worker cannot overwrite an outcome the controller has not collected yet. Reset deletes the inbound staging archives by name and the outcome blobs as part of removing the whole state container.
+
 ## Release, reset, and cooldown
 
 The controller never infers safe deletion from a terminal chat line, a missing VM, elapsed time, or budget pressure.

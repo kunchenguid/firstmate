@@ -810,7 +810,11 @@ def save():
 if request["operation"] == "mutate":
     action = request["action"]
     key = action["idempotency_key"]
-    state["calls"].append({"type": action["type"], "slot": action["slot"], "key": key})
+    state["calls"].append({
+        "type": action["type"], "slot": action["slot"], "key": key,
+        "outcome_expected": bool((action.get("request") or {}).get("outcome_expected")),
+        "outcome_dir": action.get("outcome_dir"),
+    })
     if key in state["seen"]:
         result = state["seen"][key]
     else:
@@ -861,6 +865,13 @@ if request["operation"] == "mutate":
                 "stdout_sha256": "a" * 64, "stderr_sha256": "b" * 64,
                 "stdout_truncated": False, "stderr_truncated": False,
             }
+            if request_value.get("outcome_expected") and not os.environ.get("FIXTURE_OMIT_OUTCOME"):
+                execution.update({
+                    "outcome_present": False, "outcome_error": "",
+                    "outcome_commits": 0, "outcome_sha256": "", "outcome_bytes": 0,
+                    "outcome_sink": "", "outcome_uncommitted_changes": False,
+                })
+            execution["streams_persisted"] = True
             execution["result_digest"] = hashlib.sha256(canonical(execution)).hexdigest()
             result = {"idempotency_key": key, "action": kind, "worker": state["workers"][slot], "execution": execution}
         elif kind == "steer":
@@ -1045,6 +1056,58 @@ repeat = json.loads(run(
     "--", "/usr/bin/true",
 ).stdout)
 assert repeat == execution and len(fixture_state()["calls"]) == call_count
+
+# Landing v1 arming: an outcome directory makes outcome_expected part of the
+# digest-bound request, is refused without a staged repository, and is refused
+# outright when the worker answers with no outcome disposition at all.
+staging = Path(tempfile.mkdtemp(prefix="fm-outcome-arming-"))
+payload_dir = staging / "payload"
+account_dir = staging / "account"
+outcome_dir = staging / "outcome"
+for directory in (payload_dir, account_dir, outcome_dir):
+    directory.mkdir()
+(payload_dir / "repo.bundle").write_bytes(b"bundle-fixture")
+(payload_dir / "brief.md").write_text("brief\n")
+(account_dir / "auth.json").write_text("{}\n")
+
+
+def armed_execute(*extra, overrides=None, command="/usr/bin/true"):
+    call_env = dict(env)
+    call_env.update(overrides or {})
+    arguments = [
+        "execute", "--task", "task-2", "--task-generation", "gen-2",
+        "--assignment-generation", controller_state()["workers"][
+            str(controller_state()["queue"]["task-2@gen-2"]["slot"])
+        ]["assignment_generation"],
+        "--wall-seconds", "60", *extra,
+        "--confirm-execute", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"],
+        "--", command,
+    ]
+    return subprocess.run(
+        [wrapper] + arguments, env=call_env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+refused = armed_execute("--outcome-dir", str(outcome_dir))
+assert refused.returncode != 0 and "staged repository" in refused.stderr, refused.stderr
+skewed = armed_execute(
+    "--payload-dir", str(payload_dir), "--account-dir", str(account_dir),
+    "--outcome-dir", str(outcome_dir), overrides={"FIXTURE_OMIT_OUTCOME": "1"},
+    command="/bin/echo",
+)
+assert skewed.returncode != 0 and "no outcome disposition" in skewed.stderr, skewed.stderr
+armed = armed_execute(
+    "--payload-dir", str(payload_dir), "--account-dir", str(account_dir),
+    "--outcome-dir", str(outcome_dir),
+)
+assert armed.returncode == 0, armed.stderr
+armed_result = json.loads(armed.stdout)
+assert armed_result["outcome_present"] is False, armed_result
+armed_action = [
+    entry for entry in fixture_state()["calls"] if entry["type"] == "execute"
+][-1]
+assert armed_action["outcome_expected"] is True, armed_action
+assert armed_action["outcome_dir"] == str(outcome_dir.resolve()), armed_action
 
 # A waiting task can use the slot only after deallocate, disposable deletion,
 # complete reset, and a new assignment generation.

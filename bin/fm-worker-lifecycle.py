@@ -1122,6 +1122,15 @@ def apply_action_result(env, state, action, result):
         ):
             if execution.get(field) != expected:
                 raise LifecycleError("provider execution {} binding differs".format(field))
+        if (action.get("request") or {}).get("outcome_expected"):
+            # A worker whose pinned supervisor predates the outcome contract
+            # would run the command and answer with no outcome fields at all.
+            # Refusing here turns that version skew into a visible failure
+            # instead of a task whose commits silently never come home.
+            if not isinstance(execution.get("outcome_present"), bool):
+                raise LifecycleError(
+                    "provider execution reports no outcome disposition for a landing task"
+                )
         state["executions"][action["request_digest"]] = execution
         worker["last_execution_digest"] = supplied
         worker["last_execution_at"] = iso_utc()
@@ -1546,6 +1555,7 @@ def parser():
     execute.add_argument("--wall-seconds", type=int, default=3600)
     execute.add_argument("--payload-dir", default=None)
     execute.add_argument("--account-dir", default=None)
+    execute.add_argument("--outcome-dir", default=None)
     execute.add_argument("--confirm-execute", action="store_true")
     execute.add_argument("--confirm-subscription", required=True)
     execute.add_argument("argv", nargs=argparse.REMAINDER)
@@ -2073,6 +2083,12 @@ def command_execute(env, args):
         raise LifecycleError("execution wall deadline must be between 1 and 21600 seconds")
     if (args.payload_dir is None) != (args.account_dir is None):
         raise LifecycleError("payload and account staging directories travel together or not at all")
+    if args.outcome_dir is not None and args.payload_dir is None:
+        raise LifecycleError("an outcome can only be collected from a staged repository")
+    if args.outcome_dir is not None:
+        outcome_root = Path(args.outcome_dir)
+        if outcome_root.is_symlink() or not outcome_root.is_dir():
+            raise LifecycleError("outcome directory is unavailable: {}".format(args.outcome_dir))
     payload_manifest = account_manifest = None
     if args.payload_dir is not None:
         payload_manifest = staged_directory_manifest(
@@ -2108,6 +2124,11 @@ def command_execute(env, args):
         if payload_manifest is not None:
             request["payload_files"] = payload_manifest
             request["account_files"] = account_manifest
+        if args.outcome_dir is not None:
+            # Digest-bound, so withholding the staging URL downstream cannot
+            # silently turn a landing task into a fire-and-forget one: the
+            # guest refuses instead.
+            request["outcome_expected"] = True
         request["request_digest"] = digest_value(request)
         existing = state["executions"].get(request["request_digest"])
         if existing is not None:
@@ -2120,6 +2141,8 @@ def command_execute(env, args):
         if payload_manifest is not None:
             action["payload_dir"] = str(Path(args.payload_dir).resolve())
             action["account_dir"] = str(Path(args.account_dir).resolve())
+        if args.outcome_dir is not None:
+            action["outcome_dir"] = str(Path(args.outcome_dir).resolve())
         execute_action(env, state, action)
         result = state["executions"][request["request_digest"]]
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
