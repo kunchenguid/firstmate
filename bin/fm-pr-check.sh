@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# exact pr_head=<sha>, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -40,6 +40,59 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
+validate_task_metadata_fields() {
+  if ! fm_pr_task_delivery_metadata_valid "$META" "$PROVIDER" "$HOST"; then
+    case "$FM_PR_DELIVERY_ERROR" in
+      invalid-issue-key) echo "error: task metadata carries an invalid issue key" >&2 ;;
+      invalid-delivery-rule) echo "error: task metadata carries an invalid delivery rule" >&2 ;;
+      *) echo "error: task metadata carries invalid delivery fields" >&2 ;;
+    esac
+    return 1
+  fi
+  ISSUE_KEY=$FM_PR_DELIVERY_ISSUE_KEY
+  DELIVERY_TITLE_RULE=$FM_PR_DELIVERY_TITLE_RULE
+  DELIVERY_LINK_RULE=$FM_PR_DELIVERY_LINK_RULE
+  WT=$FM_PR_DELIVERY_WORKTREE
+  DELIVERY_RULE=$FM_PR_DELIVERY_RULE
+}
+
+validate_provider_delivery_fields() {
+FM_PR_PROVIDER_TITLE=$PR_TITLE
+FM_PR_PROVIDER_BODY=$PR_BODY
+  if ! fm_pr_task_delivery_provider_fields_valid; then
+    case "$FM_PR_DELIVERY_ERROR" in
+      provider-fields) echo "error: could not read PR title and body for delivery validation" >&2 ;;
+      title-mismatch) echo "error: PR title does not match the declared delivery rule" >&2 ;;
+      body-link-mismatch) echo "error: PR body does not link the expected issue" >&2 ;;
+      *) echo "error: provider delivery fields are invalid" >&2 ;;
+    esac
+    return 1
+fi
+}
+
+load_and_validate_provider_fields() {
+PR_HEAD=
+PR_TITLE=
+PR_BODY=
+if ! fm_pr_provider_fields_load "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$WT" 1; then
+  if [ "$DELIVERY_RULE" = 1 ]; then
+    echo "error: could not read PR title and body for delivery validation" >&2
+  else
+    echo "error: provider PR head is unavailable or invalid" >&2
+  fi
+  return 1
+fi
+PR_TITLE=$FM_PR_PROVIDER_TITLE
+PR_BODY=$FM_PR_PROVIDER_BODY
+PR_HEAD=$FM_PR_PROVIDER_HEAD
+validate_provider_delivery_fields
+}
+
+validate_task_metadata_fields || exit 1
+INITIAL_ISSUE_KEY=$ISSUE_KEY
+INITIAL_DELIVERY_TITLE_RULE=$DELIVERY_TITLE_RULE
+INITIAL_DELIVERY_LINK_RULE=$DELIVERY_LINK_RULE
+INITIAL_WT=$WT
 
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
@@ -58,27 +111,9 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   exit 1
 fi
 
-# Neutralize any pre-fix poll before recording or arming this task. The
-# migration never executes legacy artifacts and holds watcher exclusion while
-# it quarantines or rebuilds them.
-"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
-# bin/fm-teardown.sh reads the head from the forge at teardown rather than from
-# metadata and falls back to its provider-agnostic content check, and
-# bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
-WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
-    && fm_pr_head_valid "$REMOTE_HEAD"; then
-    PR_HEAD=$REMOTE_HEAD
-  fi
-fi
+load_and_validate_provider_fields || exit 1
 
 META_TMP=
 META_LOCK=
@@ -93,9 +128,6 @@ pr_check_cleanup() {
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
-fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
-  || { echo "error: could not prepare PR poll" >&2; exit 1; }
-
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
@@ -104,6 +136,24 @@ META_LOCK_HELD=1
 META_DEVICE=$(fm_pr_file_device "$META") || exit 1
 STATE_DEVICE=$(fm_pr_file_device "$STATE") || exit 1
 [ "$META_DEVICE" = "$STATE_DEVICE" ] || { echo "error: task metadata is unavailable" >&2; exit 1; }
+validate_task_metadata_fields || exit 1
+[ "$ISSUE_KEY" = "$INITIAL_ISSUE_KEY" ] \
+  && [ "$DELIVERY_TITLE_RULE" = "$INITIAL_DELIVERY_TITLE_RULE" ] \
+  && [ "$DELIVERY_LINK_RULE" = "$INITIAL_DELIVERY_LINK_RULE" ] \
+  && [ "$WT" = "$INITIAL_WT" ] || {
+    echo "error: task metadata changed during PR validation" >&2
+    exit 1
+  }
+validate_provider_delivery_fields || exit 1
+
+# Neutralize any pre-fix poll before recording or arming this task. The
+# migration never executes legacy artifacts and holds watcher exclusion while
+# it quarantines or rebuilds them.
+"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || exit 1
+load_and_validate_provider_fields || exit 1
+fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
+  || { echo "error: could not prepare PR poll" >&2; exit 1; }
+
 META_TMP=$(mktemp "$STATE/.fm-pr-meta.XXXXXX") || exit 1
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
@@ -112,7 +162,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   esac
 done < "$META"
 printf 'pr=%s\n' "$URL" >> "$META_TMP" || exit 1
-[ -z "$PR_HEAD" ] || printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
+printf 'pr_head=%s\n' "$PR_HEAD" >> "$META_TMP" || exit 1
 chmod 0600 "$META_TMP" || exit 1
 fm_pr_private_file_valid "$META_TMP" 600 "$STATE_DEVICE" || exit 1
 fm_pr_metadata_identity_parse "$META_TMP" || exit 1
@@ -127,11 +177,11 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \
   && [ "$FM_PR_META_NUMBER" = "$NUMBER" ] || exit 1
-fm_lock_release "$META_LOCK"
-META_LOCK_HELD=0
 
 fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
+fm_lock_release "$META_LOCK"
+META_LOCK_HELD=0
 printf 'armed: state/%s.check.sh\n' "$ID"

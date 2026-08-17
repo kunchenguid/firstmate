@@ -12,16 +12,22 @@
 # form preserves stdout, stderr, and exit status; the checked form discards
 # stderr, while fm_nm_run keeps the fail-open query contract for read-only callers.
 fm_nm_run_bounded() {  # <dir> <timeout_secs> <args...>
-  local dir=$1 timeout_secs=$2 have_timeout=none
+  local dir=$1 timeout_secs=$2 have_timeout=none no_mistakes no_mistakes_dir no_mistakes_file
   shift 2
+  no_mistakes=$(command -v no-mistakes 2>/dev/null) || return 1
+  no_mistakes_dir=${no_mistakes%/*}
+  [ "$no_mistakes_dir" = "$no_mistakes" ] && no_mistakes_dir=.
+  no_mistakes_file=${no_mistakes##*/}
+  no_mistakes_dir=$(cd "$no_mistakes_dir" 2>/dev/null && pwd -P) || return 1
+  no_mistakes="$no_mistakes_dir/$no_mistakes_file"
   if command -v timeout >/dev/null 2>&1; then have_timeout=timeout
   elif command -v gtimeout >/dev/null 2>&1; then have_timeout=gtimeout
   elif command -v perl >/dev/null 2>&1; then have_timeout=perl
   fi
   case "$have_timeout" in
-    timeout)  ( cd "$dir" && timeout "$timeout_secs" no-mistakes "$@" ) ;;
-    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" no-mistakes "$@" ) ;;
-    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" no-mistakes "$@" ) ;;
+    timeout)  ( cd "$dir" && timeout "$timeout_secs" "$no_mistakes" "$@" ) ;;
+    gtimeout) ( cd "$dir" && gtimeout "$timeout_secs" "$no_mistakes" "$@" ) ;;
+    perl)     ( cd "$dir" && perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" "$no_mistakes" "$@" ) ;;
     *)        return 1 ;;
   esac
 }
@@ -53,6 +59,20 @@ fm_nm_strip_quotes() {
 # Scalar value of a TOON key in captured `axi status` output $1.
 fm_nm_field() {  # <toon-output> <key>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
+}
+
+fm_nm_successful_terminal() {  # <axi-status-output> [<run-id>]
+  local out=$1 expected_id=${2:-} run_id status outcome
+  run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
+  status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
+  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
+  [ -n "$run_id" ] || return 1
+  [ -z "$expected_id" ] || [ "$run_id" = "$expected_id" ] || return 1
+  [ "$status" = completed ] || return 1
+  case "$outcome" in
+    passed|delivered) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # 0 if run head $2 matches worktree $1's code identity, per the same rule

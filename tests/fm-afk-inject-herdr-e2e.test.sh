@@ -154,7 +154,6 @@ EOF
 LOOP_SCRIPT="$STATE_DIR/supervisor-loop.sh"
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
-MARK=$'\xE2\x81\xA3'
 LOG="$1"
 AGENT_SOURCE=fm-test-supervisor
 AGENT_LABEL=fm-test-supervisor
@@ -194,12 +193,13 @@ redraw() {
 }
 submit_line() {
   local _line=$_buf _c _hex
-  if [ "${_line:0:1}" = "$MARK" ]; then
-    _c="injection"
-  else
-    _c="user"
-  fi
   _hex=$(printf '%s' "$_line" | od -An -tx1 | tr -d ' \n')
+  # Classify from bytes: Bash substring slicing is locale-dependent and sees
+  # only the first byte of U+2063 under the POSIX locale used by CI.
+  case "$_hex" in
+    e281a3*) _c="injection" ;;
+    *) _c="user" ;;
+  esac
   printf '%s\t%s\t%s\n' "$_hex" "$_line" "$_c" >> "$LOG"
   _buf=
   printf '\r\033[K\n'

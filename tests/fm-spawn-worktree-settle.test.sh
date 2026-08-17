@@ -64,10 +64,10 @@ SH
 # entirely, distinct from both the project and the worktree - mirroring the
 # live incident where the stale read was another real firstmate home).
 make_settle_case() {
-  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile
+  local name=$1 id=$2 stale_reads=$3 project_name=${4:-project} case_dir home proj wt stale fakebin countfile
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
-  proj="$case_dir/project"
+  proj="$case_dir/$project_name"
   wt="$case_dir/wt"
   stale="$case_dir/stale-other-checkout"
   countfile="$case_dir/pane-call-count"
@@ -77,7 +77,7 @@ make_settle_case() {
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_git_init_commit "$stale"
   mkdir -p "$home/data/$id"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  printf '%s\n' '# Definition of done' "brief for $id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin|$countfile|$stale_reads"
 }
@@ -89,7 +89,8 @@ EOF
 }
 
 run_settle_spawn() {
-  local id=$1
+  local id=$1 issue_key=${2:-} issue_args=()
+  [ -z "$issue_key" ] || issue_args=(--issue-key "$issue_key")
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -97,7 +98,7 @@ run_settle_spawn() {
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off ${issue_args[@]+"${issue_args[@]}"} 2>&1
 }
 
 # A single stale first read (the exact incident) must not be accepted: the
@@ -141,7 +142,40 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+test_spawn_records_the_brief_issue_key() {
+  local rec id out status brief
+  id=settle-orc-issue-z3
+  rec=$(make_settle_case settle-issue "$id" 0 fixture-project)
+  read_settle_record "$rec"
+  brief="$HOME_DIR/data/$id/brief.md"
+  printf '%s\n' \
+    '# Definition of done' \
+    'Delivery contract: mode=no-mistakes' \
+    'Delivery issue: TASK-88' \
+    "Delivery title rule: {issue_key}: O'Reilly" \
+    "Delivery link rule: https://tracker.example/issue/{issue_key}?owner=O'Reilly" > "$brief"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn without the brief's issue key should fail"
+  assert_contains "$out" "delivery issue mismatch" \
+    "spawn did not explain the missing issue key"
+
+  out=$(run_settle_spawn "$id" TASK-88)
+  status=$?
+  expect_code 0 "$status" "spawn with the brief's issue key should succeed"
+  assert_grep 'issue_key=TASK-88' "$HOME_DIR/state/$id.meta" \
+    "spawn metadata did not retain the intake issue key"
+  grep -qxF "delivery_title_rule={issue_key}: O'Reilly" "$HOME_DIR/state/$id.meta" \
+    || fail "spawn metadata did not retain the brief title rule"
+  grep -qxF "delivery_link_rule=https://tracker.example/issue/{issue_key}?owner=O'Reilly" \
+    "$HOME_DIR/state/$id.meta" \
+    || fail "spawn metadata did not retain the brief link rule"
+  pass "spawn records the brief issue key and delivery rules in task metadata"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_spawn_records_the_brief_issue_key
 
 echo "# all fm-spawn-worktree-settle tests passed"

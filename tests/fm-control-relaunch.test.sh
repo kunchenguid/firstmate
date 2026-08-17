@@ -249,11 +249,12 @@ SH
 # --- 1. same-harness relaunch -----------------------------------------------
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
-  local dir out rc gen_before gen_after
+  local dir out rc gen_before gen_after spawn_after
   dir=$(new_case same rl1)
   add_ship_task "$dir" rl1 claude
   gen_before=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl1)
   printf 'busy_gen=%s\n' "$gen_before" >> "$dir/home/state/rl1.meta"
+  printf 'spawn_gen=%s\n' 's0.stale' >> "$dir/home/state/rl1.meta"
   out=$(run_control "$dir" rl1 relaunch --note "stopped mid-refactor"); rc=$?
   expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
   assert_contains "$out" "relaunched rl1 harness=claude from=claude" "the outcome should name the transition"
@@ -266,6 +267,11 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   gen_after=$(meta_field "$dir" rl1 busy_gen)
   [ -n "$gen_after" ] && [ "$gen_after" != "$gen_before" ] \
     || fail "a relaunch must arm a fresh busy generation, got '$gen_after'"
+  [ "$(grep -c '^spawn_gen=' "$dir/home/state/rl1.meta")" = 1 ] \
+    || fail "a relaunch must leave exactly one spawn incarnation line"
+  spawn_after=$(meta_field "$dir" rl1 spawn_gen)
+  [ -n "$spawn_after" ] && [ "$spawn_after" != s0.stale ] \
+    || fail "a relaunch must mint a fresh spawn incarnation, got '$spawn_after'"
   [ "$(journal_field "$dir" rl1 phase)" = complete ] \
     || fail "the transaction journal should end complete"
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
@@ -783,6 +789,46 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
     || fail "fm-spawn --relaunch without --harness must reuse the recorded harness, got '$(meta_field "$dir" rl21 harness)'"
   assert_contains "$out" "spawned rl21 harness=claude" "the launch should report the recorded harness"
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
+}
+
+test_spawn_relaunch_requires_equal_delivery_rules_in_the_brief() {
+  local dir out rc meta brief
+  dir=$(new_case relaunch-rules-missing rl35)
+  add_ship_task "$dir" rl35 claude
+  meta="$dir/home/state/rl35.meta"
+  brief="$dir/home/data/rl35/brief.md"
+  printf '%s\n' \
+    'issue_key=TASK-91' \
+    'delivery_title_rule={issue_key}:' \
+    'delivery_link_rule=https://tracker.example/issue/{issue_key}' >> "$meta"
+  printf '%s\n' \
+    '# Definition of done' \
+    'Delivery issue: TASK-91' >> "$brief"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl35 --relaunch); rc=$?
+  expect_code 1 "$rc" "relaunch without its durable delivery fields in the brief should refuse"
+  assert_contains "$out" "durable delivery rules require matching issue, title, and link fields" \
+    "the refusal should name the missing brief contract"
+
+  dir=$(new_case relaunch-rules-equal rl36)
+  add_ship_task "$dir" rl36 claude
+  meta="$dir/home/state/rl36.meta"
+  brief="$dir/home/data/rl36/brief.md"
+  printf '%s\n' \
+    'issue_key=TASK-91' \
+    'delivery_title_rule={issue_key}:' \
+    'delivery_link_rule=https://tracker.example/issue/{issue_key}' >> "$meta"
+  printf '%s\n' \
+    '# Definition of done' \
+    'Delivery issue: TASK-91' \
+    'Delivery title rule: {issue_key}:' \
+    'Delivery link rule: https://tracker.example/issue/{issue_key}' >> "$brief"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl36 --relaunch); rc=$?
+  expect_code 0 "$rc" "relaunch with equal durable delivery fields should succeed"
+  assert_contains "$out" "spawned rl36 harness=claude" \
+    "the successful relaunch should report the replacement task"
+  pass "fm-spawn --relaunch requires durable delivery rules to survive in the brief"
 }
 
 # fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
@@ -1334,6 +1380,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_requires_equal_delivery_rules_in_the_brief
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch

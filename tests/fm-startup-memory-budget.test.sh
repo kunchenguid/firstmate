@@ -88,7 +88,7 @@ new_bootstrap_world() {
 
 run_bootstrap() {
   local root=$1 home=$2 fakebin=$3
-  PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+  BASH_ENV=/dev/null PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$BOOTSTRAP"
 }
 
@@ -242,7 +242,7 @@ latest_reread_instruction() {
 
 run_config_push() {
   local root=$1 home=$2 fakebin=$3 log=$4
-  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SEND_SETTLE=0 \
+  BASH_ENV=/dev/null PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SEND_SETTLE=0 \
     FM_FAKE_TMUX_LOG="$log" "$CONFIG_PUSH"
 }
 

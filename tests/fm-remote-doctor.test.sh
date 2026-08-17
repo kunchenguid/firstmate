@@ -20,7 +20,9 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 JOB_LABEL=dev.firstmate.remote-job
 CASE_N=0
 DOCTOR_WORKER_PID=
-trap 'if [ -n "$DOCTOR_WORKER_PID" ]; then kill "$DOCTOR_WORKER_PID" 2>/dev/null || true; fi; fm_test_cleanup || true' EXIT
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$ROOT/bin/fm-remote-job-lib.sh"
+trap 'if [ -n "$DOCTOR_WORKER_PID" ]; then fm_remote_job_stop_worker_tree "$DOCTOR_WORKER_PID" || true; fi; fm_test_cleanup || true' EXIT
 
 # A fixture must be able to present a host with NO herdr, so the doctor never
 # sees the runner's own PATH. Only the two required tools are re-exposed, by
@@ -589,14 +591,7 @@ assert_contains "$DOCTOR_OUT" 'check remote-job-worker=ok:' "the refreshed worke
 assert_contains "$DOCTOR_OUT" 'check remote-job-probe=ok: the remote job worker completed the required-tool probe' \
   "doctor did not probe tools through the refreshed worker"
 DOCTOR_WORKER_PID=$(cat "$CASE_HOME/.firstmate/remote-job/worker.pid")
-kill -TERM "$DOCTOR_WORKER_PID"
-for _ in $(seq 1 100); do
-  kill -0 "$DOCTOR_WORKER_PID" 2>/dev/null || break
-  sleep 0.05
-done
-if kill -0 "$DOCTOR_WORKER_PID" 2>/dev/null; then
-  kill -KILL "$DOCTOR_WORKER_PID" 2>/dev/null || true
-fi
+fm_remote_job_stop_worker_tree "$DOCTOR_WORKER_PID" || true
 DOCTOR_WORKER_PID=
 pass "doctor refreshes stale worker identity before probing tools"
 

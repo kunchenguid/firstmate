@@ -8,19 +8,22 @@
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# normal ship task whose commits are not so reachable - when its recorded PR or MR
+# is merged and the applicable provider reports a head that contains the current
+# local work, or its content is already present in the up-to-date default branch.
+# This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
-# The PR itself is resolved from the task's recorded pr= when present, or - when
+# The change request is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
-# up a merged PR whose head branch matches the worktree's branch, fetching its head
-# via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
+# up a merged GitHub PR whose head branch matches the worktree's branch, fetching
+# its head via refs/pull/<n>/head when the branch itself was deleted. So a missing pr= never
 # by itself causes a false refusal of landed work.
-# A gh lookup error falls back to the content check; if that is also inconclusive,
-# teardown refuses rather than risk discarding unlanded work.
+# A recorded PR or MR lookup error refuses teardown rather than falling back to
+# the content check. The content check applies only when no change request is
+# recorded or confirmed; if it is inconclusive, teardown refuses rather than risk
+# discarding unlanded work.
 # Uncommitted changes are never landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
@@ -93,22 +96,8 @@
 # refusal above has already passed, and BEFORE any worktree return, branch
 # delete, or backend kill below - a still-active run or a leaked process may
 # own live work in that worktree):
-#   Fix 1 - conclude the task's own no-mistakes run. A ship task's worktree can
-#     be torn down while its no-mistakes pipeline run is still PARKED at a gate
-#     (awaiting_approval/fix_review/any awaiting_agent field), with no worker
-#     left to ever answer it - the run then sits there holding a fleet slot
-#     indefinitely (observed 2026-08-03: runs parked 7h39m and parked at a
-#     post-CI approval gate after the worker was already cleaned up). A run
-#     with an autonomous step still under way (running/fixing/ci) is left
-#     alone: no-mistakes drives those against its own gate-repo clone, not the
-#     crew's worktree, so they are not orphaned by removing the worktree.
-#     conclude_task_no_mistakes_run attributes the active-or-most-recent run to
-#     THIS task only when its branch AND code identity (bin/fm-nm-run-lib.sh's
-#     fm_nm_head_matches_worktree, the same rule bin/fm-crew-state.sh uses) both
-#     match this worktree, then runs `no-mistakes axi abort --run <id>` for
-#     that verified run instance. A run already terminal
-#     (an outcome is set) or not parked at a gate is left untouched. Idempotent:
-#     an already-aborted run reads back terminal and is skipped on retry.
+#   Fix 1 - require the task's own no-mistakes run to have an authoritative
+#     successful terminal result, and require the committed work to have landed.
 #   Fix 2 - reap leaked descendant processes. A backgrounded/disowned process
 #     started under the worktree (or its per-task tasktmp) does not receive the
 #     SIGHUP/SIGTERM that closing the backend pane sends to its own foreground
@@ -442,6 +431,7 @@ if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
@@ -788,11 +778,23 @@ pr_number_from_target() {
 }
 
 ensure_commit_object() {
-  local target=$1 commit=$2 n
+  local target=$1 commit=$2 n ref provider
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
+  if [[ "$target" == https://* ]]; then
+    fm_pr_url_parse "$target" || return 1
+    provider=$FM_PR_PROVIDER
+    n=$FM_PR_NUMBER
+    case "$provider" in
+      github) ref="refs/pull/$n/head" ;;
+      gitlab) ref="refs/merge-requests/$n/head" ;;
+      *) return 1 ;;
+    esac
+  else
+    n=$(pr_number_from_target "$target") || return 1
+    ref="refs/pull/$n/head"
+  fi
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "$ref" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
@@ -829,31 +831,56 @@ EOF
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# PR from the recorded pr= URL first, then from the branch name, and asks the
+# applicable provider for both the PR state and head. Returns 0 when the PR is merged, 2 when
+# the provider confirms it is not merged, 3 when a merged head does not contain
+# the local work, and 1 when no PR is found or lookup is unavailable.
 pr_is_merged() {
-  local branch=$1 target view state head current
+  local branch=$1 target view state head current provider
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
+    fm_pr_url_parse "$target" || return 1
+    provider=$FM_PR_PROVIDER
   else
     target=$(pr_number_from_branch "$branch") || return 1
+    provider=github
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  head=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
-  case "$state" in
-    MERGED|merged) ;;
+  case "$provider" in
+    github)
+      view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
+      state=${view%%$'\t'*}
+      head=${view#*$'\t'}
+      [ "$state" != "$view" ] || return 1
+      case "$state" in
+        MERGED|merged) ;;
+        OPEN|open|CLOSED|closed) return 2 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    gitlab)
+      fm_pr_provider_fields_load "$provider" "$target" "$FM_PR_HOST" "$FM_PR_PATH" \
+        "$FM_PR_NUMBER" "$WT" 1 || return 1
+      state=$FM_PR_PROVIDER_STATE
+      case "$state" in
+        MERGED|merged) ;;
+        OPEN|open|CLOSED|closed) return 2 ;;
+        *) return 1 ;;
+      esac
+      head=$FM_PR_PROVIDER_HEAD
+      ;;
     *) return 1 ;;
   esac
-  [ -n "$head" ] || return 1
+  fm_pr_head_valid "$head" || return 3
+  if [ -n "$PR_URL" ]; then
+    fm_pr_head_valid "$PR_HEAD" || return 3
+    [ "$PR_HEAD" = "$head" ] || return 3
+  fi
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
-  unpushed_patches_are_in_pr_head "$head"
+  unpushed_patches_are_in_pr_head "$head" && return 0
+  return 3
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
@@ -884,11 +911,20 @@ content_in_default() {
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# default branch when no PR is recorded and no applicable PR is confirmed. A provider-
+# confirmed open or closed PR is not landed even when the content also appears in the
+# default branch.
 work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
+  local branch=$1 pr_result
+  if pr_is_merged "$branch"; then
+    return 0
+  else
+    pr_result=$?
+  fi
+  [ -n "$PR_URL" ] && return "$pr_result"
+  if [ "$pr_result" -eq 2 ] || [ "$pr_result" -eq 3 ]; then
+    return 1
+  fi
   content_in_default
 }
 
@@ -1200,89 +1236,53 @@ validate_worktree_teardown_safety() {
   fi
 }
 
-# Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
-# worktree $1 belong to THIS task, and is it parked at a gate awaiting an agent
-# that is about to be removed? Prints nothing; returns 0 only on a genuine
-# match so the caller knows it is safe to abort - never a guess.
+# Fix 1 (see script header): require an authoritative successful no-mistakes
+# result for this task before teardown.
 NM_TEARDOWN_TIMEOUT=${FM_TEARDOWN_NM_TIMEOUT:-10}
 case "$NM_TEARDOWN_TIMEOUT" in ''|*[!0-9]*) NM_TEARDOWN_TIMEOUT=10 ;; esac
 TASK_RUN_ID=
-task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
-  local wt=$1 out=$2 branch run_id run_branch run_head status outcome awaiting has_gate
+task_status_is_own_run() {  # <worktree> <axi-status-output>
+  local wt=$1 out=$2 branch run_id run_branch run_head
   TASK_RUN_ID=
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
-  [ -n "$branch" ] || return 1
-  [ -n "$out" ] || return 1
+  [ -n "$branch" ] && [ -n "$out" ] || return 1
   run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
   [ -n "$run_id" ] || return 1
   run_branch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
-  [ -n "$run_branch" ] && [ "$run_branch" = "$branch" ] || return 1
+  [ "$run_branch" = "$branch" ] || return 1
   run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
   fm_nm_head_matches_worktree "$wt" "$run_head" || return 1
-  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
-  [ -z "$outcome" ] || return 1
-  status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
-  awaiting=$(printf '%s\n' "$out" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
-  has_gate=$(printf '%s\n' "$out" | grep -Eq '^[[:space:]]*gate:[[:space:]]*' && echo 1 || echo 0)
-  case "$status" in
-    awaiting_approval|fix_review) TASK_RUN_ID=$run_id; return 0 ;;
-  esac
-  if [ -n "$awaiting" ] || [ "$has_gate" = 1 ]; then
-    TASK_RUN_ID=$run_id
-    return 0
+  TASK_RUN_ID=$run_id
+}
+
+require_task_no_mistakes_delivery() {  # <worktree>
+  local wt=$1 out branch
+  [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] || return 0
+  [ -d "$wt" ] || {
+    echo "REFUSED: no-mistakes delivery for $ID has no inspectable worktree." >&2
+    return 1
+  }
+  command -v no-mistakes >/dev/null 2>&1 || {
+    echo "REFUSED: no-mistakes delivery for $ID has no authoritative run result." >&2
+    return 1
+  }
+  if ! out=$(fm_nm_run_bounded "$wt" "$NM_TEARDOWN_TIMEOUT" axi status 2>&1); then
+    echo "REFUSED: no-mistakes delivery for $ID has no authoritative terminal result." >&2
+    return 1
   fi
-  return 1
-}
-
-task_run_is_own_parked_run() {  # <worktree>
-  local wt=$1 out
-  # Accepted best-effort residual: query failures stay fail-open because making
-  # no-mistakes availability a prerequisite would block ship tasks with no run.
-  out=$(fm_nm_run "$wt" "$NM_TEARDOWN_TIMEOUT" axi status)
-  task_status_is_own_parked_run "$wt" "$out"
-}
-
-task_status_is_terminal_run() {  # <axi-status-output> <run-id>
-  local out=$1 expected_id=$2 run_id outcome
-  run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
-  [ "$run_id" = "$expected_id" ] || return 1
-  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
-  case "$outcome" in
-    cancelled|failed|passed|checks-passed) return 0 ;;
-  esac
-  return 1
-}
-
-task_status_is_run_not_found() {  # <status-error> <run-id>
-  local actual expected
-  actual=$(fm_nm_trim "$1")
-  expected=$(printf 'error: "run \\"%s\\" not found"' "$2")
-  [ "$actual" = "$expected" ]
-}
-
-# Abort THIS task's own parked no-mistakes run before the worker that would
-# have answered its gate is removed, so no run is left orphaned holding a
-# fleet slot. Only KIND=ship drives a no-mistakes validation of its own
-# worktree (scouts and secondmates never do, mirroring bin/fm-crew-state.sh);
-# a run not attributed to this exact branch+head is left completely alone.
-conclude_task_no_mistakes_run() {  # <worktree>
-  local wt=$1 out run_id
-  [ "$KIND" = ship ] || return 0
-  [ -d "$wt" ] || return 0
-  command -v no-mistakes >/dev/null 2>&1 || return 0
-  task_run_is_own_parked_run "$wt" || return 0
-  run_id=$TASK_RUN_ID
-  echo "teardown: no-mistakes run for $ID is parked at a gate; aborting before the worker is removed" >&2
-  # Accepted best-effort residual: abort supports run-id targeting but no atomic
-  # live-state condition; fully closing the resume race needs upstream compare-and-cancel.
-  fm_nm_run_checked "$wt" "$NM_TEARDOWN_TIMEOUT" axi abort --run "$run_id" >/dev/null 2>&1 || true
-  if out=$(fm_nm_run_bounded "$wt" "$NM_TEARDOWN_TIMEOUT" axi status --run "$run_id" 2>&1); then
-    task_status_is_terminal_run "$out" "$run_id" && return 0
-  elif task_status_is_run_not_found "$out" "$run_id"; then
-    return 0
+  if ! task_status_is_own_run "$wt" "$out" \
+    || ! fm_nm_successful_terminal "$out" "$TASK_RUN_ID"; then
+    echo "REFUSED: no-mistakes delivery for $ID lacks an authoritative successful terminal result." >&2
+    return 1
   fi
-  echo "REFUSED: no-mistakes run for $ID is still parked after axi abort; confirm it stopped (no-mistakes axi status) or abort it manually (no-mistakes axi abort --run <id>) before retrying teardown." >&2
-  return 1
+  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || {
+    echo "REFUSED: no-mistakes delivery for $ID has no inspectable task branch." >&2
+    return 1
+  }
+  if ! work_is_landed "$branch"; then
+    echo "REFUSED: no-mistakes delivery for $ID is not landed through its applicable PR or default branch." >&2
+    return 1
+  fi
 }
 
 # Fix 2 (see script header): pids of every process whose CURRENT WORKING
@@ -2376,14 +2376,16 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
+# them). Fix 1 (see script header) applies to ordinary completion, while Fix 2
+# runs for both completion and discard before ANY destructive step below - a
+# still-parked run or a leaked process can own live work in this exact worktree. Not for
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
-  conclude_task_no_mistakes_run "$WT"
+  if [ "$FORCE" != "--force" ]; then
+    require_task_no_mistakes_delivery "$WT"
+  fi
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
@@ -2549,5 +2551,9 @@ META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
-echo "teardown $ID complete (window $T, worktree $WT)"
-backlog_refresh_reminder
+if [ "$FORCE" = "--force" ]; then
+  echo "teardown $ID discarded (window $T, worktree $WT)"
+else
+  echo "teardown $ID complete (window $T, worktree $WT)"
+  backlog_refresh_reminder
+fi

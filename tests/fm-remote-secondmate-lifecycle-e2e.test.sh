@@ -9,6 +9,8 @@ set -u
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$ROOT/bin/fm-remote-job-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-remote-secondmate-e2e)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
@@ -24,20 +26,26 @@ HERDR_LOG="$TMP_ROOT/remote-herdr.log"
 TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
+FIXTURE_WATCHER_PID=
+FIXTURE_WATCHER_IDENTITY=
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 cleanup() {
-  local worker_pid='' wait_attempt=0
+  local worker_pid='' watcher_identity=''
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \
     "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true
+  if [ -n "$FIXTURE_WATCHER_PID" ] && [ -n "$FIXTURE_WATCHER_IDENTITY" ]; then
+    watcher_identity=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" /bin/bash -c \
+      '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$FIXTURE_WATCHER_PID" 2>/dev/null || true)
+    if [ "$watcher_identity" = "$FIXTURE_WATCHER_IDENTITY" ]; then
+      kill -TERM "$FIXTURE_WATCHER_PID" 2>/dev/null || true
+      wait "$FIXTURE_WATCHER_PID" 2>/dev/null || true
+    fi
+  fi
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
     worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
-    kill "$worker_pid" 2>/dev/null || true
-    while kill -0 "$worker_pid" 2>/dev/null && [ "$wait_attempt" -lt 100 ]; do
-      wait_attempt=$((wait_attempt + 1))
-      sleep 0.05
-    done
+    [ -z "$worker_pid" ] || fm_remote_job_stop_worker_tree "$worker_pid" || true
   fi
   rm -rf -- "$TMP_ROOT"
 }
@@ -243,12 +251,24 @@ SH
 chmod +x "$FAKEBIN/fake-ssh"
 
 publish_healthy_watcher_identity() { # <state> <home> <watch-script>
-  local state=$1 home=$2 watch=$3 identity
+  local state=$1 home=$2 watch=$3 identity watcher_pid old_identity
+  if [ -n "$FIXTURE_WATCHER_PID" ] && [ -n "$FIXTURE_WATCHER_IDENTITY" ]; then
+    old_identity=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" /bin/bash -c \
+      '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$FIXTURE_WATCHER_PID" 2>/dev/null || true)
+    if [ "$old_identity" = "$FIXTURE_WATCHER_IDENTITY" ]; then
+      kill -TERM "$FIXTURE_WATCHER_PID" 2>/dev/null || true
+      wait "$FIXTURE_WATCHER_PID" 2>/dev/null || true
+    fi
+  fi
+  sleep 600 &
+  watcher_pid=$!
   identity=$(FM_HOME="$PARENT" FM_STATE_OVERRIDE="$PARENT/state" /bin/bash -c \
-    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$$") \
+    '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$watcher_pid") \
     || fail "could not derive fixture watcher identity"
+  FIXTURE_WATCHER_PID=$watcher_pid
+  FIXTURE_WATCHER_IDENTITY=$identity
   mkdir -p "$state/.watch.lock"
-  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  printf '%s\n' "$watcher_pid" > "$state/.watch.lock/pid"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$watch" > "$state/.watch.lock/watcher-path"
@@ -276,7 +296,7 @@ remote_env() {
   FM_FAKE_LAUNCH_ENTERED="$TMP_ROOT/launch.entered" \
   FM_FAKE_LAUNCH_RELEASE="$TMP_ROOT/launch.release" \
   FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_REMOTE_REPLY_WAIT_SECONDS=10 \
-  "$@"
+  "$@" < /dev/null
 }
 
 sha256_file() {
@@ -896,7 +916,7 @@ assert_grep '"revision":2' "$REMOTE_HOME/config/crew-dispatch.json" "partial inh
   || fail "partial inheritance unexpectedly applied the failed file"
 NUDGE_MARKER="$PARENT/state/.secondmate-nudge-pending/ios.pending"
 assert_grep 'remote=1' "$NUDGE_MARKER" "partial inheritance left no durable remote reread marker"
-publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$REMOTE_ROOT/bin/fm-watch.sh"
+publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
 remote_env "$ROOT/bin/fm-bootstrap.sh" > "$TMP_ROOT/config-partial-retry.out" \
   || fail "bootstrap did not converge partial remote inheritance"
 [ "$(cat "$REMOTE_HOME/config/crew-harness")" = grok ] \

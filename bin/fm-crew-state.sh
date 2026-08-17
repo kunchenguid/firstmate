@@ -30,11 +30,12 @@
 #      diverged from it, invalidates attribution.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
+#      successful terminal outcome -> done, checks-passed -> parked,
+#      failed/cancelled -> failed. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a ci-step log-tail check overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating.
+#      a ci-step log-tail check overrides working -> parked once checks read
+#      green, so a green PR is reported as ready without becoming delivered.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -100,8 +101,10 @@ meta_value() {  # <key>
 
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
+MODE=$(meta_value mode)
 HARNESS=$(meta_value harness)
 [ -n "$KIND" ] || KIND=ship
+[ -n "$MODE" ] || MODE=no-mistakes
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
@@ -129,7 +132,16 @@ map_log_state() {  # <line>
     working)        echo working ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
-    done)           echo "done" ;;
+    done)
+      if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+        case "$1" in
+          "done: PR https://"*" checks green") echo parked ;;
+          *) echo working ;;
+        esac
+      else
+        echo "done"
+      fi
+      ;;
     failed)         echo failed ;;
     *)              echo unknown ;;
   esac
@@ -277,7 +289,7 @@ nm_effective_ci_step_status() {
 # Root cause of the PR #252 incident (2026-07): for a repo where merge is left
 # to the captain, no-mistakes' ci step (and therefore top-level status/outcome)
 # stays "running" for the ENTIRE CI-monitor phase, including long after GitHub
-# reports every check green - it only reaches outcome=passed once the PR is
+# reports every check green - it only reaches a successful terminal outcome once the PR is
 # actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
 # never distinguishes "still waiting on checks" from "checks green, waiting on
 # merge": both read as plain `ci,running,...`. The only place that transition is
@@ -390,7 +402,8 @@ RUN_SOURCE=full
 COARSE_STATUS=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
-if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] && [ -n "$CREW_BRANCH" ] \
+  && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
@@ -431,7 +444,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     # coarse-vs-full distinction, so a real gate is never silently missed.
     case "$COARSE_STATUS" in
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
+      completed) RUN_STATE=parked; RUN_DETAIL="run completed without a guarded delivery outcome" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
@@ -446,13 +459,16 @@ if [ "$HAVE_RUN" = 1 ]; then
     nm_has_gate && has_gate=1
 
     if [ -n "$outcome" ]; then
-      case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+      if fm_nm_successful_terminal "$RUN_OUT"; then
+        RUN_STATE="done"; RUN_DETAIL="guarded delivery succeeded"
+      else
+        case "$outcome" in
+        checks-passed) RUN_STATE=parked; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
-      esac
+        esac
+      fi
     elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
       if [ "$has_gate" = 1 ]; then
         gate=$(nm_gate_line_name)
@@ -472,7 +488,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
-        completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
+        completed)      RUN_STATE=parked; RUN_DETAIL="run completed without a guarded delivery outcome" ;;
         failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
         cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
@@ -484,7 +500,7 @@ if [ "$HAVE_RUN" = 1 ]; then
           running)
             CI_LOG_STATE=$(nm_ci_checks_state)
             if [ "$CI_LOG_STATE" = green ]; then
-              RUN_STATE="done"
+              RUN_STATE=parked
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
             fi
             ;;
@@ -498,7 +514,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit parked status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -509,7 +525,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit parked status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
   fi
 
@@ -566,7 +582,15 @@ fi
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+    LOG_DETAIL=$(status_line_note "$LOG_LINE")
+    if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ] && [ "$LOG_VERB" = "done" ]; then
+      if [ "$LOG_STATE" = parked ]; then
+        LOG_DETAIL="$LOG_DETAIL${SEP}guarded merge pending"
+      else
+        LOG_DETAIL="$LOG_DETAIL${SEP}no-mistakes delivery not confirmed"
+      fi
+    fi
+    emit "$LOG_STATE" status-log "$LOG_DETAIL"
   fi
 fi
 

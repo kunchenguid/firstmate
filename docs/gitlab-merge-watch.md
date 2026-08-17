@@ -20,8 +20,7 @@ It holds one deliberately merged merge request and one deliberately open one, so
 Every command against it reads a public merge request and needs no credential, so a reader can rerun each one and see the same output.
 Its README asks that the open merge request be left open.
 
-A non-default host appears below only as the placeholder `gitlab.example`, which resolves nowhere.
-That is deliberate: the host-agnostic property is a property of the stored record and the poll's URL reconstruction, so it is demonstrated by inspecting those rather than by reaching any private instance.
+The host-agnostic property is covered by the canonical URL parser and security tests rather than by an unreachable live instance.
 
 ## Why the host is data rather than a constant
 
@@ -30,14 +29,20 @@ A GitLab project also sits under at least one group at no fixed depth, so no own
 The stored record therefore carries `provider`, `url`, `host`, `path`, and `number`, and every consumer rebuilds the URL from those parts and refuses any record that does not reconstruct the stored URL exactly.
 `tests/fm-pr-check-security.test.sh` asserts that neither `bin/fm-pr-lib.sh` nor `bin/fm-pr-poll.sh` contains the string `gitlab.com` at all.
 
+## Current provider snapshot contract
+
+Firstmate requests one `glab` JSON provider observation and reads its top-level `sha`, `title`, and `description` fields.
+When a task declares delivery rules, that same snapshot supplies the title and description used to validate the PR before registration.
+The GitLab JSON parser uses the universal `node` toolchain documented in [configuration.md](configuration.md).
+The head is accepted only when it is an exact commit hash, so a changed output format produces no registration rather than an unbound delivery record.
+`tests/fm-pr-check-security.test.sh` verifies this contract hermetically through registration behavior, including distinct top-level and nested heads and a changed title in the same JSON snapshot.
+
 ## How plain glab is invoked, and why
 
-Two things about plain `glab` were established by running it, because assuming either one would have failed silently into a permanent "not merged".
+The dated live transcript below establishes two separate plain `glab` facts used by that implementation.
 
 First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
-Its JSON would need a JSON processor, and `jq` is not one of firstmate's common tools, so the state is read from glab's own field output instead.
-Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
 That form shells out to git for the current repository, and the watcher runs in no repository:
@@ -71,15 +76,13 @@ open
 
 ## End to end: arming and polling a real merge request
 
-Three tasks were armed, two against the fixture and one against the placeholder host:
+Two tasks were armed against the fixture:
 
 ```
 $ fm-pr-check.sh e1 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/1
 armed: state/e1.check.sh
 $ fm-pr-check.sh e2 https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
 armed: state/e2.check.sh
-$ fm-pr-check.sh e3 https://gitlab.example/group/subgroup/project/-/merge_requests/7
-armed: state/e3.check.sh
 ```
 
 The stored record for each, showing the host and the full project namespace as data:
@@ -92,29 +95,12 @@ gitlab.com
 KarotKris/gitlab-merge-watch-fixture
 1
 
-$ cat state/e3.pr-poll
+$ cat state/e2.pr-poll
 gitlab
-https://gitlab.example/group/subgroup/project/-/merge_requests/7
-gitlab.example
-group/subgroup/project
-7
-```
-
-The provenance record for the non-default host, showing the bumped version tag:
-
-```
-$ cat state/e3.pr-poll-registration
-fm-pr-poll-registration-v2
-e3
-gitlab
-https://gitlab.example/group/subgroup/project/-/merge_requests/7
-gitlab.example
-group/subgroup/project
-7
-514b7e04f0cca3e2c913c9fd504c54dfe54c8a51a7f5ebc57279bbd4db5d4a60
-1817b0f95db7148246434a4afa0b2c8e7b81fd8f74ef7d473bbd62023e47c439
-70:957243
-70:957244
+https://gitlab.com/KarotKris/gitlab-merge-watch-fixture/-/merge_requests/2
+gitlab.com
+KarotKris/gitlab-merge-watch-fixture
+2
 ```
 
 Running each published poll the way the watcher does, where an empty result means the poll stayed silent and produced no wake:
@@ -123,11 +109,10 @@ Running each published poll the way the watcher does, where an empty result mean
 $ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e1.pr-poll)
 merged
 $ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e2.pr-poll)
-$ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e3.pr-poll)
 ```
 
 The merged fixture merge request produces exactly one `merged` line.
-The open one produces nothing, and the unreachable placeholder host produces nothing rather than a false merge.
+The open one produces nothing rather than a false merge.
 
 The same bytes work in the watcher's sidecar-driven mode, where the published check locates its own record:
 
@@ -143,7 +128,6 @@ With `glab` removed from `PATH`, the poll stays silent even for the merge reques
 
 ```
 $ PATH="$noglab" fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e1.pr-poll)
-$ PATH="$noglab" fm-pr-poll.sh --validated $(tr '\n' ' ' < state/e3.pr-poll)
 ```
 
 Arming is the one point where that can be reported, so it refuses there instead of arming a watch that can never fire:
@@ -164,8 +148,9 @@ armed: state/e6.check.sh
 
 ## Upgrade path from an existing armed watch
 
-The stored record gained the provider tag, so its version moved to `fm-pr-poll-registration-v2` and a record written by the previous release no longer parses.
-The existing non-executing migration handles that: it never runs the old artifact, and rebuilds the poll from the task's recorded pull request URL.
+The stored record gained the provider tag and now requires a valid provider-observed head, so its version moved to `fm-pr-poll-registration-v2` and a record written by the previous release no longer parses.
+The existing non-executing migration never runs the old artifact.
+It revalidates each task through the current delivery-field seam, rebuilds only records that pass from the task's recorded pull request URL, and quarantines records with missing, stale, or rejected provider data without publishing a replacement poll.
 Starting from a poll armed exactly as the previous release wrote it:
 
 ```
@@ -188,13 +173,13 @@ $ fm-pr-poll.sh --validated $(tr '\n' ' ' < state/t1.pr-poll)
 merged
 ```
 
-No armed watch is lost by upgrading.
+A canonical validated watch remains armed by upgrading, while rejected or stale records are quarantined without publishing monitoring.
 
 ## What this change does not cover
 
 `bin/fm-pr-merge.sh` still addresses GitHub only, by owner and repository.
 It refuses a GitLab merge request URL rather than sending it to the wrong forge, so merging a merge request stays a deliberate manual step until merge parity lands separately.
 
-A GitLab task records no `pr_head=`.
-`gh` exposes the head commit as a selectable field, while plain `glab` exposes it only inside its JSON output, which would need a JSON processor firstmate does not require.
-Both consumers already treat it as optional: `bin/fm-teardown.sh` reads the head from the forge at teardown rather than from metadata and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
+A GitLab task records `pr_head=` from the merge request's JSON `sha` field, and registration refuses when `glab` cannot provide a valid head.
+`bin/fm-teardown.sh` reads the current head from the provider and requires it to equal the registered head before accepting landed delivery.
+`bin/fm-review-diff.sh` still resolves the head from the remote when reviewing legacy metadata that has no recorded head.

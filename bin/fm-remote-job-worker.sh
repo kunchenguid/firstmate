@@ -143,6 +143,15 @@ worker_recover_quarantine() { # <account-home>
   rm -f -- "$WORKER_LOCK/quarantine"
 }
 
+# A publish killed between its mktemp and its mv leaves a rename temp inside
+# the ownership directory, and that stray entry makes every later rmdir of the
+# directory fail - wedging acquisition for good. Only the owner writes here, so
+# discarding those temps alongside the published names is safe.
+worker_discard_lock_temps() {
+  rm -f -- "$WORKER_LOCK"/.pid.* "$WORKER_LOCK"/.start.* \
+    "$WORKER_LOCK"/.command.* "$WORKER_LOCK"/.quarantine.* 2>/dev/null || true
+}
+
 worker_acquire_lock() {
   local account_home=$1 attempt=0
   while [ "$attempt" -lt 150 ]; do
@@ -164,6 +173,7 @@ worker_acquire_lock() {
     fi
     [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] || return 1
     rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" || return 1
+    worker_discard_lock_temps
     rmdir "$WORKER_LOCK" || return 1
   done
   return 1
@@ -190,6 +200,7 @@ worker_cleanup() {
   if [ -z "$owner_pid" ]; then
     [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] &&
       rm -f -- "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
+    worker_discard_lock_temps
     rmdir "$WORKER_LOCK" 2>/dev/null || true
     WORKER_LOCK_HELD=0
     return 0
@@ -202,6 +213,7 @@ worker_cleanup() {
   [ ! -L "$ready" ] && rm -f -- "$ready" 2>/dev/null || true
   [ ! -L "$identity" ] && rm -f -- "$identity" 2>/dev/null || true
   rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
+  worker_discard_lock_temps
   rmdir "$WORKER_LOCK" 2>/dev/null || true
   WORKER_LOCK_HELD=0
 }
@@ -654,7 +666,9 @@ worker_process_once() { # <account-home>
       worker_publish_result "$job" 126 || true
       continue
     fi
-    deadline=$(( $(date +%s) + timeout ))
+    # date has whole-second resolution; round up so flooring cannot shorten a
+    # newly claimed job's execution window by almost one second.
+    deadline=$(( $(date +%s) + timeout + 1 ))
     fm_remote_job_write_number "$job" deadline "$deadline" || {
       worker_publish_result "$job" 125 || true
       continue

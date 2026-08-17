@@ -7,6 +7,8 @@ set -u
 
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$ROOT/bin/fm-remote-job-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-remote-handoff)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
@@ -25,21 +27,13 @@ mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE_ROOT/bin" \
 # So wait for the worker to actually exit and drain the shell's background jobs
 # before removing the tree, then retry rm -rf until the now-quiesced tree is gone.
 fm_remote_handoff_teardown() {
-  local worker_pid i
+  local worker_pid i=0
   touch "$TMP_ROOT/put.release" "$TMP_ROOT/route.release" 2>/dev/null || true
   if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
     worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid" 2>/dev/null || true)
-    if [ -n "$worker_pid" ]; then
-      kill "$worker_pid" 2>/dev/null || true
-      i=0
-      while [ "$i" -lt 500 ] && kill -0 "$worker_pid" 2>/dev/null; do
-        sleep 0.01
-        i=$((i + 1))
-      done
-    fi
+    [ -z "$worker_pid" ] || fm_remote_job_stop_worker_tree "$worker_pid" || true
   fi
   wait 2>/dev/null || true
-  i=0
   while [ "$i" -lt 50 ]; do
     rm -rf -- "$TMP_ROOT" 2>/dev/null && return 0
     sleep 0.02

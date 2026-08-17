@@ -305,7 +305,23 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/gh-axi" "$fakebin/gh"
+  # Hermetic no-mistakes stub: teardown requires an authoritative successful
+  # `axi status` for a no-mistakes ship task. Without it `command -v no-mistakes`
+  # would fall through to whatever real binary is on the runner's own PATH
+  # (mirrors tests/fm-teardown make_case).
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "axi status")
+    branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    head=$(git rev-parse --verify HEAD 2>/dev/null || true)
+    [ -n "$branch" ] && [ -n "$head" ] || exit 0
+    printf 'run:\n  id: "01RUN"\n  branch: %s\n  status: completed\n  head: "%s"\n  pr: ""\n  findings: none\noutcome: passed\n' "$branch" "$head"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
   git init -q --bare "$case_dir/origin.git"
   git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
   git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null

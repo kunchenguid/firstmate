@@ -110,12 +110,10 @@ esac
 exit 0
 SH
   # Default hermetic no-mistakes stub: `axi status` answers FM_FAKE_AXI_STATUS
-  # verbatim (empty by default, i.e. no active run - the pre-teardown run-abort
-  # step is then a no-op), and `axi abort` appends one line to
-  # FM_FAKE_NM_ABORT_LOG when set. This keeps every case hermetic - without it,
-  # `command -v no-mistakes` would fall through to whatever real binary
-  # happens to be on the test runner's own PATH. Tests exercising the run-abort
-  # path override FM_FAKE_AXI_STATUS/FM_FAKE_NM_ABORT_LOG before run_teardown.
+  # verbatim when set, otherwise reports a successful run for the current
+  # worktree. FM_FAKE_NM_NO_RUN covers the missing-run refusal path. This keeps
+  # every case hermetic - without it, `command -v no-mistakes` would fall through
+  # to whatever real binary happens to be on the test runner's own PATH.
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -124,23 +122,16 @@ case "${1:-}" in
     case "${1:-}" in
       status)
         shift
-        run_id=""
-        if [ "${1:-}" = --run ]; then run_id=${2:-}; fi
-        if [ -n "${FM_FAKE_NM_ABORT_LOG:-}" ] \
-           && grep -Fxq "abort --run $run_id" "$FM_FAKE_NM_ABORT_LOG" 2>/dev/null \
-           && [ "${FM_FAKE_NM_ABORT_NOOP:-0}" != 1 ]; then
-          if [ "${FM_FAKE_NM_NOT_FOUND_AFTER_ABORT:-0}" = 1 ]; then
-            printf 'error: "run \\"%s\\" not found"\n' "$run_id" >&2
-            exit 1
-          elif [ "${FM_FAKE_NM_EMPTY_AFTER_ABORT:-0}" = 1 ]; then
-            exit 0
-          elif [ -n "${FM_FAKE_AXI_STATUS_AFTER_ABORT:-}" ]; then
-            printf '%s\n' "$FM_FAKE_AXI_STATUS_AFTER_ABORT"
-          else
-            printf 'run:\n  id: "%s"\n  outcome: cancelled\n' "$run_id"
+        if [ -n "${FM_FAKE_AXI_STATUS:-}" ]; then
+          printf '%s\n' "$FM_FAKE_AXI_STATUS"
+        elif [ "${FM_FAKE_NM_NO_RUN:-0}" != 1 ]; then
+          branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+          head=$(git rev-parse --verify HEAD 2>/dev/null || true)
+          if [ -n "$branch" ] && [ -n "$head" ]; then
+            printf 'run:\n  id: "01RUN"\n  branch: %s\n  status: completed\n  head: "%s"\n  pr: ""\n  findings: none\noutcome: passed\n' "$branch" "$head"
           fi
         else
-          printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"
+          :
         fi
         ;;
       abort)
@@ -284,9 +275,52 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+add_gh_pr_open_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    printf '%s\t%s\n' 'OPEN' '$head'
+    exit 0
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+add_gitlab_mr_merged_for_head() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *"--output json"*)
+    printf '{"sha":"%s","state":"%s","title":"fixture merge request","description":"fixture body"}\n' \
+      "${FM_TEST_GLAB_HEAD:?}" "${FM_TEST_GLAB_STATE:-merged}"
+    exit 0
+    ;;
+esac
+case "${1:-} ${2:-}" in
+  "mr view")
+    printf '%s\n' 'title: fixture merge request' 'state: opened' 'author: someone' '--' 'fixture body'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/glab"
+}
+
 append_pr_meta_for_current_head() {
   local case_dir=$1 head
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  append_pr_meta_for_head "$case_dir" "$head"
+}
+
+append_pr_meta_for_head() {
+  local case_dir=$1 head=$2
   printf '%s\n' \
     'pr=https://github.com/example/repo/pull/7' \
     "pr_head=$head" >> "$case_dir/state/task-x1.meta"
@@ -294,7 +328,7 @@ append_pr_meta_for_current_head() {
 
 append_pr_meta_url() {
   local case_dir=$1
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  append_pr_meta_for_current_head "$case_dir"
 }
 
 commit_tree_from_wt_head() {
@@ -583,7 +617,8 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   local case_dir out
   case_dir=$(make_case tasks-axi-reminder)
   write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  append_pr_meta_for_current_head "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   add_compatible_tasks_axi "$case_dir"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
@@ -602,7 +637,8 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
   local case_dir out
   case_dir=$(make_case tasks-axi-manual-optout)
   write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  append_pr_meta_for_current_head "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   add_compatible_tasks_axi "$case_dir"
 
@@ -720,9 +756,9 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
   case_dir=$(make_case squash-ancestor)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
-  append_pr_meta_url "$case_dir"
   local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
+  append_pr_meta_for_head "$case_dir" "$pr_head"
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   set +e
@@ -776,8 +812,8 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   git -C "$case_dir/wt" push -q origin "$parent_head:refs/heads/fm/task-x1"
   git -C "$case_dir/project" fetch -q origin fm/task-x1
   wt_commit_file "$case_dir" feature.txt hello "add feature"
-  append_pr_meta_url "$case_dir"
   pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
+  append_pr_meta_for_head "$case_dir" "$pr_head"
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   set +e
@@ -808,6 +844,72 @@ test_merged_pr_with_later_local_commit_refuses() {
   expect_code 1 "$rc" "stale-pr-head: teardown should refuse when HEAD moved after PR recording"
   grep -q REFUSED "$case_dir/stderr" || fail "stale-pr-head: no REFUSED line in stderr"
   pass "merged PR does not allow teardown after a later local commit"
+}
+
+test_merged_pr_with_force_pushed_head_refuses() {
+  local case_dir rc recorded_head provider_head
+  case_dir=$(make_case force-pushed-pr-head)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
+  recorded_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  provider_head=$(commit_tree_from_wt_head "$case_dir" "$recorded_head" "force-pushed merged head")
+  add_gh_pr_merged_for_head "$case_dir" "$provider_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "force-pushed-pr-head: a changed merged head should refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "force-pushed-pr-head: no REFUSED line in stderr"
+  pass "a force-pushed merged PR head cannot satisfy the recorded delivery proof"
+}
+
+test_merged_pr_with_mismatched_head_does_not_use_content_fallback() {
+  local case_dir rc local_head base pr_head
+  case_dir=$(make_case merged-pr-head-mismatch)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_url "$case_dir"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  base=$(git -C "$case_dir/wt" rev-parse "$local_head^")
+  pr_head=$(printf '%s\n' "unrelated merged head" | git -C "$case_dir/wt" commit-tree "$base^{tree}" -p "$base")
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merged-pr-head-mismatch: a merged PR with the wrong head should refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "merged-pr-head-mismatch: no REFUSED line in stderr"
+  pass "a merged PR whose head omits local work cannot use content fallback"
+}
+
+test_merged_pr_with_invalid_head_does_not_use_content_fallback() {
+  local case_dir rc
+  case_dir=$(make_case merged-pr-invalid-head)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_url "$case_dir"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" HEAD
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "merged-pr-invalid-head: a merged PR without a valid head should refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "merged-pr-invalid-head: no REFUSED line in stderr"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "merged-pr-invalid-head: teardown erased task metadata"
+  pass "a merged PR without a valid head cannot use content fallback"
 }
 
 test_pr_check_does_not_refresh_stale_pr_head() {
@@ -887,6 +989,89 @@ test_content_in_default_fallback_allows() {
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
 }
 
+test_recorded_open_pr_does_not_use_content_fallback() {
+  local case_dir rc pr_head
+  case_dir=$(make_case recorded-open-pr)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  append_pr_meta_url "$case_dir"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_open_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "recorded-open-pr: an open PR should refuse even when content is in default"
+  grep -q REFUSED "$case_dir/stderr" || fail "recorded-open-pr: no REFUSED line in stderr"
+  pass "a recorded open PR cannot be satisfied by the content fallback"
+}
+
+test_recorded_gitlab_merged_pr_requires_matching_source_head() {
+  local case_dir rc head
+  case_dir=$(make_case recorded-gitlab-merged-pr)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' 'pr=https://gitlab.example/group/project/-/merge_requests/7' "pr_head=$head" \
+    >> "$case_dir/state/task-x1.meta"
+  add_gitlab_mr_merged_for_head "$case_dir" "$head"
+
+  set +e
+  FM_TEST_GLAB_HEAD=$head run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "recorded-gitlab-merged-pr: matching merged source head should allow teardown"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "recorded-gitlab-merged-pr: teardown refused the confirmed GitLab MR"
+  pass "a recorded GitLab MR lands only with merged state and matching source-head proof"
+}
+
+test_recorded_gitlab_missing_head_refuses() {
+  local case_dir rc head
+  case_dir=$(make_case recorded-gitlab-missing-head)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf '%s\n' 'pr=https://gitlab.example/group/project/-/merge_requests/7' \
+    >> "$case_dir/state/task-x1.meta"
+  add_gitlab_mr_merged_for_head "$case_dir" "$head"
+
+  set +e
+  FM_TEST_GLAB_HEAD=$head run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "recorded-gitlab-missing-head: missing registration head should refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "recorded-gitlab-missing-head: no REFUSED line in stderr"
+  pass "a recorded GitLab MR without a registered head cannot land"
+}
+
+test_recorded_pr_lookup_error_does_not_use_content_fallback() {
+  local case_dir rc
+  case_dir=$(make_case recorded-pr-error)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_url "$case_dir"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_axi_error "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "recorded-pr-error: a PR lookup error should refuse even when content is in default"
+  grep -q REFUSED "$case_dir/stderr" || fail "recorded-pr-error: no REFUSED line in stderr"
+  pass "a recorded PR lookup error cannot use the content fallback"
+}
+
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
   case_dir=$(make_case content-stale-ref)
@@ -910,11 +1095,11 @@ test_dirty_worktree_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case dirty-wt)
   write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   # The committed work has fully landed (merged PR + content in default), but an
   # uncommitted edit remains. Dirtiness must refuse regardless: the reset would
   # discard those changes.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
   land_on_origin_main "$case_dir" feature.txt hello
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
@@ -935,10 +1120,10 @@ test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
   write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   # Real content not pushed, the PR lookup errors, and origin/main never gained the
   # content. The fail-safe must refuse rather than allow on a transient gh failure.
   wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_pr_meta_for_current_head "$case_dir"
   add_gh_axi_error "$case_dir"
 
   set +e
@@ -1305,6 +1490,25 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_no_mistakes_force_discards_without_delivery_or_backlog() {
+  local case_dir rc
+  case_dir=$(make_case no-mistakes-force-discard)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "unfinished work"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-mistakes-force-discard: --force should discard unfinished work"
+  grep -q 'teardown task-x1 discarded' "$case_dir/stdout" \
+    || fail "no-mistakes-force-discard: teardown did not identify the action as discard"
+  ! grep -q '^Backlog:' "$case_dir/stdout" \
+    || fail "no-mistakes-force-discard: forced discard prompted completion bookkeeping"
+  pass "forced no-mistakes teardown discards unfinished work without claiming delivery"
+}
+
 test_teardown_missing_busy_sidecar_completes() {
   local case_dir gen rc
   case_dir=$(make_case missing-busy-sidecar)
@@ -1493,8 +1697,8 @@ SH
   [ -s "$thlog" ] || fail "herdr-orphan-refusal: the successful retry never returned the isolated copy"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "herdr-orphan-refusal: the successful retry left the metadata behind"
   [ ! -e "$case_dir/state/task-x1.status" ] || fail "herdr-orphan-refusal: the successful retry left the status record behind"
-  grep -q "teardown task-x1 complete" "$case_dir/stdout2" \
-    || fail "herdr-orphan-refusal: the successful retry did not report completion"
+  grep -q "teardown task-x1 discarded" "$case_dir/stdout2" \
+    || fail "herdr-orphan-refusal: the successful retry did not report discard"
   pass "herdr flat teardown refuses before returning the isolated copy under lock contention and the retry completes cleanly"
 }
 
@@ -2002,10 +2206,9 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
   pass "herdr projection teardown surfaces failed focus restoration without turning confirmed cleanup into a hard failure"
 }
 
-# --- Fix 1: conclude/abort the task's own parked no-mistakes run before the
-# worker is removed, and Fix 2: reap leaked descendant processes rooted under
-# the task's own worktree/tasktmp - both exercised through the real teardown
-# path (bin/fm-teardown.sh), never by matching its source text. ------------
+# --- Guard the no-mistakes delivery result and reap leaked descendant
+# processes rooted under the task's own worktree/tasktmp through the real
+# teardown path (bin/fm-teardown.sh), never by matching its source text. -----
 
 # A parked-at-a-gate `axi status` TOON payload for <branch>/<head>, matching
 # the shape no-mistakes actually emits (see tests/fm-crew-state.test.sh's
@@ -2037,10 +2240,23 @@ steps[1]{step,status,findings,summary}:
 EOF
 }
 
+terminal_axi_status_toon() {  # <branch> <head> <outcome> [run-id] [status]
+  cat <<EOF
+run:
+  id: "${4:-01RUN}"
+  branch: $1
+  status: ${5:-completed}
+  head: "$2"
+  pr: ""
+  findings: none
+outcome: $3
+EOF
+}
+
 # Land a shippable commit on the task branch and push it to origin, the same
 # "definitely landed, teardown must ALLOW" shape test_no_mistakes_origin_remote_allows
-# uses, so these new cases exercise the abort/reap steps on a real successful
-# teardown rather than a refusal path.
+# uses, so these cases exercise the delivery guard and process reap on a real
+# successful teardown rather than a refusal path.
 land_shippable_commit() {
   local case_dir=$1
   wt_commit "$case_dir" "shippable work"
@@ -2048,139 +2264,87 @@ land_shippable_commit() {
   git -C "$case_dir/project" fetch -q origin
 }
 
-test_parked_own_run_is_aborted_before_teardown() {
-  local case_dir rc head
-  case_dir=$(make_case parked-run-abort)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-
-  local rc=0
-  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
-  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 0 "$rc" "parked-run-abort: teardown should still succeed"
-  assert_present "$case_dir/nm-abort.log" \
-    "parked-run-abort: no-mistakes axi abort was never invoked for the task's own parked run"
-  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
-    "parked-run-abort: no-mistakes axi abort did not target the verified run id"
-  assert_grep "parked at a gate; aborting" "$case_dir/stderr" \
-    "parked-run-abort: teardown did not report aborting the parked run before removing the worker"
-  pass "a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed"
+test_no_mistakes_requires_successful_terminal_result() {
+  local label outcome case_dir head rc
+  while IFS='|' read -r label outcome; do
+    [ -n "$label" ] || continue
+    case_dir=$(make_case "nm-incomplete-$label")
+    write_meta "$case_dir" no-mistakes ship
+    land_shippable_commit "$case_dir"
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    rc=0
+    if [ "$outcome" = missing ]; then
+      FM_FAKE_NM_NO_RUN=1 run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    else
+      FM_FAKE_AXI_STATUS="$(terminal_axi_status_toon fm/task-x1 "$head" "$outcome")" \
+        run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    fi
+    expect_code 1 "$rc" "$label: incomplete no-mistakes delivery should refuse"
+    assert_contains "$(cat "$case_dir/stderr")" \
+      "REFUSED: no-mistakes delivery for task-x1" \
+      "$label: refusal did not identify the guarded delivery"
+    assert_not_contains "$(cat "$case_dir/stdout")" \
+      "Backlog: task-x1 just finished" \
+      "$label: backlog completion reminder bypassed the delivery guard"
+    assert_present "$case_dir/wt" "$label: teardown removed the worktree"
+    assert_present "$case_dir/state/task-x1.meta" "$label: teardown removed task metadata"
+  done <<'ROWS'
+missing|missing
+checks-passed|checks-passed
+pr-ready|pr-ready
+commit-only|commit-only
+unknown|unknown
+new|new
+error|error
+ask-user|ask-user
+failed|failed
+cancelled|cancelled
+incomplete|incomplete
+ROWS
+  pass "no-mistakes teardown refuses missing, partial, and unsuccessful terminal results"
 }
 
-test_mismatched_run_after_abort_refuses_unconfirmed() {
-  local case_dir rc head
-  case_dir=$(make_case parked-run-replaced)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-
-  rc=0
-  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head" 01RUN)" \
-  FM_FAKE_AXI_STATUS_AFTER_ABORT="$(parked_axi_status_toon fm/task-x1 "$head" 02RUN)" \
-  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 1 "$rc" "parked-run-replaced: a different run does not confirm the targeted abort"
-  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
-    "parked-run-replaced: teardown did not abort only the verified run"
-  assert_present "$case_dir/wt" "parked-run-replaced: teardown removed the worktree without confirmation"
-  pass "a different run cannot confirm the targeted abort"
+test_no_mistakes_refuses_active_run_without_abort() {
+  local label case_dir head rc abort_log
+  for label in parked running; do
+    case_dir=$(make_case "nm-active-$label")
+    write_meta "$case_dir" no-mistakes ship
+    land_shippable_commit "$case_dir"
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    abort_log="$case_dir/nm-abort.log"
+    rc=0
+    if [ "$label" = parked ]; then
+      FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+      FM_FAKE_NM_ABORT_LOG="$abort_log" \
+        run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    else
+      FM_FAKE_AXI_STATUS="$(running_axi_status_toon fm/task-x1 "$head")" \
+      FM_FAKE_NM_ABORT_LOG="$abort_log" \
+        run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    fi
+    expect_code 1 "$rc" "$label: active no-mistakes run should refuse"
+    assert_absent "$abort_log" "$label: teardown aborted an incomplete run"
+    assert_present "$case_dir/wt" "$label: teardown removed the worktree"
+  done
+  pass "active no-mistakes runs remain untouched and block teardown"
 }
 
-test_empty_status_after_abort_refuses_unconfirmed() {
-  local case_dir rc head
-  case_dir=$(make_case parked-run-empty-confirmation)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-
-  rc=0
-  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
-  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
-  FM_FAKE_NM_EMPTY_AFTER_ABORT=1 \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 1 "$rc" "parked-run-empty-confirmation: empty status should refuse"
-  assert_present "$case_dir/wt" "parked-run-empty-confirmation: teardown removed the worktree"
-  pass "empty post-abort status is not accepted as confirmation"
-}
-
-test_not_found_status_after_abort_confirms_completion() {
-  local case_dir rc head
-  case_dir=$(make_case parked-run-not-found-confirmation)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-
-  rc=0
-  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
-  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
-  FM_FAKE_NM_NOT_FOUND_AFTER_ABORT=1 \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 0 "$rc" "parked-run-not-found-confirmation: explicit not-found should confirm completion"
-  pass "the CLI's exact run-not-found signal confirms completion"
-}
-
-test_parked_own_run_refuses_when_abort_is_unconfirmed() {
-  local case_dir rc head pid
-  case_dir=$(make_case parked-run-abort-unconfirmed)
-  write_meta "$case_dir" no-mistakes ship
-  land_shippable_commit "$case_dir"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  ( cd "$case_dir/wt" && exec sleep 300 ) &
-  pid=$!
-  disown
-
-  cat > "$case_dir/fakebin/treehouse" <<EOF
-#!/usr/bin/env bash
-printf 'return\n' >> "$case_dir/treehouse.log"
-EOF
-  chmod +x "$case_dir/fakebin/treehouse"
-
-  rc=0
-  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
-  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
-  FM_FAKE_NM_ABORT_NOOP=1 \
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-
-  expect_code 1 "$rc" "parked-run-abort-unconfirmed: teardown should refuse"
-  assert_grep "REFUSED: no-mistakes run for task-x1 is still parked after axi abort" "$case_dir/stderr" \
-    "parked-run-abort-unconfirmed: teardown did not explain the parked-run refusal"
-  assert_present "$case_dir/wt" \
-    "parked-run-abort-unconfirmed: teardown removed the worktree after refusing"
-  assert_present "$case_dir/state/task-x1.meta" \
-    "parked-run-abort-unconfirmed: teardown removed task metadata after refusing"
-  assert_absent "$case_dir/treehouse.log" \
-    "parked-run-abort-unconfirmed: teardown returned the worktree after refusing"
-  kill -0 "$pid" 2>/dev/null || fail "parked-run-abort-unconfirmed: process reap ran before refusal"
-  kill -KILL "$pid" 2>/dev/null || true
-  pass "teardown refuses before reap or removal when a task-owned run remains parked"
-}
-
-test_another_branchs_parked_run_is_never_touched() {
+test_another_branchs_run_is_never_touched() {
   local case_dir rc
   case_dir=$(make_case parked-run-not-ours)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
 
   local rc=0
-  # A parked run reported for a DIFFERENT branch - e.g. another crew's task
-  # still validating on the shared gate - must never be aborted by this task's
-  # teardown.
   FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/some-other-task deadbeef)" \
   FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 0 "$rc" "parked-run-not-ours: teardown should still succeed"
+  expect_code 1 "$rc" "other-branch: an unowned run should not satisfy teardown"
   assert_absent "$case_dir/nm-abort.log" \
-    "parked-run-not-ours: teardown called axi abort for a run on another branch"
-  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
-    "parked-run-not-ours: teardown reported aborting a run it does not own"
-  pass "a parked run on another branch is never aborted by this task's teardown (ownership is precise)"
+    "other-branch: teardown touched another task's run"
+  assert_present "$case_dir/wt" "other-branch: teardown removed the worktree"
+  pass "a no-mistakes run on another branch cannot satisfy teardown"
 }
 
 test_own_autonomous_run_is_left_alone() {
@@ -2195,13 +2359,32 @@ test_own_autonomous_run_is_left_alone() {
   FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 0 "$rc" "autonomous-run-left-alone: teardown should still succeed"
+  expect_code 1 "$rc" "autonomous-run-left-alone: active run should refuse"
   assert_absent "$case_dir/nm-abort.log" \
     "autonomous-run-left-alone: teardown aborted a task-owned autonomous run"
-  assert_not_contains "$(cat "$case_dir/stderr")" "aborting" \
-    "autonomous-run-left-alone: teardown reported aborting an autonomous run"
-  pass "a task-owned autonomous running step is left alone rather than aborted"
+  assert_present "$case_dir/wt" \
+    "autonomous-run-left-alone: teardown removed the worktree"
+  pass "a task-owned autonomous run remains untouched and blocks teardown"
 }
+
+test_no_mistakes_alternate_successful_outcome_allows() {
+  local case_dir head rc
+  case_dir=$(make_case nm-alternate-success)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  git -C "$case_dir/project" merge -q --ff-only origin/fm/task-x1
+  git -C "$case_dir/project" push -q origin main
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  rc=0
+  FM_FAKE_AXI_STATUS="$(terminal_axi_status_toon fm/task-x1 "$head" delivered)" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" \
+    "alternate-success: a successful non-passed outcome should allow teardown"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "alternate-success: teardown retained task metadata"
+  pass "a successful terminal outcome is accepted without hard-coding passed"
+}
+
 
 test_leaked_worktree_process_is_reaped() {
   local case_dir rc pid
@@ -2283,6 +2466,8 @@ EOF
   chmod +x "$case_dir/fakebin/tmux"
 
   rc=0
+  mkdir -p "$case_dir/home/.local/bin"
+  HOME="$case_dir/home" BASH_ENV=/dev/null \
   FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
@@ -2549,46 +2734,39 @@ EOF
   pass "a process exiting during identity lookup does not block teardown"
 }
 
-test_run_abort_precedes_process_reap_precedes_worktree_removal() {
-  local case_dir rc head pid abort_log
-  case_dir=$(make_case abort-then-reap-then-remove-order)
+test_successful_run_precedes_process_reap_and_worktree_removal() {
+  local case_dir rc head pid
+  case_dir=$(make_case delivery-then-reap-then-remove-order)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  abort_log="$case_dir/nm-abort.log"
 
   ( cd "$case_dir/wt" && exec sleep 300 ) &
   pid=$!
   disown
   sleep 0.3
-  kill -0 "$pid" 2>/dev/null || fail "abort-then-reap-then-remove-order: setup sleeper did not start"
+  kill -0 "$pid" 2>/dev/null || fail "delivery-then-reap-then-remove-order: setup sleeper did not start"
 
   # A treehouse fake that snapshots, at the exact moment the destructive
-  # worktree return runs, whether the run was already aborted and whether the
-  # leaked process was already reaped - direct causal proof of ordering from
-  # real observed state, not a source-text or line-number correlation.
+  # worktree return runs, whether the leaked process was already reaped.
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
 if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
 exit 0
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
 
   rc=0
-  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
-  FM_FAKE_NM_ABORT_LOG="$abort_log" \
+  FM_FAKE_AXI_STATUS="$(terminal_axi_status_toon fm/task-x1 "$head" delivered)" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  expect_code 0 "$rc" "abort-then-reap-then-remove-order: teardown should still succeed"
+  expect_code 0 "$rc" "delivery-then-reap-then-remove-order: teardown should still succeed"
   kill -0 "$pid" 2>/dev/null && { kill -KILL "$pid" 2>/dev/null || true; }
 
   assert_present "$case_dir/order.log" \
-    "abort-then-reap-then-remove-order: the destructive worktree return was never invoked"
-  assert_grep "abort-already-happened" "$case_dir/order.log" \
-    "abort-then-reap-then-remove-order: the run was not yet aborted when the worktree return ran"
+    "delivery-then-reap-then-remove-order: the destructive worktree return was never invoked"
   assert_grep "reap-already-happened" "$case_dir/order.log" \
-    "abort-then-reap-then-remove-order: the leaked process was not yet reaped when the worktree return ran"
-  pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
+    "delivery-then-reap-then-remove-order: the leaked process was not yet reaped when the worktree return ran"
+  pass "the successful delivery result is verified before leaked-process reap and worktree return"
 }
 
 test_local_only_fork_remote_allows
@@ -2599,6 +2777,7 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_no_mistakes_force_discards_without_delivery_or_backlog
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
@@ -2616,9 +2795,16 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
+test_merged_pr_with_force_pushed_head_refuses
+test_merged_pr_with_mismatched_head_does_not_use_content_fallback
+test_merged_pr_with_invalid_head_does_not_use_content_fallback
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
+test_recorded_open_pr_does_not_use_content_fallback
+test_recorded_gitlab_merged_pr_requires_matching_source_head
+test_recorded_gitlab_missing_head_refuses
+test_recorded_pr_lookup_error_does_not_use_content_fallback
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
@@ -2632,13 +2818,11 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
-test_parked_own_run_is_aborted_before_teardown
-test_parked_own_run_refuses_when_abort_is_unconfirmed
-test_mismatched_run_after_abort_refuses_unconfirmed
-test_empty_status_after_abort_refuses_unconfirmed
-test_not_found_status_after_abort_confirms_completion
-test_another_branchs_parked_run_is_never_touched
+test_no_mistakes_requires_successful_terminal_result
+test_no_mistakes_refuses_active_run_without_abort
+test_another_branchs_run_is_never_touched
 test_own_autonomous_run_is_left_alone
+test_no_mistakes_alternate_successful_outcome_allows
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
 test_lsof_absent_reaps_tmux_process_group
@@ -2648,4 +2832,4 @@ test_exec_changed_process_is_still_reaped
 test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
-test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_successful_run_precedes_process_reap_and_worktree_removal

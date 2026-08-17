@@ -24,6 +24,17 @@ FM_PR_PATH=
 FM_PR_OWNER=
 FM_PR_REPO=
 FM_PR_NUMBER=
+FM_PR_PROVIDER_HEAD=
+FM_PR_PROVIDER_TITLE=
+FM_PR_PROVIDER_BODY=
+FM_PR_PROVIDER_STATE=
+FM_PR_PROVIDER_FIELDS_STATUS=
+FM_PR_DELIVERY_ISSUE_KEY=
+FM_PR_DELIVERY_TITLE_RULE=
+FM_PR_DELIVERY_LINK_RULE=
+FM_PR_DELIVERY_WORKTREE=
+FM_PR_DELIVERY_RULE=0
+FM_PR_DELIVERY_ERROR=
 FM_PR_DATA_PROVIDER=
 FM_PR_DATA_URL=
 FM_PR_DATA_HOST=
@@ -107,6 +118,194 @@ fm_task_id_creation_valid() {
   local id=${1-}
   fm_pr_task_id_valid "$id" || return 1
   [ "${#id}" -le 64 ]
+}
+
+fm_pr_delivery_issue_key_valid() {
+  local issue_key=${1-}
+  local LC_ALL=C
+  [ -n "$issue_key" ] || return 1
+  case "$issue_key" in
+    *[[:space:]]* | *[[:cntrl:]]*) return 1 ;;
+  esac
+}
+
+fm_pr_delivery_rule_valid() {
+  local rule=${1-}
+  [ -n "$rule" ] || return 1
+  case "$rule" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  case "$rule" in
+    *'{issue_key}'*) ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_pr_delivery_rule_expand() {
+  local rule=$1 issue_key=$2
+  printf '%s' "${rule//\{issue_key\}/$issue_key}"
+}
+
+fm_pr_delivery_title_matches() {
+  local title=$1 rule=$2 issue_key=$3 expected
+  expected=$(fm_pr_delivery_rule_expand "$rule" "$issue_key")
+  case "$title" in
+    "$expected"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_pr_delivery_body_links_issue() {
+  local body=$1 rule=$2 issue_key=$3 expected
+  expected=$(fm_pr_delivery_rule_expand "$rule" "$issue_key")
+  FM_PR_DELIVERY_NEEDLE=$expected awk '
+    BEGIN { needle = ENVIRON["FM_PR_DELIVERY_NEEDLE"] }
+    {
+      rest = $0
+      while ((pos = index(rest, needle)) > 0) {
+        prefix = substr(rest, 1, pos - 1)
+        suffix = substr(rest, pos + length(needle))
+        if ((prefix == "" || substr(prefix, length(prefix), 1) !~ /[[:alnum:]_=?#\/-]/) \
+          && (suffix == "" || substr(suffix, 1, 1) !~ /[[:alnum:]_-]/)) found = 1
+        rest = substr(rest, pos + length(needle))
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' <<< "$body"
+}
+
+fm_pr_provider_fields_load() {
+  local provider=$1 url=$2 host=$3 path=$4 number=$5 worktree=$6 required=${7:-1}
+  local raw_view remote_head title body state json_view
+  FM_PR_PROVIDER_HEAD=
+  FM_PR_PROVIDER_TITLE=
+  FM_PR_PROVIDER_BODY=
+  FM_PR_PROVIDER_STATE=
+  FM_PR_PROVIDER_FIELDS_STATUS=unavailable
+  if [ "$required" != 1 ]; then
+    FM_PR_PROVIDER_FIELDS_STATUS=not-required
+    return 0
+  fi
+  case "$provider" in
+    github)
+      if command -v gh >/dev/null 2>&1; then
+        if [ -n "$worktree" ] && [ -d "$worktree" ]; then
+          raw_view=$(cd "$worktree" && gh pr view "$url" --json headRefOid,title,body --jq '[.headRefOid, .title, .body] | @tsv' 2>/dev/null) || raw_view=
+        else
+          raw_view=$(gh pr view "$url" --json headRefOid,title,body --jq '[.headRefOid, .title, .body] | @tsv' 2>/dev/null) || raw_view=
+        fi
+        case "$raw_view" in *$'\n'*) raw_view= ;; esac
+        if [ -n "$raw_view" ]; then
+          IFS=$'\t' read -r remote_head title body <<< "$raw_view"
+          if printf -v remote_head '%b' "$remote_head" \
+            && printf -v title '%b' "$title" \
+            && printf -v body '%b' "$body"; then
+            # shellcheck disable=SC2034 # Consumed by the sourceable PR-check caller.
+            FM_PR_PROVIDER_HEAD=$remote_head
+            FM_PR_PROVIDER_TITLE=$title
+            FM_PR_PROVIDER_BODY=$body
+          fi
+        fi
+      fi
+      ;;
+    gitlab)
+      json_view=$(glab mr view "$number" -R "https://$host/$path" --output json 2>/dev/null) || json_view=
+      if {
+        IFS= read -r -d '' remote_head
+        IFS= read -r -d '' title
+        IFS= read -r -d '' body
+        IFS= read -r -d '' state
+      } < <(
+        printf '%s\n' "$json_view" | node -e '
+const value = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const body = value.description == null ? "" : value.description;
+const state = value.state == null ? "" : value.state;
+const fields = [value.sha, value.title, body, state];
+if (fields.some(field => typeof field !== "string" || field.includes("\0"))) {
+  process.exit(1);
+}
+process.stdout.write(fields.join("\0") + "\0");
+' 2>/dev/null
+      ); then
+        FM_PR_PROVIDER_HEAD=$remote_head
+        FM_PR_PROVIDER_TITLE=$title
+        FM_PR_PROVIDER_BODY=$body
+        # shellcheck disable=SC2034 # Output global consumed by sourceable callers.
+        FM_PR_PROVIDER_STATE=$state
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+  fm_pr_head_valid "$FM_PR_PROVIDER_HEAD" || return 1
+  # shellcheck disable=SC2034 # Output global consumed by sourceable callers.
+  FM_PR_PROVIDER_FIELDS_STATUS=loaded
+}
+
+fm_pr_task_delivery_metadata_valid() {
+  local meta=$1
+  local issue_key title_rule link_rule worktree
+  FM_PR_DELIVERY_ISSUE_KEY=
+  FM_PR_DELIVERY_TITLE_RULE=
+  FM_PR_DELIVERY_LINK_RULE=
+  FM_PR_DELIVERY_WORKTREE=
+  FM_PR_DELIVERY_RULE=0
+  FM_PR_DELIVERY_ERROR=
+  issue_key=$(grep '^issue_key=' "$meta" | tail -1 | cut -d= -f2- || true)
+  title_rule=$(grep '^delivery_title_rule=' "$meta" | tail -1 | cut -d= -f2- || true)
+  link_rule=$(grep '^delivery_link_rule=' "$meta" | tail -1 | cut -d= -f2- || true)
+  worktree=$(grep '^worktree=' "$meta" | tail -1 | cut -d= -f2- || true)
+  [ -z "$issue_key" ] || fm_pr_delivery_issue_key_valid "$issue_key" || {
+    FM_PR_DELIVERY_ERROR='invalid-issue-key'
+    return 1
+  }
+  if [ -n "$title_rule" ] || [ -n "$link_rule" ]; then
+    if [ -z "$issue_key" ] || [ -z "$title_rule" ] || [ -z "$link_rule" ] \
+      || ! fm_pr_delivery_rule_valid "$title_rule" \
+      || ! fm_pr_delivery_rule_valid "$link_rule"; then
+      FM_PR_DELIVERY_ERROR='invalid-delivery-rule'
+      return 1
+    fi
+  fi
+  [ -z "$issue_key" ] || [ -z "$title_rule" ] || [ -z "$link_rule" ] || FM_PR_DELIVERY_RULE=1
+  FM_PR_DELIVERY_ISSUE_KEY=$issue_key
+  FM_PR_DELIVERY_TITLE_RULE=$title_rule
+  FM_PR_DELIVERY_LINK_RULE=$link_rule
+  FM_PR_DELIVERY_WORKTREE=$worktree
+}
+
+fm_pr_task_delivery_provider_fields_valid() {
+  FM_PR_DELIVERY_ERROR=
+  [ "$FM_PR_DELIVERY_RULE" = 1 ] || return 0
+  [ -n "$FM_PR_PROVIDER_TITLE" ] && [ -n "$FM_PR_PROVIDER_BODY" ] || {
+    FM_PR_DELIVERY_ERROR='provider-fields'
+    return 1
+  }
+  fm_pr_delivery_title_matches \
+    "$FM_PR_PROVIDER_TITLE" "$FM_PR_DELIVERY_TITLE_RULE" "$FM_PR_DELIVERY_ISSUE_KEY" || {
+      FM_PR_DELIVERY_ERROR='title-mismatch'
+      return 1
+    }
+  fm_pr_delivery_body_links_issue \
+    "$FM_PR_PROVIDER_BODY" "$FM_PR_DELIVERY_LINK_RULE" "$FM_PR_DELIVERY_ISSUE_KEY" || {
+      FM_PR_DELIVERY_ERROR='body-link-mismatch'
+      return 1
+    }
+}
+
+fm_pr_task_delivery_fields_valid() {
+  local meta=$1 provider=$2 url=$3 host=$4 path=$5 number=$6 required=${7:-0}
+  local provider_required=$required
+  fm_pr_task_delivery_metadata_valid "$meta" "$provider" "$host" || return 1
+  [ "$required" != 1 ] || fm_pr_metadata_identity_parse "$meta" 1 || return 1
+  [ "$FM_PR_DELIVERY_RULE" = 1 ] && provider_required=1
+  fm_pr_provider_fields_load "$provider" "$url" "$host" "$path" "$number" \
+    "$FM_PR_DELIVERY_WORKTREE" "$provider_required" || {
+      # shellcheck disable=SC2034 # Consumed by the sourceable PR-check caller.
+      FM_PR_DELIVERY_ERROR='provider-fields'
+      return 1
+    }
+  fm_pr_task_delivery_provider_fields_valid || return 1
+  [ "$required" != 1 ] || [ "$FM_PR_PROVIDER_HEAD" = "$FM_PR_META_HEAD" ]
 }
 
 # GitLab serves self-hosted instances, so the host is part of the identity
@@ -286,12 +485,13 @@ fm_pr_regular_destination_on_device_or_absent() {
 }
 
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 require_head=${2:-0} line value pr_count=0 seen_pr=0 post_pr_invalid=0 head_count=0
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
   FM_PR_META_PATH=
   FM_PR_META_NUMBER=
+  FM_PR_META_HEAD=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -312,6 +512,8 @@ fm_pr_metadata_identity_parse() {
       pr_head=*)
         if [ "$seen_pr" -eq 1 ]; then
           value=${line#pr_head=}
+          head_count=$((head_count + 1))
+          [ "$head_count" -eq 1 ] && FM_PR_META_HEAD=$value
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
@@ -324,7 +526,10 @@ fm_pr_metadata_identity_parse() {
   done < "$file"
   [ "$pr_count" -eq 1 ] || return 1
   [ "$post_pr_invalid" -eq 0 ] || return 1
-  [ -n "$FM_PR_META_URL" ]
+  [ -n "$FM_PR_META_URL" ] || return 1
+  if [ "$require_head" = 1 ]; then
+    [ "$head_count" -eq 1 ] && fm_pr_head_valid "$FM_PR_META_HEAD" || return 1
+  fi
 }
 
 # Sidecar layout: provider, url, host, path, number, one per line. A sidecar
@@ -366,8 +571,9 @@ fm_pr_poll_data_parse() {
 # identity as the sidecar, then the two hashes and the two file identities.
 # The version tag moved to v2 with the provider tag, so a registration written
 # by the previous release is recognised as old and refused. The non-executing
-# migration in bin/fm-pr-check-migrate.sh then rebuilds that poll from the
-# task's recorded pull request URL.
+# migration in bin/fm-pr-check-migrate.sh revalidates delivery fields, rebuilds
+# only accepted polls from the task's recorded pull request URL, and quarantines
+# rejected records without publishing a replacement poll.
 fm_pr_poll_registration_parse() {
   local file=$1 version id provider url host path number data_hash template_hash data_identity check_identity
   FM_PR_REG_ID=
@@ -616,6 +822,16 @@ fm_pr_poll_artifacts_valid() {
   [ "$FM_PR_META_HOST" = "$FM_PR_DATA_HOST" ] || return 1
   [ "$FM_PR_META_PATH" = "$FM_PR_DATA_PATH" ] || return 1
   [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ]
+}
+
+fm_pr_poll_delivery_fields_valid() {
+  local state=$1 id=$2 template=$3 data
+  fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
+  data="$state/$id.pr-poll"
+  fm_pr_poll_data_parse "$data" || return 1
+  fm_pr_task_delivery_fields_valid "$state/$id.meta" \
+    "$FM_PR_DATA_PROVIDER" "$FM_PR_DATA_URL" "$FM_PR_DATA_HOST" \
+    "$FM_PR_DATA_PATH" "$FM_PR_DATA_NUMBER" 1
 }
 
 fm_pr_poll_snapshot_capture() {

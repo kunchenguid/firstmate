@@ -256,8 +256,10 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
-    "explicit no-mistakes brief did not render the pipeline definition of done"
+  assert_grep "Invoke and drive the no-mistakes pipeline immediately after the implementation commit" "$brief" \
+    "explicit no-mistakes brief did not require immediate pipeline delivery"
+  assert_no_grep "The task is complete only when committed" "$brief" \
+    "no-mistakes brief still treated an implementation commit as completion"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
@@ -286,8 +288,46 @@ yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yol
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
+issue key on a scout brief|brief-refused-b5 some-proj --scout --issue-key TASK-1|--issue-key applies only to ship briefs
 ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
+}
+
+test_delivery_issue_and_rules_are_explicit() {
+  local home out status brief
+  home="$TMP_ROOT/delivery-metadata-home"
+  mkdir -p "$home/data"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-delivery-c1 fixture-project --mode no-mistakes 2>&1)
+  status=$?
+  expect_code 0 "$status" "a project without an issue key should scaffold"
+  ! grep -q '^Delivery issue:' "$home/data/brief-delivery-c1/brief.md" \
+    || fail "issue-less brief invented an issue key"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-delivery-c2 fixture-project --mode no-mistakes --issue-key 'bad key' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an invalid issue key should be refused"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-delivery-c3 fixture-project --mode no-mistakes \
+    --delivery-title-rule '{issue_key}:' \
+    --delivery-link-rule 'https://tracker.example/issue/{issue_key}' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "delivery rules without an issue key should be refused"
+  assert_contains "$out" "delivery rules require an issue key" \
+    "unbound delivery-rule refusal did not name the missing issue key"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-delivery-c4 fixture-project --mode no-mistakes \
+    --issue-key external/42 --delivery-title-rule '{issue_key}:' \
+    --delivery-link-rule 'https://tracker.example/issue/{issue_key}' >/dev/null 2>&1 \
+    || fail "a brief with an issue key and delivery rules should scaffold"
+  brief="$home/data/brief-delivery-c4/brief.md"
+  grep -qx 'Delivery issue: external/42' "$brief" \
+    || fail "brief did not record its issue key"
+  grep -qx 'Delivery title rule: {issue_key}:' "$brief" \
+    || fail "brief did not record its title rule"
+  grep -qx 'Delivery link rule: https://tracker.example/issue/{issue_key}' "$brief" \
+    || fail "brief did not record its link rule"
+  pass "fm-brief.sh: optional issue keys and declared delivery rules are explicit"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -717,6 +757,7 @@ test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
+test_delivery_issue_and_rules_are_explicit
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording

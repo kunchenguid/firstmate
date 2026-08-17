@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--issue-key <key>] [--delivery-title-rule <template> --delivery-link-rule <template>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -37,7 +37,8 @@
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # The generated ship brief records the chosen mode as a fixed machine-readable
-# "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
+# "Delivery contract: mode=<mode>" line and, when present, its fixed delivery
+# issue and title/link rule lines. bin/fm-spawn.sh reads those lines and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
@@ -73,6 +74,8 @@ esac
 
 # shellcheck source=bin/fm-marker-lib.sh
 . "$SCRIPT_DIR/fm-marker-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
@@ -106,6 +109,12 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+ISSUE_KEY=
+ISSUE_KEY_SET=0
+DELIVERY_TITLE_RULE=
+DELIVERY_TITLE_RULE_SET=0
+DELIVERY_LINK_RULE=
+DELIVERY_LINK_RULE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -115,6 +124,9 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      issue-key) ISSUE_KEY=$a; ISSUE_KEY_SET=1 ;;
+      delivery-title-rule) DELIVERY_TITLE_RULE=$a; DELIVERY_TITLE_RULE_SET=1 ;;
+      delivery-link-rule) DELIVERY_LINK_RULE=$a; DELIVERY_LINK_RULE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -127,6 +139,12 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --issue-key) want_value=issue-key ;;
+    --issue-key=*) ISSUE_KEY=${a#--issue-key=}; ISSUE_KEY_SET=1 ;;
+    --delivery-title-rule) want_value=delivery-title-rule ;;
+    --delivery-title-rule=*) DELIVERY_TITLE_RULE=${a#--delivery-title-rule=}; DELIVERY_TITLE_RULE_SET=1 ;;
+    --delivery-link-rule) want_value=delivery-link-rule ;;
+    --delivery-link-rule=*) DELIVERY_LINK_RULE=${a#--delivery-link-rule=}; DELIVERY_LINK_RULE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -152,6 +170,27 @@ if [ "$KIND" = ship ]; then
   esac
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+[ "$ISSUE_KEY_SET" -eq 0 ] || [ -n "$ISSUE_KEY" ] || { echo "error: --issue-key requires a non-empty value" >&2; exit 1; }
+if [ "$ISSUE_KEY_SET" -eq 1 ] && ! fm_pr_delivery_issue_key_valid "$ISSUE_KEY"; then
+  echo "error: --issue-key must be a non-empty single-line value without whitespace or control characters" >&2
+  exit 1
+fi
+if [ "$KIND" != ship ] && { [ "$DELIVERY_TITLE_RULE_SET" -eq 1 ] || [ "$DELIVERY_LINK_RULE_SET" -eq 1 ]; }; then
+  echo "error: delivery rules apply only to ship briefs" >&2
+  exit 1
+fi
+if [ "$DELIVERY_TITLE_RULE_SET" -ne "$DELIVERY_LINK_RULE_SET" ] \
+  || { [ "$DELIVERY_TITLE_RULE_SET" -eq 1 ] \
+    && { [ -z "$ISSUE_KEY" ] \
+      || ! fm_pr_delivery_rule_valid "$DELIVERY_TITLE_RULE" \
+      || ! fm_pr_delivery_rule_valid "$DELIVERY_LINK_RULE"; }; }; then
+  echo "error: delivery rules require an issue key and valid title and link templates containing {issue_key}" >&2
+  exit 1
+fi
+if [ "$KIND" != ship ] && [ "$ISSUE_KEY_SET" -eq 1 ]; then
+  echo "error: --issue-key applies only to ship briefs" >&2
   exit 1
 fi
 ID=${POS[0]}
@@ -265,6 +304,12 @@ exit 0
 fi
 
 REPO=${POS[1]}
+DELIVERY_ISSUE_LINE=
+[ "$ISSUE_KEY_SET" -eq 0 ] || DELIVERY_ISSUE_LINE="Delivery issue: $ISSUE_KEY"
+DELIVERY_TITLE_RULE_LINE=
+[ "$DELIVERY_TITLE_RULE_SET" -eq 0 ] || DELIVERY_TITLE_RULE_LINE="Delivery title rule: $DELIVERY_TITLE_RULE"
+DELIVERY_LINK_RULE_LINE=
+[ "$DELIVERY_LINK_RULE_SET" -eq 0 ] || DELIVERY_LINK_RULE_LINE="Delivery link rule: $DELIVERY_LINK_RULE"
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -358,6 +403,9 @@ case "$MODE" in
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=direct-PR
+$DELIVERY_ISSUE_LINE
+$DELIVERY_TITLE_RULE_LINE
+$DELIVERY_LINK_RULE_LINE
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
@@ -370,6 +418,9 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=local-only
+$DELIVERY_ISSUE_LINE
+$DELIVERY_TITLE_RULE_LINE
+$DELIVERY_LINK_RULE_LINE
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
@@ -384,9 +435,11 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+$DELIVERY_ISSUE_LINE
+$DELIVERY_TITLE_RULE_LINE
+$DELIVERY_LINK_RULE_LINE
+The implementation is not complete at commit time. Invoke and drive the no-mistakes pipeline immediately after the implementation commit; never append a commit-only \`done:\` event.
+Checks-passed is the PR-ready handoff, not merged completion. The task and backlog item complete only after the guarded merge path confirms delivery.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -399,7 +452,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. Your worker handoff is finished; guarded merge and backlog completion remain firstmate-owned.
 EOF
     ;;
 esac
