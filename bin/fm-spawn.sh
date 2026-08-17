@@ -38,6 +38,13 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   An agy --model additionally passes the captain's strict-exhaustion model
+#   ladder, which refuses a launch onto a rung below one that is not yet
+#   exhausted and refuses rung 1 at or below its reserved floor.
+#   FM_AGY_LADDER_OVERRIDE=<reason> launches past a refusal on the captain's
+#   explicit request and prints that it did. bin/fm-agy-ladder-lib.sh owns the
+#   rungs, the floors, the evidence, and why an absent reading blocks a descent
+#   but never a launch at the top.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -256,6 +263,10 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-agy-lib.sh
 . "$SCRIPT_DIR/fm-agy-lib.sh"
+# shellcheck source=bin/fm-agy-quota-lib.sh
+. "$SCRIPT_DIR/fm-agy-quota-lib.sh"
+# shellcheck source=bin/fm-agy-ladder-lib.sh
+. "$SCRIPT_DIR/fm-agy-ladder-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -1275,6 +1286,18 @@ case "$HARNESS" in
     # be fetched establishes nothing and is deliberately not treated as proof
     # that a model is absent.
     AGY_BIN=$(fm_agy_resolve_binary) || exit 1
+    # The captain's strict-exhaustion ladder, enforced rather than remembered
+    # (bin/fm-agy-ladder-lib.sh owns the rungs, the floors, and why an absent
+    # reading blocks a DESCENT but never a launch at the top). It runs here
+    # because this case is on the one path every agy crewmate and scout launch
+    # already takes, so an ordinary dispatch has nowhere to route around it, and
+    # ahead of the catalogue probe below so a launch the policy already refuses
+    # never spends a network round-trip while holding the spawn locks.
+    AGY_LADDER_NOTE=$(fm_agy_ladder_gate "$MODEL" "$STATE") || {
+      printf '%s\n' "$AGY_LADDER_NOTE" >&2
+      exit 1
+    }
+    [ -z "$AGY_LADDER_NOTE" ] || printf '%s\n' "$AGY_LADDER_NOTE" >&2
     if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
       if AGY_MODELS=$(fm_agy_list_models "$AGY_BIN"); then
         if ! printf '%s\n' "$AGY_MODELS" | fm_agy_catalog_has_model "$MODEL"; then
