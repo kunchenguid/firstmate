@@ -14,15 +14,15 @@
 #   bin/fm-public-followup-lib.sh  the activation gate and private transport.
 # This script composes them; it never restates their contracts or schemas.
 #
-# ZERO OVERHEAD FOR HOMES THAT DO NOT USE THE RELAY: every subcommand gates
-# first on the authoritative activation contract (a non-empty FMX_PAIRING_TOKEN
-# in $FM_HOME/.env). Read-side and cleanup paths then use an O(1) presence check
-# for registrations this home actually created. A relay-disabled home therefore
-# runs one [ -f ] test before any backlog work: no tasks-axi call, no backlog scan,
-# and no file created. Silent read-side commands return without output; commands
-# that require an active relay report their configuration error after the same
-# gate. A relay-enabled home with no live commitments stops at the second gate
-# for the same cost.
+# NO RELAY STATE OR BACKLOG WORK FOR HOMES THAT DO NOT USE THE RELAY: every
+# subcommand gates first on the authoritative activation contract (a non-empty
+# FMX_PAIRING_TOKEN in $FM_HOME/.env). Read-side and cleanup paths then use an
+# O(1) presence check for registrations this home actually created. A
+# relay-disabled invocation therefore runs one [ -f ] test before any backlog
+# work: no tasks-axi call, no backlog scan, and no file created. Silent read-side
+# commands return without output; commands that require an active relay report
+# their configuration error after the same gate. A relay-enabled home with no
+# live commitments stops at the second gate for the same cost.
 #
 # Usage:
 #   fm-public-followup.sh active
