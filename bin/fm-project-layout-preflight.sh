@@ -506,49 +506,51 @@ if [ -n "$CACHE_ARG" ]; then
     fi
   else
     CACHE_PHYSICAL=$(fmp_existing_path_physical "$CACHE_ARG") || CACHE_PHYSICAL=
-    CACHE_UID=$(fmp_stat_uid "$CACHE_PHYSICAL" 2>/dev/null) || CACHE_UID=unknown
-    CACHE_MODE=$(fmp_stat_mode "$CACHE_PHYSICAL" 2>/dev/null) || CACHE_MODE=unknown
-    if [ "$CACHE_UID" != "$CURRENT_UID" ]; then
-      add_blocker cache_owner_mismatch "Proposed cache is not owned by the current user"
-    fi
-    if [ "$CACHE_MODE" = unknown ] || fmp_mode_group_or_world_writable "$CACHE_MODE"; then
-      add_blocker cache_permissions "Proposed cache is not verifiably owner-only"
-    fi
-    CACHE_FILESYSTEM_SOURCE=$(fmp_filesystem_source "$CACHE_PHYSICAL")
-    CACHE_FILESYSTEM_LOCALITY=$(fmp_filesystem_locality "$CACHE_FILESYSTEM_SOURCE")
-    case "$CACHE_FILESYSTEM_LOCALITY" in
-      local) ;;
-      network) add_blocker cache_network_filesystem "Proposed cache is on a network filesystem" ;;
-      *) add_blocker cache_filesystem_unknown "Proposed cache filesystem locality cannot be proved" ;;
-    esac
     if [ -z "$CACHE_PHYSICAL" ]; then
       add_blocker cache_unresolved "Proposed cache path could not be resolved to a readable physical directory"
-    elif git -C "$CACHE_PHYSICAL" rev-parse --git-dir >/dev/null 2>&1; then
-      CACHE_IS_GIT=true
-      if [ "$(git -C "$CACHE_PHYSICAL" rev-parse --is-bare-repository 2>/dev/null || echo false)" = true ]; then
-        CACHE_IS_BARE=true
-      else
-        add_blocker cache_not_bare "Proposed per-project cache is not a bare repository"
-      fi
-      CACHE_OBJECT_FORMAT=$(fmp_git_object_format "$CACHE_PHYSICAL")
-      CACHE_ORIGIN_RAW=$(git -C "$CACHE_PHYSICAL" remote get-url origin 2>/dev/null) || CACHE_ORIGIN_RAW=
-      CACHE_ORIGIN_REDACTED=$(fmp_redact_origin "$CACHE_ORIGIN_RAW")
-      if [ -z "$CACHE_ORIGIN_RAW" ]; then
-        add_blocker cache_no_origin "Proposed cache has no origin remote"
-      elif fmp_origin_has_http_credentials "$CACHE_ORIGIN_RAW"; then
-        add_blocker cache_embedded_credentials "Proposed cache origin contains embedded HTTP credentials or query/fragment material; sensitive text was redacted"
-      elif [ -n "$ORIGIN_RAW" ] && [ "$CACHE_ORIGIN_RAW" != "$ORIGIN_RAW" ]; then
-        add_blocker cache_origin_mismatch "Proposed cache origin differs from the control checkout origin"
-      fi
-      if [ "$OBJECT_FORMAT" != unknown ] && [ "$CACHE_OBJECT_FORMAT" != "$OBJECT_FORMAT" ]; then
-        add_blocker cache_object_format_mismatch "Proposed cache and control checkout use different object formats"
-      fi
-      CACHE_ALTERNATES=$(git -C "$CACHE_PHYSICAL" rev-parse --path-format=absolute --git-path objects/info/alternates 2>/dev/null) || CACHE_ALTERNATES=
-      if [ -n "$CACHE_ALTERNATES" ] && [ -s "$CACHE_ALTERNATES" ]; then
-        add_blocker cache_has_alternate "Proposed cache itself borrows objects from another store"
-      fi
     else
-      add_blocker cache_not_git "Proposed cache is not a Git repository"
+      CACHE_UID=$(fmp_stat_uid "$CACHE_PHYSICAL" 2>/dev/null) || CACHE_UID=unknown
+      CACHE_MODE=$(fmp_stat_mode "$CACHE_PHYSICAL" 2>/dev/null) || CACHE_MODE=unknown
+      if [ "$CACHE_UID" != "$CURRENT_UID" ]; then
+        add_blocker cache_owner_mismatch "Proposed cache is not owned by the current user"
+      fi
+      if [ "$CACHE_MODE" = unknown ] || fmp_mode_group_or_world_writable "$CACHE_MODE"; then
+        add_blocker cache_permissions "Proposed cache is not verifiably owner-only"
+      fi
+      CACHE_FILESYSTEM_SOURCE=$(fmp_filesystem_source "$CACHE_PHYSICAL")
+      CACHE_FILESYSTEM_LOCALITY=$(fmp_filesystem_locality "$CACHE_FILESYSTEM_SOURCE")
+      case "$CACHE_FILESYSTEM_LOCALITY" in
+        local) ;;
+        network) add_blocker cache_network_filesystem "Proposed cache is on a network filesystem" ;;
+        *) add_blocker cache_filesystem_unknown "Proposed cache filesystem locality cannot be proved" ;;
+      esac
+      if git -C "$CACHE_PHYSICAL" rev-parse --git-dir >/dev/null 2>&1; then
+        CACHE_IS_GIT=true
+        if [ "$(git -C "$CACHE_PHYSICAL" rev-parse --is-bare-repository 2>/dev/null || echo false)" = true ]; then
+          CACHE_IS_BARE=true
+        else
+          add_blocker cache_not_bare "Proposed per-project cache is not a bare repository"
+        fi
+        CACHE_OBJECT_FORMAT=$(fmp_git_object_format "$CACHE_PHYSICAL")
+        CACHE_ORIGIN_RAW=$(git -C "$CACHE_PHYSICAL" remote get-url origin 2>/dev/null) || CACHE_ORIGIN_RAW=
+        CACHE_ORIGIN_REDACTED=$(fmp_redact_origin "$CACHE_ORIGIN_RAW")
+        if [ -z "$CACHE_ORIGIN_RAW" ]; then
+          add_blocker cache_no_origin "Proposed cache has no origin remote"
+        elif fmp_origin_has_http_credentials "$CACHE_ORIGIN_RAW"; then
+          add_blocker cache_embedded_credentials "Proposed cache origin contains embedded HTTP credentials or query/fragment material; sensitive text was redacted"
+        elif [ -n "$ORIGIN_RAW" ] && [ "$CACHE_ORIGIN_RAW" != "$ORIGIN_RAW" ]; then
+          add_blocker cache_origin_mismatch "Proposed cache origin differs from the control checkout origin"
+        fi
+        if [ "$OBJECT_FORMAT" != unknown ] && [ "$CACHE_OBJECT_FORMAT" != "$OBJECT_FORMAT" ]; then
+          add_blocker cache_object_format_mismatch "Proposed cache and control checkout use different object formats"
+        fi
+        CACHE_ALTERNATES=$(git -C "$CACHE_PHYSICAL" rev-parse --path-format=absolute --git-path objects/info/alternates 2>/dev/null) || CACHE_ALTERNATES=
+        if [ -n "$CACHE_ALTERNATES" ] && [ -s "$CACHE_ALTERNATES" ]; then
+          add_blocker cache_has_alternate "Proposed cache itself borrows objects from another store"
+        fi
+      else
+        add_blocker cache_not_git "Proposed cache is not a Git repository"
+      fi
     fi
   fi
 fi

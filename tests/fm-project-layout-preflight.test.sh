@@ -343,6 +343,19 @@ test_unreadable_cache_and_taskless_pending_reply() {
   expect_code 1 "$rc" "unreadable cache preflight"
   assert_json_code "$out" blockers cache_unresolved
   assert_no_json_code "$out" blockers cache_not_bare
+  assert_no_json_code "$out" blockers cache_not_git
+  assert_no_json_code "$out" blockers cache_owner_mismatch
+  assert_no_json_code "$out" blockers cache_permissions
+  assert_no_json_code "$out" blockers cache_filesystem_unknown
+  assert_no_json_code "$out" blockers cache_network_filesystem
+  [ "$(json_value "$out" 'd["proposal"]["cache_uid"]')" = unknown ] \
+    || fail "unresolved cache reported an ownership claim"
+  [ "$(json_value "$out" 'd["proposal"]["cache_mode"]')" = unknown ] \
+    || fail "unresolved cache reported a mode claim"
+  [ "$(json_value "$out" 'd["proposal"]["cache_object_format"]')" = unknown ] \
+    || fail "unresolved cache borrowed an object format from another repository"
+  [ "$(json_value "$out" 'd["proposal"]["cache_origin"]')" = "" ] \
+    || fail "unresolved cache borrowed an origin from another repository"
   [ "$(json_value "$out" 'json.dumps(d["proposal"]["cache_is_git"])')" = false ] \
     || fail "unreadable cache borrowed Git evidence from another repository"
   pass "unreadable cache paths never yield foreign Git evidence and taskless pending replies are ignored"
