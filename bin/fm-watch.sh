@@ -46,6 +46,18 @@
 #                          and has not been surfaced yet; reported once per
 #                          captured generation, never again while that record
 #                          stays queued and never once it is acknowledged
+#   check: secondmate-stalled <id>: ...
+#                          a secondmate's own last status event DECLARES work
+#                          (a working: line) that nothing has followed, and its
+#                          endpoint has been idle past FM_DECLARED_WORK_STALL_SECS.
+#                          Deliberately not a "stale:" reason: the mate's idle
+#                          endpoint is healthy by design and stays exempt from the
+#                          stale loop, so the finding is the unresumed declaration,
+#                          not the quiet endpoint, and it asks the supervisor to
+#                          reconcile the mate and push that work forward. Surfaced
+#                          once per threshold window while the stall persists, and
+#                          never for a declared paused: wait, a terminal last
+#                          event, or a proven-busy endpoint.
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -160,6 +172,18 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # turn-ended and resets the age. Set generously above any legitimate interval
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
+# A secondmate's idle endpoint is healthy by design, which is why the stale loop
+# below skips it. That exemption holds only while the mate has nothing
+# outstanding: its own last event may DECLARE work (a `working:` line), and a
+# declaration is an intention, never proof the work was launched. A mate that
+# writes its plan and ends its turn therefore leaves declared work that nothing
+# will ever resume, invisible to every existing detector - the stale loop skips
+# the healthy idle endpoint, and the heartbeat backstop correctly absorbs a
+# status that is neither captain-relevant nor unpresented. DECLARED_WORK_STALL_SECS
+# bounds how long declared work may sit unresumed on an idle endpoint before it
+# surfaces under its own reason; fm-classify-lib.sh owns the decision and the
+# default's rationale.
+DECLARED_WORK_STALL_SECS=${FM_DECLARED_WORK_STALL_SECS:-$FM_DECLARED_WORK_STALL_SECS_DEFAULT}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -321,6 +345,60 @@ busy_turn_over_age() {  # <task>
   f="$STATE/$task.turn-ended"
   [ -e "$f" ] || f="$STATE/$task.meta"
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
+}
+
+# endpoint_idle_age: seconds since the newest evidence that <task>'s endpoint was
+# active - its latest completed turn (state/<id>.turn-ended, the harness-neutral
+# marker every verified turn-end hook touches, falling back to the spawn record
+# before any turn completes exactly as busy_turn_over_age ages it) or its latest
+# status event, whichever is more recent. Taking the newer of the two is what
+# makes this measure CONTINUOUS idleness: a new turn or a new report resets the
+# clock, so a mate that reports, works, reports again never accumulates age, and
+# only a mate that stops doing both does.
+endpoint_idle_age() {  # <task>
+  local task=$1 f turn status
+  f="$STATE/$task.turn-ended"
+  [ -e "$f" ] || f="$STATE/$task.meta"
+  turn=$(age_of "$f")
+  status=$(age_of "$STATE/$task.status")
+  [ "$status" -lt "$turn" ] && turn=$status
+  printf '%s' "$turn"
+}
+
+# Surface a secondmate whose own last event declares work that nothing resumed
+# while its endpoint sat idle past DECLARED_WORK_STALL_SECS. This is NOT the
+# stale path and must never become it: the mate's idle endpoint is healthy by
+# design, so the finding is the unresumed declaration, not the quiet pane, and it
+# carries its own wake reason so the supervisor reconciles and pushes the work
+# forward instead of reading it as one more quiet crewmate.
+# Ordered cheapest-first, and every gate is a pure status/stat read until the
+# last one: the endpoint read runs only for work that has already proven both
+# declared and long idle, so an ordinary fleet pays nothing for this per poll.
+# The throttle marker gives the same bounded re-surface shape a declared pause
+# uses, so one mishandled wake cannot let a stall rot invisibly, and it clears
+# itself as soon as any later event or completed turn resets the idle clock.
+secondmate_declared_work_check() {  # <window> <task> <last-status-line>
+  local win=$1 task=$2 last=$3 key age tail40 reason
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  age=$(endpoint_idle_age "$task")
+  if ! status_declared_work_stalled "$STATE/$task.status" "$age" "$DECLARED_WORK_STALL_SECS"; then
+    rm -f "$STATE/.stalled-$key"
+    return 0
+  fi
+  [ "$(age_of "$STATE/.stalled-$key")" -ge "$DECLARED_WORK_STALL_SECS" ] || return 0
+  # A capture may be unavailable (a remote mate's endpoint lives on another
+  # host); the semantic busy record still decides, and a busy state that cannot
+  # be proven surfaces rather than being swallowed, exactly as everywhere else.
+  tail40=$(fm_backend_capture "$(window_backend "$win")" "$win" 40 "$(window_label "$win")" 2>/dev/null) || tail40=
+  if window_is_busy "$win" "$tail40"; then
+    rm -f "$STATE/.stalled-$key"
+    triage_log "absorbed declared-work stall (endpoint busy on the declared work): $win"
+    return 0
+  fi
+  reason="check: secondmate-stalled $task: declared work idle ${age}s with no later report - reconcile it and push the work forward (last report: $last)"
+  fm_wake_append check "secondmate-stalled:$task" "$reason" || exit 1
+  date +%s > "$STATE/.stalled-$key"
+  wake "$reason"
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -1014,8 +1092,12 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
-    if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
-      continue
+    if [ "$kind" = secondmate ]; then
+      # Runs for every secondmate, including the ones the stale exemption below
+      # skips: an unresumed declaration is exactly what a healthy idle endpoint
+      # hides. The stale exemption itself is unchanged.
+      secondmate_declared_work_check "$w" "$task" "$last"
+      status_is_paused "$last" || continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)

@@ -61,6 +61,29 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
+# The non-terminal verb that DECLARES work. A worker (or a secondmate reporting
+# to its parent) appends
+#   working: <the phase it has started or is about to start>
+# to state what it is doing. Unlike `paused:` - a KNOWN external wait that is
+# expected to idle and owns its own bounded re-surface cadence - and unlike the
+# terminal verbs, this line is an INTENTION: it proves what the worker said it
+# would do, never that the work is running. When it is the last event in a stream
+# and the endpoint has gone idle, the declared work was never resumed. This
+# constant is the ONE definition of the verb, read by both consumers rather than
+# hardcoded; FM_CLASSIFY_DECLARED_WORK_VERB overrides it.
+FM_CLASSIFY_DECLARED_WORK_VERB_DEFAULT='working'
+
+# Idle seconds before unresumed declared work counts as stalled. Deliberately far
+# above the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), because an
+# idle endpoint is a healthy default state for a secondmate and it may think for
+# several minutes before its next turn; and below the declared-pause cadence
+# (FM_PAUSE_RESURFACE_SECS, default 3600s), because a declared external wait is a
+# legitimate reason to idle while unresumed declared work is not. Both consumers
+# read FM_DECLARED_WORK_STALL_SECS with this default so the threshold has one
+# owner.
+# shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
+FM_DECLARED_WORK_STALL_SECS_DEFAULT=900
+
 # Bounded re-surface cadence for a declared pause or a dead-agent captain hold.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
 # avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
@@ -129,6 +152,50 @@ status_is_paused() {  # <status-line>
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
+}
+
+# 0 if a status line's leading verb declares work (working: <what>). A pure read
+# of the line, matching only the verb before the first colon, so a blocker or
+# note that merely mentions "working" does not false-match.
+status_declares_work() {  # <status-line>
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = "${FM_CLASSIFY_DECLARED_WORK_VERB:-$FM_CLASSIFY_DECLARED_WORK_VERB_DEFAULT}" ]
+}
+
+# 0 if a status stream still declares work that nothing has followed: its last
+# non-blank line declares work, so no later event of any kind - a terminal verb,
+# a resolution, a captain-held transfer, a declared pause, an informational note,
+# or a newer declared phase - superseded it.
+# Deliberately the LAST event rather than the keyed activity fold
+# (status_open_activities): a `working` phase has no contract requiring a keyed
+# terminal event to close it, so an open phase routinely outlives the work
+# itself - the exact false signal the registered-secondmate current-state section
+# of docs/architecture.md records. Any later event, keyed or not, is evidence the
+# worker is still reporting, and that is the honest boundary here.
+status_work_declared_unresumed() {  # <status-file>
+  status_declares_work "$(last_status_line "$1")"
+}
+
+# 0 if declared work has STALLED: the stream still declares unresumed work AND
+# its endpoint has been continuously idle for at least <threshold> seconds.
+# Neither half is a stall on its own - a declared-work line alone is the healthy
+# state of any worker mid-task, and an idle endpoint alone is the healthy default
+# state of a secondmate - which is exactly why every existing detector let the
+# combination through: the stale path exempts a secondmate's idle endpoint by
+# design, and a working: line is not captain-relevant, so the heartbeat backstop
+# correctly absorbs it.
+# The caller measures <idle-age-secs> because endpoint idleness is a backend read
+# rather than a status-file read, keeping this a pure decision both supervisors
+# share. A caller that cannot measure the age, or has no threshold, passes a
+# non-numeric value and gets no stall rather than a guess.
+status_declared_work_stalled() {  # <status-file> <idle-age-secs> <threshold-secs>
+  local f=$1 age=$2 threshold=$3
+  case "$age" in ''|*[!0-9]*) return 1 ;; esac
+  case "$threshold" in ''|*[!0-9]*) return 1 ;; esac
+  status_work_declared_unresumed "$f" || return 1
+  [ "$age" -ge "$threshold" ]
 }
 
 # 0 if a status line declares either an external-wait pause or a verified
