@@ -134,6 +134,7 @@ fm_crew_identity_assignment() { # <captain|primary|agent> [<task-id>]
     primary) filter='.primary // "unassigned"' ;;
     agent)
       case "$id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+      # shellcheck disable=SC2016 # $id is a jq --arg, not a shell expansion
       filter='(.agents[$id] // "unassigned")'
       ;;
     *) return 1 ;;

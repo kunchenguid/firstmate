@@ -41,7 +41,7 @@ SESSION=${1:-${HERDR_SESSION:-}}
 . "$SCRIPT_DIR/fm-backend.sh"
 fm_backend_source herdr || exit 1
 
-FM_CREW_IDENTITY_CONFIG="$CONFIG/crew-identities.json"
+export FM_CREW_IDENTITY_CONFIG="$CONFIG/crew-identities.json"
 fm_crew_identity_config_present || {
   echo "error: config/crew-identities.json is absent; there is no identity migration to apply" >&2
   exit 1

@@ -225,8 +225,8 @@ crew_identity_record_cached() {  # <roster> <identity>
     i=$((i + 1))
   done
   record=$(fm_crew_identity_record_json "$roster" "$identity" 2>/dev/null) || record=""
-  CREW_RECORD_KEYS[$i]=$key
-  CREW_RECORD_VALUES[$i]=$record
+  CREW_RECORD_KEYS[i]=$key
+  CREW_RECORD_VALUES[i]=$record
   CREW_RECORD_JSON=$record
   [ -n "$record" ] || return 1
 }
