@@ -80,7 +80,8 @@ config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCA
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
 config/slack-captain-channel  configured private channel id for the Slack captain channel; LOCAL, gitignored
 config/slack-captain-user     configured captain Slack user id required by the Socket Mode consumer; LOCAL, gitignored
-config/slack-captain.env      generated Slack captain channel watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/slack-captain-cadence  operator-owned Slack captain poll cadence in seconds; LOCAL, gitignored; bootstrap reads it and on the first run after this convention adopts a pre-convention value from config/slack-captain.env, then never overwrites it so the value survives regeneration (docs/configuration.md "Slack captain channel")
+config/slack-captain.env      generated Slack captain channel watcher cadence from config/slack-captain-cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update

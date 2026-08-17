@@ -954,15 +954,23 @@ EOF
 # Drops two idempotent, gitignored artifacts:
 #   state/slack-watch.check.sh - byte-static identity shim; the watcher validates
 #                                its bytes and invokes bin/fm-slack-poll.sh directly
-#   config/slack-captain.env   - exports FM_SLACK_CHECK_INTERVAL=15 for watcher processes
+#   config/slack-captain.env   - exports FM_SLACK_CHECK_INTERVAL for watcher processes,
+#                                set from operator-owned config/slack-captain-cadence
+#                                (seconds) or the built-in default; bootstrap preserves
+#                                that operator value across regeneration, and adopts a
+#                                pre-convention value from an existing slack-captain.env
+#                                into config/slack-captain-cadence on the first run
 # On opt-out it removes any such artifacts. Absent token or channel id AND with no
 # leftover artifacts it is a complete no-op.
 slack_captain_setup() {
   local env_file token channel_file channel_id shim cadence shim_body cadence_body tool missing shim_home
+  local cadence_file cadence_value default_cadence existing valid adopted cadence_source_body
   env_file="$FM_HOME/.env"
   channel_file="$CONFIG/slack-captain-channel"
+  cadence_file="$CONFIG/slack-captain-cadence"
   shim="$STATE/slack-watch.check.sh"
   cadence="$CONFIG/slack-captain.env"
+  default_cadence=15
 
   token=
   [ -f "$env_file" ] && token=$(fmx_env_get FM_SLACK_BOT_TOKEN "$env_file")
@@ -978,9 +986,9 @@ slack_captain_setup() {
   if [ -z "$token" ] || [ -z "$channel_id" ] || ! fms_channel_id_valid "$channel_id"; then
     if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
       if slack_remove_artifacts; then
-        echo "FMS: Slack captain channel off - removed poll shim and 15s Slack fast cadence"
+        echo "FMS: Slack captain channel off - removed poll shim and Slack cadence"
       else
-        echo "FMS: Slack captain channel off - failed to remove poll shim or 15s Slack fast cadence"
+        echo "FMS: Slack captain channel off - failed to remove poll shim or Slack cadence"
       fi
     fi
     return 0
@@ -1006,9 +1014,9 @@ slack_captain_setup() {
 
   fms_arm_failed() {
     if slack_remove_artifacts; then
-      echo "FMS: Slack captain channel off - failed to arm poll shim or 15s Slack fast cadence"
+      echo "FMS: Slack captain channel off - failed to arm poll shim or Slack cadence"
     else
-      echo "FMS: Slack captain channel off - failed to arm poll shim or 15s Slack fast cadence; stale artifacts remain"
+      echo "FMS: Slack captain channel off - failed to arm poll shim or Slack cadence; stale artifacts remain"
     fi
   }
 
@@ -1026,16 +1034,61 @@ slack_captain_setup() {
   fms_poll_shim_valid "$shim" "$shim_home" "$FM_ROOT" \
     || { fms_arm_failed; return 0; }
 
-  cadence_body=$(cat <<'EOF'
+  # config/slack-captain-cadence is the sole operator-owned source after this
+  # convention. The operator's prior decision may still live only in a
+  # pre-convention generated config/slack-captain.env (no mention of the new
+  # source file); adopt that recorded value into the new source on the first
+  # regeneration so the decision is never silently reverted. Skip the adoption
+  # when the recorded value equals the default (nothing to preserve) and warn
+  # when it is present but unparseable, since regenerating the default there is
+  # still a quiet shape of the reported defect. A post-convention env already
+  # names the new source in its comment, so a later deleted source file falls
+  # through to the default instead of re-adopting a stale value.
+  cadence_value=$(fms_cadence_read "$cadence_file")
+  adopted=0
+  if [ -z "$cadence_value" ] && [ -f "$cadence" ] \
+    && ! grep -q 'slack-captain-cadence' "$cadence" 2>/dev/null; then
+    existing=$(fmx_env_get FM_SLACK_CHECK_INTERVAL "$cadence")
+    if [ -n "$existing" ]; then
+      valid=$(fms_cadence_emit "$existing")
+      if [ -n "$valid" ] && [ "$valid" -ne "$default_cadence" ]; then
+        cadence_value=$valid
+        adopted=1
+      elif [ -z "$valid" ]; then
+        echo "FMS: Slack captain cadence in config/slack-captain.env is not a positive integer (\"$existing\"); using the built-in default ${default_cadence}s. Set config/slack-captain-cadence to correct it."
+      fi
+    fi
+  fi
+  [ -n "$cadence_value" ] || cadence_value=$default_cadence
+
+  # One-time adoption: persist the carried-forward decision into the new sole
+  # source before regenerating the derived env, so the value survives even if the
+  # env write later fails. If the source write fails, leave the existing env
+  # untouched and retry on the next bootstrap rather than destroying it.
+  if [ "$adopted" -eq 1 ]; then
+    cadence_source_body=$(printf '# Adopted from config/slack-captain.env by fm-bootstrap.sh\n# on first regeneration under the operator-owned cadence convention; the prior\n# cadence decision is preserved here. Edit this value (seconds); bootstrap reads\n# but never overwrites this file.\n%s\n' "$cadence_value")
+    if ! x_mode_write_if_changed "$cadence_file" "$cadence_source_body" 600 2>/dev/null; then
+      echo "FMS: Slack captain cadence adoption skipped - could not write config/slack-captain-cadence; existing config/slack-captain.env left unchanged"
+      return 0
+    fi
+  fi
+
+  cadence_body=$(cat <<EOF
 # Auto-generated by fm-bootstrap.sh - Slack captain channel watcher cadence.
 # Source this before the active harness protocol starts a watcher process so
-# fm-watch.sh runs the Slack check on the 15-second watcher cycle.
-export FM_SLACK_CHECK_INTERVAL=15
+# fm-watch.sh runs the Slack check on this watcher cycle. The value below is the
+# operator-set cadence from config/slack-captain-cadence (seconds) or the
+# built-in default when that file is absent; edit the source file, not this one,
+# since bootstrap regenerates this file and preserves the operator value.
+export FM_SLACK_CHECK_INTERVAL=$cadence_value
 EOF
 )
   x_mode_write_if_changed "$cadence" "$cadence_body" 600 || { fms_arm_failed; return 0; }
 
-  echo "FMS: Slack captain channel on - poll armed via state/slack-watch.check.sh; 15s Slack fast cadence in config/slack-captain.env"
+  echo "FMS: Slack captain channel on - poll armed via state/slack-watch.check.sh; ${cadence_value}s Slack cadence in config/slack-captain.env"
+  if [ "$adopted" -eq 1 ]; then
+    echo "FMS: Slack captain cadence adopted ${cadence_value}s from existing config/slack-captain.env into config/slack-captain-cadence; edit the source file going forward"
+  fi
 }
 
 # Socket Mode push transport (opt-in alongside the poll). It becomes eligible

@@ -495,6 +495,141 @@ out=$(run_poll "$home" "$(make_fake_curl "$home/fake-badchan")"); rc=$?
   || fail "poll must stay inert with an invalid configured channel id"
 pass "fm-slack-poll stays inert with an invalid channel id"
 
+# --- watcher intervals owner regression (PARTIAL GATE) -----------------------
+# POLL, CHECK_INTERVAL, and SLACK_CHECK_INTERVAL are set by fm_watch_intervals in
+# bin/fm-slack-lib.sh; fm-watch.sh evaluates its output, and the assertions below
+# call the same function. This is a PARTIAL GATE, not a complete one, and what it
+# closes and what it provably does not are stated here, each named by the
+# refuter's mutation id with its green-27 evidence cited from
+# data/refute-cadence-stop-condition/report.md, so the comments cannot re-derive
+# a false completeness claim and the limits link to their evidence.
+#
+# CLOSED: the fixture-equal constant class (m1/m4) - the two-value loop below
+# asserts distinct configured cadences (37 and 53) both transport, so no single
+# hardcoded constant in the owner satisfies the oracle. Also closed: the owner's
+# config load deleted or made unreachable; the owner returning the default when a
+# cadence is configured (hardcoding 15, the only cadence constant in shipped
+# code); and disagreement between fm_watch_intervals and a sourced fm-watch.sh.
+#
+# NOT CLOSED - two KNOWN ESCAPES that ship unclosed and are written down as such
+# (each verified green with a configured cadence resolving to the default while all
+# 27 checks pass, evidence in data/refute-cadence-stop-condition/report.md,
+# mutations m10 and m11):
+#   - m10: a mode-gated eval at the fm-watch.sh call site. The call site is top
+#     level where BASH_SOURCE/$0 can distinguish sourced from executed (unlike
+#     inside the owner function, where BASH_SOURCE[0] is the defining file in both
+#     modes); wrapping the eval in that condition drops a configured 45 to 15 in
+#     executed mode with all 27 checks green. Historical site: the eval at commit
+#     b3449187:122; the line number moves with fm-watch.sh. NOT closed.
+#   - m11: any override in the executed-only region after fm-watch.sh's Main entry
+#     return guard, which a sourced oracle never reaches; same result, all 27
+#     checks green. Historical site: just after the guard at commit b3449187:763;
+#     the line number moves with fm-watch.sh. NOT closed.
+# A bounded executed-mode seam exists and would distinguish both known escapes:
+# record a live external process as the holder of this home's watcher lock, run
+# bin/fm-watch.sh as a script so the existing singleton-collision path exits
+# before the loop, and use a BASH_ENV-injected EXIT trap to capture the effective
+# SLACK_CHECK_INTERVAL from that shell. The repository already uses BASH_ENV
+# injection for test instrumentation in tests/fm-bootstrap.test.sh and
+# tests/fm-session-start.test.sh; their BASH_ENV payloads do not install EXIT traps.
+# On this bounded path, fm-watch.sh acquires no watcher lock and enters no loop.
+# The targeted Slack cadence suite does not exercise that available seam. Under
+# the pre-declared stop condition, m10 and m11 remain open by decision even though
+# the bounded seam above can test them.
+#
+# The two-value transport assertion (37 and 53) closes the constant class and
+# nothing else - it does not make the oracle complete, and nothing here claims it
+# does. The watcher-consumes assertions below source fm-watch.sh (the documented
+# unit-test seam, which returns before the Main entry loop), not execute it; they
+# verify the sourced path agrees with the owner, not that the executed path does.
+# The defaults (POLL=15, CHECK_INTERVAL=300) must surface with no env files
+# present; an x-mode.env FM_CHECK_INTERVAL must win for the global sweep without
+# touching the Slack cadence; two distinct slack-captain.env FM_SLACK_CHECK_INTERVAL
+# values must both flow into the effective Slack interval.
+
+run_intervals() {
+  # shellcheck source=bin/fm-x-lib.sh
+  # shellcheck source=bin/fm-slack-lib.sh
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_CONFIG_OVERRIDE="$1/config" \
+    FM_ROOT_OVERRIDE="$ROOT" PATH="$BASE_PATH" \
+    bash -c '. "$FM_ROOT_OVERRIDE/bin/fm-slack-lib.sh"; eval "$(fm_watch_intervals)"; printf %s:%s:%s "$POLL" "$CHECK_INTERVAL" "$SLACK_CHECK_INTERVAL"'
+}
+
+home="$TMP_ROOT/intervals-defaults"
+mkdir -p "$home/config" "$home/state"
+out=$(run_intervals "$home")
+[ "$out" = "15:300:15" ] \
+  || fail "fm_watch_intervals defaults must be POLL=15 CHECK_INTERVAL=300 SLACK_CHECK_INTERVAL=15 (got '$out')"
+
+# x-mode.env raises the global sweep cadence; the Slack path stays on POLL=15
+# when slack-captain.env is absent, proving the two intervals are independent.
+home="$TMP_ROOT/intervals-xmode"
+mkdir -p "$home/config" "$home/state"
+printf 'export FM_CHECK_INTERVAL=120\n' > "$home/config/x-mode.env"
+chmod 600 "$home/config/x-mode.env"
+out=$(run_intervals "$home")
+[ "$out" = "15:120:15" ] \
+  || fail "fm_watch_intervals must let x-mode.env set CHECK_INTERVAL without touching POLL or Slack (got '$out')"
+
+# slack-captain.env sets the Slack cadence only; the global sweep stays default.
+# Two distinct configured values must both transport, so no single hardcoded
+# constant in the owner can satisfy the oracle - this kills the fixture-equal
+# constant escape (a hardcode equal to one configured value fails the other).
+for cadence in 37 53; do
+  home="$TMP_ROOT/intervals-slack-$cadence"
+  mkdir -p "$home/config" "$home/state"
+  printf 'export FM_SLACK_CHECK_INTERVAL=%s\n' "$cadence" > "$home/config/slack-captain.env"
+  chmod 600 "$home/config/slack-captain.env"
+  out=$(run_intervals "$home")
+  [ "$out" = "15:300:$cadence" ] \
+    || fail "fm_watch_intervals must transport the configured cadence $cadence, not a constant (got '$out')"
+done
+
+# fm-watch.sh must evaluate that same owner, not a separate inline copy, so a
+# sourced fm-watch.sh's effective Slack interval matches the owner's. This
+# sources fm-watch.sh (its top-level runs the owner via eval, then the Main entry
+# guard returns before the loop); it does NOT exercise executed mode. The owner
+# assertions above already cover the owner's own transport; this checks the
+# sourced fm-watch.sh path agrees with the owner. An override at the eval call
+# site that fires only in executed mode, or in the executed-only region after the
+# Main entry guard, leaves this assertion green while executed production is not
+# covered - those escapes are documented in the PARTIAL GATE note above.
+home="$TMP_ROOT/watcher-consumes"
+make_home "$home"
+cat > "$home/config/slack-captain.env" <<ENV
+# Auto-generated by fm-bootstrap.sh - Slack captain channel watcher cadence.
+# Source this before the active harness protocol starts a watcher process so
+# fm-watch.sh runs the Slack check on this watcher cycle. The value below is the
+# operator-set cadence from config/slack-captain-cadence (seconds) or the built-in
+# default when that file is absent; edit the source file, not this one.
+export FM_SLACK_CHECK_INTERVAL=30
+ENV
+chmod 600 "$home/config/slack-captain.env"
+executed=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_ROOT_OVERRIDE="$ROOT" PATH="$BASE_PATH" \
+  bash -c '. "$FM_ROOT_OVERRIDE/bin/fm-watch.sh" >/dev/null 2>&1; printf %s "$SLACK_CHECK_INTERVAL"')
+[ "$executed" = 30 ] \
+  || fail "sourced fm-watch.sh must apply the generated Slack cadence via fm_watch_intervals (got SLACK_CHECK_INTERVAL='$executed', expected 30); this covers the sourced path only, not executed mode"
+[ "$executed" = "$(run_intervals "$home" | cut -d: -f3)" ] \
+  || fail "sourced fm-watch.sh and fm_watch_intervals must agree on the Slack interval"
+
+# fallback: no slack-captain.env -> effective 15 via the same owner in both paths
+home="$TMP_ROOT/watcher-fallback"
+make_home "$home"
+rm -f "$home/config/slack-captain.env"
+executed=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_ROOT_OVERRIDE="$ROOT" PATH="$BASE_PATH" \
+  bash -c '. "$FM_ROOT_OVERRIDE/bin/fm-watch.sh" >/dev/null 2>&1; printf %s "$SLACK_CHECK_INTERVAL"')
+[ "$executed" = 15 ] \
+  || fail "sourced fm-watch.sh must fall back to POLL=15 when no cadence env is present (got '$executed'); this covers the sourced path only, not executed mode"
+pass "watcher interval owner transports distinct cadences; sourced fm-watch.sh agrees (partial gate)"
+
+# fm-watch.sh still keeps the global sweep narrow: the slow sweep skips the
+# Slack shim, which runs on its own dedicated fast path.
+awk '/elif.*slack-watch\.check\.sh/ { getline; if ($0 ~ /continue/) found=1 } END { exit found ? 0 : 1 }' \
+  "$ROOT/bin/fm-watch.sh" \
+  || fail "fm-watch.sh must skip the Slack shim in the slow sweep"
+pass "fm-watch.sh keeps a dedicated Slack fast path"
 # --- watcher cadence stays narrow -------------------------------------------
 
 # shellcheck disable=SC2016 # single quotes are deliberate: the grep needle is the literal ${...} default expression
@@ -635,6 +770,141 @@ grep -F 'export FM_SLACK_CHECK_INTERVAL=15' "$home/config/slack-captain.env" >/d
 ! grep -F 'FM_CHECK_INTERVAL' "$home/config/slack-captain.env" >/dev/null \
   || fail "bootstrap must not lower the global check interval"
 pass "bootstrap arms Slack poll when token and channel are configured"
+
+# --- bootstrap adoption of a pre-convention cadence -------------------------
+# The captain's decision may already live in config/slack-captain.env from before
+# this operator-owned source existed. Bootstrap must adopt that value into
+# config/slack-captain-cadence on the first regeneration instead of silently
+# reverting it to the default - the reported defect's upgrade path. Mutating the
+# generator to ignore the existing file must turn these red.
+
+write_preconvention_env() {
+  local home=$1 value=$2
+  cat > "$home/config/slack-captain.env" <<ENV
+# Auto-generated by fm-bootstrap.sh - Slack captain channel watcher cadence.
+# Source this before the active harness protocol starts a watcher process so
+# fm-watch.sh runs the Slack check on the 15-second watcher cycle.
+export FM_SLACK_CHECK_INTERVAL=$value
+ENV
+  chmod 600 "$home/config/slack-captain.env"
+}
+
+home="$TMP_ROOT/bootstrap-adopt-existing"
+make_home "$home"
+write_preconvention_env "$home" 30
+[ ! -e "$home/config/slack-captain-cadence" ] \
+  || fail "adoption precondition: no source cadence file yet"
+log="$home/bootstrap.log"
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_ROOT_OVERRIDE="$ROOT" PATH="$BASE_PATH" \
+  "$ROOT/bin/fm-bootstrap.sh" > "$log" 2>&1
+grep -F 'export FM_SLACK_CHECK_INTERVAL=30' "$home/config/slack-captain.env" >/dev/null \
+  || fail "bootstrap must preserve an existing cadence across regeneration, not revert to 15"
+! grep -F 'export FM_SLACK_CHECK_INTERVAL=15' "$home/config/slack-captain.env" >/dev/null \
+  || fail "bootstrap must not revert an existing cadence to the built-in default"
+[ -f "$home/config/slack-captain-cadence" ] \
+  || fail "bootstrap must adopt the existing cadence into config/slack-captain-cadence"
+grep -Eq '^[[:space:]]*30([[:space:]]|$)' "$home/config/slack-captain-cadence" \
+  || fail "bootstrap must write the adopted cadence value into config/slack-captain-cadence"
+grep -F 'adopted 30s' "$log" >/dev/null \
+  || fail "bootstrap must announce cadence adoption so the transition is not silent"
+
+# idempotent: cadence source now owns the value, so a second run keeps 30 and
+# does not re-adopt
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_ROOT_OVERRIDE="$ROOT" PATH="$BASE_PATH" \
+  "$ROOT/bin/fm-bootstrap.sh" > "$log" 2>&1
+grep -F 'export FM_SLACK_CHECK_INTERVAL=30' "$home/config/slack-captain.env" >/dev/null \
+  || fail "bootstrap must keep an adopted cadence across a second regeneration"
+! grep -F 'adopted' "$log" >/dev/null \
+  || fail "bootstrap must not re-announce adoption once the source file exists"
+
+# reset safety: deleting the source file must fall back to the default, not
+# re-adopt a stale value from the now-post-convention env
+rm -f "$home/config/slack-captain-cadence"
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_ROOT_OVERRIDE="$ROOT" PATH="$BASE_PATH" \
+  "$ROOT/bin/fm-bootstrap.sh" > "$log" 2>&1
+grep -F 'export FM_SLACK_CHECK_INTERVAL=15' "$home/config/slack-captain.env" >/dev/null \
+  || fail "bootstrap must fall back to the default when the operator deletes the cadence source, not re-adopt a stale value"
+! grep -F 'export FM_SLACK_CHECK_INTERVAL=30' "$home/config/slack-captain.env" >/dev/null \
+  || fail "bootstrap must not re-adopt a stale cadence after the source file is deleted"
+[ ! -e "$home/config/slack-captain-cadence" ] \
+  || fail "bootstrap must not recreate the cadence source after a reset to default"
+pass "bootstrap adopts an existing cadence on upgrade and defends reset-to-default"
+
+# a pre-convention env with a present but unparseable cadence must warn and use
+# the default, never silently keep a broken value or revert without notice
+home="$TMP_ROOT/bootstrap-adopt-malformed"
+make_home "$home"
+write_preconvention_env "$home" abc
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_ROOT_OVERRIDE="$ROOT" PATH="$BASE_PATH" \
+  "$ROOT/bin/fm-bootstrap.sh" > "$log" 2>&1
+grep -F 'is not a positive integer' "$log" >/dev/null \
+  || fail "bootstrap must warn when an existing cadence is unparseable rather than silently reverting"
+grep -F 'export FM_SLACK_CHECK_INTERVAL=15' "$home/config/slack-captain.env" >/dev/null \
+  || fail "bootstrap must use the built-in default when the existing cadence is unparseable"
+[ ! -e "$home/config/slack-captain-cadence" ] \
+  || fail "bootstrap must not adopt an unparseable cadence into the source file"
+pass "bootstrap warns and uses the default when an existing cadence is unparseable"
+
+# An operator-set cadence in config/slack-captain-cadence must survive bootstrap
+# regeneration. The captain owns this value; bootstrap reads but never writes the
+# source file, so rerunning the generator must keep the operator's number rather
+# than reverting it to the built-in default - the regression that motivated this
+# test. Mutating the generator to ignore the source file must turn these red.
+home="$TMP_ROOT/bootstrap-cadence-set"
+make_home "$home"
+printf '7\n' > "$home/config/slack-captain-cadence"
+chmod 600 "$home/config/slack-captain-cadence"
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_ROOT_OVERRIDE="$ROOT" PATH="$BASE_PATH" \
+  "$ROOT/bin/fm-bootstrap.sh" >/dev/null
+grep -F 'export FM_SLACK_CHECK_INTERVAL=7' "$home/config/slack-captain.env" >/dev/null \
+  || fail "bootstrap must preserve an operator-set Slack cadence across regeneration"
+# idempotent on a second regeneration with the same operator value
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_ROOT_OVERRIDE="$ROOT" PATH="$BASE_PATH" \
+  "$ROOT/bin/fm-bootstrap.sh" >/dev/null
+grep -F 'export FM_SLACK_CHECK_INTERVAL=7' "$home/config/slack-captain.env" >/dev/null \
+  || fail "bootstrap must keep the operator-set Slack cadence across a second regeneration"
+# the operator value, not the generated file, is the surviving source of truth:
+# change the source and regenerate, and the generated file must follow it
+printf '9\n' > "$home/config/slack-captain-cadence"
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_ROOT_OVERRIDE="$ROOT" PATH="$BASE_PATH" \
+  "$ROOT/bin/fm-bootstrap.sh" >/dev/null
+grep -F 'export FM_SLACK_CHECK_INTERVAL=9' "$home/config/slack-captain.env" >/dev/null \
+  || fail "bootstrap must follow an updated operator cadence on regeneration"
+! grep -F 'export FM_SLACK_CHECK_INTERVAL=15' "$home/config/slack-captain.env" >/dev/null \
+  || fail "bootstrap must not revert an operator cadence to the built-in default"
+
+# absent operator file falls back to the built-in default
+cadence_default_home="$TMP_ROOT/bootstrap-cadence-default"
+make_home "$cadence_default_home"
+FM_HOME="$cadence_default_home" FM_STATE_OVERRIDE="$cadence_default_home/state" \
+  FM_CONFIG_OVERRIDE="$cadence_default_home/config" FM_ROOT_OVERRIDE="$ROOT" \
+  PATH="$BASE_PATH" \
+  "$ROOT/bin/fm-bootstrap.sh" >/dev/null
+grep -F 'export FM_SLACK_CHECK_INTERVAL=15' "$cadence_default_home/config/slack-captain.env" >/dev/null \
+  || fail "bootstrap must fall back to the built-in default cadence when the operator file is absent"
+
+# a malformed operator file falls back to the built-in default rather than
+# arming a non-numeric or zero cadence
+cadence_bad_home="$TMP_ROOT/bootstrap-cadence-malformed"
+make_home "$cadence_bad_home"
+printf '# not a number\nnope\n0\n' > "$cadence_bad_home/config/slack-captain-cadence"
+chmod 600 "$cadence_bad_home/config/slack-captain-cadence"
+FM_HOME="$cadence_bad_home" FM_STATE_OVERRIDE="$cadence_bad_home/state" \
+  FM_CONFIG_OVERRIDE="$cadence_bad_home/config" FM_ROOT_OVERRIDE="$ROOT" \
+  PATH="$BASE_PATH" \
+  "$ROOT/bin/fm-bootstrap.sh" >/dev/null
+grep -F 'export FM_SLACK_CHECK_INTERVAL=15' "$cadence_bad_home/config/slack-captain.env" >/dev/null \
+  || fail "bootstrap must ignore a malformed cadence file and use the built-in default"
+! grep -F 'export FM_SLACK_CHECK_INTERVAL=0' "$cadence_bad_home/config/slack-captain.env" >/dev/null \
+  || fail "bootstrap must not arm a zero or non-numeric cadence"
+pass "bootstrap preserves an operator-set Slack cadence and falls back to the built-in default"
 
 home="$TMP_ROOT/bootstrap-off"
 mkdir -p "$home/state" "$home/config"

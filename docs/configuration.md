@@ -462,9 +462,11 @@ Socket Mode is armed alongside that poll when `.env` also contains `FM_SLACK_APP
 The socket path verifies that user id on every event, records refused events under `state/slack-refused/` by message timestamp or envelope id when malformed, and never acknowledges or wakes for them.
 The poll remains independently armed and is not retired by enabling Socket Mode.
 
-The locked session-start bootstrap step writes `state/slack-watch.check.sh`, a byte-static identity shim for `bin/fm-slack-poll.sh`, and `config/slack-captain.env`, which exports `FM_SLACK_CHECK_INTERVAL=15` for watcher processes in that home.
-`bin/fm-watch.sh` sources `config/x-mode.env` and `config/slack-captain.env` at process start when either file exists.
-The watcher runs the Slack shim on the 15-second poll cycle via a dedicated fast path; every other `*.check.sh` sweep stays on the default 300-second `CHECK_INTERVAL`.
+The locked session-start bootstrap step writes `state/slack-watch.check.sh`, a byte-static identity shim for `bin/fm-slack-poll.sh`, and `config/slack-captain.env`, which exports `FM_SLACK_CHECK_INTERVAL` for watcher processes in that home.
+The exported cadence is the operator-set value from gitignored `config/slack-captain-cadence` (seconds, first positive integer on a non-comment line), or the built-in default when that file is absent or malformed; bootstrap reads but never overwrites that source file, so an operator's cadence choice survives regeneration.
+On the first regeneration after this convention landed, bootstrap also adopts a pre-convention operator decision that still lives only in `config/slack-captain.env`: when the new source file is absent and the existing generated file omits any mention of `config/slack-captain-cadence`, bootstrap carries its valid non-default `FM_SLACK_CHECK_INTERVAL` into `config/slack-captain-cadence` so that decision is not silently reverted, and announces the adoption; a present but unparseable value warns and uses the default so the reversion is never silent.
+`bin/fm-watch.sh` resolves `POLL`, `CHECK_INTERVAL`, and `SLACK_CHECK_INTERVAL` through `fm_watch_intervals` in `bin/fm-slack-lib.sh`, the single owner that sources `config/x-mode.env` and `config/slack-captain.env` (when either exists) and emits the intervals; the regression tests call that same owner, so the watcher's sourced and executed initialization share one code path.
+The watcher runs the Slack shim on that configured Slack poll cycle via a dedicated fast path; every other `*.check.sh` sweep stays on the default 300-second `CHECK_INTERVAL`.
 
 `bin/fm-slack-poll.sh` calls `conversations.history` and, when needed, `conversations.replies` on the configured channel only.
 It never calls `conversations.list` or any other discovery API.

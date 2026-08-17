@@ -63,6 +63,70 @@ fms_config_channel_read() {
   printf '%s' "$line"
 }
 
+# Validate and emit a Slack captain poll cadence (positive integer seconds).
+# Empty, non-numeric, or zero input emits nothing so the caller falls back to
+# the built-in default. This is the single owner of the cadence format check;
+# both the operator-owned source reader and the one-time adoption from a
+# pre-convention generated file route through it.
+fms_cadence_emit() {
+  local v=$1
+  case "$v" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$v" -gt 0 ] 2>/dev/null || return 0
+  printf '%s' "$v"
+}
+
+# Read the operator-owned Slack captain poll cadence (seconds) from
+# config/slack-captain-cadence: the first positive integer on a non-comment
+# line, or empty when the file is absent or holds no valid integer so the
+# caller falls back to the default. Bootstrap reads but never overwrites this
+# file, so an operator's cadence choice survives regeneration; this is the same
+# operator-owned-config mechanism config/slack-captain-channel uses.
+fms_cadence_read() {
+  local file=$1 line
+  [ -f "$file" ] || return 0
+  line=$(grep -Ev '^[[:space:]]*(#|$)' "$file" 2>/dev/null | head -1) || return 0
+  line=${line#"${line%%[![:space:]]*}"}
+  line=${line%"${line##*[![:space:]]}"}
+  fms_cadence_emit "$line"
+}
+
+# Resolve the watcher's poll and check intervals from the operator-owned env files.
+# This function owns the config-load and effective-interval logic. Production
+# initialization evaluates its output from bin/fm-watch.sh, while the regression
+# tests call it directly. Its current body does not branch on caller mode.
+# The specific predicate [ "${BASH_SOURCE[0]}" != "$0" ] is true in both measured
+# call contexts because BASH_SOURCE[0] is this library and differs from $0 in
+# both. That fact is predicate-specific, not a claim that every mutation inside
+# this function is mode-insensitive: $0 identifies the bash -c test shell in the
+# sourced regression path and bin/fm-watch.sh in executed production.
+# The regression therefore does not close the sourced-versus-executed dimension.
+# At the top-level eval in bin/fm-watch.sh, BASH_SOURCE[0] is fm-watch.sh in both
+# modes while $0 identifies different callers, so the same predicate distinguishes
+# sourced from executed mode and can leave the sourced suite green while executed
+# production falls back to the default. The PARTIAL GATE notes in bin/fm-watch.sh
+# and tests/fm-slack-captain-channel.test.sh state what is and is not closed.
+# It sources config/x-mode.env then config/slack-captain.env when each file exists
+# (both may export FM_CHECK_INTERVAL and/or FM_SLACK_CHECK_INTERVAL), then emits
+# eval-able POLL/CHECK_INTERVAL/SLACK_CHECK_INTERVAL assignments using the same
+# defaults fm-watch.sh used inline. fm-watch.sh evaluates the output to set the
+# shell globals; tests source the same function under a fixture env and read
+# SLACK_CHECK_INTERVAL from the emitted assignments. Callers capture stdout under
+# the same FM_HOME / FM_STATE_OVERRIDE / FM_CONFIG_OVERRIDE / FM_ROOT_OVERRIDE
+# that fm-watch.sh top-level honors.
+fm_watch_intervals() {
+  local home config
+  home="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT_OVERRIDE}}"
+  config="${FM_CONFIG_OVERRIDE:-$home/config}"
+  # shellcheck disable=SC1091
+  [ -f "$config/x-mode.env" ] && . "$config/x-mode.env"
+  # shellcheck disable=SC1091
+  [ -f "$config/slack-captain.env" ] && . "$config/slack-captain.env"
+  printf 'POLL=%q\nCHECK_INTERVAL=%q\nSLACK_CHECK_INTERVAL=%q\n' \
+    "${FM_POLL:-15}" "${FM_CHECK_INTERVAL:-300}" "${FM_SLACK_CHECK_INTERVAL:-${FM_POLL:-15}}"
+}
+
 # Resolve Slack credentials and pinned captain-channel identities.
 # Env wins over files. Missing token or channel leaves both empty.
 fms_load_config() {

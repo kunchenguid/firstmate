@@ -62,12 +62,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 mkdir -p "$STATE"
-# shellcheck disable=SC1091
-[ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
-# shellcheck disable=SC1091
-[ -f "$CONFIG/slack-captain.env" ] && . "$CONFIG/slack-captain.env"
 
 # The native event fast-path and only its true dependencies have one narrow
 # production owner. The Herdr event-wait smoke test consumes this same owner
@@ -115,11 +110,55 @@ else
   stat_sig()   { stat -c '%s:%Y' "$1" 2>/dev/null; }
 fi
 
-POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
-CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
-SLACK_CHECK_INTERVAL=${FM_SLACK_CHECK_INTERVAL:-$POLL}  # slack-watch.check.sh only
+# POLL, CHECK_INTERVAL, and SLACK_CHECK_INTERVAL are set by fm_watch_intervals
+# (in bin/fm-slack-lib.sh, sourced above): the owner that sources
+# config/x-mode.env and config/slack-captain.env and emits the intervals with the
+# same defaults the inline lines used. This eval routes the executed watcher's
+# initialization through it. PARTIAL GATE, not a complete one. The regression
+# suite only ever sources fm-watch.sh (it returns before the Main entry loop), so
+# the oracle observes this eval only in sourced mode; what is and is not closed is
+# written down here and in tests/fm-slack-captain-channel.test.sh's PARTIAL GATE
+# note, so the comments cannot re-derive a false completeness claim.
+#
+# CLOSED: the fixture-equal constant class (m1/m4) - the owner regression now
+# asserts two distinct configured cadences (37 and 53) both transport, so no
+# single hardcoded constant in the owner satisfies the oracle. Also closed: the
+# owner's config load deleted or made unreachable; the owner returning the default
+# when a cadence is configured (hardcoding 15, the only cadence constant in
+# shipped code); and disagreement between fm_watch_intervals and a sourced
+# fm-watch.sh.
+#
+# NOT CLOSED (the two remaining known suite escapes, each verified green with a
+# configured 45 resolving to 15 while all 27 checks pass; evidence in
+# data/refute-cadence-stop-condition/report.md, mutations m10 and m11):
+#   - m10: a mode-gated eval here. This call site is top level, where
+#     BASH_SOURCE/$0 can distinguish sourced from executed (unlike inside the
+#     owner function, where BASH_SOURCE[0] is the defining file in both modes);
+#     wrapping this eval in that condition drops a configured 45 to 15 in executed
+#     mode with all 27 checks green. The historical mutation site was the eval at
+#     commit b3449187:122; the line number moves with this file.
+#   - m11: any override in the executed-only region after the Main entry return
+#     guard below, which a sourced oracle never reaches; same result, all 27
+#     checks green. The historical mutation site was just after the guard at
+#     commit b3449187:763; the line number moves with this file.
+# A bounded executed-mode seam exists and would distinguish both known escapes:
+# record a live external process as the holder of this home's watcher lock, run
+# bin/fm-watch.sh as a script so the existing singleton-collision path exits
+# before the loop, and use a BASH_ENV-injected EXIT trap to capture the effective
+# SLACK_CHECK_INTERVAL from that shell. The repository already uses BASH_ENV
+# injection for test instrumentation in tests/fm-bootstrap.test.sh and
+# tests/fm-session-start.test.sh; their BASH_ENV payloads do not install EXIT traps.
+# On this bounded path, fm-watch.sh acquires no watcher lock and enters no loop.
+# The targeted Slack cadence suite does not exercise that available seam. Under
+# the pre-declared stop condition, m10 and m11 remain open by decision even though
+# the bounded seam above can test them.
+# The two-value transport assertion closes the constant class only - it does not
+# make the oracle complete, and nothing here claims it does. What the suite does
+# prove: the owner transports a non-default cadence (two distinct configured
+# values, killing the hardcode class) and a sourced fm-watch.sh agrees.
+eval "$(fm_watch_intervals)"
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
