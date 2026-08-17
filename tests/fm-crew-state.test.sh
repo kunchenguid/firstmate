@@ -192,9 +192,10 @@ EOF
 }
 
 # A run object whose top-level status still reads running while no step of it
-# is running or fixing any more: nothing is executing behind that status. This
-# is the uncorroborated shape an abandoned run answers with - contrast
-# run_running above, whose review step is genuinely mid-flight.
+# is running or fixing any more: nothing is executing behind that status. With
+# no active_steps age on offer, that stalled table is itself the proof an
+# abandoned run leaves - contrast run_running above, whose review step is
+# genuinely mid-flight.
 run_running_no_active_step() {  # <branch>
   cat <<EOF
 run:
@@ -484,17 +485,15 @@ test_gate_block_parked_not_superseded() {
   pass "gate block parked run is not flagged superseded"
 }
 
-# --- stale unconfirmed run-step vs a recorded PR + a later status-log verb --
+# --- frozen run-step vs a recorded PR + a later status-log verb -------------
 # Regression for the dev-tailscale-router-fix (w20) incident (2026-08-16): a
 # no-mistakes run object kept answering "running" long after this branch's PR
 # was already posted (meta pr= recorded, a durable fact independent of any one
-# run object) and the crew had since declared a pause. Because the plain
-# "validating (running)" reading carries no corroborating detail (no outcome,
-# no gate, and no step of the run itself still running or fixing), it must
-# defer to the crew's own later status-log verb instead of silently
-# superseding it forever - unlike the needs-decision/blocked reconciliation
-# above, which trusts an ACTIVE (running/fixing) run over a stale log
-# precisely because that run has fresh corroborating detail.
+# run object) and the crew had since declared a pause. A run that has stopped
+# moving cannot describe what is happening now, so it must defer to the crew's
+# own later status-log verb instead of silently superseding it forever - unlike
+# the needs-decision/blocked reconciliation above, which trusts a run over a
+# stale log whenever that run is still fresh.
 test_stale_running_with_recorded_pr_defers_to_paused_log() {
   reset_fakes
   local d; d=$(new_case stale-running-paused)
@@ -510,7 +509,7 @@ test_stale_running_with_recorded_pr_defers_to_paused_log() {
   assert_contains "$out" "source: status-log" "deferred paused state comes from the status log"
   assert_contains "$out" "awaiting external team review/merge" "the pause reason is carried in the detail"
   assert_not_contains "$out" "state: working" "the stale run-step reading must not supersede the pause"
-  pass "stale unconfirmed running run + recorded PR defers to a later paused log"
+  pass "a frozen running run + recorded PR defers to a later paused log"
 }
 
 # Same, but the crew's later log line is a plain done: report rather than the
@@ -529,7 +528,7 @@ test_stale_running_with_recorded_pr_defers_to_done_log() {
   assert_contains "$out" "state: done" "stale running run + recorded PR defers to a plain done log"
   assert_contains "$out" "source: status-log" "deferred done state comes from the status log"
   assert_not_contains "$out" "state: working" "the stale run-step reading must not supersede done"
-  pass "stale unconfirmed running run + recorded PR defers to a later plain done log"
+  pass "a frozen running run + recorded PR defers to a later plain done log"
 }
 
 # The deferral is confined to the full `axi status` reading. The coarse
@@ -558,7 +557,7 @@ test_coarse_running_with_recorded_pr_stays_working() {
 
 # The reconciliation must not fire without a recorded PR: this is the same
 # stale-looking "validating (running)" reading, but with no pr= in meta the
-# durable corroborating fact is missing, so the run-step stays authoritative -
+# durable independent fact is missing, so the run-step stays authoritative -
 # a genuinely wedged task never legitimately has meta pr= before its first PR.
 test_stale_running_without_recorded_pr_stays_working() {
   reset_fakes
@@ -591,9 +590,9 @@ test_stale_running_with_recorded_pr_and_working_log_stays_working() {
   pass "recorded PR does not mask genuinely active work reported as working:"
 }
 
-# A genuinely active auto-fix (top-level status=fixing) has its own
-# corroborating detail and must not be treated as unconfirmed, even with a
-# recorded PR and a paused log.
+# A genuinely active auto-fix (top-level status=fixing, and a reading that
+# offers no stalled step table to judge it stale by) keeps its authority, even
+# with a recorded PR and a paused log.
 test_stale_fixing_with_recorded_pr_and_paused_log_stays_working() {
   reset_fakes
   local d; d=$(new_case fixing-recorded-pr-paused)
@@ -606,7 +605,7 @@ test_stale_fixing_with_recorded_pr_and_paused_log_stays_working() {
   local out; out=$(run_crew_state "$d" feat-w20f)
   assert_contains "$out" "state: working" "an active fixing run stays working despite a recorded PR"
   assert_contains "$out" "source: run-step" "an active fixing run is not deferred to the status log"
-  pass "a genuinely active fixing run is not treated as unconfirmed"
+  pass "a genuinely active fixing run keeps its authority"
 }
 
 # The reconciliation must apply regardless of pane liveness (run-step
@@ -630,13 +629,11 @@ test_dead_window_stale_running_with_recorded_pr_defers_to_paused_log() {
   pass "a bare-shell pane on a stale-running + recorded-PR + paused task reports paused, not working"
 }
 
-# A top-level status=running WITH a ci step row (running or fixing) has real
-# corroborating detail even when that ci row does not itself resolve to a
-# confirmed CI-green transition: the CI monitor is genuinely watching this
-# run right now, so it must not be treated as unconfirmed and deferred to a
-# stale paused log, even with a recorded PR. Regression for the review
-# finding that the initial version of this reconciliation bypassed the
-# deliberate not-ready guard already applied to log_reports_ci_ready.
+# A top-level status=running WITH a ci step row (running or fixing) and no
+# staleness evidence against it is a CI monitor genuinely watching this run
+# right now, even when that row does not itself resolve to a confirmed
+# CI-green transition, so it must not be deferred to a stale paused log even
+# with a recorded PR.
 test_stale_running_with_recorded_pr_and_active_ci_row_stays_working() {
   reset_fakes
   local d; d=$(new_case stale-running-active-ci)
@@ -649,13 +646,13 @@ test_stale_running_with_recorded_pr_and_active_ci_row_stays_working() {
   # No FM_FAKE_CI_LOGS: the ci log tail does not confirm green, so this is
   # genuinely still-monitoring, not yet a done-reconciled outcome either.
   local out; out=$(run_crew_state "$d" feat-w20h)
-  assert_contains "$out" "state: working" "an active ci,running row is corroborating detail, not unconfirmed"
-  assert_contains "$out" "source: run-step" "a corroborated ci-monitoring run is not deferred to the status log"
-  pass "a top-level running status with an active ci step row is not treated as unconfirmed"
+  assert_contains "$out" "state: working" "an active ci,running row with no staleness evidence stays fresh"
+  assert_contains "$out" "source: run-step" "a fresh ci-monitoring run is not deferred to the status log"
+  pass "a top-level running status with an active ci step row keeps its authority"
 }
 
-# The same corroboration applies to any step, not just ci. Regression for the
-# review finding that an earlier version only recognized a ci step row: a crew
+# Freshness is judged on any step, not just ci. Regression for the review
+# finding that an earlier version only recognized a ci step row: a crew
 # whose PR drew change requests pushes a fix, a new run starts on the same head
 # and sits in review/test/lint long before it reaches ci, while the crew's last
 # status line is still the pause it declared while awaiting that review (crews
@@ -672,10 +669,10 @@ test_running_with_recorded_pr_and_active_review_step_stays_working() {
   printf 'paused: awaiting external team review/merge\n' > "$d/state/feat-w20j.status"
   FM_FAKE_AXI_STATUS="$(run_running fm/feat-w20j)"   # review,running
   local out; out=$(run_crew_state "$d" feat-w20j)
-  assert_contains "$out" "state: working" "an active review step row is corroborating detail, not unconfirmed"
-  assert_contains "$out" "source: run-step" "a corroborated re-run is not deferred to the status log"
+  assert_contains "$out" "state: working" "an active review step row keeps the run fresh"
+  assert_contains "$out" "source: run-step" "a fresh re-run is not deferred to the status log"
   assert_not_contains "$out" "run-step stale" "the recorded-PR deferral must not fire over an executing step"
-  pass "a running status with an active non-ci step row is not treated as unconfirmed"
+  pass "a running status with an active non-ci step row keeps its authority"
 }
 
 # The shape the real w20 run answered with after its host rebooted: `ci,running`
@@ -683,7 +680,7 @@ test_running_with_recorded_pr_and_active_review_step_stays_working() {
 # - a reboot or a killed agent leaves the in-flight step frozen at running
 # forever - so its presence cannot mean "executing now". Only the active_steps
 # last_activity age separates the two, and a stale one leaves the reading
-# uncorroborated so the declared pause still wins. Without this the crew is
+# stale so the declared pause still wins. Without this the crew is
 # reported working again and the wedge-escalation loop the intent removes comes
 # straight back.
 test_frozen_ci_step_with_stale_last_activity_defers_to_paused_log() {
@@ -698,15 +695,15 @@ test_frozen_ci_step_with_stale_last_activity_defers_to_paused_log() {
   # step_quiet_warning (10m default) - the form the real reading carried.
   FM_FAKE_AXI_STATUS="$(run_running_frozen_ci_step fm/feat-w20k "quiet 2d14h")"
   local out; out=$(run_crew_state "$d" feat-w20k)
-  assert_contains "$out" "state: paused" "a frozen ci step row does not corroborate, so the pause wins"
+  assert_contains "$out" "state: paused" "a frozen ci step row is not fresh, so the pause wins"
   assert_contains "$out" "source: status-log" "the deferred state comes from the status log"
   assert_contains "$out" "run-step stale" "the reconciliation fired on the run-step path"
   assert_not_contains "$out" "state: working" "a run quiet for days must not read as executing now"
-  pass "a running step row frozen past the liveness window does not corroborate"
+  pass "a running step row frozen past the liveness window is not fresh"
 }
 
 # The same shape while the step is genuinely working: last_activity is recent,
-# so the step row corroborates and the run stays authoritative. active_for is
+# so the run reads fresh and stays authoritative. active_for is
 # identical to the frozen case above - only last_activity separates them.
 test_active_ci_step_with_recent_last_activity_stays_working() {
   reset_fakes
@@ -718,35 +715,94 @@ test_active_ci_step_with_recent_last_activity_stays_working() {
   printf 'paused: awaiting external team review/merge\n' > "$d/state/feat-w20l.status"
   FM_FAKE_AXI_STATUS="$(run_running_frozen_ci_step fm/feat-w20l 2m30s)"
   local out; out=$(run_crew_state "$d" feat-w20l)
-  assert_contains "$out" "state: working" "a recently-active step row corroborates the run"
+  assert_contains "$out" "state: working" "a recently-active step row keeps the run fresh"
   assert_contains "$out" "source: run-step" "a live run is not deferred to the status log"
   assert_not_contains "$out" "run-step stale" "the deferral must not fire over a live step"
   pass "a running step row with recent last_activity keeps the run authoritative"
 }
 
-# Staleness alone must not license re-emitting a done: report the run object has
-# demonstrably moved past. A crew reports "done: PR ... checks green" (which is
-# what makes fm-pr-check.sh record meta pr= in the first place), CI then goes
-# red and no-mistakes moves to ci,fixing, and the host reboots - freezing that
-# row with a stale last_activity. log_reports_ci_ready already refuses to emit
-# done for exactly this reading; the recorded-PR deferral must refuse too, or
-# the crew is reported complete on a green report while its checks are red and
-# fm-inactive-reconcile.sh records that as a terminal outcome.
-test_frozen_ci_fixing_with_stale_activity_does_not_emit_done() {
+# A frozen run's ci evidence is frozen too, so it cannot veto the declared
+# pause. `ci,fixing` freezes exactly as readily as `ci,running` - the run was
+# auto-fixing checks when the host died - and reads as CI "not-ready" forever
+# after. That verdict describes the instant the run stopped, not now, so the
+# crew's later pause still wins.
+test_frozen_ci_fixing_with_stale_activity_defers_to_paused_log() {
   reset_fakes
-  local d; d=$(new_case frozen-ci-fixing-not-ready)
+  local d; d=$(new_case frozen-ci-fixing-paused)
   make_repo_on_branch "$d/wt" fm/feat-w20n
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-w20n.meta" "window=fm:fm-feat-w20n" "worktree=$d/wt" "kind=ship" \
     "pr=https://github.com/o/r/pull/21"
-  printf 'done: PR https://github.com/o/r/pull/21 checks green\n' > "$d/state/feat-w20n.status"
+  printf 'paused: awaiting external team review/merge\n' > "$d/state/feat-w20n.status"
   FM_FAKE_AXI_STATUS="$(run_running_frozen_ci_step fm/feat-w20n "quiet 2d14h" fixing)"
   local out; out=$(run_crew_state "$d" feat-w20n)
-  assert_contains "$out" "state: working" "an auto-fixing ci step is not masked to done by a stale row"
-  assert_contains "$out" "source: run-step" "the run-step stays authoritative while CI is not-ready"
-  assert_contains "$out" "validating" "the detail reports the run as still validating"
-  assert_not_contains "$out" "state: done" "a superseded checks-green report must not be re-emitted"
-  pass "a stale ci,fixing row does not let a superseded checks-green log report done"
+  assert_contains "$out" "state: paused" "a frozen ci,fixing row does not veto the declared pause"
+  assert_contains "$out" "source: status-log" "the deferred state comes from the status log"
+  assert_not_contains "$out" "state: working" "a dead run must not keep the crew in wedge-escalation"
+  pass "a frozen ci,fixing row still defers to a later paused log"
+}
+
+# The same frozen run against a later done: report. Whether CI has since gone
+# red is not something a run that stopped days ago can answer - that belongs to
+# the PR poll fm-pr-check.sh arms - so the crew's own last word stands.
+test_frozen_ci_fixing_with_stale_activity_defers_to_done_log() {
+  reset_fakes
+  local d; d=$(new_case frozen-ci-fixing-done)
+  make_repo_on_branch "$d/wt" fm/feat-w20o
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20o.meta" "window=fm:fm-feat-w20o" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/22"
+  printf 'done: PR https://github.com/o/r/pull/22 checks green\n' > "$d/state/feat-w20o.status"
+  FM_FAKE_AXI_STATUS="$(run_running_frozen_ci_step fm/feat-w20o "quiet 2d14h" fixing)"
+  local out; out=$(run_crew_state "$d" feat-w20o)
+  assert_contains "$out" "state: done" "a frozen run defers to the crew's later done report"
+  assert_contains "$out" "source: status-log" "the deferred state comes from the status log"
+  assert_not_contains "$out" "state: working" "a dead run must not read as still validating"
+  pass "a frozen run defers to a later done log rather than re-validating forever"
+}
+
+# The w20 shape with its ci.log tail pinned. A host that reboots mid-CI-monitor
+# leaves the last log marker at "CI checks running", which reads as not-ready
+# forever after. Nothing about a frozen run's own stale log may block the
+# deferral, or the bare-shell pane goes back to wedge-escalating every few
+# minutes - the exact noise this change exists to stop.
+test_frozen_ci_running_with_not_ready_log_defers_to_paused_log() {
+  reset_fakes
+  local d; d=$(new_case frozen-ci-running-not-ready)
+  make_repo_on_branch "$d/wt" fm/feat-w20p
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20p.meta" "window=fm:fm-feat-w20p" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/23"
+  printf 'paused: awaiting external team review/merge\n' > "$d/state/feat-w20p.status"
+  FM_FAKE_AXI_STATUS="$(run_running_frozen_ci_step fm/feat-w20p "quiet 2d14h")"
+  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
+  FM_FAKE_TMUX_MISSING=1   # the agent process died with the host
+  local out; out=$(run_crew_state "$d" feat-w20p)
+  assert_contains "$out" "state: paused" "a frozen run's own stale ci log cannot veto the pause"
+  assert_contains "$out" "source: status-log" "the deferred state comes from the status log"
+  assert_not_contains "$out" "state: working" "the bare-shell pane must not read as a wedge candidate"
+  pass "a frozen ci monitor with a not-ready log tail still defers to the declared pause"
+}
+
+# The other side of that line: while the run is still FRESH its CI verdict is
+# current, so a relapse is caught exactly as before. Same not-ready log tail as
+# above, same stale done: report - only last_activity differs, and that is
+# enough to keep the run authoritative and refuse the done.
+test_fresh_ci_not_ready_beats_stale_checks_green_log() {
+  reset_fakes
+  local d; d=$(new_case fresh-ci-not-ready-relapse)
+  make_repo_on_branch "$d/wt" fm/feat-w20q
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20q.meta" "window=fm:fm-feat-w20q" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/24"
+  printf 'done: PR https://github.com/o/r/pull/24 checks green\n' > "$d/state/feat-w20q.status"
+  FM_FAKE_AXI_STATUS="$(run_running_frozen_ci_step fm/feat-w20q 2m30s)"
+  FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
+  local out; out=$(run_crew_state "$d" feat-w20q)
+  assert_contains "$out" "state: working" "a fresh run's not-ready CI still supersedes a stale checks-green log"
+  assert_contains "$out" "source: run-step" "a fresh run stays authoritative"
+  assert_not_contains "$out" "state: done" "a CI relapse under a live run must not report done"
+  pass "a fresh not-ready ci reading still catches a relapse after a checks-green report"
 }
 
 # The window is tunable for fleets whose steps legitimately go quiet longer.
@@ -1771,7 +1827,10 @@ test_stale_running_with_recorded_pr_and_active_ci_row_stays_working
 test_running_with_recorded_pr_and_active_review_step_stays_working
 test_frozen_ci_step_with_stale_last_activity_defers_to_paused_log
 test_active_ci_step_with_recent_last_activity_stays_working
-test_frozen_ci_fixing_with_stale_activity_does_not_emit_done
+test_frozen_ci_fixing_with_stale_activity_defers_to_paused_log
+test_frozen_ci_fixing_with_stale_activity_defers_to_done_log
+test_frozen_ci_running_with_not_ready_log_defers_to_paused_log
+test_fresh_ci_not_ready_beats_stale_checks_green_log
 test_liveness_window_is_overridable
 test_stale_running_with_recorded_pr_and_blocked_log_stays_working
 test_ci_ready_done_log_beats_monitoring_run

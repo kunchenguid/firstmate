@@ -42,21 +42,31 @@
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
 #      green, so a green PR is never silently read as still-validating. A
-#      SECOND exception, confined to the full `axi status` reading: a plain
-#      top-level status=running with no corroborating detail at all (no
-#      outcome, no gate, and no steps[] row that both reads running/fixing
-#      and is still live by its active_steps last_activity - see
-#      nm_has_active_step and RUN_STATE_UNCONFIRMED) means nothing is actually
-#      executing behind that status, so it can be a stale run object that
-#      never advanced. When that reading is paired with a recorded state/<id>.meta
-#      pr= (a durable fact the run object lacks) and the crew's own last
-#      status line has since moved to paused: or done:, defer to that
-#      status-log verb instead - narrower than the needs-decision/blocked
-#      reconciliation below, which still always trusts an active run over
-#      those two verbs. The coarse runs-list fallback carries no step detail
-#      to corroborate against, so it never takes this deferral, and neither
-#      does a reading whose ci checks are known not-ready: a stale row does
-#      not make a superseded "checks green" report safe to re-emit.
+#      SECOND exception, confined to the full `axi status` reading, is a
+#      matter of FRESHNESS rather than of any particular status word:
+#
+#        fresh run-step > status-log > stale run-step
+#
+#      A run object is a durable record, not a heartbeat. A machine reboot, a
+#      killed agent, or an abandoned daemon leaves it frozen mid-step, still
+#      answering "running" with an in-flight step row, for as long as the row
+#      survives - so a run that has stopped moving cannot describe what is
+#      happening NOW, however confidently it still claims to. RUN_SOURCE_FRESH
+#      (see nm_run_is_fresh) settles that once per read; when it comes back
+#      false and this branch's PR is already recorded in state/<id>.meta pr=
+#      (a durable fact the run object lacks), the crew's own later paused: or
+#      done: line wins over the frozen reading. This governs EVERY verdict a
+#      stale run would otherwise supply about being mid-work, including what
+#      its ci step row and ci.log tail say about CI: those stopped at the same
+#      instant the run did. A CI regression after a run freezes is the PR
+#      poll's job (fm-pr-check.sh), not this reader's.
+#      Narrower than the needs-decision/blocked reconciliation below, which
+#      still always trusts an active run over those two verbs. Terminal
+#      outcomes and gate parks are exempt by construction - `passed` or a
+#      waiting gate stays true no matter how long ago it was written, so only
+#      claims of CURRENT activity are ever demoted. The coarse runs-list
+#      fallback carries no step detail to judge recency by and keeps its
+#      authority unchanged.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -104,7 +114,7 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 # Seconds of `axi status` active_steps last_activity age within which a
 # running/fixing step row still counts as evidence that this run is executing
-# NOW (see nm_has_active_step). A step row alone survives a machine reboot or a
+# NOW (see nm_run_is_fresh). A step row alone survives a machine reboot or a
 # killed agent unchanged, so a frozen run keeps presenting one forever; only
 # last_activity distinguishes that from real work. Generous by default: agent
 # steps legitimately go quiet for long stretches (no-mistakes' own
@@ -332,28 +342,31 @@ nm_ci_step_status() {
   strip_quotes "$(trim "${rest%%,*}")"
 }
 
-# True when this run is executing SOMETHING right now, whatever the step is
-# named. Two signals, both read from the same `axi status` output:
+# THE freshness verdict for a run object: 0 (true) while it can still describe
+# what is happening NOW, 1 once it is provably frozen. One gate, consulted
+# once - RUN_SOURCE_FRESH below is its only caller.
 #
-#   steps[]       a row carrying its own running/fixing status. Scoped to the
-#                 steps table (a row is any `<name>,<status>,...` line after
+# `axi status` exposes no run-level timestamp (no created/updated field is in
+# its TOON surface at all), so recency has to come from the run's own steps:
+#
+#   active_steps[] the authoritative signal. no-mistakes emits it only while a
+#                 step is running/fixing, carrying a last_activity age per
+#                 step. Within FM_RUN_STEP_LIVENESS_MAX the run is live.
+#                 active_for is deliberately ignored - it keeps growing on a
+#                 frozen run all by itself (observed on the w20 run:
+#                 `ci,running` with active_for 2d17h and last_activity 2d14h
+#                 after a reboot).
+#   steps[]       the fallback when no age is on offer. A steps table whose
+#                 rows have all left running/fixing says the run is between
+#                 steps and executing nothing, which is itself frozen. Scoped
+#                 to that table (a row is any `<name>,<status>,...` line after
 #                 the header) so a findings[] row or a trailing `gate:` block
 #                 is never mistaken for a step.
-#   active_steps[] the liveness qualifier. A step row is a DURABLE record: a
-#                 machine reboot, a killed agent, or an abandoned daemon
-#                 leaves the in-flight step frozen at running forever, so its
-#                 presence alone cannot mean "executing now" (observed on the
-#                 w20 run: `ci,running` with active_for 2d17h and
-#                 last_activity 2d14h after a reboot). no-mistakes emits
-#                 active_steps only while a step is running/fixing, with a
-#                 last_activity age per step; when it gives one, that age must
-#                 be within FM_RUN_STEP_LIVENESS_MAX for the step row to
-#                 corroborate. active_for is deliberately ignored - a frozen
-#                 run's active_for keeps growing on its own.
 #
-# Older CLIs (and terminal/parked readings) emit no active_steps at all; with
-# no age to test, a running/fixing step row still corroborates on its own.
-nm_has_active_step() {
+# Absent BOTH - no steps table at all, as older CLIs and the terse readings
+# emit - there is no evidence either way, and the run keeps its authority:
+# this gate only ever demotes on positive proof of a frozen run.
+nm_run_is_fresh() {
   printf '%s\n' "$RUN_OUT" | awk -v maxage="$FM_RUN_STEP_LIVENESS_MAX" '
     function age_secs(v,   tok, unit, num, total) {
       gsub(/"/, "", v)
@@ -375,7 +388,7 @@ nm_has_active_step() {
       }
       return total
     }
-    /^[[:space:]]*steps\[/ { in_steps = 1; in_active = 0; next }
+    /^[[:space:]]*steps\[/ { in_steps = 1; in_active = 0; saw_steps = 1; next }
     /^[[:space:]]*active_steps\[/ {
       in_active = 1; in_steps = 0; la_col = 0
       hdr = $0
@@ -410,7 +423,8 @@ nm_has_active_step() {
     }
     END {
       if (aged) exit(freshest <= maxage ? 0 : 1)
-      exit(step_row ? 0 : 1)
+      if (saw_steps) exit(step_row ? 0 : 1)
+      exit 0
     }
   '
 }
@@ -578,15 +592,12 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
-  # 1 iff RUN_STATE=working came from the plain "still validating" catch-all
-  # with no corroborating detail (no outcome, no gate, no step row that is
-  # both running/fixing and still live): the run object says "running" and
-  # nothing else backs that up. Only ever set on the full `axi status` path, which is
-  # the only one that carries the detail to corroborate against.
-  # Consulted below to decide whether a stale run-step reading may be
-  # overridden by a durable, independent fact (meta's recorded pr=) plus the
-  # crew's own later status-log verb.
-  RUN_STATE_UNCONFIRMED=0
+  # Can this run object still describe what is happening NOW? Everything it
+  # says about being mid-work rests on this one answer (see nm_run_is_fresh).
+  # Defaults to yes and is only ever lowered by positive proof of a frozen
+  # run, so the coarse runs-list path - which carries no step detail to judge
+  # recency by - keeps its authority untouched.
+  RUN_SOURCE_FRESH=1
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
     # true/working, done, or failed. A crew genuinely parked at a gate still
@@ -595,11 +606,11 @@ if [ "$HAVE_RUN" = 1 ]; then
     # needs-decision/blocked status-log append (a captain-relevant VERB) is
     # surfaced through signal_reason_is_actionable regardless of this
     # coarse-vs-full distinction, so a real gate is never silently missed.
-    # For the same reason RUN_STATE_UNCONFIRMED stays 0 here: with no step
-    # detail to corroborate against, "running" on this path can never be
-    # distinguished from a stale record, so the recorded-PR deferral below
-    # would fire on every genuinely-validating crew whose branch simply is not
-    # the one bare `axi status` answered for. This path keeps trusting the run.
+    # For the same reason RUN_SOURCE_FRESH stays 1 here: with no step detail to
+    # judge recency by, "running" on this path can never be distinguished from
+    # a stale record, so demoting it would fire the deferral below on every
+    # genuinely-validating crew whose branch simply is not the one bare `axi
+    # status` answered for. This path keeps trusting the run.
     case "$COARSE_STATUS" in
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
@@ -610,6 +621,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
+    nm_run_is_fresh || RUN_SOURCE_FRESH=0
     outcome=$(strip_quotes "$(nm_field outcome)")
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
     gate_status=$(nm_gate_status)
@@ -642,7 +654,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     else
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
-        running)        RUN_STATE=working; RUN_DETAIL="validating (running)"; RUN_STATE_UNCONFIRMED=1 ;;
+        running)        RUN_STATE=working; RUN_DETAIL="validating (running)" ;;
         fixing)         RUN_STATE=working; RUN_DETAIL="validating (fixing)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
         failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
@@ -664,22 +676,6 @@ if [ "$HAVE_RUN" = 1 ]; then
             CI_LOG_STATE=not-ready
             ;;
         esac
-        # A step row reading running or fixing, still live by its
-        # active_steps last_activity, is corroborating detail in its own
-        # right, even when a ci row does not resolve to a confirmed CI-green
-        # transition above: some step of this run is executing, so the run
-        # object is not just answering "running" with nothing else behind it.
-        # Clearing the flag here keeps the recorded-PR deferral below from
-        # firing over genuinely active validation - a re-run started after PR
-        # feedback sits in review/test/lint long before it reaches ci.
-        # CI_STEP_STATUS is deliberately NOT consulted as a second way in: its
-        # ci,running row is exactly the row a frozen run leaves behind, so it
-        # has to clear the same liveness bar as any other step. Being stale
-        # therefore no longer implies "safe to report the log's verdict" -
-        # CI_LOG_STATE carries the active-CI guard down to the deferral itself.
-        if nm_has_active_step; then
-          RUN_STATE_UNCONFIRMED=0
-        fi
       fi
     fi
   fi
@@ -701,31 +697,24 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  # A plain "still validating" full-status reading with no corroborating detail
-  # (RUN_STATE_UNCONFIRMED, never set on the coarse path) is not trustworthy
-  # evidence of CURRENT activity once
-  # this branch's PR was already recorded in meta (pr=, written once by
-  # fm-pr-check.sh after an earlier "done: PR ... checks green" report) and the
-  # crew's own most recent status line has since moved to a declared pause or a
-  # done: report: the crew already reported past this run, so the run object is
-  # answering for a stale record that never advanced, not a fresh restart.
-  # Defer to the status log instead of letting that reading supersede it -
-  # generalizes log_reports_ci_ready's narrower done+"checks green" text match
-  # to any done: report, and applies regardless of pane liveness since
-  # run-step precedence itself is pane-liveness-independent by design.
+  # Where a frozen run object loses to the crew's own later word. A run that
+  # is not fresh is claiming to be mid-work on evidence that stopped moving,
+  # so once this branch's PR was already recorded in meta (pr=, written once
+  # by fm-pr-check.sh after an earlier "done: PR ... checks green" report) and
+  # the crew's own most recent status line has since moved to a declared pause
+  # or a done: report, that later declaration is the better description of now.
+  # Generalizes log_reports_ci_ready's narrower done+"checks green" text match
+  # to any done: report, and applies regardless of pane liveness since run-step
+  # precedence itself is pane-liveness-independent by design.
   # Deliberately excludes needs-decision/blocked (map_log_state's parked/
   # blocked): those keep the OPPOSITE precedence just below - an active run
   # over a stale needs-decision/blocked log - since a genuine gate resolving
   # and the run resuming is the routine case there, not the exception.
-  # Never fires while CI is known to be actively not-ready (checks not yet
-  # green, or the pipeline auto-fixing them): the same guard log_reports_ci_ready
-  # applies just above, for the same reason. A "done: PR ... checks green" line
-  # the run object has demonstrably moved past must not be re-emitted as done
-  # here just because that ci row has since gone quiet - a rebooted host freezes
-  # `ci,fixing` exactly like `ci,running`, and reporting done on it would record
-  # a terminal outcome for a PR whose checks are red.
-  if [ "$RUN_STATE" = working ] && [ "$RUN_STATE_UNCONFIRMED" = 1 ] &&
-     [ "$CI_LOG_STATE" != not-ready ] && [ -n "$(meta_value pr)" ]; then
+  # Nothing else is consulted here, CI state least of all: a frozen run's ci
+  # step row and its ci.log tail stopped at the same instant the run did, so
+  # they cannot report on a PR's checks now either. Whether CI has since gone
+  # red belongs to the PR poll fm-pr-check.sh arms, not to this reader.
+  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE_FRESH" = 0 ] && [ -n "$(meta_value pr)" ]; then
     LOG_OVERRIDE=$(map_log_state "$LOG_LINE")
     case "$LOG_OVERRIDE" in
       paused|done)
