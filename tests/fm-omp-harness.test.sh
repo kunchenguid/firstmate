@@ -40,8 +40,10 @@ OMP_PINNED_VERSION="omp/17.2.9"
 OMP_MODEL="anthropic/claude-sonnet-4-5"
 
 make_omp_fakebin() {  # <dir> [omp-version|absent] -> echoes fakebin dir
-  local dir=$1 version=${2:-$OMP_PINNED_VERSION} fakebin
+  local dir=$1 version=${2:-$OMP_PINNED_VERSION} fakebin node_bin
   fakebin=$(fm_fakebin "$dir")
+  node_bin=$(command -v node) || fail "the Orca fixture requires node for adapter JSON parsing"
+  ln -sf "$node_bin" "$fakebin/node"
   # The tmux stub records send-keys payloads so a test can read back the exact
   # launch command the adapter would deliver to a pane, without a real pane.
   # FM_FAKE_WINDOW/FM_FAKE_COMMAND model an existing, agent-free endpoint for
@@ -65,6 +67,51 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  # The candidate is Orca-only. This stub returns the case's already-isolated
+  # git worktree and records terminal-send text in the same log the assertions
+  # have always inspected; no real Orca runtime or terminal is contacted.
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "status --json")
+    printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
+    ;;
+  "repo show"|"repo add")
+    printf '{"ok":true,"result":{"id":"repo-omp-fixture"}}\n'
+    ;;
+  "worktree create")
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-omp-fixture","path":"%s"},"terminal":{"handle":"term-omp-fixture"}}}\n' "${FM_FAKE_PANE_PATH:?}"
+    ;;
+  "terminal create")
+    printf '{"ok":true,"result":{"terminal":{"handle":"term-omp-fixture"}}}\n'
+    ;;
+  "terminal send")
+    text= saw_text=0
+    shift 2
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --text ] && [ "$#" -gt 1 ]; then
+        text=$2
+        saw_text=1
+        shift 2
+      else
+        shift
+      fi
+    done
+    if [ "$saw_text" -eq 1 ] && [ -n "${FM_TMUX_LOG:-}" ]; then
+      printf '%s\n' "$text" >> "$FM_TMUX_LOG"
+    fi
+    printf '{"ok":true,"result":{}}\n'
+    ;;
+  "worktree rm")
+    printf '{"ok":true,"result":{}}\n'
+    ;;
+  *)
+    printf '{"ok":true,"result":{}}\n'
+    ;;
+esac
+SH
+  chmod +x "$fakebin/orca"
   fm_fake_exit0 "$fakebin" treehouse
   # `absent` deliberately installs no omp at all, so PATH resolution must fail.
   if [ "$version" != absent ]; then
@@ -130,7 +177,7 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    GROK_HOME="$home/grok-home" PATH="$path" \
+    GROK_HOME="$home/grok-home" PATH="$path" FM_BACKEND="${FM_TEST_BACKEND:-orca}" \
     FM_OMP_STUB_LOG="${FM_OMP_STUB_LOG:-}" FM_TMUX_LOG="${FM_TMUX_LOG:-}" \
     "$SPAWN" "$@" 2>&1
 }
@@ -146,7 +193,7 @@ run_spawn_guarded() {  # <home> <wt> <fakebin> <spawn-args...>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    GROK_HOME="$home/grok-home" PATH="$path" \
+    GROK_HOME="$home/grok-home" PATH="$path" FM_BACKEND="${FM_TEST_BACKEND:-orca}" \
     FM_OMP_STUB_LOG="${FM_OMP_STUB_LOG:-}" FM_TMUX_LOG="${FM_TMUX_LOG:-}" \
     "$SPAWN" "$@" 2>&1
 }
@@ -289,7 +336,7 @@ test_omp_launch_argv_is_contained() {
   # rather than one of omp's subcommands (auth, token, usage, setup, update,
   # plugin, marketplace, acp), which is what keeps those surfaces unreachable.
   assert_contains "$launch" \
-    "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=1 '$FAKEBIN_DIR/omp' --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash --model '$OMP_MODEL' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
+    "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 '$FAKEBIN_DIR/omp' --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash --model '$OMP_MODEL' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
     "omp launch argv is not the contained shape"
 
   # The allowlist is exact, so a later widening has to be deliberate.
@@ -386,6 +433,51 @@ test_omp_launch_carries_exactly_one_qualified_model_flag() {
   assert_absent "$HOME_DIR/config/crew-dispatch.json" "an omp launch must not write a dispatch profile"
   assert_absent "$HOME_DIR/config/secondmate-harness" "an omp launch must not write secondmate configuration"
   pass "an omp launch carries exactly one --model with the exact supplied provider/model, no provider flag, and writes no configuration"
+}
+
+test_omp_requires_orca_before_any_mutation() {
+  local rec id=omp-backend-allowed out backend n=0
+  rec=$(make_omp_case omp-backend-allowed claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --backend orca --mode no-mistakes --yolo off)
+  expect_code 0 $? "an explicit Orca OMP spawn should succeed: $out"
+  assert_grep 'backend=orca' "$HOME_DIR/state/$id.meta" "the allowed OMP spawn must record backend=orca"
+
+  rec=$(make_omp_case omp-backend-refused claude omp-backend-0)
+  read_case_record "$rec"
+  for backend in tmux herdr zellij cmux; do
+    n=$((n + 1))
+    assert_omp_launch_refused "omp-backend-$n" "omp requires backend=orca" \
+      --model "$OMP_MODEL" --backend "$backend"
+  done
+  [ "$n" -eq 4 ] || fail "the OMP non-Orca backend matrix must carry four rows, found $n"
+  pass "OMP accepts Orca and refuses tmux, Herdr, Zellij, and cmux before every mutation"
+}
+
+test_omp_forces_trace_off_and_clears_ambient_carrier() {
+  local rec id=omp-trace-off out launch tmux_log meta
+  local carrier='00-0123456789abcdef0123456789abcdef-0123456789abcdef-01'
+  rec=$(make_omp_case omp-trace-off claude "$id")
+  read_case_record "$rec"
+  # Freeze this home session to trace=on, then also seed an ambient carrier.
+  # OMP must override both independent inputs.
+  printf '%s\n' "$$" > "$HOME_DIR/state/.lock"
+  printf '%s on\n' "$$" > "$HOME_DIR/state/.trace-context-effective"
+  tmux_log="$CASE_DIR/endpoint-sends"
+  : > "$tmux_log"
+  out=$(TRACEPARENT="$carrier" FM_TMUX_LOG="$tmux_log" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --backend orca --mode no-mistakes --yolo off)
+  expect_code 0 $? "OMP should launch with trace forced off: $out"
+  launch=$(grep -F -- '--approval-mode' "$tmux_log" | tail -1)
+  [ -n "$launch" ] || fail "no OMP launch command was delivered"
+  assert_contains "$launch" '-u TRACEPARENT' "the OMP child must explicitly clear an ambient carrier"
+  assert_not_contains "$launch" "$carrier" "the ambient carrier must not reach the OMP child argv"
+  assert_no_grep '^export TRACEPARENT=' "$tmux_log" "the enabled home must not export trace context to OMP"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_no_grep '^traceparent=' "$meta" "OMP metadata must not record a trace carrier"
+  pass "OMP forces effective trace propagation off and clears an ambient TRACEPARENT carrier"
 }
 
 # --- refusal ordering probes ------------------------------------------------
@@ -670,11 +762,217 @@ test_omp_selection_policy_matrix() {
 
 # --- relaunch ---------------------------------------------------------------
 
+case_tree_fingerprint() {
+  local path rel
+  while IFS= read -r path; do
+    rel=${path#"$HOME_DIR"/}
+    if [ -L "$path" ]; then
+      printf 'link\t%s\t%s\n' "$rel" "$(readlink "$path")"
+    elif [ -f "$path" ]; then
+      printf 'file\t%s\t' "$rel"
+      cksum < "$path"
+    elif [ -d "$path" ]; then
+      printf 'dir\t%s\n' "$rel"
+    elif [ -p "$path" ]; then
+      printf 'fifo\t%s\n' "$rel"
+    else
+      printf 'other\t%s\n' "$rel"
+    fi
+  done < <(find "$HOME_DIR" -mindepth 1 -print | LC_ALL=C sort)
+}
+
+assert_relaunch_record_refused_without_mutation() {  # <task-id> <message> [extra-positional...]
+  local id=$1 want=$2 out status before after wt_before wt_after proj_before proj_after stub_log tmux_log
+  shift 2
+  stub_log="$CASE_DIR/omp-relaunch-preflight-argv"
+  tmux_log="$CASE_DIR/omp-relaunch-preflight-sends"
+  : > "$stub_log"
+  : > "$tmux_log"
+  rm -f "$HOME_DIR/state/.last-watcher-beat"
+  printf 'window=fm-decoy\nharness=claude\n' > "$HOME_DIR/state/decoy.meta"
+  case "$id" in
+    ''|.*|*[!A-Za-z0-9._-]*) : ;;
+    *)
+      mkdir -p "$HOME_DIR/state/.control-$id.lock" "$HOME_DIR/state/.spawn-$id.lock"
+      printf '%s\n' "$$" > "$HOME_DIR/state/.control-$id.lock/pid"
+      printf '%s\n' "$$" > "$HOME_DIR/state/.spawn-$id.lock/pid"
+      ;;
+  esac
+  before=$(case_tree_fingerprint)
+  wt_before=$(/usr/bin/git -C "$WT_DIR" status --porcelain=v1)
+  proj_before=$(/usr/bin/git -C "$PROJ_DIR" status --porcelain=v1)
+  out=$(FM_OMP_STUB_LOG="$stub_log" FM_TMUX_LOG="$tmux_log" \
+    run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$@" --relaunch)
+  status=$?
+  [ "$status" -ne 0 ] || fail "$id: unsafe relaunch metadata must be refused: $out"
+  assert_contains "$out" "$want" "$id: refusal did not identify the relaunch preflight: $out"
+  assert_not_contains "$out" "another lifecycle action" "$id: refusal reached the control lock: $out"
+  assert_not_contains "$out" "another spawn is already creating" "$id: refusal reached the task lock: $out"
+  after=$(case_tree_fingerprint)
+  wt_after=$(/usr/bin/git -C "$WT_DIR" status --porcelain=v1)
+  proj_after=$(/usr/bin/git -C "$PROJ_DIR" status --porcelain=v1)
+  [ "$after" = "$before" ] || fail "$id: refused relaunch mutated the First Mate home"
+  [ "$wt_after" = "$wt_before" ] || fail "$id: refused relaunch mutated the worktree"
+  [ "$proj_after" = "$proj_before" ] || fail "$id: refused relaunch mutated the project repository"
+  assert_absent "$HOME_DIR/state/.guard-watcher-stale-banner" "$id: refusal ran after the watcher guard"
+  case "$id" in
+    ''|.*|*[!A-Za-z0-9._-]*) : ;;
+    *)
+      assert_present "$HOME_DIR/state/.control-$id.lock" "$id: refusal altered the control-lock probe"
+      assert_present "$HOME_DIR/state/.spawn-$id.lock" "$id: refusal altered the task-lock probe"
+      assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "$id: refusal wrote an OMP extension"
+      assert_absent "$HOME_DIR/state/$id.busy-gen" "$id: refusal armed busy state"
+      ;;
+  esac
+  [ ! -s "$tmux_log" ] || fail "$id: refused relaunch contacted an endpoint"
+  [ ! -s "$stub_log" ] || fail "$id: refused relaunch invoked OMP"
+}
+
+test_relaunch_rejects_unsafe_metadata_before_every_mutation() {
+  local rec id target meta
+
+  id=omp-relaunch-missing
+  rec=$(make_omp_case "$id" claude "$id")
+  read_case_record "$rec"
+  assert_relaunch_record_refused_without_mutation "$id" "regular, non-symlink metadata file"
+
+  id=omp-relaunch-symlink
+  rec=$(make_omp_case "$id" claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$HOME_DIR/targets"
+  target="$HOME_DIR/targets/task.meta"
+  printf 'harness=omp\n' > "$target"
+  ln -s ../targets/task.meta "$HOME_DIR/state/$id.meta"
+  assert_relaunch_record_refused_without_mutation "$id" "regular, non-symlink metadata file"
+
+  id=omp-relaunch-directory
+  rec=$(make_omp_case "$id" claude "$id")
+  read_case_record "$rec"
+  mkdir "$HOME_DIR/state/$id.meta"
+  assert_relaunch_record_refused_without_mutation "$id" "regular, non-symlink metadata file"
+
+  id=omp-relaunch-fifo
+  rec=$(make_omp_case "$id" claude "$id")
+  read_case_record "$rec"
+  mkfifo "$HOME_DIR/state/$id.meta"
+  assert_relaunch_record_refused_without_mutation "$id" "regular, non-symlink metadata file"
+
+  rec=$(make_omp_case omp-relaunch-invalid claude omp-relaunch-fixture)
+  read_case_record "$rec"
+  assert_relaunch_record_refused_without_mutation '../omp-relaunch-invalid' "--relaunch requires a valid task id"
+
+  id=omp-relaunch-arity
+  rec=$(make_omp_case "$id" claude "$id")
+  read_case_record "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+  fm_write_meta "$meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  assert_relaunch_record_refused_without_mutation "$id" \
+    "--relaunch takes the task id only" "$PROJ_DIR"
+  pass "missing, symlinked, directory, FIFO, invalid-id, and multi-positional relaunches refuse before every mutation"
+}
+
+test_relaunch_detects_a_path_swap_while_binding_the_snapshot() {
+  local rec id=omp-relaunch-snapshot-race out status meta target trigger real_cat
+  local before after wt_before wt_after proj_before proj_after stub_log tmux_log
+  rec=$(make_omp_case "$id" claude "$id")
+  read_case_record "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+  target="$CASE_DIR/swapped-task.meta"
+  trigger="$CASE_DIR/swap-on-path-read"
+  stub_log="$CASE_DIR/omp-relaunch-race-argv"
+  tmux_log="$CASE_DIR/omp-relaunch-race-sends"
+  real_cat=$(command -v cat) || fail "race fixture requires the system cat"
+  fm_write_meta "$meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-$id" \
+    "orca_worktree_id=wt-$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=omp" "kind=ship" "mode=no-mistakes" "yolo=off" "backend=orca"
+  printf 'harness=claude\nbackend=tmux\n' > "$target"
+  cat > "$FAKEBIN_DIR/cat" <<'SH'
+#!/usr/bin/env bash
+set -u
+path=
+if [ "$#" -eq 2 ] && [ "$1" = -- ]; then
+  path=$2
+elif [ "$#" -eq 1 ]; then
+  path=$1
+fi
+if [ -n "$path" ] && [ "$path" = "${FM_RELAUNCH_SWAP_META:-}" ] \
+   && [ -e "${FM_RELAUNCH_SWAP_TRIGGER:-}" ]; then
+  rm -f -- "$path"
+  ln -s -- "${FM_RELAUNCH_SWAP_TARGET:?}" "$path"
+  rm -f -- "$FM_RELAUNCH_SWAP_TRIGGER"
+fi
+exec "${FM_REAL_CAT:?}" "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/cat"
+  : > "$stub_log"
+  : > "$tmux_log"
+  : > "$trigger"
+  rm -f "$HOME_DIR/state/.last-watcher-beat"
+  printf 'window=fm-decoy\nharness=claude\n' > "$HOME_DIR/state/decoy.meta"
+  mkdir -p "$HOME_DIR/state/.control-$id.lock" "$HOME_DIR/state/.spawn-$id.lock"
+  printf '%s\n' "$$" > "$HOME_DIR/state/.control-$id.lock/pid"
+  printf '%s\n' "$$" > "$HOME_DIR/state/.spawn-$id.lock/pid"
+  before=$(case_tree_fingerprint)
+  wt_before=$(/usr/bin/git -C "$WT_DIR" status --porcelain=v1)
+  proj_before=$(/usr/bin/git -C "$PROJ_DIR" status --porcelain=v1)
+  out=$(FM_REAL_CAT="$real_cat" FM_RELAUNCH_SWAP_META="$meta" \
+    FM_RELAUNCH_SWAP_TARGET="$target" FM_RELAUNCH_SWAP_TRIGGER="$trigger" \
+    FM_OMP_STUB_LOG="$stub_log" FM_TMUX_LOG="$tmux_log" \
+    run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" --relaunch --model "$OMP_MODEL")
+  status=$?
+  [ "$status" -ne 0 ] || fail "metadata path swap must refuse the relaunch: $out"
+  assert_contains "$out" "could not bind a stable regular, non-symlink metadata snapshot" \
+    "metadata path swap did not fail the stable-snapshot acquisition: $out"
+  assert_absent "$trigger" "race fixture never swapped the metadata path"
+  [ -L "$meta" ] || fail "race fixture did not replace metadata with a symlink"
+  rm -f "$meta"
+  fm_write_meta "$meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-$id" \
+    "orca_worktree_id=wt-$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=omp" "kind=ship" "mode=no-mistakes" "yolo=off" "backend=orca"
+  after=$(case_tree_fingerprint)
+  wt_after=$(/usr/bin/git -C "$WT_DIR" status --porcelain=v1)
+  proj_after=$(/usr/bin/git -C "$PROJ_DIR" status --porcelain=v1)
+  [ "$after" = "$before" ] || fail "metadata race refusal changed the First Mate home"
+  [ "$wt_after" = "$wt_before" ] || fail "metadata race refusal changed the worktree"
+  [ "$proj_after" = "$proj_before" ] || fail "metadata race refusal changed the project"
+  assert_absent "$HOME_DIR/state/.guard-watcher-stale-banner" "metadata race reached the watcher guard"
+  assert_not_contains "$out" "another lifecycle action" "metadata race reached the control lock"
+  assert_not_contains "$out" "another spawn is already creating" "metadata race reached the task lock"
+  assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "metadata race wrote an OMP extension"
+  assert_absent "$HOME_DIR/state/$id.busy-gen" "metadata race armed busy state"
+  [ ! -s "$tmux_log" ] || fail "metadata race contacted an endpoint"
+  [ ! -s "$stub_log" ] || fail "metadata race invoked OMP"
+  pass "a deterministic metadata symlink swap during snapshot acquisition refuses before every mutation"
+}
+
+test_valid_nonomp_relaunch_passes_the_preflight() {
+  local rec id=claude-relaunch-valid out meta tmux_log
+  rec=$(make_omp_case "$id" claude "$id")
+  read_case_record "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+  tmux_log="$CASE_DIR/tmux-relaunch-sends"
+  : > "$tmux_log"
+  fm_write_meta "$meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  out=$(FM_TEST_BACKEND=tmux FM_FAKE_WINDOW="fm-$id" FM_FAKE_COMMAND=zsh FM_TMUX_LOG="$tmux_log" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --relaunch)
+  expect_code 0 $? "a valid non-OMP relaunch should pass the preflight and launch: $out"
+  assert_contains "$out" "spawned $id harness=claude" "valid non-OMP relaunch did not launch: $out"
+  assert_grep 'harness=claude' "$meta" "valid non-OMP relaunch did not preserve its harness"
+  pass "a valid non-OMP regular task record passes the relaunch preflight"
+}
+
 test_omp_relaunch_still_requires_the_model() {
-  local rec id=omp-relaunch out status meta
-  # A --relaunch adopts its harness from the task's own record, which cannot be
-  # read until that record has been validated under the task's locks, so its
-  # model refusal lands at that adoption point instead of in the early gate.
+  local rec id=omp-relaunch out status meta guard_marker
+  # A --relaunch adopts its harness from the task's own record. Its read-only,
+  # regular-file preflight applies the model/backend gates before every lock;
+  # the full locked endpoint validation below remains authoritative.
   # It must still refuse: a relaunch carries no recorded model forward, and omp
   # would otherwise resolve the provider itself.
   rec=$(make_omp_case omp-relaunch claude "$id")
@@ -690,7 +988,39 @@ test_omp_relaunch_still_requires_the_model() {
   assert_contains "$out" "omp requires an explicit --model" \
     "the relaunch refusal did not name the launch pin: $out"
   assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "a refused relaunch must not write the extension"
-  pass "a relaunch of an omp task still requires an explicit qualified model"
+
+  # Supplying the model must not make a legacy non-Orca record launchable.
+  # This read-only metadata preflight also precedes the watcher guard and task
+  # lock, while the normal locked endpoint validation remains authoritative.
+  guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
+  arm_ordering_probes "$id"
+  out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" --relaunch --model "$OMP_MODEL")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a relaunch of an OMP task recorded on tmux must be refused: $out"
+  assert_contains "$out" "omp requires backend=orca" "the relaunch refusal did not enforce Orca: $out"
+  assert_not_contains "$out" "another spawn is already creating" "the relaunch backend refusal reached the task lock"
+  assert_absent "$guard_marker" "the relaunch backend refusal ran after the watcher guard"
+  rm -rf "$HOME_DIR/state/.spawn-$id.lock"
+
+  # A complete Orca record passes both new relaunch preflight checks and OMP's
+  # adapter checks, then retains the existing recovery boundary: Orca still has
+  # no recovery-grade agent-state classifier, so the replacement is refused
+  # rather than risking a duplicate agent. That downstream verdict is the
+  # current valid-OMP relaunch behavior and must not be shadowed by this patch.
+  fm_write_meta "$meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-$id" \
+    "orca_worktree_id=wt-$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=omp" "kind=ship" "mode=no-mistakes" "yolo=off" "backend=orca"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" --relaunch --model "$OMP_MODEL")
+  status=$?
+  [ "$status" -ne 0 ] || fail "an OMP relaunch must retain its recovery-grade endpoint gate: $out"
+  assert_contains "$out" "has no recovery-grade agent-state classifier" \
+    "a valid OMP record did not pass both early preflights to the existing recovery gate: $out"
+  assert_not_contains "$out" "regular, non-symlink metadata" \
+    "a valid OMP record was incorrectly rejected by the new metadata preflight: $out"
+  pass "an OMP relaunch still requires a qualified model and Orca record, and valid metadata reaches the existing recovery gate"
 }
 
 # --- busy-state trust table ------------------------------------------------
@@ -721,9 +1051,14 @@ test_omp_launch_argv_is_contained
 test_omp_records_exact_task_metadata
 test_omp_accepts_a_scout_launch
 test_omp_launch_carries_exactly_one_qualified_model_flag
+test_omp_requires_orca_before_any_mutation
+test_omp_forces_trace_off_and_clears_ambient_carrier
 test_ordering_probes_are_live
 test_omp_model_policy_matrix
 test_omp_selection_policy_matrix
+test_relaunch_rejects_unsafe_metadata_before_every_mutation
+test_relaunch_detects_a_path_swap_while_binding_the_snapshot
+test_valid_nonomp_relaunch_passes_the_preflight
 test_omp_relaunch_still_requires_the_model
 test_omp_trusts_only_its_own_semantic_source
 

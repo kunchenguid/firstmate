@@ -19,8 +19,10 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-busy-adapter-wiring)
 
 make_spawn_fakebin() {
-  local dir=$1 fakebin
+  local dir=$1 fakebin node_bin
   fakebin=$(fm_fakebin "$dir")
+  node_bin=$(command -v node) || fail "the Orca fixture requires node for adapter JSON parsing"
+  ln -sf "$node_bin" "$fakebin/node"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -35,6 +37,18 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n' ;;
+  "repo show"|"repo add") printf '{"ok":true,"result":{"id":"repo-busy-fixture"}}\n' ;;
+  "worktree create") printf '{"ok":true,"result":{"worktree":{"id":"wt-busy-fixture","path":"%s"},"terminal":{"handle":"term-busy-fixture"}}}\n' "${FM_FAKE_PANE_PATH:?}" ;;
+  "terminal create") printf '{"ok":true,"result":{"terminal":{"handle":"term-busy-fixture"}}}\n' ;;
+  *) printf '{"ok":true,"result":{}}\n' ;;
+esac
+SH
+  chmod +x "$fakebin/orca"
   fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex
   # omp is version-pinned, so its stub has to answer the adapter's one identity
   # probe; the installed Oh My Pi asset is never executed by these tests.
@@ -214,7 +228,7 @@ test_omp_extension_semantic_lifecycle() {
   # Every omp launch requires an explicit --model flag. It is a structural fixture
   # string here: no provider is contacted and no model catalog is queried.
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
-    --model anthropic/claude-sonnet-4-5)
+    --model anthropic/claude-sonnet-4-5 --backend orca)
   expect_code 0 $? "omp spawn should succeed: $out"
   state="$HOME_DIR/state"
   ext="$state/$id.omp-ext.ts"
@@ -252,7 +266,7 @@ test_omp_extension_stale_incarnation_rejected() {
   rec=$(make_spawn_case omp-stale omp "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" \
-    --model anthropic/claude-sonnet-4-5)
+    --model anthropic/claude-sonnet-4-5 --backend orca)
   expect_code 0 $? "omp spawn should succeed: $out"
   state="$HOME_DIR/state"
   ext="$state/$id.omp-ext.ts"
