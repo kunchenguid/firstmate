@@ -34,7 +34,7 @@
 #   --host HOST    loopback bind address: 127.0.0.1, ::1, or localhost
 #                  (default 127.0.0.1; non-loopback is refused)
 #   --refresh N    page auto-refresh interval in seconds (default 10)
-#   --gh-cache N   PR checks cache TTL in seconds (default 60)
+#   --gh-cache N   PR checks cache TTL in seconds, minimum 60 (default 60)
 #   --pane-lines N pane tail line count (default 15)
 #
 # Output contract: `--snapshot` prints one JSON object with schema
@@ -61,6 +61,7 @@ usage: fm-dashboard.sh [--port N] [--host HOST] [--refresh N] [--gh-cache N]
 Serve an always-on, read-only local fleet dashboard on localhost.
 With no mode flag the dashboard serves. --snapshot prints the dashboard JSON,
 --pr-check prints one PR's checks JSON, and --html prints the page HTML.
+--gh-cache accepts a minimum of 60 seconds.
 EOF
 }
 
@@ -111,6 +112,7 @@ case "$HOST" in
 esac
 case "$REFRESH" in ''|*[!0-9]*|0) fail_usage "--refresh must be a positive integer" ;; esac
 case "$GH_CACHE_TTL" in ''|*[!0-9]*|0) fail_usage "--gh-cache must be a positive integer" ;; esac
+[ "$GH_CACHE_TTL" -ge 60 ] || fail_usage "--gh-cache must be at least 60 seconds"
 case "$PANE_LINES" in ''|*[!0-9]*|0) fail_usage "--pane-lines must be a positive integer" ;; esac
 
 # pane_tail_json <backend> <target> <lines> <id> - read the last <lines> lines

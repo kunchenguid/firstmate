@@ -614,6 +614,10 @@ test_usage_and_validation() {
   expect_code 2 "$rc" "non-loopback host must be refused"
   "$DASH" --refresh 0 >/dev/null 2>&1; rc=$?
   expect_code 2 "$rc" "refresh 0 must be refused"
+  out=$("$DASH" --gh-cache 59 2>&1); rc=$?
+  expect_code 2 "$rc" "GitHub cache TTL below 60 seconds must be refused"
+  assert_contains "$out" "--gh-cache must be at least 60 seconds" \
+    "low GitHub cache TTL must fail with its minimum"
   pass "usage documents flags and argument validation refuses bad values"
 }
 
