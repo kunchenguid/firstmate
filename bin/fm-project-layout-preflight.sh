@@ -221,7 +221,9 @@ else
     add_blocker project_writable_by_others "Project is group- or world-writable"
   fi
 
-  if ! git -C "$PROJECT_PHYSICAL" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if [ -z "$PROJECT_PHYSICAL" ]; then
+    add_blocker project_unresolved "Project path could not be resolved to a readable physical directory"
+  elif ! git -C "$PROJECT_PHYSICAL" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     add_blocker project_not_worktree "Project is not an ordinary Git working tree"
   else
     PROJECT_GIT_DIR=$(fmp_git_absolute_dir "$PROJECT_PHYSICAL" git 2>/dev/null) || PROJECT_GIT_DIR=
@@ -392,6 +394,7 @@ if [ -d "$STATE_DIR" ] && [ -n "$PROJECT_PHYSICAL" ]; then
       REPLY_PHASE=$(fmp_meta_value "$REPLY" phase)
       [ "$REPLY_PHASE" != resolved ] || continue
       REPLY_TASK=$(fmp_meta_value "$REPLY" task_id)
+      [ -n "$REPLY_TASK" ] || continue
       if array_contains "$REPLY_TASK" "${LIVE_TASK_IDS[@]:-}"; then
         PENDING_REPLY_COUNT=$((PENDING_REPLY_COUNT + 1))
       fi
@@ -460,7 +463,9 @@ if [ -n "$CANONICAL_ARG" ]; then
     if [ -n "$PROJECT_PHYSICAL" ] && [ "$CANONICAL_PHYSICAL" = "$PROJECT_PHYSICAL" ]; then
       add_blocker canonical_is_control "Canonical human checkout is the Firstmate control checkout"
     fi
-    if git -C "$CANONICAL_PHYSICAL" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [ -z "$CANONICAL_PHYSICAL" ]; then
+      add_blocker canonical_unresolved "Canonical navigation path could not be resolved to a readable physical directory"
+    elif git -C "$CANONICAL_PHYSICAL" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       CANONICAL_GIT_DIR=$(fmp_git_absolute_dir "$CANONICAL_PHYSICAL" git 2>/dev/null) || CANONICAL_GIT_DIR=
       CANONICAL_COMMON_DIR=$(fmp_git_absolute_dir "$CANONICAL_PHYSICAL" common 2>/dev/null) || CANONICAL_COMMON_DIR=
       if [ -n "$PROJECT_COMMON_DIR" ] && [ "$CANONICAL_COMMON_DIR" = "$PROJECT_COMMON_DIR" ]; then
@@ -516,7 +521,9 @@ if [ -n "$CACHE_ARG" ]; then
       network) add_blocker cache_network_filesystem "Proposed cache is on a network filesystem" ;;
       *) add_blocker cache_filesystem_unknown "Proposed cache filesystem locality cannot be proved" ;;
     esac
-    if git -C "$CACHE_PHYSICAL" rev-parse --git-dir >/dev/null 2>&1; then
+    if [ -z "$CACHE_PHYSICAL" ]; then
+      add_blocker cache_unresolved "Proposed cache path could not be resolved to a readable physical directory"
+    elif git -C "$CACHE_PHYSICAL" rev-parse --git-dir >/dev/null 2>&1; then
       CACHE_IS_GIT=true
       if [ "$(git -C "$CACHE_PHYSICAL" rev-parse --is-bare-repository 2>/dev/null || echo false)" = true ]; then
         CACHE_IS_BARE=true

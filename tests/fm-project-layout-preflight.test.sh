@@ -321,6 +321,33 @@ test_live_work_endpoint_orca_pending_and_no_mistakes_worktree() {
   pass "linked run worktree, live metadata, endpoint, Orca, and pending reply all block"
 }
 
+test_unreadable_cache_and_taskless_pending_reply() {
+  local home="$TMP_ROOT/unreadable" cache="$TMP_ROOT/unreadable-cache.git" out rc
+
+  setup_home "$home" sample
+  mkdir -p "$home/state/pending-replies"
+  fm_write_meta "$home/state/pending-replies/0123456789abcdef" \
+    "schema=fm-pending-reply.v1" "phase=awaiting_report"
+  out=$(run_json "$home" sample)
+  rc=$?
+  expect_code 0 "$rc" "taskless pending reply preflight"
+  assert_no_json_code "$out" blockers pending_reply
+  [ "$(json_value "$out" 'd["live"]["pending_reply_count"]')" = 0 ] \
+    || fail "taskless pending reply was counted as live"
+
+  mkdir -p "$cache"
+  chmod 0600 "$cache"
+  out=$(run_json "$home" sample --cache-root "$cache")
+  rc=$?
+  chmod 0700 "$cache"
+  expect_code 1 "$rc" "unreadable cache preflight"
+  assert_json_code "$out" blockers cache_unresolved
+  assert_no_json_code "$out" blockers cache_not_bare
+  [ "$(json_value "$out" 'json.dumps(d["proposal"]["cache_is_git"])')" = false ] \
+    || fail "unreadable cache borrowed Git evidence from another repository"
+  pass "unreadable cache paths never yield foreign Git evidence and taskless pending replies are ignored"
+}
+
 test_duplicate_cross_home_branch_and_remote_isolation() {
   local home="$TMP_ROOT/parent" child="$TMP_ROOT/child" project child_project out rc remote_path=/remote/private/home
   setup_home "$home" sample
@@ -388,6 +415,7 @@ test_alternate_shallow_partial_promisor_and_replace
 test_no_origin_and_diverged_default
 test_cache_identity_and_format_mismatch
 test_live_work_endpoint_orca_pending_and_no_mistakes_worktree
+test_unreadable_cache_and_taskless_pending_reply
 test_duplicate_cross_home_branch_and_remote_isolation
 test_canonical_checkout_is_navigation_only
 test_spaces_and_metacharacters_are_literal

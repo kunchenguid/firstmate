@@ -55,15 +55,17 @@ fmp_path_has_symlink_component() {
 }
 
 fmp_existing_path_physical() {
-  local path=$1 parent base
+  local path=$1 parent base resolved
   [ -e "$path" ] || [ -L "$path" ] || return 1
   if [ -d "$path" ]; then
-    (cd "$path" 2>/dev/null && pwd -P)
-    return
+    resolved=$(cd "$path" 2>/dev/null && pwd -P)
+  else
+    parent=$(dirname "$path")
+    base=$(basename "$path")
+    resolved=$(cd "$parent" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$base")
   fi
-  parent=$(dirname "$path")
-  base=$(basename "$path")
-  (cd "$parent" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$base")
+  [ -n "$resolved" ] || return 1
+  printf '%s\n' "$resolved"
 }
 
 fmp_nearest_existing_ancestor() {
