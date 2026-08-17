@@ -23,6 +23,9 @@ The target window's harness is recorded as `harness=` in `state/<id>.meta`.
 This procedure covers ordinary `kind=ship` and `kind=scout` direct reports.
 Load `secondmate-provisioning` instead for `kind=secondmate` recovery.
 
+For a REMOTE secondmate, `fm-crew-state`'s `unknown`/`worktree gone` and `fm-send`'s `remote send failed`/`delivery unconfirmed` verdicts are unreliable and routinely false-negative; do not conclude the mate is dead or the send failed from those alone, confirm against the actual remote pane first.
+Recover a genuinely stuck remote mate only through `bin/fm-spawn.sh <id> --secondmate`, never raw herdr pane close/kill surgery, which strands the endpoint binding.
+
 Treat the digest's endpoint result as a presence signal, not proof that the task's work or validation run is gone.
 Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding to relaunch.
 A no-mistakes run matched to the crew's branch and current code remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.

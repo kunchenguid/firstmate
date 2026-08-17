@@ -2,10 +2,11 @@
 
 Audience: maintainer verification.
 
-This record supports two active guarantees for promised public replies made through the myfirstmate relay:
+This record supports three active guarantees for promised public replies made through the myfirstmate relay:
 
 1. A promised final reply survives compaction and restart, reconciles from disk alone, and lands in the original thread exactly once.
-2. A home that never opted into the relay pays nothing for any of it.
+2. Work routed to a secondmate uses the typed cross-home commitment instead of a home-local mention link, and a later handoff reports any commitment still bound to the old home.
+3. A home that never opted into the relay creates no public-followup state, makes no `tasks-axi` call, and emits no relay guidance.
 
 [`docs/configuration.md`](../configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, [`docs/architecture.md`](../architecture.md#optional-relay) owns the mechanism boundary, and `tasks-axi public-followup --help` owns the typed obligation schema.
 Task chronology and delivery evidence stay outside this record.
@@ -43,22 +44,16 @@ ok - typed public-followup records carry only public-safe summaries and delivera
 The first case is the end-to-end proof.
 It reproduces the stranded state first (work bound, no reconciled terminal result, delivery refused with "still waiting on its bound work" and zero posts), then has a secondmate-shaped child report a typed `pr-merged` result, deletes the drained inbox payload, reconciles from disk, and asserts exactly one `connector/followup` call carrying the original `request_id`, a validated `posted` receipt, and a Done obligation.
 
-The existing Relay suite is unchanged by this work:
+The cross-home selection and handoff guards are pinned by `tests/fm-x-mode.test.sh` and `tests/fm-backlog-handoff.test.sh`.
+The first refuses to attach a home-local mention link to secondmate-routed work and points at the typed promised-final registration instead.
+The second reports a moved item whose unresolved commitment still names `main/<task-id>`, while keeping a relay-disabled handoff silent.
 
-```sh
-bash tests/fm-x-mode.test.sh | grep -c '^ok -'
-```
-
-```
-103
-```
-
-## Relay-disabled zero overhead
+## Relay-disabled no-op behavior
 
 The relay-disabled case in `tests/fm-public-followup.test.sh` invokes every public-followup entry point against a home with no `.env`, logs every `tasks-axi` invocation, and compares the state tree before and after.
 It proves the feature makes no `tasks-axi` call, prints nothing, and creates no `state/public-followup` artifact without coupling that guarantee to session start's independently owned state files.
 
-The whole added cost in that home is the activation predicate, measured over 1000 in-process calls including loop overhead:
+Each direct public-followup entry point exits at the activation predicate, whose cost was measured over 1000 in-process calls including loop overhead:
 
 ```sh
 . bin/fm-public-followup-lib.sh
@@ -69,7 +64,8 @@ for i in $(seq 1 1000); do fm_pf_relay_active "$HOME_DIR" || true; done
 total_ns=69694000 per_call_us=69
 ```
 
-Roughly 0.07 ms per session start, from a single `[ -f "$FM_HOME/.env" ]` test that returns false before anything else runs.
+The measured cost is roughly 0.07 ms per check, from a single `[ -f "$FM_HOME/.env" ]` test that returns false before anything else runs.
+A backlog handoff now performs one such presence check per moved key so it can report a stale cross-home binding when Relay is enabled; with Relay disabled those checks still create no artifact, call no `tasks-axi`, and emit no public-reply guidance.
 
 ## Compatibility axes reviewed
 
@@ -79,4 +75,5 @@ The only supervision surfaces touched are the session-start digest, which `bin/f
 
 Runtime backends (tmux, herdr, zellij, orca, cmux): not applicable after inspection.
 No command here reads `state/<id>.meta`'s backend fields, resolves an endpoint, or captures a pane.
-The one lifecycle integration is `bin/fm-teardown.sh`'s refusal, which runs before any backend command and keys only on the task id, so it behaves identically on every backend.
+The lifecycle integrations run before any backend command and key only on task and home identity: `bin/fm-teardown.sh` refuses cleanup while a reply is owed, `bin/fm-backlog-handoff.sh` reports a binding left on the old home, and `bin/fm-x-link.sh` distinguishes a local task record from work routed to a registered secondmate.
+They therefore behave identically on every backend.
