@@ -126,12 +126,12 @@ The supported launch-profile flags below are verified locally; each row records 
 | Harness | Model flag | Effort flag | Notes |
 |---|---|---|---|
 | claude | `--model <model>` | `--effort <low\|medium\|high\|xhigh\|max>` | Verified on Claude Code 2.1.196. |
-| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'` | Verified on codex-cli 0.142.1. The installed binary schema contains `model_reasoning_effort`, the active config uses it, and the bundled model catalog advertises only low/medium/high/xhigh. `max` is omitted. |
-| grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so firstmate omits them. |
+| codex | `--model <model>` | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'` | Verified history: codex-cli 0.142.1 lacked `max`, while 0.146.1 accepts `none\|minimal\|low\|medium\|high\|xhigh\|max`; Firstmate threads its shared `low\|medium\|high\|xhigh\|max` vocabulary and leaves `none` and `minimal` out of scope. |
+| grok | `--model <model>` | `--reasoning-effort <low\|medium\|high>` | Verified on grok 0.2.99 (2026-07-13). `--effort` is an alias, but firstmate's profile axis is reasoning effort. As of 0.2.99 the ceiling is `high`; both `xhigh` and `max` are rejected with `use one of: high, medium, low`, so Firstmate applies the unsupported-axis behavior below. |
 | pi / pi-signed | `--model <model>` | `--thinking <low\|medium\|high\|xhigh\|max>` | Verified 2026-07-27 on Pi and pi-signed 0.82.0. Both expose the same accepted thinking levels and completed the same model-qualified max-thinking smoke. |
 | opencode | `--model <provider/model>` | none for firstmate's interactive launch | Verified on opencode 1.17.6. `opencode run` has `--variant`, but firstmate launches the interactive `opencode --prompt` path, which has no verified effort flag. |
 | kimi | `--model <model>` | none | Verified 2026-07-25 on Kimi Code CLI 0.29.1. |
-| cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No effort flag exists, so firstmate records the requested effort in task metadata and omits it from the launch. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
+| cursor | `--model <model>` | none | Verified 2026-08-11 on Cursor Agent CLI 2026.08.11-e8db854. No separate effort flag exists; the unsupported-axis behavior below owns its warning and verified-delivery metadata. Validate ids against `cursor-agent --list-models` rather than assuming a low/medium/high family: the live catalog carries only `-high` Grok ids. |
 | muse | `--model <model>` | `--reasoning-effort <low\|medium\|high\|xhigh>`, and `ultra` only for an explicit `max` | Verified 2026-08-05 on Muse Code 0.1.0-R708.1. The flag accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra` and defaults to `high`. `ultra` is muse's max-class level, so it is reachable only through an explicit captain `max`, never from the generic fallback; `none` and `minimal` sit below the shared vocabulary and stay unreachable. |
 
 The concrete `harness` field owns adapter identity independently of the model provider: `harness=pi` with `model=xai/grok-*` is Pi using xAI, not `harness=grok`, and does not require Grok CLI login; `harness=grok` remains the standalone Grok Build CLI adapter.
@@ -157,9 +157,11 @@ For an unfamiliar harness or model namespace, establish support and provider ide
 A listing that reaches the account and does not contain the model is concrete evidence the model is unsupported: block that candidate and quote the result.
 A discovery surface you could not reach establishes nothing; report that as uncertainty rather than turning it into a supported or unsupported verdict.
 
-When a requested effort value is outside the harness-specific accepted set, `fm-spawn` records the requested `effort=` in meta but emits no effort flag for that harness.
-This preserves launch success instead of passing a known-bad value.
+When a requested effort value is outside the harness-specific accepted set, a verified adapter launch emits no effort flag and warns on stderr with the harness, requested value, and accepted set.
+`fm-spawn` preserves the requested `effort=` for traceability while its verified delivery metadata records that the harness received its default.
 For Cursor, select the intended reasoning class through a model id the account's own `--list-models` actually returns, and leave the separate effort axis unset.
+Raw launch commands are outside that verification path and refuse separate `--model` or `--effort` axes before launch or metadata publication; put those flags in the raw command itself.
+`bin/fm-spawn.sh`'s header owns the exact diagnostic and metadata mechanics.
 
 ## no-mistakes skill invocation
 
@@ -388,7 +390,7 @@ Do not confuse `harness=cursor` using a `cursor-grok-4.5-*` model with `harness=
 | Autonomy | `--yolo`, the documented alias for `--force`, whose TUI footer reads `Run Everything`. |
 | Trust dialog | `--trust` suppresses it. `--yolo` does NOT, and every task gets a fresh worktree path, so without `--trust` every spawn would block on it. |
 | Environment marker | `CURSOR_INVOKED_AS=cursor-agent` on the agent process and its children, plus `CURSOR_AGENT=1` on child/tool processes. Other `CURSOR_*` endpoint and credential variables are not identity markers. |
-| Effort | No effort flag exists. The requested axis is recorded in task metadata and never reaches the launch command. |
+| Effort | No effort flag exists; [Launch profile axes](#launch-profile-axes) owns the omission warning and verified-delivery metadata. |
 | Composer | A BARE row whose prompt glyph is `→` (U+2192); no border. Idle placeholders are `Plan, search, build anything` fresh and `Add a follow-up` after a turn, drawn de-emphasised so a styled capture separates them from real typed text. |
 | Primary hooks | Tracked project-scope `.cursor/hooks.json` registers `stop`, `sessionStart`, and two `preToolUse` seatbelts, all anchored through `$CURSOR_PROJECT_DIR`. Cursor ALSO loads `<project>/.claude/settings.json`, so the tracked Claude entries stand down on a Cursor-delivered payload; `docs/turnend-guard.md` owns that predicate. |
 | Primary limits | `stop` does not fire in headless `cursor-agent -p`. `preCompact` is deliberately unregistered because it cannot inject context, so a Cursor primary does not re-emit its digest after a compaction; that surface is deferred to a follow-up. Project hooks need `--trust`. |
@@ -455,7 +457,7 @@ Kimi Code CLI launches from the absolute path resolved from `PATH`, falling back
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; detection relies on process ancestry command name `kimi`. |
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
-| Effort | No reasoning-effort flag exists, so requested effort is recorded in task metadata but omitted from launch. |
+| Effort | No reasoning-effort flag exists; `fm-spawn` follows the unsupported-axis warning and verified-delivery behavior in [Launch profile axes](#launch-profile-axes). |
 
 `fm-spawn.sh` launches Kimi bare, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
 This launch-then-send shape is mandatory because Kimi rejects a positional brief as an unknown command.

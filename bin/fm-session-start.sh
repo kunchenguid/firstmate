@@ -13,9 +13,11 @@
 #
 # COMPOSITION, NOT DUPLICATION: this script calls fm-lock.sh, fm-bootstrap.sh,
 # fm-wake-drain.sh, and fm-startup-network.sh as real subprocesses and prints
-# their real output. It never re-implements their logic; all
-# sequencing/formatting logic added here stays local to this file. Those four
-# scripts remain fully working
+# their real output.
+# It keeps subprocess stderr on stderr so launch warnings are neither swallowed
+# by command substitution nor reclassified as digest output.
+# It never re-implements their logic; all sequencing/formatting logic added here
+# stays local to this file. Those four scripts remain fully working
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing
 # tests) still call them directly. The one seam this script needed -
@@ -669,15 +671,15 @@ stage bootstrap
 subsection "BOOTSTRAP"
 if [ "$READ_ONLY" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
-    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh")
 elif [ "$REEMIT" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_LOCKED=1 FM_BOOTSTRAP_NETWORK=skip \
-    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
+    FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" "$SCRIPT_DIR/fm-bootstrap.sh")
 else
   BOOT_OUT=$(
-    "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" 2>&1 || true
+    "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" || true
     FM_BOOTSTRAP_NETWORK=skip FM_TASKS_AXI_COMPATIBLE="$TASKS_AXI_COMPATIBLE" \
-      "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
+      "$SCRIPT_DIR/fm-bootstrap.sh"
   )
 fi
 if [ -n "$BOOT_OUT" ]; then

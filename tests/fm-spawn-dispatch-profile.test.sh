@@ -30,6 +30,18 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+make_spawn_codex_probe() {
+  local fakebin=$1
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'codex-cli %s\n' "${FM_FAKE_CODEX_VERSION:-0.146.1}"
+fi
+exit 0
+SH
+  chmod +x "$fakebin/codex"
+}
+
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -76,6 +88,7 @@ SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
+  make_spawn_codex_probe "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -113,10 +126,9 @@ make_seeded_secondmate_home() {
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
 }
 
-run_spawn() {
+invoke_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
-  : > "$launchlog"
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
@@ -127,16 +139,38 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_CODEX_VERSION="${FM_TEST_CODEX_VERSION:-0.146.1}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$@" 2>&1
+    "$SPAWN" "$@"
+}
+
+run_spawn() {
+  local launchlog=$4
+  : > "$launchlog"
+  invoke_spawn "$@" 2>&1
+}
+
+run_spawn_with_stderr() {
+  local stderr_log=$1 launchlog
+  shift
+  launchlog=$4
+  : > "$launchlog"
+  : > "$stderr_log"
+  invoke_spawn "$@" 2>"$stderr_log"
 }
 
 # Ship spawns carry an explicit delivery contract (AGENTS.md section 7); these
 # tests are about profile resolution, so they pass a fixed valid one.
 run_ship_spawn() {
   run_spawn "$@" --mode no-mistakes --yolo off
+}
+
+run_ship_spawn_with_stderr() {
+  local stderr_log=$1
+  shift
+  run_spawn_with_stderr "$stderr_log" "$@" --mode no-mistakes --yolo off
 }
 
 read_case_record() {
@@ -168,6 +202,27 @@ test_no_profile_keeps_claude_profile_defaults() {
   expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
+}
+
+test_shared_effort_axis_excludes_none_and_minimal() {
+  local rec id effort out status launch
+  for effort in none minimal; do
+    id="profile-codex-${effort}-outside-axis-z1a"
+    rec=$(make_spawn_case "profile-codex-${effort}-outside-axis" codex "$id")
+    read_case_record "$rec"
+
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --harness codex --model gpt-5.6-terra --effort "$effort")
+    status=$?
+    expect_code 1 "$status" "shared effort axis must reject codex-only '$effort'"
+    assert_contains "$out" "error: --effort must be one of low, medium, high, xhigh, max" \
+      "shared effort-axis refusal did not name the supported values"
+    assert_absent "$HOME_DIR/state/$id.meta" \
+      "shared effort-axis refusal published metadata for codex-only '$effort'"
+    launch=$(cat "$LAUNCH_LOG")
+    [ -z "$launch" ] || fail "shared effort-axis refusal launched codex-only '$effort'"$'\n'"actual: $launch"
+  done
+  pass "none and minimal stay outside the shared fm-spawn effort axis"
 }
 
 test_non_cursor_launch_clears_inherited_cursor_markers() {
@@ -400,22 +455,26 @@ test_active_dispatch_profile_allows_positional_harness() {
   pass "active crew-dispatch profile allows the legacy positional harness form"
 }
 
-test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch
+test_raw_codex_refuses_unthreaded_effort() {
+  local rec id out status launch stderr_log err
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  stderr_log="$CASE_DIR/spawn.stderr"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" "custom-agent --flag")
+  out=$(run_ship_spawn_with_stderr "$stderr_log" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "codex --custom-flag" --effort max)
   status=$?
-  expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
-  assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
+  expect_code 1 "$status" "raw codex launch with a separate effort axis should be refused"
+  assert_absent "$HOME_DIR/state/$id.meta" "raw codex refusal published requested effort as delivered metadata"
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+  [ -z "$launch" ] || fail "raw codex refusal still launched"$'\n'"actual: $launch"
+  err=$(cat "$stderr_log")
+  assert_contains "$err" "error: raw launch harness 'codex' cannot thread requested effort 'max'; accepted effort values through fm-spawn raw commands: no supported values; put the effort flag in the raw command instead" \
+    "raw codex refusal did not diagnose the unthreaded effort on stderr"
+  assert_not_contains "$out" "cannot thread requested effort" "raw launch effort warning leaked onto stdout"
+  pass "raw codex commands refuse separate effort axes before launch or metadata publication"
 }
 
 test_claude_threads_model_and_effort() {
@@ -451,7 +510,7 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_omits_invalid_max_effort() {
+test_codex_threads_max_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
   rec=$(make_spawn_case profile-codex-max codex "$id")
@@ -459,13 +518,47 @@ test_codex_omits_invalid_max_effort() {
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
   status=$?
-  expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
+  expect_code 0 "$status" "codex spawn with max effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
+  assert_grep 'profile_delivery=fm-spawn.v1' "$HOME_DIR/state/$id.meta" \
+    "codex max metadata omitted delivered-profile provenance"
+  assert_grep 'delivered_model=gpt-5' "$HOME_DIR/state/$id.meta" \
+    "codex max metadata omitted the delivered model"
+  assert_grep 'delivered_effort=max' "$HOME_DIR/state/$id.meta" \
+    "codex max metadata omitted the delivered effort"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
-  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
-  pass "codex omits unsupported max effort instead of passing a bad config value"
+  assert_contains "$launch" "'$FAKEBIN_DIR/codex' --model 'gpt-5' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex max launch did not use the executable whose capability was probed"
+  assert_not_contains "$launch" "codex --model 'gpt-5'" \
+    "codex max launch must not re-resolve a bare executable in the pane"
+  pass "codex threads max reasoning effort so launch and metadata agree"
+}
+
+test_codex_omits_max_effort_below_verified_floor() {
+  local rec id out status launch stderr_log err
+  id=profile-codex-max-old-z4b
+  rec=$(make_spawn_case profile-codex-max-old codex "$id")
+  read_case_record "$rec"
+  stderr_log="$CASE_DIR/spawn.stderr"
+
+  FM_TEST_CODEX_VERSION=0.142.1 \
+    out=$(run_ship_spawn_with_stderr "$stderr_log" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
+  status=$?
+  expect_code 0 "$status" "codex max effort below the verified floor should omit the effort setting"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
+  assert_grep 'profile_delivery=fm-spawn.v1' "$HOME_DIR/state/$id.meta" \
+    "old Codex metadata omitted delivered-profile provenance"
+  assert_grep 'delivered_effort=default' "$HOME_DIR/state/$id.meta" \
+    "old Codex metadata claimed the unsupported max setting was delivered"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" 'model_reasoning_effort' \
+    "old Codex launch carried an unsupported max setting"
+  err=$(cat "$stderr_log")
+  assert_contains "$err" "warning: harness 'codex' cannot thread requested effort 'max'; accepted effort values: low, medium, high, xhigh; Codex CLI '0.142.1' does not meet verified max-capability floor 0.146.1; omitting effort flag" \
+    "old Codex max omission was not diagnosed on stderr"
+  assert_not_contains "$out" 'cannot thread requested effort' \
+    "old Codex max omission warning leaked onto stdout"
+  pass "codex loudly omits max below its verified capability floor"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -486,12 +579,13 @@ test_grok_threads_model_and_reasoning_effort() {
 }
 
 test_grok_omits_invalid_max_reasoning_effort() {
-  local rec id out status launch
+  local rec id out status launch stderr_log err
   id=profile-grok-max-z6
   rec=$(make_spawn_case profile-grok-max grok "$id")
   read_case_record "$rec"
+  stderr_log="$CASE_DIR/spawn.stderr"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort max)
+  out=$(run_ship_spawn_with_stderr "$stderr_log" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort max)
   status=$?
   expect_code 0 "$status" "grok spawn with unsupported max reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 max
@@ -500,7 +594,11 @@ test_grok_omits_invalid_max_reasoning_effort() {
     "grok launch did not preserve the model flag and typed brief when max effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
-  pass "grok omits unsupported max reasoning effort"
+  err=$(cat "$stderr_log")
+  assert_contains "$err" "warning: harness 'grok' cannot thread requested effort 'max'; accepted effort values: low, medium, high; omitting effort flag" \
+    "grok max-effort omission was not reported on stderr"
+  assert_not_contains "$out" "cannot thread requested effort" "grok max-effort warning leaked onto stdout"
+  pass "grok loudly omits unsupported max reasoning effort"
 }
 
 test_grok_omits_invalid_xhigh_reasoning_effort() {
@@ -519,10 +617,12 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
     "grok launch did not preserve the model flag and typed brief when xhigh effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported xhigh reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
-  pass "grok omits unsupported xhigh reasoning effort"
+  assert_contains "$out" "warning: harness 'grok' cannot thread requested effort 'xhigh'; accepted effort values: low, medium, high; omitting effort flag" \
+    "grok xhigh-effort omission was silent"
+  pass "grok loudly omits unsupported xhigh reasoning effort"
 }
 
-test_cursor_threads_model_workspace_and_omits_effort_axis() {
+test_cursor_threads_model_workspace_and_loudly_omits_effort_axis() {
   local rec id out status launch
   id=profile-cursor-z6c
   rec=$(make_spawn_case profile-cursor cursor "$id")
@@ -553,7 +653,11 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not invent a separate reasoning-effort flag"
   assert_grep 'harness=cursor' "$HOME_DIR/state/$id.meta" "cursor harness was not recorded in meta"
   assert_grep 'model=cursor-grok-4.5-high' "$HOME_DIR/state/$id.meta" "cursor model was recorded as default"
-  pass "cursor receives its model-qualified reasoning class and exact task workspace"
+  assert_grep 'delivered_effort=default' "$HOME_DIR/state/$id.meta" \
+    "cursor profile metadata did not record the omitted effort axis honestly"
+  assert_contains "$out" "warning: harness 'cursor' cannot thread requested effort 'high'; accepted effort values: no separate supported values; select a model-qualified reasoning class; omitting effort flag" \
+    "cursor effort-axis omission was silent"
+  pass "cursor receives its model-qualified reasoning class and loudly omits a separate effort axis"
 }
 
 test_cursor_refuses_model_absent_from_live_catalog() {
@@ -592,13 +696,14 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
   pass "cursor preserves the requested model when its live catalog is unreachable"
 }
 
-test_opencode_threads_model_and_ignores_effort_axis() {
-  local rec id out status launch
+test_opencode_threads_model_and_warns_for_ignored_effort_axis() {
+  local rec id out status launch stderr_log err
   id=profile-opencode-z7
   rec=$(make_spawn_case profile-opencode opencode "$id")
   read_case_record "$rec"
+  stderr_log="$CASE_DIR/spawn.stderr"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
+  out=$(run_ship_spawn_with_stderr "$stderr_log" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
   status=$?
   expect_code 0 "$status" "opencode spawn with model and ignored effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
@@ -608,7 +713,11 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
-  pass "opencode receives --model and omits the unsupported effort axis"
+  err=$(cat "$stderr_log")
+  assert_contains "$err" "warning: harness 'opencode' cannot thread requested effort 'high'; accepted effort values: no supported values; omitting effort flag" \
+    "opencode effort-axis omission was not reported on stderr"
+  assert_not_contains "$out" "cannot thread requested effort" "opencode effort warning leaked onto stdout"
+  pass "opencode receives --model and loudly omits the unsupported effort axis"
 }
 
 test_pi_threads_model_and_max_effort() {
@@ -827,6 +936,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_no_profile_keeps_claude_profile_defaults
+test_shared_effort_axis_excludes_none_and_minimal
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
@@ -836,17 +946,18 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
-test_active_dispatch_profile_allows_raw_launch_command
+test_raw_codex_refuses_unthreaded_effort
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_omits_invalid_max_effort
+test_codex_threads_max_effort
+test_codex_omits_max_effort_below_verified_floor
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
-test_cursor_threads_model_workspace_and_omits_effort_axis
+test_cursor_threads_model_workspace_and_loudly_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
-test_opencode_threads_model_and_ignores_effort_axis
+test_opencode_threads_model_and_warns_for_ignored_effort_axis
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity

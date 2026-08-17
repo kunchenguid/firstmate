@@ -519,6 +519,34 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
 }
 
+test_relaunch_replaces_delivered_profile_provenance() {
+  local dir out rc meta
+  dir=$(new_case provenance rl35)
+  add_ship_task "$dir" rl35 claude
+  meta="$dir/home/state/rl35.meta"
+  sed 's/^model=default$/model=opus/; s/^effort=default$/effort=max/' "$meta" > "$meta.tmp"
+  mv "$meta.tmp" "$meta"
+  {
+    echo 'profile_delivery=fm-spawn.v1'
+    echo 'delivered_model=opus'
+    echo 'delivered_effort=max'
+  } >> "$meta"
+
+  out=$(run_control "$dir" rl35 relaunch --model sonnet --effort high --note "replacing profile provenance"); rc=$?
+  expect_code 0 "$rc" "a relaunch with replacement profile axes should succeed"$'\n'"$out"
+  [ "$(grep -c '^profile_delivery=' "$meta")" -eq 1 ] \
+    || fail "relaunch retained a prior profile-delivery record"
+  [ "$(grep -c '^delivered_model=' "$meta")" -eq 1 ] \
+    || fail "relaunch retained a prior delivered-model record"
+  [ "$(grep -c '^delivered_effort=' "$meta")" -eq 1 ] \
+    || fail "relaunch retained a prior delivered-effort record"
+  [ "$(meta_field "$dir" rl35 delivered_model)" = sonnet ] \
+    || fail "relaunch did not publish the replacement delivered model"
+  [ "$(meta_field "$dir" rl35 delivered_effort)" = high ] \
+    || fail "relaunch did not publish the replacement delivered effort"
+  pass "fm-control relaunch: delivery provenance is replaced with the new launch"
+}
+
 test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
@@ -1323,6 +1351,7 @@ test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
+test_relaunch_replaces_delivered_profile_provenance
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared

@@ -37,7 +37,8 @@
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   from that harness's launch rather than guessed, with a warning that names the
+#   harness, requested value, and adapter's accepted set.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -113,6 +114,8 @@
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
+#   Raw launch commands cannot carry separate --model/--effort profile axes;
+#   put those flags directly in the raw command or the spawn is refused.
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
@@ -177,6 +180,9 @@
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+# A verified adapter launch appends versioned delivered-profile metadata only
+# after launch submission; a raw command never claims verified profile delivery.
+# AGENTS.md section 2 owns the exact fields and local-versus-remote meaning.
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -399,7 +405,9 @@ fi
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
-  local remote_traceparent remote_recorded_traceparent
+  local remote_traceparent remote_recorded_traceparent remote_model remote_effort
+  local remote_profile_delivery remote_requested_model remote_requested_effort
+  local remote_recorded_model remote_recorded_effort remote_stderr_file remote_stderr
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
@@ -557,26 +565,42 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  remote_stderr_file=$(mktemp "$STATE/.remote-spawn-stderr.XXXXXX") || {
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id launch diagnostics could not be captured" >&2
+    return 1
+  }
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
-    "${launch_args[@]}" < /dev/null 2>&1); then
+    "${launch_args[@]}" < /dev/null 2>"$remote_stderr_file"); then
     rc=0
   else
     rc=$?
   fi
+  remote_stderr=$(cat "$remote_stderr_file")
+  rm -f -- "$remote_stderr_file"
   if [ "$rc" -ne 0 ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     [ -z "$out" ] || printf '%s\n' "$out" >&2
+    [ -z "$remote_stderr" ] || printf '%s\n' "$remote_stderr" >&2
     if [ "$rc" -eq 255 ]; then
       echo "error: remote secondmate $id is unavailable or launch completion is unknown; preserved route $host:$home" >&2
     fi
     return "$rc"
   fi
+  [ -z "$remote_stderr" ] || printf '%s\n' "$remote_stderr" >&2
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
+  remote_profile_delivery=$(printf '%s\n' "$out" | sed -n 's/^profile_delivery=//p' | tail -1)
+  remote_requested_model=$(printf '%s\n' "$out" | sed -n 's/^requested_model=//p' | tail -1)
+  remote_requested_effort=$(printf '%s\n' "$out" | sed -n 's/^requested_effort=//p' | tail -1)
+  remote_model=$(printf '%s\n' "$out" | sed -n 's/^model=//p' | tail -1)
+  remote_effort=$(printf '%s\n' "$out" | sed -n 's/^effort=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -598,6 +622,33 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
   fi
+  if [ "$remote_profile_delivery" != fm-spawn.v1 ] \
+    || [ -z "$remote_requested_model" ] || [ -z "$remote_requested_effort" ] \
+    || [ -z "$remote_model" ] || [ -z "$remote_effort" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch returned no verified delivered profile; preserving the remote route for reconciliation" >&2
+    return 1
+  fi
+  if [ "$model" != - ] && [ "$remote_requested_model" != "$model" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id is already live with model '$remote_requested_model', not requested model '$model'; live endpoint was not restarted" >&2
+    return 1
+  fi
+  if [ "$effort" != - ] && [ "$remote_requested_effort" != "$effort" ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id is already live with effort '$remote_requested_effort', not requested effort '$effort'; live endpoint was not restarted" >&2
+    return 1
+  fi
+  remote_recorded_model=$remote_model
+  remote_recorded_effort=$remote_effort
+  [ "$remote_recorded_model" != default ] || remote_recorded_model=
+  [ "$remote_recorded_effort" != default ] || remote_recorded_effort=
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
   # guarantee that the recorded carrier is the identity the child received even
@@ -617,8 +668,11 @@ spawn_remote_secondmate() {
     echo "mode=secondmate"
     echo "yolo=off"
     echo "tasktmp="
-    echo "model=${model#-}"
-    echo "effort=${effort#-}"
+    echo "model=$remote_recorded_model"
+    echo "effort=$remote_recorded_effort"
+    echo "profile_delivery=$remote_profile_delivery"
+    echo "delivered_model=$remote_model"
+    echo "delivered_effort=$remote_effort"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
     echo "remote_host=$host"
@@ -1074,7 +1128,7 @@ shell_quote() {
   printf "'"
 }
 
-resolve_pi_executable() {
+resolve_harness_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
   [ -x "$candidate" ] || return 1
@@ -1146,8 +1200,9 @@ launch_template() {
     # `cursor` is not the CLI (the installed names are cursor-agent and the
     # legacy alias agent), and the foreign primary markers are cleared so an
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
-    # only reads the environment. Cursor exposes no effort flag, so the shared
-    # effort axis is deliberately omitted and stays in task metadata only.
+    # only reads the environment. Cursor exposes no separate effort flag.
+    # The common profile path warns when it omits a requested effort and records
+    # its default delivery outside this template.
     cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
@@ -1180,8 +1235,10 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1227,9 +1284,22 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   exit 1
 fi
 
+if [ "$RAW_LAUNCH" -eq 1 ]; then
+  RAW_PROFILE_INVALID=0
+  if [ -n "$MODEL" ]; then
+    echo "error: raw launch harness '$HARNESS' cannot thread requested model '$MODEL'; accepted model values through fm-spawn raw commands: no supported values; put the model flag in the raw command instead" >&2
+    RAW_PROFILE_INVALID=1
+  fi
+  if [ -n "$EFFORT" ]; then
+    echo "error: raw launch harness '$HARNESS' cannot thread requested effort '$EFFORT'; accepted effort values through fm-spawn raw commands: no supported values; put the effort flag in the raw command instead" >&2
+    RAW_PROFILE_INVALID=1
+  fi
+  [ "$RAW_PROFILE_INVALID" -eq 0 ] || exit 1
+fi
+
 case "$HARNESS" in
   pi|pi-signed)
-    PI_BIN=$(resolve_pi_executable "$HARNESS") || {
+    PI_BIN=$(resolve_harness_executable "$HARNESS") || {
       echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
       exit 1
     }
@@ -1278,6 +1348,11 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
   fi
+fi
+
+CODEX_BIN=
+if [ "$HARNESS" = codex ] && [ "$EFFORT" = max ]; then
+  CODEX_BIN=$(resolve_harness_executable codex) || true
 fi
 
 secondmate_registry_value() {
@@ -1367,6 +1442,27 @@ model_flag_for_harness() {
   esac
 }
 
+CODEX_MAX_EFFORT_VERSION=
+codex_max_effort_supported() {
+  local executable=$1 output parts major minor patch extra
+  local floor=0.146.1 floor_major floor_minor floor_patch floor_extra
+
+  CODEX_MAX_EFFORT_VERSION=unverified
+  [ -n "$executable" ] && [ -x "$executable" ] || return 1
+  output=$("$executable" --version 2>/dev/null) || return 1
+  parts=$(printf '%s\n' "$output" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
+  IFS=' ' read -r major minor patch extra <<< "$parts" || return 1
+  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
+  IFS='.' read -r floor_major floor_minor floor_patch floor_extra <<< "$floor" || return 1
+  [ -n "$floor_major" ] && [ -n "$floor_minor" ] && [ -n "$floor_patch" ] && [ -z "$floor_extra" ] || return 1
+  CODEX_MAX_EFFORT_VERSION="$major.$minor.$patch"
+  [ "$major" -gt "$floor_major" ] && return 0
+  [ "$major" -eq "$floor_major" ] || return 1
+  [ "$minor" -gt "$floor_minor" ] && return 0
+  [ "$minor" -eq "$floor_minor" ] || return 1
+  [ "$patch" -ge "$floor_patch" ]
+}
+
 effort_flag_for_harness() {
   local harness=$1 effort=$2
   [ -n "$effort" ] && [ "$effort" != default ] || return 0
@@ -1377,11 +1473,19 @@ effort_flag_for_harness() {
       esac
       ;;
     codex)
-      # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+      # Verified with codex-cli 0.146.1: the server accepts
+      # none|minimal|low|medium|high|xhigh|max through model_reasoning_effort.
+      # Firstmate threads its shared low|medium|high|xhigh|max vocabulary here;
+      # none and minimal remain outside the shared profile axis.
       case "$effort" in
         low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        max)
+          if codex_max_effort_supported "$CODEX_BIN"; then
+            printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")"
+          else
+            echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values: low, medium, high, xhigh; Codex CLI '${CODEX_MAX_EFFORT_VERSION:-unverified}' does not meet verified max-capability floor 0.146.1; omitting effort flag" >&2
+          fi
+          ;;
       esac
       ;;
     grok)
@@ -1391,6 +1495,7 @@ effort_flag_for_harness() {
       # than passing a known-bad value.
       case "$effort" in
         low|medium|high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+        *) echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values: low, medium, high; omitting effort flag" >&2 ;;
       esac
       ;;
     pi|pi-signed)
@@ -1417,10 +1522,21 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
-    # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command. Cursor encodes effort
-    # in model ids such as cursor-grok-4.5-high, so it also receives no separate
-    # effort flag.
+    # Kimi likewise has no reasoning-effort flag. Both use the common
+    # unsupported-axis path, which warns and records default delivery instead of
+    # inserting the requested effort into the launch command.
+    opencode|kimi)
+      echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values: no supported values; omitting effort flag" >&2
+      ;;
+    # Cursor exposes no separate effort flag. Its model ids may encode a
+    # reasoning class (for example cursor-grok-4.5-high), but fm-spawn does not
+    # infer or validate that mapping from a separate effort request.
+    cursor)
+      echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values: no separate supported values; select a model-qualified reasoning class; omitting effort flag" >&2
+      ;;
+    *)
+      echo "warning: harness '$harness' cannot thread requested effort '$effort'; accepted effort values through fm-spawn: no supported values; raw launch commands must carry their own effort flags" >&2
+      ;;
   esac
 }
 
@@ -2589,6 +2705,13 @@ elif [ "$KIND" = scout ]; then
   YOLO=
 fi
 
+MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+DELIVERED_MODEL=default
+DELIVERED_EFFORT=default
+[ -z "$MODELFLAG" ] || DELIVERED_MODEL=${MODEL:-default}
+[ -z "$EFFORTFLAG" ] || DELIVERED_EFFORT=${EFFORT:-default}
+
 # Resolve the optional default-off W3C trace context (bin/fm-trace-context-lib.sh,
 # docs/configuration.md): the one carrier both recorded in meta and injected into
 # the pane, so an observer reads exactly what the child receives. Empty only when
@@ -2632,7 +2755,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort profile_delivery delivered_model delivered_effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2712,8 +2835,6 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
-MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
-EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
@@ -2725,6 +2846,11 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+  codex)
+    if [ -n "$CODEX_BIN" ]; then
+      LAUNCH=${LAUNCH/#codex/"$(shell_quote "$CODEX_BIN")"}
+    fi
+    ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
@@ -2813,6 +2939,13 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$RAW_LAUNCH" -eq 0 ]; then
+  {
+    echo "profile_delivery=fm-spawn.v1"
+    echo "delivered_model=$DELIVERED_MODEL"
+    echo "delivered_effort=$DELIVERED_EFFORT"
+  } >> "$STATE/$ID.meta"
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

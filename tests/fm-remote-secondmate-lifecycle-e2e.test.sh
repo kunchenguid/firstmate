@@ -704,7 +704,7 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
-out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --effort high)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
@@ -714,6 +714,10 @@ assert_grep 'herdr_session=fm-remote' "$REMOTE_HOME/state/parent-route/ios.meta"
 assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the fm-remote session"
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"
+assert_grep 'effort=high' "$PARENT/state/ios.meta" "parent metadata omitted the delivered remote effort"
+assert_grep 'effort=high' "$REMOTE_HOME/state/parent-route/ios.meta" "remote route metadata omitted the delivered effort"
+assert_grep 'profile_delivery=fm-spawn.v1' "$REMOTE_HOME/state/parent-route/ios.meta" "remote route metadata omitted delivered-profile provenance"
+assert_grep 'delivered_effort=high' "$REMOTE_HOME/state/parent-route/ios.meta" "remote route metadata omitted the verified delivered effort"
 assert_present "$PARENT/state/procevent/remote-reply-ios.source" "remote spawn did not arm its reply source"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
@@ -724,7 +728,108 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-effort-mismatch.meta"
+cp "$REMOTE_HOME/state/parent-route/ios.meta" "$TMP_ROOT/remote-ios-before-effort-mismatch.meta"
+launches_before_effort_mismatch=$(grep -c '^tab create' "$HERDR_LOG" || true)
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --effort max \
+  > "$TMP_ROOT/spawn-effort-mismatch.out" 2> "$TMP_ROOT/spawn-effort-mismatch.err"
+effort_mismatch_rc=$?
+[ "$effort_mismatch_rc" -ne 0 ] || fail "live remote endpoint accepted an undelivered effort change"
+assert_grep "remote secondmate ios is already live with effort 'high', not requested effort 'max'; live endpoint was not restarted" \
+  "$TMP_ROOT/spawn-effort-mismatch.err" "live remote effort mismatch did not name actual and requested values"
+cmp -s "$TMP_ROOT/parent-ios-before-effort-mismatch.meta" "$PARENT/state/ios.meta" \
+  || fail "live remote effort mismatch rewrote parent metadata"
+cmp -s "$TMP_ROOT/remote-ios-before-effort-mismatch.meta" "$REMOTE_HOME/state/parent-route/ios.meta" \
+  || fail "live remote effort mismatch rewrote endpoint metadata"
+launches_after_effort_mismatch=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_before_effort_mismatch" -eq "$launches_after_effort_mismatch" ] \
+  || fail "live remote effort mismatch restarted the endpoint"
+pass "live remote reuse rejects profile drift without restart or metadata divergence"
+
+printf 'opencode default high\n' > "$PARENT/config/secondmate-harness"
+reset_remote_herdr_fixture "$HERDR_STATE"
+rm -rf -- "$PARENT/state/.watch.lock"
+rm -f -- "$PARENT/state/.last-watcher-beat"
+BOOT_PROFILE_WARNING=$(FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=1 remote_env \
+  "$ROOT/bin/fm-bootstrap.sh" 2> "$TMP_ROOT/bootstrap-profile-warning.err")
+assert_grep "warning: harness 'opencode' cannot thread requested effort 'high'; accepted effort values: no supported values; omitting effort flag" \
+  "$TMP_ROOT/bootstrap-profile-warning.err" "successful remote startup relaunch swallowed the effort warning"
+assert_not_contains "$BOOT_PROFILE_WARNING" "cannot thread requested effort" \
+  "successful remote startup relaunch moved the effort warning onto stdout"
+assert_grep 'harness=opencode' "$PARENT/state/ios.meta" "warning-path relaunch did not publish the remote harness"
+assert_grep 'harness=opencode' "$REMOTE_HOME/state/parent-route/ios.meta" "warning-path relaunch did not publish endpoint metadata"
+grep -qxF 'effort=' "$PARENT/state/ios.meta" \
+  || fail "warning-path parent metadata published the omitted effort as delivered"
+assert_grep 'effort=high' "$REMOTE_HOME/state/parent-route/ios.meta" "warning-path endpoint lost the requested effort trace"
+assert_grep 'delivered_effort=default' "$REMOTE_HOME/state/parent-route/ios.meta" "warning-path endpoint did not distinguish the omitted effort from its delivered default"
+pass "remote and startup relaunch wrappers preserve successful effort diagnostics on stderr"
+publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
+
+printf 'codex default high\n' > "$PARENT/config/secondmate-harness"
+reset_remote_herdr_fixture "$HERDR_STATE"
+restore_out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2> "$TMP_ROOT/spawn-profile-restore.err")
+restore_rc=$?
+[ "$restore_rc" -eq 0 ] || fail "remote profile restore failed"$'\n'"$(cat "$TMP_ROOT/spawn-profile-restore.err")"
+assert_contains "$restore_out" 'harness=codex' "remote profile restore did not relaunch codex"
+assert_grep 'effort=high' "$PARENT/state/ios.meta" "remote profile restore lost the delivered effort"
+
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-proven-profile.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-legacy-profile.meta"
+awk '
+  /^profile_delivery=/ || /^delivered_model=/ || /^delivered_effort=/ { next }
+  /^effort=/ { print "effort=max"; next }
+  { print }
+' "$TMP_ROOT/remote-ios-proven-profile.meta" > "$remote_route_meta"
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-legacy-max.meta"
+legacy_profile_state=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios \
+  2> "$TMP_ROOT/legacy-profile-state.err")
+[ "$legacy_profile_state" = unverified ] || fail "pre-fix live Codex max metadata was not classified unverified"
+launches_before_legacy_profile=$(grep -c '^tab create' "$HERDR_LOG" || true)
+if remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --effort max \
+  > "$TMP_ROOT/legacy-profile-spawn.out" 2> "$TMP_ROOT/legacy-profile-spawn.err"; then
+  fail "pre-fix live Codex max metadata was accepted as delivered"
+fi
+assert_grep 'delivered profile is unproven' "$TMP_ROOT/legacy-profile-spawn.err" \
+  "pre-fix live Codex max refusal did not identify missing delivery provenance"
+cmp -s "$TMP_ROOT/remote-ios-legacy-max.meta" "$remote_route_meta" \
+  || fail "pre-fix live Codex max refusal rewrote endpoint metadata"
+cmp -s "$TMP_ROOT/parent-ios-before-legacy-profile.meta" "$PARENT/state/ios.meta" \
+  || fail "pre-fix live Codex max refusal rewrote parent metadata"
+launches_after_legacy_profile=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_before_legacy_profile" -eq "$launches_after_legacy_profile" ] \
+  || fail "pre-fix live Codex max refusal restarted the endpoint"
+pass "live pre-fix Codex max metadata is rejected without restart or republication"
+
+reset_remote_herdr_fixture "$HERDR_STATE"
+legacy_dead_profile_state=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios \
+  2> "$TMP_ROOT/legacy-dead-profile-state.err")
+[ "$legacy_dead_profile_state" = missing ] \
+  || fail "dead pre-upgrade endpoint was masked as $legacy_dead_profile_state instead of missing"
+[ ! -s "$TMP_ROOT/legacy-dead-profile-state.err" ] \
+  || fail "dead pre-upgrade endpoint emitted a profile-proof refusal"
+launches_before_legacy_recovery=$(grep -c '^tab create' "$HERDR_LOG" || true)
+if ! legacy_recovery_out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --effort high \
+  2> "$TMP_ROOT/legacy-profile-recovery.err"); then
+  fail "dead pre-upgrade endpoint did not recover"$'\n'"$(cat "$TMP_ROOT/legacy-profile-recovery.err")"
+fi
+assert_contains "$legacy_recovery_out" 'harness=codex' "dead pre-upgrade recovery did not relaunch Codex"
+launches_after_legacy_recovery=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$launches_after_legacy_recovery" -eq $((launches_before_legacy_recovery + 1)) ] \
+  || fail "dead pre-upgrade recovery did not perform exactly one relaunch"
+assert_grep 'profile_delivery=fm-spawn.v1' "$remote_route_meta" \
+  "dead pre-upgrade recovery did not publish fresh profile provenance"
+assert_grep 'delivered_effort=high' "$remote_route_meta" \
+  "dead pre-upgrade recovery did not record its delivered effort"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "dead pre-upgrade recovery did not produce a live proven endpoint"
+pass "dead pre-upgrade endpoints recover with fresh delivered-profile provenance"
+
+if [ "${FM_TEST_PROFILE_ONLY:-0}" = 1 ]; then
+  echo "ALL PROFILE TESTS PASSED"
+  exit 0
+fi
+
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
 legacy_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
 awk -v pane="$legacy_pane" '
@@ -1189,6 +1294,17 @@ if ! wait "$spawn_retirement_pid"; then
   printf 'serialized respawn output:\n%s\n' "$(cat "$TMP_ROOT/spawn-retirement.out")" >&2
   fail "serialized remote respawn failed"
 fi
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "retirement fixture did not produce a live endpoint"
+awk '
+  /^profile_delivery=/ || /^delivered_model=/ || /^delivered_effort=/ { next }
+  { print }
+' "$remote_route_meta" > "$TMP_ROOT/remote-ios-live-legacy-retire.meta"
+mv -f "$TMP_ROOT/remote-ios-live-legacy-retire.meta" "$remote_route_meta"
+legacy_retire_state=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios \
+  2> "$TMP_ROOT/legacy-retire-state.err")
+[ "$legacy_retire_state" = unverified ] \
+  || fail "live pre-upgrade retirement fixture was not classified unverified"
 sleep 0.2
 kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active backlog handoff"
 touch "$TMP_ROOT/handoff.release"
@@ -1207,6 +1323,7 @@ jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
   || fail "remote retirement removed the sibling secondmate workspace or pane from fm-remote"
 assert_no_grep 'session stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote session"
 assert_no_grep 'server stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote server"
+pass "live pre-upgrade endpoint retires through the documented teardown path"
 pass "remote retirement refuses child work, then removes only its own endpoint while a shared-session sibling survives"
 
 echo "ALL TESTS PASSED"
