@@ -467,6 +467,40 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
+test_raw_codex_fast_tier_refuses_before_mutation() {
+  local rec id out status launch
+  id=profile-raw-codex-standard-z15a
+  rec=$(make_spawn_case profile-raw-codex-standard claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "codex --profile custom")
+  status=$?
+  expect_code 0 "$status" "raw standard Codex launch should remain supported"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default standard
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS codex --profile custom" ] \
+    || fail "raw standard Codex launch changed"$'\n'"actual: $launch"
+
+  id=profile-raw-codex-fast-z15b
+  rec=$(make_spawn_case profile-raw-codex-fast claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "codex --profile custom" --tier fast)
+  status=$?
+  expect_code 1 "$status" "raw fast Codex launch should be refused"
+  assert_contains "$out" "--tier fast requires Firstmate's canonical Codex launch template" \
+    "raw fast Codex refusal did not require the canonical template"
+  assert_absent "$HOME_DIR/state/$id.meta" "raw fast Codex refusal published metadata"
+  assert_absent "$LAUNCH_LOG.endpoint" "raw fast Codex refusal created an endpoint"
+  assert_absent "$LAUNCH_LOG.treehouse" "raw fast Codex refusal acquired a worktree"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw fast Codex refusal reached launch construction"
+  pass "raw Codex fast tier refuses before worktree or endpoint mutation"
+}
+
 test_claude_threads_model_and_effort() {
   local rec id out status launch
   id=profile-claude-z2
@@ -1033,6 +1067,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_raw_codex_fast_tier_refuses_before_mutation
 test_claude_threads_model_and_effort
 test_non_codex_tier_is_omitted_with_warning
 test_codex_threads_model_and_effort

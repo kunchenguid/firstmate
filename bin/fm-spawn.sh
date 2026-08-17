@@ -1306,6 +1306,7 @@ launch_template() {
   esac
 }
 
+CANONICAL_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
@@ -1335,12 +1336,19 @@ case "$ARG3" in
       harness_src='config/crew-harness'
     fi
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    CANONICAL_LAUNCH=1
     ;;
   *)
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    CANONICAL_LAUNCH=1
     ;;
 esac
+
+if [ "$HARNESS" = codex ] && [ "$TIER" = fast ] && [ "$CANONICAL_LAUNCH" != 1 ]; then
+  echo "error: --tier fast requires Firstmate's canonical Codex launch template; raw Codex launch commands cannot be verified or rewritten safely" >&2
+  exit 1
+fi
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
