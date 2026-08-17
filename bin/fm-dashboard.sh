@@ -460,6 +460,7 @@ import json
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 SCRIPT = sys.argv[1]
@@ -501,17 +502,20 @@ def snapshot_json():
 
 
 def pr_checks(url):
-    now = time.monotonic()
-    cached = SERVER.gh_cache.get(url)
-    if cached and (now - cached[0]) < GH_TTL:
-        return cached[1]
-    p = subprocess.run([SCRIPT, "--pr-check", url], capture_output=True, text=True, timeout=30)
-    try:
-        checks = json.loads(p.stdout or "{}")
-    except json.JSONDecodeError:
-        checks = {"url": url, "error": "pr-check returned invalid JSON"}
-    SERVER.gh_cache[url] = (now, checks)
-    return checks
+    with SERVER.gh_locks_guard:
+        lock = SERVER.gh_locks.setdefault(url, threading.Lock())
+    with lock:
+        now = time.monotonic()
+        cached = SERVER.gh_cache.get(url)
+        if cached and (now - cached[0]) < GH_TTL:
+            return cached[1]
+        p = subprocess.run([SCRIPT, "--pr-check", url], capture_output=True, text=True, timeout=30)
+        try:
+            checks = json.loads(p.stdout or "{}")
+        except json.JSONDecodeError:
+            checks = {"url": url, "error": "pr-check returned invalid JSON"}
+        SERVER.gh_cache[url] = (time.monotonic(), checks)
+        return checks
 
 
 class Server(http.server.ThreadingHTTPServer):
@@ -521,6 +525,8 @@ class Server(http.server.ThreadingHTTPServer):
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.gh_cache = {}
+        self.gh_locks = {}
+        self.gh_locks_guard = threading.Lock()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

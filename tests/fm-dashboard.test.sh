@@ -117,6 +117,7 @@ fake_gh() {  # <fakebin> <json>
   cat > "$fb/gh" <<SH
 #!/usr/bin/env bash
 [ -n "\${GH_COUNT_FILE:-}" ] && printf 'x\n' >> "\$GH_COUNT_FILE"
+[ -z "\${GH_DELAY:-}" ] || sleep "\$GH_DELAY"
 cat <<'JSON'
 $json
 JSON
@@ -418,6 +419,67 @@ test_serve_and_cache() {
   pass "dashboard serves localhost snapshot and HTML, caching PR checks across refreshes"
 }
 
+test_concurrent_serve_cache_single_flight() {
+  serve_tools_available || { pass "concurrent cache test skipped (python3 or curl absent)"; return 0; }
+  local home fakebin port pid gh_count out_dir curl_pid i ready
+  home=$(make_home serveconcurrent)
+  mkdir -p "$home/projects/wt"
+  fm_write_meta "$home/state/ship-task.meta" \
+    "window=firstmate:fm-ship-task" \
+    "worktree=$home/projects/wt" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship" \
+    "pr=https://github.com/o/r/pull/8"
+  printf 'working: building\n' > "$home/state/ship-task.status"
+  record_busy "$home/state" ship-task
+  fakebin=$(make_fakebin "$home")
+  fake_gh "$fakebin" '{"state":"OPEN","statusCheckRollup":[{"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}'
+  GH_COUNT_FILE=$TMP_ROOT/gh-concurrent-count
+  : > "$GH_COUNT_FILE"
+  out_dir=$TMP_ROOT/concurrent-responses
+  mkdir -p "$out_dir"
+  port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+
+  GH_COUNT_FILE="$GH_COUNT_FILE" GH_DELAY=1 PATH="$fakebin:$PATH" FM_HOME="$home" \
+    "$DASH" --port "$port" --gh-cache 60 >"$TMP_ROOT/serve-concurrent.log" 2>&1 &
+  pid=$!
+  i=0
+  ready=0
+  while [ "$i" -lt 50 ]; do
+    if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then ready=1; break; fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$ready" -ne 1 ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "concurrent-cache dashboard server did not come up: $(cat "$TMP_ROOT/serve-concurrent.log")"
+  fi
+
+  curl_pid=""
+  i=1
+  while [ "$i" -le 6 ]; do
+    curl -fsS "http://127.0.0.1:$port/snapshot" > "$out_dir/$i.json" &
+    curl_pid="$curl_pid $!"
+    i=$((i + 1))
+  done
+  for i in $curl_pid; do
+    wait "$i" || fail "concurrent snapshot request failed"
+  done
+  for i in "$out_dir"/*.json; do
+    jq -e '.tasks[0].pr.checks.verdict == "success"' "$i" >/dev/null \
+      || fail "concurrent snapshot omitted successful checks: $(cat "$i")"
+  done
+  gh_count=$(wc -l < "$GH_COUNT_FILE" | tr -d ' ')
+  [ "$gh_count" = "1" ] || fail "concurrent cache misses must single-flight gh, got $gh_count calls"
+
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "concurrent snapshot requests single-flight PR check refreshes"
+}
+
 # Empty fleet served over HTTP must render the explicit empty state.
 test_serve_empty_fleet() {
   serve_tools_available || { pass "empty serve test skipped (python3 or curl absent)"; return 0; }
@@ -499,6 +561,7 @@ test_run_step_validation_active
 test_pr_check_verdicts
 test_html_page
 test_serve_and_cache
+test_concurrent_serve_cache_single_flight
 test_serve_empty_fleet
 test_serve_ipv6_host
 test_usage_and_validation
