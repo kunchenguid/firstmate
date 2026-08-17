@@ -12,6 +12,7 @@
 # end-to-end cwd-leak regression, and the per-harness wiring. No harness is
 # spawned; live per-harness evidence lives in docs/cd-guard.md.
 set -u
+unset FM_ROOT_OVERRIDE
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

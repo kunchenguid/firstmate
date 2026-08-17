@@ -167,6 +167,34 @@ fm_fakebin() {
   printf '%s\n' "$fakebin"
 }
 
+# Hide selected host-installed commands while still allowing a fixture-owned
+# replacement below <fixture-root>. Exporting the command wrapper keeps nested
+# Bash processes on the same hermetic lookup boundary.
+fm_test_hide_host_commands() { # <fixture-root> <command...>
+  FM_TEST_ALLOWED_COMMAND_ROOT=$1
+  shift
+  FM_TEST_HIDDEN_HOST_COMMANDS=" $* "
+  export FM_TEST_ALLOWED_COMMAND_ROOT FM_TEST_HIDDEN_HOST_COMMANDS
+  # shellcheck disable=SC2329 # Exported for command -v calls in nested fixture shells.
+  command() {
+    local resolved
+    if [ "${1:-}" = -v ]; then
+      case "$FM_TEST_HIDDEN_HOST_COMMANDS" in
+        *" ${2:-} "*)
+          resolved=$(builtin command -v "$2") || return 1
+          case "$resolved" in
+            "$FM_TEST_ALLOWED_COMMAND_ROOT"/*) printf '%s\n' "$resolved" ;;
+            *) return 1 ;;
+          esac
+          return
+          ;;
+      esac
+    fi
+    builtin command "$@"
+  }
+  export -f command
+}
+
 fm_fake_exit0() {
   local fakebin=$1 tool
   shift

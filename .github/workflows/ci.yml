@@ -21,129 +21,32 @@ env:
 jobs:
   suite:
     name: Suite
-    # The repository variable keeps a future hosted fallback mechanical.
-    # Set FM_CI_RUNNER_LABELS to JSON string "ubuntu-latest" to opt into it.
-    runs-on: ${{ fromJSON(vars.FM_CI_RUNNER_LABELS || '["self-hosted","linux","x64","water-7"]') }}
+    runs-on: [self-hosted, Linux, X64, water-7]
+    if: >-
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'push' &&
+      github.event.repository.full_name == github.repository)
     timeout-minutes: 120
+    env:
+      LC_ALL: C
+      LANG: C
+      GIT_AUTHOR_NAME: Firstmate CI
+      GIT_AUTHOR_EMAIL: firstmate-ci@users.noreply.github.com
+      GIT_COMMITTER_NAME: Firstmate CI
+      GIT_COMMITTER_EMAIL: firstmate-ci@users.noreply.github.com
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      - name: Validate workflow policy
-        run: bin/fm-ci-workflow-check.sh
+          persist-credentials: false
 
       - name: Admit suite only below the shared-host load ceiling
         run: bin/fm-ci-load-guard.sh wait --max-load "$FM_CI_MAX_LOAD" --timeout 900 --poll 15
 
-      - name: Restore checksum-verified CI tools
-        id: ci-tools-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/firstmate-ci-tools
-          key: water-7-ci-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bin/fm-install-shellcheck.sh', 'bin/fm-install-herdr.sh', 'bin/fm-install-treehouse.sh') }}
-
-      - name: Install checksum-verified CI tools
-        if: steps.ci-tools-cache.outputs.cache-hit != 'true'
-        run: |
-          set -eu
-          mkdir -p "$HOME/.cache/firstmate-ci-tools"
-          bin/fm-install-shellcheck.sh "$HOME/.cache/firstmate-ci-tools"
-          bin/fm-install-herdr.sh "$HOME/.cache/firstmate-ci-tools"
-          bin/fm-install-treehouse.sh "$HOME/.cache/firstmate-ci-tools"
-
-      - name: Verify cached CI tools
-        run: |
-          set -eu
-          echo "$HOME/.cache/firstmate-ci-tools" >> "$GITHUB_PATH"
-          PATH="$HOME/.cache/firstmate-ci-tools:$PATH"
-          [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$(bin/fm-lint.sh --required-version)" ]
-          [ "$(herdr --version | awk '{print $2; exit}')" = "0.7.4" ]
-          case "$(treehouse --version | tr -d '[:space:]')" in
-            v2.0.1|2.0.1) ;;
-            *) exit 1 ;;
-          esac
-
-      - name: Restore credential-free npm content cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm/_cacache
-          key: water-7-npm-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
-          restore-keys: |
-            water-7-npm-${{ runner.os }}-
-
-      - name: Install tasks-axi into the job workspace
-        run: |
-          set -eu
-          npm install --prefix "$RUNNER_TEMP/fm-node" --no-audit --no-fund tasks-axi
-          echo "$RUNNER_TEMP/fm-node/node_modules/.bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/fm-node/node_modules/.bin/tasks-axi" --version
-
-      - name: Lint shell scripts
-        run: bin/fm-lint.sh
-
-      - name: Prove complete suite selection
-        run: bin/fm-test-run.sh --check-coverage
-
-      - name: Start isolated Herdr test server
-        run: |
-          set -eu
-          mkdir -p "$RUNNER_TEMP/fm-herdr"
-          if [ "$(herdr status --json | jq -r '.server.running // false')" != true ]; then
-            nohup herdr server >"$RUNNER_TEMP/fm-herdr/default-server.log" 2>&1 &
-            echo $! >"$RUNNER_TEMP/fm-herdr/default-server.pid"
-          fi
-          attempt=0
-          while [ "$attempt" -lt 150 ]; do
-            if herdr session list --json | jq -e '
-              [.sessions[]? | select(.default == true and .name == "default" and .running == true)]
-              | length == 1
-            ' >/dev/null; then
-              exit 0
-            fi
-            sleep 0.2
-            attempt=$((attempt + 1))
-          done
-          echo "::error::dedicated Herdr test server did not become ready"
-          exit 1
-
-      - name: Snapshot pre-suite Herdr sessions
-        run: bin/fm-herdr-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-herdr/sessions-before.json"
-
-      - name: Run the complete repository suite
-        run: |
-          set -eu
-          mkdir -p "$RUNNER_TEMP/fm-test"
-          bin/fm-test-run.sh --all \
-            --fail-on-gate-skip 'herdr not found' \
-            --json "$RUNNER_TEMP/fm-test/fm-test-timing-all.json"
-
-      - name: Check repository invariants
-        run: |
-          set -eu
-          [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]
-          [ "$(readlink .claude/skills)" = "../.agents/skills" ]
-          [ -z "$(git ls-files -- data state config projects .no-mistakes)" ]
+      - name: Run the repository-owned serial CI policy
+        run: bin/fm-ci.sh
 
       - name: Refuse an overloaded suite verdict
         if: always()
         run: bin/fm-ci-load-guard.sh check --max-load "$FM_CI_MAX_LOAD"
-
-      - name: Cleanup job-owned Herdr sessions
-        if: always()
-        run: |
-          set -eu
-          if [ -f "$RUNNER_TEMP/fm-herdr/sessions-before.json" ]; then
-            bin/fm-herdr-ci-cleanup.sh teardown "$RUNNER_TEMP/fm-herdr/sessions-before.json"
-          fi
-
-      - name: Upload suite timing and diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fm-test-timing-all
-          path: |
-            ${{ runner.temp }}/fm-test/fm-test-timing-all.json
-            ${{ runner.temp }}/fm-herdr/sessions-before.json
-            ${{ runner.temp }}/fm-herdr/default-server.log
-          if-no-files-found: warn

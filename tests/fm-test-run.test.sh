@@ -418,6 +418,8 @@ test_exclude_family() {
   listed=$("$RUNNER" --list --family real-herdr-gated)
   printf '%s\n' "$listed" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
     || fail "family real-herdr-gated must list smoke test"
+  printf '%s\n' "$listed" | grep -Fq 'tests/fm-backend-herdr-focus-flash-e2e.test.sh' \
+    || fail "family real-herdr-gated must list focus-flash e2e"
   pass "exclude-family drops the named primary family after selection"
 }
 
@@ -439,6 +441,8 @@ test_portable_shard_union_and_coverage_guard() {
   # No herdr in portable lanes.
   printf '%s\n' "$s1" "$s2" "$serial" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
     && fail "portable lanes must not include real-herdr-gated smoke"
+  printf '%s\n' "$s1" "$s2" "$serial" | grep -Fq 'tests/fm-backend-herdr-focus-flash-e2e.test.sh' \
+    && fail "portable lanes must not include real-Herdr focus-flash e2e"
   printf '%s\n' "$herdr" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
     || fail "herdr family must include smoke"
   out=$("$RUNNER" --check-coverage)

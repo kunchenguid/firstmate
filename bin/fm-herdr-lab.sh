@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Provision and operate an isolated Herdr lab session without risking the live
-# default session.
+# protected controller session.
 #
 # Usage:
 #   fm-herdr-lab.sh name <label>
@@ -19,11 +19,24 @@
 # operation.
 # Session stop is available only through guarded stop or teardown, and session
 # delete is available only through teardown.
-# Both paths perform a fresh refuse-default check immediately before each
-# destructive call.
-# Provision records the running default session as a fleet-state tripwire and
-# teardown requires that record to be identical afterward.
+# Both paths revalidate the protected controller and lab identity immediately
+# before each destructive call.
+# With FM_HERDR_LAB_TASK_ID unset, the compatible ordinary-home controller is
+# the single running default session.
+# With FM_HERDR_LAB_TASK_ID set, the shared backend endpoint validator must
+# accept the task metadata under FM_HERDR_LAB_TASK_STATE_DIR,
+# FM_STATE_OVERRIDE, or FM_HOME/state (in that order); no ambient endpoint
+# marker or session name is authority.
+# A host with no default controller at all (the dedicated CI runner) names its
+# own pre-existing controller in FM_HERDR_LAB_PROTECTED_SESSION, which must be
+# an explicit non-lab session name. HERDR_SESSION is never that authority.
+# Provision records the running controller as a tripwire and teardown requires
+# that record to be identical afterward.
 set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 fm_herdr_lab_error() {
   echo "fm-herdr-lab: $*" >&2
@@ -48,6 +61,54 @@ fm_herdr_lab_tripwire_path() { # <session>
   printf '%s/%s.fleet-state.json' "$(fm_herdr_lab_state_dir)" "$1"
 }
 
+fm_herdr_lab_protected_session() {
+  local task_id=${FM_HERDR_LAB_TASK_ID:-} named=${FM_HERDR_LAB_PROTECTED_SESSION:-}
+  local state=${FM_HERDR_LAB_TASK_STATE_DIR:-} meta session
+  if [ -z "$task_id" ]; then
+    if [ -z "$named" ]; then
+      printf 'default\n'
+      return
+    fi
+    case "$named" in
+      fm-lab-*)
+        fm_herdr_lab_error "FM_HERDR_LAB_PROTECTED_SESSION must not name a lab session: $named"
+        return 1
+        ;;
+      *[!a-zA-Z0-9_-]*|-*)
+        fm_herdr_lab_error "FM_HERDR_LAB_PROTECTED_SESSION is not a valid session name: $named"
+        return 1
+        ;;
+    esac
+    printf '%s\n' "$named"
+    return
+  fi
+  if [ -n "$state" ]; then
+    :
+  elif [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+    state=$FM_STATE_OVERRIDE
+  elif [ -n "${FM_HOME:-}" ]; then
+    state=$FM_HOME/state
+  else
+    fm_herdr_lab_error "FM_HERDR_LAB_TASK_STATE_DIR, FM_STATE_OVERRIDE, or FM_HOME is required with FM_HERDR_LAB_TASK_ID"
+    return 1
+  fi
+  case "$state" in
+    /*) ;;
+    *) fm_herdr_lab_error "recorded task state directory must be absolute"; return 1 ;;
+  esac
+  meta="$state/$task_id.meta"
+  fm_backend_validate_task_endpoint "$meta" "$task_id" >/dev/null || {
+    fm_herdr_lab_error "authoritative recorded task endpoint is invalid"
+    return 1
+  }
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = herdr ] || {
+    fm_herdr_lab_error "authoritative recorded task is not on Herdr"
+    return 1
+  }
+  session=$(fm_backend_meta_exact_value "$meta" herdr_session) || return 1
+  printf '%s\n' "$session"
+}
+
 fm_herdr_lab_raw() { # <session> <herdr arguments...>
   local name=$1
   shift
@@ -59,20 +120,23 @@ fm_herdr_lab_session_list() { # <session>
 }
 
 fm_herdr_lab_fleet_state() { # <session>
-  local name=$1 sessions snapshot
+  local name=$1 protected sessions snapshot
+  protected=$(fm_herdr_lab_protected_session) || return 1
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot read Herdr sessions for the fleet-state tripwire"
     return 1
   }
-  snapshot=$(printf '%s' "$sessions" | jq -c '
-    [.sessions[]? | select(.default == true)]
-    | if length == 1 and .[0].name == "default" and .[0].running == true
+  snapshot=$(printf '%s' "$sessions" | jq -c --arg protected "$protected" '
+    [.sessions[]? | select(.name == $protected)]
+    | if length == 1
+        and .[0].running == true
+        and ($protected != "default" or .[0].default == true)
       then .[0] | {name, default, running, socket_path}
       else empty
       end
   ' 2>/dev/null)
   [ -n "$snapshot" ] || {
-    fm_herdr_lab_error "fleet-state tripwire requires exactly one running default session"
+    fm_herdr_lab_error "fleet-state tripwire requires exactly one running protected controller named '$protected'"
     return 1
   }
   printf '%s\n' "$snapshot"
@@ -106,17 +170,24 @@ fm_herdr_lab_prepare() { # <session>
   }
 }
 
-fm_herdr_lab_refuse_if_default() { # <session>
-  local name=$1 info flag
+fm_herdr_lab_refuse_if_protected() { # <session>
+  local name=$1 protected info flag
   fm_herdr_lab_validate_name "$name" || return 1
+  protected=$(fm_herdr_lab_protected_session) || return 1
+  [ -n "$protected" ] && [ "$name" != "$protected" ] || {
+    fm_herdr_lab_error "refusing destructive call against the protected controller '$protected'"
+    return 1
+  }
   info=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "refusing destructive call because session list failed"
     return 1
   }
-  flag=$(printf '%s' "$info" | jq -r --arg name "$name" \
-    '.sessions[]? | select(.name == $name) | .default' 2>/dev/null)
+  flag=$(printf '%s' "$info" | jq -r --arg name "$name" '
+    [.sessions[]? | select(.name == $name)]
+    | if length == 1 then .[0].default else "ambiguous" end
+  ' 2>/dev/null)
   [ "$flag" = false ] && return 0
-  fm_herdr_lab_error "refusing destructive call for '$name': session is absent or default (default=${flag:-<not found>})"
+  fm_herdr_lab_error "refusing destructive call for '$name': session is absent, ambiguous, or protected (default=${flag:-<not found>})"
   return 1
 }
 
@@ -184,14 +255,14 @@ fm_herdr_lab_provision() { # <session>
       fm_herdr_lab_error "missing fleet-state tripwire for existing session '$name'; refusing to adopt it"
       return 1
     }
-    fm_herdr_lab_refuse_if_default "$name" || return 1
+    fm_herdr_lab_check_tripwire "$name" || return 1
+    fm_herdr_lab_refuse_if_protected "$name" || return 1
     running=$(printf '%s' "$sessions" | jq -r --arg name "$name" \
       '.sessions[]? | select(.name == $name) | .running' 2>/dev/null)
     [ "$running" = false ] || {
       fm_herdr_lab_error "session '$name' is not stopped; refusing to re-provision it"
       return 1
     }
-    fm_herdr_lab_check_tripwire "$name" || return 1
   else
     fm_herdr_lab_prepare "$name" || return 1
   fi
@@ -203,7 +274,11 @@ fm_herdr_lab_provision() { # <session>
   while [ "$attempt" -lt "$max_attempts" ]; do
     running=$(fm_herdr_lab_cli "$name" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null) || running=false
     if [ "$running" = true ]; then
-      fm_herdr_lab_refuse_if_default "$name" || {
+      fm_herdr_lab_check_tripwire "$name" || {
+        fm_herdr_lab_cancel_provision "$server_pid"
+        return 1
+      }
+      fm_herdr_lab_refuse_if_protected "$name" || {
         fm_herdr_lab_cancel_provision "$server_pid"
         return 1
       }
@@ -227,7 +302,7 @@ fm_herdr_lab_check_tripwire() { # <session>
   before=$(cat "$tripwire")
   after=$(fm_herdr_lab_fleet_state "$name") || return 1
   [ "$before" = "$after" ] || {
-    fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: default session changed during lab work"
+    fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: protected controller changed during lab work"
     fm_herdr_lab_error "before: $before"
     fm_herdr_lab_error "after:  $after"
     return 1
@@ -249,18 +324,20 @@ fm_herdr_lab_stop() { # <session>
     fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing stop"
     return 1
   }
-  fm_herdr_lab_refuse_if_default "$name" || return 1
+  fm_herdr_lab_check_tripwire "$name" || return 1
+  fm_herdr_lab_refuse_if_protected "$name" || return 1
   fm_herdr_lab_raw "$name" session stop "$name" --json
 }
 
 fm_herdr_lab_teardown() { # <session>
-  local name=$1 tripwire sessions delete_status=0
+  local name=$1 tripwire sessions running delete_status=0
   fm_herdr_lab_validate_name "$name" || return 1
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
     fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing destructive calls"
     return 1
   }
+  fm_herdr_lab_check_tripwire "$name" || return 1
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot list Herdr sessions before teardown"
     return 1
@@ -269,9 +346,23 @@ fm_herdr_lab_teardown() { # <session>
     fm_herdr_lab_verify_tripwire "$name"
     return
   fi
-  fm_herdr_lab_stop "$name" >/dev/null 2>&1 || true
-  sleep 0.5
-  fm_herdr_lab_refuse_if_default "$name" || return 1
+  running=$(printf '%s' "$sessions" | jq -r --arg name "$name" '
+    [.sessions[]? | select(.name == $name)]
+    | if length == 1 then (.[0].running | tostring) else "ambiguous" end
+  ' 2>/dev/null)
+  case "$running" in
+    true)
+      fm_herdr_lab_stop "$name" >/dev/null 2>&1 || return 1
+      sleep 0.5
+      ;;
+    false) ;;
+    *)
+      fm_herdr_lab_error "cannot determine whether lab session '$name' is running before teardown"
+      return 1
+      ;;
+  esac
+  fm_herdr_lab_check_tripwire "$name" || return 1
+  fm_herdr_lab_refuse_if_protected "$name" || return 1
   fm_herdr_lab_raw "$name" session delete "$name" --json >/dev/null 2>&1 || delete_status=$?
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot confirm removal of lab session '$name' after teardown"

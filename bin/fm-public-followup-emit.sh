@@ -224,8 +224,8 @@ case "$EVENT_ID" in
 esac
 [ "${#EVENT_ID}" -eq 64 ] || die "could not derive a usable event id" 1
 
-# jq bounds the outcome text by codepoint, so a long or non-ASCII sentence is
-# capped without ever splitting a multi-byte character.
+# jq applies both the public codepoint cap and the 1200-byte UTF-8 cap without
+# ever splitting a multi-byte character.
 EVENT_JSON=$(jq -Sc -n \
   --argjson schema_version "$FM_PF_EVENT_SCHEMA_VERSION" \
   --arg event_id "$EVENT_ID" \
@@ -238,12 +238,24 @@ EVENT_JSON=$(jq -Sc -n \
   --argjson deliverables "$DELIVERABLES_JSON" \
   --arg public_safe_outcome "$OUTCOME_TEXT" \
   --argjson outcome_max "$FM_PF_OUTCOME_TEXT_MAX" \
+  --argjson outcome_bytes_max "$FM_PF_OUTCOME_BYTES_MAX" \
   --arg occurred_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  '{schema_version:$schema_version, event_id:$event_id, obligation_id:$obligation_id,
+  'def utf8_width:
+     if . <= 127 then 1 elif . <= 2047 then 2 elif . <= 65535 then 3 else 4 end;
+   def utf8_prefix($max):
+     reduce (explode[]) as $cp
+       ({bytes:0, codepoints:[], accepting:true};
+        ($cp | utf8_width) as $width
+        | if .accepting and .bytes + $width <= $max
+          then .bytes += $width | .codepoints += [$cp]
+          else .accepting = false
+          end)
+     | .codepoints | implode;
+   {schema_version:$schema_version, event_id:$event_id, obligation_id:$obligation_id,
     relation_id:$relation_id, work_id:$work_id, generation:$generation,
     source_home_id:$source_home_id, outcome_type:$outcome_type,
     deliverables:$deliverables,
-    public_safe_outcome:($public_safe_outcome[0:$outcome_max]),
+    public_safe_outcome:($public_safe_outcome[0:$outcome_max] | utf8_prefix($outcome_bytes_max)),
     occurred_at:$occurred_at, successor:null}') \
   || die "could not build the typed terminal event" 1
 

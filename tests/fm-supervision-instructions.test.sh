@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tests for harness-aware supervision instruction rendering.
 set -u
+unset FM_ROOT_OVERRIDE
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

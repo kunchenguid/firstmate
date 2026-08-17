@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compatibility source for real-Herdr tests.
-# The production owner of the isolation, refuse-default, teardown, and
-# fleet-state tripwire contract is bin/fm-herdr-lab.sh.
+# The production owner of the isolation, protected-controller refusal,
+# teardown, and fleet-state tripwire contract is bin/fm-herdr-lab.sh.
 set -u
 
 # Herdr backend tests drive the real fm-spawn/fm-teardown but do not source
@@ -31,10 +31,6 @@ HERDR_TEST_SAFETY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # spawn sets HERDR_PANE_ID itself, to a pane it created in its own lab session.
 herdr_forget_inherited_pane() {
   unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_SESSION
-}
-
-herdr_refuse_if_default() { # <session>
-  fm_herdr_lab_refuse_if_default "$1"
 }
 
 herdr_safe_stop_and_delete() { # <session>

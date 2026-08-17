@@ -28,8 +28,8 @@ An auto-detected Herdr spawn prints an opt-out notice.
 Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
 No separate first-run provisioning is required.
 
-The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
-Those script headers own release assets, checksums, download bounds, and post-install gates.
+The required CI lane self-bootstraps only its pinned Herdr build through `bin/fm-install-herdr.sh` and requires Treehouse from the runner's existing tracked owner.
+The installer header owns Herdr's release asset, checksum, download bound, and post-install gate.
 Real harness credential tests remain opt-in rather than part of default CI.
 
 ## Watching and task containers
@@ -283,8 +283,11 @@ An environment-only session selection can silently reach a different running ser
 
 `bin/fm-herdr-lab.sh` is the sole supported lifecycle helper for isolated verification.
 It provisions only non-default names beginning with `fm-lab-`, appends an explicit `--session` to allowed task commands, refuses caller-supplied session flags and server/session lifecycle subcommands, and performs destructive stop/delete only through its guarded lifecycle actions.
-Immediately before every destructive call it re-queries the named session and refuses empty, missing, literal `default`, or `default:true` identities.
-Its before/after tripwire requires the live default-session snapshot to remain byte-identical.
+Immediately before every destructive call it revalidates both the exact lab identity and the protected-controller tripwire.
+The compatible ordinary-home path protects the single running `default` session.
+A host that has no `default` controller at all - the dedicated CI runner, whose only controller is the one `bin/fm-ci.sh` readies - names that controller explicitly in `FM_HERDR_LAB_PROTECTED_SESSION`, which must be a non-lab session name; ambient `HERDR_SESSION` is never that authority.
+A Herdr-launched task may instead select its own recorded task id through the standard lab brief, after which the helper derives the controller only from that task's fully validated authoritative metadata; ambient Herdr endpoint markers and session names are never authority.
+Missing, duplicate, malformed, non-Herdr, changed, or mismatched authority fails before a destructive call, and the before/after tripwire requires the complete protected-controller record to remain byte-identical.
 
 The helper's header and `--help` own exact commands.
 Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never duplicate the destructive policy.

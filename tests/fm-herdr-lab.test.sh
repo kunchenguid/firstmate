@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-herdr-lab.sh using a stateful fake Herdr client.
+#
+# The fake controller fleet is exactly one `default` session plus whichever lab
+# session a case provisions, so every ambient protection authority is dropped
+# here at the fixture boundary: bin/fm-ci.sh exports the dedicated Water 7
+# controller into the whole suite, and a Herdr-launched developer shell carries
+# its own endpoint markers. Each case supplies its own authority explicitly.
 set -u
+unset FM_HERDR_LAB_PROTECTED_SESSION FM_HERDR_LAB_TASK_ID FM_HERDR_LAB_TASK_STATE_DIR FM_HERDR_LAB_STATE_DIR
+unset FM_HOME FM_STATE_OVERRIDE
+unset HERDR_ENV HERDR_SESSION HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID HERDR_SOCKET_PATH
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -33,14 +42,19 @@ lab_state=absent
 
 case "$1 ${2:-}" in
   "session list")
-    if [ "$lab_state" = absent ] || [ "$lab_state" = deleted ]; then
-      jq -nc --arg socket "$default_socket" '{sessions:[{default:true,name:"default",running:true,socket_path:$socket}]}'
+    if [ -f "$state/session-fixture.json" ]; then
+      sessions=$(jq -c '.sessions' "$state/session-fixture.json")
     else
+      sessions=$(jq -nc --arg socket "$default_socket" \
+        '[{default:true,name:"default",running:true,socket_path:$socket}]')
+    fi
+    if [ "$lab_state" != absent ] && [ "$lab_state" != deleted ]; then
       running=false
       [ "$lab_state" = running ] && running=true
-      jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" \
-        '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
+      sessions=$(printf '%s' "$sessions" | jq -c --arg name "$session" --argjson running "$running" \
+        '. + [{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]')
     fi
+    jq -nc --argjson sessions "$sessions" '{sessions:$sessions}'
     ;;
   "server --session")
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
@@ -57,6 +71,10 @@ case "$1 ${2:-}" in
     ;;
   "session stop")
     [ "$3" = "$session" ] || exit 91
+    # A real controller has no obligation to succeed at stopping a session that
+    # is already stopped, so the fake refuses it and teardown must not depend
+    # on that redundant call.
+    [ "$lab_state" = running ] || exit 94
     printf '%s\n' stopped > "$state/$session"
     ;;
   "session delete")
@@ -84,6 +102,35 @@ run_with_fake() {
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
+}
+
+write_task_meta() { # <home> <task> [backend] [session] [window]
+  local home=$1 task=$2 backend=${3:-herdr} session=${4:-fm-remote} window=${5:-fm-remote:w8:p2}
+  mkdir -p "$home/state"
+  cat > "$home/state/$task.meta" <<EOF
+window=$window
+endpoint_task_id=$task
+worktree=$home/worktree
+project=$home/project
+backend=$backend
+herdr_session=$session
+herdr_workspace_id=w8
+herdr_tab_id=w8:t2
+herdr_pane_id=w8:p2
+EOF
+}
+
+run_with_recorded_controller() { # <home> <task> <command...>
+  local home=$1 task=$2
+  shift 2
+  FM_HOME="$home" \
+    FM_HERDR_LAB_TASK_ID="$task" \
+    HERDR_ENV=0 \
+    HERDR_SESSION=ambient-must-not-authorize \
+    HERDR_WORKSPACE_ID=ambient-workspace \
+    HERDR_TAB_ID=ambient-tab \
+    HERDR_PANE_ID=ambient-pane \
+    run_with_fake "$@"
 }
 
 test_refuses_unsafe_names() {
@@ -181,6 +228,54 @@ test_changed_default_trips_after_teardown() {
   pass "fm-herdr-lab: changed default fleet state is a hard failure"
 }
 
+test_recorded_named_controller_is_authoritative_and_fail_closed() {
+  local home task name tripwire protected status=0 before after
+  home="$TMP_ROOT/recorded-controller-home"
+  task='remote-task'
+  name="fm-lab-recorded-$$"
+  write_task_meta "$home" "$task"
+  jq -n '{sessions:[
+    {default:true,name:"default",running:false,socket_path:"/tmp/default.sock"},
+    {default:false,name:"fm-remote",running:true,socket_path:"/tmp/fm-remote.sock"}
+  ]}' > "$FAKE_STATE/session-fixture.json"
+  : > "$FAKE_LOG"
+
+  protected=$(FM_HOME='' FM_STATE_OVERRIDE='' \
+    FM_HERDR_LAB_TASK_STATE_DIR="$home/state" \
+    FM_HERDR_LAB_TASK_ID="$task" \
+    HERDR_SESSION=ambient-must-not-authorize \
+    run_with_fake fm_herdr_lab_protected_session) \
+    || fail "explicit task-state authority failed without an ambient home"
+  [ "$protected" = fm-remote ] \
+    || fail "explicit task-state authority selected the wrong controller: $protected"
+
+  run_with_recorded_controller "$home" "$task" fm_herdr_lab_provision "$name" \
+    || fail "authoritative recorded controller did not permit isolated provisioning"
+  tripwire="$TRIPWIRES/$name.fleet-state.json"
+  jq -e '. == {
+    name:"fm-remote", default:false, running:true,
+    socket_path:"/tmp/fm-remote.sock"
+  }' "$tripwire" >/dev/null || fail "tripwire did not bind the recorded controller state"
+
+  before=$(grep -c "^session stop $name " "$FAKE_LOG" || true)
+  write_task_meta "$home" "$task" herdr fm-changed fm-changed:w8:p2
+  run_with_recorded_controller "$home" "$task" fm_herdr_lab_stop "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "changed recorded controller must refuse stop"
+  after=$(grep -c "^session stop $name " "$FAKE_LOG" || true)
+  [ "$before" = "$after" ] || fail "changed recorded identity reached destructive stop"
+
+  write_task_meta "$home" "$task"
+  run_with_recorded_controller "$home" "$task" fm_herdr_lab_teardown "$name" \
+    || fail "restored authoritative controller could not tear down the owned lab"
+  assert_absent "$tripwire" "recorded-controller teardown left its tripwire behind"
+  if grep -E '^session (stop|delete) fm-remote ' "$FAKE_LOG" >/dev/null; then
+    fail "recorded protected controller was targeted by a destructive call"
+  fi
+
+  rm -f "$FAKE_STATE/session-fixture.json"
+  pass "fm-herdr-lab: authoritative named controller is exact, protected, and fail-closed"
+}
+
 test_stopped_owned_lab_can_reprovision() {
   local name="fm-lab-reprovision-$$"
   : > "$FAKE_LOG"
@@ -193,6 +288,59 @@ test_stopped_owned_lab_can_reprovision() {
   assert_present "$TRIPWIRES/$name.fleet-state.json" "re-provision removed the lab ownership tripwire"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after re-provision failed"
   pass "fm-herdr-lab: an owned stopped lab can re-provision safely"
+}
+
+test_teardown_is_idempotent_for_a_stopped_owned_lab() {
+  local name="fm-lab-stopped-teardown-$$" stops
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "stopped-teardown fixture provision failed"
+  run_with_fake fm_herdr_lab_stop "$name" || fail "guarded mid-run stop failed"
+  [ "$(cat "$FAKE_STATE/$name")" = stopped ] || fail "guarded stop did not stop the lab session"
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_teardown "$name" \
+    || fail "teardown aborted on an owned lab that was already stopped"
+  [ "$(cat "$FAKE_STATE/$name")" = deleted ] || fail "teardown did not delete the stopped lab session"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" \
+    "teardown of a stopped owned lab left its tripwire behind"
+  stops=$(grep -c "^session stop $name " "$FAKE_LOG" || true)
+  [ "$stops" = 0 ] || fail "teardown re-issued a redundant stop against an already-stopped lab"
+  pass "fm-herdr-lab: teardown of an already-stopped owned lab is idempotent and still deletes it"
+}
+
+test_explicit_named_controller_protects_a_host_without_a_default() {
+  local name="fm-lab-named-controller-$$" tripwire status=0
+  jq -n '{sessions:[
+    {default:false,name:"fm-ci-water7",running:true,socket_path:"/tmp/fm-ci-water7.sock"}
+  ]}' > "$FAKE_STATE/session-fixture.json"
+  : > "$FAKE_LOG"
+
+  FM_HERDR_LAB_PROTECTED_SESSION=fm-ci-water7 \
+    run_with_fake fm_herdr_lab_provision "$name" \
+    || fail "an explicitly named controller did not permit isolated provisioning"
+  tripwire="$TRIPWIRES/$name.fleet-state.json"
+  jq -e '. == {
+    name:"fm-ci-water7", default:false, running:true,
+    socket_path:"/tmp/fm-ci-water7.sock"
+  }' "$tripwire" >/dev/null || fail "tripwire did not bind the explicitly named controller state"
+
+  run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "the default-controller fallback must not adopt a lab owned by a named controller"
+
+  status=0
+  FM_HERDR_LAB_PROTECTED_SESSION=fm-lab-pretend \
+    run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "a lab-prefixed protected controller must be refused"
+
+  FM_HERDR_LAB_PROTECTED_SESSION=fm-ci-water7 \
+    run_with_fake fm_herdr_lab_teardown "$name" \
+    || fail "teardown under the explicitly named controller failed"
+  assert_absent "$tripwire" "named-controller teardown left its tripwire behind"
+  if grep -E '^session (stop|delete) fm-ci-water7 ' "$FAKE_LOG" >/dev/null; then
+    fail "the explicitly named protected controller was targeted by a destructive call"
+  fi
+
+  rm -f "$FAKE_STATE/session-fixture.json"
+  pass "fm-herdr-lab: an explicitly named non-default controller is protected on a host with no default session"
 }
 
 test_failed_delete_retains_tripwire() {
@@ -238,6 +386,9 @@ test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
+test_recorded_named_controller_is_authoritative_and_fail_closed
 test_stopped_owned_lab_can_reprovision
+test_teardown_is_idempotent_for_a_stopped_owned_lab
+test_explicit_named_controller_protects_a_host_without_a_default
 test_failed_delete_retains_tripwire
 test_timed_out_provision_cancels_late_launch

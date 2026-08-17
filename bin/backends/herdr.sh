@@ -463,12 +463,16 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
 
 # fm_backend_herdr_presentation_session_lock_path: one machine-private lock
 # path per live named Herdr session/socket, shared across every Firstmate home
-# that uses that session.
+# that uses that session under the same Unix owner.
+# The owner-scoped namespace prevents an unrelated account from blocking every
+# presentation lock merely by having its own valid private namespace first.
 # The path is never under any one home's state/ and secondmates never write the
 # primary home. Returns non-zero when the named session's socket cannot be
 # resolved unambiguously.
 fm_backend_herdr_presentation_lock_namespace() {
-  printf '%s' '/tmp/firstmate-herdr-presentation'
+  local uid
+  uid=$(id -u 2>/dev/null) || return 1
+  printf '/tmp/firstmate-herdr-presentation-%s' "$uid"
 }
 
 fm_backend_herdr_presentation_lock_namespace_mode() {

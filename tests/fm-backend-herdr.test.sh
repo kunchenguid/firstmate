@@ -9,6 +9,7 @@
 # The real-binary smoke test lives in tests/fm-backend-herdr-smoke.test.sh,
 # gated on the herdr binary actually being installed.
 set -u
+unset FM_ROOT_OVERRIDE FM_HOME
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -2229,7 +2230,7 @@ SH
 }
 
 test_presentation_session_lock_path_is_shared_across_homes() {
-  local dir log resp fb path_a path_b path_other path_tmp path_private
+  local dir log resp fb lock_namespace path_a path_b path_other path_tmp path_private
   dir="$TMP_ROOT/presentation-session-lock"; mkdir -p "$dir/responses" "$dir/sockdir"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
   : > "$dir/sockdir/fmtest.sock"
@@ -2238,6 +2239,7 @@ test_presentation_session_lock_path_is_shared_across_homes() {
   printf '%s\n' "{\"sessions\":[{\"name\":\"other\",\"running\":true,\"socket_path\":\"$dir/sockdir/other.sock\"}]}" > "$resp/3.out"
   : > "$dir/sockdir/other.sock"
   fb=$(make_herdr_fakebin "$dir")
+  lock_namespace="/tmp/firstmate-herdr-presentation-$(id -u)"
   path_a=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path fmtest' "$ROOT") \
     || fail "session lock path resolution failed for home A"
@@ -2246,7 +2248,7 @@ test_presentation_session_lock_path_is_shared_across_homes() {
     || fail "session lock path resolution failed for home B"
   [ "$path_a" = "$path_b" ] || fail "same session/socket must resolve one shared lock path"
   case "$path_a" in
-    /tmp/firstmate-herdr-presentation/order-*.lock) ;;
+    "$lock_namespace"/order-*.lock) ;;
     *) fail "session lock path must use the shared machine namespace: $path_a" ;;
   esac
   case "$path_a" in

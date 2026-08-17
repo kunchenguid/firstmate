@@ -16,6 +16,7 @@ JQ_BIN=$(command -v jq) || fail "test needs jq"
 NODE_BIN=$(command -v node) || fail "test needs node"
 TRUST_CHECK="$ROOT/bin/fm-kimi-trust-check.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
+fm_test_hide_host_commands "$TMP_ROOT" kimi
 
 cleanup_kimi_harness() {
   [ -z "$KIMI_RUNTIME_TASK_TMP" ] || rm -rf "$KIMI_RUNTIME_TASK_TMP"

@@ -277,11 +277,13 @@ run_final_enter_fixture() {  # <dir> [harness]
   printf '0\n' > "$dir/count"
   : > "$dir/enters"
   (
+    # shellcheck disable=SC2329
     tmux() {
       case "$1" in
         send-keys) printf 'Enter\n' >> "$dir/enters" ;;
       esac
     }
+    # shellcheck disable=SC2329
     fm_tmux_composer_state() {
       local count
       count=$(cat "$dir/count")
@@ -323,11 +325,13 @@ test_backend_dispatch_forwards_harness_to_submit_core() {
     # shellcheck source=/dev/null
     . "$ROOT/bin/fm-backend.sh"
     fm_backend_source tmux || fail "could not source the tmux backend adapter"
+    # shellcheck disable=SC2329
     tmux() {
       case "$1" in
         send-keys) printf '%s\n' "$*" >> "$dir/sends" ;;
       esac
     }
+    # shellcheck disable=SC2329
     fm_tmux_composer_state() {
       local count
       count=$(cat "$dir/count")

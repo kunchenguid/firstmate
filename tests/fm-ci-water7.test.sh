@@ -1,0 +1,350 @@
+#!/usr/bin/env bash
+# Contract tests for the single-runner Water 7 workflow and command policy.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+test_workflows_are_static_and_water7_only() {
+  if ! python3 - "$ROOT" <<'PY'
+import pathlib
+import sys
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    print("fm-ci-water7.test.sh: python3 PyYAML is required to parse workflow policy", file=sys.stderr)
+    sys.exit(2)
+
+root = pathlib.Path(sys.argv[1])
+labels = ["self-hosted", "Linux", "X64", "water-7"]
+ci_path = root / ".github/workflows/ci.yml"
+required_path = root / ".github/workflows/no-mistakes-required.yml"
+ci = yaml.safe_load(ci_path.read_text())
+required = yaml.safe_load(required_path.read_text())
+
+assert ci.get("permissions") == {"contents": "read"}
+assert required.get("permissions") == {"contents": "read"}
+assert list(ci["jobs"]) == ["suite"]
+assert list(required["jobs"]) == ["check"]
+
+assert ci["concurrency"] == {
+    "group": "ci-water-7-${{ github.event.pull_request.number || github.ref }}",
+    "cancel-in-progress": True,
+}
+assert ci["env"] == {"FM_CI_MAX_LOAD": "12"}
+
+ci_job = ci["jobs"]["suite"]
+required_job = required["jobs"]["check"]
+for job in (ci_job, required_job):
+    assert job["runs-on"] == labels
+    assert "strategy" not in job
+    assert "needs" not in job
+    assert job.get("continue-on-error") is None
+
+normalize = lambda value: " ".join(value.split())
+ci_admission = (
+    "(github.event_name == 'pull_request' && "
+    "github.event.pull_request.head.repo.full_name == github.repository) || "
+    "(github.event_name == 'push' && "
+    "github.event.repository.full_name == github.repository)"
+)
+required_admission = (
+    "github.event.pull_request.head.repo.full_name == github.repository && "
+    "github.event.pull_request.user.login != 'github-actions[bot]' && "
+    "github.event.pull_request.user.login != 'dependabot[bot]'"
+)
+assert normalize(ci_job["if"]) == ci_admission
+assert normalize(required_job["if"]) == required_admission
+
+def admitted(event_name, repository, head_repository=None, event_repository=None):
+    return (
+        event_name == "pull_request" and head_repository == repository
+    ) or (
+        event_name == "push" and event_repository == repository
+    )
+
+repository = "pedromuller-del/firstmate"
+assert admitted("pull_request", repository, head_repository=repository)
+assert not admitted("pull_request", repository, head_repository="contributor/firstmate")
+assert admitted("push", repository, event_repository=repository)
+assert not admitted("push", repository, event_repository="elsewhere/firstmate")
+
+assert ci_job["env"] == {
+    "LC_ALL": "C",
+    "LANG": "C",
+    "GIT_AUTHOR_NAME": "Firstmate CI",
+    "GIT_AUTHOR_EMAIL": "firstmate-ci@users.noreply.github.com",
+    "GIT_COMMITTER_NAME": "Firstmate CI",
+    "GIT_COMMITTER_EMAIL": "firstmate-ci@users.noreply.github.com",
+}
+assert ci_job["name"] == "Suite"
+assert len(ci_job["steps"]) == 4
+checkout, admission, command, verdict = ci_job["steps"]
+assert checkout["uses"] == "actions/checkout@v6"
+assert checkout["with"]["fetch-depth"] == 0
+assert checkout["with"]["persist-credentials"] is False
+assert admission["run"] == 'bin/fm-ci-load-guard.sh wait --max-load "$FM_CI_MAX_LOAD" --timeout 900 --poll 15'
+assert command["run"] == "bin/fm-ci.sh"
+assert verdict["if"] == "always()"
+assert verdict["run"] == 'bin/fm-ci-load-guard.sh check --max-load "$FM_CI_MAX_LOAD"'
+
+required_runs = [step["run"] for step in required_job["steps"] if "run" in step]
+assert len(required_runs) == 1
+assert "${{" not in required_runs[0]
+assert "Updates from [git push no-mistakes]" in required_runs[0]
+
+# Every remaining routing and command-policy property is asserted against the
+# parsed jobs and steps, never against the file text: only actions/checkout is
+# allowed to run, no step may soften its own failure, and no delivered command
+# or step environment may reach the upstream repository or mutate the runner's
+# ambient PATH/env across steps.
+for job in (ci_job, required_job):
+    for step in job["steps"]:
+        assert step.get("continue-on-error") is None
+        if "uses" in step:
+            assert step["uses"] == "actions/checkout@v6", step["uses"]
+        delivered = [step.get("run", "")]
+        delivered.extend(str(value) for value in (step.get("env") or {}).values())
+        for text in delivered:
+            for forbidden in ("GITHUB_PATH", "GITHUB_ENV", "kunchenguid/firstmate"):
+                assert forbidden not in text, forbidden
+PY
+  then
+    fail "workflow routing or command policy contract failed"
+  fi
+  pass "both final workflows admit only trusted same-repository events to Water 7"
+}
+
+make_policy_fixture() {
+  local repo=$1 fakebin=$2 command_name
+  mkdir -p "$repo/bin/backends" "$repo/.claude" "$fakebin"
+  cp "$ROOT/bin/fm-ci.sh" "$repo/bin/fm-ci.sh"
+  cp "$ROOT/bin/fm-backend.sh" "$repo/bin/fm-backend.sh"
+  cp "$ROOT/bin/backends/herdr.sh" "$repo/bin/backends/herdr.sh"
+  cp "$ROOT/bin/fm-composer-lib.sh" "$repo/bin/fm-composer-lib.sh"
+  cp "$ROOT/bin/fm-transition-lib.sh" "$repo/bin/fm-transition-lib.sh"
+  chmod +x "$repo/bin/fm-ci.sh"
+  ln -s AGENTS.md "$repo/CLAUDE.md"
+  ln -s ../.agents/skills "$repo/.claude/skills"
+  : > "$repo/AGENTS.md"
+
+  cat > "$repo/bin/fm-lint.sh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --required-version) echo 0.11.0 ;;
+  --list-files) printf '%s\n' bin/fm-ci.sh ;;
+  *) printf 'lint\n' >> "$FM_CI_CALLS" ;;
+esac
+SH
+  cat > "$repo/bin/fm-test-run.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'test-run %s\n' "$*" >> "$FM_CI_CALLS"
+printf 'SHELL=%s|HERDR_SESSION=%s|FM_HERDR_LAB_PROTECTED_SESSION=%s\n' \
+  "${SHELL:-}" "${HERDR_SESSION:-}" "${FM_HERDR_LAB_PROTECTED_SESSION:-}" >> "$FM_CI_SUITE_ENV"
+SH
+  chmod +x "$repo"/bin/*.sh
+
+  cat > "$fakebin/systemctl" <<'SH'
+#!/usr/bin/env bash
+cat <<EOF
+LoadState=loaded
+ActiveState=active
+SubState=running
+UnitFileState=enabled
+User=fm-ci-runner
+CPUQuotaPerSecUSec=6s
+MemoryMax=infinity
+TasksMax=${FM_TEST_TASKS_MAX:-16854}
+LimitNOFILE=524288
+LimitNOFILESoft=1024
+EOF
+SH
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf 'herdr %s\n' "$*" >> "$FM_CI_HERDR_CALLS"
+case "$1 ${2:-}" in
+  '--version ') printf '%s\n' 'herdr 0.7.4' ;;
+  'status --json')
+    running=${FM_TEST_HERDR_RUNNING:-true}
+    [ ! -e "$FM_TEST_HERDR_STATE" ] || running=true
+    printf '{"client":{"version":"0.7.4","protocol":16},"server":{"running":%s}}\n' "$running"
+    ;;
+  'server --session') : > "$FM_TEST_HERDR_STATE" ;;
+  *) exit 2 ;;
+esac
+SH
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+SH
+  mkdir -p "$fakebin.install"
+  cp "$fakebin/herdr" "$fakebin.install/herdr"
+  cp "$fakebin/shellcheck" "$fakebin.install/shellcheck"
+  cat > "$repo/bin/fm-install-shellcheck.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'shellcheck\n' >> "$FM_CI_INSTALL_CALLS"
+install -m 0755 "$FM_TEST_INSTALL_FIXTURES/shellcheck" "$1/shellcheck"
+SH
+  cat > "$repo/bin/fm-install-herdr.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'herdr\n' >> "$FM_CI_INSTALL_CALLS"
+install -m 0755 "$FM_TEST_INSTALL_FIXTURES/herdr" "$1/herdr"
+SH
+  chmod +x "$repo/bin/fm-install-shellcheck.sh" "$repo/bin/fm-install-herdr.sh"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+case "$1 ${2:-}" in
+  'var GIT_AUTHOR_IDENT') printf '%s <%s> 0 +0000\n' "$GIT_AUTHOR_NAME" "$GIT_AUTHOR_EMAIL" ;;
+  'ls-files --') exit 0 ;;
+  *) exec /usr/bin/git "$@" ;;
+esac
+SH
+  for command_name in tmux rg tasks-axi treehouse; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$command_name"
+  done
+  chmod +x "$fakebin"/*
+}
+
+run_policy_fixture() {
+  local repo=$1 fakebin=$2 calls=$3
+  # Scrub the ambient Herdr selection so the fixture proves what the policy
+  # itself hands the suite, not what the developer's shell happened to export.
+  env -u HERDR_SESSION -u FM_HERDR_LAB_PROTECTED_SESSION \
+    PATH="$fakebin:$PATH" \
+    FM_CI_CALLS="$calls" \
+    FM_CI_SUITE_ENV="$calls.suite-env" \
+    FM_CI_INSTALL_CALLS="$calls.install" \
+    FM_CI_HERDR_CALLS="$calls.herdr" \
+    FM_TEST_INSTALL_FIXTURES="$fakebin.install" \
+    FM_TEST_HERDR_STATE="$calls.herdr-running" \
+    GITHUB_ACTIONS=true \
+    RUNNER_NAME=water-7 \
+    RUNNER_OS=Linux \
+    RUNNER_ARCH=X64 \
+    GITHUB_REPOSITORY=pedromuller-del/firstmate \
+    RUNNER_TEMP="$(dirname "$calls")" \
+    SHELL=/usr/sbin/nologin \
+    LC_ALL=C LANG=C \
+    GIT_AUTHOR_NAME='Firstmate CI' \
+    GIT_AUTHOR_EMAIL=firstmate-ci@users.noreply.github.com \
+    GIT_COMMITTER_NAME='Firstmate CI' \
+    GIT_COMMITTER_EMAIL=firstmate-ci@users.noreply.github.com \
+    "$repo/bin/fm-ci.sh"
+}
+
+test_policy_runs_every_family_serially() {
+  local tmp repo fakebin calls expected
+  tmp=$(fm_test_tmproot fm-ci-water7)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  make_policy_fixture "$repo" "$fakebin"
+  run_policy_fixture "$repo" "$fakebin" "$calls" \
+    || fail "Water 7 command policy rejected its valid host fixture"
+  expected=$(cat <<'EOF'
+lint
+test-run --check-coverage
+test-run --lane portable-parallel-1
+test-run --lane portable-parallel-2
+test-run --lane portable-serial
+test-run --family real-herdr-gated --fail-on-gate-skip herdr not found
+EOF
+)
+  [ "$(cat "$calls")" = "$expected" ] \
+    || fail "Water 7 command policy changed its complete serial order: $(cat "$calls")"
+  pass "the command owner runs lint, coverage, all portable lanes, then real Herdr serially"
+}
+
+test_policy_refuses_semantically_unsafe_systemd_limits() {
+  local tmp repo fakebin calls out rc
+  tmp=$(fm_test_tmproot fm-ci-water7-limits)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  make_policy_fixture "$repo" "$fakebin"
+  rc=0
+  out=$(FM_TEST_TASKS_MAX=32 run_policy_fixture "$repo" "$fakebin" "$calls" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Water 7 command policy accepted TasksMax=32"
+  assert_contains "$out" "TasksMax must be at least 512" \
+    "systemd limit refusal did not name the semantic TasksMax boundary"
+  [ ! -e "$calls" ] || fail "unsafe systemd limits reached the test suite"
+  pass "the command owner refuses unsafe semantic systemd limits before tests"
+}
+
+test_policy_refuses_a_missing_test_dependency() {
+  local tmp repo fakebin calls out rc
+  tmp=$(fm_test_tmproot fm-ci-water7-dependency)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  make_policy_fixture "$repo" "$fakebin"
+  rm -f "$fakebin/rg"
+  fm_test_hide_host_commands "$fakebin" rg
+  rc=0
+  out=$(run_policy_fixture "$repo" "$fakebin" "$calls" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Water 7 command policy ran without ripgrep"
+  assert_contains "$out" "rg is required on Water 7" \
+    "missing dependency refusal did not name ripgrep"
+  [ ! -e "$calls" ] || fail "a missing test dependency reached the suite"
+  pass "the command owner refuses before tests when a required host dependency is absent"
+}
+
+test_policy_uses_only_bounded_ci_bootstrap() {
+  local tmp repo fakebin calls expected_shell herdr_calls install_calls suite_env
+  tmp=$(fm_test_tmproot fm-ci-water7-readiness)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  make_policy_fixture "$repo" "$fakebin"
+  FM_TEST_HERDR_RUNNING=false run_policy_fixture "$repo" "$fakebin" "$calls" \
+    || fail "Water 7 command policy did not start its down dedicated controller"
+  herdr_calls=$(cat "$calls.herdr")
+  assert_contains "$herdr_calls" 'herdr server --session fm-ci-water7' \
+    "down-controller bootstrap did not start the dedicated CI controller"
+  assert_not_contains "$herdr_calls" 'default' \
+    "bounded CI bootstrap touched the default Herdr session"
+  assert_not_contains "$herdr_calls" 'session stop' \
+    "bounded CI bootstrap stopped a Herdr session"
+  assert_not_contains "$herdr_calls" 'server stop' \
+    "bounded CI bootstrap stopped a Herdr server"
+  assert_not_contains "$herdr_calls" 'session delete' \
+    "bounded CI bootstrap deleted a Herdr session"
+
+  : > "$calls.herdr"
+  FM_TEST_HERDR_RUNNING=true run_policy_fixture "$repo" "$fakebin" "$calls" \
+    || fail "Water 7 command policy rejected its already-running controller"
+  herdr_calls=$(cat "$calls.herdr")
+  assert_not_contains "$herdr_calls" 'herdr server ' \
+    "already-running controller path started a second Herdr server"
+  assert_not_contains "$herdr_calls" 'default' \
+    "already-running controller path touched the default Herdr session"
+
+  suite_env=$(sort -u < "$calls.suite-env")
+  expected_shell=$(command -v bash)
+  [ "$suite_env" = "SHELL=$expected_shell|HERDR_SESSION=|FM_HERDR_LAB_PROTECTED_SESSION=fm-ci-water7" ] \
+    || fail "the suite did not inherit the usable Bash shell and explicit dedicated protected controller: $suite_env"
+
+  tmp=$(fm_test_tmproot fm-ci-water7-installers)
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  calls="$tmp/calls"
+  make_policy_fixture "$repo" "$fakebin"
+  sed 's/version: 0.11.0/version: 0.10.0/' "$fakebin/shellcheck" > "$fakebin/shellcheck.old"
+  mv "$fakebin/shellcheck.old" "$fakebin/shellcheck"
+  sed 's/herdr 0.7.4/herdr 0.7.3/' "$fakebin/herdr" > "$fakebin/herdr.old"
+  mv "$fakebin/herdr.old" "$fakebin/herdr"
+  chmod +x "$fakebin/shellcheck" "$fakebin/herdr"
+  run_policy_fixture "$repo" "$fakebin" "$calls" \
+    || fail "Water 7 command policy did not bootstrap its pinned tools"
+  install_calls=$(cat "$calls.install")
+  [ "$install_calls" = "shellcheck
+herdr" ] || fail "bounded bootstrap did not use exactly the two tracked installers: $install_calls"
+  pass "the command owner only starts its explicit dedicated controller when down"
+}
+
+test_workflows_are_static_and_water7_only
+test_policy_runs_every_family_serially
+test_policy_refuses_semantically_unsafe_systemd_limits
+test_policy_uses_only_bounded_ci_bootstrap
+test_policy_refuses_a_missing_test_dependency

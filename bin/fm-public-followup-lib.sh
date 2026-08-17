@@ -64,6 +64,7 @@ FM_PF_EVENT_SCHEMA_VERSION=1
 # Bounded so a public-safe outcome line can never carry a raw public message,
 # and so one event file stays small enough to read and validate cheaply.
 FM_PF_OUTCOME_TEXT_MAX=${FM_PF_OUTCOME_TEXT_MAX:-600}
+FM_PF_OUTCOME_BYTES_MAX=${FM_PF_OUTCOME_BYTES_MAX:-1200}
 FM_PF_EVENT_BYTES_MAX=${FM_PF_EVENT_BYTES_MAX:-8192}
 
 # --- gate 1: the authoritative relay activation contract --------------------

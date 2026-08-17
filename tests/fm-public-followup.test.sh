@@ -195,7 +195,7 @@ expect_failure() {
 # non-ASCII characters, and control characters must never survive into the typed
 # event or the thread.
 test_outcome_text_is_bounded_without_corrupting_characters() {
-  local home event text long codepoints
+  local home event text long bytes codepoints
   home=$(make_home outcome-text)
   seed_commitment "$home" pf-text req-text discord main work-text
 
@@ -229,7 +229,22 @@ test_outcome_text_is_bounded_without_corrupting_characters() {
   case "$text" in
     *[!é]*) fail "codepoint bounding split a multi-byte character" ;;
   esac
-  pass "outcome text is collapsed to one line, bounded by codepoint, and never corrupts characters"
+
+  rm -f "$event"
+  long=$(python3 -c 'print("🚢" * 5000, end="")')
+  "$EMIT" --home "$home" --obligation pf-text --relation rel-code \
+    --source-home main --work-id work-text --generation 1 --outcome pr-merged \
+    --deliverable pr_url=https://github.com/example/repo/pull/5 \
+    --outcome-text "$long" >/dev/null \
+    || fail "emit failed for a four-byte UTF-8 outcome"
+  event=$(find "$home/state/public-followup/events" -name '*.json' | head -1)
+  text=$(jq -r '.public_safe_outcome' "$event") || fail "the byte-bounded event must remain valid JSON"
+  bytes=$(printf '%s' "$text" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$bytes" -le 1200 ] || fail "public outcome exceeded 1200 bytes: $bytes"
+  case "$text" in
+    *[!🚢]*) fail "byte bounding split a four-byte character" ;;
+  esac
+  pass "outcome text is single-line, codepoint-bounded, and at most 1200 intact UTF-8 bytes"
 }
 
 # --- 1. the restart end-to-end -------------------------------------------------

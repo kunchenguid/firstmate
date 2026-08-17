@@ -21,8 +21,9 @@ concurrency:
 jobs:
   check:
     name: PR must be raised via no-mistakes
-    runs-on: ${{ fromJSON(vars.FM_CI_RUNNER_LABELS || '["self-hosted","linux","x64","water-7"]') }}
+    runs-on: [self-hosted, Linux, X64, water-7]
     if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:

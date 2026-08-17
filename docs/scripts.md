@@ -28,9 +28,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |
 | `fm-herdr-ci-cleanup.sh` | Snapshot and tear down only job-owned `fm-lab-*` sessions in the Herdr CI lane       |
-| `fm-ci-workflow-check.sh` | Lint the water-7 workflow routing, concurrency, load, and suite-entry policy          |
 | `fm-ci-load-guard.sh`    | Admit or validate a self-hosted CI run against the shared-host load ceiling           |
-| `fm-ci-runner-install.sh` | Install or roll back the repository-scoped water-7 service under its dedicated user   |
 | `fm-heavy-suite.sh`      | Serialize heavy frontend and browser suites across local worktrees                  |
 | `fm-macos-scope.sh`      | Fail-closed CI decision for whether a change requires stock macOS Bash              |
 | `fm-test-run.sh`         | Behavior-test runner: selection, portable lanes, proven-isolated `--jobs`, coverage guard, timing/JSON |
