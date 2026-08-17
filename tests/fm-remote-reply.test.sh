@@ -9,13 +9,16 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 TMP_ROOT=$(fm_test_tmproot fm-remote-reply)
 PARENT="$TMP_ROOT/parent"
 REMOTE="$TMP_ROOT/remote"
+REMOTE_INTERLEAVE="$TMP_ROOT/remote-interleave"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 CLAIMS="$TMP_ROOT/claims"
-mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE/state" "$REMOTE/data/reply" "$CLAIMS"
+mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE/state" "$REMOTE/data/reply" \
+  "$REMOTE_INTERLEAVE/state" "$REMOTE_INTERLEAVE/data" "$CLAIMS"
 trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; fm_test_cleanup' EXIT
 
 cat > "$PARENT/data/secondmates.md" <<EOF
 - ios - iOS delivery (host: remote-mac; root: $ROOT; home: $REMOTE; scope: iOS work; projects: alpha; added 2026-08-02)
+- interleave - interleaved reply fixture (host: remote-interleave; root: $ROOT; home: $REMOTE_INTERLEAVE; scope: test; projects: alpha; added 2026-08-02)
 EOF
 printf '# Detailed remote answer\n\nThe build is green.\n' > "$REMOTE/data/reply/report.md"
 : > "$REMOTE/state/parent-replies.status"
@@ -34,7 +37,9 @@ done
 host=$1
 entry=$2
 shift 2
-[ "$host" = remote-mac ] || exit 91
+  case "$host" in remote-mac|remote-interleave) ;;
+    *) exit 91 ;;
+  esac
 [ "$entry" = fm-remote-entrypoint.sh ] || exit 92
 exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
 SH
@@ -175,6 +180,50 @@ assert_contains "$out" 'handled: remote-reply-ios 2' "earlier generation remaine
 [ "$(grep -cF 'working [corr=1111111111111111]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "earlier generation replay duplicated its parent status"
 pass "later generations cannot invalidate an unacknowledged ingested result"
+
+# An uncorrelated line after the legacy prefix must not discard surrounding
+# correlated replies or prevent the cursor from advancing past the delta.
+printf 'working [corr=aaaaaaaaaaaaaaaa]: first interleaved reply\n' \
+  >> "$REMOTE_INTERLEAVE/state/parent-replies.status"
+printf 'working: uncorrelated noise after a correlated reply\n' \
+  >> "$REMOTE_INTERLEAVE/state/parent-replies.status"
+printf 'done [corr=bbbbbbbbbbbbbbbb]: second interleaved reply\n' \
+  >> "$REMOTE_INTERLEAVE/state/parent-replies.status"
+INTERLEAVE_SID=$(remote_env "$ADAPTER" source-id interleave)
+remote_env "$ADAPTER" arm interleave >/dev/null \
+  || fail "could not arm the interleaved reply fixture"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$INTERLEAVE_SID" >/dev/null \
+  || fail "interleaved reply fixture was not captured"
+INTERLEAVE_RESULT="$PARENT/state/procevent-inbox/$INTERLEAVE_SID.1.result"
+interleave_out=$(remote_env "$ADAPTER" handle interleave 1 "$INTERLEAVE_RESULT") \
+  || fail "an uncorrelated line discarded the valid lines in the same delta"
+assert_contains "$interleave_out" 'ingested: interleave appended=2' \
+  "valid correlated lines were not ingested around the uncorrelated line"
+assert_grep 'first interleaved reply' "$PARENT/state/interleave.status" \
+  "the first correlated line was discarded"
+assert_grep 'second interleaved reply' "$PARENT/state/interleave.status" \
+  "the second correlated line was discarded"
+assert_no_grep 'uncorrelated noise' "$PARENT/state/interleave.status" \
+  "the uncorrelated line was appended instead of skipped"
+INTERLEAVE_OFFSET=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/interleave.cursor")
+[ "$INTERLEAVE_OFFSET" -gt 0 ] \
+  || fail "the cursor did not advance after ingesting an interleaved delta"
+printf 'done [corr=cccccccccccccccc]: third interleaved reply\n' \
+  >> "$REMOTE_INTERLEAVE/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$INTERLEAVE_SID" >/dev/null \
+  || fail "the re-armed source did not capture a later delta"
+INTERLEAVE_RESULT_TWO="$PARENT/state/procevent-inbox/$INTERLEAVE_SID.2.result"
+assert_grep 'from_offset=' "$INTERLEAVE_RESULT_TWO" \
+  "the second capture did not include a committed starting offset"
+interleave_payload_boundary=$(grep -n -m 1 '^$' "$INTERLEAVE_RESULT_TWO" | cut -d: -f1)
+tail -n "+$((interleave_payload_boundary + 1))" "$INTERLEAVE_RESULT_TWO" \
+  | grep -F -q 'third interleaved reply' \
+  || fail "the second capture did not begin after the committed cursor"
+if tail -n "+$((interleave_payload_boundary + 1))" "$INTERLEAVE_RESULT_TWO" \
+  | grep -F -q 'first interleaved reply'; then
+  fail "the second capture replayed bytes from the rejected delta"
+fi
+pass "uncorrelated lines are skipped while correlated replies ingest and the cursor advances"
 
 # A digest-valid but uncorrelated line is still rejected at the public ingest
 # boundary. Recalculate its payload commitment so the behavioral assertion is

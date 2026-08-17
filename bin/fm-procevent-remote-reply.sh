@@ -17,8 +17,8 @@
 # cursor-anchored source. A continuity break is escalated and not re-armed.
 #
 # Ingest accepts bounded, printable status lines with an allowed lifecycle verb.
-# New lines must carry corr=<16hex>, while a byte-zero compatibility prefix of
-# legacy lines without corr= is mirrored verbatim before the first new line.
+# New lines must carry corr=<16hex>, while legacy lines without corr= are
+# skipped after the byte-zero compatibility prefix and never block the cursor.
 # Exact lines are appended at most once to the parent's state/<id>.status.
 # A data/*.md pointer is fetched through the path-confined remote file reader and
 # rewritten to its local private copy before append for correlated lines.
@@ -305,14 +305,18 @@ cmd_ingest() {
   while IFS= read -r line || [ -n "$line" ]; do
     line_status_valid "$line" || { fm_lock_release "$lock"; die "delta contains an invalid status line"; }
     if ! line_has_valid_corr "$line"; then
-      if [ "$from" -ne 0 ] || [ "$legacy_prefix" -ne 1 ] || line_has_corr_token "$line"; then
+      if [ "$from" -eq 0 ] && [ "$legacy_prefix" -eq 1 ] && ! line_has_corr_token "$line"; then
+        if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
+          printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append legacy remote reply"; }
+          appended=$((appended + 1))
+        fi
+        continue
+      fi
+      if line_has_corr_token "$line"; then
         fm_lock_release "$lock"
         die "delta contains an invalid or uncorrelated status line"
       fi
-      if ! grep -Fqx -- "$line" "$status_file" 2>/dev/null; then
-        printf '%s\n' "$line" >> "$status_file" || { fm_lock_release "$lock"; die "cannot append legacy remote reply"; }
-        appended=$((appended + 1))
-      fi
+      legacy_prefix=0
       continue
     fi
     legacy_prefix=0
