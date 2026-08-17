@@ -44,7 +44,9 @@ The bundled helper is `scripts/bws-safe.sh` relative to this skill directory.
 
 Add this exact line to the project's always-loaded agent instructions (for example `AGENTS.md`):
 
-`- `bws` - load before any work with Bitwarden Secrets Manager CLI (`bws`, not `bw`): authentication checks, listing projects or secrets, reading secret values, creating, updating, rotating, or deleting secrets.`
+```md
+- `bws` - load before any work with Bitwarden Secrets Manager CLI (`bws`, not `bw`): authentication checks, listing projects or secrets, reading secret values, creating, updating, rotating, or deleting secrets.
+```
 
 ## Bundled helper
 
