@@ -28,6 +28,18 @@ AMBIENT_GIT_ALTERNATES=${GIT_ALTERNATE_OBJECT_DIRECTORIES:-}
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
   GIT_GRAFT_FILE GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
+AMBIENT_GIT_CONFIG_COUNT=${GIT_CONFIG_COUNT:-}
+unset GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG
+case "$AMBIENT_GIT_CONFIG_COUNT" in
+  ''|*[!0-9]*) AMBIENT_GIT_CONFIG_COUNT=0 ;;
+esac
+[ "$AMBIENT_GIT_CONFIG_COUNT" -le 1024 ] || AMBIENT_GIT_CONFIG_COUNT=1024
+AMBIENT_CONFIG_INDEX=0
+while [ "$AMBIENT_CONFIG_INDEX" -lt "$AMBIENT_GIT_CONFIG_COUNT" ]; do
+  unset "GIT_CONFIG_KEY_$AMBIENT_CONFIG_INDEX" "GIT_CONFIG_VALUE_$AMBIENT_CONFIG_INDEX"
+  AMBIENT_CONFIG_INDEX=$((AMBIENT_CONFIG_INDEX + 1))
+done
+unset AMBIENT_CONFIG_INDEX AMBIENT_GIT_CONFIG_COUNT
 
 # shellcheck source=bin/fm-project-layout-lib.sh
 . "$SCRIPT_DIR/fm-project-layout-lib.sh"
@@ -233,7 +245,12 @@ else
       add_blocker project_writable_by_others "Project is not verifiably owner-only"
     fi
 
-    if ! git -C "$PROJECT_PHYSICAL" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    PROJECT_TOPLEVEL=$(git -C "$PROJECT_PHYSICAL" rev-parse --show-toplevel 2>/dev/null) || PROJECT_TOPLEVEL=
+    if [ -n "$PROJECT_TOPLEVEL" ]; then
+      PROJECT_TOPLEVEL=$(fmp_existing_path_physical "$PROJECT_TOPLEVEL" 2>/dev/null) || PROJECT_TOPLEVEL=
+    fi
+    if ! git -C "$PROJECT_PHYSICAL" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+      || [ "$PROJECT_TOPLEVEL" != "$PROJECT_PHYSICAL" ]; then
       add_blocker project_not_worktree "Project is not an ordinary Git working tree"
     else
       PROJECT_GIT_DIR=$(fmp_git_absolute_dir "$PROJECT_PHYSICAL" git 2>/dev/null) || PROJECT_GIT_DIR=

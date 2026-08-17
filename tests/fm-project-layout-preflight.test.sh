@@ -492,8 +492,44 @@ test_unverifiable_ownership_fails_closed() {
   pass "unverifiable ownership and permissions fail closed"
 }
 
+test_ambient_git_config_injection_cannot_alter_evidence() {
+  local home="$TMP_ROOT/ambient config" clean injected rc
+  setup_home "$home" sample
+  clean=$(run_json "$home" sample) || fail "ambient config baseline preflight blocked"
+  injected=$(GIT_CONFIG_COUNT=3 \
+    GIT_CONFIG_KEY_0=remote.evil.promisor GIT_CONFIG_VALUE_0=true \
+    GIT_CONFIG_KEY_1=extensions.partialclone GIT_CONFIG_VALUE_1=evil \
+    GIT_CONFIG_KEY_2=extensions.objectformat GIT_CONFIG_VALUE_2=sha256 \
+    GIT_CONFIG_PARAMETERS="'extensions.objectformat=sha256'" \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    run_json "$home" sample)
+  rc=$?
+  expect_code 0 "$rc" "ambient git config injection preflight"
+  [ "$injected" = "$clean" ] \
+    || fail "ambient GIT_CONFIG_* injection changed reported repository evidence"
+  pass "ambient Git config injection cannot alter reported repository evidence"
+}
+
+test_nested_directory_cannot_borrow_ancestor_repository() {
+  local home="$TMP_ROOT/nested" out rc
+  mkdir -p "$home/data" "$home/state"
+  git clone --quiet "$ORIGIN_URL" "$home/outer" || fail "could not clone nested ancestor"
+  git -C "$home/outer" remote set-url origin https://ancestor.invalid/team/outer.git
+  mkdir -p "$home/outer/projects/sample"
+  printf -- '- sample [direct-PR] - fixture project (added 2026-08-17)\n' > "$home/data/projects.md"
+  out=$(run_json "$home/outer" sample)
+  rc=$?
+  expect_code 1 "$rc" "nested ancestor preflight"
+  json_valid "$out"
+  assert_json_code "$out" blockers project_not_worktree
+  assert_not_contains "$out" "ancestor.invalid" "ancestor repository origin leaked into project evidence"
+  pass "plain nested directory cannot borrow an ancestor repository identity"
+}
+
 test_help_and_ready_json
 test_ambient_git_environment_cannot_substitute_another_repository
+test_ambient_git_config_injection_cannot_alter_evidence
+test_nested_directory_cannot_borrow_ancestor_repository
 test_unverifiable_ownership_fails_closed
 test_idempotence_and_byte_invariance
 test_dirty_off_default_and_unpushed
