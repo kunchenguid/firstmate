@@ -834,7 +834,7 @@ test_kill_is_noop_when_session_absent() {
 test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   local dir state data config project fb out status
   dir="$TMP_ROOT/teardown-zellij-ghost"; state="$dir/state"; data="$dir/data"; config="$dir/config"; project="$dir/project"
-  mkdir -p "$state" "$data/zghost" "$config" "$project" "$dir/responses"
+  mkdir -p "$state" "$data/zghost" "$config" "$project" "$dir/firstmate-home" "$dir/responses"
   printf 'report\n' > "$data/zghost/report.md"
   fm_write_meta "$state/zghost.meta" \
     "window=firstmate:7" \
@@ -851,7 +851,7 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   printf '[]\n' > "$dir/responses/1.out"
   printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
   fb=$(make_zellij_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+  out=$( PATH="$fb:$PATH" FM_HOME="$dir/firstmate-home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
     "$ROOT/bin/fm-teardown.sh" zghost 2>&1 )
   status=$?

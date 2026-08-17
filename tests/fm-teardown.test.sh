@@ -72,6 +72,8 @@ TELEMETRY="$ROOT/bin/fm-model-telemetry.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
+mkdir -p "$TMP_ROOT/firstmate-home"
+export FM_HOME="$TMP_ROOT/firstmate-home"
 REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)

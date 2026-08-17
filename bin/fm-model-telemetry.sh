@@ -214,15 +214,18 @@ validate_intake() {
     def keys_are($a): (keys|sort)==($a|sort);
     def oneof($a): . as $v | ($a|index($v))!=null;
     def safeid: type=="string" and length>=1 and length<=96 and test("^[A-Za-z0-9._:-]+$");
+    def accountprofile: type=="string" and length>=1 and length<=32 and test("^[a-z][a-z0-9-]*$");
     def sha: type=="string" and test("^[0-9a-f]{64}$");
     def dt: type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$");
     def tuple:
-      keys_are(["harness","provider","model","effort","modelVersion","cliVersion"]) and
+      (keys_are(["harness","provider","model","effort","modelVersion","cliVersion"]) or
+       keys_are(["harness","provider","model","effort","modelVersion","cliVersion","accountProfile"])) and
       (.harness|safeid) and (.provider==null or (.provider|type=="string" and length<=96)) and
       (.model==null or (.model|type=="string" and length<=160)) and
       (.effort|oneof(["low","medium","high","xhigh","max","default",null])) and
       (.modelVersion==null or (.modelVersion|type=="string" and length<=160)) and
-      (.cliVersion==null or (.cliVersion|type=="string" and length<=160));
+      (.cliVersion==null or (.cliVersion|type=="string" and length<=160)) and
+      (if has("accountProfile") then .harness=="claude" and (.accountProfile|accountprofile) else true end);
     def selection:
       keys_are(["matchedRule","configSha256","fitReasons","candidateAssessments","quota"]) and
       (.matchedRule==null or (.matchedRule|type=="string" and test("^(rule-[0-9]+|default)$"))) and

@@ -36,6 +36,8 @@ SEND="$ROOT/bin/fm-send.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 
 TMP=$(fm_test_tmproot fm-gate-refuse)
+mkdir -p "$TMP/firstmate-home"
+export FM_HOME="$TMP/firstmate-home"
 fm_git_identity fmtest fmtest@example.invalid
 
 # The env marker's exact stderr fragment (the primary signal).

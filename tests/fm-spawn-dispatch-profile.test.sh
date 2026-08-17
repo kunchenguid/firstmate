@@ -28,7 +28,11 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   capture-pane) printf '%s\n' "${FM_FAKE_TMUX_CAPTURE:-}"; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
+  new-window)
+    [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf 'created\n' >> "$FM_FAKE_ENDPOINT_LOG"
+    exit 0
+    ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -46,6 +50,30 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse pi-signed no-mistakes gh-axi gh tasks-axi
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = auth ] && [ "${2:-}" = status ] && [ "${3:-}" = --json ]; then
+  if [ -n "${FM_FAKE_CLAUDE_AUTH_STDIN_LOG:-}" ]; then
+    if IFS= read -r fake_stdin_line; then
+      printf 'read:%s\n' "$fake_stdin_line" >> "$FM_FAKE_CLAUDE_AUTH_STDIN_LOG"
+    else
+      printf 'eof\n' >> "$FM_FAKE_CLAUDE_AUTH_STDIN_LOG"
+    fi
+  fi
+  # exec so the bounded runner's signal reaches the sleeping process itself and
+  # no survivor keeps the captured stdout pipe open.
+  [ "${FM_FAKE_CLAUDE_AUTH_HANG_SECONDS:-0}" = 0 ] || exec sleep "$FM_FAKE_CLAUDE_AUTH_HANG_SECONDS"
+  printf '{"loggedIn":%s,"authMethod":"%s","apiProvider":"%s"}\n' \
+    "${FM_FAKE_CLAUDE_LOGGED_IN:-true}" \
+    "${FM_FAKE_CLAUDE_AUTH_METHOD:-claude.ai}" \
+    "${FM_FAKE_CLAUDE_API_PROVIDER:-firstParty}"
+  exit "${FM_FAKE_CLAUDE_AUTH_RC:-0}"
+fi
+printf 'profile=%s\n' "${CLAUDE_CONFIG_DIR:-absent}" >> "${FM_FAKE_CLAUDE_RUN_LOG:?}"
+[ "${FM_FAKE_CLAUDE_HOLD_SECONDS:-0}" = 0 ] || sleep "$FM_FAKE_CLAUDE_HOLD_SECONDS"
+SH
+  chmod +x "$fakebin/claude"
   write_reviewer_quota_fixture "$fakebin" known known 100
   printf '%s\n' "$fakebin"
 }
@@ -127,7 +155,8 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="${FM_TEST_ENDPOINT_LOG:-}" \
+    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -148,6 +177,26 @@ assert_meta_profile() {
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+}
+
+make_claude_profile_dir() { # <path> -> physical path, owner-only like the documented setup
+  local path=$1
+  mkdir -p "$path"
+  chmod 0700 "$path"
+  (CDPATH='' cd -- "$path" && pwd -P)
+}
+
+write_claude_account_profile() {
+  local home=$1 name=$2 dir=$3
+  printf '%s=%s\n' "$name" "$dir" > "$home/config/claude-account-profiles"
+  chmod 0600 "$home/config/claude-account-profiles"
+}
+
+write_two_claude_account_profiles() {
+  local home=$1 name1=$2 dir1=$3 name2=$4 dir2=$5
+  printf '%s=%s\n%s=%s\n' "$name1" "$dir1" "$name2" "$dir2" \
+    > "$home/config/claude-account-profiles"
+  chmod 0600 "$home/config/claude-account-profiles"
 }
 
 test_routing_source_recorded_only_when_declared() {
@@ -722,6 +771,395 @@ test_batch_forwards_shared_profile_flags() {
   pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
 }
 
+test_claude_account_profile_binds_canonical_dir_and_records_alias_only() {
+  local rec id out status profile_dir endpoint_log launch meta ledger run_log marker
+  id=profile-claude-account-z43
+  rec=$(make_spawn_case profile-claude-account claude "$id")
+  read_case_record "$rec"
+  profile_dir=$(make_claude_profile_dir "$CASE_DIR/profiles/account-\$(touch injected)")
+  write_claude_account_profile "$HOME_DIR" paid-primary "$profile_dir"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 0 "$status" "authenticated claude account profile should spawn"
+  [ "$(wc -l < "$endpoint_log" | tr -d ' ')" = 1 ] || fail "selected profile did not create exactly one endpoint"
+
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$profile_dir' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "selected account profile did not bind its canonical directory to the claude launch"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "account_profile=paid-primary" "$meta" "selected account alias was not recorded in private task metadata"
+  assert_no_grep "$profile_dir" "$meta" "task metadata leaked the selected config directory"
+  ledger="$HOME_DIR/data/routing-outcomes.jsonl"
+  jq -e 'select(.eventType=="attempt-intake") | .intake.tuple.accountProfile=="paid-primary" and .intake.selection.candidateAssessments[0].tuple.accountProfile=="paid-primary"' \
+    "$ledger" >/dev/null || fail "model-attempt selection evidence did not record the selected account alias"
+  assert_no_grep "$profile_dir" "$ledger" "model telemetry leaked the selected config directory"
+
+  marker="$CASE_DIR/injected"
+  run_log="$CASE_DIR/claude-run.log"
+  (
+    cd "$CASE_DIR" || exit 1
+    PATH="$FAKEBIN_DIR:$PATH" FM_FAKE_CLAUDE_RUN_LOG="$run_log" bash -c "$launch"
+  )
+  assert_absent "$marker" "shell metacharacters from the canonical config directory executed during launch"
+  [ "$(cat "$run_log")" = "profile=$profile_dir" ] \
+    || fail "launched claude did not receive the selected config directory as one literal environment value"
+  pass "claude account profile binds one canonical directory without shell re-parsing and records alias-only evidence"
+}
+
+test_two_claude_account_profiles_can_run_concurrently() {
+  local rec id1 id2 out status dir1 dir2 launch1 launch2 run_log p1 p2 i lines
+  id1=profile-claude-concurrent-a-z44
+  id2=profile-claude-concurrent-b-z45
+  rec=$(make_spawn_case profile-claude-concurrent claude "$id1" "$id2")
+  read_case_record "$rec"
+  dir1=$(make_claude_profile_dir "$CASE_DIR/profiles/one")
+  dir2=$(make_claude_profile_dir "$CASE_DIR/profiles/two")
+  write_two_claude_account_profiles "$HOME_DIR" paid-primary "$dir1" paid-secondary "$dir2"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id1" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 0 "$status" "first isolated claude profile should spawn"
+  launch1=$(cat "$LAUNCH_LOG")
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id2" "$PROJ_DIR" --account-profile paid-secondary)
+  status=$?
+  expect_code 0 "$status" "second isolated claude profile should spawn"
+  launch2=$(cat "$LAUNCH_LOG")
+
+  run_log="$CASE_DIR/concurrent-runs.log"
+  PATH="$FAKEBIN_DIR:$PATH" FM_FAKE_CLAUDE_RUN_LOG="$run_log" FM_FAKE_CLAUDE_HOLD_SECONDS=5 bash -c "$launch1" &
+  p1=$!
+  PATH="$FAKEBIN_DIR:$PATH" FM_FAKE_CLAUDE_RUN_LOG="$run_log" FM_FAKE_CLAUDE_HOLD_SECONDS=5 bash -c "$launch2" &
+  p2=$!
+  i=0
+  lines=0
+  while [ "$i" -lt 50 ]; do
+    if [ -f "$run_log" ]; then
+      lines=$(wc -l < "$run_log" | tr -d ' ')
+    else
+      lines=0
+    fi
+    [ "$lines" = 2 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$p1" 2>/dev/null || fail "first claude profile was not live while the second started"
+  kill -0 "$p2" 2>/dev/null || fail "second claude profile was not live with the first"
+  kill "$p1" "$p2" 2>/dev/null || true
+  wait "$p1" 2>/dev/null || true
+  wait "$p2" 2>/dev/null || true
+  [ "$lines" = 2 ] || fail "concurrent claude profile launches did not both reach the native command"
+  [ "$(grep -Fxc "profile=$dir1" "$run_log")" = 1 ] || fail "first concurrent launch did not receive only its own profile"
+  [ "$(grep -Fxc "profile=$dir2" "$run_log")" = 1 ] || fail "second concurrent launch did not receive only its own profile"
+  pass "two isolated claude account profiles remain live concurrently and each receives only its own binding"
+}
+
+test_claude_account_profile_rejects_unsafe_mapping_before_endpoint() {
+  local rec id out status endpoint_log profile_dir target
+
+  id=profile-claude-missing-z46
+  rec=$(make_spawn_case profile-claude-missing claude "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --account-profile missing)
+  status=$?
+  expect_code 1 "$status" "missing account mapping should be refused"
+  [ ! -s "$endpoint_log" ] || fail "missing account mapping created an endpoint"
+
+  id=profile-claude-malformed-z47
+  rec=$(make_spawn_case profile-claude-malformed claude "$id")
+  read_case_record "$rec"
+  printf 'malformed-record\n' > "$HOME_DIR/config/claude-account-profiles"
+  chmod 0600 "$HOME_DIR/config/claude-account-profiles"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "malformed account mapping should be refused"
+  [ ! -s "$endpoint_log" ] || fail "malformed account mapping created an endpoint"
+
+  id=profile-claude-symlink-file-z48
+  rec=$(make_spawn_case profile-claude-symlink-file claude "$id")
+  read_case_record "$rec"
+  profile_dir=$(make_claude_profile_dir "$CASE_DIR/profiles/one")
+  target="$CASE_DIR/profile-map"
+  printf 'paid-primary=%s\n' "$profile_dir" > "$target"
+  chmod 0600 "$target"
+  ln -s "$target" "$HOME_DIR/config/claude-account-profiles"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "symlink account mapping should be refused"
+  [ ! -s "$endpoint_log" ] || fail "symlink account mapping created an endpoint"
+
+  id=profile-claude-symlink-dir-z49
+  rec=$(make_spawn_case profile-claude-symlink-dir claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/profiles/real"
+  ln -s "$CASE_DIR/profiles/real" "$CASE_DIR/profiles/link"
+  write_claude_account_profile "$HOME_DIR" paid-primary "$CASE_DIR/profiles/link"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "symlink profile directory should be refused"
+  [ ! -s "$endpoint_log" ] || fail "symlink profile directory created an endpoint"
+
+  id=profile-claude-unsafe-name-z50
+  rec=$(make_spawn_case profile-claude-unsafe-name claude "$id")
+  read_case_record "$rec"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --account-profile '../paid-primary')
+  status=$?
+  expect_code 1 "$status" "unsafe account profile name should be refused"
+  [ ! -s "$endpoint_log" ] || fail "unsafe account profile name created an endpoint"
+
+  id=profile-claude-control-path-z56
+  rec=$(make_spawn_case profile-claude-control-path claude "$id")
+  read_case_record "$rec"
+  profile_dir="$CASE_DIR/profiles/control"$'\033'"path"
+  mkdir -p "$profile_dir"
+  profile_dir=$(cd "$profile_dir" && pwd -P)
+  write_claude_account_profile "$HOME_DIR" paid-primary "$profile_dir"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "control character in account profile path should be refused"
+  [ ! -s "$endpoint_log" ] || fail "control-character account profile path created an endpoint"
+
+  id=profile-claude-duplicate-name-z58
+  rec=$(make_spawn_case profile-claude-duplicate-name claude "$id")
+  read_case_record "$rec"
+  write_two_claude_account_profiles "$HOME_DIR" \
+    paid-primary "$(make_claude_profile_dir "$CASE_DIR/profiles/dup-a")" \
+    paid-primary "$(make_claude_profile_dir "$CASE_DIR/profiles/dup-b")"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "repeated account profile name should be refused"
+  [ ! -s "$endpoint_log" ] || fail "repeated account profile name created an endpoint"
+
+  id=profile-claude-duplicate-dir-z59
+  rec=$(make_spawn_case profile-claude-duplicate-dir claude "$id")
+  read_case_record "$rec"
+  profile_dir=$(make_claude_profile_dir "$CASE_DIR/profiles/shared")
+  write_two_claude_account_profiles "$HOME_DIR" \
+    paid-primary "$profile_dir" paid-secondary "$profile_dir"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "two names mapping to one directory should be refused"
+  [ ! -s "$endpoint_log" ] || fail "duplicate account profile directory created an endpoint"
+  pass "unsafe, malformed, missing, symlink, and duplicate account mappings are refused before endpoint creation"
+}
+
+test_claude_account_profile_requires_exact_paid_native_auth_predicate() {
+  local rec id out status endpoint_log profile_dir
+
+  id=profile-claude-auth-weaken-z51
+  rec=$(make_spawn_case profile-claude-auth-weaken claude "$id")
+  read_case_record "$rec"
+  profile_dir=$(make_claude_profile_dir "$CASE_DIR/profiles/one")
+  write_claude_account_profile "$HOME_DIR" paid-primary "$profile_dir"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" FM_FAKE_CLAUDE_LOGGED_IN=false \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "loggedIn=false with exit zero should be refused"
+  [ ! -s "$endpoint_log" ] || fail "weakened loggedIn predicate created an endpoint"
+
+  id=profile-claude-auth-constant-z52
+  rec=$(make_spawn_case profile-claude-auth-constant claude "$id")
+  read_case_record "$rec"
+  profile_dir=$(make_claude_profile_dir "$CASE_DIR/profiles/one")
+  write_claude_account_profile "$HOME_DIR" paid-primary "$profile_dir"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" FM_FAKE_CLAUDE_AUTH_RC=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "auth status exit one with a true-looking body should be refused"
+  [ ! -s "$endpoint_log" ] || fail "constant-true auth body created an endpoint despite native command refusal"
+
+  id=profile-claude-auth-method-z53
+  rec=$(make_spawn_case profile-claude-auth-method claude "$id")
+  read_case_record "$rec"
+  profile_dir=$(make_claude_profile_dir "$CASE_DIR/profiles/one")
+  write_claude_account_profile "$HOME_DIR" paid-primary "$profile_dir"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" FM_FAKE_CLAUDE_AUTH_METHOD=api_key \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "non-subscription native auth method should be refused"
+  [ ! -s "$endpoint_log" ] || fail "non-subscription auth method created an endpoint"
+  pass "account binding requires native status success plus the exact paid first-party auth predicate"
+}
+
+test_claude_account_profile_requires_owner_only_directory() {
+  local rec id_open id_private out status endpoint_log profile_dir
+  id_open=profile-claude-dir-mode-z60
+  id_private=profile-claude-dir-mode-ok-z61
+  rec=$(make_spawn_case profile-claude-dir-mode claude "$id_open" "$id_private")
+  read_case_record "$rec"
+  profile_dir=$(make_claude_profile_dir "$CASE_DIR/profiles/one")
+  write_claude_account_profile "$HOME_DIR" paid-primary "$profile_dir"
+  endpoint_log="$CASE_DIR/endpoints.log"
+
+  chmod 0755 "$profile_dir"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id_open" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "a world-readable credential directory should be refused"
+  [ ! -s "$endpoint_log" ] || fail "world-readable credential directory created an endpoint"
+  assert_contains "$out" "must not be group- or world-accessible" \
+    "the refusal did not name the directory permission invariant"
+
+  chmod 0750 "$profile_dir"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id_open" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "a group-readable credential directory should be refused"
+  [ ! -s "$endpoint_log" ] || fail "group-readable credential directory created an endpoint"
+
+  chmod 0700 "$profile_dir"
+  : > "$endpoint_log"
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id_private" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 0 "$status" "the documented owner-only mode should still spawn"
+  assert_grep "account_profile=paid-primary" "$HOME_DIR/state/$id_private.meta" \
+    "owner-only profile directory did not bind and record the alias"
+  pass "credential-bearing profile directories must be owner-only before endpoint creation"
+}
+
+test_claude_account_profile_auth_command_is_bounded_with_stdin_closed() {
+  local rec id_stdin id_bound out status endpoint_log profile_dir stdin_log started elapsed
+  id_stdin=profile-claude-auth-stdin-z62
+  id_bound=profile-claude-auth-bound-z63
+  rec=$(make_spawn_case profile-claude-auth-envelope claude "$id_stdin" "$id_bound")
+  read_case_record "$rec"
+  profile_dir=$(make_claude_profile_dir "$CASE_DIR/profiles/one")
+  write_claude_account_profile "$HOME_DIR" paid-primary "$profile_dir"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  stdin_log="$CASE_DIR/auth-stdin.log"
+  : > "$endpoint_log"
+  : > "$stdin_log"
+
+  out=$(printf 'INJECTED-CAPTAIN-INPUT\n' \
+    | FM_TEST_ENDPOINT_LOG="$endpoint_log" FM_FAKE_CLAUDE_AUTH_STDIN_LOG="$stdin_log" \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "$id_stdin" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 0 "$status" "authenticated profile should spawn with the caller holding stdin"
+  assert_grep "eof" "$stdin_log" "the native auth command did not run with stdin closed"
+  assert_no_grep "INJECTED-CAPTAIN-INPUT" "$stdin_log" \
+    "caller stdin reached the native auth command, so an interactive prompt could consume it"
+
+  : > "$endpoint_log"
+  started=$(date +%s)
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" FM_FAKE_CLAUDE_AUTH_HANG_SECONDS=30 \
+    FM_CLAUDE_ACCOUNT_PROFILE_TIMEOUT=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id_bound" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 1 "$status" "a native auth command that never answers should refuse the spawn"
+  [ ! -s "$endpoint_log" ] || fail "an unanswered native auth command created an endpoint"
+  [ "$elapsed" -lt 15 ] \
+    || fail "a hung native auth command wedged intake for ${elapsed}s instead of hitting its 1s bound"
+  assert_contains "$out" "exceeded its 1s bound" \
+    "the refusal did not report the hard bound as the reason"
+  pass "the native auth command runs with stdin closed under a hard bound that refuses instead of wedging intake"
+}
+
+test_claude_account_profile_rejects_non_directory_before_endpoint() {
+  local rec id out status endpoint_log profile_path
+  id=profile-claude-nondir-z55
+  rec=$(make_spawn_case profile-claude-nondir claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/profiles"
+  profile_path="$CASE_DIR/profiles/not-a-directory"
+  touch "$profile_path"
+  write_claude_account_profile "$HOME_DIR" paid-primary "$profile_path"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "regular file account profile path should be refused"
+  [ ! -s "$endpoint_log" ] || fail "non-directory account profile path created an endpoint"
+  pass "account profile paths must be directories before endpoint creation"
+}
+
+test_non_claude_harness_refuses_account_profile_before_endpoint() {
+  local rec id out status endpoint_log profile_dir
+  id=profile-codex-account-refusal-z54
+  rec=$(make_spawn_case profile-codex-account-refusal codex "$id")
+  read_case_record "$rec"
+  profile_dir=$(make_claude_profile_dir "$CASE_DIR/profiles/one")
+  write_claude_account_profile "$HOME_DIR" paid-primary "$profile_dir"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "non-claude harness should refuse the claude account-profile axis"
+  [ ! -s "$endpoint_log" ] || fail "non-claude account-profile refusal created an endpoint"
+  pass "only the verified native claude adapter accepts the account-profile axis"
+}
+
+test_secondmate_parent_refuses_home_local_account_profile() {
+  local rec id sm out status endpoint_log profile_dir
+  id=profile-secondmate-account-refusal-z57
+  rec=$(make_spawn_case profile-secondmate-account-refusal claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' claude > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  profile_dir=$(make_claude_profile_dir "$CASE_DIR/profiles/one")
+  write_claude_account_profile "$HOME_DIR" paid-primary "$profile_dir"
+  endpoint_log="$CASE_DIR/endpoints.log"
+  : > "$endpoint_log"
+
+  out=$(FM_TEST_ENDPOINT_LOG="$endpoint_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" --secondmate --account-profile paid-primary)
+  status=$?
+  expect_code 1 "$status" "secondmate parent launch should refuse a home-local account profile"
+  assert_contains "$out" "run the account-profile mechanism inside that home" \
+    "secondmate account-profile refusal did not name the home-local setup path"
+  [ ! -s "$endpoint_log" ] || fail "secondmate account-profile refusal created an endpoint"
+  pass "secondmate parent launches cannot transfer a home-local Claude account profile"
+}
+
 test_claude_forwards_firstmate_config_dir_when_set() {
   local rec id out status launch
   id=profile-claude-cfgdir-z17
@@ -736,6 +1174,34 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
+}
+
+test_selected_account_profile_wins_over_ambient_config_dir() {
+  local rec id out status profile_dir launch run_log
+  id=profile-claude-account-precedence-z64
+  rec=$(make_spawn_case profile-claude-account-precedence claude "$id")
+  read_case_record "$rec"
+  profile_dir=$(make_claude_profile_dir "$CASE_DIR/profiles/one")
+  write_claude_account_profile "$HOME_DIR" paid-primary "$profile_dir"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --account-profile paid-primary)
+  status=$?
+  expect_code 0 "$status" "a selected account profile should spawn while firstmate runs under its own store"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$profile_dir' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" \
+    "the selected account profile did not bind the crewmate launch"
+  assert_not_contains "$launch" "/opt/test/claude-work" \
+    "firstmate's ambient CLAUDE_CONFIG_DIR reached an account-bound claude launch"
+  run_log="$CASE_DIR/claude-run.log"
+  (
+    cd "$CASE_DIR" || exit 1
+    PATH="$FAKEBIN_DIR:$PATH" FM_FAKE_CLAUDE_RUN_LOG="$run_log" bash -c "$launch"
+  )
+  [ "$(cat "$run_log")" = "profile=$profile_dir" ] \
+    || fail "the launched claude resolved an account other than the selected profile"
+  pass "a selected account profile wins over firstmate's ambient CLAUDE_CONFIG_DIR"
 }
 
 test_claude_omits_config_dir_prefix_when_unset() {
@@ -1370,7 +1836,17 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
+test_claude_account_profile_binds_canonical_dir_and_records_alias_only
+test_two_claude_account_profiles_can_run_concurrently
+test_claude_account_profile_rejects_unsafe_mapping_before_endpoint
+test_claude_account_profile_requires_exact_paid_native_auth_predicate
+test_claude_account_profile_requires_owner_only_directory
+test_claude_account_profile_auth_command_is_bounded_with_stdin_closed
+test_claude_account_profile_rejects_non_directory_before_endpoint
+test_non_claude_harness_refuses_account_profile_before_endpoint
+test_secondmate_parent_refuses_home_local_account_profile
 test_claude_forwards_firstmate_config_dir_when_set
+test_selected_account_profile_wins_over_ambient_config_dir
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch

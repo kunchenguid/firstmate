@@ -108,7 +108,7 @@ When changing any primary watcher adapter, update `docs/supervision-protocols/`,
 
 ## Launch profile axes
 
-`bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, `--effort`, `--task-class`, and `--routing-source` values chosen by firstmate at intake, plus the `--exploration` marker.
+`bin/fm-spawn.sh` accepts concrete `--harness`, `--model`, `--effort`, `--task-class`, and `--routing-source` values chosen by firstmate at intake, plus the `--exploration` marker and the claude-only `--account-profile` axis.
 Do not make the shell scripts parse or match natural-language dispatch rules.
 
 Pass `--task-class` on every crewmate and scout spawn, using the class that describes the task you just classified at intake: `rote-reversible-edit`, `bounded-implementation-proven-root-fix`, `unknown-root-diagnosis`, `adversarial-review-security-review`, `evidence-heavy-research`, `long-horizon-repository-work`, `visual-browser-sensitive-work`, `documentation-specification-decision-extraction`, or `external-wait-integration-work`.
@@ -117,6 +117,10 @@ The class is telemetry, not routing: it never changes which harness, model, or e
 
 Pass `--routing-source captain|profile|fallback` on every crewmate and scout spawn too, naming how you actually resolved the tuple you are passing: `captain` for an explicit per-task captain instruction, `profile` for a configured dispatch profile or pin, `fallback` for the generic effort and harness fallback.
 It is provenance, not a routing choice, and the recovery escalation ladder (`bin/fm-harness.sh escalate`) is its consumer: it may raise effort or rotate a harness only where the fallback acted, so an omitted flag records unknown provenance and leaves every wedged task's routing frozen.
+
+`--account-profile <name>` names one home-local native Claude account alias from `config/claude-account-profiles`; the verified `claude` adapter is its only consumer, and a non-Claude harness, a raw launch command, or a secondmate parent launch refuses it.
+Nothing selects an account for you: pass it only when the captain named the account for that task, or when re-passing an escalation verdict's emitted `account_profile=` alias unchanged (`stuck-crewmate-recovery`).
+Setup, schema, and the pre-launch refusals are owned by [`docs/configuration.md`](../../../docs/configuration.md) "Claude account profiles"; never put a profile directory in a brief, report, or message.
 
 `--exploration` records that the tuple you are launching is a deliberate rotation away from your default choice for this class, so the ledger can compare the rotated tuple against the usual one under the same observed machine load.
 `fm-spawn.sh` accepts it only on a `no-mistakes` ship whose `--task-class` is `bounded-implementation-proven-root-fix`, because that class is where a mechanical accepted/step-rerun result makes the comparison readable.

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--task-class <class>] [--exploration] [--backend <name>] [--routing-source <captain|profile|fallback>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--task-class <class>] [--backend <name>] [--routing-source <captain|profile|fallback>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--allow-no-mistakes-without-reviewer-quota] [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--exploration] [--backend <name>] [--routing-source <captain|profile|fallback>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--dispatch-resolved|--dispatch-override-reason <why>] [--dispatch-provider <name>] [--dispatch-model-family <name>] [--model <name>] [--effort <level>] [--account-profile <name>] [--task-class <class>] [--backend <name>] [--routing-source <captain|profile|fallback>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--telemetry-task-root <mrt_uuid> --telemetry-parent <mra_uuid>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -32,6 +32,15 @@
 #   literal "default", the task meta's spelling for an unset axis, and treat it
 #   as exactly that, so a recorded tuple - the escalation ladder's relaunch
 #   verdict (bin/fm-harness.sh escalate) - can be re-passed verbatim.
+#   --account-profile <name> selects one home-local native Claude subscription
+#   from config/claude-account-profiles. The verified claude template is the only
+#   consumer; non-Claude and raw launch commands refuse the axis. Spawn validates
+#   the complete mapping and exact native paid-account auth status before endpoint
+#   creation, records only account_profile=<name> in private task metadata and the
+#   selected model-attempt tuple, and binds the canonical directory as one quoted
+#   CLAUDE_CONFIG_DIR value. An absent axis leaves all prior launch bytes unchanged.
+#   A secondmate parent launch refuses this axis; run the same portable mechanism
+#   inside that home rather than transferring home-local paths.
 #   --routing-source <captain|profile|fallback> records how this task's routing
 #   tuple was authorized at intake: an explicit per-task captain instruction, a
 #   configured dispatch profile or pin, or the generic fallback. The value lands
@@ -282,6 +291,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-launch-axis-lib.sh
 . "$SCRIPT_DIR/fm-launch-axis-lib.sh"
+# shellcheck source=bin/fm-claude-account-profile-lib.sh
+. "$SCRIPT_DIR/fm-claude-account-profile-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -292,6 +303,7 @@ KIND=ship
 HARNESS_ARG=
 MODEL=
 EFFORT=
+ACCOUNT_PROFILE=
 TASK_CLASS=unresolved
 EXPLORATION=none
 BACKEND_ARG=
@@ -312,6 +324,7 @@ DISPATCH_MODEL_FAMILY_SET=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+ACCOUNT_PROFILE_SET=0
 TASK_CLASS_SET=0
 BACKEND_SET=0
 MODE_SET=0
@@ -329,6 +342,7 @@ for a in "$@"; do
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
+      account-profile) ACCOUNT_PROFILE=$a; ACCOUNT_PROFILE_SET=1 ;;
       task-class) TASK_CLASS=$a; TASK_CLASS_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
@@ -354,6 +368,8 @@ for a in "$@"; do
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --account-profile) want_value=account-profile ;;
+    --account-profile=*) ACCOUNT_PROFILE=${a#--account-profile=}; ACCOUNT_PROFILE_SET=1 ;;
     --task-class) want_value=task-class ;;
     --task-class=*) TASK_CLASS=${a#--task-class=}; TASK_CLASS_SET=1 ;;
     --exploration) EXPLORATION=deliberate ;;
@@ -386,6 +402,15 @@ done
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
+[ "$ACCOUNT_PROFILE_SET" -eq 0 ] || [ -n "$ACCOUNT_PROFILE" ] || { echo "error: --account-profile requires a non-empty value" >&2; exit 1; }
+if [ "$ACCOUNT_PROFILE_SET" -eq 1 ] && ! fm_claude_account_profile_name_valid "$ACCOUNT_PROFILE"; then
+  echo "error: --account-profile requires a safe profile name" >&2
+  exit 1
+fi
+if [ "$ACCOUNT_PROFILE_SET" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: --account-profile is home-local; run the account-profile mechanism inside that home" >&2
+  exit 1
+fi
 [ "$TASK_CLASS_SET" -eq 0 ] || [ -n "$TASK_CLASS" ] || { echo "error: --task-class requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
@@ -1053,6 +1078,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$ALLOW_NO_MISTAKES_WITHOUT_REVIEWER_QUOTA" -eq 0 ] || shared_args+=(--allow-no-mistakes-without-reviewer-quota)
   [ "$DISPATCH_RESOLVED" -eq 0 ] || shared_args+=(--dispatch-resolved)
   [ "$DISPATCH_OVERRIDE_REASON_SET" -eq 0 ] || shared_args+=(--dispatch-override-reason "$DISPATCH_OVERRIDE_REASON")
+  [ "$ACCOUNT_PROFILE_SET" -eq 0 ] || shared_args+=(--account-profile "$ACCOUNT_PROFILE")
   [ "$DISPATCH_PROVIDER_SET" -eq 0 ] || shared_args+=(--dispatch-provider "$DISPATCH_PROVIDER")
   [ "$DISPATCH_MODEL_FAMILY_SET" -eq 0 ] || shared_args+=(--dispatch-model-family "$DISPATCH_MODEL_FAMILY")
   if [ -n "$TELEMETRY_TASK_ROOT" ] || [ -n "$TELEMETRY_PARENT" ]; then
@@ -1175,6 +1201,7 @@ launch_template() {
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1182,6 +1209,7 @@ case "$ARG3" in
     done
     ;;
   '')
+    RAW_LAUNCH=0
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
     # secondmate harness (config/secondmate-harness -> config/crew-harness -> own);
     # every other kind uses the crew harness only when no dispatch profile file is
@@ -1204,6 +1232,7 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
   *)
+    RAW_LAUNCH=0
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
@@ -1274,6 +1303,23 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
         *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
       esac
     fi
+  fi
+fi
+
+CLAUDE_ACCOUNT_CONFIG_DIR=
+if [ "$ACCOUNT_PROFILE_SET" -eq 1 ]; then
+  if [ "$HARNESS" != claude ] || [ "$RAW_LAUNCH" -eq 1 ]; then
+    echo "error: --account-profile is accepted only by the verified native claude adapter" >&2
+    exit 1
+  fi
+  if ! fm_claude_account_profile_resolve "$CONFIG" "$ACCOUNT_PROFILE"; then
+    echo "error: $FM_CLAUDE_ACCOUNT_PROFILE_ERROR" >&2
+    exit 1
+  fi
+  CLAUDE_ACCOUNT_CONFIG_DIR=$FM_CLAUDE_ACCOUNT_PROFILE_DIR
+  if ! fm_claude_account_profile_preflight "$ACCOUNT_PROFILE" "$CLAUDE_ACCOUNT_CONFIG_DIR"; then
+    echo "error: $FM_CLAUDE_ACCOUNT_PROFILE_ERROR" >&2
+    exit 1
   fi
 fi
 
@@ -2502,10 +2548,11 @@ TELEMETRY_INTAKE=$(jq -cn \
   --arg project "$TELEMETRY_PROJECT_REF" --arg harness "$HARNESS" \
   --arg model "$TELEMETRY_MODEL" --arg modelVersion "$TELEMETRY_MODEL_VERSION" \
   --arg effort "$TELEMETRY_EFFORT" --arg cliVersion "$TELEMETRY_CLI_VERSION" \
+  --arg accountProfile "$ACCOUNT_PROFILE" \
   --arg taskClass "$TASK_CLASS" --arg exploration "$EXPLORATION" \
   --argjson machine "$TELEMETRY_MACHINE_CONDITION" \
   --arg config "$TELEMETRY_CONFIG_SHA" --arg started "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-  '{attemptClass:"real",source:"firstmate",taskRootId:(if $root=="" then null else $root end),parentAttemptId:(if $parent=="" then null else $parent end),projectRef:$project,taskClass:$taskClass,tuple:{harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:$modelVersion,cliVersion:$cliVersion},selection:{matchedRule:null,configSha256:(if $config=="" then null else $config end),fitReasons:[],candidateAssessments:[{tuple:{harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:$modelVersion,cliVersion:$cliVersion},eligibility:"selected",reasons:[]}],quota:{decision:"unknown",headroom:"unknown",runway:"unknown",observedAt:null}},neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},exploration:{kind:$exploration,machineCondition:$machine},startedAt:$started,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}')
+  '{attemptClass:"real",source:"firstmate",taskRootId:(if $root=="" then null else $root end),parentAttemptId:(if $parent=="" then null else $parent end),projectRef:$project,taskClass:$taskClass,tuple:({harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:$modelVersion,cliVersion:$cliVersion} + (if $accountProfile=="" then {} else {accountProfile:$accountProfile} end)),selection:{matchedRule:null,configSha256:(if $config=="" then null else $config end),fitReasons:[],candidateAssessments:[{tuple:({harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:$modelVersion,cliVersion:$cliVersion} + (if $accountProfile=="" then {} else {accountProfile:$accountProfile} end)),eligibility:"selected",reasons:[]}],quota:{decision:"unknown",headroom:"unknown",runway:"unknown",observedAt:null}},neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},exploration:{kind:$exploration,machineCondition:$machine},startedAt:$started,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}')
 if ! TELEMETRY_RESULT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     "$FM_ROOT/bin/fm-model-telemetry.sh" intake --state "$STATE" --task "$ID" --payload "$TELEMETRY_INTAKE"); then
   echo "error: model telemetry intake refused; no model launch was submitted" >&2
@@ -2525,6 +2572,7 @@ TELEMETRY_TASK_ROOT=$(printf '%s' "$TELEMETRY_RESULT" | jq -er '.taskRootId | se
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$ACCOUNT_PROFILE" ] || echo "account_profile=$ACCOUNT_PROFILE"
   # routing_source= is written only when the caller declared it, so a legacy
   # meta stays byte-identical and the escalation ladder (fm-harness.sh
   # escalate) reads absent as unknown provenance and fails closed.
@@ -2595,14 +2643,14 @@ LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
-# Crewmate panes are created by a long-lived tmux/herdr daemon that does not
-# inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+# A selected account profile wins over the invoking firstmate's ambient store.
+# Without a selection, preserve the existing forwarding behavior for a firstmate
+# already running under CLAUDE_CONFIG_DIR; an unset value remains the byte-identical
+# single-store default. shell_quote makes the directory one assignment value in
+# the literal launch string, so its bytes are never evaluated as shell syntax.
+if [ "$HARNESS" = claude ] && [ -n "$CLAUDE_ACCOUNT_CONFIG_DIR" ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_ACCOUNT_CONFIG_DIR") $LAUNCH"
+elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then

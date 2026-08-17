@@ -358,6 +358,35 @@ test_secondmate_and_bad_input_fail_closed() {
   pass "secondmate kind, unknown classes, and missing metadata all fail closed with exit 1"
 }
 
+test_relaunch_preserves_account_profile_binding() {
+  local home id out
+  home=$(make_home account-profile); id=account-profile-a1
+  write_task_meta "$home" "$id" harness=claude kind=ship model=default effort=low \
+    routing_source=fallback account_profile=paid-primary
+
+  out=$(esc "$home" "$id" substantive)
+  expect_code 0 "$(esc_status)" "escalation of an account-bound Claude task"
+  assert_contains "$out" "verdict=relaunch" "account-bound task should relaunch"
+  assert_contains "$out" "account_profile=paid-primary" \
+    "relaunch tuple should preserve the recorded account alias"
+  assert_not_contains "$out" "account_profile=paid-secondary" \
+    "escalation ladder must not rotate Claude accounts"
+
+  home=$(make_home account-profile-injection); id=account-profile-injection-a1
+  write_task_meta "$home" "$id" harness=claude kind=ship model=default effort=low \
+    routing_source=fallback account_profile=paid-primary
+  out=$(esc "$home" "$id" injection)
+  expect_code 0 "$(esc_status)" "injection escalation of an account-bound Claude task"
+  assert_contains "$out" "verdict=escalate-captain" \
+    "account-bound task must not rotate to a harness that cannot consume the profile"
+  assert_contains "$out" "reason=account-profile-harness-bound" \
+    "refused account-bound harness rotation should name its reason"
+  assert_contains "$out" "harness=claude" "refused account-bound rotation should keep Claude"
+  assert_contains "$out" "account_profile=paid-primary" \
+    "refused account-bound rotation should preserve the account alias"
+  pass "relaunch preserves the recorded Claude account profile binding"
+}
+
 test_substantive_failure_raises_default_effort_one_rung
 test_substantive_failure_climbs_rungs_then_stops_below_max
 test_mechanical_failure_relaunches_same_tuple
@@ -373,3 +402,4 @@ test_unknown_provenance_reports_also_consume_budget
 test_attempt_budget_exhaustion_escalates_to_captain
 test_uncountable_relaunch_fails_instead_of_looping
 test_secondmate_and_bad_input_fail_closed
+test_relaunch_preserves_account_profile_binding

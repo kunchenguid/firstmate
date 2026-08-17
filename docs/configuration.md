@@ -206,6 +206,60 @@ The full zellij home label also includes a short hash of the resolved `FM_ROOT` 
 For the cmux backend, `FM_CONFIG_OVERRIDE` overrides where `config/cmux-socket-password` is read from, while `FM_HOME` determines the default config path and readable home prefix embedded in workspace titles.
 The full cmux home label also includes a short hash of the resolved `FM_ROOT` path, and there is no per-home container split.
 
+## Claude account profiles (config/claude-account-profiles)
+
+`config/claude-account-profiles` maps stable home-local names to isolated native Claude CLI configuration directories.
+It is local and gitignored, is never inherited or transferred to another home, and works under the effective `FM_HOME` on macOS and Linux.
+Each non-empty, non-comment line is exactly `name=/physical/canonical/directory`.
+A name must match `[a-z][a-z0-9-]{0,31}`, and each name and directory must be unique.
+The mapping must be a mode-600 regular non-symlink file.
+Every directory must be absolute, existing, non-symlinked, and written exactly as `pwd -P` resolves it; one malformed or unsafe record refuses the complete mapping.
+Because those directories hold native credentials, each must also be owned by the launching user and carry no group or other permission bits, which is what the `chmod 0700` below establishes.
+The directories contain native Claude credentials and settings, so never commit, copy, print, or place them in a repository, brief, PR, or telemetry record.
+
+Create and authenticate both directories once under the target operator account, never under a GitHub Actions runner user.
+These are portable home-local setup commands, not Water 7 host provisioning or preflight; Shipwright's existing task contract owns those host operations.
+
+```bash
+: "${FM_HOME:?set FM_HOME to the target Firstmate home}"
+primary_dir='<new-primary-claude-config-directory>'
+secondary_dir='<new-secondary-claude-config-directory>'
+umask 077
+mkdir -p "$primary_dir" "$secondary_dir"
+chmod 0700 "$primary_dir" "$secondary_dir"
+CLAUDE_CONFIG_DIR="$primary_dir" claude auth login
+CLAUDE_CONFIG_DIR="$secondary_dir" claude auth login
+primary_dir=$(CDPATH='' cd -- "$primary_dir" && pwd -P)
+secondary_dir=$(CDPATH='' cd -- "$secondary_dir" && pwd -P)
+profiles_authenticated=1
+for profile_dir in "$primary_dir" "$secondary_dir"; do
+  profile_status=$(CLAUDE_CONFIG_DIR="$profile_dir" claude auth status --json) \
+    || { profiles_authenticated=0; break; }
+  printf '%s\n' "$profile_status" \
+    | jq -e '.loggedIn == true and .authMethod == "claude.ai" and .apiProvider == "firstParty"' \
+      >/dev/null || { profiles_authenticated=0; break; }
+done
+if [ "$profiles_authenticated" -ne 1 ]; then
+  echo "not a paid native Claude session: $profile_dir - re-run claude auth login for it" >&2
+else
+  mkdir -p "$FM_HOME/config"
+  {
+    printf 'paid-primary=%s\n' "$primary_dir"
+    printf 'paid-secondary=%s\n' "$secondary_dir"
+  } > "$FM_HOME/config/claude-account-profiles"
+  chmod 0600 "$FM_HOME/config/claude-account-profiles"
+fi
+```
+
+Select a profile with `fm-spawn.sh --harness claude --account-profile paid-primary` or `paid-secondary` plus the task's normal delivery flags.
+The selected profile is resolved and checked with the exact native `claude auth status --json` command before any runtime endpoint is created.
+Only exit zero with `loggedIn=true`, `authMethod=claude.ai`, and `apiProvider=firstParty` is accepted.
+That command runs with stdin closed under a hard bound, so a hung or interactive CLI refuses the spawn instead of wedging intake; `FM_CLAUDE_ACCOUNT_PROFILE_TIMEOUT` overrides the 20-second default and a non-positive or non-numeric value falls back to it.
+[`docs/verification/dispatch-auth.md`](verification/dispatch-auth.md) records the dated per-version evidence for that predicate and names the live guard that refreshes it.
+Binding and refusal mechanics for the axis - what the selected directory is bound to, what is recorded, and which callers refuse it - live in the [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) header.
+With no `--account-profile`, the launch and private records remain unchanged, including the existing ambient `CLAUDE_CONFIG_DIR` forwarding behavior.
+CI exercises this contract only with isolated fixture directories and a fake Claude CLI; it never performs `claude auth login` or writes credentials under the runner user.
+
 ## Harness support
 
 claude, codex, opencode, pi, pi-signed, grok, and kimi are empirically verified for crewmate and secondmate launches.

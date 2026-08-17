@@ -208,6 +208,7 @@ family_for_basename() {
       printf '%s\n' session-bootstrap
       ;;
     fm-afk-pi-herdr-return-e2e.test.sh|\
+    fm-claude-account-profile-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
@@ -415,6 +416,7 @@ tests/fm-bootstrap.test.sh 21912
 tests/fm-busy-adapter-wiring.test.sh 13962
 tests/fm-busy-state.test.sh 607
 tests/fm-calm-pi-extension.test.sh 203
+tests/fm-claude-account-profile-live-e2e.test.sh 19
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 19
 tests/fm-claude-stop-autoarm.test.sh 60521
 tests/fm-codex-continuity-live-e2e.test.sh 19
@@ -943,6 +945,13 @@ families_for_changed_path() {
       # pre-teardown run abort (pr-forge).
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
+      ;;
+    bin/fm-claude-account-profile-lib.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' pure-contract-unit
+      # Its auth predicate reads vendor-emitted fields, so a change here also
+      # selects the opt-in guard that re-checks them against the installed CLI.
+      printf '%s\n' live-harness-optin
       ;;
     bin/fm-quota-cooldown.sh|bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-launch-axis-lib.sh|bin/fm-peek.sh|bin/fm-composer*)
@@ -1545,7 +1554,12 @@ run_one_serial() {
   set +e
   # Stream live output while retaining a copy for gate-skip detection.
   # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  bash "$script" 2>&1 | tee "$out"
+  (
+    unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
+      FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
+    cd "$ROOT" || exit 1
+    bash "$script"
+  ) 2>&1 | tee "$out"
   rc=${PIPESTATUS[0]}
   set -e
   : "${rc:=1}"

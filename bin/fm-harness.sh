@@ -69,7 +69,9 @@
 # Output is stable and parseable. A relaunch verdict prints:
 #   verdict=relaunch / class=<class> / attempts=<n> / harness= / model= / effort=
 # A report or escalate-captain verdict prints verdict=, reason=, attempts=, and
-# the current (unchanged) tuple. All verdicts exit 0; usage errors, unreadable or
+# the current (unchanged) tuple. When metadata records account_profile=, every
+# verdict appends that alias unchanged; the ladder never selects another account.
+# All verdicts exit 0; usage errors, unreadable or
 # nonstandard metadata, refused kinds, and an attempt log that cannot be
 # appended to exit 1 with the error on stderr - an escalation the budget cannot
 # record is never emitted.
@@ -241,12 +243,13 @@ escalate_task() {
     echo "error: escalate $id: no readable task metadata at $meta" >&2
     exit 1
   fi
-  local kind harness model effort source
+  local kind harness model effort source account_profile
   kind=$(esc_meta_get "$meta" kind)
   harness=$(esc_meta_get "$meta" harness)
   model=$(esc_meta_get "$meta" model)
   effort=$(esc_meta_get "$meta" effort)
   source=$(esc_meta_get "$meta" routing_source)
+  account_profile=$(esc_meta_get "$meta" account_profile)
   case "$kind" in
     ship|scout) ;;
     secondmate)
@@ -259,6 +262,16 @@ escalate_task() {
       ;;
   esac
   [ -n "$harness" ] || { echo "error: escalate $id: metadata records no harness=" >&2; exit 1; }
+  if [ -n "$account_profile" ]; then
+    [ "$harness" = claude ] || {
+      echo "error: escalate $id: account_profile metadata is valid only for harness=claude" >&2
+      exit 1
+    }
+    fm_claude_account_profile_name_valid "$account_profile" || {
+      echo "error: escalate $id: metadata records an unsafe account_profile=" >&2
+      exit 1
+    }
+  fi
   model=${model:-default}
   effort=${effort:-default}
 
@@ -322,6 +335,10 @@ escalate_task() {
         ;;
       mechanical) ;;
     esac
+    if [ -n "$account_profile" ] && [ "$new_harness" != "$harness" ]; then
+      verdict=escalate-captain reason=account-profile-harness-bound
+      new_harness=$harness new_model=$model new_effort=$effort
+    fi
     [ -n "$verdict" ] || verdict=relaunch
   fi
   if [ "$verdict" != relaunch ]; then
@@ -363,10 +380,12 @@ escalate_task() {
   if [ "$verdict" = relaunch ]; then
     printf 'verdict=relaunch\nclass=%s\nattempts=%s\nharness=%s\nmodel=%s\neffort=%s\n' \
       "$class" "$attempts" "$new_harness" "$new_model" "$new_effort"
+    [ -z "$account_profile" ] || printf 'account_profile=%s\n' "$account_profile"
     return 0
   fi
   printf 'verdict=%s\nreason=%s\nattempts=%s\nharness=%s\nmodel=%s\neffort=%s\n' \
     "$verdict" "$reason" "$attempts" "$harness" "$model" "$effort"
+  [ -z "$account_profile" ] || printf 'account_profile=%s\n' "$account_profile"
 }
 
 escalate_main() {
@@ -399,6 +418,8 @@ escalate_main() {
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   # shellcheck source=bin/fm-launch-axis-lib.sh
   . "$SCRIPT_DIR/fm-launch-axis-lib.sh"
+  # shellcheck source=bin/fm-claude-account-profile-lib.sh
+  . "$SCRIPT_DIR/fm-claude-account-profile-lib.sh"
   escalate_task "$id" "$class"
 }
 

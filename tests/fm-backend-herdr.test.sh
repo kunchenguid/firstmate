@@ -23,6 +23,9 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 herdr_forget_inherited_pane
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
+TEST_FM_HOME="$TMP_ROOT/firstmate-home"
+mkdir -p "$TEST_FM_HOME"
+export FM_HOME="$TEST_FM_HOME"
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,

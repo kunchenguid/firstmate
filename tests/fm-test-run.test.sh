@@ -294,6 +294,35 @@ SH
   pass "aggregate exit reflects any script failure"
 }
 
+test_serial_runner_sanitizes_firstmate_overrides() {
+  local tmp fixture out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-env.XXXXXX")
+  fixture="$tmp/env.test.sh"
+  out="$tmp/out.txt"
+  cat >"$fixture" <<'SH'
+#!/usr/bin/env bash
+if env | grep -Eq '^(FM_HOME|FM_STATE_OVERRIDE|FM_DATA_OVERRIDE|FM_ROOT_OVERRIDE|FM_PROJECTS_OVERRIDE|FM_CONFIG_OVERRIDE|FM_BACKEND)='; then
+  echo "not ok - inherited Firstmate override reached serial test"
+  exit 1
+fi
+echo "ok - serial test environment is isolated"
+SH
+  chmod +x "$fixture"
+  FM_HOME=/tmp/inherited-home \
+    FM_STATE_OVERRIDE=/tmp/inherited-state \
+    FM_DATA_OVERRIDE=/tmp/inherited-data \
+    FM_ROOT_OVERRIDE=/tmp/inherited-root \
+    FM_PROJECTS_OVERRIDE=/tmp/inherited-projects \
+    FM_CONFIG_OVERRIDE=/tmp/inherited-config \
+    FM_BACKEND=inherited-backend \
+    "$RUNNER" "$fixture" >"$out" 2>"$tmp/err.txt" \
+    || { rm -rf "$tmp"; fail "serial runner leaked a Firstmate override"; }
+  grep -Fq 'ok - serial test environment is isolated' "$out" \
+    || { rm -rf "$tmp"; fail "serial environment fixture did not run"; }
+  rm -rf "$tmp"
+  pass "serial runner sanitizes Firstmate overrides"
+}
+
 test_gate_skip_accounting_under_unsupported_inherited_locale() {
   local tmp skip_f out json
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-skip.XXXXXX")
@@ -719,6 +748,7 @@ test_changed_dependency_selection_and_unmapped_failure
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
+test_serial_runner_sanitizes_firstmate_overrides
 test_gate_skip_accounting_under_unsupported_inherited_locale
 test_inherited_locale_replacement_keeps_utf8_text_semantics
 test_fail_on_gate_skip_token

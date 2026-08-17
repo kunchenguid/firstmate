@@ -168,11 +168,34 @@ These discriminator strings are un-owned vendor UI text.
 `bin/fm-vendor-auth-probe.sh` pins the verified version, reports `versionVerified=no` when the running CLI differs, and classifies any unrecognized first line as `indeterminate` rather than authenticated.
 Re-run the two commands above and update this section and the pinned version together when the vendor CLI changes.
 
+## Native Claude account-profile auth predicate
+
+Verified 2026-08-16 on `claude 2.1.233 (Claude Code)`.
+
+```sh
+claude --version
+CLAUDE_CONFIG_DIR=<profile-dir> claude auth status --json   # stdin closed, single attempt, hard-bounded
+```
+
+Observed:
+
+- An authenticated paid session exits `0` and prints an object whose keys are `apiProvider`, `authMethod`, `email`, `loggedIn`, `orgId`, `orgName`, and `subscriptionType`, with `loggedIn: true` and `authMethod: "claude.ai"`.
+- Pointed at a directory holding no credential, the same command exits `1` and prints `loggedIn: false` with `authMethod: "none"`, so `CLAUDE_CONFIG_DIR` selects the store that `auth status` reports on. Unlike the Grok probe, the exit status does discriminate here and is read as part of the verdict.
+- Setting the variable is not the same as leaving it unset, even when it names the conventional path: with `CLAUDE_CONFIG_DIR` unset the CLI reported the authenticated session, while `CLAUDE_CONFIG_DIR=<home>/.claude` on the same host reported `loggedIn: false` although that directory exists. The default store is therefore not addressable by guessing a path, which is why the live guard establishes "this host has an account" with the variable unset and never binds a launch that way.
+- `apiProvider` is `"firstParty"` in BOTH cases, so it alone never establishes an authenticated account; it constrains the session to the first-party endpoint and carries a verdict only in conjunction with `loggedIn` and `authMethod`.
+- Only `email`, `orgId`, `orgName`, and `subscriptionType` are account-identifying, and `bin/fm-claude-account-profile-lib.sh` reads none of them, prints no raw status output, and keeps the directory out of its diagnostics.
+
+`bin/fm-claude-account-profile-lib.sh` requires all three discriminators plus exit zero, so a vendor change that weakens any one of them refuses the launch rather than binding an unauthenticated directory.
+Re-run the two commands above and update this section together with that predicate when the vendor CLI changes.
+`FM_CLAUDE_ACCOUNT_PROFILE_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-claude-account-profile-live-e2e.test.sh` refreshes this evidence against the installed CLI; it needs one authenticated native session and no second account.
+Adding `FM_CLAUDE_ACCOUNT_PROFILE_LIVE_DIR=<profile-dir>` also covers the positive binding path, which is the post-login smoke for a real mapped profile; without it the guard reports that path as not checked rather than passing over it.
+
 ## Regression coverage
 
 `tests/fm-vendor-auth-probe.test.sh` drives the real script against a fake vendor CLI that records every invocation's argv and anything readable on stdin.
 It asserts that the script accepts no harness, model, or provider input, never calls `quota-axi`, exits alike for every probe result because it renders no verdict, invokes only the two fixed non-destructive argv forms with stdin closed, holds a real bound even when the configured bound is zero or malformed, and never echoes raw vendor output.
-`tests/fm-spawn-dispatch-profile.test.sh` owns spawn's deterministic profile and harness refusals.
+`tests/fm-spawn-dispatch-profile.test.sh` owns spawn's deterministic profile and harness refusals, including the account-profile mapping, directory-permission, and paid-predicate refusals, and it drives a fake Claude CLI that records what reaches its stdin to prove the preflight closes stdin and holds its bound.
+`tests/fm-claude-account-profile-live-e2e.test.sh` is the env-gated live guard for the section above: it exercises the real installed CLI, refuses to pass when nothing was checked, and fails naming the harness and version.
 `tests/fm-bootstrap.test.sh` owns the quota-axi version-floor diagnostic.
 `tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake `quota-axi --json` snapshot per case.
 It covers the Claude 1 percent versus Codex 55 percent reserve regression, explicit accounting for unmeasurable runway, and the strongest-reasoning constraint.

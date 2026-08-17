@@ -65,14 +65,14 @@ Failure classes and their signals:
 
 Act on the verdict:
 
-- `relaunch` - respawn through `bin/fm-spawn.sh` into the same worktree with the emitted `--harness`, `--model`, and `--effort` values, and pass `--routing-source fallback` again so the task stays ladder-eligible on the respawned meta.
+- `relaunch` - respawn through `bin/fm-spawn.sh` into the same worktree with the emitted `--harness`, `--model`, and `--effort` values, re-pass an emitted `account_profile=` alias as `--account-profile` unchanged, and pass `--routing-source fallback` again so the task stays ladder-eligible on the respawned meta.
   When `config/crew-dispatch.json` is active, the respawn must also carry `--dispatch-override-reason "escalation-ladder relaunch <class>"`: the routing came from the ladder, not from fresh profile consultation, and the attestation backstop refuses an unattested explicit harness.
   A relaunch is an ordinary crewmate or scout spawn for the durable routing cooldowns too, so while `data/quota-cooldowns.json` exists it carries the catalog-established `--dispatch-provider` and `--dispatch-model-family` axes like any other spawn (`AGENTS.md` section 4; `docs/configuration.md` "Routing cooldowns").
 - `report` (`routing-pinned` or `unknown-provenance`) - the ladder may not touch this task's routing: an explicit captain instruction or a configured dispatch profile or pin resolved the tuple, or the meta predates provenance recording.
-  Relaunch the unchanged tuple by the ordinary path and tell the captain at the next natural report that the failure looked substantive but routing was pinned, so the tier held.
+  Relaunch the unchanged tuple by the ordinary path, re-passing an emitted `account_profile=` alias as `--account-profile` unchanged, and tell the captain at the next natural report that the failure looked substantive but routing was pinned, so the tier held.
   Never escalate through a pin.
   A report still spends an attempt, so a task that only ever reports reaches the same budget ceiling and then goes to the captain instead of relaunching forever.
-- `escalate-captain` - the ladder hit a ceiling (`effort-ceiling`, `effort-capped`, `effort-unsupported`, `attempt-budget`, or `harness-not-rotatable`): follow step 5.
+- `escalate-captain` - the ladder hit a ceiling (`effort-ceiling`, `effort-capped`, `effort-unsupported`, `attempt-budget`, `harness-not-rotatable`, or `account-profile-harness-bound`): follow step 5.
   `effort-capped` and `effort-unsupported` mean the harness would launch identically at the higher rung, so a stronger tier is not available on this adapter without the captain choosing a different one.
 
 The ladder never selects `max` effort on its own; that level requires the captain's explicit preference, exactly as `AGENTS.md` section 4 states.

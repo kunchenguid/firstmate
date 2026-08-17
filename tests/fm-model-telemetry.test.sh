@@ -530,6 +530,28 @@ test_legacy_lossless_and_read_only_sheets() {
   pass "model telemetry preserves legacy bytes and renders JSON, CSV, and Markdown without ledger mutation"
 }
 
+test_account_profile_evidence_is_bound_only_to_claude() {
+  local home payload
+  home=$(make_home account-profile)
+  payload=$(intake_payload | jq -c '
+    .tuple.harness="claude" |
+    .tuple.provider="anthropic" |
+    .tuple.accountProfile="paid-primary" |
+    .selection.candidateAssessments[0].tuple=.tuple
+  ')
+  run_intake "$home" claude-account "$payload" >/dev/null \
+    || fail "valid Claude account-profile evidence was refused"
+
+  payload=$(printf '%s' "$payload" | jq -c '
+    .tuple.harness="codex" |
+    .selection.candidateAssessments[0].tuple.harness="codex"
+  ')
+  if run_intake "$home" codex-account "$payload" >/dev/null 2>&1; then
+    fail "non-Claude telemetry tuple accepted a Claude account profile"
+  fi
+  pass "account-profile selection evidence is accepted only on Claude tuples"
+}
+
 test_terminals_and_retry_links
 test_crash_recovery_and_terminal_idempotency
 test_relaunch_supersedes_stale_receipt
@@ -542,4 +564,5 @@ test_routing_candidate_verdict_requires_preregistered_comparable_evidence
 test_routing_candidate_guard_rejects_post_outcome_registration_and_missing_plan_fields
 test_candidate_sample_excludes_non_quality_outcomes_and_binds_frozen_verdict
 test_legacy_lossless_and_read_only_sheets
+test_account_profile_evidence_is_bound_only_to_claude
 printf 'All model telemetry tests passed.\n'
