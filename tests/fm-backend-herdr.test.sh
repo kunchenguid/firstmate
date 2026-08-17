@@ -273,6 +273,61 @@ test_workspace_label_different_secondmates_get_different_labels() {
   pass "fm_backend_herdr_workspace_label: two different secondmate homes get two different, non-colliding labels"
 }
 
+test_workspace_identity_labels_are_exact_and_never_expose_mechanical_ids() {
+  local base primary home out token projected
+  base="$TMP_ROOT/identity-workspaces"
+  primary="$base/primary"
+  mkdir -p "$primary/config"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"agent-a":"john-allen","agent-b":"stephen-maturin","agent-c":"william-mowett"}}' \
+    > "$primary/config/crew-identities.json"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$primary" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT")
+  [ "$out" = "Lt Pullings" ] || fail "primary identity Space label was not exact: $out"
+
+  for record in 'agent-a|Mr Allen' 'agent-b|Dr Maturin' 'agent-c|Lt Mowett'; do
+    id=${record%%|*}
+    expected=${record#*|}
+    home="$base/$id"
+    mkdir -p "$home/config"
+    cp "$primary/config/crew-identities.json" "$home/config/crew-identities.json"
+    printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT")
+    [ "$out" = "$expected" ] || fail "$id identity Space label was not '$expected': $out"
+    assert_not_contains "$out" "Second Mate" "identity Space label used a mechanical role prefix"
+    assert_not_contains "$out" "$id" "identity Space label exposed its mechanical task id"
+  done
+
+  token='AbCdEfGhIjKlMnOpQrStUv'
+  projected=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$primary" bash -c \
+    '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label secret-project-task "$1" "Mr Allen"' \
+    "$ROOT" "$token")
+  [ "$projected" = "└ Mr Allen · p:$token" ] || fail "projected identity label was wrong: $projected"
+  assert_not_contains "$projected" "secret-project-task" "projected Space title exposed a mechanical task id"
+  pass "Herdr identity Space labels are exactly Lt Pullings, Mr Allen, Dr Maturin, and Lt Mowett"
+}
+
+test_exact_legacy_workspace_identity_rename_is_id_bound() {
+  local dir home log resp fb out
+  dir="$TMP_ROOT/identity-rename"; home="$dir/home"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/config" "$resp"; : > "$log"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{}}' \
+    > "$home/config/crew-identities.json"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-primary","label":"firstmate"}}}' > "$resp/1.out"
+  : > "$resp/2.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-primary","label":"Lt Pullings"}}}' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact test-session w-primary' \
+      "$ROOT" 2>&1) || fail "exact legacy workspace identity rename failed: $out"
+  assert_contains "$(cat "$log")" $'workspace\x1frename\x1fw-primary\x1fLt Pullings' \
+    "identity migration did not rename the exact workspace id to the exact label"
+  assert_not_contains "$(cat "$log")" "workspace list" \
+    "identity migration selected a Space through a label list instead of its exact id"
+  pass "Herdr identity migration renames only one exact legacy-bound workspace id"
+}
+
 # --- fm_backend_herdr_cli: session targeting (2026-07-02 incident fix) -------
 
 test_cli_helper_sets_env_and_appends_trailing_session_flag() {
@@ -1240,6 +1295,35 @@ test_projection_journal_v2_binds_and_advances_exact_endpoint() {
     fail "duplicate version 2 journal fields must be ambiguous"
   fi
   pass "herdr presentation journal: version 2 binds exact home/endpoint/parent identities and advances atomically"
+}
+
+test_projection_journal_v3_persists_identity_label() {
+  local dir state home out token
+  dir="$TMP_ROOT/projection-journal-v3"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$state" "$home"
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" identity-task) || exit 1
+    journal="$1/identity-task.herdr-presentation"
+    canonical=$(fm_backend_herdr_projection_home_identity "$2") || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label identity-task "$token" "Mr Allen")
+    fm_backend_herdr_projection_journal_bind \
+      "$journal" identity-task "$canonical" lab-session w3 w3:t2 w3:p2 w1 "Lt Pullings" "$label" fm-identity-task "Mr Allen" || exit 1
+    fm_backend_herdr_projection_journal_snapshot "$journal" identity-task || exit 1
+    printf "%s|%s|%s\n" "$FM_BACKEND_HERDR_JOURNAL_VERSION" "$FM_BACKEND_HERDR_JOURNAL_IDENTITY_LABEL" "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL"
+    fm_backend_herdr_projection_journal_replace_endpoint \
+      "$journal" identity-task w3:t2 w3:p2 w3:t3 w3:p3 || exit 1
+    fm_backend_herdr_projection_journal_snapshot "$journal" identity-task || exit 1
+    printf "%s|%s|%s\n" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" "$FM_BACKEND_HERDR_JOURNAL_IDENTITY_LABEL"
+  ' "$ROOT" "$state" "$home") || fail "version 3 identity projection binding failed"
+  token=$(sed -n 's/^projection_id=//p' "$state/identity-task.herdr-presentation")
+  [ "$(printf '%s\n' "$out" | sed -n '1p')" = "3|Mr Allen|└ Mr Allen · p:$token" ] \
+    || fail "version 3 journal lost its identity title: $out"
+  [ "$(printf '%s\n' "$out" | sed -n '2p')" = "w3:t3|w3:p3|Mr Allen" ] \
+    || fail "version 3 journal lost identity during endpoint replacement: $out"
+  [ "$(wc -l < "$state/identity-task.herdr-presentation" | tr -d '[:space:]')" = 13 ] \
+    || fail "version 3 projection journal must have exactly 13 fields"
+  pass "Herdr presentation journal version 3 persists the assigned identity across recovery"
 }
 
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
@@ -4323,6 +4407,8 @@ test_workspace_label_secondmate_home_uses_marker_id
 test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
+test_workspace_identity_labels_are_exact_and_never_expose_mechanical_ids
+test_exact_legacy_workspace_identity_rename_is_id_bound
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_launcher_identity_absent_without_a_herdr_pane
 test_launcher_identity_absent_when_herdr_env_alone_is_set
@@ -4371,6 +4457,7 @@ test_release_floor_verdict_survives_losing_either_signal
 test_presentation_preference_reports_three_distinct_states
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
+test_projection_journal_v3_persists_identity_label
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab

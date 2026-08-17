@@ -10,11 +10,11 @@
 # shared named-session Herdr presentation lock, in that order.
 #
 # A visible title is discovery only. Cleanup requires the exact current
-# "└ <concise-task> · p:<22-char-token>" grammar, one token occurrence across
+# "└ <concise-task-or-identity> · p:<22-char-token>" grammar, one token occurrence across
 # the named-session snapshot, exactly one matching home-local journal, one tab,
 # one pane, absent task metadata, no registered agent, and a process proof that
 # the pane contains only one idle recognized shell with no child process. A
-# version 2 journal must also bind the exact workspace, tab, and pane.
+# version 2 or 3 journal must also bind the exact workspace, tab, and pane.
 # Topology is first checked from one locked API snapshot, then every mutation
 # prerequisite is immediately rechecked before the existing exact-pane
 # focus-preserving close helper is called.
@@ -70,14 +70,19 @@ fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
     id=$(basename "$journal" "$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX")
     fm_task_id_creation_valid "$id" || continue
     fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || continue
-    if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
+    if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
+       || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ]; then
       journal_home=$(fm_backend_herdr_projection_home_identity \
         "$FM_BACKEND_HERDR_JOURNAL_HOME" 2>/dev/null) || continue
       [ "$journal_home" = "$home_real" ] \
         && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || continue
     fi
-    expected=$(fm_backend_herdr_projection_workspace_label \
-      "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
+    if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ]; then
+      expected=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL
+    else
+      expected=$(fm_backend_herdr_projection_workspace_label \
+        "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
+    fi
     [ "$expected" = "$title" ] || continue
     printf '%s\t%s\t%s\n' "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
   done
@@ -107,7 +112,8 @@ fm_herdr_cleanup_unique_match() { # <title> <session> <home-real>
     "$FM_HERDR_CLEANUP_JOURNAL" "$FM_HERDR_CLEANUP_ID" || return 1
   [ "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" = "$FM_HERDR_CLEANUP_TOKEN" ] || return 1
   FM_HERDR_CLEANUP_VERSION=$FM_BACKEND_HERDR_JOURNAL_VERSION
-  if [ "$FM_HERDR_CLEANUP_VERSION" = 2 ]; then
+  if [ "$FM_HERDR_CLEANUP_VERSION" = 2 ] \
+     || [ "$FM_HERDR_CLEANUP_VERSION" = 3 ]; then
     FM_HERDR_CLEANUP_BOUND_WORKSPACE=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
     FM_HERDR_CLEANUP_BOUND_TAB=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
     FM_HERDR_CLEANUP_BOUND_PANE=$FM_BACKEND_HERDR_JOURNAL_PANE_ID

@@ -134,6 +134,9 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
+# shellcheck source=bin/fm-crew-identity.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-crew-identity.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
@@ -190,6 +193,58 @@ path_present_json() {  # <path>
 
 meta_value() {  # <meta-file> <key>
   fm_meta_get "$1" "$2"
+}
+
+crew_identity_record_for_meta_json() {  # <meta-file>
+  local meta=$1 roster identity record roster_count identity_count
+  roster_count=$(awk -F= '$1 == "crew_roster" { n++ } END { print n+0 }' "$meta")
+  identity_count=$(awk -F= '$1 == "crew_identity" { n++ } END { print n+0 }' "$meta")
+  if [ "$roster_count" -eq 0 ] && [ "$identity_count" -eq 0 ]; then
+    jq -n '{status:"absent",assigned:false,roster:null,id:null,space_label:null,full_name:null,shipboard_role:null,affinities:[]}'
+    return 0
+  fi
+  if [ "$roster_count" -ne 1 ] || [ "$identity_count" -ne 1 ]; then
+    jq -n '{status:"invalid",assigned:false,roster:null,id:null,space_label:null,full_name:null,shipboard_role:null,affinities:[],error:"crew_roster and crew_identity must each appear exactly once"}'
+    return 0
+  fi
+  roster=$(fm_crew_identity_meta_value "$meta" crew_roster) || return 1
+  identity=$(fm_crew_identity_meta_value "$meta" crew_identity) || return 1
+  if ! fm_crew_identity_validate_roster "$roster" 2>/dev/null; then
+    jq -n --arg roster "$roster" --arg identity "$identity" '{status:"invalid",assigned:false,roster:$roster,id:$identity,space_label:null,full_name:null,shipboard_role:null,affinities:[],error:"recorded crew roster is invalid or unavailable"}'
+    return 0
+  fi
+  if [ "$identity" = unassigned ]; then
+    jq -n --arg roster "$roster" '{status:"unassigned",assigned:false,roster:$roster,id:"unassigned",space_label:"Unassigned crew",full_name:"Unassigned crew identity",shipboard_role:"Unassigned",affinities:[]}'
+    return 0
+  fi
+  if ! record=$(fm_crew_identity_record_json "$roster" "$identity" 2>/dev/null); then
+    jq -n --arg roster "$roster" --arg identity "$identity" '{status:"invalid",assigned:false,roster:$roster,id:$identity,space_label:null,full_name:null,shipboard_role:null,affinities:[],error:"identity is absent from the recorded roster"}'
+    return 0
+  fi
+  printf '%s' "$record" | jq --arg roster "$roster" '{status:"assigned",assigned:true,roster:$roster} + .'
+}
+
+crew_identity_config_json() {
+  local roster captain primary captain_json primary_json
+  FM_CREW_IDENTITY_CONFIG="$CONFIG/crew-identities.json"
+  if ! fm_crew_identity_config_present; then
+    jq -n '{configured:false,status:"absent",roster:null,captain:null,primary:null}'
+    return 0
+  fi
+  if ! fm_crew_identity_validate_config 2>/dev/null; then
+    jq -n --arg path "$FM_CREW_IDENTITY_CONFIG" '{configured:true,status:"invalid",roster:null,captain:null,primary:null,error:("invalid crew identity config: " + $path)}'
+    return 0
+  fi
+  roster=$(fm_crew_identity_config_roster) || return 1
+  captain=$(fm_crew_identity_assignment captain) || return 1
+  primary=$(fm_crew_identity_assignment primary) || return 1
+  captain_json=$(fm_crew_identity_record_json "$roster" "$captain") || return 1
+  primary_json=$(fm_crew_identity_record_json "$roster" "$primary") || return 1
+  jq -n \
+    --arg roster "$roster" \
+    --argjson captain "$captain_json" \
+    --argjson primary "$primary_json" \
+    '{configured:true,status:"valid",roster:$roster,captain:$captain,primary:$primary}'
 }
 
 last_nonempty_line() {  # <file>
@@ -405,7 +460,7 @@ task_json_lines() {
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json identity_json
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -516,6 +571,7 @@ task_json_lines() {
     fi
 
     [ -f "$report_path" ] && report_present=1 || report_present=0
+    identity_json=$(crew_identity_record_for_meta_json "$meta")
     meta_json=$(path_present_json "$meta")
     status_json=$event_json
     report_json=$(path_present_json "$report_path")
@@ -558,8 +614,10 @@ task_json_lines() {
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
+      --argjson crew_identity "$identity_json" \
       '{
         id:$id,
+        crew_identity:$crew_identity,
         kind:$kind,
         harness:($harness // ""),
         mode:($mode // ""),
@@ -1347,6 +1405,7 @@ scout_report_lines() {
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+CREW_IDENTITY_JSON=$(crew_identity_config_json) || { echo "fm-fleet-snapshot: crew identity snapshot failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
   secondmate_home_summary_json "$BACKLOG_JSON" "$TASKS_JSON" \
@@ -1372,6 +1431,7 @@ jq -n \
   --arg projects "$PROJECTS" \
   --argjson backlog "$BACKLOG_JSON" \
   --argjson tasks "$TASKS_JSON" \
+  --argjson crew_identity "$CREW_IDENTITY_JSON" \
   --argjson main_inventory "$MAIN_INVENTORY_JSON" \
   --argjson scout_reports "$SCOUT_REPORTS_JSON" \
   --argjson secondmate_current "$SECONDMATE_CURRENT_JSON" \
@@ -1383,6 +1443,7 @@ jq -n \
      schema:"fm-fleet-snapshot.v1",
      generated:$generated,
      fm_home:$fm_home,
+     crew_identity:$crew_identity,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
      backlog:$backlog,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),

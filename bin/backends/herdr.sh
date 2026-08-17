@@ -21,7 +21,7 @@
 # workspace is a non-authoritative visual projection containing only the normal
 # task pane. Its random token and mutable label never authorize lookup,
 # adoption, reuse, closure, deletion, task ownership, or endpoint selection.
-# A version 2 journal can participate in replacing only its exact same-identity
+# A version 2 or version 3 journal can participate in replacing only its exact same-identity
 # endpoint after metadata, home, session, workspace, tab, pane, parent, shape,
 # focus, and agent-absence checks all agree under the session lock.
 # Every ambiguous recovered launch uses the default flat home workspace when
@@ -85,6 +85,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # through fm_transition_policy - it never re-encodes the mapping.
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
+# shellcheck source=bin/fm-crew-identity.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-crew-identity.sh"
 
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
@@ -136,9 +138,10 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # task endpoint record.
 # A per-task journal lives under state/ as <id>.herdr-presentation.
 # Version 1 records only the attempted projection's random correlator.
-# Version 2 additionally binds the successful projection's exact home,
-# session, workspace, tab, pane, parent, and presentation labels so a resumed
-# spawn can replace one verified agent-free husk under the session lock.
+# Version 2 additionally binds a legacy projection's exact home, session,
+# workspace, tab, pane, parent, and presentation labels. Version 3 adds the
+# assigned short identity label. Either exact binding can let a resumed spawn
+# replace one verified agent-free husk under the session lock.
 # No send, capture, Treehouse, or general task-ownership path reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 
@@ -337,21 +340,36 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
   fm_backend_herdr_presentation_default_supported "$state_dir"
 }
 
-# fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
-# label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no
-# secondmate marker) resolves to the constant "firstmate", byte-identical to
-# every pre-existing task's recorded label - no forced migration. A SECONDMATE
-# home resolves to "2ndmate-<secondmate-id>", so its tasks land in their own
-# workspace, obviously distinguishable from the primary's (and from every
-# other secondmate's) in herdr's spaces sidebar. Read fresh from FM_HOME on
-# every call rather than cached at source time: FM_HOME is the home's own
-# durable identity, not env plumbing threaded through a call chain, so the
-# label is automatically stable across every respawn/recovery for the life of
-# that home. fm-spawn.sh briefly shadows FM_HOME to a secondmate's own home
-# when the PRIMARY spawns that secondmate (its own process's FM_HOME still
-# names the primary at that point) - see fm-spawn.sh's herdr case arm.
+# fm_backend_herdr_workspace_label: the presentation label for one Firstmate
+# home. An enabled crew-identity config resolves the primary or the durable
+# secondmate marker id to its roster space_label. With no config, the historical
+# firstmate / 2ndmate-<id> labels remain byte-compatible. A configured but
+# unassigned persistent home returns the explicit "Unassigned crew" label;
+# spawn-time ensure refuses that ambiguous shape before creating or adopting a
+# workspace. Read fresh from FM_HOME on every call so relaunch and recovery use
+# the same durable assignment. Mechanical placement never trusts this label.
 fm_backend_herdr_workspace_label() {
-  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id roster identity
+  FM_CREW_IDENTITY_CONFIG="${FM_CREW_IDENTITY_CONFIG_OVERRIDE:-$FM_HOME/config/crew-identities.json}"
+  if fm_crew_identity_config_present; then
+    roster=$(fm_crew_identity_config_roster) || return 1
+    if [ -f "$marker" ]; then
+      id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
+      [ -n "$id" ] || {
+        echo "error: crew identity config is active but the secondmate home marker is empty" >&2
+        return 1
+      }
+      identity=$(fm_crew_identity_assignment agent "$id") || return 1
+    else
+      identity=$(fm_crew_identity_assignment primary) || return 1
+    fi
+    if [ "$identity" = unassigned ]; then
+      printf 'Unassigned crew'
+    else
+      fm_crew_identity_space_label "$roster" "$identity"
+    fi
+    return
+  fi
   if [ -f "$marker" ]; then
     id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
     if [ -n "$id" ]; then
@@ -360,6 +378,91 @@ fm_backend_herdr_workspace_label() {
     fi
   fi
   printf 'firstmate'
+}
+
+fm_backend_herdr_workspace_legacy_label() {
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
+  if [ -f "$marker" ]; then
+    id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
+    [ -z "$id" ] || { printf '2ndmate-%s' "$id"; return 0; }
+  fi
+  printf 'firstmate'
+}
+
+# Rename only one exact workspace id whose current label is the expected legacy
+# label for this same home. The workspace id comes from launcher ancestry or
+# durable task metadata, never a label search. A changed or unreadable binding
+# refuses without touching another Space.
+fm_backend_herdr_workspace_identity_rename_exact() { # <session> <workspace-id>
+  local session=$1 workspace=$2 desired legacy out current verify
+  desired=$(fm_backend_herdr_workspace_label) || return 1
+  [ "$desired" != "Unassigned crew" ] || {
+    echo "error: crew identity config is active but this persistent home is unassigned; refusing an ambiguous Herdr Space title" >&2
+    return 1
+  }
+  legacy=$(fm_backend_herdr_workspace_legacy_label)
+  out=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
+  current=$(printf '%s' "$out" | jq -er --arg workspace "$workspace" \
+    'select(.result.workspace.workspace_id == $workspace) | .result.workspace.label' 2>/dev/null) || return 1
+  [ "$current" != "$desired" ] || return 0
+  [ "$current" = "$legacy" ] || {
+    echo "error: Herdr workspace '$workspace' is labelled '$current', not this home's expected legacy '$legacy'; refusing identity rename" >&2
+    return 1
+  }
+  fm_backend_herdr_cli "$session" workspace rename "$workspace" "$desired" >/dev/null 2>&1 || return 1
+  verify=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$verify" | jq -e --arg workspace "$workspace" --arg desired "$desired" \
+    '.result.workspace.workspace_id == $workspace and .result.workspace.label == $desired' >/dev/null 2>&1
+}
+
+# Rename one exact legacy projected workspace to its assigned presentation
+# identity and upgrade its journal atomically enough to remain recoverable. The
+# caller must hold the named session's presentation lock. Only a complete v2
+# binding whose exact live workspace still has its recorded legacy title is
+# mutable. A journal publication failure rolls the title back and verifies the
+# rollback before returning failure.
+fm_backend_herdr_projection_identity_rename_exact() { # <session> <journal> <task-id> <roster> <identity>
+  local session=$1 journal=$2 id=$3 roster=$4 identity=$5 identity_label desired
+  local workspace current out verify old_label
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ] || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || return 1
+  identity_label=$(fm_crew_identity_space_label "$roster" "$identity") || return 1
+  desired=$(fm_backend_herdr_projection_workspace_label \
+    "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" "$identity_label")
+  workspace=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
+  old_label=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL
+  out=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
+  current=$(printf '%s' "$out" | jq -er --arg workspace "$workspace" \
+    'select(.result.workspace.workspace_id == $workspace) | .result.workspace.label' 2>/dev/null) || return 1
+  if [ "$current" = "$desired" ] && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ] \
+     && [ "$FM_BACKEND_HERDR_JOURNAL_IDENTITY_LABEL" = "$identity_label" ]; then
+    return 0
+  fi
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] && [ "$current" = "$old_label" ] || {
+    echo "error: projected Herdr workspace '$workspace' is not its exact recorded legacy binding; refusing identity rename" >&2
+    return 1
+  }
+  fm_backend_herdr_cli "$session" workspace rename "$workspace" "$desired" >/dev/null 2>&1 || return 1
+  verify=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
+  if ! printf '%s' "$verify" | jq -e --arg workspace "$workspace" --arg desired "$desired" \
+      '.result.workspace.workspace_id == $workspace and .result.workspace.label == $desired' >/dev/null 2>&1 \
+     || ! fm_backend_herdr_projection_journal_write_v3 \
+       "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
+       "$FM_BACKEND_HERDR_JOURNAL_HOME" "$FM_BACKEND_HERDR_JOURNAL_SESSION" \
+       "$workspace" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
+       "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" \
+       "$desired" "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" "$identity_label"; then
+    fm_backend_herdr_cli "$session" workspace rename "$workspace" "$old_label" >/dev/null 2>&1 || return 1
+    verify=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
+    printf '%s' "$verify" | jq -e --arg workspace "$workspace" --arg old "$old_label" \
+      '.result.workspace.workspace_id == $workspace and .result.workspace.label == $old' >/dev/null 2>&1 || return 1
+    return 1
+  fi
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$desired" ]
 }
 
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
@@ -490,9 +593,9 @@ fm_backend_herdr_projection_journal_field() {  # <journal> <key>
   grep "^${key}=" "$journal" 2>/dev/null | cut -d= -f2-
 }
 
-# fm_backend_herdr_projection_journal_snapshot: validate a version 1 attempt
-# journal or a version 2 exact projection binding without sourcing shell code.
-# Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
+# fm_backend_herdr_projection_journal_snapshot: validate a version 1 attempt,
+# a version 2 legacy exact binding, or a version 3 identity-labelled exact
+# binding without sourcing shell code. Exact bindings set the journal globals.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   local journal=$1 id=$2 lines expected_label expected_task_label exact
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
@@ -507,6 +610,7 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL=""
   FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=""
   FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=""
+  FM_BACKEND_HERDR_JOURNAL_IDENTITY_LABEL=""
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
   lines=$(wc -l < "$journal" 2>/dev/null | tr -d '[:space:]')
   FM_BACKEND_HERDR_JOURNAL_VERSION=$(fm_backend_herdr_projection_journal_field "$journal" version) || return 1
@@ -520,6 +624,7 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   case "$FM_BACKEND_HERDR_JOURNAL_VERSION:$lines" in
     1:3) return 0 ;;
     2:12) ;;
+    3:13) ;;
     *) return 1 ;;
   esac
   FM_BACKEND_HERDR_JOURNAL_HOME=$(fm_backend_herdr_projection_journal_field "$journal" home) || return 1
@@ -531,6 +636,12 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" parent_label) || return 1
   FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" workspace_label) || return 1
   FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" task_label) || return 1
+  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ]; then
+    FM_BACKEND_HERDR_JOURNAL_IDENTITY_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" identity_label) || return 1
+    case "$FM_BACKEND_HERDR_JOURNAL_IDENTITY_LABEL" in
+      ''|*/*|*[[:cntrl:]]*) return 1 ;;
+    esac
+  fi
   case "$FM_BACKEND_HERDR_JOURNAL_HOME" in
     /*) ;;
     *) return 1 ;;
@@ -548,7 +659,8 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   [ -n "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" ] || return 1
-  expected_label=$(fm_backend_herdr_projection_workspace_label "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
+  expected_label=$(fm_backend_herdr_projection_workspace_label \
+    "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" "$FM_BACKEND_HERDR_JOURNAL_IDENTITY_LABEL")
   expected_task_label="fm-$id"
   [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
     && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ]
@@ -594,34 +706,82 @@ fm_backend_herdr_projection_journal_write_v2() {  # <journal> <task-id> <token> 
   mv -f "$tmp" "$journal"
 }
 
+fm_backend_herdr_projection_journal_write_v3() {  # <journal> <task-id> <token> <home> <session> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label> <identity-label>
+  local journal=$1 id=$2 token=$3 home=$4 session=$5 workspace=$6 tab=$7 pane=$8
+  local parent_workspace=$9 parent_label=${10} workspace_label=${11} task_label=${12}
+  local identity_label=${13} state tmp
+  state=$(dirname "$journal")
+  tmp=$(mktemp "$state/.${id}.herdr-presentation.bind.XXXXXX") || return 1
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! {
+    printf 'version=3\n'
+    printf 'task_id=%s\n' "$id"
+    printf 'projection_id=%s\n' "$token"
+    printf 'home=%s\n' "$home"
+    printf 'session=%s\n' "$session"
+    printf 'workspace_id=%s\n' "$workspace"
+    printf 'tab_id=%s\n' "$tab"
+    printf 'pane_id=%s\n' "$pane"
+    printf 'parent_workspace_id=%s\n' "$parent_workspace"
+    printf 'parent_label=%s\n' "$parent_label"
+    printf 'workspace_label=%s\n' "$workspace_label"
+    printf 'task_label=%s\n' "$task_label"
+    printf 'identity_label=%s\n' "$identity_label"
+  } > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  [ -f "$journal" ] && [ ! -L "$journal" ] || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$journal"
+}
+
 # fm_backend_herdr_projection_journal_bind: upgrade one exact version 1
-# attempt to a version 2 binding after the live projection and parent relation
-# have both been verified under the session lock.
-fm_backend_herdr_projection_journal_bind() {  # <journal> <task-id> <home> <session> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
+# attempt to an exact binding after the live projection and parent relation
+# have both been verified under the session lock. Identity-labelled projections
+# use version 3; an empty optional label keeps the historical version 2 shape.
+fm_backend_herdr_projection_journal_bind() {  # <journal> <task-id> <home> <session> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label> [<identity-label>]
   local journal=$1 id=$2 home=$3 session=$4 workspace=$5 tab=$6 pane=$7
-  local parent_workspace=$8 parent_label=$9 workspace_label=${10} task_label=${11} token
+  local parent_workspace=$8 parent_label=$9 workspace_label=${10} task_label=${11}
+  local identity_label=${12:-} token
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
   [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 1 ] || return 1
   token=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
-  fm_backend_herdr_projection_journal_write_v2 \
-    "$journal" "$id" "$token" "$home" "$session" "$workspace" "$tab" "$pane" \
-    "$parent_workspace" "$parent_label" "$workspace_label" "$task_label"
+  if [ -n "$identity_label" ]; then
+    fm_backend_herdr_projection_journal_write_v3 \
+      "$journal" "$id" "$token" "$home" "$session" "$workspace" "$tab" "$pane" \
+      "$parent_workspace" "$parent_label" "$workspace_label" "$task_label" "$identity_label"
+  else
+    fm_backend_herdr_projection_journal_write_v2 \
+      "$journal" "$id" "$token" "$home" "$session" "$workspace" "$tab" "$pane" \
+      "$parent_workspace" "$parent_label" "$workspace_label" "$task_label"
+  fi
 }
 
 # fm_backend_herdr_projection_journal_replace_endpoint: atomically advance one
-# exact version 2 binding after its old husk was replaced successfully.
+# exact version 2 or version 3 binding after its old husk was replaced.
 fm_backend_herdr_projection_journal_replace_endpoint() {  # <journal> <task-id> <old-tab> <old-pane> <new-tab> <new-pane>
   local journal=$1 id=$2 old_tab=$3 old_pane=$4 new_tab=$5 new_pane=$6
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
-  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
+  { [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ]; } \
     && [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$old_tab" ] \
     && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$old_pane" ] || return 1
-  fm_backend_herdr_projection_journal_write_v2 \
-    "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
-    "$FM_BACKEND_HERDR_JOURNAL_HOME" "$FM_BACKEND_HERDR_JOURNAL_SESSION" \
-    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" "$new_tab" "$new_pane" \
-    "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" \
-    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL"
+  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ]; then
+    fm_backend_herdr_projection_journal_write_v3 \
+      "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
+      "$FM_BACKEND_HERDR_JOURNAL_HOME" "$FM_BACKEND_HERDR_JOURNAL_SESSION" \
+      "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" "$new_tab" "$new_pane" \
+      "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" \
+      "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" \
+      "$FM_BACKEND_HERDR_JOURNAL_IDENTITY_LABEL"
+  else
+    fm_backend_herdr_projection_journal_write_v2 \
+      "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
+      "$FM_BACKEND_HERDR_JOURNAL_HOME" "$FM_BACKEND_HERDR_JOURNAL_SESSION" \
+      "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" "$new_tab" "$new_pane" \
+      "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" \
+      "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL"
+  fi
 }
 
 # fm_backend_herdr_projection_concise_task_label: strip redundant owner
@@ -643,10 +803,19 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
 
 # fm_backend_herdr_projection_workspace_label: presentation-only child label.
 # Format is literal U+2514 BOX DRAWINGS LIGHT UP AND RIGHT, one space, the
-# concise task label, then the unchanged · p:<full-22-char-token> suffix.
-# Labels and tokens remain non-authoritative correlators only.
-fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
-  printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
+# assigned character title, or the concise task label for an unconfigured
+# legacy home, then the unchanged · p:<full-22-char-token> suffix. Configured
+# but unassigned tasks use an explicit non-identifying label. Tokens remain
+# non-authoritative correlators only.
+fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id> [<identity-label>]
+  local task=$1 token=$2 identity_label=${3:-}
+  if [ -n "$identity_label" ]; then
+    printf '└ %s · p:%s' "$identity_label" "$token"
+  elif fm_crew_identity_config_present; then
+    printf '└ Unassigned crew · p:%s' "$token"
+  else
+    printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$task")" "$token"
+  fi
 }
 
 # fm_backend_herdr_presentation_session_lock_path: one machine-private lock
@@ -1756,6 +1925,11 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
     case "$status" in
       0)
         FM_BACKEND_HERDR_WS_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
+        FM_CREW_IDENTITY_CONFIG="$FM_HOME/config/crew-identities.json"
+        if fm_crew_identity_config_present; then
+          fm_backend_herdr_workspace_identity_rename_exact \
+            "$session" "$FM_BACKEND_HERDR_WS_ID" || return 3
+        fi
         printf '%s' "$FM_BACKEND_HERDR_WS_ID"
         return 0
         ;;
@@ -1763,7 +1937,11 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
       *) return 3 ;;
     esac
   fi
-  label=$(fm_backend_herdr_workspace_label)
+  label=$(fm_backend_herdr_workspace_label) || return 1
+  if [ "$label" = "Unassigned crew" ]; then
+    echo "error: crew identity config is active but this persistent home is unassigned; refusing an ambiguous Herdr Space title" >&2
+    return 3
+  fi
   matches=$(fm_backend_herdr_workspace_find_all "$session")
   count=$(printf '%s' "$matches" | grep -c '[^[:space:]]' || true)
   if [ "$count" -gt 1 ]; then
@@ -2280,7 +2458,8 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
-  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ]; then
+  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ] \
+     && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 3 ]; then
     echo "warning: herdr presentation journal for $id has no exact restart binding; spawning flat" >&2
     return 2
   fi

@@ -6,9 +6,9 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
-#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--identity <identity-id>] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--identity <identity-id>] [--herdr-lab]
+#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects} [--identity <identity-id>]
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -22,6 +22,10 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --identity captures one identity from local config/crew-identities.json.
+#   Without the flag, an assignment for <task-id> in that optional config is
+#   captured automatically. Homes with no identity config remain byte-compatible
+#   at the schema level: generated briefs contain no Crew roster/identity fields.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
@@ -75,6 +79,8 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-crew-identity.sh
+. "$SCRIPT_DIR/fm-crew-identity.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -101,11 +107,18 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+if [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
+  CONFIG=$(resolve_directory_input FM_CONFIG_OVERRIDE "$FM_CONFIG_OVERRIDE") || exit 1
+else
+  CONFIG="$FM_HOME/config"
+fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
+IDENTITY=
 MODE_SET=0
+IDENTITY_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -115,6 +128,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      identity) IDENTITY=$a; IDENTITY_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -127,6 +141,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --identity) want_value=identity ;;
+    --identity=*) IDENTITY=${a#--identity=}; IDENTITY_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -135,6 +151,7 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$IDENTITY_SET" -eq 0 ] || [ -n "$IDENTITY" ] || { echo "error: --identity requires a non-empty roster identity id" >&2; exit 1; }
 
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
@@ -155,6 +172,18 @@ elif [ "$MODE_SET" -eq 1 ]; then
   exit 1
 fi
 ID=${POS[0]}
+
+FM_CREW_IDENTITY_CONFIG="$CONFIG/crew-identities.json"
+fm_crew_identity_resolve_task "$ID" "$DATA/$ID/brief.md" "$IDENTITY" || exit 1
+CREW_IDENTITY_SECTION=""
+if [ -n "$FM_CREW_IDENTITY_RESOLVED_ID" ]; then
+  CREW_IDENTITY_DETAIL=$(fm_crew_identity_detail \
+    "$FM_CREW_IDENTITY_RESOLVED_ROSTER" "$FM_CREW_IDENTITY_RESOLVED_ID") || exit 1
+  CREW_IDENTITY_SECTION="# Crew identity
+Crew roster: $FM_CREW_IDENTITY_RESOLVED_ROSTER
+Crew identity: $FM_CREW_IDENTITY_RESOLVED_ID
+Crew detail: $CREW_IDENTITY_DETAIL"
+fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -201,6 +230,8 @@ else
 fi
 cat > "$BRIEF" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
+
+$CREW_IDENTITY_SECTION
 
 # Charter
 $SECONDMATE_CHARTER
@@ -301,6 +332,8 @@ fi
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+$CREW_IDENTITY_SECTION
 
 # Task
 {TASK}
@@ -411,6 +444,8 @@ DOD=${DOD%$'\n'}
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+
+$CREW_IDENTITY_SECTION
 
 # Task
 {TASK}

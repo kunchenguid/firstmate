@@ -1148,6 +1148,31 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+test_crew_identity_validation() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/identity-config"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/rosters"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+
+  printf '%s\n' '{"version":1' > "$case_dir/home/config/crew-identities.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "CREW_IDENTITY: invalid config/crew-identities.json" \
+    "bootstrap did not report malformed crew identity config"
+
+  cp "$ROOT/rosters/master-and-commander.json" "$case_dir/home/rosters/master-and-commander.json"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{}}' \
+    > "$case_dir/home/config/crew-identities.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "BOOTSTRAP_INFO: crew identities active config/crew-identities.json" \
+    "bootstrap did not validate a configured crew identity schema"
+  assert_not_contains "$out" "CREW_IDENTITY:" "valid crew identity config emitted an error"
+  pass "bootstrap validates the optional crew identity config loudly"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1176,3 +1201,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_crew_identity_validation

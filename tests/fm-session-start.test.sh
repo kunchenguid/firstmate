@@ -2201,6 +2201,31 @@ EOF
   pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
 }
 
+test_fleet_digest_renders_configured_crew_identity() {
+  local rec root home fakebin out
+  rec=$(new_world crew-identity-fleet)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  mkdir -p "$root/rosters"
+  cp "$ROOT/rosters/master-and-commander.json" "$root/rosters/master-and-commander.json"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"digest-agent":"john-allen"}}' \
+    > "$home/config/crew-identities.json"
+  fm_write_meta "$home/state/digest-agent.meta" \
+    "harness=codex" "kind=ship" "crew_roster=master-and-commander" "crew_identity=john-allen"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "primary crew identity: Lt Pullings" \
+    "session-start fleet digest lost the primary short identity label"
+  assert_contains "$out" "crew identity: Mr Allen" \
+    "session-start fleet digest lost the active agent short identity label"
+  assert_not_contains "$out" "crew identity: Second Mate" \
+    "session-start identity surface used a mechanical role prefix"
+  pass "session-start fleet digest renders exact configured crew identity labels"
+}
+
 test_next_step_sources_x_mode_cadence() {
   local rec root home fakebin out
   rec=$(new_world next-step-x)
@@ -2426,6 +2451,7 @@ test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
+test_fleet_digest_renders_configured_crew_identity
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic

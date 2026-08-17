@@ -710,6 +710,71 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_crew_identity_roster_config_and_brief_capture() {
+  local home brief count out rc
+  home="$TMP_ROOT/crew-identity"
+  mkdir -p "$home/config" "$home/data" "$home/state"
+  count=$(jq '.identities | length' "$ROOT/rosters/master-and-commander.json")
+  [ "$count" -ge 29 ] || fail "Master-and-Commander roster needs at least 29 identities, got $count"
+  jq -e '
+    .schema == "firstmate-crew-roster.v1"
+    and (.sources | length) >= 2
+    and all(.identities[];
+      (.full_name | length) > 0
+      and (.space_label | length) > 0
+      and (.shipboard_role | length) > 0
+      and (.affinities | length) > 0
+      and (.source_refs | length) > 0)
+    and ([.identities[].id] | length) == ([.identities[].id] | unique | length)
+    and ([.identities[].space_label] | length) == ([.identities[].space_label] | unique | length)
+  ' "$ROOT/rosters/master-and-commander.json" >/dev/null \
+    || fail "Master-and-Commander roster did not satisfy its public schema contract"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"identity-task":"john-allen","other-task":"stephen-maturin"}}' \
+    > "$home/config/crew-identities.json"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$ROOT/bin/fm-crew-identity.sh" validate \
+    || fail "valid crew identity config was rejected"
+  [ "$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$ROOT/bin/fm-crew-identity.sh" assignment primary)" = thomas-pullings ] \
+    || fail "primary crew assignment did not parse"
+  [ "$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$ROOT/bin/fm-crew-identity.sh" space-label unknown-roster thomas-pullings 2>/dev/null || true)" = "" ] \
+    || fail "an unknown roster name unexpectedly resolved"
+  [ "$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$ROOT/bin/fm-crew-identity.sh" space-label master-and-commander thomas-pullings)" = "Lt Pullings" ] \
+    || fail "Pullings short Space label was not exact"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" \
+    identity-task demo --mode local-only >/dev/null \
+    || fail "configured crew identity brief scaffold failed"
+  brief="$home/data/identity-task/brief.md"
+  assert_grep 'Crew roster: master-and-commander' "$brief" "brief did not persist crew roster"
+  assert_grep 'Crew identity: john-allen' "$brief" "brief did not persist crew identity"
+  assert_grep "Crew detail: Mr John Allen - Sailing master of HMS Surprise" "$brief" \
+    "brief did not retain full name and canonical role in its detail view"
+
+  printf '%s\n' 'window=fm-a' 'crew_roster=master-and-commander' 'crew_identity=higgins' \
+    > "$home/state/active-a.meta"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    "$ROOT/bin/fm-crew-identity.sh" check-active active-b master-and-commander higgins "$home/state" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "duplicate active crew identity was accepted"
+  assert_contains "$out" "already assigned to active task 'active-a'" \
+    "duplicate active crew identity refusal did not name the existing owner"
+
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","primary":"","agents":{}}' \
+    > "$home/config/crew-identities.json"
+  if FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$ROOT/bin/fm-crew-identity.sh" validate >/dev/null 2>&1; then
+    fail "an empty configured primary identity was accepted"
+  fi
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","agents":{}}' \
+    > "$home/config/crew-identities.json"
+  if FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$ROOT/bin/fm-crew-identity.sh" validate >/dev/null 2>&1; then
+    fail "a crew identity config without its required primary assignment was accepted"
+  fi
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","primary":"thomas-pullings","agents":{"task-a":"john-allen","task-b":"john-allen"}}' \
+    > "$home/config/crew-identities.json"
+  if FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$ROOT/bin/fm-crew-identity.sh" validate >/dev/null 2>&1; then
+    fail "duplicate configured crew identities were accepted"
+  fi
+  pass "crew identities: 29+ sourced roster, config parsing, brief detail, and active uniqueness"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -730,3 +795,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_crew_identity_roster_config_and_brief_capture

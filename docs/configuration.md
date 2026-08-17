@@ -24,6 +24,57 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Crew identities (config/crew-identities.json)
+
+`config/crew-identities.json` is an optional local, gitignored presentation layer for the captain, primary Firstmate, persistent secondmates, and ordinary task agents.
+It never replaces a task id, `kind=secondmate`, endpoint target, project, status filename, recovery binding, or selector.
+Homes without the file retain their existing briefs, metadata, routing, and legacy backend labels.
+
+The tracked [`master-and-commander` roster](../rosters/master-and-commander.json) contains 32 distinct identities drawn from the 2003 film and the wider Aubrey-Maturin novels.
+Each record has a stable roster id, full name, short Space label, canonical shipboard role, operational affinity tags, and public source references.
+The affinity tags are Firstmate's implementation-oriented classification, not a claim that the source uses those words.
+The roster sources are concise cast and character references; no copyrighted prose is reproduced.
+
+Copy [`docs/examples/crew-identities.json`](examples/crew-identities.json) to `config/crew-identities.json`, then replace the example agent keys with real mechanical task ids:
+
+```json
+{
+  "version": 1,
+  "roster": "master-and-commander",
+  "captain": "jack-aubrey",
+  "primary": "thomas-pullings",
+  "agents": {
+    "navigation-agent": "john-allen"
+  }
+}
+```
+
+The accepted top-level keys are exactly `version`, `roster`, `primary`, optional `captain`, and optional `agents`.
+`version` is currently `1`; `roster` names a tracked `rosters/<id>.json`; `primary` and the optional `captain` contain roster identity ids; and `agents` maps unchanged task ids to roster identity ids.
+An omitted assignment is explicitly unassigned while the config is active.
+`bin/fm-crew-identity.sh validate` validates both schema and roster references.
+Bootstrap reports malformed configured files as `CREW_IDENTITY:` diagnostics, and spawn refuses invalid or incomplete records.
+
+The unique `agents[<task-id>]` map is the reservation owner for task identities across every inherited home.
+An explicit `--identity` may confirm that reservation, and an already-recorded brief must still match it; neither path can create an identity outside the central map.
+Capture checks an explicit confirmation first, then a matching brief, then the configured reservation.
+`bin/fm-brief.sh` records the roster id, identity id, full name, and role in the charter or task detail.
+`bin/fm-spawn.sh` persists the roster and identity in `state/<id>.meta`; relaunch reads those metadata fields rather than current config, so a later local edit cannot silently change an active agent's identity.
+Old briefs and metadata without the optional fields remain valid.
+The fleet JSON, human fleet view, and session-start fleet digest render the short label when identity metadata is present and make malformed identity metadata visible.
+
+An identity may appear only once among the captain, primary Firstmate, configured agent map, and active task metadata.
+Configuration validation rejects duplicate reserved assignments before launch; fresh spawn, relaunch, and migration also reject a duplicate active assignment and report both the contested roster identity and the existing owner.
+Persistent secondmates must be assigned when the config is enabled; ordinary tasks may remain visibly `Unassigned crew`.
+
+The configuration is primary-authoritative and inherited into secondmate homes through the same guarded local-material propagation as crew dispatch.
+After a mid-session edit, run `bin/fm-config-push.sh` to converge live secondmate homes.
+For Herdr homes upgraded while Spaces are already open, run `bin/fm-crew-identity-migrate-herdr.sh <session>` from the lock-owning primary session inside its exact primary Space.
+The migration captures missing active metadata, then renames only exact workspace ids whose current titles match their expected legacy titles; a changed, ambiguous, foreign, duplicate, or incomplete binding is refused.
+It never stops or restarts an agent.
+The Aubrey/Pullings example renders the primary Space as `Lt Pullings`; configured agents use the roster's short canonical labels, such as `Mr Allen`, `Dr Maturin`, and `Lt Mowett`.
+Full names and expanded ranks remain in charters and detailed fleet JSON.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
@@ -82,7 +133,9 @@ These five sentences are the single owner of the task-selector vocabulary; backe
 `fm-teardown.sh <id>` takes a task id directly and validates the complete metadata-only endpoint identity before any runtime dispatch or cleanup mutation.
 Missing, empty, duplicate, malformed, backend-inconsistent, or task-mismatched endpoint records are preserved and refused.
 Legacy tmux metadata remains cleanup-compatible when its exact window name is `fm-<id>`; opaque non-tmux endpoints require their recorded `endpoint_task_id=` binding.
-`FM_HOME` determines Herdr's home label: the primary home uses `firstmate`, and a secondmate home marked by `.fm-secondmate-home` uses `2ndmate-<secondmate-id>`.
+`FM_HOME` determines Herdr's home label.
+With crew identities configured, the primary and marked secondmate homes use their assigned roster `space_label`; no mechanical task or project id is included.
+Without that optional config, the primary remains `firstmate` and a marked secondmate remains `2ndmate-<secondmate-id>` for backwards compatibility.
 [`herdr-backend.md`](herdr-backend.md#watching-and-task-containers) owns launcher-bound workspace placement, the label-only fallback, collision handling, and recovery behavior.
 The local `config/herdr-presentation-spaces` file instead opts a home out of, or explicitly in to, Herdr's default-on disposable single-task visual projection; [Presentation spaces](herdr-backend.md#presentation-spaces) owns its accepted values, default, Herdr version floor, migration, behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.
 The setting is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
@@ -303,7 +356,7 @@ Backend tool availability uses the adapter's own executable resolver, so bootstr
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.
 Orca provides both the task worktree and terminal endpoint (see "Runtime backend" above), so `backend=orca` requires only `orca` on top of the universal toolchain and skips both `treehouse` and every other backend's session CLI.
 A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the `treehouse` durable-lease upgrade check runs only for the backends that actually use treehouse.
-When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
+When `config/crew-dispatch.json` or `config/crew-identities.json` exists, bootstrap also requires `jq` for local-schema validation.
 When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 `tasks-axi` and `quota-axi` are required bootstrap tools in every profile, the same class as `lavish-axi`.
 An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm install -g tasks-axi)`; when `config/backlog-backend` is not `manual` and compatible `tasks-axi` is on `PATH`, bootstrap stays silent and firstmate uses its verbs for routine backlog mutations, otherwise it hand-edits `data/backlog.md` until installation is approved and completed.
@@ -326,7 +379,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-identities.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.

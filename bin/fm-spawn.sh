@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--identity <identity-id>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--identity <identity-id>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--identity <identity-id>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -34,6 +34,11 @@
 #   the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
+#   --identity <identity-id> captures a presentation identity from local
+#   config/crew-identities.json. Without it, a Crew identity recorded in the
+#   brief wins, then the config's agents[<task-id>] assignment. Relaunch ignores
+#   current config and preserves crew_roster=/crew_identity= from task metadata.
+#   Homes and records without those optional fields retain historical behavior.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
@@ -75,7 +80,8 @@
 #   then creates a disposable
 #   workspace containing only the ordinary task pane. A successful clean create
 #   upgrades its attempt journal with exact home, session, workspace, tab, pane,
-#   parent, and label bindings. On a same-identity restart, that complete binding
+#   parent, and label bindings, including the short identity label when assigned.
+#   On a same-identity restart, that complete binding
 #   plus authoritative metadata may replace one exact agent-free husk in place.
 #   The journal, visible token, and labels alone are never endpoint or ownership
 #   authority, and every ambiguous recovery stays on the flat fallback after
@@ -258,6 +264,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-crew-identity.sh
+. "$SCRIPT_DIR/fm-crew-identity.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -275,6 +283,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+IDENTITY_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -282,6 +291,7 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+IDENTITY_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -298,6 +308,7 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      identity) IDENTITY_ARG=$a; IDENTITY_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -321,6 +332,8 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --identity) want_value=identity ;;
+    --identity=*) IDENTITY_ARG=${a#--identity=}; IDENTITY_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -332,6 +345,7 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$IDENTITY_SET" -eq 0 ] || [ -n "$IDENTITY_ARG" ] || { echo "error: --identity requires a non-empty roster identity id" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -359,6 +373,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  [ "$IDENTITY_SET" -eq 0 ] || { echo "error: --relaunch preserves the task's recorded crew identity; --identity cannot override it" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -621,6 +636,8 @@ spawn_remote_secondmate() {
     echo "effort=${effort#-}"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
+    [ -z "$CREW_ROSTER" ] || echo "crew_roster=$CREW_ROSTER"
+    [ -z "$CREW_IDENTITY" ] || echo "crew_identity=$CREW_IDENTITY"
     echo "remote_host=$host"
     echo "remote_root=$root"
     echo "remote_backend=$remote_backend"
@@ -749,6 +766,8 @@ spawn_abort_cleanup() {
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
             echo "kind=$KIND"
+            [ -z "${CREW_ROSTER:-}" ] || echo "crew_roster=$CREW_ROSTER"
+            [ -z "${CREW_IDENTITY:-}" ] || echo "crew_identity=$CREW_IDENTITY"
             [ -z "${MODE:-}" ] || echo "mode=$MODE"
             [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
             echo "tasktmp=${TASK_TMP:-}"
@@ -853,6 +872,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  if [ "$IDENTITY_SET" -eq 1 ]; then
+    echo "error: batch dispatch requires distinct crew identities per task; scaffold or spawn each identity explicitly" >&2
+    exit 1
+  fi
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -887,6 +910,14 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+CREW_IDENTITY=""
+CREW_ROSTER=""
+if [ "$RELAUNCH" -eq 0 ]; then
+  FM_CREW_IDENTITY_CONFIG="$CONFIG/crew-identities.json"
+  fm_crew_identity_resolve_task "$ID" "$DATA/$ID/brief.md" "$IDENTITY_ARG" || exit 1
+  CREW_IDENTITY=$FM_CREW_IDENTITY_RESOLVED_ID
+  CREW_ROSTER=$FM_CREW_IDENTITY_RESOLVED_ROSTER
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -928,6 +959,13 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ -n "$CREW_IDENTITY" ]; then
+  if [ "$KIND" = secondmate ] && [ "$CREW_IDENTITY" = unassigned ]; then
+    echo "error: crew identity config is active but persistent secondmate '$ID' is unassigned; add agents.$ID before launch so its Space title never exposes a mechanical id" >&2
+    exit 1
+  fi
+  fm_crew_identity_check_active "$ID" "$CREW_ROSTER" "$CREW_IDENTITY" "$STATE" || exit 1
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
@@ -1010,6 +1048,19 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
+  CREW_ROSTER=$(fm_meta_get "$RELAUNCH_META" crew_roster)
+  CREW_IDENTITY=$(fm_meta_get "$RELAUNCH_META" crew_identity)
+  if { [ -n "$CREW_ROSTER" ] && [ -z "$CREW_IDENTITY" ]; } \
+     || { [ -z "$CREW_ROSTER" ] && [ -n "$CREW_IDENTITY" ]; }; then
+    echo "error: task $ID has an incomplete crew identity record; crew_roster and crew_identity must appear together" >&2
+    exit 1
+  fi
+  if [ -n "$CREW_IDENTITY" ]; then
+    [ "$CREW_IDENTITY" = unassigned ] \
+      || fm_crew_identity_record_json "$CREW_ROSTER" "$CREW_IDENTITY" >/dev/null \
+      || { echo "error: task $ID records an invalid crew identity '$CREW_ROSTER/$CREW_IDENTITY'" >&2; exit 1; }
+    fm_crew_identity_check_active "$ID" "$CREW_ROSTER" "$CREW_IDENTITY" "$STATE" || exit 1
+  fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
@@ -1032,6 +1083,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+    if [ "$KIND" = secondmate ] && [ -n "$CREW_IDENTITY" ]; then
+      FM_HOME="$FIRSTMATE_HOME" fm_backend_herdr_workspace_identity_rename_exact \
+        "$HERDR_SES" "$HERDR_WORKSPACE_ID" || {
+          echo "error: could not safely migrate secondmate $ID's exact Herdr Space title" >&2
+          exit 1
+        }
+    fi
   fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config
@@ -1972,7 +2030,13 @@ case "$BACKEND" in
             spawn_herdr_presentation_order_lock_release
           else
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
-            HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+            HERDR_PRESENTATION_IDENTITY_LABEL=""
+            if [ -n "$CREW_IDENTITY" ]; then
+              HERDR_PRESENTATION_IDENTITY_LABEL=$(fm_crew_identity_space_label \
+                "$CREW_ROSTER" "$CREW_IDENTITY") || exit 1
+            fi
+            HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label \
+              "$ID" "$HERDR_PROJECTION_ID" "$HERDR_PRESENTATION_IDENTITY_LABEL")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
               "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
@@ -2004,7 +2068,8 @@ case "$BACKEND" in
                && fm_backend_herdr_projection_journal_bind \
                  "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
                  "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
-                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
+                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" \
+                 "$HERDR_PRESENTATION_IDENTITY_LABEL"; then
               :
             else
               echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
@@ -2632,7 +2697,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects crew_roster crew_identity control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2645,6 +2710,8 @@ preserve_relaunch_meta() {
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
+  [ -z "$CREW_ROSTER" ] || echo "crew_roster=$CREW_ROSTER"
+  [ -z "$CREW_IDENTITY" ] || echo "crew_identity=$CREW_IDENTITY"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
@@ -2849,4 +2916,6 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+SPAWN_IDENTITY=
+[ -z "$CREW_IDENTITY" ] || SPAWN_IDENTITY=" identity=$CREW_ROSTER/$CREW_IDENTITY"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY$SPAWN_IDENTITY window=$META_WINDOW worktree=$WT"

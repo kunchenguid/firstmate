@@ -335,6 +335,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-crew-identity.sh
+. "$SCRIPT_DIR/fm-crew-identity.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -787,6 +789,17 @@ stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
+FM_CREW_IDENTITY_CONFIG="$CONFIG/crew-identities.json"
+if fm_crew_identity_config_present; then
+  if primary_roster=$(fm_crew_identity_config_roster 2>/dev/null) \
+     && primary_identity=$(fm_crew_identity_assignment primary 2>/dev/null) \
+     && primary_label=$(fm_crew_identity_space_label "$primary_roster" "$primary_identity" 2>/dev/null); then
+    printf 'primary crew identity: %s\n' "$primary_label"
+  else
+    printf 'primary crew identity: INVALID config/crew-identities.json\n'
+  fi
+fi
+
 subsection "Work under way (state/*.meta)"
 META_FOUND=0
 for meta in "$STATE"/*.meta; do
@@ -794,6 +807,13 @@ for meta in "$STATE"/*.meta; do
   META_FOUND=1
   id=$(basename "$meta" .meta)
   printf '\n--- %s ---\n' "$id"
+  if identity_roster=$(fm_crew_identity_meta_value "$meta" crew_roster 2>/dev/null) \
+     && identity_id=$(fm_crew_identity_meta_value "$meta" crew_identity 2>/dev/null) \
+     && identity_label=$(fm_crew_identity_space_label "$identity_roster" "$identity_id" 2>/dev/null); then
+    printf 'crew identity: %s\n' "$identity_label"
+  elif grep -qE '^(crew_roster|crew_identity)=' "$meta" 2>/dev/null; then
+    printf 'crew identity: INVALID metadata\n'
+  fi
   cat "$meta"
 
   window=$(fm_meta_get "$meta" window)

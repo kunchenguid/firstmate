@@ -1,0 +1,285 @@
+{
+  "schema": "firstmate-crew-roster.v1",
+  "id": "master-and-commander",
+  "title": "HMS Surprise - Master and Commander",
+  "sources": {
+    "film-cast": {
+      "title": "Master and Commander: The Far Side of the World - cast",
+      "url": "https://en.wikipedia.org/wiki/Master_and_Commander:_The_Far_Side_of_the_World#Cast"
+    },
+    "recurring-characters": {
+      "title": "Recurring characters in the Aubrey-Maturin series",
+      "url": "https://en.wikipedia.org/wiki/Recurring_characters_in_the_Aubrey%E2%80%93Maturin_series"
+    },
+    "master-and-commander-novel": {
+      "title": "Master and Commander - principal characters",
+      "url": "https://en.wikipedia.org/wiki/Master_and_Commander#Principal_characters"
+    },
+    "ionian-mission": {
+      "title": "The Ionian Mission - characters",
+      "url": "https://en.wikipedia.org/wiki/The_Ionian_Mission#Characters"
+    },
+    "hundred-days": {
+      "title": "The Hundred Days - characters",
+      "url": "https://en.wikipedia.org/wiki/The_Hundred_Days_(novel)#Characters"
+    }
+  },
+  "identities": [
+    {
+      "id": "jack-aubrey",
+      "full_name": "Captain Jack Aubrey",
+      "space_label": "Capt Aubrey",
+      "shipboard_role": "Captain of HMS Surprise",
+      "affinities": ["leadership", "navigation", "operations"],
+      "source_refs": ["film-cast", "master-and-commander-novel"]
+    },
+    {
+      "id": "stephen-maturin",
+      "full_name": "Dr Stephen Maturin",
+      "space_label": "Dr Maturin",
+      "shipboard_role": "Ship's surgeon, natural philosopher, and intelligence officer",
+      "affinities": ["analysis", "diagnosis", "research", "security"],
+      "source_refs": ["film-cast", "recurring-characters"]
+    },
+    {
+      "id": "thomas-pullings",
+      "full_name": "First Lieutenant Thomas Pullings",
+      "space_label": "Lt Pullings",
+      "shipboard_role": "First lieutenant and later flag-captain under Aubrey",
+      "affinities": ["leadership", "implementation", "operations"],
+      "source_refs": ["film-cast", "recurring-characters"]
+    },
+    {
+      "id": "william-mowett",
+      "full_name": "Second Lieutenant William Mowett",
+      "space_label": "Lt Mowett",
+      "shipboard_role": "Junior lieutenant and later first lieutenant",
+      "affinities": ["communication", "implementation", "leadership"],
+      "source_refs": ["film-cast", "recurring-characters"]
+    },
+    {
+      "id": "john-allen",
+      "full_name": "Mr John Allen",
+      "space_label": "Mr Allen",
+      "shipboard_role": "Sailing master of HMS Surprise",
+      "affinities": ["navigation", "operations", "planning"],
+      "source_refs": ["film-cast"]
+    },
+    {
+      "id": "howard",
+      "full_name": "Captain Howard",
+      "space_label": "Capt Howard",
+      "shipboard_role": "Royal Marines officer aboard HMS Surprise",
+      "affinities": ["leadership", "security", "operations"],
+      "source_refs": ["film-cast"]
+    },
+    {
+      "id": "peter-calamy",
+      "full_name": "Acting Third Lieutenant Peter Myles Calamy",
+      "space_label": "Mr Calamy",
+      "shipboard_role": "Midshipman and acting third lieutenant",
+      "affinities": ["implementation", "learning", "operations"],
+      "source_refs": ["film-cast"]
+    },
+    {
+      "id": "william-blakeney",
+      "full_name": "Midshipman Lord William Blakeney",
+      "space_label": "Lord Blakeney",
+      "shipboard_role": "Midshipman aboard HMS Surprise",
+      "affinities": ["analysis", "learning", "resilience"],
+      "source_refs": ["film-cast"]
+    },
+    {
+      "id": "hollom",
+      "full_name": "Midshipman Hollom",
+      "space_label": "Mr Hollom",
+      "shipboard_role": "Midshipman aboard HMS Surprise",
+      "affinities": ["communication", "support"],
+      "source_refs": ["film-cast"]
+    },
+    {
+      "id": "higgins",
+      "full_name": "Mr Higgins",
+      "space_label": "Mr Higgins",
+      "shipboard_role": "Surgeon's mate aboard HMS Surprise",
+      "affinities": ["diagnosis", "implementation", "support"],
+      "source_refs": ["film-cast"]
+    },
+    {
+      "id": "hollar",
+      "full_name": "Mr Hollar",
+      "space_label": "Mr Hollar",
+      "shipboard_role": "Boatswain of HMS Surprise",
+      "affinities": ["coordination", "maintenance", "operations"],
+      "source_refs": ["film-cast"]
+    },
+    {
+      "id": "lamb",
+      "full_name": "Mr Lamb",
+      "space_label": "Mr Lamb",
+      "shipboard_role": "Carpenter of HMS Surprise",
+      "affinities": ["implementation", "maintenance", "repair"],
+      "source_refs": ["film-cast"]
+    },
+    {
+      "id": "preserved-killick",
+      "full_name": "Preserved Killick",
+      "space_label": "Killick",
+      "shipboard_role": "Captain's steward",
+      "affinities": ["maintenance", "support", "stewardship"],
+      "source_refs": ["film-cast", "recurring-characters"]
+    },
+    {
+      "id": "barrett-bonden",
+      "full_name": "Barrett Bonden",
+      "space_label": "Bonden",
+      "shipboard_role": "Captain's coxswain and captain of the maintop",
+      "affinities": ["implementation", "operations", "reliability"],
+      "source_refs": ["film-cast", "recurring-characters"]
+    },
+    {
+      "id": "joseph-nagle",
+      "full_name": "Joseph Nagle",
+      "space_label": "Nagle",
+      "shipboard_role": "Carpenter's mate",
+      "affinities": ["implementation", "maintenance", "repair"],
+      "source_refs": ["film-cast"]
+    },
+    {
+      "id": "william-warley",
+      "full_name": "William Warley",
+      "space_label": "Warley",
+      "shipboard_role": "Captain of the mizzentop",
+      "affinities": ["coordination", "operations", "reliability"],
+      "source_refs": ["film-cast"]
+    },
+    {
+      "id": "joseph-plaice",
+      "full_name": "Joseph Plaice",
+      "space_label": "Plaice",
+      "shipboard_role": "Able seaman and forecastle hand",
+      "affinities": ["implementation", "operations", "resilience"],
+      "source_refs": ["film-cast", "recurring-characters"]
+    },
+    {
+      "id": "awkward-davies",
+      "full_name": "Awkward Davies",
+      "space_label": "Davies",
+      "shipboard_role": "Able seaman and boarding-party hand",
+      "affinities": ["implementation", "operations", "security"],
+      "source_refs": ["film-cast", "recurring-characters"]
+    },
+    {
+      "id": "padeen-colman",
+      "full_name": "Padeen Colman",
+      "space_label": "Padeen",
+      "shipboard_role": "Loblolly boy and Maturin's medical attendant",
+      "affinities": ["care", "diagnosis", "support"],
+      "source_refs": ["film-cast", "recurring-characters"]
+    },
+    {
+      "id": "hogg",
+      "full_name": "Mr Hogg",
+      "space_label": "Mr Hogg",
+      "shipboard_role": "Master of the whaler Albatross",
+      "affinities": ["navigation", "research", "reconnaissance"],
+      "source_refs": ["film-cast"]
+    },
+    {
+      "id": "james-dillon",
+      "full_name": "First Lieutenant James Dillon",
+      "space_label": "Lt Dillon",
+      "shipboard_role": "First lieutenant of HM Sloop Sophie",
+      "affinities": ["analysis", "leadership", "operations"],
+      "source_refs": ["master-and-commander-novel"]
+    },
+    {
+      "id": "william-babbington",
+      "full_name": "Captain William Babbington",
+      "space_label": "Capt Babbington",
+      "shipboard_role": "Midshipman, lieutenant, and later post-captain",
+      "affinities": ["leadership", "learning", "operations"],
+      "source_refs": ["recurring-characters", "ionian-mission"]
+    },
+    {
+      "id": "william-reade",
+      "full_name": "Master's Mate William Reade",
+      "space_label": "Mr Reade",
+      "shipboard_role": "Master's mate and commander of the tender Ringle",
+      "affinities": ["navigation", "operations", "resilience"],
+      "source_refs": ["recurring-characters", "hundred-days"]
+    },
+    {
+      "id": "nathaniel-martin",
+      "full_name": "Reverend Nathaniel Martin",
+      "space_label": "Rev Martin",
+      "shipboard_role": "Surgeon's mate, later acting surgeon, and natural philosopher",
+      "affinities": ["diagnosis", "research", "support"],
+      "source_refs": ["recurring-characters", "ionian-mission"]
+    },
+    {
+      "id": "amos-jacob",
+      "full_name": "Dr Amos Jacob",
+      "space_label": "Dr Jacob",
+      "shipboard_role": "Assistant surgeon, naturalist, and intelligence agent",
+      "affinities": ["analysis", "diagnosis", "research", "security"],
+      "source_refs": ["recurring-characters", "hundred-days"]
+    },
+    {
+      "id": "john-daniel",
+      "full_name": "Mr John Daniel",
+      "space_label": "Mr Daniel",
+      "shipboard_role": "Master's mate and navigator aboard Surprise",
+      "affinities": ["analysis", "navigation", "planning"],
+      "source_refs": ["hundred-days"]
+    },
+    {
+      "id": "harding",
+      "full_name": "First Lieutenant Harding",
+      "space_label": "Lt Harding",
+      "shipboard_role": "First lieutenant of Surprise",
+      "affinities": ["leadership", "implementation", "operations"],
+      "source_refs": ["hundred-days"]
+    },
+    {
+      "id": "somers",
+      "full_name": "Second Lieutenant Somers",
+      "space_label": "Lt Somers",
+      "shipboard_role": "Second lieutenant of Surprise",
+      "affinities": ["communication", "implementation", "operations"],
+      "source_refs": ["hundred-days"]
+    },
+    {
+      "id": "whewell",
+      "full_name": "Third Lieutenant Whewell",
+      "space_label": "Lt Whewell",
+      "shipboard_role": "Third lieutenant of Surprise",
+      "affinities": ["implementation", "operations", "support"],
+      "source_refs": ["hundred-days"]
+    },
+    {
+      "id": "woodbine",
+      "full_name": "Mr Woodbine",
+      "space_label": "Mr Woodbine",
+      "shipboard_role": "Sailing master of Surprise",
+      "affinities": ["navigation", "operations", "planning"],
+      "source_refs": ["hundred-days"]
+    },
+    {
+      "id": "poll-skeeping",
+      "full_name": "Mrs Poll Skeeping",
+      "space_label": "Mrs Skeeping",
+      "shipboard_role": "Loblolly boy aboard Surprise",
+      "affinities": ["care", "diagnosis", "support"],
+      "source_refs": ["hundred-days"]
+    },
+    {
+      "id": "heneage-dundas",
+      "full_name": "Captain Heneage Dundas",
+      "space_label": "Capt Dundas",
+      "shipboard_role": "Post-captain and long-time shipmate of Aubrey",
+      "affinities": ["leadership", "operations", "strategy"],
+      "source_refs": ["recurring-characters", "hundred-days"]
+    }
+  ]
+}

@@ -866,6 +866,17 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
       ;;
+    bin/fm-crew-identity.sh|bin/fm-crew-identity-migrate-herdr.sh|\
+    rosters/*|docs/examples/crew-identities.json)
+      # Crew identity is an optional cross-surface presentation contract:
+      # brief/spawn capture, persistent-home inheritance, Herdr labels,
+      # fleet rendering, and session-start diagnostics must move together.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' backend-dispatch
+      printf '%s\n' snapshot-bearings
+      printf '%s\n' session-bootstrap
+      printf '%s\n' secondmate
+      ;;
     bin/backends/zellij*|tests/zellij-test-safety.sh)
       printf '%s\n' zellij
       printf '%s\n' backend-dispatch

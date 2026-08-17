@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "roster": "master-and-commander",
+  "captain": "jack-aubrey",
+  "primary": "thomas-pullings",
+  "agents": {
+    "navigation-agent": "john-allen",
+    "research-agent": "stephen-maturin",
+    "implementation-agent": "william-mowett"
+  }
+}

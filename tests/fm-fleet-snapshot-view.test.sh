@@ -551,7 +551,7 @@ EOF
       and .paths.report.present == true
   ' >/dev/null || fail "bold task did not join to override-backed backlog and report"
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$VIEW")
-  assert_contains "$view" "| bold-task | done / status-log | scout | alpha | tmux | present | $data/bold-task/report.md" \
+  assert_contains "$view" "| bold-task | - | done / status-log | scout | alpha | tmux | present | $data/bold-task/report.md" \
     "view should render bold in-flight row from snapshot"
   assert_contains "$view" "| blocked-reason | Blocked Reason | beta | ship | queued-comma - waits on queued-comma | - |" \
     "view should render blocked reason without title metadata"
@@ -568,7 +568,7 @@ test_view_renders_snapshot() {
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| ship-task | working / pane | ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
+  assert_contains "$view" "| ship-task | - | working / pane | ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
     "view should render ship row from snapshot"
   assert_contains "$view" "| queued-task | Queued Task | alpha | ship | ship-task | -" \
     "view should render queued backlog row"
@@ -576,7 +576,7 @@ test_view_renders_snapshot() {
     "view should render done backlog row"
   assert_contains "$view" "bin/fm-send.sh fm-secondmate-task" \
     "view should show secondmate send guidance"
-  assert_contains "$view" "| secondmate-task | working / status-log | secondmate | $home/secondmate-home | tmux | present / alive |" \
+  assert_contains "$view" "| secondmate-task | - | working / status-log | secondmate | $home/secondmate-home | tmux | present / alive |" \
     "view should show secondmate endpoint agent liveness"
   assert_not_contains "$view" "fm-peek.sh fm-secondmate-task" \
     "view must not tell firstmate to routinely peek secondmates"
@@ -597,11 +597,41 @@ test_view_renders_dead_secondmate_agent_status() {
   printf 'working: watching delegated scope\n' > "$home/state/dead-secondmate.status"
   fakebin=$(make_fakebin "$home")
   view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead |" \
+  assert_contains "$view" "| dead-secondmate | - | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead |" \
     "view should distinguish a present secondmate endpoint from a dead agent"
-  assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead | - | $home/secondmate-home (absent) |" \
+  assert_contains "$view" "| dead-secondmate | - | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead | - | $home/secondmate-home (absent) |" \
     "view should show a recorded missing secondmate home path"
   pass "fleet view renders secondmate agent liveness"
+}
+
+test_identity_labels_render_exactly_in_snapshot_and_view() {
+  local home fakebin out view
+  home=$(make_home identities)
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"agent-a":"john-allen","agent-b":"stephen-maturin","agent-c":"william-mowett"}}' \
+    > "$home/config/crew-identities.json"
+  fm_write_meta "$home/state/agent-a.meta" \
+    "window=firstmate:fm-agent-a" "project=alpha" "harness=codex" "kind=ship" \
+    "crew_roster=master-and-commander" "crew_identity=john-allen"
+  fm_write_meta "$home/state/agent-b.meta" \
+    "window=firstmate:fm-agent-b" "project=beta" "harness=codex" "kind=ship" \
+    "crew_roster=master-and-commander" "crew_identity=stephen-maturin"
+  fm_write_meta "$home/state/agent-c.meta" \
+    "window=firstmate:fm-agent-c" "project=gamma" "harness=codex" "kind=secondmate" \
+    "crew_roster=master-and-commander" "crew_identity=william-mowett"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .crew_identity.primary.space_label == "Lt Pullings"
+    and ([.tasks[] | {key:.id,value:.crew_identity.space_label}] | from_entries)
+      == {"agent-a":"Mr Allen","agent-b":"Dr Maturin","agent-c":"Lt Mowett"}
+  ' >/dev/null || fail "snapshot did not render exact configured crew labels: $out"
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  assert_contains "$view" "Primary identity: Lt Pullings" "fleet view lost the primary short label"
+  assert_contains "$view" "| agent-a | Mr Allen |" "fleet view did not render Mr Allen exactly"
+  assert_contains "$view" "| agent-b | Dr Maturin |" "fleet view did not render Dr Maturin exactly"
+  assert_contains "$view" "| agent-c | Lt Mowett |" "fleet view did not render Lt Mowett exactly"
+  assert_not_contains "$view" "Second Mate" "captain-facing identity rendering used a mechanical role prefix"
+  pass "fleet snapshot and view render exact short canonical crew labels"
 }
 
 # A still-open decision must survive a LATER, UNRELATED terminal event on the same
@@ -794,3 +824,4 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_identity_labels_render_exactly_in_snapshot_and_view

@@ -214,6 +214,19 @@ write_v2() { # <home> <workspace> <tab> <pane>
   } > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
 }
 
+write_v3() { # <home> <workspace> <tab> <pane> <title> <identity-label>
+  local home=$1 workspace=$2 tab=$3 pane=$4 title=$5 identity_label=$6
+  {
+    printf 'version=3\n'
+    printf 'task_id=%s\n' "$ID"
+    printf 'projection_id=%s\n' "$TOKEN"
+    printf 'home=%s\n' "$home"
+    printf 'session=test\nworkspace_id=%s\ntab_id=%s\npane_id=%s\n' "$workspace" "$tab" "$pane"
+    printf 'parent_workspace_id=w1\nparent_label=Lt Pullings\nworkspace_label=%s\ntask_label=fm-%s\nidentity_label=%s\n' \
+      "$title" "$ID" "$identity_label"
+  } > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+}
+
 write_cross_home_v2() {
   mkdir -p "$TMP_ROOT/other-home"
   write_v2 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"
@@ -269,6 +282,14 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v2 cleanup kept the journal"
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v2 cleanup did not close exactly once"
 pass "v2 cleanup requires and accepts the exact journal endpoint binding"
+reset_fixture
+IDENTITY_TITLE="└ Mr Allen · p:$TOKEN"
+printf '%s\n' "$IDENTITY_TITLE" > "$FIXTURE_DIR/title"
+write_v3 "$FM_HOME" "$WS" "$TAB" "$PANE" "$IDENTITY_TITLE" "Mr Allen"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v3 identity cleanup kept the journal"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v3 identity cleanup did not close exactly once"
+pass "v3 cleanup accepts the exact identity-labelled journal endpoint binding"
 reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "current task metadata"
 reset_fixture; printf 'live\n' > "$FIXTURE_DIR/agent"; assert_preserved "registered agent"
 reset_fixture; printf 'unknown\n' > "$FIXTURE_DIR/agent"; assert_preserved "unknown agent"

@@ -826,6 +826,36 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_spawn_captures_configured_identity_and_refuses_active_collision() {
+  local rec first second out status
+  first=identity-spawn-a
+  second=identity-spawn-b
+  rec=$(make_spawn_case identity-spawn codex "$first" "$second")
+  read_case_record "$rec"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"identity-spawn-a":"john-allen","identity-spawn-b":"higgins"}}' \
+    > "$HOME_DIR/config/crew-identities.json"
+  printf '%s\n' 'window=fm-external' 'crew_roster=master-and-commander' 'crew_identity=higgins' \
+    > "$HOME_DIR/state/external-active.meta"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$first" "$PROJ_DIR" --identity john-allen)
+  status=$?
+  expect_code 0 "$status" "configured identity spawn should succeed"
+  assert_contains "$out" "identity=master-and-commander/john-allen" \
+    "spawn outcome did not report the captured identity"
+  assert_grep 'crew_roster=master-and-commander' "$HOME_DIR/state/$first.meta" \
+    "spawn metadata did not persist the crew roster"
+  assert_grep 'crew_identity=john-allen' "$HOME_DIR/state/$first.meta" \
+    "spawn metadata did not persist the crew identity"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$second" "$PROJ_DIR" --identity higgins 2>&1)
+  status=$?
+  expect_code 1 "$status" "second active use of one crew identity should refuse"
+  assert_contains "$out" "already assigned to active task 'external-active'" \
+    "spawn collision did not loudly identify the active assignment"
+  assert_absent "$HOME_DIR/state/$second.meta" "duplicate identity refusal wrote task metadata"
+  pass "spawn captures optional crew identity metadata and prevents active collisions"
+}
+
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
@@ -857,5 +887,6 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset
 test_non_claude_harness_ignores_config_dir
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_spawn_captures_configured_identity_and_refuses_active_collision
 
 echo "# all fm-spawn-dispatch-profile tests passed"
