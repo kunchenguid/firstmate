@@ -335,6 +335,39 @@ test_unreadable_cache_and_taskless_pending_reply() {
   [ "$(json_value "$out" 'd["live"]["pending_reply_count"]')" = 0 ] \
     || fail "taskless pending reply was counted as live"
 
+  out=$(run_json "$home" sample --cache-root "$TMP_ROOT/cache/../escape.git")
+  rc=$?
+  expect_code 1 "$rc" "lexically unsafe cache preflight"
+  assert_json_code "$out" blockers cache_path_unsafe
+  assert_no_json_code "$out" blockers cache_missing
+  assert_no_json_code "$out" blockers cache_not_git
+  assert_no_json_code "$out" blockers cache_filesystem_unknown
+  [ "$(json_value "$out" 'd["proposal"]["cache_locality"]')" = not-supplied ] \
+    || fail "unsafe cache path was probed for filesystem locality"
+  [ "$(json_value "$out" 'json.dumps(d["proposal"]["cache_is_git"])')" = false ] \
+    || fail "unsafe cache path was probed with Git"
+
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "taskless pending replies are ignored (unreadable-path coverage needs a non-root user)"
+    return 0
+  fi
+
+  mkdir -p "$home/projects/unreadable"
+  chmod 0600 "$home/projects/unreadable"
+  out=$(run_json "$home" unreadable)
+  rc=$?
+  chmod 0700 "$home/projects/unreadable"
+  expect_code 1 "$rc" "unreadable project preflight"
+  assert_json_code "$out" blockers project_unresolved
+  assert_no_json_code "$out" blockers project_path_escape
+  assert_no_json_code "$out" blockers project_not_worktree
+  assert_no_json_code "$out" blockers dirty_worktree
+  assert_no_json_code "$out" blockers off_default
+  [ "$(json_value "$out" 'd["repository"]["origin"]')" = "" ] \
+    || fail "unresolved project borrowed an origin from the caller repository"
+  [ "$(json_value "$out" 'd["repository"]["object_format"]')" = unknown ] \
+    || fail "unresolved project borrowed an object format from the caller repository"
+
   mkdir -p "$cache"
   chmod 0600 "$cache"
   out=$(run_json "$home" sample --cache-root "$cache")

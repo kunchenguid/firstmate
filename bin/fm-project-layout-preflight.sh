@@ -208,139 +208,141 @@ else
   if fmp_path_has_symlink_component "$PROJECT_REQUESTED"; then
     add_blocker project_symlink "Project path has a symlink component"
   fi
-  PROJECTS_PHYSICAL=$(fmp_existing_path_physical "$HOME_PHYSICAL/projects" 2>/dev/null) || PROJECTS_PHYSICAL=
-  if [ -z "$PROJECTS_PHYSICAL" ] || [ -z "$PROJECT_PHYSICAL" ] || ! fmp_path_is_within "$PROJECTS_PHYSICAL" "$PROJECT_PHYSICAL"; then
-    add_blocker project_path_escape "Project does not resolve beneath the supplied home's projects directory"
-  fi
-  PROJECT_UID=$(fmp_stat_uid "$PROJECT_PHYSICAL" 2>/dev/null) || PROJECT_UID=unknown
-  PROJECT_MODE=$(fmp_stat_mode "$PROJECT_PHYSICAL" 2>/dev/null) || PROJECT_MODE=unknown
-  if [ "$PROJECT_UID" != unknown ] && [ "$PROJECT_UID" != "$CURRENT_UID" ]; then
-    add_blocker project_owner_mismatch "Project is not owned by the current user"
-  fi
-  if [ "$PROJECT_MODE" != unknown ] && fmp_mode_group_or_world_writable "$PROJECT_MODE"; then
-    add_blocker project_writable_by_others "Project is group- or world-writable"
-  fi
-
   if [ -z "$PROJECT_PHYSICAL" ]; then
     add_blocker project_unresolved "Project path could not be resolved to a readable physical directory"
-  elif ! git -C "$PROJECT_PHYSICAL" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    add_blocker project_not_worktree "Project is not an ordinary Git working tree"
   else
-    PROJECT_GIT_DIR=$(fmp_git_absolute_dir "$PROJECT_PHYSICAL" git 2>/dev/null) || PROJECT_GIT_DIR=
-    PROJECT_COMMON_DIR=$(fmp_git_absolute_dir "$PROJECT_PHYSICAL" common 2>/dev/null) || PROJECT_COMMON_DIR=
-    [ -n "$PROJECT_GIT_DIR" ] || add_blocker git_dir_unreadable "Project Git directory cannot be resolved"
-    [ -n "$PROJECT_COMMON_DIR" ] || add_blocker common_dir_unreadable "Project common Git directory cannot be resolved"
-    OBJECT_FORMAT=$(fmp_git_object_format "$PROJECT_PHYSICAL")
+    PROJECTS_PHYSICAL=$(fmp_existing_path_physical "$HOME_PHYSICAL/projects" 2>/dev/null) || PROJECTS_PHYSICAL=
+    if [ -z "$PROJECTS_PHYSICAL" ] || ! fmp_path_is_within "$PROJECTS_PHYSICAL" "$PROJECT_PHYSICAL"; then
+      add_blocker project_path_escape "Project does not resolve beneath the supplied home's projects directory"
+    fi
+    PROJECT_UID=$(fmp_stat_uid "$PROJECT_PHYSICAL" 2>/dev/null) || PROJECT_UID=unknown
+    PROJECT_MODE=$(fmp_stat_mode "$PROJECT_PHYSICAL" 2>/dev/null) || PROJECT_MODE=unknown
+    if [ "$PROJECT_UID" != unknown ] && [ "$PROJECT_UID" != "$CURRENT_UID" ]; then
+      add_blocker project_owner_mismatch "Project is not owned by the current user"
+    fi
+    if [ "$PROJECT_MODE" != unknown ] && fmp_mode_group_or_world_writable "$PROJECT_MODE"; then
+      add_blocker project_writable_by_others "Project is group- or world-writable"
+    fi
 
-    ORIGIN_RAW=$(git -C "$PROJECT_PHYSICAL" remote get-url origin 2>/dev/null) || ORIGIN_RAW=
-    if [ -n "$ORIGIN_RAW" ]; then
-      ORIGIN_PRESENT=true
-      ORIGIN_REDACTED=$(fmp_redact_origin "$ORIGIN_RAW")
-      ORIGIN_IDENTITY=$(printf '%s' "$ORIGIN_REDACTED" | fmp_fingerprint)
-      if fmp_origin_has_http_credentials "$ORIGIN_RAW"; then
-        add_blocker origin_embedded_credentials "Origin contains embedded HTTP credentials or query/fragment material; sensitive text was redacted"
-      fi
+    if ! git -C "$PROJECT_PHYSICAL" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      add_blocker project_not_worktree "Project is not an ordinary Git working tree"
     else
-      add_blocker no_origin "Project has no origin remote"
-    fi
+      PROJECT_GIT_DIR=$(fmp_git_absolute_dir "$PROJECT_PHYSICAL" git 2>/dev/null) || PROJECT_GIT_DIR=
+      PROJECT_COMMON_DIR=$(fmp_git_absolute_dir "$PROJECT_PHYSICAL" common 2>/dev/null) || PROJECT_COMMON_DIR=
+      [ -n "$PROJECT_GIT_DIR" ] || add_blocker git_dir_unreadable "Project Git directory cannot be resolved"
+      [ -n "$PROJECT_COMMON_DIR" ] || add_blocker common_dir_unreadable "Project common Git directory cannot be resolved"
+      OBJECT_FORMAT=$(fmp_git_object_format "$PROJECT_PHYSICAL")
 
-    DEFAULT_BRANCH=$(fmp_git_default_branch "$PROJECT_PHYSICAL" 2>/dev/null) || DEFAULT_BRANCH=
-    if [ -z "$DEFAULT_BRANCH" ]; then
-      add_blocker default_branch_unknown "Remote default branch cannot be determined from local refs"
-    fi
-    CURRENT_BRANCH=$(git -C "$PROJECT_PHYSICAL" symbolic-ref --quiet --short HEAD 2>/dev/null) || CURRENT_BRANCH=DETACHED
-    if [ -n "$DEFAULT_BRANCH" ] && [ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]; then
-      OFF_DEFAULT=true
-      add_blocker off_default "Project checkout is not on its remote default branch"
-    fi
+      ORIGIN_RAW=$(git -C "$PROJECT_PHYSICAL" remote get-url origin 2>/dev/null) || ORIGIN_RAW=
+      if [ -n "$ORIGIN_RAW" ]; then
+        ORIGIN_PRESENT=true
+        ORIGIN_REDACTED=$(fmp_redact_origin "$ORIGIN_RAW")
+        ORIGIN_IDENTITY=$(printf '%s' "$ORIGIN_REDACTED" | fmp_fingerprint)
+        if fmp_origin_has_http_credentials "$ORIGIN_RAW"; then
+          add_blocker origin_embedded_credentials "Origin contains embedded HTTP credentials or query/fragment material; sensitive text was redacted"
+        fi
+      else
+        add_blocker no_origin "Project has no origin remote"
+      fi
 
-    if [ -n "$(git -C "$PROJECT_PHYSICAL" status --porcelain=v1 --untracked-files=normal 2>/dev/null)" ]; then
-      DIRTY=true
-      add_blocker dirty_worktree "Project checkout has uncommitted or untracked changes"
-    fi
+      DEFAULT_BRANCH=$(fmp_git_default_branch "$PROJECT_PHYSICAL" 2>/dev/null) || DEFAULT_BRANCH=
+      if [ -z "$DEFAULT_BRANCH" ]; then
+        add_blocker default_branch_unknown "Remote default branch cannot be determined from local refs"
+      fi
+      CURRENT_BRANCH=$(git -C "$PROJECT_PHYSICAL" symbolic-ref --quiet --short HEAD 2>/dev/null) || CURRENT_BRANCH=DETACHED
+      if [ -n "$DEFAULT_BRANCH" ] && [ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]; then
+        OFF_DEFAULT=true
+        add_blocker off_default "Project checkout is not on its remote default branch"
+      fi
 
-    if [ -n "$DEFAULT_BRANCH" ] \
-      && git -C "$PROJECT_PHYSICAL" rev-parse --verify --quiet "refs/heads/$DEFAULT_BRANCH^{commit}" >/dev/null 2>&1 \
-      && git -C "$PROJECT_PHYSICAL" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT_BRANCH^{commit}" >/dev/null 2>&1; then
-      COUNTS=$(git -C "$PROJECT_PHYSICAL" rev-list --left-right --count "$DEFAULT_BRANCH...origin/$DEFAULT_BRANCH" 2>/dev/null) || COUNTS=
-      if [ -n "$COUNTS" ]; then
-        DEFAULT_AHEAD=${COUNTS%%[[:space:]]*}
-        DEFAULT_BEHIND=${COUNTS##*[[:space:]]}
-        if [ "$DEFAULT_AHEAD" -gt 0 ] && [ "$DEFAULT_BEHIND" -gt 0 ]; then
-          DIVERGED=true
-          add_blocker default_diverged "Local and remote default branches have diverged"
-        elif [ "$DEFAULT_AHEAD" -gt 0 ]; then
-          add_blocker default_ahead "Local default branch is ahead of its origin default ref"
-        elif [ "$DEFAULT_BEHIND" -gt 0 ]; then
-          add_warning default_behind "Local default branch is behind its cached origin ref"
+      if [ -n "$(git -C "$PROJECT_PHYSICAL" status --porcelain=v1 --untracked-files=normal 2>/dev/null)" ]; then
+        DIRTY=true
+        add_blocker dirty_worktree "Project checkout has uncommitted or untracked changes"
+      fi
+
+      if [ -n "$DEFAULT_BRANCH" ] \
+        && git -C "$PROJECT_PHYSICAL" rev-parse --verify --quiet "refs/heads/$DEFAULT_BRANCH^{commit}" >/dev/null 2>&1 \
+        && git -C "$PROJECT_PHYSICAL" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT_BRANCH^{commit}" >/dev/null 2>&1; then
+        COUNTS=$(git -C "$PROJECT_PHYSICAL" rev-list --left-right --count "$DEFAULT_BRANCH...origin/$DEFAULT_BRANCH" 2>/dev/null) || COUNTS=
+        if [ -n "$COUNTS" ]; then
+          DEFAULT_AHEAD=${COUNTS%%[[:space:]]*}
+          DEFAULT_BEHIND=${COUNTS##*[[:space:]]}
+          if [ "$DEFAULT_AHEAD" -gt 0 ] && [ "$DEFAULT_BEHIND" -gt 0 ]; then
+            DIVERGED=true
+            add_blocker default_diverged "Local and remote default branches have diverged"
+          elif [ "$DEFAULT_AHEAD" -gt 0 ]; then
+            add_blocker default_ahead "Local default branch is ahead of its origin default ref"
+          elif [ "$DEFAULT_BEHIND" -gt 0 ]; then
+            add_warning default_behind "Local default branch is behind its cached origin ref"
+          fi
         fi
       fi
-    fi
 
-    UNPUSHED_COUNT=$(git -C "$PROJECT_PHYSICAL" rev-list --count --branches --not --remotes 2>/dev/null) || UNPUSHED_COUNT=0
-    case "$UNPUSHED_COUNT" in ''|*[!0-9]*) UNPUSHED_COUNT=0 ;; esac
-    if [ "$UNPUSHED_COUNT" -gt 0 ]; then
-      add_blocker unpushed_commits "Local branches contain commits not reachable from any remote ref"
-    fi
+      UNPUSHED_COUNT=$(git -C "$PROJECT_PHYSICAL" rev-list --count --branches --not --remotes 2>/dev/null) || UNPUSHED_COUNT=0
+      case "$UNPUSHED_COUNT" in ''|*[!0-9]*) UNPUSHED_COUNT=0 ;; esac
+      if [ "$UNPUSHED_COUNT" -gt 0 ]; then
+        add_blocker unpushed_commits "Local branches contain commits not reachable from any remote ref"
+      fi
 
-    if [ "$(git -C "$PROJECT_PHYSICAL" rev-parse --is-shallow-repository 2>/dev/null || echo false)" = true ]; then
-      SHALLOW=true
-      add_blocker shallow_repository "Project is shallow"
-    fi
-    if git -C "$PROJECT_PHYSICAL" config --get extensions.partialClone >/dev/null 2>&1 \
-      || git -C "$PROJECT_PHYSICAL" config --get-regexp '^remote\..*\.partialclonefilter$' >/dev/null 2>&1; then
-      PARTIAL=true
-      add_blocker partial_clone "Project uses partial-clone configuration"
-    fi
-    if git -C "$PROJECT_PHYSICAL" config --get-regexp '^remote\..*\.promisor$' 2>/dev/null \
-      | awk '$NF == "true" { found=1 } END { exit found ? 0 : 1 }'; then
-      PROMISOR=true
-      add_blocker promisor_remote "Project has a promisor remote"
-    fi
-    REPLACE_REF_COUNT=$(git -C "$PROJECT_PHYSICAL" for-each-ref --format='%(refname)' refs/replace 2>/dev/null | awk 'NF { n++ } END { print n+0 }')
-    if [ "$REPLACE_REF_COUNT" -gt 0 ]; then
-      add_blocker replace_refs "Project has replace refs"
-    fi
-    if [ -n "$PROJECT_COMMON_DIR" ] && [ -s "$PROJECT_COMMON_DIR/info/grafts" ]; then
-      GRAFTS=true
-      add_blocker grafts "Project has legacy grafts"
-    fi
-    ALTERNATES_PATH=$(git -C "$PROJECT_PHYSICAL" rev-parse --path-format=absolute --git-path objects/info/alternates 2>/dev/null) || ALTERNATES_PATH=
-    if [ -n "$ALTERNATES_PATH" ] && [ -s "$ALTERNATES_PATH" ]; then
-      ALTERNATE=true
-      add_blocker unexpected_alternate "Project already borrows from an alternate object store"
-    fi
-    if [ -n "${GIT_ALTERNATE_OBJECT_DIRECTORIES:-}" ]; then
-      ALTERNATE=true
-      add_blocker ambient_alternate "GIT_ALTERNATE_OBJECT_DIRECTORIES is set in the preflight environment"
-    fi
-    if git -C "$PROJECT_PHYSICAL" remote get-url no-mistakes >/dev/null 2>&1; then
-      NO_MISTAKES_REMOTE=true
-    fi
+      if [ "$(git -C "$PROJECT_PHYSICAL" rev-parse --is-shallow-repository 2>/dev/null || echo false)" = true ]; then
+        SHALLOW=true
+        add_blocker shallow_repository "Project is shallow"
+      fi
+      if git -C "$PROJECT_PHYSICAL" config --get extensions.partialClone >/dev/null 2>&1 \
+        || git -C "$PROJECT_PHYSICAL" config --get-regexp '^remote\..*\.partialclonefilter$' >/dev/null 2>&1; then
+        PARTIAL=true
+        add_blocker partial_clone "Project uses partial-clone configuration"
+      fi
+      if git -C "$PROJECT_PHYSICAL" config --get-regexp '^remote\..*\.promisor$' 2>/dev/null \
+        | awk '$NF == "true" { found=1 } END { exit found ? 0 : 1 }'; then
+        PROMISOR=true
+        add_blocker promisor_remote "Project has a promisor remote"
+      fi
+      REPLACE_REF_COUNT=$(git -C "$PROJECT_PHYSICAL" for-each-ref --format='%(refname)' refs/replace 2>/dev/null | awk 'NF { n++ } END { print n+0 }')
+      if [ "$REPLACE_REF_COUNT" -gt 0 ]; then
+        add_blocker replace_refs "Project has replace refs"
+      fi
+      if [ -n "$PROJECT_COMMON_DIR" ] && [ -s "$PROJECT_COMMON_DIR/info/grafts" ]; then
+        GRAFTS=true
+        add_blocker grafts "Project has legacy grafts"
+      fi
+      ALTERNATES_PATH=$(git -C "$PROJECT_PHYSICAL" rev-parse --path-format=absolute --git-path objects/info/alternates 2>/dev/null) || ALTERNATES_PATH=
+      if [ -n "$ALTERNATES_PATH" ] && [ -s "$ALTERNATES_PATH" ]; then
+        ALTERNATE=true
+        add_blocker unexpected_alternate "Project already borrows from an alternate object store"
+      fi
+      if [ -n "${GIT_ALTERNATE_OBJECT_DIRECTORIES:-}" ]; then
+        ALTERNATE=true
+        add_blocker ambient_alternate "GIT_ALTERNATE_OBJECT_DIRECTORIES is set in the preflight environment"
+      fi
+      if git -C "$PROJECT_PHYSICAL" remote get-url no-mistakes >/dev/null 2>&1; then
+        NO_MISTAKES_REMOTE=true
+      fi
 
-    WORKTREE_DATA=$(git -C "$PROJECT_PHYSICAL" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || WORKTREE_DATA=
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        worktree\ *)
-          WORKTREE_PATH=${line#worktree }
-          WORKTREE_COUNT=$((WORKTREE_COUNT + 1))
-          if ! paths_match "$WORKTREE_PATH" "$PROJECT_PHYSICAL"; then
-            EXTRA_WORKTREE_COUNT=$((EXTRA_WORKTREE_COUNT + 1))
-            EXTRA_WORKTREES+=("$WORKTREE_PATH")
-            case "$WORKTREE_PATH" in
-              */.no-mistakes/*) NO_MISTAKES_WORKTREE_COUNT=$((NO_MISTAKES_WORKTREE_COUNT + 1)) ;;
-            esac
-          fi
-          ;;
-      esac
-    done <<EOF
+      WORKTREE_DATA=$(git -C "$PROJECT_PHYSICAL" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || WORKTREE_DATA=
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          worktree\ *)
+            WORKTREE_PATH=${line#worktree }
+            WORKTREE_COUNT=$((WORKTREE_COUNT + 1))
+            if ! paths_match "$WORKTREE_PATH" "$PROJECT_PHYSICAL"; then
+              EXTRA_WORKTREE_COUNT=$((EXTRA_WORKTREE_COUNT + 1))
+              EXTRA_WORKTREES+=("$WORKTREE_PATH")
+              case "$WORKTREE_PATH" in
+                */.no-mistakes/*) NO_MISTAKES_WORKTREE_COUNT=$((NO_MISTAKES_WORKTREE_COUNT + 1)) ;;
+              esac
+            fi
+            ;;
+        esac
+      done <<EOF
 $WORKTREE_DATA
 EOF
-    if [ "$EXTRA_WORKTREE_COUNT" -gt 0 ]; then
-      add_blocker linked_worktrees "Project has linked worktrees beyond its control checkout"
-    fi
-    if [ "$NO_MISTAKES_WORKTREE_COUNT" -gt 0 ]; then
-      add_blocker no_mistakes_run_worktree "Project has a linked no-mistakes worktree"
+      if [ "$EXTRA_WORKTREE_COUNT" -gt 0 ]; then
+        add_blocker linked_worktrees "Project has linked worktrees beyond its control checkout"
+      fi
+      if [ "$NO_MISTAKES_WORKTREE_COUNT" -gt 0 ]; then
+        add_blocker no_mistakes_run_worktree "Project has a linked no-mistakes worktree"
+      fi
     fi
   fi
 fi
@@ -420,7 +422,7 @@ if [ -f "$HOME_PHYSICAL/data/secondmates.md" ] && [ ! -L "$HOME_PHYSICAL/data/se
       fi
       continue
     fi
-    [ "$SECONDMATE_REGISTRY_HOME" != "$HOME_PHYSICAL" ] || continue
+    ! paths_match "$SECONDMATE_REGISTRY_HOME" "$HOME_PHYSICAL" || continue
     SIBLING_PROJECT="$SECONDMATE_REGISTRY_HOME/projects/$PROJECT_NAME"
     [ -d "$SIBLING_PROJECT" ] || continue
     SIBLING_ORIGIN=$(git -C "$SIBLING_PROJECT" remote get-url origin 2>/dev/null) || SIBLING_ORIGIN=
@@ -496,8 +498,7 @@ if [ -n "$CACHE_ARG" ]; then
     add_blocker cache_path_unsafe "Proposed cache path is not a traversal-free absolute path"
   elif fmp_path_has_symlink_component "$CACHE_ARG"; then
     add_blocker cache_symlink "Proposed cache path has a symlink component"
-  fi
-  if [ ! -d "$CACHE_ARG" ]; then
+  elif [ ! -d "$CACHE_ARG" ]; then
     add_blocker cache_missing "Proposed cache repository does not exist; preflight will not create it"
     CACHE_ANCESTOR=$(fmp_nearest_existing_ancestor "$CACHE_ARG" 2>/dev/null) || CACHE_ANCESTOR=
     if [ -n "$CACHE_ANCESTOR" ]; then
