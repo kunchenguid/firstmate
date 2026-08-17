@@ -245,7 +245,8 @@ SH
 }
 
 # fm_lint_isolated_bin <tmp> <command>...: build a directory of symlinks to the
-# named real commands and print it, for use as a COMPLETE replacement PATH.
+# named real commands and report it in FM_TEST_ISOLATED_BIN, for use as a
+# COMPLETE replacement PATH.
 #
 # The missing-tool tests need a PATH with provably no shellcheck on it. Trimming
 # the ambient PATH cannot promise that (a contributor may have shellcheck in
@@ -253,9 +254,16 @@ SH
 # worse than no test. An allowlisted PATH inverts that: shellcheck is absent
 # because nothing was linked, on every host. A command that cannot be resolved
 # fails the test rather than leaving the run to fail later for the wrong reason.
+#
+# It answers through a variable instead of stdout precisely so that promise
+# holds: called as `dir=$(fm_lint_isolated_bin ...)` its own `fail` would exit
+# only the command-substitution subshell, and the caller would keep going with an
+# empty PATH - turning a host-setup problem into a bogus refusal diagnosis, and
+# writing stubs to filesystem-root paths like /shellcheck along the way.
 fm_lint_isolated_bin() {
   local tmp=$1 dir resolved cmd
   shift
+  FM_TEST_ISOLATED_BIN=
   dir="$tmp/isolated-bin"
   mkdir -p "$dir" || fail "could not create an isolated bin directory"
   for cmd in "$@"; do
@@ -265,7 +273,7 @@ fm_lint_isolated_bin() {
   done
   PATH="$dir" command -v shellcheck >/dev/null 2>&1 \
     && fail "the isolated PATH resolved a shellcheck, so the missing-tool path would go untested"
-  printf '%s\n' "$dir"
+  FM_TEST_ISOLATED_BIN=$dir
 }
 
 # The commands fm-lint.sh itself needs before it can resolve ShellCheck at all.
@@ -305,7 +313,8 @@ test_missing_shellcheck_refuses_instead_of_passing() {
   local tmp isolated out rc
   tmp=$(fm_test_tmproot fm-lint-missing-tool)
   # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
-  isolated=$(fm_lint_isolated_bin "$tmp" $FM_LINT_REFUSAL_PATH_COMMANDS)
+  fm_lint_isolated_bin "$tmp" $FM_LINT_REFUSAL_PATH_COMMANDS
+  isolated=$FM_TEST_ISOLATED_BIN
 
   rc=0
   # CI=true selects the full canonical set, so this reaches the tool check
@@ -323,7 +332,8 @@ test_wrong_version_and_unversioned_tool_share_the_refusal() {
   # The full run set: version resolution happens after the other tool checks, so
   # a thinner PATH would refuse for the wrong reason and prove nothing.
   # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
-  isolated=$(fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS)
+  fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS
+  isolated=$FM_TEST_ISOLATED_BIN
 
   cat > "$isolated/shellcheck" <<'SH'
 #!/usr/bin/env bash
@@ -357,7 +367,8 @@ test_pin_and_inventory_answer_without_any_shellcheck() {
   local tmp isolated version listed rc
   tmp=$(fm_test_tmproot fm-lint-no-tool-queries)
   # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
-  isolated=$(fm_lint_isolated_bin "$tmp" $FM_LINT_REFUSAL_PATH_COMMANDS)
+  fm_lint_isolated_bin "$tmp" $FM_LINT_REFUSAL_PATH_COMMANDS
+  isolated=$FM_TEST_ISOLATED_BIN
 
   rc=0
   version=$(PATH="$isolated" "$LINT" --required-version 2>&1) || rc=$?
@@ -381,7 +392,8 @@ test_installer_learns_the_pin_with_no_shellcheck_present() {
   local tmp isolated destination out rc installed
   tmp=$(fm_test_tmproot fm-shellcheck-install-no-tool)
   # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
-  isolated=$(fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS install)
+  fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS install
+  isolated=$FM_TEST_ISOLATED_BIN
   destination="$tmp/provisioned"
   fm_lint_stub_download "$isolated"
 
@@ -403,7 +415,8 @@ test_ci_provisioned_shape_never_refuses() {
   local tmp isolated log out rc
   tmp=$(fm_test_tmproot fm-lint-ci-shape)
   # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
-  isolated=$(fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS)
+  fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS
+  isolated=$FM_TEST_ISOLATED_BIN
   log="$tmp/shellcheck.log"
   fm_lint_stub_shellcheck "$isolated" "$log"
 
@@ -422,7 +435,8 @@ test_provisioning_is_opt_in_and_never_degrades_to_a_pass() {
   local tmp isolated target out rc
   tmp=$(fm_test_tmproot fm-lint-provision)
   # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
-  isolated=$(fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS install)
+  fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS install
+  isolated=$FM_TEST_ISOLATED_BIN
   target="$tmp/good.sh"
   printf '#!/usr/bin/env bash\nset -eu\nprintf "ok\\n"\n' > "$target"
 
@@ -449,15 +463,105 @@ test_provisioning_is_opt_in_and_never_degrades_to_a_pass() {
   [ "$rc" -eq 0 ] || fail "FM_LINT_PROVISION_SHELLCHECK did not provision the pin"$'\n'"$out"
   [ -x "$tmp/provisioned-env/shellcheck" ] || fail "FM_LINT_PROVISION_SHELLCHECK installed no ShellCheck"
 
-  # A failed opt-in must refuse, never quietly lint with nothing or pass.
+  # From here the network is unreachable, exactly as on an offline host.
   printf '#!/usr/bin/env bash\nexit 22\n' > "$isolated/curl"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$isolated/sleep"
   chmod +x "$isolated/curl" "$isolated/sleep"
+
+  # The opt-in ENSURES the pin rather than always fetching it: a directory that
+  # already holds the pinned build must lint without reaching the network, or the
+  # documented env-var form would refetch on every validation run and refuse
+  # offline while the correct binary sits on disk.
+  rc=0
+  out=$(PATH="$isolated" CI=true FM_LINT_JOBS=1 \
+    "$LINT" --provision-shellcheck "$tmp/provisioned" "$target" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "an already-provisioned pin refused with the network unreachable"$'\n'"$out"
+  assert_not_contains "$out" "LINT NOT RUN" "reusing an already-provisioned pin still refused"
+
+  # Skipping the download must never skip the pin: a binary in the opt-in
+  # directory that is not the pinned version refuses like any other version skew.
+  mkdir -p "$tmp/tampered"
+  cat > "$tmp/tampered/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.9.9\n'
+fi
+exit 0
+SH
+  chmod +x "$tmp/tampered/shellcheck"
+  rc=0
+  out=$(PATH="$isolated" CI=true \
+    "$LINT" --provision-shellcheck "$tmp/tampered" "$target" 2>&1) || rc=$?
+  fm_lint_assert_refusal "$out" "$rc" "an opt-in directory holding a ShellCheck that is not the pin"
+
+  # A failed opt-in must refuse, never quietly lint with nothing or pass.
   rc=0
   out=$(PATH="$isolated" CI=true \
     "$LINT" --provision-shellcheck "$tmp/failed" "$target" 2>&1) || rc=$?
   fm_lint_assert_refusal "$out" "$rc" "a failed opt-in provisioning"
-  pass "fm-lint.sh provisions only on request and refuses when that request fails"
+  pass "fm-lint.sh provisions only on request, reuses an existing pin, and refuses when that request fails"
+}
+
+test_unusable_temp_directory_refuses_on_the_could_not_run_status() {
+  # A host that cannot hand the gate a temp directory (a TMPDIR that does not
+  # exist, a full disk) checked nothing, so it must land on the declared
+  # could-not-run status rather than on 1, which the same contract defines as
+  # "ShellCheck reported findings". The status is the load-bearing signal: a
+  # consumer capturing neither stream still has to fail the gate on it.
+  local tmp isolated log target out rc
+  tmp=$(fm_test_tmproot fm-lint-no-tmpdir)
+  # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
+  fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS
+  isolated=$FM_TEST_ISOLATED_BIN
+  log="$tmp/shellcheck.log"
+  fm_lint_stub_shellcheck "$isolated" "$log"
+  target="$tmp/good.sh"
+  printf '#!/usr/bin/env bash\nset -eu\nprintf "ok\\n"\n' > "$target"
+
+  rc=0
+  out=$(PATH="$isolated" CI=true FM_LINT_JOBS=1 TMPDIR="$tmp/absent" \
+    "$LINT" "$target" 2>&1) || rc=$?
+  [ "$rc" -eq "$FM_LINT_REFUSED_EXIT" ] \
+    || fail "an unusable TMPDIR exited $rc, not the could-not-run status $FM_LINT_REFUSED_EXIT"$'\n'"$out"
+  assert_contains "$out" "LINT NOT RUN" "an unusable TMPDIR did not visibly mark the lint as not run"
+  [ ! -s "$log" ] \
+    || fail "a run that could not create its temp directory still claimed to check files"$'\n'"$(cat "$log")"
+  pass "fm-lint.sh refuses on the could-not-run status when it cannot create a temp directory"
+}
+
+test_lost_worker_result_refuses_on_the_could_not_run_status() {
+  # A bounded worker that dies before recording its result leaves its shard
+  # unverified. Reporting that as a findings status (1) or a usage status (2)
+  # would describe a run that never happened, so it refuses on the same
+  # could-not-run status as a missing tool.
+  local tmp isolated target out rc
+  tmp=$(fm_test_tmproot fm-lint-lost-worker)
+  # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
+  fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS
+  isolated=$FM_TEST_ISOLATED_BIN
+  # Reproduce the worker dying mid-shard (an out-of-memory kill, a hard host
+  # timeout): this stub kills the worker shell that is waiting on it, so no
+  # shard result is ever written.
+  cat > "$isolated/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+kill -KILL "$PPID"
+exit 0
+SH
+  chmod +x "$isolated/shellcheck"
+  target="$tmp/good.sh"
+  printf '#!/usr/bin/env bash\nset -eu\nprintf "ok\\n"\n' > "$target"
+
+  rc=0
+  out=$(PATH="$isolated" CI=true FM_LINT_JOBS=1 "$LINT" "$target" 2>&1) || rc=$?
+  [ "$rc" -eq "$FM_LINT_REFUSED_EXIT" ] \
+    || fail "a lost worker result exited $rc, not the could-not-run status $FM_LINT_REFUSED_EXIT"$'\n'"$out"
+  assert_contains "$out" "LINT NOT RUN" "a lost worker result did not visibly mark the lint as not run"
+  pass "fm-lint.sh refuses on the could-not-run status when a worker result never arrives"
 }
 
 # fm_lint_stub_download <dir>: stub the network and archive tools
@@ -1113,6 +1217,8 @@ test_pin_and_inventory_answer_without_any_shellcheck
 test_installer_learns_the_pin_with_no_shellcheck_present
 test_ci_provisioned_shape_never_refuses
 test_provisioning_is_opt_in_and_never_degrades_to_a_pass
+test_unusable_temp_directory_refuses_on_the_could_not_run_status
+test_lost_worker_result_refuses_on_the_could_not_run_status
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes

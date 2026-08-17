@@ -36,12 +36,17 @@
 #   0  the selected file set is clean, or there were no changed lint targets
 #   1  ShellCheck reported findings
 #   2  invalid usage
-#   3  the lint could not run and NOTHING was checked (see the refusal below)
+#   3  the lint could not run to completion, so NOTHING it reports can be
+#      trusted (see the refusal below)
 #
 # This gate refuses instead of passing when it cannot run. A missing ShellCheck,
-# a ShellCheck that is not the pin, one that will not report its version, and a
-# missing perl all print an unmissable "LINT NOT RUN" line naming the tool, the
-# exact version required, and how to get it, then exit 3.
+# a ShellCheck that is not the pin, one that will not report its version, a
+# missing perl, a repository root it cannot enter, a temporary directory it
+# cannot create, and a bounded worker whose result never arrived all print an
+# unmissable "LINT NOT RUN" line naming what is missing - plus, when ShellCheck
+# is the missing piece, the exact version required and how to get it - then exit
+# 3. EVERY path that could not check the selected files lands there, so a
+# nonzero status is never a lint failure that in fact never ran.
 # 3 is deliberately not 127: 127 is the shell's own "command not found", so a
 # caller that sees it cannot tell whether this script refused or was never found
 # at all, and a gate that reads lint output for actionable findings sees none in
@@ -50,11 +55,15 @@
 # Provisioning is opt-in and never a side effect of linting, because a gate that
 # reaches the network to validate is harder to trust and breaks on an offline
 # host. A caller that deliberately wants it passes --provision-shellcheck <dir>
-# (or sets FM_LINT_PROVISION_SHELLCHECK=<dir>); this script then installs the
-# pinned, checksum-verified build there through bin/fm-install-shellcheck.sh and
-# puts it first on PATH for that run only. A provisioning attempt that fails
-# refuses exactly like a missing tool; it never degrades into a pass. CI
-# provisions in its own step (.github/workflows/ci.yml) and never needs this.
+# (or sets FM_LINT_PROVISION_SHELLCHECK=<dir>) to ENSURE the pin is present in
+# <dir>: an existing <dir>/shellcheck that already reports the pinned version is
+# only put first on PATH, and the pinned, checksum-verified build is installed
+# through bin/fm-install-shellcheck.sh only when <dir> does not already hold it,
+# so a repeat run neither refetches nor breaks offline. Either way the version
+# enforcement below still runs on whatever ends up on PATH, so skipping the
+# download can never skip the pin. A provisioning attempt that fails refuses
+# exactly like a missing tool; it never degrades into a pass. CI provisions in
+# its own step (.github/workflows/ci.yml) and never needs this.
 #
 # --required-version and --list-files answer with no ShellCheck present at all,
 # because bin/fm-install-shellcheck.sh asks this script which version to fetch:
@@ -66,7 +75,8 @@
 #   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --provision-shellcheck <dir>
-#                                      opt in to installing the pin into <dir>
+#                                      opt in to ensuring the pin is in <dir>,
+#                                      installing it only if it is not already
 #   fm-lint.sh --required-version      print the ShellCheck pin
 #   fm-lint.sh --list-files            print the file set that would be linted
 #   fm-lint.sh --help                  print this usage
@@ -80,7 +90,6 @@ REFUSED_EXIT=3
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/fm-lint.sh"
 ROOT="$(cd "$SELF_DIR/.." && pwd)"
-cd "$ROOT" || exit 1
 
 # fm_lint_refuse <reason> [shellcheck]: the single exit for "this gate could not
 # run". Says so unmissably rather than letting a caller read silence as a clean
@@ -88,7 +97,7 @@ cd "$ROOT" || exit 1
 # version, and both ways to get it. See the exit-status note in the header.
 fm_lint_refuse() {
   printf 'fm-lint.sh: LINT NOT RUN: %s\n' "$1" >&2
-  printf 'fm-lint.sh: nothing was checked, so this is a failed lint gate, not a clean one.\n' >&2
+  printf 'fm-lint.sh: nothing trustworthy was checked, so this is a failed lint gate, not a clean one.\n' >&2
   if [ "${2:-}" = shellcheck ]; then
     printf 'fm-lint.sh: required tool: ShellCheck, exactly version %s (pinned so local and CI cannot diverge).\n' \
       "$REQUIRED_SHELLCHECK" >&2
@@ -98,12 +107,33 @@ fm_lint_refuse() {
   exit "$REFUSED_EXIT"
 }
 
+# The repository root every relative canonical root and worker manifest path is
+# resolved against. Refuses on the same contract when it cannot be entered: the
+# selected file set would be unreachable, so nothing could be checked.
+cd "$ROOT" || fm_lint_refuse "could not enter the repository root $ROOT"
+
 # fm_lint_provision_shellcheck <dir>: opt-in only, never reached by a default
-# lint. Installs the pinned, checksum-verified build into <dir> and puts it first
-# on PATH for this run. A failed install refuses; it never falls through to a
-# lint that silently used some other ShellCheck, or to no lint at all.
+# lint. ENSURES the pinned, checksum-verified build is in <dir> and puts <dir>
+# first on PATH for this run: a <dir>/shellcheck that already reports the pin is
+# used as it stands, so a repeat run does not refetch and an offline host with
+# the right binary already on disk still lints; anything else is installed. A
+# failed install refuses; it never falls through to a lint that silently used
+# some other ShellCheck, or to no lint at all. Skipping the download never skips
+# the pin: the main flow still resolves and enforces the version on whatever
+# this leaves on PATH, so a wrong or tampered binary here still refuses.
 fm_lint_provision_shellcheck() {
-  local dir=$1 log resolved_dir
+  local dir=$1 log resolved_dir present=
+  resolved_dir=$(cd "$dir" 2>/dev/null && pwd) || resolved_dir=
+  if [ -n "$resolved_dir" ] && [ -x "$resolved_dir/shellcheck" ]; then
+    present=$("$resolved_dir/shellcheck" --version 2>/dev/null | awk '/^version:/ {print $2; exit}')
+  fi
+  if [ "$present" = "$REQUIRED_SHELLCHECK" ]; then
+    PATH="$resolved_dir:$PATH"
+    export PATH
+    printf 'fm-lint.sh: ShellCheck %s is already provisioned in %s; not fetching.\n' \
+      "$REQUIRED_SHELLCHECK" "$resolved_dir" >&2
+    return 0
+  fi
   log=$("$SELF_DIR/fm-install-shellcheck.sh" "$dir" 2>&1) || {
     printf '%s\n' "$log" >&2
     fm_lint_refuse "provisioning ShellCheck $REQUIRED_SHELLCHECK into $dir failed" shellcheck
@@ -325,10 +355,12 @@ if ! PERL_BIN=$(command -v perl); then
   fm_lint_refuse 'no perl was found on PATH, and it is required for bounded worker cleanup'
 fi
 resolved=$("$SHELLCHECK_BIN" --version | awk '/^version:/ {print $2; exit}')
-printf 'fm-lint.sh: ShellCheck %s (pinned %s)\n' "$resolved" "$REQUIRED_SHELLCHECK" >&2
+# Reported only once a version actually resolved: a banner with an empty version
+# reads like a successful resolution directly above the refusal that follows it.
 if [ -z "$resolved" ]; then
   fm_lint_refuse "the shellcheck at $SHELLCHECK_BIN did not report a version" shellcheck
 fi
+printf 'fm-lint.sh: ShellCheck %s (pinned %s)\n' "$resolved" "$REQUIRED_SHELLCHECK" >&2
 if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
   fm_lint_refuse "the shellcheck at $SHELLCHECK_BIN is version $resolved, not the pinned $REQUIRED_SHELLCHECK" \
     shellcheck
@@ -349,7 +381,8 @@ if [ -n "$TELEMETRY" ]; then
   }
 fi
 
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-lint.XXXXXX") || exit 1
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-lint.XXXXXX") \
+  || fm_lint_refuse "could not create a temporary working directory under ${TMPDIR:-/tmp}"
 ACTIVE_PIDS=()
 # shellcheck disable=SC2329 # Registered by the EXIT and signal traps below.
 fm_lint_cleanup() {
@@ -514,6 +547,7 @@ fi
 # Replay both stable shards in deterministic order and select the first nonzero
 # shard status. ShellCheck processes every root in a shard after earlier findings.
 overall_rc=0
+lost_shards=
 worker=0
 while [ "$worker" -lt "$SHARD_COUNT" ]; do
   output="$OUTPUT_DIR/shard.$worker"
@@ -521,15 +555,21 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
   if [ -f "$output.rc" ]; then
     rc=$(cat "$output.rc" 2>/dev/null || printf '2')
     case "$rc" in ''|*[!0-9]*) rc=2 ;; esac
+    if [ "$overall_rc" -eq 0 ] && [ "$rc" -ne 0 ]; then
+      overall_rc=$rc
+    fi
   else
-    printf 'fm-lint.sh: worker produced no result for shard %s.\n' "$worker" >&2
-    rc=2
-  fi
-  if [ "$overall_rc" -eq 0 ] && [ "$rc" -ne 0 ]; then
-    overall_rc=$rc
+    lost_shards="${lost_shards:+$lost_shards, }$worker"
   fi
   worker=$((worker + 1))
 done
+
+# A shard whose result never arrived (a worker killed off, an out-of-memory host)
+# leaves its files unverified, so this run has no verdict to report even if the
+# surviving shard was clean. Refused after the replay above so whatever the other
+# shard did find is still printed for whoever has to act on it.
+[ -z "$lost_shards" ] || fm_lint_refuse \
+  "a bounded lint worker produced no result for shard $lost_shards of $SHARD_COUNT, so those files were not checked"
 
 if [ -n "$TELEMETRY" ]; then
   TELEMETRY_END_EPOCH=$(date +%s)
