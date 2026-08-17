@@ -47,6 +47,9 @@ case "${1:-}" in
         duplicate)
           printf '%s\n' '[{"id":"id-a","key":"dup","value":"one","projectId":"proj-1"},{"id":"id-b","key":"dup","value":"two","projectId":"proj-1"}]'
           ;;
+        malformed)
+          printf '%s\n' '{invalid json'
+          ;;
         authenticated|read_only)
           printf '%s\n' '[{"id":"only-id","key":"ONLY","value":"secret-value","note":"sensitive-note","projectId":"proj-1"}]'
           ;;
@@ -181,6 +184,17 @@ test_resolve_duplicate_names() {
   pass 'resolve-id refuses duplicate secret names'
 }
 
+test_resolve_malformed_json() {
+  local rc=0
+  set +e
+  run_with_fake malformed env BWS_ACCESS_TOKEN=ok "$HELPER" resolve-id proj-1 ONLY >/dev/null 2>"$TMP_ROOT/malformed.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "malformed JSON should exit 3, got $rc"
+  assert_not_contains "$(<"$TMP_ROOT/malformed.err")" 'duplicate secret key' 'malformed JSON must not report duplicates'
+  pass 'resolve-id rejects malformed CLI JSON'
+}
+
 test_probe_absent
 test_probe_broken_version
 test_probe_no_token
@@ -192,3 +206,4 @@ test_probe_local_permission_failure
 test_redact_metadata
 test_list_metadata_redacts
 test_resolve_duplicate_names
+test_resolve_malformed_json
