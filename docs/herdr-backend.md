@@ -200,6 +200,67 @@ A Herdr pane id contains a colon, so the adapter splits `window=` on the first c
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
 
+## Fixture operations console
+
+`bin/fm-herdr-operations-console.sh` is an opt-in, fixture-first renderer around one `fm-fleet-snapshot.v1` object.
+The fleet snapshot remains the current-state owner, while the fixture envelope supplies only display labels, explicit profile lanes, navigation hints, privacy-safe activity events, and dependency edges.
+The normalized `fm-herdr-operations-console.v1` object feeds the panel, bounded activity history, and separate ASCII network view so those surfaces cannot drift from one another.
+The panel identifies its Tokyo Night theme and shows project, task, phase, explicit state, profile lane, model, effort, freshness, review need, and Obsidian navigation state.
+States are accepted only from structured current-state evidence and are limited to explicit `Working`, `QA`, `Pending review`, `Waiting`, `Blocked`, `Paused`, `Done`, `Stale`, and `Unknown` labels.
+Missing or expired evidence remains `Unknown` or `Stale`, and silence never becomes `Working` or `Done`.
+`--format status` renders the routine side-panel status block that belongs in Herdr rather than Captain chat.
+Each task shows a state marker, the readable `✓ TESTS`, `◆ COMMIT`, `↗ REVIEW`, and `⚠ BLOCKER` labels, phase, freshness, profile lane, model, effort, and next action.
+The marker is a bracketed word such as `[BLOCKED]` or `[WORKING]`, so an accessible Tokyo Night colour is an added signal and never the only one, and no status is expressed as an emoji.
+Test, commit or version, blocker, and next-action values are displayed only when the fixture records them and otherwise read `Unknown` or `None recorded`.
+Captain chat keeps a plain-language outcome or a single decision question; this panel owns the routine structured detail.
+`ttl_seconds` must be a whole number of seconds between 1 and 86400, so the published display cache always carries a whole-millisecond expiry bound.
+`--format decisions` renders the durable decision inbox for tasks that explicitly need review.
+Each card carries a stable alias built from the task identity plus the authoritative Obsidian stem when the link is supported, for example `D-review-merge · React Library`, together with a one-line question, recommendation, age, blocked task, and readable keyboard tokens such as `[I] Igen` and `[N] Nem`.
+The alias prefers an explicit authoritative Obsidian decision id when the fixture records one as `decision.obsidian_id` in the `D36` form, giving the `D36 · Domain` header; otherwise it falls back to a task-identity token and reports `alias_source` as `obsidian` or `task-identity`.
+The alias is a pure, injective function of that identity: it never uses the card's position, a bounded ordinal, a lossy hash, or a suffix that appears only while another card happens to be open, so resolving, adding, or reordering decisions cannot renumber a survivor or move an alias onto a different task.
+The identity token encodes any character outside `a-z`, `0-9`, and `-` losslessly as `_<codepoint>_`, so ids differing only in case or punctuation such as `aaaaAAA` and `AaAAaaa` can never share an alias.
+`aliases_unique` and `ambiguous_aliases` report the guarantee; if two cards ever shared an alias key the console refuses to focus a card, sets `selection_required`, and asks for explicit selection rather than routing a reply.
+Option key tokens prefer the initial of a word, fall back to the first unused character, and finally to a numeric token, so every option advertises a distinct keystroke even when the option names share all their letters.
+A card is keyed to its task, so a later notification updates the same card; `evidence_signature` changes only when the question, recommendation, or options change, which is what lets a repeat notification avoid repeating the full text.
+A single focused binary card accepts the bare Hungarian words `Igen` or `Nem` without repeating the alias.
+When more than one card is open, `selection_required` is true, no card is focused, and the surface asks for an explicit selection rather than guessing.
+Multi-option cards use short understandable option names and never bare `A`/`B`/`C` codes.
+Every recorded option is retained: `option_count`, `distinct_options`, `duplicate_options`, `options_retained`, `unsupported_options`, and `options_complete` describe the set, and a decision that recorded any option never collapses to a binary `Igen`/`Nem` card.
+Options are compared after every whitespace run is normalized to one space and leading and trailing space is trimmed, so choices that differ only in invisible formatting collapse into one row and are counted as duplicates rather than rendered as rows an operator cannot tell apart.
+Whitespace length is not a meaningful difference: `zip x`, `zip  x`, and a tab-separated variant are one choice reported as duplicates, never separate rows distinguished only by a positional suffix.
+Deduplication keys on that trimmed value rather than on the display label, so an exact repeat is counted as a duplicate and never reported as a lost choice, while two different options that both fail the display check stay distinct.
+An option whose text cannot be displayed safely is shown as a numbered `<unsupported #N>` entry keyed to its position in the distinct set, so distinct unavailable choices are never merged into one row and `unsupported_options` counts each of them.
+The angle-bracket form is outside the character set an ordinary option may use, so a recorded option can never impersonate a redacted one.
+Distinctness is enforced on the rendered label rather than only on the raw value: if two different options would still read alike after redaction or truncation, each colliding row gains a `#N` position suffix, so the card never asserts a complete and distinct set above rows an operator cannot tell apart.
+`options_complete` compares what is shown against the distinct recorded set, so deduplicating a repeat never reads as loss while a genuinely missing option still does.
+Alias shorthand is refused for any decision whose text implies merge, deploy, delete, force-push, credential, production, or installed-app replacement work; those cards report `explicit confirmation required` and `shorthand_allowed` is false.
+That classification reads the raw question, recommendation, option names, blocker, next action, review, task, and project values before truncation or private-path redaction, so a long or redacted merge question can never be downgraded to shorthand-approvable; the check errs toward demanding explicit confirmation.
+The console cannot see Captain chat, so it reports `chat_visibility` as `unsupported` and `chat_ask_state` as `unknown` rather than asserting that a decision was already asked.
+
+`--format selector` renders a display-only mock of the three-step Profile, Model, Effort keyboard flow.
+It offers exactly Company Codex, Personal Codex, Company Claude, and Personal Claude, lists only the models and effort levels the fixture records as verified for each profile, and remembers only a non-secret last selection per profile.
+The preview reports `ready` with the exact tuple, for example `Company Codex · openai-codex/gpt-5.6-sol · high thinking`, and otherwise reports `incomplete`, `unverified`, or `unsupported` with a reason instead of a tuple.
+The mock never launches, switches accounts, copies credentials or session state, or performs a handoff; real launch, account switching, and handoff remain post-validation work.
+The inbox is display-only: it renders no click-to-approve affordance and approves, applies, and mutates nothing.
+Captain chat still carries only a plain-language outcome or a single concise question; this inbox owns the routine card detail.
+Motion is reduced-motion aware through `--reduced-motion`, which reports no pulse, transition, or spinner.
+With motion enabled the contract stays bounded: one pulse for a newly completed awaiting-decision task, one bounded transition on state change, and a bounded spinner only while a task is actively working, never a looping attention animation for waiting or blocked work, and never focus stealing or text obscuring.
+A future five-horizontal-fractal layout prototype is recorded as a documented requirement only; it is not implemented or activated by this fixture console.
+Activity accepts only an allowlisted source and event kind, redacts private-path or secret-like summaries, deduplicates by explicit key, keeps a configured bound, and marks the retained view scrollable.
+The network view uses only validated fixture edges and normalized task states, and an empty edge set says that no dependency was recorded rather than inventing one.
+Obsidian navigation is supported only for an explicit `AI Project Manager` vault link to a safe relative `Items/*.md` file, with every other link rendered as unsupported.
+The renderer reads no agent chat, pane text, process name, prompt, report body, or raw private path.
+Use `--width 76` or another bounded width for a later narrow terminal attachment; this prototype does not configure Tailscale, SSH, mobile access, or the live Captain layout.
+The optional `--publish-metadata <workspace-id>` path is display-only and accepts only an explicitly named `fm-lab-` session through `bin/fm-herdr-lab.sh`; it verifies focus before and after metadata publication and never starts, stops, deletes, approves, or controls a worker.
+The Herdr metadata is therefore a short-lived display cache, not task, approval, worker, project, or AI Project Manager authority.
+
+The deterministic fixture and contract tests are:
+
+```sh
+tests/fm-herdr-operations-console.test.sh
+tests/fm-herdr-lab.test.sh
+```
+
 ## Current transport behavior
 
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
@@ -331,6 +392,7 @@ tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
+tests/fm-herdr-operations-console.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh

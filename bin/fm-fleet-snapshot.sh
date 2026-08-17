@@ -23,6 +23,8 @@
 #   tasks[]: one row per state/<id>.meta, sorted by id.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
 #     state, source, detail, and raw line separately.
+#     model and effort are the explicit launch metadata recorded by fm-spawn;
+#     an absent value remains an empty string and is never inferred from silence.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
@@ -401,7 +403,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind harness mode yolo model effort project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -415,6 +417,8 @@ task_json_lines() {
     harness=$(meta_value "$meta" harness)
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
+    model=$(meta_value "$meta" model)
+    effort=$(meta_value "$meta" effort)
     project=$(meta_value "$meta" project)
     worktree=$(meta_value "$meta" worktree)
     home=$(meta_value "$meta" home)
@@ -534,6 +538,8 @@ task_json_lines() {
       --arg harness "$harness" \
       --arg mode "$mode" \
       --arg yolo "$yolo" \
+      --arg model "$model" \
+      --arg effort "$effort" \
       --arg project "$project" \
       --arg worktree "$worktree" \
       --arg home "$home" \
@@ -564,6 +570,8 @@ task_json_lines() {
         harness:($harness // ""),
         mode:($mode // ""),
         yolo:($yolo // ""),
+        model:($model // ""),
+        effort:($effort // ""),
         project:($project // ""),
         backend:$backend,
         remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),

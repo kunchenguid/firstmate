@@ -243,6 +243,25 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Fixture operations console capability probe
+
+The fixture operations console probe ran on 2026-08-13 against Herdr 0.8.0 protocol 19 on macOS aarch64.
+It used `bin/fm-herdr-lab.sh` to generate, provision, query, and tear down one non-default lab session, with the default-session tripwire unchanged after cleanup.
+The guarded `api schema --json` response exposed `agent.view.set`, `agent.view.clear`, `notification.show`, `workspace.report_metadata`, `workspace.get`, and `session.snapshot`.
+The guarded `workspace report-metadata` response accepted a bounded token set and a TTL, while `workspace create --no-focus` preserved the existing focused workspace when a second workspace was created.
+The fixture adapter and its tests keep those calls behind the helper and use Herdr metadata only as a display cache.
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name herdr-firstmate-operations-console)
+trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" status --json
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" api schema --json
+```
+
+The renderer validation is fixture-only and covers restart determinism, malformed input, duplicate and bounded activity, TTL expiry, profile separation, private-path redaction, focus preservation, narrow output, model and effort projection, and helper-only lab publication.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:
