@@ -97,6 +97,8 @@ Family selection is the ordinary local path; `--all` is deliberate full regressi
 CI owns the complete serial behavior suite, real-Herdr setup, lint, invariants, and the coverage guard in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 The dedicated `water-7` runner executes one job at a time and refuses a suite verdict when the shared host's one-minute load is above 12.
 That conservative queue protects fleet workers at the cost of longer CI latency, and it replaces the former hosted macOS Bash 3.2 lane with the repository's Linux suite.
+Hosted macOS Bash 3.2 coverage was dropped to keep CI on the repository-owned `water-7` runner rather than paid hosted capacity, leaving a recorded portability gap: no CI signal on stock macOS Bash 3.2.
+Cover that gap locally with the existing `bin/fm-test-run.sh` suite on a stock-Bash macOS machine before landing a change to the canonical shell inventory or its portability-sensitive parsing.
 Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--jobs` rules and required gate-skip flags when reproducing a lane locally.
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.

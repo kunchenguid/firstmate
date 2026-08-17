@@ -885,6 +885,7 @@ SH
 test_firstmate_fork_sync_report() {
   local case_dir fixture repo remote fakebin out
 
+  fm_git_identity
   case_dir="$TMP_ROOT/firstmate-fork-ahead"
   fixture=$(make_firstmate_fork_fixture "$case_dir")
   repo=${fixture%%|*}

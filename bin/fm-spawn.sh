@@ -992,9 +992,10 @@ trap spawn_abort_cleanup EXIT
 # One bounded lock per live Herdr session/socket, shared across all homes.
 # <session> is required so secondmate and primary spawns serialize against the
 # same session without writing any other home's state directory.
-spawn_herdr_presentation_order_lock_acquire() {
+spawn_herdr_presentation_order_lock_acquire() {  # [session] [max_attempts]
   local session=${1:-} max_attempts=${2:-50} attempt lock_path
   [ -n "$session" ] || session=$(fm_backend_herdr_session)
+  case "$max_attempts" in ''|*[!0-9]*|0) return 1 ;; esac
   lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
   HERDR_PRESENTATION_ORDER_LOCK="$lock_path"
   attempt=0
@@ -1809,9 +1810,11 @@ case "$BACKEND" in
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
           exit 1
         }
-        # Exact recovery has no safe flat fallback. Give a competing spawn time
-        # to finish the existing 60-second worktree-settle window plus launch
-        # handoff; fresh optional projections keep the five-second default.
+        # Recovery holds this lock across worktree and launch setup, so a peer
+        # recovery may legitimately need longer than the ordinary 5s projection
+        # fallback budget. Exact recovery has no safe flat fallback: give a
+        # competing spawn time to finish the existing 60-second worktree-settle
+        # window plus launch handoff, rather than failing under a loaded runner.
         spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" 700 || {
           echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
           exit 1
