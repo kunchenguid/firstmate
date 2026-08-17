@@ -225,8 +225,8 @@ SH
   pass "dashboard surfaces a pane capture failure loudly"
 }
 
-test_remote_pane_capture() {
-  local home fakebin fake_ssh out
+test_remote_pane_notice_without_capture() {
+  local home fakebin fake_ssh ssh_log out
   home=$(make_home remote)
   fm_write_meta "$home/state/remote-task.meta" \
     "home=/remote/home" \
@@ -242,20 +242,30 @@ test_remote_pane_capture() {
   printf '%s\n' '- remote-task - remote delivery (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote work; projects: alpha; added 2026-08-17)' > "$home/data/secondmates.md"
   fakebin=$(make_fakebin "$home")
   fake_ssh="$fakebin/ssh"
+  ssh_log="$home/ssh.log"
   cat > "$fake_ssh" <<'SH'
 #!/usr/bin/env bash
-printf 'remote worker output\nremote validation active\n'
+argv_b64=${@: -1}
+if [ "$(uname)" = Darwin ]; then
+  printf '%s' "$argv_b64" | base64 -D
+else
+  printf '%s' "$argv_b64" | base64 --decode
+fi | tr '\0' ' ' >> "${SSH_LOG:?}"
+printf '\n' >> "$SSH_LOG"
+printf 'alive\n'
 SH
   chmod +x "$fake_ssh"
-  out=$(PATH="$fakebin:$PATH" FM_SSH_BIN="$fake_ssh" FM_HOME="$home" "$DASH" --snapshot)
+  out=$(PATH="$fakebin:$PATH" FM_SSH_BIN="$fake_ssh" SSH_LOG="$ssh_log" FM_HOME="$home" "$DASH" --snapshot)
   printf '%s' "$out" | jq -e '
     .tasks[0].model == "opus-4"
       and .tasks[0].remote_host == "remote-mac"
-      and .tasks[0].pane_tail.error == null
-      and (.tasks[0].pane_tail.lines | index("remote worker output") != null)
-      and (.tasks[0].pane_tail.lines | index("remote validation active") != null)
-  ' >/dev/null || fail "remote pane capture must be displayed through the remote reader: $out"
-  pass "dashboard captures remote worker pane tails through the supported reader"
+      and .tasks[0].pane_tail.error == "remote worker - live view not available from the dashboard; open its remote session"
+      and (.tasks[0].pane_tail.lines | length) == 0
+  ' >/dev/null || fail "remote workers must carry an explicit unavailable live-view notice: $out"
+  if grep -q ' capture ' "$ssh_log"; then
+    fail "dashboard must not transport remote pane capture: $(cat "$ssh_log")"
+  fi
+  pass "dashboard reports remote live view unavailable without remote capture"
 }
 
 test_run_step_validation_active() {
@@ -472,7 +482,7 @@ test_usage_and_validation() {
 test_empty_fleet_snapshot
 test_pane_source_task_enrichment
 test_pane_capture_error_is_loud
-test_remote_pane_capture
+test_remote_pane_notice_without_capture
 test_run_step_validation_active
 test_pr_check_verdicts
 test_html_page

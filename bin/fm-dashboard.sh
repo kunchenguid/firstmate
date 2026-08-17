@@ -142,19 +142,6 @@ pane_tail_json() {  # <backend> <target> <lines> <id>
   jq -n --argjson lines "$lines_json" '{lines:$lines, error:null}'
 }
 
-remote_pane_tail_json() {  # <id> <lines>
-  local id=$1 lines=$2 capture rc text lines_json
-  capture=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh capture "$id" "$lines" 2>/dev/null)
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    jq -n --arg e "remote pane capture failed (exit $rc)" '{lines:[], error:$e}'
-    return 0
-  fi
-  text=$(printf '%s\n' "$capture" | sed '/^[[:space:]]*$/d' | tail -n "$lines")
-  lines_json=$(printf '%s\n' "$text" | jq -Rn '[inputs]')
-  jq -n --argjson lines "$lines_json" '{lines:$lines, error:null}'
-}
-
 # pr_check_json <url> - read-only PR checks for one github.com PR via gh.
 # Non-github URLs are answered with an explicit error rather than a fake pass.
 pr_check_json() {  # <url>
@@ -225,7 +212,7 @@ dashboard_snapshot() {
     target=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
     model=$(printf '%s' "$task" | jq -r '.model // ""')
     if [ "$(printf '%s' "$task" | jq -r '.remote.host // ""')" != "" ]; then
-      pane=$(remote_pane_tail_json "$id" "$PANE_LINES")
+      pane=$(jq -n '{lines:[], error:"remote worker - live view not available from the dashboard; open its remote session"}')
     else
       pane=$(pane_tail_json "$backend" "$target" "$PANE_LINES" "$id")
     fi
