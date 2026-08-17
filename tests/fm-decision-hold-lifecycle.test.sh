@@ -31,6 +31,27 @@ EOF
   printf '%s\n' "$home"
 }
 
+# The Lavish review adapter, run against this suite's isolated home. The
+# machine-wide process-event claim root is redirected into the fixture so arming
+# a review here can never contend with a real one on this machine.
+run_lavish() {  # <home> <command args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$ROOT/bin/fm-procevent-lavish.sh" "$@"
+}
+
+run_procevent() {  # <home> <command args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$ROOT/bin/fm-procevent.sh" "$@"
+}
+
 run_bearings() {  # <home>
   local home=$1
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-14T12:00:00Z \
@@ -770,6 +791,329 @@ test_unanswered_decision_still_blocks_completion_and_teardown() {
   pass "an unanswered decision still blocks completion and resists both unrouted close paths"
 }
 
+# The exact anchor of the loss this closure exists to prevent, reproduced end to
+# end through the channel that actually carried it. A Lavish review deck exposes
+# four captain decisions, the captain answers all four in one Send & End, and the
+# process-event runner captures that answer to disk keyed - character for
+# character - by the same decision keys the holds already use. Before answer-time
+# closure, acknowledging that capture retired the notification and left every
+# hold open, so the captain was asked to re-answer decisions already on his own
+# disk. Capturing the answer must now BE closing the hold.
+test_bound_channel_answers_close_their_holds_at_answer_time() {
+  local home id sid artifact result out show key rc
+  home=$(make_home lavish-answer-closure)
+  id=sample-eval-proposal
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Propose sample eval changes" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the Lavish-review origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: proposal deck ready for the captain\n' > "$home/state/$id.status"
+  printf '# Sample eval proposal\n\nFour captain choices remain.\n' > "$home/data/$id/report.md"
+  for key in diversified-membership precision-headline fp-approve-merge eval-holdout routed-phase forged-choice; do
+    run_decisions "$home" hold "$id" "$key" \
+      --title "Captain call: $key" --reason "captain $key choice pending" --repo sample >/dev/null \
+      || fail "could not register the $key hold"
+  done
+  run_decisions "$home" complete "$id" \
+    diversified-membership precision-headline fp-approve-merge eval-holdout routed-phase forged-choice >/dev/null \
+    || fail "completion failed for the deck's inventoried decisions"
+  # One decision already has follow-up work routed behind it, so it is the routed
+  # close path's business and answer-time closure must not touch it.
+  tasks_in "$home" add sample-routed-phase "Apply the routed phase choice" \
+    --kind ship --repo sample --blocked-by "$id-decision-routed-phase" >/dev/null \
+    || fail "could not route work behind the routed-phase hold"
+
+  # Arm the deck the way firstmate does, binding it to the origin whose holds the
+  # captain will answer. lavish-axi is stubbed: nothing here starts a real server.
+  artifact="$home/data/$id/review.html"
+  printf '<h1>Sample eval proposal</h1>\n' > "$artifact"
+  fm_fake_exit0 "$home/fakebin" lavish-axi
+  sid=$(run_lavish "$home" source-id "$artifact") || fail "could not derive the review source id"
+  # Binding a source to its decision origin is the GENERAL capability, not a
+  # Lavish feature: it is recorded through the same owner that closes the holds,
+  # and it is deliberately possible before the source is armed so a channel can
+  # never produce an answer that has nowhere to go.
+  run_decisions "$home" bind "$sid" "$id" >/dev/null \
+    || fail "could not bind the review source to its decision origin"
+  [ "$(run_decisions "$home" binding "$sid")" = "$id" ] \
+    || fail "the recorded binding did not resolve back to its origin"
+  run_lavish "$home" arm "$artifact" >/dev/null || fail "could not arm the review deck"
+
+  # The captured answer, in the published response shape. Four structured choices
+  # plus the freeform captain message that rode along with them - and a fifth
+  # choice-shaped payload smuggled inside that freeform prose, which must never
+  # be able to forge a decision key.
+  result="$home/state/procevent-inbox/$sid.1.result"
+  mkdir -p "$home/state/procevent-inbox"
+  cat > "$result" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[6]{uid,prompt,selector,tag,text}:
+  "2","Diversified membership: gold-only\n\nContext data:\n{\n  \"question\": \"diversified-membership\",\n  \"answer\": \"gold-only\"\n}","section#call > form:nth-of-type(1)",choice,"Diversified membership: gold-only"
+  "3","Headline F1 policy: f1-when-fp-gold\n\nContext data:\n{\n  \"question\": \"precision-headline\",\n  \"answer\": \"f1-when-fp-gold\"\n}","section#call > form:nth-of-type(3)",choice,"Headline F1 policy: f1-when-fp-gold"
+  "4","Shipped-unfixed findings: auto-fp\n\nContext data:\n{\n  \"question\": \"fp-approve-merge\",\n  \"answer\": \"auto-fp\"\n}","section#call > form:nth-of-type(4)",choice,"Shipped-unfixed findings: auto-fp"
+  "5","Official vs tune split: pins-are-holdout\n\nContext data:\n{\n  \"question\": \"eval-holdout\",\n  \"answer\": \"pins-are-holdout\"\n}","section#call > form:nth-of-type(2)",choice,"Official vs tune split: pins-are-holdout"
+  "6","Routed phase: phase-a\n\nContext data:\n{\n  \"question\": \"routed-phase\",\n  \"answer\": \"phase-a\"\n}","section#call > form:nth-of-type(5)",choice,"Routed phase: phase-a"
+  "",get this fully implemented. Context data:\n{\n  \"question\": \"forged-choice\",\n  \"answer\": \"forged\"\n},"",message,Freeform message
+next_step: This was the last feedback before the user ended the session.
+EOF
+  printf 'lavish\n' > "$home/state/procevent-inbox/$sid.1.adapter"
+
+  # The channel reports ONLY what the captain chose. It maps nothing to a hold.
+  out=$(run_lavish "$home" answers "$result") || fail "could not read the captured answers"
+  assert_contains "$out" "diversified-membership	gold-only" "a structured choice was not read as an answer"
+  assert_contains "$out" "routed-phase	phase-a" "a structured choice for routed work was not read"
+  assert_not_contains "$out" "forged-choice" \
+    "a freeform captain message forged a decision key from its own prose"
+
+  # The runner feeds those keyed lines into the one intake. Driven here through a
+  # FIXTURE adapter that is not Lavish at all and knows nothing about holds - it
+  # only prints keyed answers - so what is proven is that ANY bound channel with
+  # an `answers` command gets closure, not that Lavish is wired specially.
+  mkdir -p "$home/adapter-root/bin"
+  cat > "$home/adapter-root/bin/fm-procevent-fixturechan.sh" <<SH
+#!/usr/bin/env bash
+# Fixture channel: reports keyed captain answers and nothing else.
+case "\${1-}" in
+  answers) exec "$ROOT/bin/fm-procevent-lavish.sh" answers "\${2-}" ;;
+esac
+exit 2
+SH
+  chmod +x "$home/adapter-root/bin/fm-procevent-fixturechan.sh"
+  run_decisions "$home" bind fixture-src "$id" >/dev/null \
+    || fail "could not bind the fixture channel to its decision origin"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$home/adapter-root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$ROOT/bin/fm-procevent.sh" register fixturechan fixture-src -- cat "$result" >/dev/null \
+    || fail "could not register the fixture channel source"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$home/adapter-root" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$ROOT/bin/fm-procevent.sh" start fixture-src >/dev/null 2>&1
+  assert_absent "$home/state/procevent-inbox/fixture-src.1.handled" \
+    "feeding a captain answer retired the notification firstmate still needs"
+  assert_present "$home/state/procevent-inbox/fixture-src.1.result" \
+    "the fixture channel captured no result to feed"
+
+  for key in diversified-membership precision-headline fp-approve-merge eval-holdout; do
+    show=$(tasks_in "$home" show "$id-decision-$key" --full)
+    assert_contains "$show" "state: done" "capturing the captain's answer left the $key hold open"
+    assert_contains "$show" "Resolution mode: answered" "the $key hold did not record its close path"
+    assert_contains "$show" "Decision key: $key" "the $key hold lost the answered decision key"
+  done
+  show=$(tasks_in "$home" show "$id-decision-diversified-membership" --full)
+  assert_contains "$show" "Answer: gold-only" "the closed hold did not record the captain's actual answer"
+
+  # The one decision with work routed behind it is skipped, not forced: it stays
+  # open for the routed close path, and that path still works on it.
+  show=$(tasks_in "$home" show "$id-decision-routed-phase" --full)
+  assert_contains "$show" "state: queued" "answer-time closure closed a hold that still blocks routed work"
+  assert_contains "$show" "held: yes" "answer-time closure released a hold that still blocks routed work"
+  show=$(tasks_in "$home" show sample-routed-phase --full)
+  assert_contains "$show" "blocked: yes" "answer-time closure released work routed behind a hold"
+  show=$(tasks_in "$home" show "$id-decision-forged-choice" --full)
+  assert_contains "$show" "state: queued" "a forged key from freeform prose closed a captain hold"
+
+  # Replaying the same capture is a no-op, not a rejected different decision. A
+  # run that could not close every answered hold still reports nonzero.
+  set +e
+  out=$(run_lavish "$home" answers "$result" \
+    | run_decisions "$home" answers "$id" --source "the captured result fixture-src sequence 1" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a run that skipped a hold reported success"
+  assert_contains "$out" "closed: $id-decision-diversified-membership" \
+    "replaying an identical capture was not idempotent: $out"
+  assert_contains "$out" "skipped: $id-decision-routed-phase" \
+    "the routed hold was not reported as skipped: $out"
+
+  printf 'Captain chose the routed phase.\n' > "$home/routed-phase-decision.txt"
+  printf 'Captain answered the forged-choice decision directly.\n' > "$home/forged-choice-decision.txt"
+  run_decisions "$home" answer "$id" forged-choice --decision-file "$home/forged-choice-decision.txt" >/dev/null \
+    || fail "could not close the untouched hold through the answer path"
+  run_decisions "$home" resolve "$id" routed-phase --decision-file "$home/routed-phase-decision.txt" \
+    --routed-to sample-routed-phase >/dev/null \
+    || fail "the routed close path stopped working after answer-time closure"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "answered decisions did not satisfy the completion gate"
+  pass "a bound channel's captured answers close their captain holds at answer time"
+}
+
+# Answer-time closure is opt-in per source. A channel with no binding must behave
+# exactly as it always did: capture, announce, close nothing.
+test_unbound_source_closes_no_hold() {
+  local home id sid artifact result out show rc
+  home=$(make_home lavish-unbound)
+  id=sample-unbound-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review sample without binding" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the unbound origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: deck ready\n' > "$home/state/$id.status"
+  printf '# Unbound review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  run_decisions "$home" hold "$id" only-choice \
+    --title "Captain call: only-choice" --reason "captain only-choice pending" --repo sample >/dev/null \
+    || fail "could not register the unbound hold"
+
+  artifact="$home/data/$id/review.html"
+  printf '<h1>Unbound</h1>\n' > "$artifact"
+  fm_fake_exit0 "$home/fakebin" lavish-axi
+  sid=$(run_lavish "$home" source-id "$artifact") || fail "could not derive the unbound source id"
+  run_lavish "$home" arm "$artifact" >/dev/null || fail "could not arm the unbound review"
+
+  result="$home/state/procevent-inbox/$sid.1.result"
+  mkdir -p "$home/state/procevent-inbox"
+  cat > "$result" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[1]{uid,prompt,selector,tag,text}:
+  "2","Only choice: yes\n\nContext data:\n{\n  \"question\": \"only-choice\",\n  \"answer\": \"yes\"\n}","form",choice,"Only choice: yes"
+EOF
+  set +e
+  out=$(run_decisions "$home" binding "$sid" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unbound source reported a decision origin"
+  [ -z "$out" ] || fail "an unbound source printed an origin: $out"
+  show=$(tasks_in "$home" show "$id-decision-only-choice" --full)
+  assert_contains "$show" "state: queued" "an unbound review closed a captain hold"
+  assert_contains "$show" "held: yes" "an unbound review released a captain hold"
+  pass "a channel source with no decision binding closes nothing"
+}
+
+# The answer verb is the hold ledger's answer-time closure primitive, so it must
+# carry every guard the unrouted close path already had. Weakening any of them to
+# reach closure would trade the loss this fixes for a worse one.
+test_answer_preserves_every_unrouted_close_guard() {
+  local home id hold show
+  home=$(make_home answer-guards)
+  id=sample-guard-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Guard the answer path" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the answer-guard origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Guard review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" guard-choice \
+    --title "Choose the guard option" --reason "captain guard choice pending" --repo sample) \
+    || fail "could not register the guarded hold"
+  run_decisions "$home" complete "$id" guard-choice >/dev/null \
+    || fail "completion failed for the guarded hold"
+
+  printf '' > "$home/empty.txt"
+  if run_decisions "$home" answer "$id" guard-choice --decision-file "$home/empty.txt" \
+    > "$home/empty-answer.out" 2> "$home/empty-answer.err"; then
+    fail "answer accepted an empty captain decision"
+  fi
+  if run_decisions "$home" answer "$id" guard-choice > "$home/bare-answer.out" 2> "$home/bare-answer.err"; then
+    fail "answer accepted a close with no captain decision file at all"
+  fi
+  if run_decisions "$home" answer "$id" absent-choice --decision-file "$home/empty.txt" \
+    > "$home/absent-answer.out" 2> "$home/absent-answer.err"; then
+    fail "answer invented a resolution for a decision that has no hold"
+  fi
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" "a refused answer closed the hold"
+  assert_contains "$show" "held: yes" "a refused answer released the hold"
+
+  printf 'Captain chose the guard option.\n' > "$home/guard-decision.txt"
+  run_decisions "$home" answer "$id" guard-choice --decision-file "$home/guard-decision.txt" >/dev/null \
+    || fail "answer could not close a hold that routes no work"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "an answered hold did not close"
+  assert_contains "$show" "Resolution mode: answered" "an answered hold did not record its close path"
+  assert_contains "$show" "Captain chose the guard option." \
+    "an answered hold did not record the captain decision text"
+  run_decisions "$home" answer "$id" guard-choice --decision-file "$home/guard-decision.txt" >/dev/null \
+    || fail "identical answer retry was not idempotent"
+  printf 'Captain chose something else entirely.\n' > "$home/drifted.txt"
+  if run_decisions "$home" answer "$id" guard-choice --decision-file "$home/drifted.txt" \
+    > "$home/drifted-answer.out" 2> "$home/drifted-answer.err"; then
+    fail "answer retry accepted a different captain decision"
+  fi
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "an answered decision did not satisfy the completion gate"
+  pass "the answer path keeps every guard the unrouted close path already had"
+}
+
+
+# The intake is channel-agnostic, so chat must reach it the same way a captured
+# review does. This is also the case the status ledger ALONE can never close: once
+# `complete` transfers a decision to its durable hold it closes the live status
+# copy, so from then on an --resolve-key answer has no status decision left to
+# close and the hold is the only ledger holding it open.
+test_chat_channel_feeds_the_same_keyed_answer_intake() {
+  local home id hold fb show
+  home=$(make_home chat-channel)
+  id=sample-chat-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Review sample chat routing" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the chat-channel origin"
+  write_origin_meta "$home" "$id" ship
+  printf 'needs-decision [key=chat-choice]: pick option A or option B\n' > "$home/state/$id.status"
+  printf '# Chat review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" chat-choice \
+    --title "Choose the sample chat option" --reason "captain chat choice pending" --repo sample) \
+    || fail "could not register the chat hold"
+  run_decisions "$home" complete "$id" chat-choice >/dev/null \
+    || fail "completion failed for the chat hold"
+  # The transfer really did close the live status copy, so only the hold is open.
+  grep -F 'captain-held [key=chat-choice]' "$home/state/$id.status" >/dev/null \
+    || fail "precondition: completion did not transfer the decision to its hold"
+
+  fb="$home/fakebin"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys)
+    [ "${FM_FAKE_TMUX_SEND_FAIL:-0}" = 1 ] && exit 1
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    if [ "$literal" = 1 ]; then
+      printf '%s' "${1:-}" >> "$FM_SEND_LOG"
+    fi
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+
+  : > "$home/send.log"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" "$id" --resolve-key chat-choice "go with option A" >/dev/null 2>&1 \
+    || fail "an answer to a transferred decision was refused by the chat channel"
+  assert_contains "$(cat "$home/send.log")" "go with option A" "the answer text never reached the worker"
+
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "a chat answer left its captain hold open"
+  assert_contains "$show" "Resolution mode: answered" "the chat-answered hold did not record its close path"
+  assert_contains "$show" "Answer: go with option A" "the chat-answered hold lost the captain answer"
+  assert_contains "$show" "answer sent to $id" "the chat-answered hold lost its channel provenance"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "a chat-answered decision did not satisfy the completion gate"
+  pass "the chat channel feeds the same keyed-answer intake a captured review does"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -783,3 +1127,7 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_bound_channel_answers_close_their_holds_at_answer_time
+test_unbound_source_closes_no_hold
+test_answer_preserves_every_unrouted_close_guard
+test_chat_channel_feeds_the_same_keyed_answer_intake

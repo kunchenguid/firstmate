@@ -48,10 +48,22 @@
 # remote secondmate alike - because the open-decision ledger fm-wake-drain
 # folds lives in this home's own state dir (a remote mate's escalations reach
 # it through the parent-replies ingest); only the answer message crosses the
-# backend or remote transport. Each named key must currently be open in that
-# ledger per status_open_decisions (bin/fm-classify-lib.sh) or fm-send refuses
-# before sending, so a mistyped key cannot deliver an answer while silently
-# orphaning the decision. A failed or unconfirmed send never closes a key; a
+# backend or remote transport.
+#
+# Chat is also a channel that carries keyed captain answers, so the same flag
+# feeds bin/fm-decision-hold.sh's one keyed-answer intake for any key that names
+# a durable decision hold on the target task. fm-send maps nothing to a hold and
+# closes nothing itself; it hands the intake `<key>\t<answer>\t<label>` exactly
+# as every other channel does, and the intake owns what that means. This is what
+# lets an answer reach a decision that has already been transferred from the live
+# status log to its durable hold, which the status ledger alone can no longer
+# close.
+#
+# Each named key must therefore currently be open in ONE of the two ledgers: open
+# in this home's status log per status_open_decisions (bin/fm-classify-lib.sh), or
+# an active captain hold for the target task. A key in neither is refused before
+# sending, so a mistyped key cannot deliver an answer while silently orphaning the
+# decision. A failed or unconfirmed send never closes a key; a
 # delivered answer whose closing append fails exits nonzero with the exact
 # manual close command, leaving the decision open to re-surface (the safe
 # direction). A send without the flag never closes anything: a routine steer,
@@ -350,6 +362,25 @@ fi
 # send, is what keeps a mistyped key loud instead of delivering an answer that
 # silently leaves its decision open.
 RESOLVE_STATUS_FILE=
+# Which ledger each answered key belongs to. A key still open in the status log
+# is owned by the status log: fm-decision-hold's `complete` closes that live copy
+# at the moment it transfers a decision to its durable hold, so "still open in
+# status" and "already a hold" are the two sides of one transfer, never both at
+# once. Checking the hold only for keys the status log no longer owns also keeps
+# the common path free of any backlog read.
+RESOLVE_STATUS_KEYS=
+RESOLVE_HOLD_KEYS=
+
+fm_send_hold_is_active() {  # <task-id> <decision-key>
+  local show
+  command -v tasks-axi >/dev/null 2>&1 || return 1
+  show=$( (cd "$FM_HOME" && tasks-axi show "$1-decision-$2" --full) 2>/dev/null ) || return 1
+  case "$show" in *"held: yes"*) : ;; *) return 1 ;; esac
+  case "$show" in *"hold_kind: captain"*) : ;; *) return 1 ;; esac
+  case "$show" in *"state: queued"*) return 0 ;; esac
+  return 1
+}
+
 if [ -n "$RESOLVE_KEYS" ]; then
   if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
     echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
@@ -368,12 +399,20 @@ if [ -n "$RESOLVE_KEYS" ]; then
   resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
   for k in $RESOLVE_KEYS; do
     case "$resolve_open_set" in
-      "$k"$'\t'*|*$'\n'"$k"$'\t'*) ;;
-      *)
-        echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE (already closed, mistyped, or transferred). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
-        exit 1
+      "$k"$'\t'*|*$'\n'"$k"$'\t'*)
+        RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
+        continue
         ;;
     esac
+    # Not open in the status log. A decision already transferred to its durable
+    # hold is exactly this case, and it is answerable - just through the other
+    # ledger - so check there before refusing.
+    if fm_send_hold_is_active "$RESOLVE_TASK_ID" "$k"; then
+      RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$k"
+      continue
+    fi
+    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no active captain decision $RESOLVE_TASK_ID-decision-$k (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+    exit 1
   done
 fi
 
@@ -387,7 +426,7 @@ fi
 fm_send_close_resolved_keys() {  # <answer-text>
   local note=$1 k line append_rc
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
-  for k in $RESOLVE_KEYS; do
+  for k in $RESOLVE_STATUS_KEYS; do
     line="resolved [key=$k]: answered: $note"
     fm_cap_line_var "$line"
     append_rc=0
@@ -397,6 +436,23 @@ fm_send_close_resolved_keys() {  # <answer-text>
       return 1
     fi
   done
+}
+
+# Feed the answered hold keys to the ONE keyed-answer intake, as keyed lines,
+# exactly the way every other channel does. fm-send decides nothing here: it does
+# not map a key to a hold, build a decision record, or choose a close path.
+fm_send_feed_resolved_holds() {  # <answer-text>
+  local note=$1 k lines=''
+  [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
+  note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  for k in $RESOLVE_HOLD_KEYS; do
+    lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
+  done
+  if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-decision-hold.sh" answers "$RESOLVE_TASK_ID" \
+    --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
+    echo "error: the answer was delivered to $T, but this captain decision could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-decision-hold.sh (answer, or resolve when it routes work) - do not resend the answer." >&2
+    return 1
+  fi
 }
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
@@ -542,6 +598,7 @@ else
   # ledger (answerer-closes; see the header contract).
   if [ -n "$RESOLVE_KEYS" ]; then
     fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+    fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
   fi
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the
