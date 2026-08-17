@@ -14,11 +14,18 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 lineage = json.loads((root / "docs/verification/prompt-lineage.json").read_text())
-upstream = subprocess.check_output(["git", "show", "-s", "--format=%P", "HEAD"], cwd=root, text=True).strip()
-if len(upstream.split()) != 1:
-    raise SystemExit("installed overlay is not a single-parent commit")
+review = lineage.get("semantic_refresh_review", {})
+candidate = review.get("candidate")
+upstream = lineage.get("semantic_refresh", {}).get("upstream")
+if not isinstance(candidate, str) or not isinstance(upstream, str):
+    raise SystemExit("reviewed candidate graph is not recorded")
+parents = subprocess.check_output(
+    ["git", "show", "-s", "--format=%P", candidate], cwd=root, text=True
+).strip().split()
+if parents != [upstream]:
+    raise SystemExit("reviewed overlay is not a single-parent child of the exact upstream")
 changed = set(subprocess.check_output(
-    ["git", "diff", "--name-only", upstream, "HEAD", "--"], cwd=root, text=True
+    ["git", "diff", "--name-only", upstream, candidate, "--"], cwd=root, text=True
 ).splitlines())
 missing = sorted(changed - set(lineage["overlay_paths"]))
 if missing:
@@ -28,13 +35,15 @@ PY
 git init -q "$REPO"
 git -C "$REPO" config user.name test
 git -C "$REPO" config user.email test@example.invalid
+mkdir -p "$REPO/bin"
+cp "$ROOT/bin/fm-prompt-semantic-refresh.py" "$REPO/bin/"
 printf 'base\n' > "$REPO/registered.txt"
 printf 'base converged\n' > "$REPO/converged.txt"
 printf 'base unrelated\n' > "$REPO/unrelated.txt"
 printf 'authority base\n' > "$REPO/authoritative.txt"
 printf 'overlay-doc base\nupstream-doc base\n' > "$REPO/shared-doc.txt"
 cat > "$REPO/lineage.json" <<'EOF'
-{"schema_version":4,"generations":[{"generation":0},{"generation":1,"kind":"live-overlay","upstream_commit":"0000000000000000000000000000000000000000"}],"overlay_paths":["authoritative.txt","converged.txt","lineage.json","registered.txt","shared-doc.txt","tool.sh"],"disjoint_merge_paths":["shared-doc.txt"]}
+{"schema_version":4,"generations":[{"generation":0},{"generation":1,"kind":"live-overlay","upstream_commit":"0000000000000000000000000000000000000000"}],"overlay_paths":["authoritative.txt","bin/fm-prompt-semantic-refresh.py","converged.txt","lineage.json","registered.txt","shared-doc.txt","tool.sh"],"disjoint_merge_paths":["shared-doc.txt"]}
 EOF
 git -C "$REPO" add . && git -C "$REPO" commit -qm base
 base=$(git -C "$REPO" rev-parse HEAD)
@@ -146,8 +155,9 @@ mkdir -p "$HISTORY_REPO/.github/workflows" "$HISTORY_REPO/bin"
 printf 'jobs:\n  behavior:\n    timeout-minutes: 10\n  pointers:\n    legacy: true\n' > "$HISTORY_REPO/.github/workflows/ci.yml"
 printf 'base\n' > "$HISTORY_REPO/owned.txt"
 printf 'import sys\nraise SystemExit(0)\n' > "$HISTORY_REPO/bin/fm-operation-disclosure.py"
+cp "$ROOT/bin/fm-prompt-semantic-refresh.py" "$HISTORY_REPO/bin/"
 cat > "$HISTORY_REPO/lineage.json" <<'EOF'
-{"schema_version":4,"generations":[{"generation":0},{"generation":1,"kind":"live-overlay","upstream_commit":"0000000000000000000000000000000000000000"}],"overlay_paths":["bin/fm-operation-disclosure.py","lineage.json","owned.txt"]}
+{"schema_version":4,"generations":[{"generation":0},{"generation":1,"kind":"live-overlay","upstream_commit":"0000000000000000000000000000000000000000"}],"overlay_paths":["bin/fm-operation-disclosure.py","bin/fm-prompt-semantic-refresh.py","lineage.json","owned.txt"]}
 EOF
 git -C "$HISTORY_REPO" add . && git -C "$HISTORY_REPO" commit -qm semantic-baseline
 semantic_base=$(git -C "$HISTORY_REPO" rev-parse HEAD)
@@ -202,9 +212,11 @@ CRISS_REPO="$TMP/criss-repo"
 git init -q "$CRISS_REPO"
 git -C "$CRISS_REPO" config user.name test
 git -C "$CRISS_REPO" config user.email test@example.invalid
+mkdir -p "$CRISS_REPO/bin"
+cp "$ROOT/bin/fm-prompt-semantic-refresh.py" "$CRISS_REPO/bin/"
 printf 'base\n' > "$CRISS_REPO/owned.txt"
 cat > "$CRISS_REPO/lineage.json" <<'EOF'
-{"schema_version":4,"generations":[{"generation":0},{"generation":1,"kind":"live-overlay","upstream_commit":"0000000000000000000000000000000000000000"}],"overlay_paths":["lineage.json","owned.txt"]}
+{"schema_version":4,"generations":[{"generation":0},{"generation":1,"kind":"live-overlay","upstream_commit":"0000000000000000000000000000000000000000"}],"overlay_paths":["bin/fm-prompt-semantic-refresh.py","lineage.json","owned.txt"]}
 EOF
 git -C "$CRISS_REPO" add . && git -C "$CRISS_REPO" commit -qm base
 criss_base=$(git -C "$CRISS_REPO" rev-parse HEAD)

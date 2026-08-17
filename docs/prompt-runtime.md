@@ -46,8 +46,10 @@ This history-aware ownership boundary supports multiple local overlay commits wh
 `bin/fm-prompt-semantic-refresh.py` is the deep transformation module at the instruction seam.
 Ruby with Psych is a supported runtime dependency for its YAML-semantic skill-frontmatter boundary; bootstrap reports missing Ruby separately from an installed Ruby whose Psych library cannot load.
 Its single refresh interface diffs `AGENTS.md`, internal skills, and role instructions from the lineage-bound upstream generation to the selected upstream, then emits a canonical transformation only when each change has exactly one optimized owner.
-For `AGENTS.md`, unchanged semantic context must locate one always-loaded or deferred owner and the resulting text must occur exactly once; skill refresh takes the new upstream body and metadata while retaining a deliberate compact discovery description.
-Unmapped additions, ambiguous context, removals without one owner, new instruction surfaces without a proven policy, and role leakage stop before candidate construction rather than selecting the old overlay file.
+For `AGENTS.md`, unchanged semantic context must locate one always-loaded or deferred owner and the resulting text must occur exactly once.
+Skill refresh takes the new upstream body and metadata, preserving the overlay description only for paths explicitly registered as compact-description owners and otherwise taking the upstream description.
+Psych validates the complete YAML scalar boundary, including multiline forms; malformed, duplicated, noncanonical, or otherwise unproven descriptions stop before candidate construction.
+Unmapped additions, ambiguous context, removals without one owner, new instruction surfaces without a proven policy, and role leakage likewise stop rather than selecting the old overlay file.
 The same proof emits refreshed upstream artifacts, generated-role parity input, lineage, and live-authority hashes, so those bindings can change only as outputs of a complete reconstruction.
 The updater, overlay planner, verifier, and documentation call or describe that interface rather than reimplementing semantic ownership.
 Separately registered documentation-composition paths preserve both owners only when their changes from the actual shared base are disjoint.
@@ -57,7 +59,8 @@ A safe rebuild uses a private temporary Git index, preserves exact object modes,
 The tracked lineage graph must remain inside the repository, be present in its own complete path inventory, and match the exact graph stored by the selected overlay commit.
 Its live-overlay generation binds the fixed generated-parity compatibility baseline, and reconciliation requires that binding to equal the plan's previous upstream rather than the newer selected upstream.
 Legacy preservation verification fixes the original live-authority inventory and binding.
-A later binding is accepted only when the semantic refresh can be reconstructed from its immutable previous-upstream, selected-upstream, and installed-overlay commits and every emitted owner byte matches the candidate.
+A later binding is accepted only when the semantic refresh can be reconstructed from its immutable previous-upstream, selected-upstream, and producer-overlay provenance and every emitted owner byte matches the candidate.
+When review hardens the transformer after candidate construction, the lineage attestation additionally binds the exact single-parent candidate and evidence, a descendant reviewer commit and transformer hash, and the only permitted lineage additions; verification reconstructs and compares the candidate generation while rejecting circular producer ancestry or unattested drift.
 Every plan-consuming stage reconstructs the canonical plan from its bound commits and repository lineage, so a saved plan cannot change overlay ownership or other reconciliation inputs after planning.
 Verification recomputes the tree and graph, and readiness binds the exact candidate, upstream, canonical plan, and checks while reporting the actual installed overlay for rollback.
 The ordinary `bin/fm-update.sh` entrypoint prepares a compatible candidate without moving installed refs; its explicit installation form re-verifies the token, origin, clean tree, branch, and installed overlay, then updates `main`, the working tree, the live ref, and the rollback ref as one approved transition.
