@@ -58,6 +58,64 @@ run_bearings() {  # <home>
     "$BEARINGS" --json
 }
 
+liveness_matrix_holds() {  # <json> <phantom> <held> <measured> <run>
+  printf '%s' "$1" | jq -e --arg phantom "$2" --arg held "$3" --arg measured "$4" --arg run "$5" '
+    (.gates | any(
+      .id == $phantom
+        and .reason == "measured liveness: absent; endpoint=verified_absent; worker=verified_absent"
+    ))
+      and (.gates | any(.id == $held and .reason == "captain route choice pending"))
+      and (.gates | any(
+        .id == $held and (.reason | startswith("measured liveness:"))
+      ) | not)
+      and (.gates | any(.id == $measured or .id == $run) | not)
+      and (.in_flight | any(.id == $measured and .state == "active"))
+      and (.in_flight | any(.id == $run and .state == "working"))
+  ' >/dev/null
+}
+
+liveness_record() {  # <id> <activity> <endpoint-presence> <worker-presence>
+  local id=$1 activity=$2 endpoint=$3 worker=$4
+  jq -n \
+    --arg id "$id" \
+    --arg activity "$activity" \
+    --arg endpoint "$endpoint" \
+    --arg worker "$worker" '
+    {
+      id:$id,
+      harness:"codex",
+      harness_family:"codex",
+      backend:"tmux",
+      target:("firstmate:fm-" + $id),
+      worktree:null,
+      endpoint:{
+        presence:$endpoint,
+        raw:(if $endpoint == "verified_present" then "alive" else "missing" end)
+      },
+      worker:{
+        presence:$worker,
+        pids_sample_1:(if $worker == "verified_present" then 1 else 0 end),
+        pids_sample_2:(if $worker == "verified_present" then 1 else 0 end),
+        harness_processes_sample_1:(if $worker == "verified_present" then 1 else 0 end),
+        harness_processes_sample_2:(if $worker == "verified_present" then 1 else 0 end)
+      },
+      output:{
+        sample_1_readable:true,
+        sample_2_readable:true,
+        changed:($activity == "active")
+      },
+      cpu:{
+        sample_1_max_ms:1000,
+        sample_2_max_ms:(if $activity == "active" then 1030 else 1000 end),
+        delta_ms:(if $activity == "active" then 30 else 0 end),
+        rate_ms_per_minute:(if $activity == "active" then 900 else 0 end),
+        baseline:"verified",
+        threshold_ms_per_minute:760
+      },
+      activity:$activity
+    }'
+}
+
 run_teardown() {  # <home> <id>
   local home=$1 id=$2
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -67,16 +125,24 @@ run_teardown() {  # <home> <id>
 
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
 # and visual review have ended, the only genuine unresolved decision is report prose,
-# no held backlog item or open status exists, and the authoritative Bearings view
-# correctly omits it. Completion must now refuse before teardown can erase the source.
+# no held backlog item or open status exists. Measured liveness must surface the
+# unreclaimed in-flight task as a gate before completion can erase the source.
 test_uninventoried_report_decision_refuses_completion() {
-  local home id json rc
+  local home id held_id measured_id run_id run_worktree run_branch run_head
+  local phantom_liveness held_liveness measured_liveness run_liveness liveness neutralized json neutralized_json rc
   home=$(make_home omitted-decision)
   id=sample-route-review
-  mkdir -p "$home/data/$id"
+  held_id=sample-held-review
+  measured_id=sample-measured-review
+  run_id=sample-run-review
+  run_worktree="$home/projects/active-run"
+  mkdir -p "$home/data/$id" "$home/data/$held_id" "$home/data/$measured_id" "$home/data/$run_id" "$run_worktree"
   cat > "$home/data/backlog.md" <<EOF
 ## In flight
 - [ ] $id - Investigate sample routing (repo: sample) (kind: scout) (since 2026-07-14)
+- [ ] $held_id - Hold sample routing (repo: sample) (kind: captain) (since 2026-07-14) (hold: captain route choice pending) (hold-kind: captain)
+- [ ] $measured_id - Continue measured sample routing (repo: sample) (kind: scout) (since 2026-07-14)
+- [ ] $run_id - Continue validated sample routing (repo: sample) (kind: ship) (since 2026-07-14)
 
 ## Queued
 
@@ -89,7 +155,47 @@ EOF
     "harness=codex" \
     "kind=scout" \
     "mode=scout"
+  fm_write_meta "$home/state/$held_id.meta" \
+    "window=firstmate:fm-$held_id" \
+    "worktree=$home/projects/missing-held" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=captain" \
+    "mode=captain"
+  fm_write_meta "$home/state/$measured_id.meta" \
+    "window=firstmate:fm-$measured_id" \
+    "worktree=$home/projects/measured-scratch" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=scout" \
+    "mode=scout"
+  git -C "$run_worktree" init -q
+  git -C "$run_worktree" checkout -q -b active-run
+  git -C "$run_worktree" -c user.name=Fixture -c user.email=fixture@example.invalid \
+    commit -q --allow-empty -m fixture
+  run_branch=$(git -C "$run_worktree" symbolic-ref --quiet --short HEAD)
+  run_head=$(git -C "$run_worktree" rev-parse HEAD)
+  fm_write_meta "$home/state/$run_id.meta" \
+    "window=firstmate:fm-$run_id" \
+    "worktree=$run_worktree" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  cat > "$home/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "axi status")
+    printf 'branch: %s\nhead: %s\nstatus: ci\nid: fixture-run\n' "${FAKE_NM_BRANCH:?}" "${FAKE_NM_HEAD:?}"
+    ;;
+  "axi logs --step ci --run fixture-run") printf 'CI checks running\n' ;;
+esac
+SH
+  chmod +x "$home/fakebin/no-mistakes"
   printf 'done: report and visual review complete\n' > "$home/state/$id.status"
+  printf 'needs-decision [key=route]: captain route choice pending\n' > "$home/state/$held_id.status"
+  printf 'working: continuing measured sample routing\n' > "$home/state/$measured_id.status"
+  printf 'working: validating sample routing\n' > "$home/state/$run_id.status"
   cat > "$home/data/$id/report.md" <<'EOF'
 # Sample route review
 
@@ -97,12 +203,43 @@ The evidence is complete.
 The captain still needs to choose route north or route south before follow-up work starts.
 EOF
 
-  json=$(run_bearings "$home") || fail "Bearings failed for unresolved-decision regression"
-  printf '%s' "$json" | jq -e '
-    (.decisions_open | length) == 0
-      and (.gates | length) == 0
-      and (.reports | any(.id == "sample-route-review"))
-  ' >/dev/null || fail "the pre-policy omission shape was not reproduced: $json"
+  phantom_liveness=$(liveness_record "$id" absent verified_absent verified_absent)
+  held_liveness=$(liveness_record "$held_id" absent verified_absent verified_absent)
+  measured_liveness=$(liveness_record "$measured_id" active verified_absent verified_present)
+  run_liveness=$(liveness_record "$run_id" parked verified_present verified_present)
+  liveness=$(jq -n \
+    --argjson phantom "$phantom_liveness" \
+    --argjson held "$held_liveness" \
+    --argjson measured "$measured_liveness" \
+    --argjson run "$run_liveness" '
+    {
+      schema:"fm-liveness.v1",
+      observed_at:"2026-07-14T12:00:00Z",
+      interval_ms:2000,
+      process_samples:{sample_1_readable:true,sample_2_readable:true},
+      records:[$phantom,$held,$measured,$run]
+    }')
+  json=$(FAKE_NM_BRANCH="$run_branch" FAKE_NM_HEAD="$run_head" \
+    FM_SNAPSHOT_LIVENESS_JSON="$liveness" run_bearings "$home") \
+    || fail "Bearings failed for unresolved-decision regression"
+  liveness_matrix_holds "$json" "$id" "$held_id" "$measured_id" "$run_id" \
+    || fail "liveness directions did not distinguish phantom, held, measured-active, and active-run lanes: $json"
+  printf '%s' "$json" | jq -e --arg id "$id" '
+    (.decisions_open | any(.id == $id) | not) and (.reports | any(.id == $id))
+  ' >/dev/null || fail "phantom regression lost its report-only decision shape: $json"
+
+  neutralized=$(printf '%s' "$liveness" | jq --arg id "$id" '
+    (.records[] | select(.id == $id) | .activity) = "active"
+  ')
+  neutralized_json=$(FAKE_NM_BRANCH="$run_branch" FAKE_NM_HEAD="$run_head" \
+    FM_SNAPSHOT_LIVENESS_JSON="$neutralized" run_bearings "$home") \
+    || fail "Bearings failed for measured-liveness selector neutralization"
+  if liveness_matrix_holds "$neutralized_json" "$id" "$held_id" "$measured_id" "$run_id"; then
+    fail "neutralizing the measured-liveness selector left the phantom-gate property green: $neutralized_json"
+  fi
+  printf '%s' "$neutralized_json" | jq -e --arg id "$id" '
+    (.gates | any(.id == $id) | not) and (.in_flight | any(.id == $id))
+  ' >/dev/null || fail "neutralized property went RED for a reason other than removal of the phantom measured-liveness gate: $neutralized_json"
 
   set +e
   run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err"
@@ -111,7 +248,7 @@ EOF
   [ "$rc" -ne 0 ] || fail "completed investigation teardown erased a report-only unresolved decision"
   assert_present "$home/state/$id.meta" "refused completion must preserve investigation metadata"
   assert_grep "REFUSED" "$home/teardown.err" "refusal must be explicit"
-  pass "report-only unresolved decision is reproduced and completion refuses before loss"
+  pass "phantom and held lanes gate while measured-active and active-run lanes do not, selector neutralization goes RED, and completion refuses before report loss"
 }
 
 tasks_in() {  # <home> <tasks-axi args...>

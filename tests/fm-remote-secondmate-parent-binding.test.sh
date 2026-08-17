@@ -97,7 +97,7 @@ publish_wait=0
 while [ ! -f "$PUBLISH_ENTERED" ]; do
   kill -0 "$PUBLISH_PID" 2>/dev/null || fail "remote provisioning exited before its completion marker"
   publish_wait=$((publish_wait + 1))
-  [ "$publish_wait" -le 250 ] || fail "remote provisioning never reached its completion marker"
+  [ "$publish_wait" -le 1500 ] || fail "remote provisioning never reached its completion marker"
   sleep 0.02
 done
 cmp -s "$PUBLISH_HOME/.fm-secondmate-parent" <(

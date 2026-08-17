@@ -52,7 +52,24 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux"
+  cat > "$fb/fm-liveness-snapshot" <<'SH'
+#!/usr/bin/env bash
+state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state}
+rows='[]'
+for meta in "$state"/*.meta; do
+  [ -f "$meta" ] || continue
+  id=$(basename "$meta" .meta)
+  busy=$(sed -n 's/.* state=\([^ ]*\).*/\1/p' "$state/$id.busy-state" 2>/dev/null | tail -1)
+  case "$busy" in busy) activity=active; worker=verified_present; changed=true ;; idle) activity=parked; worker=verified_present; changed=false ;; *) activity=inactive; worker=verified_absent; changed=false ;; esac
+  row=$(jq -n --arg id "$id" --arg activity "$activity" --arg worker "$worker" --argjson changed "$changed" '
+    {id:$id,harness:"claude",harness_family:"claude",backend:"tmux",target:("fm:"+$id),worktree:null,
+     endpoint:{presence:"verified_present",raw:"alive"},worker:{presence:$worker,pids_sample_1:1,pids_sample_2:1,harness_processes_sample_1:1,harness_processes_sample_2:1},
+     output:{sample_1_readable:true,sample_2_readable:true,changed:$changed},cpu:{sample_1_max_ms:1000,sample_2_max_ms:(if $activity=="active" then 1030 else 1000 end),delta_ms:(if $activity=="active" then 30 else 0 end),rate_ms_per_minute:(if $activity=="active" then 900 else 0 end),baseline:"verified",threshold_ms_per_minute:760},activity:$activity}')
+  rows=$(jq -n --argjson rows "$rows" --argjson row "$row" '$rows+[$row]')
+done
+jq -n --argjson rows "$rows" '{schema:"fm-liveness.v1",observed_at:"2026-08-03T10:00:00Z",interval_ms:2000,process_samples:{sample_1_readable:true,sample_2_readable:true},records:$rows}'
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/fm-liveness-snapshot"
   printf '%s\n' "$fb"
 }
 
@@ -151,12 +168,130 @@ test_empty_fleet_json() {
   pass "empty fleet snapshot and view use explicit absence markers"
 }
 
+test_large_snapshot_payloads_never_cross_exec_argv() {
+  local home arg_max payload_bytes oversized out_file
+  home=$(make_home large-payload)
+  arg_max=$(getconf ARG_MAX)
+  case "$arg_max" in ''|*[!0-9]*) fail "ARG_MAX unavailable for large-payload regression" ;; esac
+  payload_bytes=$((arg_max + 65536))
+  awk -v n="$payload_bytes" 'BEGIN {
+    print "## Queued"
+    printf "- [ ] oversized-task - "
+    for (i=0; i<n; i++) printf "x"
+    printf "\n"
+  }' > "$home/data/backlog.md"
+  oversized=$(awk -v n="$payload_bytes" 'BEGIN { for (i=0; i<n; i++) printf "x" }')
+  if jq -n --arg payload "$oversized" '$payload | length' >/dev/null 2>&1; then
+    fail "large-payload fixture did not exceed the host exec argv bound"
+  fi
+  out_file="$home/snapshot.json"
+  FM_HOME="$home" "$SNAPSHOT" --json > "$out_file" \
+    || fail "fleet snapshot passed its growing JSON payloads through exec argv"
+  jq -e '
+    .schema == "fm-fleet-snapshot.v1"
+    and .backlog.present == true
+    and (.backlog.records | length) == 1
+    and .backlog.records[0].id == "oversized-task"
+  ' "$out_file" >/dev/null || fail "large off-argv snapshot output was incomplete"
+  pass "fleet snapshot keeps backlog and task JSON off exec argv beyond ARG_MAX"
+}
+
+test_large_liveness_payload_reaches_every_member_off_exec_environment() {
+  local home fakebin payload padding arg_max padding_bytes oversized out_file id
+  home=$(make_home large-liveness-payload)
+  fakebin=$(make_fakebin "$home")
+  payload="$home/liveness.json"
+  padding="$home/padding"
+  arg_max=$(getconf ARG_MAX)
+  case "$arg_max" in ''|*[!0-9]*) fail "ARG_MAX unavailable for liveness transport regression" ;; esac
+  padding_bytes=$((arg_max / 7 + 65536))
+  awk -v n="$padding_bytes" 'BEGIN { for (i=0; i<n; i++) printf "x" }' > "$padding"
+  for id in claude codex opencode pi-signed pi grok kimi; do
+    mkdir -p "$home/projects/$id"
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" "worktree=$home/projects/$id" \
+      "project=firstmate" "harness=$id" "kind=scout" "mode=scout"
+  done
+  jq -n --rawfile padding "$padding" '
+    ["claude","codex","opencode","pi-signed","pi","grok","kimi"]
+    | map({id:.,harness:.,harness_family:.,backend:"tmux",target:("fm:"+.),worktree:null,
+      endpoint:{presence:"verified_present",raw:"alive"},
+      worker:{presence:"verified_present",pids_sample_1:1,pids_sample_2:1,
+        harness_processes_sample_1:1,harness_processes_sample_2:1},
+      output:{sample_1_readable:true,sample_2_readable:true,changed:true},
+      cpu:{sample_1_max_ms:1000,sample_2_max_ms:1030,delta_ms:30,
+        rate_ms_per_minute:900,baseline:"verified",threshold_ms_per_minute:400},
+      activity:"active",padding:$padding})
+    | {schema:"fm-liveness.v1",observed_at:"2026-08-04T12:00:00Z",interval_ms:2000,
+      process_samples:{sample_1_readable:true,sample_2_readable:true},records:.}
+  ' > "$payload"
+  [ "$(LC_ALL=C wc -c < "$payload" | tr -d ' ')" -gt "$arg_max" ] \
+    || fail "large liveness fixture did not exceed ARG_MAX"
+  oversized=$(cat "$payload")
+  if FM_CREW_STATE_LIVENESS_JSON="$oversized" /usr/bin/true 2>/dev/null; then
+    fail "legacy liveness environment fixture did not reach E2BIG"
+  fi
+  cat > "$fakebin/large-liveness" <<'SH'
+#!/usr/bin/env bash
+cat "${FM_LARGE_LIVENESS_PAYLOAD:?}"
+SH
+  chmod +x "$fakebin/large-liveness"
+  out_file="$home/snapshot.json"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/large-liveness" \
+    FM_LARGE_LIVENESS_PAYLOAD="$payload" "$SNAPSHOT" --json > "$out_file" \
+    || fail "fleet snapshot could not carry the beyond-ARG_MAX liveness file"
+  jq -e '
+    (.tasks | length) == 7
+      and ([.tasks[].id] | sort) == (["claude","codex","opencode","pi-signed","pi","grok","kimi"] | sort)
+      and all(.tasks[]; .current_state.state == "working" and .current_state.source == "process-output")
+  ' "$out_file" >/dev/null || fail "large liveness transport lost one or more fleet members"
+  pass "beyond-ARG_MAX liveness evidence reaches every supported harness member by file pointer"
+}
+
+test_cross_home_aggregation_never_uses_growing_json_argv() {
+  local home fakebin guard real_jq out
+  home=$(make_home cross-home-argv)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  guard="$home/jq-guard"
+  mkdir -p "$guard"
+  real_jq=$(command -v jq)
+  cat > "$guard/jq" <<SH
+#!/usr/bin/env bash
+previous=
+name=
+for argument in "\$@"; do
+  if [ "\$previous" = --argjson ]; then
+    name=\$argument
+    previous=argjson-name
+    continue
+  fi
+  if [ "\$previous" = argjson-name ]; then
+    case "\$name" in
+      current|records|summary) [ "\${#argument}" -le 100 ] || exit 97 ;;
+    esac
+    previous=
+    continue
+  fi
+  previous=\$argument
+done
+exec "$real_jq" "\$@"
+SH
+  chmod +x "$guard/jq"
+  out=$(PATH="$guard:$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" \
+    FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "cross-home snapshot put a growing current, records, or summary collection on jq argv"
+  printf '%s' "$out" | jq -e '.schema == "fm-fleet-snapshot.v1" and (.secondmate_current.records | length) == 1' >/dev/null \
+    || fail "off-argv cross-home aggregation lost its record: $out"
+  pass "cross-home current, records, and summary collections stay off jq argv"
+}
+
 test_fixture_snapshot_json() {
   local home fakebin out ids
   home=$(make_home fixture)
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e . >/dev/null || fail "snapshot must be valid JSON"
   ids=$(printf '%s' "$out" | jq -r '.tasks | map(.id) | join(",")')
   [ "$ids" = "cmux-task,scout-task,secondmate-task,ship-task" ] \
@@ -164,7 +299,7 @@ test_fixture_snapshot_json() {
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "ship-task")
     | .current_state.state == "working"
-      and .current_state.source == "pane"
+      and .current_state.source == "process-output"
       and .pr.url == "https://github.com/kunchenguid/firstmate/pull/9"
       and .backlog.body_excerpt == "Preserve this detail for bearings."
       and .hints.pending_decision == false
@@ -224,7 +359,7 @@ EOF
     "mode=ship"
   printf 'working: visible\n' > "$home/state/visible-ship.status"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .main_inventory.valid == false
       and .main_inventory.reason == "unstructured current backlog row"
@@ -251,7 +386,7 @@ EOF
     "kind=ship" \
     "mode=ship"
   printf 'working: orphan now live\n' > "$home/state/orphan-ship.status"
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .main_inventory.valid == true
       and .main_inventory.reason == null
@@ -284,7 +419,7 @@ EOF
     "harness=codex" "kind=ship" "mode=ship"
   printf 'working: preparing canary\n' > "$home/state/worker.status"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .main_inventory.orphan_in_flight == ["orphan"]
       and (.backlog.records[] | select(.id == "program")
@@ -313,7 +448,7 @@ EOF
 - [x] worker - Real worker (repo: alpha) (kind: ship) (done 2026-07-22)
 EOF
   rm "$home/state/worker.meta" "$home/state/worker.status"
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "captain-run")
     | .blocked_by == "review"
@@ -334,7 +469,7 @@ EOF
 - [x] worker - Real worker (repo: alpha) (kind: ship) (done 2026-07-22)
 - [x] review - Security review (repo: alpha) (kind: ship) (done 2026-07-22)
 EOF
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "captain-run")
     | .blocked_by == "review"
@@ -345,7 +480,7 @@ EOF
 
   sed 's/blocked-by: review/blocked-by: missing/' "$home/data/backlog.md" > "$home/data/backlog.next"
   mv "$home/data/backlog.next" "$home/data/backlog.md"
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "captain-run")
     | .blocked_by_ids == ["worker", "missing"]
@@ -362,7 +497,8 @@ test_event_hints_follow_reconciled_current_state() {
     "$home/projects/active-decision" \
     "$home/projects/active-blocked" \
     "$home/projects/stale-decision" \
-    "$home/projects/stale-blocked"
+    "$home/projects/stale-blocked" \
+    "$home/projects/unknown-decision"
   fm_write_meta "$home/state/active-decision.meta" \
     "window=firstmate:fm-active-decision" \
     "worktree=$home/projects/active-decision" \
@@ -403,18 +539,30 @@ test_event_hints_follow_reconciled_current_state() {
   "$ROOT/bin/fm-busy-event.sh" apply "$home/state" stale-blocked busy --gen "$hint_gen" \
     --source claude-hook --event user-prompt-submit
   printf 'blocked: old failure\n' > "$home/state/stale-blocked.status"
+  fm_write_meta "$home/state/unknown-decision.meta" \
+    "window=firstmate:fm-unknown-decision" \
+    "worktree=$home/projects/unknown-decision" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'needs-decision [key=unknown-route]: choose a route\n' > "$home/state/unknown-decision.status"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     def task($id): (.tasks[] | select(.id == $id));
     task("active-decision").current_state.state == "parked"
       and task("active-decision").hints.pending_decision == true
-      and task("active-blocked").current_state.state == "blocked"
+      and task("active-blocked").current_state.state == "parked"
       and task("active-blocked").hints.blocked_event == true
       and task("stale-decision").current_state.state == "working"
       and task("stale-decision").hints.pending_decision == false
       and task("stale-blocked").current_state.state == "working"
       and task("stale-blocked").hints.blocked_event == false
+      and task("unknown-decision").current_state.state == "unknown"
+      and task("unknown-decision").current_state.source == "process-output"
+      and task("unknown-decision").hints.pending_decision == true
+      and task("unknown-decision").hints.open_decisions[0].key == "unknown-route"
   ' >/dev/null || fail "event hints must follow reconciled current state"
   pass "snapshot event hints follow reconciled current state"
 }
@@ -474,7 +622,7 @@ EOF
   record_claude_idle "$home/state" bold-task
   printf 'done: report ready\n' > "$home/state/bold-task.status"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e --arg data "$data" --arg projects "$projects" '
     .roots.data == $data
       and .roots.projects == $projects
@@ -519,7 +667,7 @@ EOF
     .backlog.records[] | select(.id == "done-comma")
     | .repo == "gamma"
       and .merged == "2026-07-09"
-      and .completion == {verb:"merged",date:"2026-07-09"}
+      and .completion == {local_claim:"merged",date:"2026-07-09"}
   ' >/dev/null || fail "done comma metadata did not split"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-bracket-pr")
@@ -527,14 +675,14 @@ EOF
       and .title == "Done Bracket PR"
       and .pr_url == "https://github.com/kunchenguid/firstmate/pull/43"
       and .links == ["https://github.com/kunchenguid/firstmate/pull/43"]
-      and .completion == {verb:"merged",date:"2026-07-12"}
+      and .completion == {local_claim:"merged",date:"2026-07-12"}
   ' >/dev/null || fail "bracketed PR artifact did not parse"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "reported-comma")
     | .repo == "gamma"
       and .title == "Reported Scout"
       and .reported == "2026-07-10"
-      and .completion == {verb:"reported",date:"2026-07-10"}
+      and .completion == {local_claim:"reported",date:"2026-07-10"}
   ' >/dev/null || fail "reported closure metadata did not parse"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-note")
@@ -542,7 +690,7 @@ EOF
       and .title == "Done Note"
       and .local_note == "local main"
       and .done == "2026-07-11"
-      and .completion == {verb:"done",date:"2026-07-11"}
+      and .completion == {local_claim:"done",date:"2026-07-11"}
   ' >/dev/null || fail "done closure metadata did not parse"
   printf '%s' "$out" | jq -e --arg data "$data" '
     .tasks[] | select(.id == "bold-task")
@@ -550,8 +698,8 @@ EOF
       and .paths.report.path == ($data + "/bold-task/report.md")
       and .paths.report.present == true
   ' >/dev/null || fail "bold task did not join to override-backed backlog and report"
-  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$VIEW")
-  assert_contains "$view" "| bold-task | done / status-log | scout | alpha | tmux | present | $data/bold-task/report.md" \
+  view=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$VIEW")
+  assert_contains "$view" "| bold-task | parked / process-output | scout | alpha | tmux | present | $data/bold-task/report.md" \
     "view should render bold in-flight row from snapshot"
   assert_contains "$view" "| blocked-reason | Blocked Reason | beta | ship | queued-comma - waits on queued-comma | - |" \
     "view should render blocked reason without title metadata"
@@ -567,8 +715,8 @@ test_view_renders_snapshot() {
   home=$(make_home view)
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
-  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
-  assert_contains "$view" "| ship-task | working / pane | ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
+  view=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$VIEW")
+  assert_contains "$view" "| ship-task | working / process-output | ship | alpha | tmux | present | https://github.com/kunchenguid/firstmate/pull/9" \
     "view should render ship row from snapshot"
   assert_contains "$view" "| queued-task | Queued Task | alpha | ship | ship-task | -" \
     "view should render queued backlog row"
@@ -576,7 +724,7 @@ test_view_renders_snapshot() {
     "view should render done backlog row"
   assert_contains "$view" "bin/fm-send.sh fm-secondmate-task" \
     "view should show secondmate send guidance"
-  assert_contains "$view" "| secondmate-task | working / status-log | secondmate | $home/secondmate-home | tmux | present / alive |" \
+  assert_contains "$view" "| secondmate-task | unknown / process-output | secondmate | $home/secondmate-home | tmux | present / alive |" \
     "view should show secondmate endpoint agent liveness"
   assert_not_contains "$view" "fm-peek.sh fm-secondmate-task" \
     "view must not tell firstmate to routinely peek secondmates"
@@ -596,7 +744,7 @@ test_view_renders_dead_secondmate_agent_status() {
     "projects=alpha, beta"
   printf 'working: watching delegated scope\n' > "$home/state/dead-secondmate.status"
   fakebin=$(make_fakebin "$home")
-  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  view=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$VIEW")
   assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead |" \
     "view should distinguish a present secondmate endpoint from a dead agent"
   assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead | - | $home/secondmate-home (absent) |" \
@@ -626,7 +774,7 @@ test_open_decision_survives_later_unrelated_event() {
   printf 'working: implementing an unrelated subsystem\n' >> "$home/state/masked-decision.status"
   printf 'done: an unrelated subtask finished\n' >> "$home/state/masked-decision.status"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "masked-decision")
     | .hints.pending_decision == true
@@ -652,7 +800,7 @@ test_secondmate_open_decision_survives_live_endpoint() {
     "projects=alpha"
   printf 'needs-decision [key=race]: choose ordering\n' > "$home/state/active-secondmate.status"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "active-secondmate")
     | .endpoint.agent_alive == "alive"
@@ -680,7 +828,7 @@ test_open_decision_transfers_to_captain_hold() {
   printf 'needs-decision [key=route]: choose a sample route\n' > "$home/state/transferred-decision.status"
   printf 'captain-held [key=route]: tracked by transferred-decision-route\n' >> "$home/state/transferred-decision.status"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "transferred-decision")
     | .hints.pending_decision == false
@@ -706,7 +854,7 @@ test_open_decision_clears_on_keyed_resolution() {
   printf 'done: an unrelated subtask finished\n' >> "$home/state/resolved-decision.status"
   printf 'resolved [key=race]: captain chose subscribe-then-reconcile\n' >> "$home/state/resolved-decision.status"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "resolved-decision")
     | .hints.pending_decision == false
@@ -741,10 +889,10 @@ test_completed_scout_report_is_pointer_not_pending() {
   # Completed report whose PROSE reads like the decision.
   printf '# Lavish 103\nThe open question is whether to adopt approach A or B.\nThis needs a captain decision. Recommendation: A.\n' > "$home/data/lavish-103/report.md"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "lavish-103")
-    | .current_state.state == "done"
+    | .current_state.state == "parked"
       and .hints.pending_decision == false
       and (.hints.open_decisions | length) == 0
       and .hints.scout_report_present == true
@@ -769,7 +917,7 @@ test_parked_scout_decision_stays_pending() {
   record_claude_idle "$home/state" parked-scout
   printf 'needs-decision [key=q1]: adopt approach A or B\n' > "$home/state/parked-scout.status"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_LIVENESS_SNAPSHOT_BIN="$fakebin/fm-liveness-snapshot" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "parked-scout")
     | .hints.pending_decision == true
@@ -780,6 +928,9 @@ test_parked_scout_decision_stays_pending() {
 }
 
 test_empty_fleet_json
+test_large_snapshot_payloads_never_cross_exec_argv
+test_large_liveness_payload_reaches_every_member_off_exec_environment
+test_cross_home_aggregation_never_uses_growing_json_argv
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness

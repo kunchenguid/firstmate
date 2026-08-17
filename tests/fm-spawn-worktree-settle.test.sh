@@ -30,6 +30,7 @@ make_settle_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 case "$*" in
   *"#{pane_current_path}"*)
     countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
@@ -96,6 +97,7 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_TMUX_LOG="$HOME_DIR/tmux.log" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -104,18 +106,20 @@ run_settle_spawn() {
 # loop should keep polling until two consecutive reads agree, landing on the
 # real settled worktree instead.
 test_single_stale_first_read_is_not_accepted() {
-  local rec id out status
+  local rec id out status wt_real stale_real
   id=settle-single-stale-z1
   rec=$(make_settle_case settle-single "$id" 1)
   read_settle_record "$rec"
 
   out=$(run_settle_spawn "$id")
   status=$?
+  wt_real=$(cd "$WT_DIR" && pwd -P)
+  stale_real=$(cd "$STALE_DIR" && pwd -P)
   expect_code 0 "$status" "spawn should succeed once the pane settles"
   assert_contains "$out" "spawned $id" "spawn did not report success"
-  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+  assert_grep "worktree=$wt_real" "$HOME_DIR/state/$id.meta" \
     "meta did not record the settled worktree"
-  assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
+  assert_no_grep "worktree=$stale_real" "$HOME_DIR/state/$id.meta" \
     "meta wrongly recorded the transient stale path as the worktree"
   pass "a single transient stale pane_current_path read is not accepted as the worktree"
 }
@@ -124,10 +128,14 @@ test_single_stale_first_read_is_not_accepted() {
 # costs the loop's existing one-second inter-poll sleep to confirm - not an
 # extra full cycle on top of that.
 test_already_settled_pane_costs_one_confirm_sleep() {
-  local rec id out status start end elapsed
+  local rec id out status start end elapsed physical logical token
   id=settle-already-settled-z2
   rec=$(make_settle_case settle-already-settled "$id" 0)
   read_settle_record "$rec"
+  physical=$(cd "$WT_DIR" && pwd -P)
+  logical="$TMP_ROOT/settle-already-settled/wt-logical"
+  ln -s "$physical" "$logical"
+  WT_DIR=$logical
 
   start=$(date +%s)
   out=$(run_settle_spawn "$id")
@@ -135,13 +143,59 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   end=$(date +%s)
   elapsed=$((end - start))
   expect_code 0 "$status" "spawn should succeed when the pane is already settled"
-  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
-    "meta did not record the already-settled worktree"
+  [ "$(cat "$COUNTFILE")" = 2 ] \
+    || fail "physical-path guard did not require two repeated logical worktree observations"
+  assert_grep "worktree=$physical" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the physical already-settled worktree"
+  assert_no_grep "worktree=$logical" "$HOME_DIR/state/$id.meta" \
+    "meta retained the reusable worktree's symlink spelling"
+  token=$(sed -n 's/^worker_token=//p' "$HOME_DIR/state/$id.meta")
+  case "$token" in *[!0-9a-f]*) fail "spawn recorded a malformed worker token: $token" ;; esac
+  [ "${#token}" -eq 32 ] || fail "spawn did not record a 128-bit worker token"
+  assert_grep "FM_WORKER_TOKEN=$token" "$HOME_DIR/tmux.log" \
+    "the recorded worker token was not carried on the launch command"
   [ "$elapsed" -le 5 ] || fail "already-settled pane took ${elapsed}s to confirm - expected close to the single inter-poll sleep"
-  pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
+  pass "an already-settled pane records its physical path and carries one task token without an extra poll cycle"
+}
+
+# The active assertion above must not merely document the intended output: it
+# must go RED when the two canonicalization points on this path are removed.
+# The fake pane supplies the same logical symlink path twice, so a raw-path
+# implementation would record that spelling rather than pwd -P's physical one.
+test_physical_canonicalization_guard_goes_red() {
+  local rec id out status physical logical neutralized real_spawn
+  id=settle-physical-guard-z3
+  rec=$(make_settle_case settle-physical-guard "$id" 0)
+  read_settle_record "$rec"
+  physical=$(cd "$WT_DIR" && pwd -P)
+  logical="$TMP_ROOT/settle-physical-guard/wt-logical"
+  ln -s "$physical" "$logical"
+  WT_DIR=$logical
+  # Run the temporary variant from a complete sibling bin/ directory: spawn
+  # deliberately resolves its helper libraries relative to its own location.
+  cp -R "$ROOT/bin" "$TMP_ROOT/bin"
+  neutralized="$TMP_ROOT/bin/fm-spawn.sh"
+  perl -pe 's{p_real=\$\(real_path_or_raw "\$p"\)}{p_real=\$p}; s{WT=\$\(real_path_or_raw "\$WT"\)}{: # canonicalization intentionally neutralized}' \
+    "$SPAWN" > "$neutralized"
+  chmod +x "$neutralized"
+  real_spawn=$SPAWN
+  SPAWN=$neutralized
+  out=$(run_settle_spawn "$id")
+  status=$?
+  SPAWN=$real_spawn
+  expect_code 0 "$status" "neutralized fixture should still expose the raw-path regression"
+  [ "$(cat "$COUNTFILE")" = 2 ] \
+    || fail "neutralized fixture did not receive two repeated logical worktree observations"
+  grep -Fqx "worktree=$logical" "$HOME_DIR/state/$id.meta" \
+    || fail "neutralizing physical canonicalization did not record the logical symlink spelling: $out"
+  if grep -Fqx "worktree=$physical" "$HOME_DIR/state/$id.meta"; then
+    fail "neutralizing physical canonicalization left the physical-path assertion green: $out"
+  fi
+  pass "removing physical canonicalization turns the symlinked-worktree assertion RED"
 }
 
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_physical_canonicalization_guard_goes_red
 
 echo "# all fm-spawn-worktree-settle tests passed"
