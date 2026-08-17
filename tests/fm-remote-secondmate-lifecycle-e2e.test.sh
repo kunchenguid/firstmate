@@ -205,6 +205,18 @@ if [ "${FM_FAKE_SSH_MODE:-normal}" = doctor-fixable ] \
   printf 'unreadable\n'
   exit 0
 fi
+if [ "${FM_FAKE_SSH_MODE:-normal}" = legacy-tier-protocol ] \
+  && [ "$command_name" = fm-remote-secondmate-control.sh ] \
+  && [ "$_command_action" = launch ]; then
+  control_argc=$(perl -MMIME::Base64=decode_base64 -e '
+    my @args=split(/\0/, decode_base64($ARGV[0]));
+    print scalar(@args) - 2;
+  ' "$argv_b64")
+  case "$control_argc" in
+    5|6) touch "$FM_FAKE_LEGACY_LAUNCH"; exit 0 ;;
+    *) exit 2 ;;
+  esac
+fi
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
   launch-nonherdr-route:fm-remote-secondmate-control.sh:*)
     [ "$_command_action" = launch ] || exit 93
@@ -275,6 +287,7 @@ remote_env() {
   FM_FAKE_INHERIT_PAYLOAD="$TMP_ROOT/inherit.payload" \
   FM_FAKE_LAUNCH_ENTERED="$TMP_ROOT/launch.entered" \
   FM_FAKE_LAUNCH_RELEASE="$TMP_ROOT/launch.release" \
+  FM_FAKE_LEGACY_LAUNCH="$TMP_ROOT/legacy-launch.entered" \
   FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_REMOTE_REPLY_WAIT_SECONDS=10 \
   "$@"
 }
@@ -704,6 +717,17 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
+rm -f "$TMP_ROOT/legacy-launch.entered"
+if FM_FAKE_SSH_MODE=legacy-tier-protocol remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-legacy-tier-protocol.out" 2>&1; then
+  fail "remote spawn succeeded against a peer without tier protocol support"
+fi
+assert_absent "$TMP_ROOT/legacy-launch.entered" \
+  "legacy remote peer entered its launch handler without a tier override"
+assert_absent "$PARENT/state/ios.meta" \
+  "legacy remote protocol refusal published parent endpoint metadata"
+pass "legacy remote peers refuse tier-aware launches before mutation"
+
 out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"

@@ -574,16 +574,14 @@ spawn_remote_secondmate() {
   # carrier is resolved against THIS task's own meta (reused verbatim on
   # relaunch, freshly rooted otherwise, never adopting this process's ambient
   # TRACEPARENT) under this home's frozen decision, then handed to the remote
-  # host to export into the agent's pane. Disabled resolves to empty and the
-  # remote launch call stays byte-identical to the untraced one.
+  # host to export into the agent's pane. Disabled resolves to an empty
+  # positional carrier in the fixed tier-aware launch shape.
   remote_traceparent=
   if [ "$(fm_trace_context_session_effective "$STATE/.trace-context-effective")" = on ]; then
     remote_traceparent=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$meta" || true)
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
-  if [ -n "$remote_traceparent" ] || [ "$TIER_SET" -eq 1 ]; then
-    launch_args+=("$remote_traceparent" "$tier")
-  fi
+  launch_args+=("$remote_traceparent" "$tier")
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
