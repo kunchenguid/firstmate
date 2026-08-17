@@ -73,6 +73,7 @@ For Herdr homes upgraded while Spaces are already open, run `bin/fm-crew-identit
 The migration captures missing active metadata, then renames only exact workspace ids whose current titles match their expected legacy titles; a changed, ambiguous, foreign, duplicate, or incomplete binding is refused.
 It never stops or restarts an agent.
 The Aubrey/Pullings example renders the primary Space as `Lt Pullings`; configured agents use the roster's short canonical labels, such as `Mr Allen`, `Dr Maturin`, and `Lt Mowett`.
+A project-owning persistent secondmate Space appends its exact registered repository slug, for example `Mr Allen — developer-setup` and `Lt Mowett — pco-projects-mda`; project-less agents stay name-only.
 Full names and expanded ranks remain in charters and detailed fleet JSON.
 
 ## Pi Calm preference (config/calm)

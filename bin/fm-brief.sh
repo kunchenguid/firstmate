@@ -182,7 +182,9 @@ if [ -n "$FM_CREW_IDENTITY_RESOLVED_ID" ]; then
   CREW_IDENTITY_SECTION="# Crew identity
 Crew roster: $FM_CREW_IDENTITY_RESOLVED_ROSTER
 Crew identity: $FM_CREW_IDENTITY_RESOLVED_ID
-Crew detail: $CREW_IDENTITY_DETAIL"
+Crew detail: $CREW_IDENTITY_DETAIL
+
+"
 fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
@@ -231,9 +233,7 @@ fi
 cat > "$BRIEF" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
 
-$CREW_IDENTITY_SECTION
-
-# Charter
+${CREW_IDENTITY_SECTION}# Charter
 $SECONDMATE_CHARTER
 
 # Routing scope
@@ -333,9 +333,7 @@ if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
-$CREW_IDENTITY_SECTION
-
-# Task
+${CREW_IDENTITY_SECTION}# Task
 {TASK}
 
 $HERDR_SECTION
@@ -445,9 +443,7 @@ DOD=${DOD%$'\n'}
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
-$CREW_IDENTITY_SECTION
-
-# Task
+${CREW_IDENTITY_SECTION}# Task
 {TASK}
 
 $HERDR_SECTION

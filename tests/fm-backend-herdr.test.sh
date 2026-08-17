@@ -307,6 +307,73 @@ test_workspace_identity_labels_are_exact_and_never_expose_mechanical_ids() {
   pass "Herdr identity Space labels are exactly Lt Pullings, Mr Allen, Dr Maturin, and Lt Mowett"
 }
 
+test_workspace_identity_label_uses_the_exact_registered_repository_slug() {
+  local base primary home out
+  base="$TMP_ROOT/identity-project-slug"
+  primary="$base/primary"
+  mkdir -p "$primary/config"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"gentech":"john-allen","pco-mda":"william-mowett","fmdev":"stephen-maturin"}}' \
+    > "$primary/config/crew-identities.json"
+
+  for record in 'gentech|developer-setup|Mr Allen — developer-setup' \
+                'pco-mda|pco-projects-mda|Lt Mowett — pco-projects-mda'; do
+    home="$base/${record%%|*}"
+    mkdir -p "$home/config" "$home/data"
+    cp "$primary/config/crew-identities.json" "$home/config/crew-identities.json"
+    printf '%s\n' "${record%%|*}" > "$home/.fm-secondmate-home"
+    printf -- '- %s - registered clone (added 2026-01-01)\n' "$(printf '%s' "$record" | cut -d'|' -f2)" \
+      > "$home/data/projects.md"
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT")
+    [ "$out" = "${record##*|}" ] || fail "project-owning Space label was not '${record##*|}': $out"
+    assert_not_contains "$out" "2ndmate" "project-owning Space label exposed a mechanical home label"
+  done
+
+  home="$base/fmdev"
+  mkdir -p "$home/config"
+  cp "$primary/config/crew-identities.json" "$home/config/crew-identities.json"
+  printf 'fmdev\n' > "$home/.fm-secondmate-home"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT")
+  [ "$out" = "Dr Maturin" ] || fail "a project-less secondmate Space label must stay name-only: $out"
+
+  mkdir -p "$home/data"
+  printf -- '- one - a (added 2026-01-01)\n- two - b (added 2026-01-01)\n' > "$home/data/projects.md"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT")
+  [ "$out" = "Dr Maturin" ] || fail "an ambiguous multi-project home must stay name-only: $out"
+  pass "Herdr Space labels suffix the exact registered repository slug for project-owning secondmates"
+}
+
+test_projection_journal_v2_stays_valid_once_identity_config_appears() {
+  local dir state home config out
+  dir="$TMP_ROOT/projection-journal-v2-identity-later"; state="$dir/state"; home="$dir/home"
+  config="$dir/config"
+  mkdir -p "$state" "$home" "$config"
+  bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" rl-x) || exit 1
+    journal="$1/rl-x.herdr-presentation"
+    canonical=$(fm_backend_herdr_projection_home_identity "$2") || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label rl-x "$token")
+    fm_backend_herdr_projection_journal_bind \
+      "$journal" rl-x "$canonical" lab-session w2 w2:t2 w2:p2 w1 firstmate "$label" fm-rl-x
+  ' "$ROOT" "$state" "$home" || fail "pre-identity version 2 binding failed"
+
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{}}' \
+    > "$config/crew-identities.json"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_CREW_IDENTITY_CONFIG="$config/crew-identities.json" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_snapshot "$1/rl-x.herdr-presentation" rl-x || exit 1
+    printf "%s|%s\n" "$FM_BACKEND_HERDR_JOURNAL_VERSION" "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL"
+  ' "$ROOT" "$state") || fail "a pre-existing version 2 journal stopped validating once a crew identity config existed"
+  case "$out" in
+    2\|└\ rl-x\ ·\ p:*) ;;
+    *) fail "version 2 journal reconstruction changed its legacy title: $out" ;;
+  esac
+  pass "Herdr version 2 presentation journals stay valid after a crew identity config appears"
+}
+
 test_exact_legacy_workspace_identity_rename_is_id_bound() {
   local dir home log resp fb out
   dir="$TMP_ROOT/identity-rename"; home="$dir/home"; log="$dir/log"; resp="$dir/responses"
@@ -4408,6 +4475,8 @@ test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_workspace_identity_labels_are_exact_and_never_expose_mechanical_ids
+test_workspace_identity_label_uses_the_exact_registered_repository_slug
+test_projection_journal_v2_stays_valid_once_identity_config_appears
 test_exact_legacy_workspace_identity_rename_is_id_bound
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_launcher_identity_absent_without_a_herdr_pane

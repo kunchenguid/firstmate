@@ -346,11 +346,30 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
 # firstmate / 2ndmate-<id> labels remain byte-compatible. A configured but
 # unassigned persistent home returns the explicit "Unassigned crew" label;
 # spawn-time ensure refuses that ambiguous shape before creating or adopting a
-# workspace. Read fresh from FM_HOME on every call so relaunch and recovery use
-# the same durable assignment. Mechanical placement never trusts this label.
+# workspace. A project-owning persistent secondmate appends its EXACT registered
+# repository slug ("Mr Allen — developer-setup"); a project-less home stays
+# name-only, and an ambiguous multi-project home falls back to name-only rather
+# than guessing. Read fresh from FM_HOME on every call so relaunch and recovery
+# use the same durable assignment. Mechanical placement, routing, and recovery
+# bindings never trust this label.
+fm_backend_herdr_crew_identity_config_path() {
+  printf '%s' "${FM_CREW_IDENTITY_CONFIG_OVERRIDE:-$FM_HOME/config/crew-identities.json}"
+}
+
+# The single registered repository slug of this home, or nothing when the home
+# registers no project or more than one.
+fm_backend_herdr_home_project_slug() {
+  local reg="$FM_HOME/data/projects.md" names
+  [ -f "$reg" ] && [ ! -L "$reg" ] || return 0
+  names=$(awk '$1 == "-" && $2 ~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/ { print $2 }' "$reg" 2>/dev/null)
+  [ "$(printf '%s\n' "$names" | grep -c '[^[:space:]]' || true)" -eq 1 ] || return 0
+  printf '%s' "$(printf '%s' "$names" | tr -d '[:space:]')"
+}
+
 fm_backend_herdr_workspace_label() {
-  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id roster identity
-  FM_CREW_IDENTITY_CONFIG="${FM_CREW_IDENTITY_CONFIG_OVERRIDE:-$FM_HOME/config/crew-identities.json}"
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id roster identity label slug
+  local FM_CREW_IDENTITY_CONFIG
+  FM_CREW_IDENTITY_CONFIG=$(fm_backend_herdr_crew_identity_config_path)
   if fm_crew_identity_config_present; then
     roster=$(fm_crew_identity_config_roster) || return 1
     if [ -f "$marker" ]; then
@@ -365,9 +384,14 @@ fm_backend_herdr_workspace_label() {
     fi
     if [ "$identity" = unassigned ]; then
       printf 'Unassigned crew'
-    else
-      fm_crew_identity_space_label "$roster" "$identity"
+      return
     fi
+    label=$(fm_crew_identity_space_label "$roster" "$identity") || return 1
+    if [ -f "$marker" ]; then
+      slug=$(fm_backend_herdr_home_project_slug)
+      [ -z "$slug" ] || label="$label — $slug"
+    fi
+    printf '%s' "$label"
     return
   fi
   if [ -f "$marker" ]; then
@@ -803,16 +827,16 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
 
 # fm_backend_herdr_projection_workspace_label: presentation-only child label.
 # Format is literal U+2514 BOX DRAWINGS LIGHT UP AND RIGHT, one space, the
-# assigned character title, or the concise task label for an unconfigured
-# legacy home, then the unchanged · p:<full-22-char-token> suffix. Configured
-# but unassigned tasks use an explicit non-identifying label. Tokens remain
+# assigned character title, or the concise task label when no identity label is
+# given, then the unchanged · p:<full-22-char-token> suffix. Purely a function of
+# its arguments: a version 2 binding reconstructs its legacy title identically
+# whether or not an identity config exists now. Spawn passes the explicit
+# "Unassigned crew" label for a configured but unassigned task. Tokens remain
 # non-authoritative correlators only.
 fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id> [<identity-label>]
   local task=$1 token=$2 identity_label=${3:-}
   if [ -n "$identity_label" ]; then
     printf '└ %s · p:%s' "$identity_label" "$token"
-  elif fm_crew_identity_config_present; then
-    printf '└ Unassigned crew · p:%s' "$token"
   else
     printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$task")" "$token"
   fi
@@ -1925,7 +1949,8 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
     case "$status" in
       0)
         FM_BACKEND_HERDR_WS_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
-        FM_CREW_IDENTITY_CONFIG="$FM_HOME/config/crew-identities.json"
+        local FM_CREW_IDENTITY_CONFIG
+        FM_CREW_IDENTITY_CONFIG=$(fm_backend_herdr_crew_identity_config_path)
         if fm_crew_identity_config_present; then
           fm_backend_herdr_workspace_identity_rename_exact \
             "$session" "$FM_BACKEND_HERDR_WS_ID" || return 3

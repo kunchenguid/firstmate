@@ -775,6 +775,33 @@ test_crew_identity_roster_config_and_brief_capture() {
   pass "crew identities: 29+ sourced roster, config parsing, brief detail, and active uniqueness"
 }
 
+test_identity_free_briefs_keep_their_historical_opening_bytes() {
+  local home brief
+  home="$TMP_ROOT/crew-identity-absent"
+  mkdir -p "$home/data"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" \
+    plain-task demo --mode local-only >/dev/null \
+    || fail "identity-free ship brief scaffold failed"
+  brief="$home/data/plain-task/brief.md"
+  [ "$(sed -n '2p' "$brief")" = "" ] && [ "$(sed -n '3p' "$brief")" = "# Task" ] \
+    || fail "an identity-free ship brief gained a blank line after its opening sentence"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" \
+    plain-scout demo --scout >/dev/null \
+    || fail "identity-free scout brief scaffold failed"
+  brief="$home/data/plain-scout/brief.md"
+  [ "$(sed -n '3p' "$brief")" = "# Task" ] \
+    || fail "an identity-free scout brief gained a blank line after its opening sentence"
+
+  FM_SECONDMATE_CHARTER='Supervise the plain domain.' FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" plain-sm --secondmate alpha >/dev/null \
+    || fail "identity-free secondmate charter scaffold failed"
+  brief="$home/data/plain-sm/brief.md"
+  [ "$(sed -n '3p' "$brief")" = "# Charter" ] \
+    || fail "an identity-free secondmate charter gained a blank line after its opening sentence"
+  pass "fm-brief: identity-free briefs keep their historical opening bytes"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -796,3 +823,4 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_crew_identity_roster_config_and_brief_capture
+test_identity_free_briefs_keep_their_historical_opening_bytes
