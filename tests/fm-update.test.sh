@@ -474,40 +474,68 @@ PY
   pass "T14 compact description ownership survives upstream convergence"
 }
 
-test_unsupported_skill_description_scalars_refuse_candidates() {
-  local w form out installed live before_refs after_refs
-  w=$(new_semantic_overlay_world t-description-scalars)
-  installed=$(git -C "$w/main" rev-parse HEAD)
-  live=$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)
-  before_refs=$(git -C "$w/main" for-each-ref --format='%(refname) %(objectname)' refs/firstmate/overlays/candidates)
-
-  for form in '>+' '|2-'; do
-    python3 - "$w/seed/.agents/skills/demo/SKILL.md" "$form" <<'PY'
+test_multiline_skill_descriptions_have_proven_boundaries() {
+  local w case out approval candidate
+  w=$(new_semantic_overlay_world t-description-boundaries)
+  for case in folded-keep literal-keep explicit-indent quoted plain; do
+    python3 - "$w/seed/.agents/skills/demo/SKILL.md" "$case" <<'PY'
 from pathlib import Path
 import re, sys
-path, form = Path(sys.argv[1]), sys.argv[2]
-content = path.read_text()
-content = re.sub(
-    r"description:.*?(?=\n---\n)",
-    f"description: {form}\n  Expanded upstream discovery guidance.",
-    content,
-    count=1,
-    flags=re.DOTALL,
-)
+path, case = Path(sys.argv[1]), sys.argv[2]
+values = {
+    "folded-keep": "description: >+\n  Expanded upstream\n  discovery guidance.",
+    "literal-keep": "description: |+\n  Expanded upstream\n  discovery guidance.",
+    "explicit-indent": "description: |2-\n  Expanded upstream\n  discovery guidance.",
+    "quoted": 'description: "Expanded upstream\n  discovery guidance."',
+    "plain": "description: Expanded upstream\n  discovery guidance.",
+}
+content = re.sub(r"description:.*?(?=\n---\n)", values[case], path.read_text(), count=1, flags=re.DOTALL)
 path.write_text(content)
 PY
-    git -C "$w/seed" add -A && git -C "$w/seed" commit -qm "unsupported description scalar $form"
+    git -C "$w/seed" add -A && git -C "$w/seed" commit -qm "valid multiline description $case"
     git -C "$w/seed" push -q origin main
-
-    out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1)
-    assert_contains "$out" "unsupported description block scalar" "unsupported $form description reports its unmapped semantic"
-    assert_not_contains "$out" "overlay-install: approval-required" "unsupported $form description is not offered"
-    [ "$(git -C "$w/main" rev-parse HEAD)" = "$installed" ] || fail "unsupported $form description moved main"
-    [ "$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)" = "$live" ] || fail "unsupported $form description moved live ref"
-    after_refs=$(git -C "$w/main" for-each-ref --format='%(refname) %(objectname)' refs/firstmate/overlays/candidates)
-    [ "$after_refs" = "$before_refs" ] || fail "unsupported $form description produced a candidate ref"
+    out=$(run_update "$w")
+    assert_contains "$out" "overlay-install: approval-required" "valid $case description reaches readiness"
+    approval=$(printf '%s\n' "$out" | grep '^overlay-install: approval-required')
+    candidate=$(printf '%s\n' "$approval" | sed -n 's/.* candidate=\([^ ]*\).*/\1/p')
+    git -C "$w/main" show "$candidate:.agents/skills/demo/SKILL.md" | grep -qF \
+      'description: Load for demo work.' || fail "compact description was lost for $case"
+    if git -C "$w/main" show "$candidate:.agents/skills/demo/SKILL.md" | grep -qF 'Expanded upstream'; then
+      fail "upstream $case description continuation remained in candidate"
+    fi
+    git -C "$w/main" show "$candidate:.agents/skills/demo/SKILL.md" | grep -qF \
+      'New body rule.' || fail "skill body was lost for $case"
   done
-  pass "T15 unsupported YAML description scalars refuse before candidate construction"
+  pass "T15 valid multiline YAML descriptions preserve compact ownership and body updates"
+}
+
+test_unproven_skill_description_boundaries_refuse_candidates() {
+  local kind w out installed live before_refs after_refs
+  for kind in malformed ambiguous; do
+    w=$(new_semantic_overlay_world "t-description-$kind")
+    installed=$(git -C "$w/main" rev-parse HEAD)
+    live=$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)
+    before_refs=$(git -C "$w/main" for-each-ref --format='%(refname) %(objectname)' refs/firstmate/overlays/candidates)
+    python3 - "$w/seed/.agents/skills/demo/SKILL.md" "$kind" <<'PY'
+from pathlib import Path
+import re, sys
+path, kind = Path(sys.argv[1]), sys.argv[2]
+replacement = 'description: "Unterminated upstream\n  discovery guidance.'
+if kind == "ambiguous":
+    replacement = "description: First description.\ndescription: Second description."
+path.write_text(re.sub(r"description:.*?(?=\n---\n)", replacement, path.read_text(), count=1, flags=re.DOTALL))
+PY
+    git -C "$w/seed" add -A && git -C "$w/seed" commit -qm "$kind description boundary"
+    git -C "$w/seed" push -q origin main
+    out=$(FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>&1)
+    assert_contains "$out" "$kind" "$kind description reports its unmapped semantic"
+    assert_not_contains "$out" "overlay-install: approval-required" "$kind description is not offered"
+    [ "$(git -C "$w/main" rev-parse HEAD)" = "$installed" ] || fail "$kind description moved main"
+    [ "$(git -C "$w/main" rev-parse refs/firstmate/overlays/live)" = "$live" ] || fail "$kind description moved live ref"
+    after_refs=$(git -C "$w/main" for-each-ref --format='%(refname) %(objectname)' refs/firstmate/overlays/candidates)
+    [ "$after_refs" = "$before_refs" ] || fail "$kind description produced a candidate ref"
+  done
+  pass "T16 malformed and ambiguous descriptions refuse before candidate construction"
 }
 
 test_unrelated_update_refreshes_exact_lineage_bindings() {
@@ -605,7 +633,8 @@ test_unsafe_secondmate_home_skipped_before_git_update
 test_verified_overlay_requires_explicit_install_approval
 test_semantic_forward_port_reaches_optimized_owners
 test_compact_description_survives_upstream_convergence
-test_unsupported_skill_description_scalars_refuse_candidates
+test_multiline_skill_descriptions_have_proven_boundaries
+test_unproven_skill_description_boundaries_refuse_candidates
 test_unrelated_update_refreshes_exact_lineage_bindings
 test_hash_bound_overlay_cannot_mask_unmapped_semantics
 test_ambiguous_overlay_refuses_without_ref_moves

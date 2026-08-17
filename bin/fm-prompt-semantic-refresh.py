@@ -19,6 +19,7 @@ import gzip
 import hashlib
 import io
 import json
+import re
 import subprocess
 import sys
 import tarfile
@@ -71,13 +72,68 @@ def changed_semantic_paths(repo: Path, previous: str, upstream: str) -> list[str
 
 def split_frontmatter(content: bytes, path: str) -> tuple[list[bytes], list[bytes]]:
     lines = content.splitlines(keepends=True)
-    if not lines or lines[0].strip() != b"---":
+    if not lines or lines[0].rstrip() != b"---":
         raise Refusal(f"unmapped semantic owner: {path} has no skill frontmatter")
     try:
-        end = next(index for index, line in enumerate(lines[1:], 1) if line.strip() == b"---")
+        end = next(index for index, line in enumerate(lines[1:], 1) if line.rstrip() == b"---" and not line.startswith((b" ", b"\t")))
     except StopIteration:
         raise Refusal(f"unmapped semantic owner: {path} has malformed skill frontmatter") from None
     return lines[: end + 1], lines[end + 1 :]
+
+
+def scalar_field_end(frontmatter: list[bytes], start: int, path: str) -> int:
+    end = start + 1
+    while end < len(frontmatter):
+        line = frontmatter[end]
+        if line[:1] in (b" ", b"\t") or not line.strip():
+            end += 1
+            continue
+        if line.strip() == b"---" or line.startswith(b"#") or re.match(rb"[A-Za-z0-9_-]+\s*:", line):
+            break
+        raise Refusal(f"unmapped semantic owner: {path} has ambiguous description boundary")
+    return end
+
+
+def quoted_scalar_is_closed(value: bytes, quote: int) -> bool:
+    index = 1
+    while index < len(value):
+        if value[index] == quote:
+            if quote == ord("'") and index + 1 < len(value) and value[index + 1] == quote:
+                index += 2
+                continue
+            if quote == ord('"') and (len(value[:index]) - len(value[:index].rstrip(b"\\"))) % 2:
+                index += 1
+                continue
+            return not value[index + 1 :].strip() or value[index + 1 :].lstrip().startswith(b"#")
+        index += 1
+    return False
+
+
+def validate_description_scalar(lines: list[bytes], path: str) -> None:
+    value = lines[0].split(b":", 1)[1].strip()
+    continuation = b"".join(lines[1:])
+    if any(line.startswith(b"\t") for line in lines[1:] if line.strip()):
+        raise Refusal(f"unmapped semantic owner: {path} has malformed description indentation")
+    if value.startswith((b">", b"|")):
+        if not re.fullmatch(rb"[>|](?:[+-]|[1-9]|[+-][1-9]|[1-9][+-])?", value):
+            raise Refusal(f"unmapped semantic owner: {path} has malformed description block scalar")
+        indicator = next((byte - ord("0") for byte in value[1:] if ord("1") <= byte <= ord("9")), 1)
+        for line in lines[1:]:
+            if line.strip() and len(line) - len(line.lstrip(b" ")) < indicator:
+                raise Refusal(f"unmapped semantic owner: {path} has malformed description indentation")
+        return
+    if value.startswith((b"'", b'"')):
+        quote = value[0]
+        joined = value + (b"\n" + continuation if continuation else b"")
+        if not quoted_scalar_is_closed(joined, quote):
+            raise Refusal(f"unmapped semantic owner: {path} has malformed quoted description")
+        return
+    if value[:1] in (b"[", b"{", b"&", b"*", b"!"):
+        raise Refusal(f"unmapped semantic owner: {path} has unsupported description scalar")
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped and not stripped.startswith(b"#") and re.match(rb"[^:#]+:\s", stripped):
+            raise Refusal(f"unmapped semantic owner: {path} has ambiguous description scalar")
 
 
 def description_span(frontmatter: list[bytes], path: str) -> tuple[int, int]:
@@ -85,14 +141,8 @@ def description_span(frontmatter: list[bytes], path: str) -> tuple[int, int]:
     if len(starts) != 1:
         raise Refusal(f"unmapped semantic owner: {path} has ambiguous description")
     start = starts[0]
-    end = start + 1
-    value = frontmatter[start].split(b":", 1)[1].strip()
-    safe_block_scalars = (b">", b">-", b"|", b"|-")
-    if value.startswith((b">", b"|")) and value not in safe_block_scalars:
-        raise Refusal(f"unmapped semantic owner: {path} has unsupported description block scalar")
-    if value in safe_block_scalars:
-        while end < len(frontmatter) and (frontmatter[end].startswith((b" ", b"\t")) or not frontmatter[end].strip()):
-            end += 1
+    end = scalar_field_end(frontmatter, start, path)
+    validate_description_scalar(frontmatter[start:end], path)
     return start, end
 
 
