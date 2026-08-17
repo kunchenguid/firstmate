@@ -218,8 +218,11 @@ The verified adapter evidence - each harness's busy-state source, interrupt and 
 The executable interrupt and exit mechanics live in [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh), and [`docs/agent-control.md`](agent-control.md) owns their lifecycle-control architecture.
 Launch mechanics, including the verified command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
 `fm-spawn.sh` records `tier=` on every task and accepts the optional `--tier standard|fast` spawn axis.
-Codex workers default to standard, and only an explicit `--tier fast` opts that spawn into fast service.
-The per-spawn override leaves the operator's global `~/.codex/config.toml` byte-identical.
+Firstmate's canonical Codex workers default to standard, and only an explicit `--tier fast` opts that spawn into fast service.
+Fast service is available only through the canonical Codex launch template, and the launch refuses before the agent starts or task metadata is published when the effective model cannot be resolved, the installed model catalog cannot be inspected, or that catalog does not advertise priority service for the model.
+Raw Codex launch commands remain unmodified in standard mode, so their actual service tier is outside Firstmate's verified contract, and they cannot request fast service because Firstmate cannot safely verify or rewrite their executable, configuration home, and tier override.
+The per-spawn override leaves the operator's effective Codex configuration, including `~/.codex/config.toml`, byte-identical.
+[`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact fast-tier preflight and refusal mechanics.
 An explicit tier on another harness remains recorded for relaunch but is omitted from the launch with a warning.
 Pi-family launches adapt the regular-TUI safeguard to the installed CLI's capabilities; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact version-safe launch mechanics.
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).

@@ -36,11 +36,15 @@
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. --tier <standard|fast> is an optional
-#   per-spawn axis that defaults to standard. The tier is only threaded into Codex,
-#   whose installed CLI was verified to support the service-tier override; an
-#   explicit tier on another harness is recorded and omitted with a warning.
-#   A fast Codex launch additionally refuses unless its resolved model advertises
-#   the priority service tier in the installed Codex model catalog.
+#   per-spawn axis that defaults to standard. Firstmate's canonical Codex template
+#   receives the verified service-tier override; an explicit tier on another harness
+#   is recorded and omitted with a warning. A raw Codex command remains unmodified in
+#   standard mode, so its actual service tier is outside Firstmate's verified contract.
+#   Fast service requires the canonical Codex template; a raw Codex launch command is
+#   refused before task worktree or endpoint creation because its executable,
+#   configuration home, and tier override cannot be verified or rewritten safely.
+#   The canonical fast launch also refuses when its resolved model cannot be verified
+#   to advertise the priority service tier in the installed Codex model catalog.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then

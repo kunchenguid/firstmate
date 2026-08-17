@@ -660,6 +660,18 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/codex" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'doctor --json')
+    printf '%s\n' '{"checks":[{"id":"config.load","details":{"model":"gpt-5.4"}}]}'
+    ;;
+  'debug models')
+    printf '%s\n' '{"models":[{"slug":"gpt-5.4","service_tiers":[{"id":"priority"}]}]}'
+    ;;
+esac
+SH
+  chmod +x "$fakebin/codex"
   fm_fake_exit0 "$fakebin" pi
   printf '%s\n' "$fakebin"
 }
