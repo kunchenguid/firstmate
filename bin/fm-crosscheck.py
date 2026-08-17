@@ -40,6 +40,11 @@ FINDING_ID_RE = re.compile(r"^cc-[0-9a-f]{12}$")
 ACTIVE_LIFECYCLES = {"open", "claimed-fixed"}
 ALL_LIFECYCLES = ACTIVE_LIFECYCLES | {"verified-fixed", "closed-equivalent"}
 SEVERITIES = {"blocking", "high", "medium", "low"}
+# Legacy author-admission sentinel: the Azure adapter re-verifies a
+# legacy-admitted reviewer account only when a future authorship record
+# opts in with this exact mode; current task metadata never sets it.
+LEGACY_AUTHOR_ADMISSION_MODE = "legacy-author-admission"
+
 MAX_CAPTURE = 200_000
 DEFAULT_REVIEWER_CAPTURE = 16 * 1024 * 1024
 MAX_REVIEWER_CAPTURE = 64 * 1024 * 1024
@@ -251,6 +256,78 @@ def prepare_pi_execution_home(protocol_dir: Path, account_home: Path) -> Path:
             f"{execution_home} to reviewer account {account_home}: {exc}"
         )
     return execution_home
+
+
+def account_identity(harness: str, account_home: Path) -> str:
+    """Stable upstream executing-account identity for one reviewer home.
+
+    The returned string never carries token material: Codex and Pi expose
+    explicit upstream account ids; the Claude OAuth file holds only opaque
+    tokens, so its identity is a one-way digest of the long-lived refresh
+    token (two homes mirroring one account share that token byte for byte,
+    which is exactly the same-account condition the Azure adapter refuses).
+    """
+
+    home = Path(account_home).resolve()
+    if harness == "codex":
+        credential = read_json(
+            home / "auth.json",
+            "Codex executing-account credential",
+            maximum_bytes=1024 * 1024,
+            maximum_items=256,
+        )
+        tokens = credential.get("tokens") if isinstance(credential, dict) else None
+        account = tokens.get("account_id") if isinstance(tokens, dict) else None
+        if isinstance(account, str) and account.strip():
+            return "codex:" + account.strip()
+        # No API-key fallback: a key digest is key-bound, not account-bound -
+        # one upstream account yields a new identity after an ordinary key
+        # rotation, the same defect removed from the Claude lane (live
+        # crosscheck finding cc-36d5b5cfcb2a). A credential without an
+        # upstream account id exposes no stable executing-account identity
+        # and is refused.
+        tool_fail(
+            f"Codex credential at {home} exposes no executing account identity"
+        )
+    if harness == "pi":
+        credentials = read_json(
+            home / "auth.json",
+            "Pi executing-account credential",
+            maximum_bytes=1024 * 1024,
+            maximum_items=256,
+        )
+        credential = (
+            credentials.get("openai-codex") if isinstance(credentials, dict) else None
+        )
+        account = credential.get("accountId") if isinstance(credential, dict) else None
+        if isinstance(account, str) and account.strip():
+            return "openai-codex:" + account.strip()
+        tool_fail(f"Pi credential at {home} exposes no executing account identity")
+    if harness == "claude":
+        credential = read_json(
+            home / ".credentials.json",
+            "Claude executing-account credential",
+            maximum_bytes=1024 * 1024,
+            maximum_items=256,
+        )
+        oauth = (
+            credential.get("claudeAiOauth") if isinstance(credential, dict) else None
+        )
+        refresh = oauth.get("refreshToken") if isinstance(oauth, dict) else None
+        if isinstance(refresh, str) and refresh.strip():
+            digest = hashlib.sha256(refresh.strip().encode("utf-8")).hexdigest()
+            return "claude-refresh-digest:" + digest
+        # No access-token fallback: an access-token digest is token-bound,
+        # not account-bound - it changes on every ordinary refresh and two
+        # homes of one account diverge the moment their tokens differ, so it
+        # can neither power the same-account refusal nor stay pinned across
+        # a run (live crosscheck finding cc-65277c0525c7). A credential
+        # without a refresh token exposes no stable executing-account
+        # identity and is refused.
+        tool_fail(
+            f"Claude credential at {home} exposes no executing account identity"
+        )
+    tool_fail(f"no executing-account identity reader for harness {harness!r}")
 
 
 def inspect_codex_credential(account_home: Path) -> tuple[str, str]:
@@ -3443,7 +3520,16 @@ def apply_review(
     by_id = {finding["id"]: finding for finding in working_ledger["findings"]}
     updated_ids: list[str] = []
     seen_updates: set[str] = set()
-    evidence_deadline = time.monotonic() + evidence_run_timeout()
+    # A remote evidence executor owns its own aggregate clock (two fresh VM
+    # boots per item make the local seconds-per-item budget meaningless);
+    # the local path keeps the configured bound unchanged.
+    executor_deadline = getattr(evidence_executor, "batch_deadline", None)
+    evidence_deadline = (
+        float(executor_deadline)
+        if isinstance(executor_deadline, (int, float))
+        and not isinstance(executor_deadline, bool)
+        else time.monotonic() + evidence_run_timeout()
+    )
     try:
         execution = review["executed_reproduction"]
         receipt_path = require_string(
@@ -4095,6 +4181,12 @@ def run_crosscheck(root: Path, home: Path, task_id: str, url: str) -> int:
                             snapshot_value=snapshot_value,
                             ledger=ledger,
                             config=config,
+                            # Task metadata carries no upstream authorship
+                            # account record; reviewer independence stays
+                            # structural (the dedicated Crosscheck account
+                            # pool) and the adapter's same-account refusal
+                            # arms once an authorship identity exists.
+                            author_account_identity="",
                         )
                     else:
                         raw_review = run_reviewer(

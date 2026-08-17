@@ -10,6 +10,7 @@ per accepted reproduction: one fresh tool attempt and one fresh verifier attempt
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -78,15 +79,31 @@ def validate_evidence_files(value: Any) -> dict[str, bytes]:
     return result
 
 
+AZURE_EVIDENCE_BATCH_SECONDS = 4 * 3600
+
 REMOTE_EVIDENCE_PROGRAM = REPLAY.read_text(encoding="utf-8")
 
 
+MAX_ENCODED_MANIFEST_BYTES = 48 * 1024
+
+
 def encoded_manifest(files: dict[str, bytes]) -> str:
+    # The manifest rides the runner request, which is bounded at 48KiB for
+    # its control-plane parameter transport; deterministic gzip (mtime=0)
+    # keeps realistic textual evidence inside that envelope, and the bound
+    # is asserted here so an oversized manifest fails loudly at build time
+    # instead of opaquely inside the control plane.
     value = {
         relative: base64.b64encode(body).decode("ascii")
         for relative, body in sorted(files.items())
     }
-    return base64.b64encode(canonical(value)).decode("ascii")
+    encoded = base64.b64encode(gzip.compress(canonical(value), mtime=0)).decode("ascii")
+    if len(encoded) > MAX_ENCODED_MANIFEST_BYTES:
+        raise BridgeError(
+            "evidence manifest exceeds its control-plane parameter bound: "
+            f"{len(encoded)} > {MAX_ENCODED_MANIFEST_BYTES} encoded bytes"
+        )
+    return encoded
 
 
 def evidence_command(
@@ -211,9 +228,16 @@ def dispatch_once(
     state, _arguments, env = prepare_exact_snapshot(
         runner, request, suffix, command, wall_seconds
     )
+    # The runner accepts the cost-admission confirmation only as the
+    # commissioning double-confirmation; a strict-mode dispatch must omit it.
+    admission_mode = state["request"].get("cost_admission_mode")
     exit_code = runner.dispatch_prepared(
         env, state, env["subscription"],
-        confirm_cost_admission_mode=state["request"].get("cost_admission_mode"),
+        confirm_cost_admission_mode=(
+            admission_mode
+            if admission_mode == runner.COMMISSIONING_COST_ADMISSION_MODE
+            else None
+        ),
     )
     if state.get("phase") != "complete":
         raise BridgeError("Azure runner did not prove complete exact cleanup")
@@ -272,6 +296,12 @@ class RemoteEvidenceExecutor:
         review_generation: str,
         evidence_files: dict[str, bytes],
     ) -> None:
+        # The core's aggregate evidence deadline is sized for local replay
+        # (seconds per item); every remote pair costs two fresh VM boots, so
+        # the Azure executor owns its own aggregate bound instead: enough
+        # for a bounded number of pairs, still finite against runaway
+        # evidence, with each dispatch keeping its 900-second wall.
+        self.batch_deadline = time.monotonic() + AZURE_EVIDENCE_BATCH_SECONDS
         self.request = {
             "repository_root": str(repository_root.resolve()),
             "remote": remote,
@@ -300,6 +330,8 @@ class RemoteEvidenceExecutor:
     def _execute_pair(
         self, runner: Any, command: list[str], deadline: float
     ) -> dict[str, Any]:
+        del deadline
+        deadline = self.batch_deadline
         suffix = str(len(self.attempts) + 1)
         remaining = int(deadline - time.monotonic())
         if remaining < 60:

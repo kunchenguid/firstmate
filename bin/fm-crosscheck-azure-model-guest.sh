@@ -9,15 +9,21 @@
 set -euo pipefail
 umask 077
 
-[ "$#" -eq 7 ] || { echo "model guest: expected seven bound parameters" >&2; exit 125; }
-REVIEW_GENERATION=$1
-VM_RESOURCE_ID=$2
-VM_INSTANCE_ID=$3
-GUEST_DIGEST=$4
-INPUT_URL=$5
-CREDENTIAL_URL=$6
-OUTPUT_URL=$7
-set --
+# Managed Run Command delivers parameters as environment variables, never as
+# positional arguments (the same contract the validation guest proved live).
+[ "$#" -eq 0 ] || { echo "model guest: positional parameters are forbidden" >&2; exit 125; }
+REVIEW_GENERATION=${review_generation:-}
+VM_RESOURCE_ID=${vm_resource_id:-}
+VM_INSTANCE_ID=${vm_instance_id:-}
+GUEST_DIGEST=${guest_digest:-}
+INPUT_URL=${input_url:-}
+CREDENTIAL_URL=${credential_url:-}
+OUTPUT_URL=${output_url:-}
+unset review_generation vm_resource_id vm_instance_id guest_digest
+unset input_url credential_url output_url
+[ -n "$REVIEW_GENERATION" ] && [ -n "$VM_RESOURCE_ID" ] && [ -n "$VM_INSTANCE_ID" ] \
+  && [ -n "$GUEST_DIGEST" ] && [ -n "$INPUT_URL" ] && [ -n "$CREDENTIAL_URL" ] \
+  && [ -n "$OUTPUT_URL" ] || { echo "model guest: expected seven bound parameters" >&2; exit 125; }
 
 case "$REVIEW_GENERATION" in [0-9a-f][0-9a-f]*) ;; *) echo "model guest: malformed review generation" >&2; exit 125 ;; esac
 case "$GUEST_DIGEST" in sha256:[0-9a-f][0-9a-f]*) ;; *) echo "model guest: malformed guest digest" >&2; exit 125 ;; esac
@@ -152,13 +158,40 @@ case "$HARNESS" in
       --color never --output-schema "$SCHEMA" --output-last-message "$RESULT" - <"$PROMPT"
     ;;
   claude)
-    export CLAUDE_CONFIG_DIR="$ACCOUNT"
-    export CLAUDE_SECURESTORAGE_CONFIG_DIR="$ACCOUNT"
-    claude -p --safe-mode --model "$MODEL" --effort "$EFFORT" \
+    # claude refuses --dangerously-skip-permissions under root, so the
+    # credentialed model process drops to a dedicated unprivileged user;
+    # only the paths that process must touch are handed over.
+    id fmccmodel >/dev/null 2>&1 \
+      || useradd --system --home-dir "$HOME_DIR" --shell /usr/sbin/nologin fmccmodel
+    chown -R fmccmodel:fmccmodel "$ACCOUNT" "$HOME_DIR" "$TMPDIR" "$XDG_CACHE_HOME"
+    # The compartment base stays root-owned, but the unprivileged model
+    # process must traverse it to reach its handed-over leaves (the same
+    # root-only-ancestor traversal failure the validation cells hit live);
+    # execute-only keeps the root-custody files unlistable and unreadable.
+    chmod 0711 "$BASE"
+    set +e
+    runuser -u fmccmodel -- env \
+      HOME="$HOME_DIR" TMPDIR="$TMPDIR" XDG_CACHE_HOME="$XDG_CACHE_HOME" \
+      CLAUDE_CONFIG_DIR="$ACCOUNT" CLAUDE_SECURESTORAGE_CONFIG_DIR="$ACCOUNT" \
+      FM_CROSSCHECK_REVIEW_GENERATION="$REVIEW_GENERATION" PATH="$PATH" \
+      claude -p --safe-mode --model "$MODEL" --effort "$EFFORT" \
       --dangerously-skip-permissions --tools "" --no-session-persistence \
-      --disable-slash-commands --strict-mcp-config --mcp-config '{}' \
-      --output-format json --json-schema "$(<"$SCHEMA")" "$(<"$PROMPT")" >"$BASE/claude-envelope.json"
-    jq -e '.is_error == false and .subtype == "success" and .terminal_reason == "completed" and (.structured_output|type == "object")' "$BASE/claude-envelope.json" >/dev/null
+      --disable-slash-commands --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+      --output-format json --json-schema "$(<"$SCHEMA")" \
+      <"$PROMPT" >"$BASE/claude-envelope.json" 2>"$BASE/claude-stderr.log"
+    claude_rc=$?
+    set -e
+    if [ "$claude_rc" -ne 0 ] || ! jq -e '.is_error == false and .subtype == "success" and .terminal_reason == "completed" and (.structured_output|type == "object")' "$BASE/claude-envelope.json" >/dev/null 2>&1; then
+      # A refused review must name its cause in the run-command error stream;
+      # bounded envelope status and stderr slices only, never the credential.
+      {
+        echo "model guest: claude reviewer did not return a completed structured envelope (exit $claude_rc)"
+        tail -c 800 "$BASE/claude-stderr.log" 2>/dev/null
+        jq -c '{is_error, subtype, terminal_reason}' "$BASE/claude-envelope.json" 2>/dev/null
+        jq -r '.result // empty' "$BASE/claude-envelope.json" 2>/dev/null | head -c 600
+      } >&2
+      exit 125
+    fi
     jq -c '.structured_output' "$BASE/claude-envelope.json" >"$RESULT"
     ;;
   pi)

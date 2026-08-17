@@ -867,9 +867,20 @@ def provision_model_vm(
 def submit_model_run(
     config: dict[str, Any], identity: dict[str, str], resources: dict[str, Any]
 ) -> dict[str, Any]:
+    # The identity read expects the raw ARM shape (properties.vmId plus the
+    # top-level etag the cleanup identity records), and `az vm show` neither
+    # accepts this --expand form nor returns that shape.
     vm, rc, detail = az(
         config,
-        ["vm", "show", "--ids", resources["vm_id"], "--expand", "instanceView"],
+        [
+            "rest",
+            "--method",
+            "get",
+            "--url",
+            "https://management.azure.com"
+            + resources["vm_id"]
+            + "?api-version=2024-03-01&$expand=instanceView",
+        ],
         check=False,
     )
     if rc != 0:
@@ -1114,13 +1125,36 @@ def delete_exact_blob(config: dict[str, Any], blob: str) -> None:
         raise AzureCrosscheckError(f"staging absence was not proven after deletion: {blob}: {detail}")
 
 
+def prove_resource_absent(
+    config: dict[str, Any], resource_id: str, api_version: str, label: str
+) -> None:
+    # Bounded poll, matching delete_exact_resource's own absence proof: the
+    # parent deletion is asynchronous on the control plane, so a child can
+    # stay briefly resolvable (or return a not-yet-classified error) right
+    # after the parent's terminal 404. Only a still-resolvable child at the
+    # deadline is a real cleanup failure.
+    url = "https://management.azure.com" + resource_id + "?api-version=" + api_version
+    deadline = time.monotonic() + MAX_AZURE_CALL_SECONDS
+    while True:
+        _resource, rc, detail = az(config, ["rest", "--method", "get", "--url", url], check=False)
+        if rc != 0 and azure_resource_absent(detail):
+            return
+        if time.monotonic() >= deadline:
+            if rc != 0:
+                raise AzureCrosscheckError(f"{label} absence is ambiguous: {detail}")
+            raise AzureCrosscheckError(f"{label} survived its parent deletion")
+        time.sleep(5)
+
+
 def cleanup_model_vm(config: dict[str, Any], resources: dict[str, Any], identity: dict[str, str]) -> None:
     del identity
     tags = resources["tags"]
     safety_run_command = resources["vm_id"] + "/runCommands/safety-shutdown"
+    # Run-command children never expose an ETag on GET (verified live), so
+    # they cannot take the conditional standalone delete; the VM deletion is
+    # the conditional mutation that removes them, and their absence is then
+    # proven explicitly so cleanup keeps its exact-absence contract.
     for resource_id, api_version, label in (
-        (resources.get("run_command_id"), "2024-03-01", "model review run-command"),
-        (safety_run_command, "2024-03-01", "model safety run-command"),
         (resources["vm_id"], "2024-03-01", "model VM"),
         (
             f"/subscriptions/{config['subscription']}/resourceGroups/{config['resource_group']}"
@@ -1137,6 +1171,12 @@ def cleanup_model_vm(config: dict[str, Any], resources: dict[str, Any], identity
     ):
         if resource_id:
             delete_exact_resource(config, resource_id, api_version, tags, label)
+    for resource_id, label in (
+        (resources.get("run_command_id"), "model review run-command"),
+        (safety_run_command, "model safety run-command"),
+    ):
+        if resource_id:
+            prove_resource_absent(config, resource_id, "2024-03-01", label)
 
 
 def parse_result(

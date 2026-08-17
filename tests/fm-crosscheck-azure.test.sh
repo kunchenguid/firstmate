@@ -32,7 +32,26 @@ nic = next(item for item in resources if item["type"] == "Microsoft.Network/netw
 vm = next(item for item in resources if item["type"] == "Microsoft.Compute/virtualMachines")
 assert "publicipaddress" not in json.dumps(nic).lower()
 assert "identity" not in vm
-assert "ssh" not in json.dumps(vm["properties"]["osProfile"]).lower()
+# Azure refuses a Linux profile with password auth disabled and no SSH key,
+# so the profile carries the crosscheck blackhole key: nobody holds its
+# private half, which is the same no-operator-access posture as no key at
+# all (the exact pattern the validation cell template proved live). The
+# EXACT key bytes are pinned, so substituting any other key (whose private
+# half someone could hold) fails this suite even if it copies the comment.
+linux = vm["properties"]["osProfile"]["linuxConfiguration"]
+assert linux["disablePasswordAuthentication"] is True
+blackhole = linux["ssh"]["publicKeys"][0]
+assert blackhole["path"] == "/home/fmbootstrap/.ssh/authorized_keys"
+assert blackhole["keyData"] == (
+    "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCaAn1stDlmF2Wo5Dn44vAV+AzWGUIBaXvoC"
+    "EJdxmx6Xhq6ElG4OQj0VAJkBhIqtXGIdUgObA0/ix3U4WIgwX/JYWcgYhQ8yZsNnYIfn6cfTd"
+    "uCD+4kJdHnss8S2C268S/4GszEH90cpSUI5bMXXVB1Adsntnz4S3Q1Z2hsB33zKOaB/sDnKYC"
+    "ck8y17JWTLCmVlwRpjiCL2NnKNwNkYbVeNa2U98/OJbHA2UGttqpI/GKnb2wB/iZV9KQ/Cf1k"
+    "HIvJO99IFT12AKL2YoApLVVWrd2cxOHt2uAvnI3Pc+Qh2p8AZz++00eso1cmXkD5VzTNTpOnY"
+    "PmGJAEO4Lo2Mb+00Op+LHWoPXifHtBt2E3588JPxSx/cXUaLIpvHHs7RwWSG+88rXQY1s628Z"
+    "rhJFn7U/1logJ6lJo5exJAqDDzwlagdIxzCeNiyoKp/GQpwtSPYK1EIQDHqoYcBR6BJsRAbeZ"
+    "PzQ3TS/6lwEFE9EWfzohhHkVthPqsblympNQmWr8= firstmate-crosscheck-blackhole"
+)
 assert vm["properties"]["securityProfile"]["securityType"] == "TrustedLaunch"
 assert vm["properties"]["storageProfile"]["imageReference"] == {"id": "[parameters('modelImageId')]"}
 source = adapter.read_text(encoding="utf-8")
@@ -452,7 +471,8 @@ body=b"#!/usr/bin/env bash\nprintf 'allowed-positive-control\\n'\nprintf 'receip
 value={".crosscheck/reproductions/pass.sh":base64.b64encode(body).decode(),".crosscheck/reproductions/receipt.txt":base64.b64encode(b"placeholder").decode()}
 # The helper owns the receipt, so do not pre-stage its output path.
 del value[".crosscheck/reproductions/receipt.txt"]
-print(base64.b64encode(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).decode())
+import gzip
+print(base64.b64encode(gzip.compress(json.dumps(value,sort_keys=True,separators=(",",":")).encode(),mtime=0)).decode())
 PY
 )
   (
@@ -519,7 +539,8 @@ SH
   patch_evidence=$(python3 - "$mutation_tmp/proof.patch" <<'PY'
 import base64,json,sys
 body=base64.b64encode(open(sys.argv[1],"rb").read()).decode()
-print(base64.b64encode(json.dumps({".crosscheck/mutations/proof.patch":body},sort_keys=True,separators=(",",":")).encode()).decode())
+import gzip
+print(base64.b64encode(gzip.compress(json.dumps({".crosscheck/mutations/proof.patch":body},sort_keys=True,separators=(",",":")).encode(),mtime=0)).decode())
 PY
 )
   (
@@ -702,11 +723,168 @@ PY2
   pass "reviewer lanes admit FIFO, spread families deterministically, prune dead waiters, and never write auth back"
 }
 
+manifest_bounds_unit() {
+  python3 - "$BRIDGE" "$REPLAY" <<'PY' || fail "Azure manifest transport bounds contract failed"
+import importlib.util
+import base64
+import gzip
+from pathlib import Path
+import sys
+import tempfile
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+bridge = load("bridge", sys.argv[1])
+replay = load("replay", sys.argv[2])
+
+# Producer/consumer agreement through the REAL functions on both sides: the
+# exact string encoded_manifest emits must materialize byte-identically
+# through the replay guest's materialize_manifest.
+files = {
+    ".crosscheck/reproductions/proof.sh": b"#!/usr/bin/env bash\nprintf 'ok\\n'\n",
+    ".crosscheck/mutations/proof.patch": b"diff --git a/value.py b/value.py\n",
+}
+encoded = bridge.encoded_manifest(files)
+assert encoded == bridge.encoded_manifest(files), "encoded manifest is not deterministic"
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp).resolve()
+    replay.materialize_manifest(root, encoded)
+    for relative, body in files.items():
+        assert (root / relative).read_bytes() == body, relative
+
+# Producer bound: an over-limit manifest refuses at build time with the
+# parameter-bound error instead of reaching the control plane.
+import hashlib
+chunk = b""
+seed = b"fm-bound"
+while len(chunk) < 80 * 1024:
+    seed = hashlib.sha256(seed).digest()
+    chunk += seed
+try:
+    bridge.encoded_manifest({".crosscheck/reproductions/big.sh": chunk})
+except bridge.BridgeError as exc:
+    assert "control-plane parameter bound" in str(exc), exc
+else:
+    raise AssertionError("oversized manifest did not refuse the parameter bound")
+
+# Consumer bound: a small compressed payload that expands past
+# MAX_MANIFEST_JSON_BYTES is rejected without being trusted; the bounded
+# incremental read means the guard fires on the bound itself.
+bomb = base64.b64encode(
+    gzip.compress(b"0" * (replay.MAX_MANIFEST_JSON_BYTES + 2), mtime=0)
+).decode("ascii")
+with tempfile.TemporaryDirectory() as tmp:
+    try:
+        replay.materialize_manifest(Path(tmp).resolve(), bomb)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("decompression bomb was not rejected")
+PY
+  pass "manifest transport bounds hold through the real producer and consumer"
+}
+
+template_expiry_render_unit() {
+  python3 - "$TEMPLATE" <<'PY' || fail "safety-shutdown expiry render contract failed"
+import json
+import re
+import sys
+
+template = json.load(open(sys.argv[1]))
+command = next(
+    item for item in template["resources"]
+    if item["type"] == "Microsoft.Compute/virtualMachines/runCommands"
+    and "safety-shutdown" in item["name"]
+)
+expression = command["properties"]["source"]["script"]
+match = re.fullmatch(
+    r"\[format\(replace\('(.*)', '\|', uriComponentToString\('%0A'\)\), "
+    r"parameters\('expiryUtc'\)\)\]",
+    expression,
+    re.S,
+)
+assert match, "safety-shutdown script expression changed shape"
+source = match.group(1)
+# The '|' sentinel becomes a newline at render time, so the source itself may
+# never legitimately contain a pipe character as shell syntax; and the old
+# live breakage (a literal backslash-n that ARM format() never interprets)
+# must never come back.
+assert "\\n" not in source, "literal backslash-n reappeared in the expiry script"
+rendered = source.replace("|", "\n").format("2027-01-01T00:00:00Z")
+lines = rendered.split("\n")
+assert lines[0] == "set -eu"
+assert "ExecStart=/usr/sbin/shutdown -h now" in lines
+assert "OnCalendar=2027-01-01T00:00:00Z" in lines
+assert "systemctl enable --now fm-crosscheck-expiry.timer" in lines
+assert lines.count("EOF") == 2, "heredoc terminators did not render as their own lines"
+assert "|" not in rendered
+PY
+  pass "the safety-shutdown expiry script renders real newlines with the exact unit text"
+}
+
+parameter_contract_unit() {
+  # The model run-command parameter contract is env-vars-only and split
+  # across two files: the adapter SUBMITS named (protected) parameters and
+  # the guest CONSUMES them as lowercase environment variables, refusing
+  # everything else with exit 125. This pins both halves to the same seven
+  # names so a rename on either side fails here instead of as an opaque
+  # live provisioning failure.
+  python3 - "$ADAPTER" "$MODEL_GUEST" <<'PY' || fail "run-command parameter contract diverged"
+import re
+import sys
+from pathlib import Path
+
+adapter = Path(sys.argv[1]).read_text(encoding="utf-8")
+guest = Path(sys.argv[2]).read_text(encoding="utf-8")
+
+produced = set(re.findall(r'\{"name": "([a-z_]+)", "value"', adapter))
+expected = {
+    "review_generation", "vm_resource_id", "vm_instance_id", "guest_digest",
+    "input_url", "credential_url", "output_url",
+}
+assert produced == expected, ("adapter submits", sorted(produced))
+
+consumed = set()
+for upper, lower in re.findall(r'([A-Z_]+)=\$\{([a-z_]+):-\}', guest):
+    consumed.add(lower)
+assert consumed == expected, ("guest consumes", sorted(consumed))
+# Assertions below read CODE only: a comment mentioning a guard would
+# otherwise keep this unit green after the guard itself is deleted.
+code = "\n".join(
+    line for line in guest.splitlines() if not line.lstrip().startswith("#")
+)
+# Every carrier must be scrubbed after adoption, the protected SAS-URL
+# carriers included: leaving those in the environment would hand a
+# short-lived credential URL to every process the guest goes on to run.
+# The union across ALL scrub lines must be exactly what the guest consumed,
+# so deleting any one of them fails here.
+scrubbed = set()
+for line in re.findall(r"^unset ([a-z_ ]+)$", code, re.M):
+    scrubbed.update(line.split())
+assert scrubbed == expected, ("guest scrubs", sorted(scrubbed))
+assert "expected seven bound parameters" in code
+# The refusal itself, not the word: this must match the guard construct and
+# its bounded exit.
+positional_guard = re.search(
+    r'\[ "\$#" -eq 0 \][^\n]*exit 125', code
+)
+assert positional_guard, "the guest no longer refuses positional parameters"
+PY
+  pass "the adapter and guest agree on the exact seven-parameter contract"
+}
+
 static_contract
+parameter_contract_unit
 adapter_mode_unit
 identity_outcome_unit
 account_and_cleanup_identity_unit
 bridge_security_unit
+manifest_bounds_unit
+template_expiry_render_unit
 replay_positive_and_failure_unit
 shared_capacity_unit
 lane_queue_unit
