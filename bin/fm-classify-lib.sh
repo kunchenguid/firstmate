@@ -78,10 +78,11 @@ FM_CLASSIFY_DECLARED_WORK_VERB_DEFAULT='working'
 # idle endpoint is a healthy default state for a secondmate and it may think for
 # several minutes before its next turn; and below the declared-pause cadence
 # (FM_PAUSE_RESURFACE_SECS, default 3600s), because a declared external wait is a
-# legitimate reason to idle while unresumed declared work is not. Both consumers
-# read FM_DECLARED_WORK_STALL_SECS with this default so the threshold has one
-# owner.
-# shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
+# legitimate reason to idle while unresumed declared work is not. It lives beside
+# the decision it bounds so the threshold has one owner: the watcher reads
+# FM_DECLARED_WORK_STALL_SECS with this default, and any later consumer reads the
+# same pair rather than restating the number.
+# shellcheck disable=SC2034 # Read by the watcher (fm-watch.sh), not this lib.
 FM_DECLARED_WORK_STALL_SECS_DEFAULT=900
 
 # Bounded re-surface cadence for a declared pause or a dead-agent captain hold.
@@ -131,7 +132,7 @@ status_is_captain_relevant() {
   status_is_paused "$line" && return 1
   verb=$(status_line_verb "$line")
   case "$verb" in
-    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+    "${FM_CLASSIFY_DECLARED_WORK_VERB:-$FM_CLASSIFY_DECLARED_WORK_VERB_DEFAULT}"|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
       ;;
   esac
@@ -170,10 +171,20 @@ status_declares_work() {  # <status-line>
 # or a newer declared phase - superseded it.
 # Deliberately the LAST event rather than the keyed activity fold
 # (status_open_activities): a `working` phase has no contract requiring a keyed
-# terminal event to close it, so an open phase routinely outlives the work
-# itself - the exact false signal the registered-secondmate current-state section
-# of docs/architecture.md records. Any later event, keyed or not, is evidence the
-# worker is still reporting, and that is the honest boundary here.
+# terminal event to close it, so an open keyed phase routinely outlives the work
+# itself.
+# The last-event rule NARROWS the false signal the registered-secondmate
+# current-state section of docs/architecture.md records; it does not eliminate
+# it. A mate that finished a phase and never closed its record still ends its
+# stream on a declaration, and from outside that is INDISTINGUISHABLE from work
+# nothing resumed. Both readings mean the same thing about the record - the
+# mate's own stream disagrees with reality - so the consumer states both in the
+# wake and bounds it to exactly one wake per mate. Suppressing the finished-but-
+# unclosed reading was deliberately NOT built: it would take a cross-home backlog
+# read this decision has no business making, and the fold it would replace this
+# rule with is the wider false signal, not a narrower one.
+# Any later event, keyed or not, is evidence the worker is still reporting, and
+# that is the honest boundary here.
 status_work_declared_unresumed() {  # <status-file>
   status_declares_work "$(last_status_line "$1")"
 }

@@ -55,9 +55,11 @@
 #                          stale loop, so the finding is the unresumed declaration,
 #                          not the quiet endpoint, and it asks the supervisor to
 #                          reconcile the mate and push that work forward. Surfaced
-#                          once per threshold window while the stall persists, and
-#                          never for a declared paused: wait, a terminal last
-#                          event, or a proven-busy endpoint.
+#                          EXACTLY ONCE per declared-work episode - only a later
+#                          event or a completed turn ends the episode and rearms
+#                          it - and never for a declared paused: wait, a terminal
+#                          last event, a proven-busy endpoint, or a task with no
+#                          locally readable completed-turn marker.
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -349,17 +351,20 @@ busy_turn_over_age() {  # <task>
 
 # endpoint_idle_age: seconds since the newest evidence that <task>'s endpoint was
 # active - its latest completed turn (state/<id>.turn-ended, the harness-neutral
-# marker every verified turn-end hook touches, falling back to the spawn record
-# before any turn completes exactly as busy_turn_over_age ages it) or its latest
-# status event, whichever is more recent. Taking the newer of the two is what
-# makes this measure CONTINUOUS idleness: a new turn or a new report resets the
-# clock, so a mate that reports, works, reports again never accumulates age, and
-# only a mate that stops doing both does.
+# marker a locally installed turn-end hook touches) or its latest status event,
+# whichever is more recent. Taking the newer of the two is what makes this
+# measure CONTINUOUS idleness: a new turn or a new report resets the clock, so a
+# mate that reports, works, reports again never accumulates age, and only a mate
+# that stops doing both does.
+# Deliberately NO state/<id>.meta spawn-record fallback, unlike busy_turn_over_age
+# above, which keeps its own: a spawn record is a fixed timestamp that only grows,
+# so ageing it where no turn marker exists would silently turn "idle age" into
+# "time since spawn" - manufactured evidence of idleness for a task whose turns
+# this host never observes at all. Callers establish that the marker exists before
+# trusting this age.
 endpoint_idle_age() {  # <task>
-  local task=$1 f turn status
-  f="$STATE/$task.turn-ended"
-  [ -e "$f" ] || f="$STATE/$task.meta"
-  turn=$(age_of "$f")
+  local task=$1 turn status
+  turn=$(age_of "$STATE/$task.turn-ended")
   status=$(age_of "$STATE/$task.status")
   [ "$status" -lt "$turn" ] && turn=$status
   printf '%s' "$turn"
@@ -371,31 +376,51 @@ endpoint_idle_age() {  # <task>
 # design, so the finding is the unresumed declaration, not the quiet pane, and it
 # carries its own wake reason so the supervisor reconciles and pushes the work
 # forward instead of reading it as one more quiet crewmate.
-# Ordered cheapest-first, and every gate is a pure status/stat read until the
-# last one: the endpoint read runs only for work that has already proven both
-# declared and long idle, so an ordinary fleet pays nothing for this per poll.
-# The throttle marker gives the same bounded re-surface shape a declared pause
-# uses, so one mishandled wake cannot let a stall rot invisibly, and it clears
-# itself as soon as any later event or completed turn resets the idle clock.
+# Ordered cheapest-first: the last status line the caller already read decides
+# first and rejects almost every mate outright, then pure stat reads, and only
+# work already proven both declared and long idle pays for the endpoint read, so
+# an ordinary fleet pays essentially nothing for this per poll.
+# NO EVIDENCE, NO STALL. state/<id>.turn-ended is the only idle clock this host
+# can read for a task; absent it there is no evidence of idleness at all, and
+# absence of evidence must never become evidence of a stall. That silences a
+# remote mate, whose turns complete on another host so nothing here ever writes
+# the marker, and equally any local harness that installs no turn-end hook - one
+# rule about what this host can observe, never a per-backend or per-host branch.
+# SINGLE-FIRE. The .stalled-* marker is a LATCH, not a throttle: a declared-work
+# episode surfaces exactly once and stays silent until the episode actually ends,
+# which only a later status event or a completed turn can do (either resets the
+# idle clock, so the stall gate fails and the latch clears). One wake suffices
+# because the wake queue is durable and is acknowledged only after the handling
+# turn, so a single wake cannot be lost. It is also the honest bound: from
+# outside, a phase the mate FINISHED without closing its record is
+# indistinguishable from work nothing resumed, so the wake states both readings
+# and fires once per mate. That one wake is accepted as useful signal - either
+# way the mate left its own record inconsistent - and suppressing the finished-
+# but-unclosed reading was deliberately NOT built, since it would need a
+# cross-home backlog read this watcher has no business making.
 secondmate_declared_work_check() {  # <window> <task> <last-status-line>
   local win=$1 task=$2 last=$3 key age tail40 reason
   key=$(printf '%s' "$win" | tr ':/.' '___')
+  if ! status_declares_work "$last" || [ ! -e "$STATE/$task.turn-ended" ]; then
+    rm -f "$STATE/.stalled-$key"
+    return 0
+  fi
   age=$(endpoint_idle_age "$task")
   if ! status_declared_work_stalled "$STATE/$task.status" "$age" "$DECLARED_WORK_STALL_SECS"; then
     rm -f "$STATE/.stalled-$key"
     return 0
   fi
-  [ "$(age_of "$STATE/.stalled-$key")" -ge "$DECLARED_WORK_STALL_SECS" ] || return 0
-  # A capture may be unavailable (a remote mate's endpoint lives on another
-  # host); the semantic busy record still decides, and a busy state that cannot
-  # be proven surfaces rather than being swallowed, exactly as everywhere else.
+  [ ! -e "$STATE/.stalled-$key" ] || return 0
+  # A capture may be unavailable; the semantic busy record still decides, and a
+  # busy state that cannot be proven surfaces rather than being swallowed,
+  # exactly as everywhere else.
   tail40=$(fm_backend_capture "$(window_backend "$win")" "$win" 40 "$(window_label "$win")" 2>/dev/null) || tail40=
   if window_is_busy "$win" "$tail40"; then
     rm -f "$STATE/.stalled-$key"
     triage_log "absorbed declared-work stall (endpoint busy on the declared work): $win"
     return 0
   fi
-  reason="check: secondmate-stalled $task: declared work idle ${age}s with no later report - reconcile it and push the work forward (last report: $last)"
+  reason="check: secondmate-stalled $task: declared work idle ${age}s with no later report - work nothing resumed, or a phase it finished without closing its record; reconcile it and either push the work forward or close the record (last report: $last)"
   fm_wake_append check "secondmate-stalled:$task" "$reason" || exit 1
   date +%s > "$STATE/.stalled-$key"
   wake "$reason"
