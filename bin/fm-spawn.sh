@@ -694,6 +694,11 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+PREACQUIRED_WORKTREE=0
+TREEHOUSE_ABORT_CLEANUP=0
+TREEHOUSE_ABORT_FORCE=0
+TREEHOUSE_ABORT_WORKTREE=
+WORKTREE_REFRESHED=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -738,6 +743,7 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  local -a treehouse_return_args
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -807,6 +813,14 @@ spawn_abort_cleanup() {
           } > "$STATE/$ID.meta" 2>/dev/null || true
         fi
       fi
+    fi
+  fi
+  if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
+    TREEHOUSE_ABORT_CLEANUP=0
+    treehouse_return_args=(return --if-lease-holder "$ID")
+    [ "$TREEHOUSE_ABORT_FORCE" != 1 ] || treehouse_return_args+=(--force)
+    if ! (cd "$PROJ_ABS" && treehouse "${treehouse_return_args[@]}" "$TREEHOUSE_ABORT_WORKTREE" </dev/null); then
+      echo "warning: could not return pre-acquired worktree '$TREEHOUSE_ABORT_WORKTREE' after aborted spawn of $ID" >&2
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -1846,11 +1860,6 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # once here so every downstream comparison uses the same physical form
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
-CODEX_PREFLIGHT_CWD=$PROJ_ABS_REAL
-if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
-  CODEX_PREFLIGHT_CWD=$RELAUNCH_WT
-fi
-codex_fast_tier_supported "$CODEX_PREFLIGHT_CWD" "$MODEL" || exit 1
 
 real_path_or_raw() {  # <path>
   local path=$1 real
@@ -2005,6 +2014,50 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+if [ "$HARNESS" = codex ] && [ "$TIER" = fast ]; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    CODEX_PREFLIGHT_CWD=$WT
+    [ "$KIND" = secondmate ] || CODEX_PREFLIGHT_CWD=$RELAUNCH_WT
+    codex_fast_tier_supported "$CODEX_PREFLIGHT_CWD" "$MODEL" || exit 1
+  elif [ "$KIND" = secondmate ]; then
+    codex_fast_tier_supported "$WT" "$MODEL" || exit 1
+  elif [ "$BACKEND" != orca ]; then
+    TREEHOUSE_GET_STATUS=0
+    WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || TREEHOUSE_GET_STATUS=$?
+    if [ "$TREEHOUSE_GET_STATUS" -ne 0 ]; then
+      if [ -n "$WT" ]; then
+        TREEHOUSE_ABORT_CLEANUP=1
+        TREEHOUSE_ABORT_WORKTREE=$WT
+      fi
+      echo "error: treehouse get --lease failed to acquire a worktree for $ID" >&2
+      exit 1
+    fi
+    if [ -z "$WT" ]; then
+      echo "error: treehouse get --lease did not report a worktree for $ID" >&2
+      exit 1
+    fi
+    TREEHOUSE_ABORT_CLEANUP=1
+    TREEHOUSE_ABORT_WORKTREE=$WT
+    validate_spawn_worktree "treehouse get --lease" "$ID"
+    TREEHOUSE_WORKTREE_STATUS=$(git -C "$WT" status --porcelain) || {
+      echo "error: could not inspect pre-acquired worktree '$WT'" >&2
+      exit 1
+    }
+    if [ -n "$TREEHOUSE_WORKTREE_STATUS" ]; then
+      echo "error: pre-acquired worktree '$WT' is not clean; refusing to discard uncommitted work" >&2
+      exit 1
+    fi
+    TREEHOUSE_ABORT_FORCE=1
+    freshen_spawn_worktree_base "$WT" || exit 1
+    WORKTREE_REFRESHED=1
+    codex_fast_tier_supported "$WT" "$MODEL" || exit 1
+    PREACQUIRED_WORKTREE=1
+  fi
+fi
+
+SPAWN_INITIAL_CWD=$PROJ_ABS
+[ "$PREACQUIRED_WORKTREE" != 1 ] || SPAWN_INITIAL_CWD=$WT
+
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
@@ -2028,7 +2081,7 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_INITIAL_CWD") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -2080,7 +2133,7 @@ case "$BACKEND" in
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$W" "$SPAWN_INITIAL_CWD"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -2134,7 +2187,7 @@ case "$BACKEND" in
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$SPAWN_INITIAL_CWD" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -2187,7 +2240,7 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_INITIAL_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -2200,7 +2253,7 @@ EOF
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$SPAWN_INITIAL_CWD") || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -2212,7 +2265,7 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$SPAWN_INITIAL_CWD") || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -2242,6 +2295,11 @@ EOF
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
+    if [ "$HARNESS" = codex ] && [ "$TIER" = fast ]; then
+      freshen_spawn_worktree_base "$WT" || exit 1
+      WORKTREE_REFRESHED=1
+      codex_fast_tier_supported "$WT" "$MODEL" || exit 1
+    fi
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -2371,7 +2429,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$PREACQUIRED_WORKTREE" != 1 ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -2420,7 +2478,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 
   validate_spawn_worktree "treehouse get" "$T"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$WORKTREE_REFRESHED" != 1 ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
@@ -2865,6 +2923,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+[ "$PREACQUIRED_WORKTREE" != 1 ] || TREEHOUSE_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

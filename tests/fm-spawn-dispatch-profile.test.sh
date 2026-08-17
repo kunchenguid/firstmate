@@ -63,7 +63,19 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  get)
+    [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf 'get cwd=%s args=%s\n' "$PWD" "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    ;;
+  return)
+    [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf 'return cwd=%s args=%s\n' "$PWD" "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+    ;;
+esac
+SH
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
 shift
@@ -82,18 +94,23 @@ SH
 set -u
 case "${1:-} ${2:-}" in
   'doctor --json')
+    effective_model=${FM_FAKE_CODEX_EFFECTIVE_MODEL:-gpt-5.4}
+    if [ -f .codex/fake-effective-model ]; then
+      IFS= read -r effective_model < .codex/fake-effective-model
+    fi
+    [ -z "${FM_FAKE_CODEX_CWD_LOG:-}" ] || printf 'doctor %s\n' "$PWD" >> "$FM_FAKE_CODEX_CWD_LOG"
     printf '{"checks":[{"id":"config.load","details":{"model":"%s"}}]}\n' \
-      "${FM_FAKE_CODEX_EFFECTIVE_MODEL:-gpt-5.4}"
+      "$effective_model"
     exit "${FM_FAKE_CODEX_DOCTOR_STATUS:-0}"
     ;;
   'debug models')
+    [ -z "${FM_FAKE_CODEX_CWD_LOG:-}" ] || printf 'models %s\n' "$PWD" >> "$FM_FAKE_CODEX_CWD_LOG"
     [ "${FM_FAKE_CODEX_CATALOG_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CODEX_CATALOG_STATUS}"
     printf '%s\n' '{"models":[{"slug":"gpt-5.4","service_tiers":[{"id":"priority"}]},{"slug":"gpt-5.4-mini","service_tiers":[]}]}'
     ;;
 esac
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
-  chmod +x "$fakebin/codex"
+  chmod +x "$fakebin/treehouse" "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/codex"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -137,6 +154,7 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
+  rm -f "$launchlog.endpoint" "$launchlog.treehouse" "$launchlog.codex-cwd"
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
@@ -148,6 +166,8 @@ run_spawn() {
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_ENDPOINT_LOG="$launchlog.endpoint" \
+    FM_FAKE_TREEHOUSE_LOG="$launchlog.treehouse" \
+    FM_FAKE_CODEX_CWD_LOG="$launchlog.codex-cwd" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     FM_FAKE_CODEX_EFFECTIVE_MODEL="${FM_TEST_CODEX_EFFECTIVE_MODEL:-gpt-5.4}" \
@@ -525,6 +545,14 @@ SH
   assert_contains "$launch" "codex -c 'service_tier=\"priority\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex fast tier was not threaded as the verified priority override"
   assert_not_contains "$launch" "service_tier=\"default\"" "fast tier launch must not contain the standard override"
+  assert_grep "doctor $WT_DIR" "$LAUNCH_LOG.codex-cwd" \
+    "Codex fast preflight did not resolve configuration from the finalized worktree"
+  assert_grep "models $WT_DIR" "$LAUNCH_LOG.codex-cwd" \
+    "Codex fast catalog inspection did not run from the finalized worktree"
+  assert_grep "get cwd=$PROJ_DIR args=get --lease --lease-holder $id" "$LAUNCH_LOG.treehouse" \
+    "Codex fast spawn did not lease its worktree before endpoint creation"
+  assert_no_grep "return " "$LAUNCH_LOG.treehouse" \
+    "successful Codex fast spawn returned its live worktree lease"
   pass "codex fast tier is an explicit opt-in"
 }
 
@@ -548,15 +576,26 @@ test_codex_fast_tier_requires_model_support() {
   id=profile-codex-fast-config-unsupported-z3c
   rec=$(make_spawn_case profile-codex-fast-config-unsupported codex "$id")
   read_case_record "$rec"
-  out=$(FM_TEST_CODEX_EFFECTIVE_MODEL=gpt-5.4-mini \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-      "$id" "$PROJ_DIR" --tier fast)
+  mkdir -p "$PROJ_DIR/.codex"
+  printf '%s\n' gpt-5.4-mini > "$PROJ_DIR/.codex/fake-effective-model"
+  git -C "$PROJ_DIR" add .codex/fake-effective-model
+  git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm unsupported-origin-model
+  git -C "$PROJ_DIR" push --quiet origin HEAD
+  printf '%s\n' gpt-5.4 > "$PROJ_DIR/.codex/fake-effective-model"
+  git -C "$PROJ_DIR" add .codex/fake-effective-model
+  git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm supported-primary-model
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --tier fast)
   status=$?
   expect_code 1 "$status" "Codex fast tier should refuse an unsupported configured model"
   assert_contains "$out" "model 'gpt-5.4-mini' does not advertise the priority service tier" \
     "unsupported configured model refusal did not use Codex's effective model"
   assert_absent "$HOME_DIR/state/$id.meta" "unsupported configured fast model published metadata"
   assert_absent "$LAUNCH_LOG.endpoint" "unsupported configured fast model created an endpoint"
+  assert_grep "doctor $WT_DIR" "$LAUNCH_LOG.codex-cwd" \
+    "configured-model refusal did not inspect the refreshed launch worktree"
+  assert_grep "return cwd=$PROJ_DIR args=return --if-lease-holder $id --force $WT_DIR" "$LAUNCH_LOG.treehouse" \
+    "failed Codex fast preflight did not return its pre-acquired worktree"
   pass "Codex fast tier requires priority support from the resolved model"
 }
 
