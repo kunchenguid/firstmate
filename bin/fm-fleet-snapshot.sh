@@ -268,7 +268,7 @@ status_current_json() {  # <status-event-json>
       working) state=working; source=status-log; detail=$note ;;
       needs-decision) state=parked; source=status-log; detail=$note ;;
       blocked) state=blocked; source=status-log; detail=$note ;;
-      done) state=done; source=status-log; detail=$note ;;
+      done) state='done'; source=status-log; detail=$note ;;
       failed) state=failed; source=status-log; detail=$note ;;
     esac
   fi
