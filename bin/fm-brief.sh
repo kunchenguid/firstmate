@@ -266,13 +266,10 @@ fi
 
 REPO=${POS[1]}
 
-# Launch-time gstack learnings: ship and scout workers never see the gstack
-# SessionStart hooks that surface learnings in the captain's own sessions, so
-# surface the searcher's top hits directly in the written brief. The helper is
-# fail-soft - a missing searcher, empty results, or a searcher error all print
-# nothing - so the scaffold is unchanged when no learnings are available.
-# Secondmate charters are excluded: they are roles rather than tasks and exit
-# above. The helper, not this block, owns the search mechanics.
+# Ship and scout workers do not receive the captain's gstack SessionStart hooks,
+# so their written briefs may carry relevant learnings. Secondmate charters exit
+# above because they are roles rather than tasks. The helper owns lookup behavior;
+# this block derives brief tokens and conditionally formats its hits.
 LEARNINGS_BLOCK=
 learnings_tokens() {  # <id> <repo> -> one derived token per line, capped at 5
   local id=$1 repo=$2
