@@ -208,6 +208,8 @@ test_zero_changed_files_exits_clean() {
   [ "$rc" -eq 0 ] || fail "zero changed lint targets must exit 0, got $rc"$'\n'"$out"
   assert_contains "$out" "ShellCheck 0.11.0" "zero-changed run did not print the ShellCheck version line"
   assert_contains "$out" "no changed lint targets" "zero-changed run did not note the empty target set"
+  assert_contains "$out" "workflow files valid" \
+    "zero-changed run skipped workflow YAML validation"
   pass "fm-lint.sh exits 0 with a note when the local branch has no changed lint targets"
 }
 
