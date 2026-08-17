@@ -22,6 +22,11 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
+# Hermeticity: pin the gstack learnings searcher to a missing path so every
+# scaffold in this file stays byte-stable and never reads the host's real
+# learnings store. The learnings-wiring tests below override it with fixtures.
+export FM_GSTACK_SEARCH_BIN="$TMP_ROOT/missing-gstack-learnings-search"
+
 # The script itself must always parse under the ambient bash. That is Bash 5 in
 # CI and locally, where the issue #958/#1069 parser bug does not fire, so this
 # is a weak guard on its own; test_no_heredoc_in_command_substitution and the
@@ -710,6 +715,170 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Launch-time gstack learnings: ship and scout briefs embed the searcher's top
+# hits under "Relevant project learnings" when the helper returns them, capped
+# at five; the section is omitted and the scaffold unchanged when the searcher
+# is missing, returns nothing, or errors; secondmate charters never get it.
+
+write_brief_fake_searcher() {  # <dir> <name> <mode: ok|empty|fail>
+  local dir=$1 name=$2 mode=$3
+  mkdir -p "$dir"
+  case "$mode" in
+    empty) printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/$name" ;;
+    fail) printf '#!/usr/bin/env bash\nexit 3\n' > "$dir/$name" ;;
+    *)
+      cat > "$dir/$name" <<'SH'
+#!/usr/bin/env bash
+query=""
+limit="5"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --query) query=$2; shift 2 ;;
+    --limit) limit=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$query" ] || exit 0
+printf 'LEARNINGS: %s loaded (2 pitfalls)\n\n## Pitfalls\n- [fixture] (confidence: 9/10, observed, 2026-01-01)\n  insight for: %s\n' "$limit" "$query"
+SH
+      ;;
+  esac
+  chmod +x "$dir/$name"
+}
+
+test_learnings_embedded_when_searcher_present() {
+  local home fake brief
+  home="$TMP_ROOT/learnings-present-home"
+  mkdir -p "$home/data"
+  fake="$TMP_ROOT/learnings-fakebin/gstack-learnings-search"
+  write_brief_fake_searcher "$TMP_ROOT/learnings-fakebin" gstack-learnings-search ok
+  FM_HOME="$home" FM_GSTACK_SEARCH_BIN="$fake" \
+    "$ROOT/bin/fm-brief.sh" tinas-second-brain-fix-issue-698 tinas-second-brain --mode no-mistakes >/dev/null 2>&1 \
+    || fail "ship brief with a present searcher should scaffold"
+  brief="$home/data/tinas-second-brain-fix-issue-698/brief.md"
+  assert_grep "# Relevant project learnings" "$brief" "ship brief did not embed the learnings heading"
+  assert_grep "LEARNINGS: 5 loaded (2 pitfalls)" "$brief" "ship brief did not embed the searcher summary"
+  assert_grep "insight for: tinas second brain 698" "$brief" \
+    "ship brief did not derive tokens from the title and repo (noise stripped, issue number kept)"
+  assert_grep "{TASK}" "$brief" "learnings insertion broke the task placeholder"
+  assert_grep "# Setup" "$brief" "learnings insertion broke the setup section"
+  assert_no_grep "insight for: fix" "$brief" "noise token fix leaked into the learnings query"
+  assert_no_grep "insight for: issue" "$brief" "noise token issue leaked into the learnings query"
+  pass "fm-brief.sh: ship brief embeds top-five learnings from a present searcher"
+}
+
+test_scout_brief_embeds_learnings() {
+  local home fake brief
+  home="$TMP_ROOT/learnings-scout-home"
+  mkdir -p "$home/data"
+  fake="$TMP_ROOT/learnings-scout-fakebin/gstack-learnings-search"
+  write_brief_fake_searcher "$TMP_ROOT/learnings-scout-fakebin" gstack-learnings-search ok
+  FM_HOME="$home" FM_GSTACK_SEARCH_BIN="$fake" \
+    "$ROOT/bin/fm-brief.sh" investigate-698 alpha --scout >/dev/null 2>&1 \
+    || fail "scout brief with a present searcher should scaffold"
+  brief="$home/data/investigate-698/brief.md"
+  assert_grep "# Relevant project learnings" "$brief" "scout brief did not embed the learnings heading"
+  assert_grep "insight for: investigate 698 alpha" "$brief" "scout brief did not derive tokens"
+  assert_grep "SCOUT task" "$brief" "learnings insertion broke the scout contract"
+  pass "fm-brief.sh: scout brief embeds learnings like a ship brief"
+}
+
+test_learnings_omitted_when_searcher_missing() {
+  local home brief
+  home="$TMP_ROOT/learnings-missing-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_GSTACK_SEARCH_BIN="$TMP_ROOT/no-such-searcher" \
+    "$ROOT/bin/fm-brief.sh" brief-missing-l1 some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "a missing searcher must not fail the ship scaffold"
+  brief="$home/data/brief-missing-l1/brief.md"
+  assert_present "$brief" "missing searcher scaffold produced no brief"
+  assert_no_grep "# Relevant project learnings" "$brief" "missing searcher left a learnings section"
+  assert_grep "# Setup" "$brief" "missing searcher brief lost its setup section"
+  assert_grep "{TASK}" "$brief" "missing searcher brief lost the task placeholder"
+  pass "fm-brief.sh: a missing searcher leaves the brief unchanged"
+}
+
+test_learnings_omitted_when_searcher_errors() {
+  local home fake brief
+  home="$TMP_ROOT/learnings-err-home"
+  mkdir -p "$home/data"
+  fake="$TMP_ROOT/learnings-err-fakebin/gstack-learnings-search"
+  write_brief_fake_searcher "$TMP_ROOT/learnings-err-fakebin" gstack-learnings-search fail
+  FM_HOME="$home" FM_GSTACK_SEARCH_BIN="$fake" \
+    "$ROOT/bin/fm-brief.sh" brief-err-l2 some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "a failing searcher must not fail the ship scaffold"
+  brief="$home/data/brief-err-l2/brief.md"
+  assert_no_grep "# Relevant project learnings" "$brief" "a failing searcher left a learnings section"
+  assert_grep "# Setup" "$brief" "a failing searcher broke the scaffold"
+  pass "fm-brief.sh: a failing searcher never fails fm-brief"
+}
+
+test_learnings_omitted_when_no_hits() {
+  local home fake brief
+  home="$TMP_ROOT/learnings-nohits-home"
+  mkdir -p "$home/data"
+  fake="$TMP_ROOT/learnings-nohits-fakebin/gstack-learnings-search"
+  write_brief_fake_searcher "$TMP_ROOT/learnings-nohits-fakebin" gstack-learnings-search empty
+  FM_HOME="$home" FM_GSTACK_SEARCH_BIN="$fake" \
+    "$ROOT/bin/fm-brief.sh" brief-nohits-l3 some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "an empty-results searcher must not fail the ship scaffold"
+  brief="$home/data/brief-nohits-l3/brief.md"
+  assert_no_grep "# Relevant project learnings" "$brief" "no-hits searcher left a learnings section"
+  assert_grep "# Setup" "$brief" "no-hits searcher broke the scaffold"
+  pass "fm-brief.sh: no learnings hits means no section"
+}
+
+test_secondmate_charter_never_embeds_learnings() {
+  local home fake brief
+  home="$TMP_ROOT/learnings-sm-home"
+  mkdir -p "$home/data"
+  fake="$TMP_ROOT/learnings-sm-fakebin/gstack-learnings-search"
+  write_brief_fake_searcher "$TMP_ROOT/learnings-sm-fakebin" gstack-learnings-search ok
+  FM_HOME="$home" FM_GSTACK_SEARCH_BIN="$fake" FM_SECONDMATE_CHARTER='ops' \
+    "$ROOT/bin/fm-brief.sh" learnings-mate --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "a secondmate charter should scaffold even with a present searcher"
+  brief="$home/data/learnings-mate/brief.md"
+  assert_no_grep "# Relevant project learnings" "$brief" "secondmate charter got a learnings section"
+  assert_grep "# Charter" "$brief" "secondmate charter lost its charter section"
+  pass "fm-brief.sh: secondmate charters never embed learnings"
+}
+
+test_learnings_tokens_capped_at_five() {
+  local home fake brief
+  home="$TMP_ROOT/learnings-cap-home"
+  mkdir -p "$home/data"
+  fake="$TMP_ROOT/learnings-cap-fakebin/gstack-learnings-search"
+  write_brief_fake_searcher "$TMP_ROOT/learnings-cap-fakebin" gstack-learnings-search ok
+  FM_HOME="$home" FM_GSTACK_SEARCH_BIN="$fake" \
+    "$ROOT/bin/fm-brief.sh" alpha-beta-gamma-delta-epsilon-zeta omega --mode no-mistakes >/dev/null 2>&1 \
+    || fail "capped-token brief should scaffold"
+  brief="$home/data/alpha-beta-gamma-delta-epsilon-zeta/brief.md"
+  assert_grep "insight for: alpha beta gamma delta epsilon" "$brief" \
+    "token derivation did not cap the query at five tokens"
+  assert_no_grep "insight for: zeta" "$brief" "sixth token leaked past the cap"
+  pass "fm-brief.sh: learnings search tokens are capped at five"
+}
+
+test_learnings_dollar_text_renders_literally() {
+  local home fake brief
+  home="$TMP_ROOT/learnings-dollar-home"
+  mkdir -p "$home/data" "$TMP_ROOT/learnings-dollar-fakebin"
+  fake="$TMP_ROOT/learnings-dollar-fakebin/gstack-learnings-search"
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+printf 'LEARNINGS: 1 loaded (1 pitfall)\n\n## Pitfalls\n- [k] (confidence: 9/10)\n  run $D extract and $(echo SHOULD-NOT-RUN)\n'
+SH
+  chmod +x "$fake"
+  FM_HOME="$home" FM_GSTACK_SEARCH_BIN="$fake" \
+    "$ROOT/bin/fm-brief.sh" brief-dollar-l4 some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "dollar-laden learnings must not fail the scaffold"
+  brief="$home/data/brief-dollar-l4/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the fixture's literal $D/$(...) text must be asserted verbatim
+  assert_grep 'run $D extract and $(echo SHOULD-NOT-RUN)' "$brief" \
+    "learnings text lost its literal dollar and command-substitution content"
+  pass "fm-brief.sh: learnings text renders literally through the scaffold heredoc"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -730,3 +899,11 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_learnings_embedded_when_searcher_present
+test_scout_brief_embeds_learnings
+test_learnings_omitted_when_searcher_missing
+test_learnings_omitted_when_searcher_errors
+test_learnings_omitted_when_no_hits
+test_secondmate_charter_never_embeds_learnings
+test_learnings_tokens_capped_at_five
+test_learnings_dollar_text_renders_literally

@@ -266,6 +266,55 @@ fi
 
 REPO=${POS[1]}
 
+# Launch-time gstack learnings: ship and scout workers never see the gstack
+# SessionStart hooks that surface learnings in the captain's own sessions, so
+# surface the searcher's top hits directly in the written brief. The helper is
+# fail-soft - a missing searcher, empty results, or a searcher error all print
+# nothing - so the scaffold is unchanged when no learnings are available.
+# Secondmate charters are excluded: they are roles rather than tasks and exit
+# above. The helper, not this block, owns the search mechanics.
+LEARNINGS_BLOCK=
+learnings_tokens() {  # <id> <repo> -> one derived token per line, capped at 5
+  local id=$1 repo=$2
+  local -a words=() seen=() tokens=()
+  local src tok i j n
+  for src in "$id" "$repo"; do
+    while IFS= read -r tok; do
+      [ -n "$tok" ] || continue
+      words+=("$tok")
+    done < <(printf '%s\n' "$src" | tr '[:upper:]' '[:lower:]' | grep -oE '[a-z0-9]+' || true)
+  done
+  n=${#words[@]}
+  for ((i = 0; i < n; i++)); do
+    tok=${words[$i]}
+    [ "${#tok}" -ge 2 ] || continue
+    case "$tok" in
+      feat|fix|chore|docs|v0|issue) continue ;;
+    esac
+    j=0
+    while [ "$j" -lt "${#seen[@]}" ]; do
+      [ "${seen[$j]}" = "$tok" ] && continue 2
+      j=$((j + 1))
+    done
+    seen+=("$tok")
+    tokens+=("$tok")
+    [ "${#tokens[@]}" -ge 5 ] && break
+  done
+  if [ "${#tokens[@]}" -gt 0 ]; then
+    printf '%s\n' "${tokens[@]}"
+  fi
+}
+LEARNINGS_TOKENS=()
+while IFS= read -r tok; do
+  LEARNINGS_TOKENS+=("$tok")
+done < <(learnings_tokens "$ID" "$REPO")
+if [ "${#LEARNINGS_TOKENS[@]}" -gt 0 ]; then
+  learnings_output=$("$SCRIPT_DIR/fm-learnings-search.sh" --limit 5 "${LEARNINGS_TOKENS[@]}") || learnings_output=
+  if [ -n "$learnings_output" ]; then
+    LEARNINGS_BLOCK=$'\n\n# Relevant project learnings\n\n'"$learnings_output"
+  fi
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -303,7 +352,7 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
-{TASK}
+{TASK}$LEARNINGS_BLOCK
 
 $HERDR_SECTION
 
@@ -413,7 +462,7 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
-{TASK}
+{TASK}$LEARNINGS_BLOCK
 
 $HERDR_SECTION
 
