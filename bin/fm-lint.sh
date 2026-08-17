@@ -19,11 +19,10 @@
 #   - Otherwise (an ordinary local branch with a real merge-base) it lints
 #     only the canonical-set files changed since that merge-base, including
 #     uncommitted local edits, via plain local `git diff` (no network, no
-#     `gh`). A branch with zero matching changed files skips ShellCheck and
-#     prints a "no changed lint targets" note, then still validates workflows -
-#     but only after re-asking git, through a call whose exit status is
-#     observable, to confirm there really was nothing to lint rather than
-#     assuming it.
+#     `gh`). That selection is verified against a second git read before it is
+#     acted on (see Selection below). A branch with zero matching changed files
+#     skips ShellCheck and prints a "no changed lint targets" note, then still
+#     validates workflows.
 # Explicit paths always bypass this file-set selection and lint exactly the
 # given paths, matching the same config, without the workflow YAML check.
 #
@@ -39,19 +38,37 @@
 #   0  the selected file set is clean, or there were no changed lint targets
 #   1  ShellCheck reported findings
 #   2  invalid usage
-#   3  the lint could not run to completion, so NOTHING it reports can be
-#      trusted (see the refusal below)
+#   3  the lint did not run to completion, so it carries no verdict at all
+#      (see the refusal below)
 #
-# This gate refuses instead of passing when it cannot run. A missing ShellCheck,
-# a ShellCheck that is not the pin, one that will not report its version, a
-# missing perl, a repository root it cannot enter, a temporary directory it
-# cannot create, shard manifests that do not account for every selected file, an
-# empty changed-file set git will not confirm, and a bounded worker whose result
-# never arrived all print an unmissable "LINT NOT RUN" line naming what is
-# missing - plus, when ShellCheck is the missing piece, the exact version
-# required and how to get it - then exit 3. EVERY path that could not check the
-# selected files lands there, so no status this script returns, zero or not, ever
-# reports a lint that in fact never ran.
+# Two integrity checks stand between this gate and a clean exit. Each answers one
+# question, and neither covers the other's:
+#   - Execution: was every file in the selected set actually handed to ShellCheck?
+#     Each worker records the number of roots it passed for its shard next to that
+#     shard's result, and the parent refuses unless those counts sum to the
+#     selected count. A shard that dropped roots, and a shard that recorded no
+#     count at all, both refuse rather than being read as zero. This is the one
+#     place that guarantee is asserted, end to end on what was really passed
+#     rather than on an intermediate proxy.
+#   - Selection, in changed-files mode only: is the selected set really the
+#     changed set? The NUL-safe read that builds it runs in a process
+#     substitution whose exit status is invisible, so a git or sort that failed
+#     or was truncated there looks exactly like a smaller diff. The selection is
+#     therefore compared against a second `git diff` whose status IS observable,
+#     and a failed read or a differing count refuses. Full-lint mode needs no
+#     such check - its set comes from a shell glob with no external command in
+#     the path - and explicit-path mode lints exactly the caller's own list.
+# A shard whose result never arrived refuses as well, because diagnostics that
+# cannot be replayed cannot be turned into a verdict; that is replay integrity,
+# not a second completeness guarantee.
+#
+# This gate refuses instead of passing when it cannot run. Both checks above, a
+# missing ShellCheck, a ShellCheck that is not the pin, one that will not report
+# its version, a missing perl, a repository root that cannot be resolved or
+# entered, and a temporary directory that cannot be created all print an
+# unmissable "LINT NOT RUN" line naming what is missing - plus, when ShellCheck
+# is the missing piece, the exact version required and how to get it - then exit
+# 3.
 # 3 is deliberately not 127: 127 is the shell's own "command not found", so a
 # caller that sees it cannot tell whether this script refused or was never found
 # at all, and a gate that reads lint output for actionable findings sees none in
@@ -97,9 +114,9 @@ REQUIRED_SHELLCHECK=0.11.0
 # and 127 (the shell's command-not-found), so no caller can confuse a refusal
 # with a clean lint, a lint failure, or this script being absent.
 REFUSED_EXIT=3
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)
 SELF="$SELF_DIR/fm-lint.sh"
-ROOT="$(cd "$SELF_DIR/.." && pwd)"
+ROOT=$(CDPATH='' cd -- "$SELF_DIR/.." 2>/dev/null && pwd -P)
 
 # fm_lint_refuse <reason> [shellcheck]: the single exit for "this gate could not
 # run". Says so unmissably rather than letting a caller read silence as a clean
@@ -122,9 +139,14 @@ fm_lint_refuse() {
 }
 
 # The repository root every relative canonical root and worker manifest path is
-# resolved against. Refuses on the same contract when it cannot be entered: the
-# selected file set would be unreachable, so nothing could be checked.
-cd "$ROOT" || fm_lint_refuse "could not enter the repository root $ROOT"
+# resolved against. Refuses on the same contract when it cannot be resolved or
+# entered: the selected file set would be unreachable, so nothing could be
+# checked. Emptiness is tested explicitly because `cd ""` is a successful no-op in
+# bash, which would let an unresolved root run against the caller's own directory.
+if [ -z "$SELF_DIR" ] || [ -z "$ROOT" ] || ! CDPATH='' cd -- "$ROOT" 2>/dev/null; then
+  fm_lint_refuse \
+    "could not resolve and enter the repository root holding this script (directory '$SELF_DIR', root '$ROOT')"
+fi
 
 # fm_lint_provision_shellcheck <dir>: opt-in only, never reached by a default
 # lint. ENSURES the pin is in <dir> and puts <dir> first on PATH for this run: a
@@ -195,6 +217,7 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
   else
     : > "$output.out"
   fi
+  printf '%s\n' "${#roots[@]}" > "$output.checked"
   printf '%s\n' "$rc" > "$output.rc"
   return "$rc"
 }
@@ -382,30 +405,35 @@ if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
     shellcheck
 fi
 
-if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
-  # "Nothing changed" is the one clean exit that checks no file at all, and the
-  # read above cannot report its own failure: a process substitution's status is
-  # invisible, so a git or a sort that died in that pipeline is indistinguishable
-  # from an empty diff. Prove the empty set instead of assuming it, by re-asking
-  # git through a plain substitution whose status IS observable, and refuse unless
-  # that answer agrees. Only this branch pays for it; a run with roots skips it.
-  changed_recheck=$(git diff --name-only --diff-filter=ACMR "$merge_base" -- 2>&1) || {
+if [ "$CHANGED_MODE" -eq 1 ]; then
+  # Selection integrity: the read above cannot report its own failure, because a
+  # process substitution's exit status is invisible, so a git or a sort that died
+  # or was truncated there is indistinguishable from a smaller diff - whether that
+  # leaves no roots or merely fewer. Ask git again through a plain substitution
+  # whose status IS observable, count the same canonical existing paths, and act
+  # only on a selection that answer agrees with.
+  changed_recheck=$(git -c core.quotePath=false diff --name-only --diff-filter=ACMR "$merge_base" -- 2>&1) || {
     printf '%s\n' "$changed_recheck" >&2
-    fm_lint_refuse "git could not report what changed since $merge_base, so an empty lint target set is unproven"
+    fm_lint_refuse "git could not report what changed since $merge_base, so the lint target set is unproven"
   }
+  recheck_count=0
+  changed_path=
   while IFS= read -r changed_path; do
     [ -n "$changed_path" ] || continue
     fm_lint_is_canonical_root "$changed_path" || continue
     [ -f "$changed_path" ] || continue
-    fm_lint_refuse \
-      "$changed_path is a changed lint target, but reading the changed files produced none, so nothing was checked"
+    recheck_count=$((recheck_count + 1))
   done <<CHANGED_RECHECK
 $changed_recheck
 CHANGED_RECHECK
-  printf 'fm-lint.sh: no changed lint targets\n'
-  overall_rc=0
-  fm_lint_run_workflows || overall_rc=$?
-  exit "$overall_rc"
+  [ "$recheck_count" -eq "$ROOT_COUNT" ] || fm_lint_refuse \
+    "git reports $recheck_count changed lint targets but reading them selected $ROOT_COUNT, so the selection is wrong"
+  if [ "$ROOT_COUNT" -eq 0 ]; then
+    printf 'fm-lint.sh: no changed lint targets\n'
+    overall_rc=0
+    fm_lint_run_workflows || overall_rc=$?
+    exit "$overall_rc"
+  fi
 fi
 
 if [ -n "$TELEMETRY" ]; then
@@ -491,24 +519,6 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
   mv "$TMP_ROOT/manifest.$worker.sorted" "$TMP_ROOT/manifest.$worker"
   worker=$((worker + 1))
 done
-
-# The manifests are the only thing a worker reads, so one that does not account
-# for every selected root means files went unchecked while every shard still
-# reported clean. Counting them against the selection here is the single boundary
-# that covers a sort that is missing, failed, or truncated and a failed mv alike,
-# before any worker starts. A legitimately empty selection still matches at zero.
-manifest_total=0
-manifest_entry=
-worker=0
-while [ "$worker" -lt "$SHARD_COUNT" ]; do
-  while IFS= read -r manifest_entry || [ -n "$manifest_entry" ]; do
-    [ -n "$manifest_entry" ] || continue
-    manifest_total=$((manifest_total + 1))
-  done < "$TMP_ROOT/manifest.$worker"
-  worker=$((worker + 1))
-done
-[ "$manifest_total" -eq "$ROOT_COUNT" ] || fm_lint_refuse \
-  "the shard manifests account for $manifest_total of the $ROOT_COUNT selected files, so they were not all checked"
 
 fm_lint_shellcheck_count() {
   if command -v pgrep >/dev/null 2>&1; then
@@ -601,6 +611,8 @@ fi
 # shard status. ShellCheck processes every root in a shard after earlier findings.
 overall_rc=0
 lost_shards=
+uncounted_shards=
+checked_total=0
 worker=0
 while [ "$worker" -lt "$SHARD_COUNT" ]; do
   output="$OUTPUT_DIR/shard.$worker"
@@ -614,15 +626,31 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
   else
     lost_shards="${lost_shards:+$lost_shards, }$worker"
   fi
+  shard_checked=
+  [ ! -f "$output.checked" ] || shard_checked=$(cat "$output.checked" 2>/dev/null)
+  case "$shard_checked" in
+    ''|*[!0-9]*) uncounted_shards="${uncounted_shards:+$uncounted_shards, }$worker" ;;
+    *) checked_total=$((checked_total + shard_checked)) ;;
+  esac
   worker=$((worker + 1))
 done
 
 # A shard whose result never arrived (a worker killed off, an out-of-memory host)
-# leaves its files unverified, so this run has no verdict to report even if the
-# surviving shard was clean. Refused after the replay above so whatever the other
-# shard did find is still printed for whoever has to act on it.
+# leaves its diagnostics unreplayable, so this run has no verdict to report even if
+# the surviving shard was clean. Refused after the replay above so whatever the
+# other shard did find is still printed for whoever has to act on it.
 [ -z "$lost_shards" ] || fm_lint_refuse \
   "a bounded lint worker produced no result for shard $lost_shards of $SHARD_COUNT, so those files were not checked"
+
+# Execution integrity, asserted once for the whole run on what the workers really
+# handed over: a shard that says nothing about what it checked cannot be counted as
+# zero, and the roots ShellCheck actually received must be the selected set. Every
+# selected path is weighted and assigned unconditionally, including one that does
+# not exist, so a healthy run always balances here.
+[ -z "$uncounted_shards" ] || fm_lint_refuse \
+  "shard $uncounted_shards of $SHARD_COUNT recorded no count of what it checked, so this run cannot account for it"
+[ "$checked_total" -eq "$ROOT_COUNT" ] || fm_lint_refuse \
+  "ShellCheck was handed $checked_total of the $ROOT_COUNT selected files, so they were not all checked"
 
 if [ -n "$TELEMETRY" ]; then
   TELEMETRY_END_EPOCH=$(date +%s)

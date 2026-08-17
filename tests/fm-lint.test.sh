@@ -175,7 +175,7 @@ test_list_files_reports_the_shell_inventory() {
 #   FM_TEST_GIT_MERGE_BASE       merge-base value to print when OK
 #   FM_TEST_GIT_DIFF_FILE        path to a file of NUL-separated changed paths
 #   FM_TEST_GIT_DIFF_RECHECK_OK  1 (default) or 0, for the non-NUL diff form
-#                                fm-lint.sh re-asks when it selected no roots
+#                                fm-lint.sh re-asks to verify its selection
 fm_lint_stub_git() {
   local fakebin=$1
   cat > "$fakebin/git" <<'SH'
@@ -203,13 +203,13 @@ case "$*" in
     fi
     exit 1
     ;;
-  "diff --name-only --diff-filter=ACMR -z "*)
+  *"diff --name-only --diff-filter=ACMR -z "*)
     if [ -n "${FM_TEST_GIT_DIFF_FILE:-}" ] && [ -f "$FM_TEST_GIT_DIFF_FILE" ]; then
       cat "$FM_TEST_GIT_DIFF_FILE"
     fi
     exit 0
     ;;
-  "diff --name-only --diff-filter=ACMR "*)
+  *"diff --name-only --diff-filter=ACMR "*)
     [ "${FM_TEST_GIT_DIFF_RECHECK_OK:-1}" = 1 ] || {
       printf 'fatal: simulated git failure\n' >&2
       exit 128
@@ -614,15 +614,15 @@ fm_lint_run_path_without() {
   printf '%s\n' "$list"
 }
 
-test_incomplete_shard_manifest_refuses_instead_of_passing_clean() {
-  # The regression: with `sort` missing, the shard manifests came out empty, each
-  # worker took its no-roots branch and recorded a clean result, and the gate
-  # exited 0 having asked ShellCheck to check nothing. A truncated or failed sort
-  # and a failed mv land in the same place: files silently unchecked, every shard
-  # reporting clean. A run that cannot hand its workers the files it selected must
-  # refuse on the could-not-run status, not report a clean lint.
-  local tmp isolated log target out rc
-  tmp=$(fm_test_tmproot fm-lint-manifest)
+test_roots_lost_before_shellcheck_refuse_instead_of_passing_clean() {
+  # Execution integrity, end to end: whatever selected the files, every one of them
+  # must reach ShellCheck or the run refuses. The regression: with `sort` missing
+  # the shard manifests came out empty, each worker took its no-roots branch and
+  # recorded a clean result, and the gate exited 0 having asked ShellCheck to check
+  # nothing. A truncated sort and a failed mv lose roots at the same place. Both
+  # worker modes are covered, because the serial and parallel paths count alike.
+  local tmp isolated log target out rc jobs
+  tmp=$(fm_test_tmproot fm-lint-lost-roots)
   # shellcheck disable=SC2046 # Deliberate word splitting of the command list.
   fm_lint_isolated_bin "$tmp" $(fm_lint_run_path_without sort)
   isolated=$FM_TEST_ISOLATED_BIN
@@ -631,24 +631,51 @@ test_incomplete_shard_manifest_refuses_instead_of_passing_clean() {
   target="$tmp/good.sh"
   printf '#!/usr/bin/env bash\nset -eu\nprintf "ok\\n"\n' > "$target"
 
-  rc=0
-  out=$(PATH="$isolated" CI=true FM_LINT_JOBS=1 "$LINT" "$target" 2>&1) || rc=$?
-  [ "$rc" -eq "$FM_LINT_REFUSED_EXIT" ] \
-    || fail "an unbuildable shard manifest exited $rc, not the could-not-run status $FM_LINT_REFUSED_EXIT"$'\n'"$out"
-  assert_contains "$out" "LINT NOT RUN" "an unbuildable shard manifest did not mark the lint as not run"
-  [ ! -s "$log" ] \
-    || fail "the manifest refusal fired after ShellCheck had checked files"$'\n'"$(cat "$log")"
-  pass "fm-lint.sh refuses when its shard manifests do not account for every selected file"
+  for jobs in 1 2; do
+    : > "$log"
+    rc=0
+    out=$(PATH="$isolated" CI=true FM_LINT_JOBS="$jobs" "$LINT" "$target" 2>&1) || rc=$?
+    [ "$rc" -eq "$FM_LINT_REFUSED_EXIT" ] \
+      || fail "jobs=$jobs lost every root and exited $rc, not $FM_LINT_REFUSED_EXIT"$'\n'"$out"
+    assert_contains "$out" "LINT NOT RUN" "jobs=$jobs did not mark a lint that lost its roots as not run"
+    [ ! -s "$log" ] \
+      || fail "jobs=$jobs refused only after ShellCheck had checked files"$'\n'"$(cat "$log")"
+  done
+  pass "fm-lint.sh refuses when selected files never reach ShellCheck, serially and in parallel"
 }
 
-test_changed_mode_proves_an_empty_target_set_before_passing() {
-  # "no changed lint targets" is the one clean exit that checks no file at all,
-  # and the changed-file read cannot report its own failure: it runs in a process
-  # substitution, so a git or a sort that died there is indistinguishable from an
-  # empty diff. That is this gate's own production mode - .no-mistakes.yaml pins
+# fm_lint_stub_truncating_sort <dir>: install a `sort` that mangles only the -z
+# form, emitting its first NUL record and dropping the rest - the shape a sort
+# killed mid-write by an OOM kill or ENOSPC leaves in the changed-file read
+# pipeline - and delegating every other invocation to the real sort. Built from
+# shell builtins alone so it works on an isolated PATH with no sort of its own.
+fm_lint_stub_truncating_sort() {
+  local dir=$1 real
+  real=$(command -v sort) || fail "fm_lint_stub_truncating_sort needs a real sort on the ambient PATH"
+  rm -f "$dir/sort"
+  cat > "$dir/sort" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  [ "\$arg" = -z ] || continue
+  IFS= read -r -d '' first || first=
+  while IFS= read -r -d '' rest; do :; done
+  [ -z "\$first" ] || printf '%s\\0' "\$first"
+  exit 0
+done
+exec "$real" "\$@"
+SH
+  chmod +x "$dir/sort"
+}
+
+test_changed_mode_verifies_its_selection_before_acting_on_it() {
+  # The changed-file read cannot report its own failure: it runs in a process
+  # substitution, so a git or a sort that died or was truncated there is
+  # indistinguishable from a smaller diff - whether that leaves no targets or
+  # merely fewer. That is this gate's own production mode - .no-mistakes.yaml pins
   # `lint: bin/fm-lint.sh` with no arguments, which on a feature branch outside CI
-  # selects changed files - so the defect read as a clean step, twice.
-  local tmp isolated log diff_file empty_diff out rc
+  # selects changed files - and CI can never exercise it, because CI forces a full
+  # lint. So every direction of that verification is covered here.
+  local tmp isolated log diff_file partial_diff empty_diff out rc
   tmp=$(fm_test_tmproot fm-lint-changed-zero)
   # shellcheck disable=SC2046 # Deliberate word splitting of the command list.
   fm_lint_isolated_bin "$tmp" $(fm_lint_run_path_without sort)
@@ -657,11 +684,15 @@ test_changed_mode_proves_an_empty_target_set_before_passing() {
   log="$tmp/shellcheck.log"
   fm_lint_stub_shellcheck "$isolated" "$log"
   diff_file="$tmp/diff.nul"
+  partial_diff="$tmp/partial.nul"
   empty_diff="$tmp/empty.nul"
   : > "$empty_diff"
   # A real canonical target plus a non-canonical file: with the read path broken,
   # zero roots reach the lint even though bin/fm-lint.sh changed.
   fm_lint_write_diff_file "$diff_file" "bin/fm-lint.sh" "README.md"
+  # Three real canonical targets, for the partial-drop case below.
+  fm_lint_write_diff_file "$partial_diff" \
+    "bin/fm-lint.sh" "bin/fm-install-shellcheck.sh" "tests/fm-lint.test.sh"
 
   # Clear CI/GITHUB_ACTIONS so changed-file mode is live; a CI run forces a full
   # lint and cannot reach this branch at all.
@@ -675,8 +706,23 @@ test_changed_mode_proves_an_empty_target_set_before_passing() {
     "a dropped changed-file read still reported an empty target set as clean"
   [ ! -s "$log" ] || fail "the refusal fired after ShellCheck had checked files"$'\n'"$(cat "$log")"
 
+  # A read that drops SOME of the changed targets is the same defect: linting a
+  # subset while reporting on the whole is exactly the silent pass this gate exists
+  # to prevent, and a count of what reached ShellCheck cannot see it - the subset is
+  # internally consistent. Only comparing the selection against git catches it.
+  fm_lint_stub_truncating_sort "$isolated"
+  rc=0
+  out=$(PATH="$isolated" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_DIFF_FILE="$partial_diff" "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq "$FM_LINT_REFUSED_EXIT" ] \
+    || fail "a changed-file read that dropped 2 of 3 targets exited $rc, not $FM_LINT_REFUSED_EXIT"$'\n'"$out"
+  assert_contains "$out" "LINT NOT RUN" "a partially dropped changed-file read did not mark the lint as not run"
+  [ ! -s "$log" ] \
+    || fail "a partially dropped selection was linted anyway"$'\n'"$(cat "$log")"
+
   # git failing while answering that question must refuse too, rather than being
   # discarded into an unexplained empty set.
+  rm -f "$isolated/sort"
   ln -sf "$(command -v sort)" "$isolated/sort" || fail "could not restore sort on the isolated PATH"
   rc=0
   out=$(PATH="$isolated" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
@@ -687,13 +733,38 @@ test_changed_mode_proves_an_empty_target_set_before_passing() {
   assert_contains "$out" "LINT NOT RUN" "an unconfirmable empty target set did not mark the lint as not run"
 
   # ...and a branch that genuinely changed no lint target must still pass with its
-  # existing note, so proving the empty set never turns an empty diff into failure.
+  # existing note, so verifying the selection never turns an empty diff into a
+  # failure. The healthy non-empty selection is covered by the changed-mode lint
+  # test below, which must keep passing for the same reason.
   rc=0
   out=$(PATH="$isolated" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
     FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_DIFF_FILE="$empty_diff" "$LINT" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "a genuinely empty changed set no longer exits 0, got $rc"$'\n'"$out"
   assert_contains "$out" "no changed lint targets" "a genuinely empty changed set lost its note"
-  pass "fm-lint.sh proves an empty changed target set with git before reporting a clean lint"
+  pass "fm-lint.sh verifies its changed-file selection against git before acting on it"
+}
+
+test_unresolvable_repository_root_refuses_on_the_could_not_run_status() {
+  # `cd ""` is a successful no-op in bash, so a root that failed to resolve would
+  # otherwise leave the run pointed at whatever directory the caller happened to be
+  # in, reporting on a file set that is not this repository's. With dirname
+  # answering a directory that does not exist, the script cannot locate itself and
+  # must refuse on the could-not-run status instead of proceeding.
+  local tmp isolated out rc
+  tmp=$(fm_test_tmproot fm-lint-no-root)
+  # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
+  fm_lint_isolated_bin "$tmp" $FM_LINT_REFUSAL_PATH_COMMANDS
+  isolated=$FM_TEST_ISOLATED_BIN
+  rm -f "$isolated/dirname"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s/absent"\n' "$tmp" > "$isolated/dirname"
+  chmod +x "$isolated/dirname"
+
+  rc=0
+  out=$(PATH="$isolated" CI=true "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq "$FM_LINT_REFUSED_EXIT" ] \
+    || fail "an unresolvable repository root exited $rc, not $FM_LINT_REFUSED_EXIT"$'\n'"$out"
+  assert_contains "$out" "LINT NOT RUN" "an unresolvable repository root did not mark the lint as not run"
+  pass "fm-lint.sh refuses when it cannot resolve the repository root that holds it"
 }
 
 # fm_lint_stub_download <dir>: stub the network and archive tools
@@ -1351,8 +1422,9 @@ test_ci_provisioned_shape_never_refuses
 test_provisioning_is_opt_in_and_never_degrades_to_a_pass
 test_unusable_temp_directory_refuses_on_the_could_not_run_status
 test_lost_worker_result_refuses_on_the_could_not_run_status
-test_incomplete_shard_manifest_refuses_instead_of_passing_clean
-test_changed_mode_proves_an_empty_target_set_before_passing
+test_roots_lost_before_shellcheck_refuse_instead_of_passing_clean
+test_changed_mode_verifies_its_selection_before_acting_on_it
+test_unresolvable_repository_root_refuses_on_the_could_not_run_status
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
