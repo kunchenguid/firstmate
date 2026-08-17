@@ -48,11 +48,21 @@ require_jq() {
 }
 
 bws_version() {
+  local output version
   if ! command -v bws >/dev/null 2>&1; then
     printf 'none\n'
     return 0
   fi
-  bws --version 2>/dev/null | awk '{print $2; exit}' || printf 'none\n'
+  if ! output=$(bws --version 2>/dev/null); then
+    printf 'none\n'
+    return 0
+  fi
+  version=$(awk 'NF >= 2 {print $2; exit}' <<<"$output")
+  if [ -n "$version" ]; then
+    printf '%s\n' "$version"
+  else
+    printf 'none\n'
+  fi
 }
 
 token_present() {

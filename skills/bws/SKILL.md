@@ -133,7 +133,7 @@ Create or update only with current explicit authority naming the project and sec
 4. Create: `bws secret create <KEY> <VALUE> <PROJECT_ID> [--note <NOTE>]`
 5. Update: `bws secret edit <SECRET_ID> [--key <KEY>] [--value <VALUE>] [--note <NOTE>] [--project-id <PROJECT_ID>]`
 6. Pass values through env vars or stdin wrappers, never through chat or committed files.
-7. Verify with `"$HELPER" list-metadata <PROJECT_ID>` or `bws secret get <SECRET_ID> -o json | redact-json`.
+7. Verify with `"$HELPER" list-metadata <PROJECT_ID>` or `bws secret get <SECRET_ID> -o json | "$HELPER" redact-json`.
 8. A non-zero exit code is failure even when partial output appeared; never report success without verification.
 
 Rotation is an edit of `SECRET_ID` with a new value, then the same redacted verification.
@@ -143,7 +143,7 @@ Rotation is an edit of `SECRET_ID` with a new value, then the same redacted veri
 Delete only with explicit, concrete captain or operator authority that names the exact `SECRET_ID` (and project context).
 
 1. Refuse delete requests that name only a key when duplicates may exist.
-2. Re-verify identity with `bws secret get <SECRET_ID> -o json | redact-json` and `projectId`.
+2. Re-verify identity with `bws secret get <SECRET_ID> -o json | "$HELPER" redact-json` and `projectId`.
 3. Run `bws secret delete <SECRET_ID>`.
 4. Confirm absence with `resolve-id` exit 1 or metadata listing without that `id`.
 5. Never delete to "clean up" without named authority.

@@ -17,6 +17,9 @@ make_fake_bws() {
 MODE="${FM_FAKE_BWS_MODE:-authenticated}"
 case "${1:-}" in
   --version)
+    if [ "$MODE" = broken_version ]; then
+      exit 1
+    fi
     printf 'bws 9.9.9\n'
     exit 0
     ;;
@@ -97,6 +100,14 @@ test_probe_absent() {
   pass 'probe classifies absent bws'
 }
 
+test_probe_broken_version() {
+  local out
+  out=$(run_with_fake broken_version env BWS_ACCESS_TOKEN=set "$HELPER" probe)
+  assert_contains "$out" 'status=unavailable' 'failed version command should report unavailable'
+  assert_contains "$out" 'version=none' 'failed version command should report version none'
+  pass 'probe classifies broken bws installation'
+}
+
 test_probe_no_token() {
   local out
   out=$(run_with_fake no_token env -u BWS_ACCESS_TOKEN "$HELPER" probe)
@@ -171,6 +182,7 @@ test_resolve_duplicate_names() {
 }
 
 test_probe_absent
+test_probe_broken_version
 test_probe_no_token
 test_probe_invalid_token
 test_probe_unauthorized_token
