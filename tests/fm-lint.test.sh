@@ -747,24 +747,49 @@ test_changed_mode_verifies_its_selection_before_acting_on_it() {
 test_unresolvable_repository_root_refuses_on_the_could_not_run_status() {
   # `cd ""` is a successful no-op in bash, so a root that failed to resolve would
   # otherwise leave the run pointed at whatever directory the caller happened to be
-  # in, reporting on a file set that is not this repository's. With dirname
-  # answering a directory that does not exist, the script cannot locate itself and
-  # must refuse on the could-not-run status instead of proceeding.
-  local tmp isolated out rc
+  # in, linting and reporting on a file set that is not this repository's. Both ways
+  # the resolution goes wrong are covered: a dirname that answers a directory which
+  # does not exist, and no dirname on PATH at all - whose empty answer resolves to
+  # the caller's own directory, so testing for emptiness alone cannot see it.
+  #
+  # A pinned ShellCheck stub is on the PATH deliberately: it carries the run past
+  # the tool checks, so accepting a wrong root would reach a real lint of the wrong
+  # tree rather than stopping on a missing tool. That, plus asserting the refusal
+  # names the repository root, is what makes this fail if the guard regresses - a
+  # refusal for any other reason no longer satisfies it.
+  local tmp isolated log out rc
   tmp=$(fm_test_tmproot fm-lint-no-root)
   # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
-  fm_lint_isolated_bin "$tmp" $FM_LINT_REFUSAL_PATH_COMMANDS
+  fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS
   isolated=$FM_TEST_ISOLATED_BIN
+  log="$tmp/shellcheck.log"
+  fm_lint_stub_shellcheck "$isolated" "$log"
   rm -f "$isolated/dirname"
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s/absent"\n' "$tmp" > "$isolated/dirname"
   chmod +x "$isolated/dirname"
 
   rc=0
-  out=$(PATH="$isolated" CI=true "$LINT" 2>&1) || rc=$?
+  out=$(PATH="$isolated" CI=true FM_LINT_JOBS=1 "$LINT" 2>&1) || rc=$?
   [ "$rc" -eq "$FM_LINT_REFUSED_EXIT" ] \
-    || fail "an unresolvable repository root exited $rc, not $FM_LINT_REFUSED_EXIT"$'\n'"$out"
-  assert_contains "$out" "LINT NOT RUN" "an unresolvable repository root did not mark the lint as not run"
-  pass "fm-lint.sh refuses when it cannot resolve the repository root that holds it"
+    || fail "a root that resolved nowhere exited $rc, not $FM_LINT_REFUSED_EXIT"$'\n'"$out"
+  assert_contains "$out" "LINT NOT RUN" "a root that resolved nowhere did not mark the lint as not run"
+  assert_contains "$out" "repository root" "the refusal named something other than the repository root"
+  [ ! -s "$log" ] \
+    || fail "the run linted files outside this repository"$'\n'"$(cat "$log")"
+
+  # No dirname at all: the resolution silently falls back to the caller's own
+  # directory, which is not the one holding this script, so the guard must refuse
+  # there too instead of running against a tree it only assumed was the repository.
+  rm -f "$isolated/dirname"
+  rc=0
+  out=$(PATH="$isolated" CI=true FM_LINT_JOBS=1 "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq "$FM_LINT_REFUSED_EXIT" ] \
+    || fail "a run with no dirname on PATH exited $rc, not $FM_LINT_REFUSED_EXIT"$'\n'"$out"
+  assert_contains "$out" "repository root" \
+    "with no dirname on PATH the refusal named something other than the repository root"
+  [ ! -s "$log" ] \
+    || fail "with no dirname on PATH the run linted files outside this repository"$'\n'"$(cat "$log")"
+  pass "fm-lint.sh refuses, naming the repository root, when it cannot resolve the root that holds it"
 }
 
 # fm_lint_stub_download <dir>: stub the network and archive tools

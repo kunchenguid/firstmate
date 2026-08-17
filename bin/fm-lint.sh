@@ -141,11 +141,14 @@ fm_lint_refuse() {
 # The repository root every relative canonical root and worker manifest path is
 # resolved against. Refuses on the same contract when it cannot be resolved or
 # entered: the selected file set would be unreachable, so nothing could be
-# checked. Emptiness is tested explicitly because `cd ""` is a successful no-op in
-# bash, which would let an unresolved root run against the caller's own directory.
-if [ -z "$SELF_DIR" ] || [ -z "$ROOT" ] || ! CDPATH='' cd -- "$ROOT" 2>/dev/null; then
+# checked. Resolution is only believed when this script is actually where it came
+# out, because `cd ""` is a successful no-op in bash: an empty resolution - from a
+# dirname that failed, or one that is not on PATH at all - would otherwise pass
+# for the caller's own directory and lint a file set that is not this repository's.
+if [ -z "$SELF_DIR" ] || [ -z "$ROOT" ] || [ ! -f "$SELF" ] \
+  || ! CDPATH='' cd -- "$ROOT" 2>/dev/null; then
   fm_lint_refuse \
-    "could not resolve and enter the repository root holding this script (directory '$SELF_DIR', root '$ROOT')"
+    "could not resolve and enter the repository root holding this script (this script '$SELF', root '$ROOT')"
 fi
 
 # fm_lint_provision_shellcheck <dir>: opt-in only, never reached by a default
