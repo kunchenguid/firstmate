@@ -381,11 +381,11 @@ function checksHtml(pr) {
 }
 function tailHtml(t) {
   var p = t.pane_tail || {};
-  if (t.remote_host) return '<span class="badge">remote: ' + esc(t.remote_host) + '</span>';
-  if (p.error) return '<span class="errline">' + esc(p.error) + '</span>';
+  var out = t.remote_host ? '<span class="badge">remote: ' + esc(t.remote_host) + '</span> ' : '';
+  if (p.error) return out + '<span class="errline">' + esc(p.error) + '</span>';
   var lines = p.lines || [];
-  if (!lines.length) return '<span class="badge">no output</span>';
-  return '<details class="pane"><summary>tail (' + lines.length + ')</summary>' +
+  if (!lines.length) return out + '<span class="badge">no output</span>';
+  return out + '<details class="pane"><summary>tail (' + lines.length + ')</summary>' +
     '<pre class="tail">' + esc(lines.join('\n')) + '</pre></details>';
 }
 function activityHtml(t) {
