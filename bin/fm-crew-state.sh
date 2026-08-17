@@ -54,7 +54,9 @@
 #      status-log verb instead - narrower than the needs-decision/blocked
 #      reconciliation below, which still always trusts an active run over
 #      those two verbs. The coarse runs-list fallback carries no step detail
-#      to corroborate against, so it never takes this deferral.
+#      to corroborate against, so it never takes this deferral, and neither
+#      does a reading whose ci checks are known not-ready: a stale row does
+#      not make a superseded "checks green" report safe to re-emit.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -669,11 +671,12 @@ if [ "$HAVE_RUN" = 1 ]; then
         # object is not just answering "running" with nothing else behind it.
         # Clearing the flag here keeps the recorded-PR deferral below from
         # firing over genuinely active validation - a re-run started after PR
-        # feedback sits in review/test/lint long before it reaches ci - and
-        # matches the not-ready guard already applied to log_reports_ci_ready
-        # just below. CI_STEP_STATUS is deliberately NOT consulted as a second
-        # way in: its ci,running row is exactly the row a frozen run leaves
-        # behind, so it has to clear the same liveness bar as any other step.
+        # feedback sits in review/test/lint long before it reaches ci.
+        # CI_STEP_STATUS is deliberately NOT consulted as a second way in: its
+        # ci,running row is exactly the row a frozen run leaves behind, so it
+        # has to clear the same liveness bar as any other step. Being stale
+        # therefore no longer implies "safe to report the log's verdict" -
+        # CI_LOG_STATE carries the active-CI guard down to the deferral itself.
         if nm_has_active_step; then
           RUN_STATE_UNCONFIRMED=0
         fi
@@ -714,7 +717,15 @@ if [ "$HAVE_RUN" = 1 ]; then
   # blocked): those keep the OPPOSITE precedence just below - an active run
   # over a stale needs-decision/blocked log - since a genuine gate resolving
   # and the run resuming is the routine case there, not the exception.
-  if [ "$RUN_STATE" = working ] && [ "$RUN_STATE_UNCONFIRMED" = 1 ] && [ -n "$(meta_value pr)" ]; then
+  # Never fires while CI is known to be actively not-ready (checks not yet
+  # green, or the pipeline auto-fixing them): the same guard log_reports_ci_ready
+  # applies just above, for the same reason. A "done: PR ... checks green" line
+  # the run object has demonstrably moved past must not be re-emitted as done
+  # here just because that ci row has since gone quiet - a rebooted host freezes
+  # `ci,fixing` exactly like `ci,running`, and reporting done on it would record
+  # a terminal outcome for a PR whose checks are red.
+  if [ "$RUN_STATE" = working ] && [ "$RUN_STATE_UNCONFIRMED" = 1 ] &&
+     [ "$CI_LOG_STATE" != not-ready ] && [ -n "$(meta_value pr)" ]; then
     LOG_OVERRIDE=$(map_log_state "$LOG_LINE")
     case "$LOG_OVERRIDE" in
       paused|done)

@@ -212,8 +212,10 @@ EOF
 
 # The frozen-mid-step shape, as the w20 run actually answered after its host
 # rebooted: the ci step row still reads running and active_for keeps growing on
-# its own, but last_activity has not moved in days. $2 is that age.
-run_running_frozen_ci_step() {  # <branch> <last-activity-age>
+# its own, but last_activity has not moved in days. $2 is that age; $3 is the ci
+# step's own status, since a reboot freezes `ci,fixing` exactly as readily.
+run_running_frozen_ci_step() {  # <branch> <last-activity-age> [ci-step-status]
+  local ci_status=${3:-running}
   cat <<EOF
 run:
   id: "01RUN"
@@ -226,7 +228,7 @@ run:
     intent,completed,0,0
     review,completed,0,0
     push,completed,0,0
-    ci,running,0,0
+    ci,$ci_status,0,0
   active_steps[1]{step,active_for,last_activity,agent_pid,round}:
     ci,2d17h,$2,-,round 1
 EOF
@@ -720,6 +722,31 @@ test_active_ci_step_with_recent_last_activity_stays_working() {
   assert_contains "$out" "source: run-step" "a live run is not deferred to the status log"
   assert_not_contains "$out" "run-step stale" "the deferral must not fire over a live step"
   pass "a running step row with recent last_activity keeps the run authoritative"
+}
+
+# Staleness alone must not license re-emitting a done: report the run object has
+# demonstrably moved past. A crew reports "done: PR ... checks green" (which is
+# what makes fm-pr-check.sh record meta pr= in the first place), CI then goes
+# red and no-mistakes moves to ci,fixing, and the host reboots - freezing that
+# row with a stale last_activity. log_reports_ci_ready already refuses to emit
+# done for exactly this reading; the recorded-PR deferral must refuse too, or
+# the crew is reported complete on a green report while its checks are red and
+# fm-inactive-reconcile.sh records that as a terminal outcome.
+test_frozen_ci_fixing_with_stale_activity_does_not_emit_done() {
+  reset_fakes
+  local d; d=$(new_case frozen-ci-fixing-not-ready)
+  make_repo_on_branch "$d/wt" fm/feat-w20n
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20n.meta" "window=fm:fm-feat-w20n" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/21"
+  printf 'done: PR https://github.com/o/r/pull/21 checks green\n' > "$d/state/feat-w20n.status"
+  FM_FAKE_AXI_STATUS="$(run_running_frozen_ci_step fm/feat-w20n "quiet 2d14h" fixing)"
+  local out; out=$(run_crew_state "$d" feat-w20n)
+  assert_contains "$out" "state: working" "an auto-fixing ci step is not masked to done by a stale row"
+  assert_contains "$out" "source: run-step" "the run-step stays authoritative while CI is not-ready"
+  assert_contains "$out" "validating" "the detail reports the run as still validating"
+  assert_not_contains "$out" "state: done" "a superseded checks-green report must not be re-emitted"
+  pass "a stale ci,fixing row does not let a superseded checks-green log report done"
 }
 
 # The window is tunable for fleets whose steps legitimately go quiet longer.
@@ -1744,6 +1771,7 @@ test_stale_running_with_recorded_pr_and_active_ci_row_stays_working
 test_running_with_recorded_pr_and_active_review_step_stays_working
 test_frozen_ci_step_with_stale_last_activity_defers_to_paused_log
 test_active_ci_step_with_recent_last_activity_stays_working
+test_frozen_ci_fixing_with_stale_activity_does_not_emit_done
 test_liveness_window_is_overridable
 test_stale_running_with_recorded_pr_and_blocked_log_stays_working
 test_ci_ready_done_log_beats_monitoring_run
