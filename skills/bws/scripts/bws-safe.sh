@@ -75,9 +75,6 @@ classify_bws_stderr() {
     *"403"*|*"Forbidden"*|*"forbidden"*|*"permission"*|*"Permission"*)
       printf 'forbidden\n'
       ;;
-    *"404"*|*"Not Found"*|*"not found"*)
-      printf 'forbidden\n'
-      ;;
     *) printf 'indeterminate\n' ;;
   esac
 }
@@ -117,8 +114,9 @@ cmd_redact_json() {
   require_jq
   jq '
     walk(
-      if type == "object" and has("value") then
-        .value = "[REDACTED]"
+      if type == "object" then
+        (if has("value") then .value = "[REDACTED]" else . end)
+        | (if has("note") then .note = "[REDACTED]" else . end)
       else
         .
       end

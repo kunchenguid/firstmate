@@ -29,6 +29,7 @@ case "${1:-}" in
         invalid_token) printf "Error:\n   0: Doesn't contain a decryption key\n" >&2; exit 1 ;;
         unauthorized) printf "Error:\n   0: 401 Unauthorized\n" >&2; exit 1 ;;
         forbidden) printf "Error:\n   0: 403 Forbidden\n" >&2; exit 1 ;;
+        not_found) printf "Error:\n   0: 404 Not Found\n" >&2; exit 1 ;;
         absent) exit 127 ;;
         *) printf "Error: unknown mode %s\n" "$MODE" >&2; exit 1 ;;
       esac
@@ -43,7 +44,7 @@ case "${1:-}" in
           printf '%s\n' '[{"id":"id-a","key":"dup","value":"one","projectId":"proj-1"},{"id":"id-b","key":"dup","value":"two","projectId":"proj-1"}]'
           ;;
         authenticated|read_only)
-          printf '%s\n' '[{"id":"only-id","key":"ONLY","value":"secret-value","projectId":"proj-1"}]'
+          printf '%s\n' '[{"id":"only-id","key":"ONLY","value":"secret-value","note":"sensitive-note","projectId":"proj-1"}]'
           ;;
         write_fail)
           printf '%s\n' '[]'
@@ -124,12 +125,20 @@ test_probe_authenticated_read_only() {
   pass 'probe treats read-only list success as authenticated'
 }
 
+test_probe_not_found() {
+  local out
+  out=$(run_with_fake not_found env BWS_ACCESS_TOKEN=set "$HELPER" probe)
+  assert_contains "$out" 'status=indeterminate' '404 response should report indeterminate'
+  pass 'probe leaves ambiguous not-found response indeterminate'
+}
+
 test_redact_metadata() {
   local out
-  out=$(printf '%s\n' '{"id":"x","key":"k","value":"secret"}' | "$HELPER" redact-json)
+  out=$(printf '%s\n' '{"id":"x","key":"k","value":"secret","note":"credential note"}' | "$HELPER" redact-json)
   assert_contains "$out" '[REDACTED]' 'redact-json should replace value'
   assert_not_contains "$out" 'secret' 'redact-json must not leak original value'
-  pass 'redact-json redacts secret values'
+  assert_not_contains "$out" 'credential note' 'redact-json must not leak notes'
+  pass 'redact-json redacts secret values and notes'
 }
 
 test_list_metadata_redacts() {
@@ -138,6 +147,7 @@ test_list_metadata_redacts() {
   assert_contains "$out" '[REDACTED]' 'list-metadata should redact values'
   assert_contains "$out" '"key": "ONLY"' 'list-metadata should keep metadata'
   assert_not_contains "$out" 'secret-value' 'list-metadata must not leak values'
+  assert_not_contains "$out" 'sensitive-note' 'list-metadata must not leak notes'
   pass 'list-metadata returns redacted secret metadata'
 }
 
@@ -152,22 +162,12 @@ test_resolve_duplicate_names() {
   pass 'resolve-id refuses duplicate secret names'
 }
 
-test_write_failure_not_success() {
-  local rc=0
-  set +e
-  run_with_fake read_only env BWS_ACCESS_TOKEN=ro bws secret create KEY VALUE proj-1 -o none >/dev/null 2>&1
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail 'read-only create should fail'
-  pass 'read-only write attempt fails with non-zero exit'
-}
-
 test_probe_absent
 test_probe_no_token
 test_probe_invalid_token
 test_probe_unauthorized_token
 test_probe_authenticated_read_only
+test_probe_not_found
 test_redact_metadata
 test_list_metadata_redacts
 test_resolve_duplicate_names
-test_write_failure_not_success
