@@ -138,6 +138,11 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
+#   A project with NO origin remote configured - which a local-only project may
+#   genuinely be - has no remote history to be stale against, so its LOCAL default
+#   branch is the authority: the fetch is skipped and the worktree resets to that
+#   local tip instead of refusing. Only a genuinely absent remote takes that path;
+#   a configured origin that cannot be fetched still refuses exactly as above.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1727,8 +1732,24 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
-freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+# Resolve the authoritative base ref a fresh worktree must sit on, echoed on
+# stdout. Two authorities, kept as two branches on purpose: "no origin remote
+# configured" is not the same condition as "origin configured but unreachable",
+# and collapsing them would trade a real stale-base guard for convenience.
+# With origin configured, only the fetched remote default branch is authoritative,
+# so any fetch or resolution failure refuses. With NO origin configured - which a
+# local-only project may genuinely be - there is no remote history to be stale
+# against, so the LOCAL default branch is authoritative and nothing needs fetching.
+spawn_worktree_base_ref() {  # <worktree>
+  local worktree=$1 default
+  if ! git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine the local default branch for pooled worktree '$worktree' of a project with no origin remote; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    printf '%s\n' "refs/heads/$default"
+    return 0
+  fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -1741,11 +1762,16 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  target="origin/$default"
   if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    echo "error: could not fetch 'origin/$default' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
+  printf '%s\n' "origin/$default"
+}
+
+freshen_spawn_worktree_base() {  # <worktree>
+  local worktree=$1 target expected actual status
+  target=$(spawn_worktree_base_ref "$worktree") || return 1
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1

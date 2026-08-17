@@ -38,6 +38,8 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (z1) local-only project with NO remote configured + merged  -> ALLOW  (remoteless landing)
+#   (z2) local-only project with NO remote configured + unmerged -> REFUSE (remoteless safety)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -173,6 +175,34 @@ SH
   touch "$case_dir/state/.last-watcher-beat"
 
   printf '%s\n' "$case_dir"
+}
+
+# Build a case whose project has NO remote at all, as a local-only project may
+# genuinely have none. Everything else matches make_case, so the only variable
+# between this and the origin-backed cases is the absence of the remote.
+# Echoes the case dir.
+make_remoteless_case() {
+  local name=$1 case_dir
+  case_dir=$(make_case "$name")
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  rm -rf "$case_dir/project" "$case_dir/origin.git"
+  git init -q -b main "$case_dir/project"
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "local baseline"
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" main
+  [ -z "$(git -C "$case_dir/project" remote)" ] || fail "$name: fixture is not remoteless"
+  printf '%s\n' "$case_dir"
+}
+
+# Land the worktree's branch on the project's local default branch through the real
+# approved-merge path, so the case proves that path works rather than simulating it.
+run_merge_local() {
+  local case_dir=$1
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$ROOT/bin/fm-merge-local.sh" task-x1
 }
 
 add_compatible_tasks_axi() {
@@ -651,6 +681,47 @@ test_local_only_merged_to_local_main_allows() {
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+test_remoteless_local_only_merged_then_torn_down() {
+  local case_dir rc out wt_head merged_head
+  case_dir=$(make_remoteless_case remoteless-merge)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" landed.txt "remoteless local work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  out=$(run_merge_local "$case_dir") || fail "remoteless-merge: the approved local merge failed: $out"
+  merged_head=$(git -C "$case_dir/project" rev-parse refs/heads/main)
+  [ "$merged_head" = "$wt_head" ] \
+    || fail "remoteless-merge: local main is not at the branch head after the approved merge"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "remoteless-merge: teardown should accept work merged into local main"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "remoteless-merge: teardown refused landed work on a project with no remote"
+  pass "a remoteless local-only project merges through the approved path and tears down"
+}
+
+test_remoteless_local_only_unpushed_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_remoteless_case remoteless-unpushed)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" unlanded.txt "never merged anywhere"
+  # Deliberately NOT merged into local main: with no remote to fall back on, the
+  # local default branch is the only landing proof, and it does not have this work.
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "remoteless-unpushed: teardown should refuse unlanded work"
+  grep -q REFUSED "$case_dir/stderr" || fail "remoteless-unpushed: no REFUSED line in stderr"
+  assert_grep 'never merged anywhere' "$case_dir/wt/unlanded.txt" \
+    "remoteless-unpushed: teardown discarded the unlanded work it refused"
+  pass "a remoteless local-only project still refuses to discard work not on its local default branch"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -2596,6 +2667,8 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_remoteless_local_only_merged_then_torn_down
+test_remoteless_local_only_unpushed_still_refuses
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
