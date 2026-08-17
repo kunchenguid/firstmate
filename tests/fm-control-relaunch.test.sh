@@ -519,6 +519,27 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
 }
 
+test_codex_relaunch_preserves_max_effort_in_the_launch_command() {
+  local dir out rc
+  dir=$(new_case codexmax rl6a)
+  add_ship_task "$dir" rl6a codex
+  sed 's/^model=default$/model=gpt-5.6-luna/; s/^effort=default$/effort=max/' \
+    "$dir/home/state/rl6a.meta" > "$dir/home/state/rl6a.meta.tmp"
+  mv "$dir/home/state/rl6a.meta.tmp" "$dir/home/state/rl6a.meta"
+  printf 'codex' > "$dir/fake/command"
+
+  out=$(run_control "$dir" rl6a relaunch --note "preserve explicit max reasoning effort"); rc=$?
+  expect_code 0 "$rc" "a Codex relaunch with max effort should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl6a model)" = gpt-5.6-luna ] \
+    || fail "a Codex relaunch must preserve its recorded model"
+  [ "$(meta_field "$dir" rl6a effort)" = max ] \
+    || fail "a Codex relaunch must preserve its recorded max effort"
+  assert_contains "$(cat "$dir/fake/literal")" \
+    "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"'" \
+    "a Codex relaunch must pass max reasoning effort to the replacement process"
+  pass "fm-control relaunch: Codex preserves max effort in metadata and the replacement command"
+}
+
 test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
@@ -1323,6 +1344,7 @@ test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
+test_codex_relaunch_preserves_max_effort_in_the_launch_command
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
