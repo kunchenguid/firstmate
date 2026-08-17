@@ -1099,7 +1099,8 @@ signal_reason_is_actionable() {  # <file> ...
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
 # One narrow exception, owned by bin/fm-crew-state.sh's header: an
-# uncorroborated full-status reading (nothing in the run actually executing)
+# uncorroborated full-status reading (no step both running/fixing and still
+# live by its active_steps last_activity)
 # on a task whose PR is already recorded in meta reports the crew's own later
 # paused:/done: verb instead, so an abandoned run object cannot mask a
 # declared pause forever.

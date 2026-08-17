@@ -44,10 +44,11 @@
 #      green, so a green PR is never silently read as still-validating. A
 #      SECOND exception, confined to the full `axi status` reading: a plain
 #      top-level status=running with no corroborating detail at all (no
-#      outcome, no gate, and no steps[] row of its own reading running or
-#      fixing - RUN_STATE_UNCONFIRMED) means nothing is actually executing
-#      behind that status, so it can be a stale run object that never
-#      advanced. When that reading is paired with a recorded state/<id>.meta
+#      outcome, no gate, and no steps[] row that both reads running/fixing
+#      and is still live by its active_steps last_activity - see
+#      nm_has_active_step and RUN_STATE_UNCONFIRMED) means nothing is actually
+#      executing behind that status, so it can be a stale run object that
+#      never advanced. When that reading is paired with a recorded state/<id>.meta
 #      pr= (a durable fact the run object lacks) and the crew's own last
 #      status line has since moved to paused: or done:, defer to that
 #      status-log verb instead - narrower than the needs-decision/blocked
@@ -99,6 +100,16 @@ case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # history every call.
 FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
+# Seconds of `axi status` active_steps last_activity age within which a
+# running/fixing step row still counts as evidence that this run is executing
+# NOW (see nm_has_active_step). A step row alone survives a machine reboot or a
+# killed agent unchanged, so a frozen run keeps presenting one forever; only
+# last_activity distinguishes that from real work. Generous by default: agent
+# steps legitimately go quiet for long stretches (no-mistakes' own
+# step_quiet_warning defaults to 10m), and being wrong in this direction only
+# costs a wake, while being wrong the other way suppresses a real escalation.
+FM_RUN_STEP_LIVENESS_MAX=${FM_RUN_STEP_LIVENESS_MAX:-1800}
+case "$FM_RUN_STEP_LIVENESS_MAX" in ''|*[!0-9]*) FM_RUN_STEP_LIVENESS_MAX=1800 ;; esac
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
@@ -319,24 +330,86 @@ nm_ci_step_status() {
   strip_quotes "$(trim "${rest%%,*}")"
 }
 
-# True when SOME steps[] row carries its own running/fixing status, whatever
-# the step is named: the run object is not merely answering "running" at the
-# top level with a frozen step table behind it, some step is executing right
-# now. Scoped to the steps table (a row is any `<name>,<status>,...` line
-# following the header) so a findings[] row or a trailing `gate:` block can
-# never be mistaken for a step.
+# True when this run is executing SOMETHING right now, whatever the step is
+# named. Two signals, both read from the same `axi status` output:
+#
+#   steps[]       a row carrying its own running/fixing status. Scoped to the
+#                 steps table (a row is any `<name>,<status>,...` line after
+#                 the header) so a findings[] row or a trailing `gate:` block
+#                 is never mistaken for a step.
+#   active_steps[] the liveness qualifier. A step row is a DURABLE record: a
+#                 machine reboot, a killed agent, or an abandoned daemon
+#                 leaves the in-flight step frozen at running forever, so its
+#                 presence alone cannot mean "executing now" (observed on the
+#                 w20 run: `ci,running` with active_for 2d17h and
+#                 last_activity 2d14h after a reboot). no-mistakes emits
+#                 active_steps only while a step is running/fixing, with a
+#                 last_activity age per step; when it gives one, that age must
+#                 be within FM_RUN_STEP_LIVENESS_MAX for the step row to
+#                 corroborate. active_for is deliberately ignored - a frozen
+#                 run's active_for keeps growing on its own.
+#
+# Older CLIs (and terminal/parked readings) emit no active_steps at all; with
+# no age to test, a running/fixing step row still corroborates on its own.
 nm_has_active_step() {
-  printf '%s\n' "$RUN_OUT" | awk '
-    /^[[:space:]]*steps\[/ { in_steps = 1; next }
+  printf '%s\n' "$RUN_OUT" | awk -v maxage="$FM_RUN_STEP_LIVENESS_MAX" '
+    function age_secs(v,   tok, unit, num, total) {
+      gsub(/"/, "", v)
+      sub(/^[[:space:]]+/, "", v)
+      sub(/[[:space:]]+$/, "", v)
+      sub(/^quiet[[:space:]]+/, "", v)
+      sub(/[[:space:]]+ago$/, "", v)
+      if (v !~ /^([0-9]+[dhms])+$/) return -1
+      total = 0
+      while (match(v, /^[0-9]+[dhms]/)) {
+        tok = substr(v, 1, RLENGTH)
+        v = substr(v, RLENGTH + 1)
+        unit = substr(tok, length(tok), 1)
+        num = substr(tok, 1, length(tok) - 1) + 0
+        if (unit == "d") total += num * 86400
+        else if (unit == "h") total += num * 3600
+        else if (unit == "m") total += num * 60
+        else total += num
+      }
+      return total
+    }
+    /^[[:space:]]*steps\[/ { in_steps = 1; in_active = 0; next }
+    /^[[:space:]]*active_steps\[/ {
+      in_active = 1; in_steps = 0; la_col = 0
+      hdr = $0
+      sub(/^[^{]*\{/, "", hdr)
+      sub(/\}.*$/, "", hdr)
+      ncol = split(hdr, cols, ",")
+      for (i = 1; i <= ncol; i++) {
+        c = cols[i]
+        gsub(/[[:space:]"]/, "", c)
+        if (c == "last_activity") la_col = i
+      }
+      next
+    }
     in_steps {
       line = $0
       sub(/^[[:space:]]+/, "", line)
       sub(/[[:space:]]+$/, "", line)
       if (line !~ /^[A-Za-z_][A-Za-z0-9_.-]*,/) { in_steps = 0; next }
-      if (line ~ /^[A-Za-z_][A-Za-z0-9_.-]*,[[:space:]]*"?(running|fixing)"?[[:space:]]*(,|$)/) found = 1
+      if (line ~ /^[A-Za-z_][A-Za-z0-9_.-]*,[[:space:]]*"?(running|fixing)"?[[:space:]]*(,|$)/) step_row = 1
       next
     }
-    END { exit(found ? 0 : 1) }
+    in_active {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line !~ /^[A-Za-z_][A-Za-z0-9_.-]*,/) { in_active = 0; next }
+      if (la_col > 0 && split(line, f, ",") >= la_col) {
+        secs = age_secs(f[la_col])
+        if (secs >= 0 && (aged == 0 || secs < freshest)) { aged = 1; freshest = secs }
+      }
+      next
+    }
+    END {
+      if (aged) exit(freshest <= maxage ? 0 : 1)
+      exit(step_row ? 0 : 1)
+    }
   '
 }
 
@@ -504,9 +577,9 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_LOG_STATE=""
   RUN_STATUS=""
   # 1 iff RUN_STATE=working came from the plain "still validating" catch-all
-  # with no corroborating detail (no outcome, no gate, no steps[] row of its
-  # own reading running or fixing): the run object says "running" and nothing
-  # else backs that up. Only ever set on the full `axi status` path, which is
+  # with no corroborating detail (no outcome, no gate, no step row that is
+  # both running/fixing and still live): the run object says "running" and
+  # nothing else backs that up. Only ever set on the full `axi status` path, which is
   # the only one that carries the detail to corroborate against.
   # Consulted below to decide whether a stale run-step reading may be
   # overridden by a durable, independent fact (meta's recorded pr=) plus the
@@ -589,16 +662,19 @@ if [ "$HAVE_RUN" = 1 ]; then
             CI_LOG_STATE=not-ready
             ;;
         esac
-        # Any step row reading running or fixing is corroborating detail in
-        # its own right, even when a ci row does not resolve to a confirmed
-        # CI-green transition above: some step of this run is executing, so
-        # the run object is not just answering "running" with nothing else
-        # behind it. Clearing the flag here keeps the recorded-PR deferral
-        # below from firing over genuinely active validation - a re-run
-        # started after PR feedback sits in review/test/lint long before it
-        # reaches ci - and matches the not-ready guard already applied to
-        # log_reports_ci_ready just below.
-        if [ -n "$CI_STEP_STATUS" ] || nm_has_active_step; then
+        # A step row reading running or fixing, still live by its
+        # active_steps last_activity, is corroborating detail in its own
+        # right, even when a ci row does not resolve to a confirmed CI-green
+        # transition above: some step of this run is executing, so the run
+        # object is not just answering "running" with nothing else behind it.
+        # Clearing the flag here keeps the recorded-PR deferral below from
+        # firing over genuinely active validation - a re-run started after PR
+        # feedback sits in review/test/lint long before it reaches ci - and
+        # matches the not-ready guard already applied to log_reports_ci_ready
+        # just below. CI_STEP_STATUS is deliberately NOT consulted as a second
+        # way in: its ci,running row is exactly the row a frozen run leaves
+        # behind, so it has to clear the same liveness bar as any other step.
+        if nm_has_active_step; then
           RUN_STATE_UNCONFIRMED=0
         fi
       fi

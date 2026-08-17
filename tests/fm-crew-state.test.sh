@@ -210,6 +210,28 @@ run:
 EOF
 }
 
+# The frozen-mid-step shape, as the w20 run actually answered after its host
+# rebooted: the ci step row still reads running and active_for keeps growing on
+# its own, but last_activity has not moved in days. $2 is that age.
+run_running_frozen_ci_step() {  # <branch> <last-activity-age>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/2"
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,completed,0,0
+    push,completed,0,0
+    ci,running,0,0
+  active_steps[1]{step,active_for,last_activity,agent_pid,round}:
+    ci,2d17h,$2,-,round 1
+EOF
+}
+
 run_fixing() {  # <branch>
   cat <<EOF
 run:
@@ -652,6 +674,69 @@ test_running_with_recorded_pr_and_active_review_step_stays_working() {
   assert_contains "$out" "source: run-step" "a corroborated re-run is not deferred to the status log"
   assert_not_contains "$out" "run-step stale" "the recorded-PR deferral must not fire over an executing step"
   pass "a running status with an active non-ci step row is not treated as unconfirmed"
+}
+
+# The shape the real w20 run answered with after its host rebooted: `ci,running`
+# with active_for 2d17h and last_activity 2d14h. A step row is a DURABLE record
+# - a reboot or a killed agent leaves the in-flight step frozen at running
+# forever - so its presence cannot mean "executing now". Only the active_steps
+# last_activity age separates the two, and a stale one leaves the reading
+# uncorroborated so the declared pause still wins. Without this the crew is
+# reported working again and the wedge-escalation loop the intent removes comes
+# straight back.
+test_frozen_ci_step_with_stale_last_activity_defers_to_paused_log() {
+  reset_fakes
+  local d; d=$(new_case frozen-ci-stale-activity)
+  make_repo_on_branch "$d/wt" fm/feat-w20k
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20k.meta" "window=fm:fm-feat-w20k" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/18"
+  printf 'paused: awaiting external team review/merge\n' > "$d/state/feat-w20k.status"
+  # `quiet` prefixed, as no-mistakes marks any step silent past its
+  # step_quiet_warning (10m default) - the form the real reading carried.
+  FM_FAKE_AXI_STATUS="$(run_running_frozen_ci_step fm/feat-w20k "quiet 2d14h")"
+  local out; out=$(run_crew_state "$d" feat-w20k)
+  assert_contains "$out" "state: paused" "a frozen ci step row does not corroborate, so the pause wins"
+  assert_contains "$out" "source: status-log" "the deferred state comes from the status log"
+  assert_contains "$out" "run-step stale" "the reconciliation fired on the run-step path"
+  assert_not_contains "$out" "state: working" "a run quiet for days must not read as executing now"
+  pass "a running step row frozen past the liveness window does not corroborate"
+}
+
+# The same shape while the step is genuinely working: last_activity is recent,
+# so the step row corroborates and the run stays authoritative. active_for is
+# identical to the frozen case above - only last_activity separates them.
+test_active_ci_step_with_recent_last_activity_stays_working() {
+  reset_fakes
+  local d; d=$(new_case active-ci-recent-activity)
+  make_repo_on_branch "$d/wt" fm/feat-w20l
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20l.meta" "window=fm:fm-feat-w20l" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/19"
+  printf 'paused: awaiting external team review/merge\n' > "$d/state/feat-w20l.status"
+  FM_FAKE_AXI_STATUS="$(run_running_frozen_ci_step fm/feat-w20l 2m30s)"
+  local out; out=$(run_crew_state "$d" feat-w20l)
+  assert_contains "$out" "state: working" "a recently-active step row corroborates the run"
+  assert_contains "$out" "source: run-step" "a live run is not deferred to the status log"
+  assert_not_contains "$out" "run-step stale" "the deferral must not fire over a live step"
+  pass "a running step row with recent last_activity keeps the run authoritative"
+}
+
+# The window is tunable for fleets whose steps legitimately go quiet longer.
+test_liveness_window_is_overridable() {
+  reset_fakes
+  local d; d=$(new_case liveness-window-override)
+  make_repo_on_branch "$d/wt" fm/feat-w20m
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20m.meta" "window=fm:fm-feat-w20m" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/20"
+  printf 'paused: awaiting external team review/merge\n' > "$d/state/feat-w20m.status"
+  FM_FAKE_AXI_STATUS="$(run_running_frozen_ci_step fm/feat-w20m 45m)"
+  local out; out=$(run_crew_state "$d" feat-w20m)
+  assert_contains "$out" "state: paused" "45m of quiet exceeds the 30m default"
+  out=$(FM_RUN_STEP_LIVENESS_MAX=7200 run_crew_state "$d" feat-w20m)
+  assert_contains "$out" "state: working" "a widened window accepts the same reading as live"
+  pass "FM_RUN_STEP_LIVENESS_MAX tunes the step liveness window"
 }
 
 # The needs-decision/blocked reconciliation below keeps trusting an active run
@@ -1657,6 +1742,9 @@ test_stale_fixing_with_recorded_pr_and_paused_log_stays_working
 test_dead_window_stale_running_with_recorded_pr_defers_to_paused_log
 test_stale_running_with_recorded_pr_and_active_ci_row_stays_working
 test_running_with_recorded_pr_and_active_review_step_stays_working
+test_frozen_ci_step_with_stale_last_activity_defers_to_paused_log
+test_active_ci_step_with_recent_last_activity_stays_working
+test_liveness_window_is_overridable
 test_stale_running_with_recorded_pr_and_blocked_log_stays_working
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
