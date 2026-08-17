@@ -505,9 +505,10 @@ clear_pause_tracking() {  # <window-key>
 # token instead of assuming the declared wait won: an authoritative gate keeps
 # the routing it earned for the whole window rather than being served back as an
 # external wait. Only paused or actionable can be recorded, since working returns
-# before the stamp; any other content - the epoch stamp surface_nonterminal_stale
-# writes, or one left by a build from before the content mattered - reads as
-# paused, which is what this function recorded there in every such case.
+# before the stamp, and this function is the file's ONLY writer, so no other path
+# can overwrite a token it recorded. Absent or unrecognized content - a stamp left
+# by a build that wrote an epoch here - reads as paused, the conservative default;
+# an absent stamp additionally forces one real read, which records the right token.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class
   key=$(window_key "$win")
@@ -545,9 +546,11 @@ surface_nonterminal_stale() {  # <window> <hash>
   clear_write_tracking "$key"
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
+  # .paused-rechecked-<key> belongs to pause_state_class, which recorded the
+  # verdict it acted on there this same poll; overwriting it would replay a
+  # different token for the rest of the throttle window.
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
-    date +%s > "$STATE/.paused-rechecked-$key"
     date +%s > "$STATE/.paused-resurfaced-$key"
   else
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"

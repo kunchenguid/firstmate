@@ -1250,10 +1250,16 @@ test_live_declared_wait_is_absorbed_on_the_bounded_cadence() {
 # read returned `actionable`, so a window whose crew had declared a wait while its
 # authoritative state was a real gate re-read crew state on EVERY poll for as long
 # as the absorb held - the unbounded per-poll read this change exists to remove.
-# The second half is why the recorded verdict matters rather than just the clock:
-# a throttled poll must replay `actionable`, never `paused`, or a pane repaint
-# inside the throttle window would route a live gate onto the bounded pause
-# cadence and hide it for a whole STALE_ESCALATE_SECS.
+# The later phases are why the recorded verdict matters rather than just the clock:
+# a throttled poll must replay `actionable`, never `paused`. A repaint served
+# `paused` out of the throttle reaches handle_paused_stale, which re-anchors
+# .stale-<key> on the repainted hash, and every arm of the repeat-sight branch it
+# then lands in absorbs too - so the gate cannot escape by re-reading crew state
+# at all. Its only remaining exit is the PAUSE_RESURFACE_SECS re-surface, which
+# would announce a live ask-user gate as an external wait up to an hour later.
+# The last phase drives the FIRST sight through the watcher instead of seeding the
+# throttle file, because surface_nonterminal_stale is the other path that leaves
+# these markers behind and a seeded fixture cannot see what it writes.
 test_actionable_gate_behind_a_declared_wait_keeps_its_recheck_throttle() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back gate_state
   dir=$(make_case actionable-gate-throttle); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1309,6 +1315,50 @@ test_actionable_gate_behind_a_declared_wait_keeps_its_recheck_throttle() {
   grep -F "awaiting external" "$out" >/dev/null \
     && fail "a repainted gate inside the throttle window was served back as a declared pause"
   [ ! -e "$state/.stale-since-$key" ] || fail "a surfaced gate retained the wedge timer"
+
+  # Same property, but every marker is written by the watcher itself: this pane is
+  # at its FIRST stale sight with no pause tracking at all, so the gate surfaces
+  # through surface_nonterminal_stale and whatever it leaves behind is what the
+  # repaint below has to survive.
+  dir=$(make_case actionable-gate-surfaced); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate-surfaced.status"
+  window="test:fm-gate-surfaced"
+  printf 'idle at an external-decision gate\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate-surfaced.meta"
+  printf 'paused: awaiting an external decision\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate-surfaced_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle at an external-decision gate")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$gate_state" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 120 || fail "a first-sight gate behind a declared wait did not surface: $(cat "$out")"
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "a first-sight gate behind a declared wait did not surface its own bare stale wake: $(cat "$out")"
+  [ -e "$state/.paused-$key" ] || fail "a surfaced gate behind a declared wait recorded no pause cadence marker"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the surfaced first-sight gate"
+
+  # The repaint the crew's own footer produces moments later. The gate must be
+  # given its own bare stale again, never absorbed onto the pause cadence and
+  # relabeled an external wait.
+  : > "$out"
+  printf 'idle at an external-decision gate (token 2)\n' > "$capture_file"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$gate_state" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 120 \
+    || fail "a repaint after a surfaced gate was absorbed onto the pause cadence instead of surfaced: $(cat "$out")"
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "a repaint after a surfaced gate did not surface its own bare stale wake: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null \
+    && fail "a repaint after a surfaced gate was relabeled a declared external wait"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a re-surfaced gate retained the wedge timer"
   pass "an actionable verdict behind a declared wait keeps its recheck throttle and is never replayed as a pause"
 }
 
