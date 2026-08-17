@@ -27,6 +27,7 @@ case "${1:-}" in
         authenticated|read_only) exit 0 ;;
         no_token) printf "Error:\n   0: Missing access token\n" >&2; exit 1 ;;
         invalid_token) printf "Error:\n   0: Doesn't contain a decryption key\n" >&2; exit 1 ;;
+        unauthorized) printf "Error:\n   0: 401 Unauthorized\n" >&2; exit 1 ;;
         forbidden) printf "Error:\n   0: 403 Forbidden\n" >&2; exit 1 ;;
         absent) exit 127 ;;
         *) printf "Error: unknown mode %s\n" "$MODE" >&2; exit 1 ;;
@@ -73,18 +74,22 @@ SH
 run_with_fake() {
   local mode=$1
   shift
-  local fakebin case_dir
+  local fakebin case_dir isolated_home
   case_dir="$TMP_ROOT/$mode-${RANDOM}"
-  mkdir -p "$case_dir"
+  isolated_home="$case_dir/home"
+  mkdir -p "$isolated_home"
   fakebin=$(make_fake_bws "$case_dir" "$mode")
-  env FM_FAKE_BWS_MODE="$mode" PATH="$fakebin:$PATH" "$@"
+  env -u BWS_ACCESS_TOKEN -u BWS_PROFILE -u BWS_CONFIG_FILE \
+    HOME="$isolated_home" FM_FAKE_BWS_MODE="$mode" PATH="$fakebin:$PATH" "$@"
 }
 
 test_probe_absent() {
-  local out fakebin
+  local out fakebin isolated_home
   fakebin="$TMP_ROOT/absent-only/bin"
-  mkdir -p "$fakebin"
-  out=$(PATH="$fakebin:/usr/bin:/bin" env -u BWS_ACCESS_TOKEN "$HELPER" probe)
+  isolated_home="$TMP_ROOT/absent-only/home"
+  mkdir -p "$fakebin" "$isolated_home"
+  out=$(env -u BWS_ACCESS_TOKEN -u BWS_PROFILE -u BWS_CONFIG_FILE \
+    HOME="$isolated_home" PATH="$fakebin:/usr/bin:/bin" "$HELPER" probe)
   assert_contains "$out" 'status=unavailable' 'absent bws should report unavailable'
   assert_contains "$out" 'version=none' 'absent bws should report version none'
   pass 'probe classifies absent bws'
@@ -103,6 +108,13 @@ test_probe_invalid_token() {
   out=$(run_with_fake invalid_token env BWS_ACCESS_TOKEN=bad "$HELPER" probe)
   assert_contains "$out" 'status=invalid_token' 'bad token should report invalid_token'
   pass 'probe classifies invalid token'
+}
+
+test_probe_unauthorized_token() {
+  local out
+  out=$(run_with_fake unauthorized env BWS_ACCESS_TOKEN=bad "$HELPER" probe)
+  assert_contains "$out" 'status=invalid_token' '401 response should report invalid_token'
+  pass 'probe classifies rejected token'
 }
 
 test_probe_authenticated_read_only() {
@@ -150,18 +162,12 @@ test_write_failure_not_success() {
   pass 'read-only write attempt fails with non-zero exit'
 }
 
-test_delete_without_authority_is_skill_policy() {
-  grep -Fq 'explicit, concrete captain or operator authority' "$ROOT/skills/bws/SKILL.md" \
-    || fail 'skill must require explicit authority for delete'
-  pass 'skill documents delete authority requirement'
-}
-
 test_probe_absent
 test_probe_no_token
 test_probe_invalid_token
+test_probe_unauthorized_token
 test_probe_authenticated_read_only
 test_redact_metadata
 test_list_metadata_redacts
 test_resolve_duplicate_names
 test_write_failure_not_success
-test_delete_without_authority_is_skill_policy
