@@ -1528,14 +1528,32 @@ codex_fast_tier_supported() {
     return 1
   }
   if [ -z "$model" ] || [ "$model" = default ]; then
-    if ! doctor=$(cd "$worktree" && "$codex_bin" doctor --json 2>/dev/null); then
-      echo "error: could not resolve Codex's effective model; refusing --tier fast" >&2
-      return 1
-    fi
-    if ! model=$(printf '%s\n' "$doctor" | jq -er '
-      [.checks[]? | select(.id == "config.load") | .details.model
-       | select(type == "string" and length > 0)] | last
-    ' 2>/dev/null); then
+    doctor=$(cd "$worktree" && "$codex_bin" doctor --json 2>/dev/null) || true
+    case "$doctor" in
+      \{*\}) ;;
+      *)
+        echo "error: could not resolve Codex's effective model; refusing --tier fast" >&2
+        return 1
+        ;;
+    esac
+    if ! model=$(printf '%s\n' "$doctor" | awk '
+      { json = json $0 }
+      END {
+        count = split(json, checks, /"id"[[:space:]]*:[[:space:]]*"/)
+        for (i = 2; i <= count; i++) {
+          id = checks[i]
+          sub(/".*/, "", id)
+          if (id != "config.load") continue
+          if (!match(checks[i], /"model"[[:space:]]*:[[:space:]]*"[^"]+"/)) exit 1
+          model = substr(checks[i], RSTART, RLENGTH)
+          sub(/^[^:]*:[[:space:]]*"/, "", model)
+          sub(/"$/, "", model)
+          print model
+          exit 0
+        }
+        exit 1
+      }
+    '); then
       echo "error: could not resolve Codex's effective model; refusing --tier fast" >&2
       return 1
     fi
@@ -1544,11 +1562,18 @@ codex_fast_tier_supported() {
     echo "error: could not inspect the installed Codex model catalog; refusing --tier fast" >&2
     return 1
   fi
-  if ! printf '%s\n' "$catalog" | jq -e --arg model "$model" '
-    any(.models[]?;
-      .slug == $model
-      and any(.service_tiers[]?; .id == "priority"))
-  ' >/dev/null 2>&1; then
+  if ! printf '%s\n' "$catalog" | awk -v wanted="$model" '
+    { json = json $0 }
+    END {
+      count = split(json, models, /"slug"[[:space:]]*:[[:space:]]*"/)
+      for (i = 2; i <= count; i++) {
+        slug = models[i]
+        sub(/".*/, "", slug)
+        if (slug == wanted && models[i] ~ /"service_tiers"[[:space:]]*:[[:space:]]*\[[^]]*"id"[[:space:]]*:[[:space:]]*"priority"/) exit 0
+      }
+      exit 1
+    }
+  '; then
     echo "error: Codex model '$model' does not advertise the priority service tier; refusing --tier fast" >&2
     return 1
   fi
@@ -1821,6 +1846,11 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # once here so every downstream comparison uses the same physical form
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
+CODEX_PREFLIGHT_CWD=$PROJ_ABS_REAL
+if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  CODEX_PREFLIGHT_CWD=$RELAUNCH_WT
+fi
+codex_fast_tier_supported "$CODEX_PREFLIGHT_CWD" "$MODEL" || exit 1
 
 real_path_or_raw() {  # <path>
   local path=$1 real
@@ -2393,7 +2423,6 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
-codex_fast_tier_supported "$WT" "$MODEL" || exit 1
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.

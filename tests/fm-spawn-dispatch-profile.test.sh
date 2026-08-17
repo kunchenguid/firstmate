@@ -42,7 +42,11 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
+  new-window)
+    [ -z "${FM_FAKE_ENDPOINT_LOG:-}" ] || printf 'created\n' > "$FM_FAKE_ENDPOINT_LOG"
+    exit 0
+    ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
@@ -80,6 +84,7 @@ case "${1:-} ${2:-}" in
   'doctor --json')
     printf '{"checks":[{"id":"config.load","details":{"model":"%s"}}]}\n' \
       "${FM_FAKE_CODEX_EFFECTIVE_MODEL:-gpt-5.4}"
+    exit "${FM_FAKE_CODEX_DOCTOR_STATUS:-0}"
     ;;
   'debug models')
     [ "${FM_FAKE_CODEX_CATALOG_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CODEX_CATALOG_STATUS}"
@@ -142,9 +147,11 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_ENDPOINT_LOG="$launchlog.endpoint" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     FM_FAKE_CODEX_EFFECTIVE_MODEL="${FM_TEST_CODEX_EFFECTIVE_MODEL:-gpt-5.4}" \
+    FM_FAKE_CODEX_DOCTOR_STATUS="${FM_TEST_CODEX_DOCTOR_STATUS:-0}" \
     FM_FAKE_CODEX_CATALOG_STATUS="${FM_TEST_CODEX_CATALOG_STATUS:-0}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -503,8 +510,14 @@ test_codex_fast_tier_opt_in() {
   id=profile-codex-fast-z3a
   rec=$(make_spawn_case profile-codex-fast codex "$id")
   read_case_record "$rec"
+  cat > "$FAKEBIN_DIR/jq" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+  chmod +x "$FAKEBIN_DIR/jq"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --tier fast)
+  out=$(FM_TEST_CODEX_DOCTOR_STATUS=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --tier fast)
   status=$?
   expect_code 0 "$status" "codex spawn with fast tier should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default fast
@@ -528,6 +541,7 @@ test_codex_fast_tier_requires_model_support() {
   assert_contains "$out" "model 'gpt-5.4-mini' does not advertise the priority service tier" \
     "unsupported explicit model refusal did not name the missing tier capability"
   assert_absent "$HOME_DIR/state/$id.meta" "unsupported fast model refusal published metadata"
+  assert_absent "$LAUNCH_LOG.endpoint" "unsupported fast model created an endpoint"
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "service_tier" "unsupported fast model reached Codex launch"
 
@@ -542,6 +556,7 @@ test_codex_fast_tier_requires_model_support() {
   assert_contains "$out" "model 'gpt-5.4-mini' does not advertise the priority service tier" \
     "unsupported configured model refusal did not use Codex's effective model"
   assert_absent "$HOME_DIR/state/$id.meta" "unsupported configured fast model published metadata"
+  assert_absent "$LAUNCH_LOG.endpoint" "unsupported configured fast model created an endpoint"
   pass "Codex fast tier requires priority support from the resolved model"
 }
 
@@ -559,6 +574,7 @@ test_codex_fast_tier_fails_closed_without_catalog() {
   assert_contains "$out" "could not inspect the installed Codex model catalog" \
     "catalog failure refusal did not identify the unavailable capability evidence"
   assert_absent "$HOME_DIR/state/$id.meta" "unverified fast model published metadata"
+  assert_absent "$LAUNCH_LOG.endpoint" "unverified fast model created an endpoint"
   pass "Codex fast tier refuses when model capability cannot be verified"
 }
 
