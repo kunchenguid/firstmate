@@ -37,7 +37,8 @@ document:
 commands:
   lint: 'bin/fm-lint.sh'
 
-# Store test evidence in this repo so it is committed alongside the change instead of kept in a temp dir.
+# Publish each run's test evidence to the orphan `no-mistakes/evidence` branch, linked from the PR, instead of leaving it in a temp dir.
+# That branch shares no history with code branches, so no evidence is committed onto the change's own branch.
 test:
   evidence:
     store_in_repo: true
