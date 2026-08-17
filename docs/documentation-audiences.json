@@ -379,6 +379,14 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": "skills/bws/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": ".agents/skills/bws/SKILL.md",
+      "audience": "agent-runtime"
     }
   ]
 }
