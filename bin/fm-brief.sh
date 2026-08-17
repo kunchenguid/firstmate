@@ -25,8 +25,7 @@
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
-#   caller-supplied repo string cannot reliably identify this repo. Briefs made
-#   without it carry a loud declaration so an omitted contract cannot be silent.
+#   caller-supplied repo string cannot reliably identify this repo.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -51,9 +50,8 @@
 # blocked when firstmate must act.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
-# it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
-# over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
-# self-governance section when a touched project AGENTS.md lacks it.
+# it has the crewmate add the fm-ensure-agents-md.sh self-governance section when
+# a touched project AGENTS.md lacks it.
 # Refuses to overwrite an existing brief.
 set -eu
 
