@@ -1103,14 +1103,21 @@ signal_reason_is_actionable() {  # <file> ...
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
-#   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
-#             pane; the crew is legitimately mid-work on a static-looking pane
-#             (e.g. waiting on CI);
-#   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
+#   working    - an actively-running no-mistakes step (running/fixing/ci) or a busy
+#                pane; the crew is legitimately mid-work on a static-looking pane
+#                (e.g. waiting on CI);
+#   paused     - the crew's authoritative current state is a declared external-wait
+#                pause (paused:), which is EXPECTED to idle;
+#   actionable - the authoritative state is POSITIVE evidence that the supervisor
+#                is needed now: parked at a gate, blocked, finished, or failed.
+#                Distinguished from `none` so a caller that would otherwise absorb
+#                on some other evidence (a declared wait still sitting in the
+#                status log) can let a real gate, a ready PR, or a failure win;
+#   none       - no positive evidence either way: a torn-down, unreadable, or
+#                unknown crew, or `working` from a source too weak to trust. On its
+#                own it absorbs nothing, so a wake with no other absorb reason
+#                surfaces exactly as it did before this token existed.
+# One fm-crew-state.sh read serves EVERY absorb reason at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
@@ -1126,7 +1133,10 @@ crew_absorb_class() {  # <id>
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
+    printf 'none'
+    return
   fi
+  case "$state" in parked|blocked|done|failed) printf 'actionable'; return ;; esac
   printf 'none'
 }
 
@@ -1136,7 +1146,7 @@ crew_absorb_class() {  # <id>
 # ONLY when this returns 0, and SURFACED otherwise (the crew may be done, waiting
 # on a decision, or wedged). For stale panes it is checked before trusting the
 # status log so a pre-validation captain-relevant line does not override an active
-# run. See crew_absorb_class for the exact working/paused/none decision.
+# run. See crew_absorb_class for the exact token decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }

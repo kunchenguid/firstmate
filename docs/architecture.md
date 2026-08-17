@@ -26,9 +26,11 @@ A concurrent replacement remains armed, every non-merged or invalid observation 
 No-verb wakes, such as `working:` notes and bare turn-ended signals, are benign only when `bin/fm-crew-state.sh` reports positive evidence that the crew is still working: an actively running no-mistakes step attributed to that crew's current code, or an exact busy verdict from the semantic busy-state contract.
 A `kind=secondmate` task's status signal is the parent-directed reply stream and is never absorbed as provably working; only its bare turn-ended signal retains the ordinary absorb rule.
 A crew that declares `paused:` for a known external wait is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge.
-For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint only when the backend confidently reports its agent dead.
-Live or inconclusive liveness remains fail-open at that initial surface, and the secondmate idle-endpoint exemption is unchanged.
-Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
+A crew that has gone quiet without declaring any wait still surfaces one stale wake at once, on the unchanged schedule.
+The normal-mode watcher applies the bounded cadence to an unchanged `paused:` or durable `captain-held` endpoint whether that crew's agent is still live or has already exited, because the declaration rather than a backend liveness verdict is what makes the idling expected.
+Authoritative crew state still outranks the declaration: an active run step or an exact busy verdict puts the window back on the wedge timer, and a parked, blocked, done, or failed verdict keeps whatever routing that pane already had, so a live decision gate or a finished crew is never newly hidden behind a stale wait line.
+The secondmate idle-endpoint exemption is unchanged.
+A declared wait's initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
 Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin/fm-inactive-reconcile.sh` on its own bounded cadence, while locked session start performs the same bounded local scan immediately.
