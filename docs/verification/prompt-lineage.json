@@ -281,7 +281,7 @@
   "semantic_refresh_review": {
     "schema_version": 1,
     "candidate": "95d810ee991953755299bba2ab822a4a685e531d",
-    "reviewer_overlay": "REVIEWER_COMMIT_PLACEHOLDER",
+    "reviewer_overlay": "4d5ddfa049dbb985f34fe0799efad7009af1fbb9",
     "transformer_sha256": "8376df860bc1e205292da0d4975d601728e8f0c209fb0ee27ffe50fe4e66aa81"
   }
 }

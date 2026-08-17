@@ -128,22 +128,34 @@ def check_semantic_refresh(root: Path, lineage: dict, evidence: dict) -> None:
         candidate_lineage = git_object(root, candidate, LINEAGE_PATH.as_posix())
         candidate_transformer = git_object(root, candidate, "bin/fm-prompt-semantic-refresh.py")
         reviewer_transformer = git_object(root, reviewer, "bin/fm-prompt-semantic-refresh.py")
+        producer_transformer = git_object(root, overlay, "bin/fm-prompt-semantic-refresh.py")
+        if producer_transformer is not None and is_ancestor(root, candidate, overlay):
+            fail("semantic refresh producer is a descendant of the candidate it claims to produce")
         try:
-            recorded_evidence = json.loads(candidate_lineage)["semantic_refresh"] if candidate_lineage else None
+            candidate_record = json.loads(candidate_lineage) if candidate_lineage else None
+            recorded_evidence = candidate_record["semantic_refresh"] if candidate_record else None
         except (KeyError, json.JSONDecodeError):
+            candidate_record = None
             recorded_evidence = None
-        parents = run(root, "git", "show", "-s", "--format=%P", candidate).split()
+        parent_result = subprocess.run(
+            ["git", "show", "-s", "--format=%P", candidate],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        if parent_result.returncode:
+            fail("semantic refresh reviewed candidate graph is unavailable")
+        parents = parent_result.stdout.split()
         if recorded_evidence != evidence or parents != [evidence["upstream"]]:
             fail("semantic refresh review does not bind the exact candidate graph and evidence")
+        if candidate_record.get("live_authority_sha256") != lineage.get("live_authority_sha256"):
+            fail("lineage differs from the fixed live-authority binding")
         if candidate_transformer is None or hashlib.sha256(candidate_transformer).hexdigest() != transformer_hash:
             fail("candidate differs from original semantic refresh implementation binding")
         if not is_ancestor(root, candidate, reviewer) or candidate == reviewer:
             fail("semantic refresh reviewer is not a descendant of the reviewed candidate")
         if reviewer_transformer is None or hashlib.sha256(reviewer_transformer).hexdigest() != review["transformer_sha256"]:
             fail("semantic refresh review implementation differs from reviewer provenance")
-        producer_transformer = git_object(root, overlay, "bin/fm-prompt-semantic-refresh.py")
-        if producer_transformer is not None and is_ancestor(root, candidate, overlay):
-            fail("semantic refresh producer is a descendant of the candidate it claims to produce")
         reconstruction_overlay = candidate
         expected_current_hash = review["transformer_sha256"]
     else:

@@ -210,11 +210,11 @@ artifact.write_text(artifact.read_text(encoding="utf-8").replace(needle, "Remove
 overlay["upstream_artifact_sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
 lineage.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 PY
-  run_expect_failure "fixed upstream preservation artifact" verify_fixture_without_generated
+  run_expect_failure "semantic refresh output differs from live owner" verify_fixture_without_generated
   pass "preservation verifier rejects coordinated live and upstream hash refreshes"
 }
 
-test_self_contained_preservation_without_upstream_object() {
+test_semantic_review_requires_candidate_graph() {
   prepare_fixture
   rm -rf "$FIXTURE/.git"
   git -C "$FIXTURE" init -q
@@ -230,9 +230,8 @@ PY
   if git -C "$FIXTURE" cat-file -e "$upstream^{commit}" 2>/dev/null; then
     fail "isolated preservation fixture unexpectedly contains the upstream commit"
   fi
-  verify_fixture_without_generated >/dev/null \
-    || fail "self-contained preservation verification required the upstream Git object"
-  pass "preservation verifier uses the hashed upstream artifact without Git history"
+  run_expect_failure "reviewed candidate graph is unavailable" verify_fixture_without_generated
+  pass "semantic review verification requires the exact candidate graph"
 }
 
 test_self_contained_generated_parity_without_upstream_object() {
@@ -333,7 +332,7 @@ live["upstream_commit"] = sys.argv[2]
 live["upstream_artifact_sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
 lineage.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 PY
-  run_expect_failure "fixed upstream baseline" "$FIXTURE/bin/fm-instructions-generated-parity.sh"
+  run_expect_failure "malformed semantic-refresh evidence" "$FIXTURE/bin/fm-instructions-generated-parity.sh"
   pass "generated parity rejects a self-selected mutable upstream baseline"
 }
 
@@ -346,7 +345,7 @@ test_negative_non_verbatim_destination
 test_negative_refreshed_live_hash
 test_negative_coordinated_live_authority_refresh
 test_negative_refreshed_upstream_artifact
-test_self_contained_preservation_without_upstream_object
+test_semantic_review_requires_candidate_graph
 test_self_contained_generated_parity_without_upstream_object
 test_negative_dead_trigger
 test_negative_broken_link
