@@ -127,8 +127,58 @@ BASE_REF=$(resolve_base_ref) \
 # tmux-only conformance run the tmux adapter's behavior is what is under test,
 # and that is unchanged by any later (e.g. non-tmux backend) addition to
 # fm-backend.sh's own dispatch surface.
-OLD_BIN_UNCHANGED_SIBLINGS="fm-gate-refuse-lib.sh fm-guard.sh fm-lock-lib.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-marker-lib.sh fm-wake-lib.sh fm-supervision-lib.sh fm-classify-lib.sh fm-transition-lib.sh fm-ff-lib.sh fm-config-inherit-lib.sh fm-process-tree-lib.sh fm-checkout-lock-lib.sh fm-account-routing-lib.sh fm-treehouse-lib.sh fm-report-contract-lib.sh fm-tasks-axi-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh fm-backend.sh"
 OLD_BIN_REFACTORED="fm-send.sh fm-peek.sh fm-watch.sh fm-spawn.sh fm-teardown.sh"
+# Siblings the five reach WITHOUT a `. "$SCRIPT_DIR/..."` line - through
+# "$FM_ROOT/bin/...", or from a backends/ adapter. The deriver below cannot
+# see those, so they stay listed by hand.
+OLD_BIN_EXTRA_SIBLINGS="fm-guard.sh fm-tangle-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-supervision-lib.sh fm-project-mode.sh fm-harness.sh fm-crew-state.sh"
+
+# Every OTHER sibling is DERIVED from the source lines themselves. A
+# hand-maintained list does not merely drift, it drifts INVISIBLY: BASE_REF
+# starts carrying a newly added `. "$SCRIPT_DIR/<lib>"` only once that PR
+# merges, so the harness stays green all through review and turns main red on
+# landing. That is exactly how a merged fm-cloud-state-lib.sh broke this suite,
+# with fm-provision-lib.sh queued up behind it to do the same.
+old_bin_direct_sources() {  # reads a script on stdin -> sourced sibling names
+  # shellcheck disable=SC2016  # $SCRIPT_DIR is the literal text being matched.
+  grep -oE '\. +"\$SCRIPT_DIR/[A-Za-z0-9._-]+"' \
+    | sed -e 's|.*\$SCRIPT_DIR/||' -e 's|"$||' || true
+}
+
+old_bin_walk_sources() {  # <bin-dir> <seed names...> -> transitive closure
+  local bin_dir=$1 pending seen name kids
+  shift
+  pending="$*"
+  seen=" "
+  while :; do
+    # shellcheck disable=SC2086  # deliberate word splitting over the worklist
+    set -- $pending
+    [ $# -gt 0 ] || break
+    name=$1
+    shift
+    pending="$*"
+    case " $OLD_BIN_REFACTORED " in *" $name "*) continue ;; esac
+    case "$seen" in *" $name "*) continue ;; esac
+    [ -f "$bin_dir/$name" ] \
+      || fail "old-bin sibling deriver: $bin_dir/$name is sourced but does not exist"
+    seen="$seen$name "
+    kids=$(old_bin_direct_sources < "$bin_dir/$name")
+    pending="$pending $kids"
+  done
+  printf '%s\n' "$seen"
+}
+
+old_bin_sibling_closure() {  # -> every sibling build_old_bin must materialize
+  local seeds="" name
+  for name in $OLD_BIN_REFACTORED; do
+    # The ENTRY points come from BASE_REF: their source lines are what the old
+    # scripts will actually try to read at runtime.
+    seeds="$seeds $(git -C "$ROOT" show "$BASE_REF:bin/$name" | old_bin_direct_sources)"
+  done
+  # shellcheck disable=SC2086  # deliberate word splitting over the seed list
+  old_bin_walk_sources "$ROOT/bin" $seeds $OLD_BIN_EXTRA_SIBLINGS
+}
+OLD_BIN_UNCHANGED_SIBLINGS=$(old_bin_sibling_closure)
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
   local name=$1 root bin f
@@ -164,6 +214,60 @@ test_resolve_base_ref_uses_single_parent_when_main_is_head() {
   [ "$actual" = "$expected" ] \
     || fail "resolve_base_ref should use HEAD^1 when verified main is a single-parent HEAD"
   pass "resolve_base_ref: verified main-at-HEAD single-parent commits use their first parent"
+}
+
+test_old_bin_walk_sources_is_transitive() {
+  local bin_dir actual
+  bin_dir="$TMP_ROOT/walk-sources/bin"
+  mkdir -p "$bin_dir"
+  # An entry script that pulls in one lib, which pulls in a second, which
+  # pulls in a third. Only the FIRST is handed to the walk; if the walk stops
+  # at its seeds, the deeper two never get materialized and the old script
+  # dies at runtime on a missing source - the failure this deriver exists to
+  # make impossible.
+  # shellcheck disable=SC2016  # The fixtures must contain a LITERAL $SCRIPT_DIR.
+  printf '. "$SCRIPT_DIR/fm-beta-lib.sh"\n'  > "$bin_dir/fm-alpha-lib.sh"
+  # shellcheck disable=SC2016  # The fixtures must contain a LITERAL $SCRIPT_DIR.
+  printf '. "$SCRIPT_DIR/fm-gamma-lib.sh"\n' > "$bin_dir/fm-beta-lib.sh"
+  printf 'true\n'                            > "$bin_dir/fm-gamma-lib.sh"
+  actual=$(old_bin_walk_sources "$bin_dir" fm-alpha-lib.sh)
+  case "$actual" in
+    *" fm-alpha-lib.sh "*) ;;
+    *) fail "walk should keep its seed, got: $actual" ;;
+  esac
+  case "$actual" in
+    *" fm-beta-lib.sh "*) ;;
+    *) fail "walk should follow a seed's own source line, got: $actual" ;;
+  esac
+  case "$actual" in
+    *" fm-gamma-lib.sh "*) ;;
+    *) fail "walk should be transitive past the first hop, got: $actual" ;;
+  esac
+  pass "old_bin_walk_sources: sourced siblings are collected transitively, not just one hop"
+}
+
+test_old_bin_sibling_closure_covers_every_baseline_source() {
+  local siblings entry name
+  # Assert against the variable build_old_bin ACTUALLY reads, not against a
+  # fresh call to the deriver: otherwise replacing the call site with a
+  # hand-written list again leaves this case green.
+  siblings=" $OLD_BIN_UNCHANGED_SIBLINGS "
+  # Read the source lines out of the BASE_REF entry scripts independently of
+  # the closure's own bookkeeping: whatever the OLD scripts will try to source
+  # at runtime must be present, or build_old_bin hands them a broken bin/.
+  for entry in $OLD_BIN_REFACTORED; do
+    # shellcheck disable=SC2016  # $SCRIPT_DIR is the literal text being matched.
+    for name in $(git -C "$ROOT" show "$BASE_REF:bin/$entry" \
+      | grep -oE '\. +"\$SCRIPT_DIR/[A-Za-z0-9._-]+"' \
+      | sed -e 's|.*\$SCRIPT_DIR/||' -e 's|"$||'); do
+      case " $OLD_BIN_REFACTORED " in *" $name "*) continue ;; esac
+      case "$siblings" in
+        *" $name "*) ;;
+        *) fail "$BASE_REF:bin/$entry sources $name, which build_old_bin would not create" ;;
+      esac
+    done
+  done
+  pass "old_bin_sibling_closure: every library the baseline scripts source is materialized"
 }
 
 test_resolve_base_ref_refuses_unverified_merge_parent() {
@@ -1452,6 +1556,8 @@ fi
 
 test_resolve_base_ref_uses_single_parent_when_main_is_head
 test_resolve_base_ref_refuses_unverified_merge_parent
+test_old_bin_walk_sources_is_transitive
+test_old_bin_sibling_closure_covers_every_baseline_source
 test_herdr_required_tools_include_backend_specific_launcher_dependencies
 test_backend_name_precedence
 test_backend_detect_precedence
