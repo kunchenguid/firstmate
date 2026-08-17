@@ -11,7 +11,22 @@ TMP_ROOT=$(fm_test_tmproot fm-on)
 # and physicalize macOS's /var -> /private/var alias before transport validation.
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 'if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$ROOT/bin/fm-remote-job-lib.sh"
+# worker.pid records the serving child, not its restart supervisor, and kill
+# only signals: it returned with both processes still alive and still writing
+# into this fixture while rm -rf removed it, which surfaced as a real CI flake
+# after every assertion had already passed:
+#   rm: cannot remove '/tmp/fm-on.XXXXXX/remote-jobs': Directory not empty
+# So stop the whole worker tree and wait for it to be gone - the leak
+# tests/fm-remote-job-orphan-reap.test.sh pins - before removing the tree.
+cleanup() {
+  if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
+    fm_remote_job_stop_worker_tree "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" || true
+  fi
+  rm -rf -- "$TMP_ROOT"
+}
+trap cleanup EXIT
 LOCAL_HOME="$TMP_ROOT/local-home"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
