@@ -13,6 +13,11 @@ Pick Herdr when you want native busy, idle, and blocked state and accept the exp
 Prerequisites:
 
 - Herdr protocol 14 or newer, installed from [herdr.dev](https://herdr.dev).
+- `treehouse`, the worktree provider that every session-provider backend (tmux, herdr, zellij, cmux) requires.
+  Install the SHA256-pinned build with `bin/fm-install-treehouse.sh <dest>` and keep `treehouse` on `PATH`.
+  A missing or broken install stops every spawn with `treehouse get did not enter a worktree within 60s`.
+- `tasks-axi` 0.2.4 or newer (`npm install -g tasks-axi`) for the backlog backend.
+  Without a compatible `tasks-axi`, the teardown and decision-hold completion gate refuses to close a task, and the only escape is `fm-control <id> exit` followed by `fm-teardown <id> --force`.
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 - `python3` only for optional protocol-16 presentation-space ordering and native event subscription.
@@ -32,6 +37,28 @@ No separate first-run provisioning is required.
 The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
 Those script headers own release assets, checksums, download bounds, and post-install gates.
 Real harness credential tests remain opt-in rather than part of default CI.
+
+Verify a fresh deployment with a scout task: it exercises spawn, supervision, and cleanup end to end, touches no project, leaves only `data/<id>/report.md`, and discards its scratch worktree at cleanup, so a first run has bounded blast radius ([`architecture.md`](architecture.md#two-task-shapes)).
+
+## Crewmate harness default
+
+firstmate-bridge pins the crewmate harness to Pi: local `config/crew-harness` holds `pi`, so crewmate and scout dispatch defaults `--harness` to pi unless an explicit per-spawn harness or a `config/crew-dispatch.json` profile overrides it.
+Pi must be runnable as `/usr/local/bin/pi` or via `PATH pi`.
+Before the first spawn, Pi's worktree-folder trust must be pre-seeded in `/config/.pi/agent/trust.json` as a flat `{"/abs/path": true}` map covering `/config/.treehouse` and every project root, or the interactive `Trust project folder?` prompt stalls every spawn.
+That pre-seed is the same class of gate as Claude's `trustedDirs` in `~/.claude.json`.
+
+## Optional pane-border agent labels
+
+To label Herdr pane borders with the agent's name, set in `/config/.config/herdr/config.toml`:
+
+```toml
+[ui]
+show_agent_labels_on_pane_borders = true
+```
+
+The toggle labels the border with the agent NAME (pi / hermes), not working-state.
+Working-state lives in the Herdr sidebar's `state_icon` column, which is default-on; press `w` inside the sidebar to filter to only working agents.
+Pane-grid activity borders are not a Herdr feature; this is the closest safe, documented toggle.
 
 ## Watching and task containers
 

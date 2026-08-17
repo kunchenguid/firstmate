@@ -182,6 +182,10 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
 The intake and authority contract in `AGENTS.md` owns when separate scout research is warranted.
+A scout is itself a firstmate task spawned with `fm-spawn.sh <id> <project-dir> --scout`.
+A scout takes no `--mode` or `--yolo`: both flags are refused because a scout delivers a report, not a project change.
+A scout runs in its own scratch worktree, `data/<id>/report.md` is its only deliverable, and cleanup discards the scratch worktree.
+That bounded blast radius also makes a scout the safe first-run pattern for a fresh backend or deployment: it exercises spawn, supervision, and cleanup end to end without touching a project.
 
 ## Dispatch profiles
 
