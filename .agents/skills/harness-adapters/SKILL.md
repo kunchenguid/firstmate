@@ -127,12 +127,19 @@ Read the ledger to check that last precondition; it is a lookup, not a judgment 
 ```sh
 bin/fm-model-telemetry.sh sheet --format json |
   jq '[.[] | select(.recordType=="attempt" and .taskClass=="bounded-implementation-proven-root-fix")
-      | {harness,model,effort,exploration,quality,stepReruns,wallSeconds,startedAt}]'
+      | {harness,model,modelVersion,cliVersion,effort,exploration,quality,firstPassAccepted,correctionCount,stepReruns,wallSeconds,startedAt}]'
 ```
 
-Compare `harness`/`model`/`effort` against the tuple you are considering: rotate when that tuple has no recent row, and skip the rotation when it already has one whose `quality` and `wallSeconds` answer the question you were about to ask.
+Compare `harness`/`model`/`modelVersion`/`cliVersion`/`effort` against the tuple you are considering: rotate when that tuple has no recent row, and skip the rotation when it already has one whose outcome fields answer the question you were about to ask.
 The sheet is read-only and never modifies the ledger, so running it at intake is always safe.
 Never rotate to satisfy curiosity on work whose blast radius, deadline, or captain instruction argues for the known-good tuple, and never present a rotation as the fit-based choice.
+
+A routing alternative remains a `candidate` until its comparison is pre-registered and the telemetry owner accepts an `adopted` or `discarded` verdict.
+Before collecting outcomes, run `bin/fm-model-telemetry.sh candidate-register --candidate <id> --payload <json>` with the exact task-class-blocked method, candidate and comparator model/version tuples, task classes, minimum observations per model/class, time window, and rollback criterion.
+After the declared window has enough eligible outcomes from distinct task roots in every model/class cell, run `bin/fm-model-telemetry.sh candidate-verdict --comparison <mrc_uuid> --verdict <adopted|discarded> --rollback-evidence <tested|documented>:<id>`.
+The returned and recorded sample names the exact model, model version, CLI version, task class, n, accepted-first-pass count, and rate for every cell; cancelled, incomplete, quota-stopped, and known execution-environment failures do not satisfy n.
+Treat the transition as refused unless that command records the verdict; adoption also refuses when a candidate cell falls below the frozen rollback threshold, and no verdict may backfill outcomes from before registration, pool task classes, count retries of one task root twice, accept an `unreported` version, or weaken the frozen minimum.
+This guard applies only to the routing candidate-to-adopted-or-discarded transition; it does not approve individual launches, delivery, configuration edits, or any other workflow.
 
 Effort precedence is an explicit per-task captain instruction first, then any applicable standing dispatch profile or secondmate pin, then the generic fallback below.
 Never replace an effort value supplied by either higher-precedence source.

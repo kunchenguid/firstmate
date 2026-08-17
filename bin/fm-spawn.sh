@@ -47,6 +47,11 @@
 #   no-mistakes delivery path.
 #   Spawn records the machine's one-minute load average and logical CPU count with
 #   every new intake so exploration results retain their observed load condition.
+#   An explicit model selector is retained as modelVersion. When no selector is
+#   supplied, model stays default while modelVersion is honestly unreported.
+#   The resolved harness executable's first `--version` line is retained as
+#   cliVersion. An unavailable version is recorded explicitly as unreported and
+#   cannot satisfy a routing candidate comparison tuple.
 #   --telemetry-task-root links a retry or escalation to an existing opaque task
 #   root, and --telemetry-parent names that root's immediately prior attempt.
 #   They are per-attempt values, so a batch dispatch refuses them.
@@ -2471,7 +2476,15 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 TELEMETRY_MODEL=${MODEL:-}
+TELEMETRY_MODEL_VERSION=${MODEL:-unreported}
 TELEMETRY_EFFORT=${EFFORT:-default}
+TELEMETRY_CLI_VERSION=unreported
+TELEMETRY_CLI_BIN=${KIMI_BIN:-$HARNESS}
+if command -v "$TELEMETRY_CLI_BIN" >/dev/null 2>&1; then
+  TELEMETRY_CLI_VERSION=$("$TELEMETRY_CLI_BIN" --version 2>/dev/null | sed -n '1{s/\r$//;p;}' || true)
+  [ -n "$TELEMETRY_CLI_VERSION" ] || TELEMETRY_CLI_VERSION=unreported
+  TELEMETRY_CLI_VERSION=$(printf '%.160s' "$TELEMETRY_CLI_VERSION")
+fi
 TELEMETRY_PROJECT_REF=$(printf '%s' "$PROJ_ABS" | node -e 'const c=require("crypto");let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>process.stdout.write("project_"+c.createHash("sha256").update(s).digest("hex").slice(0,32)+"\n"));')
 TELEMETRY_CONFIG_SHA=
 if [ -f "$CONFIG/crew-dispatch.json" ] && [ ! -L "$CONFIG/crew-dispatch.json" ]; then
@@ -2484,11 +2497,12 @@ TELEMETRY_MACHINE_CONDITION=$(node -e 'const os=require("os");const cpus=typeof 
 TELEMETRY_INTAKE=$(jq -cn \
   --arg root "$TELEMETRY_TASK_ROOT" --arg parent "$TELEMETRY_PARENT" \
   --arg project "$TELEMETRY_PROJECT_REF" --arg harness "$HARNESS" \
-  --arg model "$TELEMETRY_MODEL" --arg effort "$TELEMETRY_EFFORT" \
+  --arg model "$TELEMETRY_MODEL" --arg modelVersion "$TELEMETRY_MODEL_VERSION" \
+  --arg effort "$TELEMETRY_EFFORT" --arg cliVersion "$TELEMETRY_CLI_VERSION" \
   --arg taskClass "$TASK_CLASS" --arg exploration "$EXPLORATION" \
   --argjson machine "$TELEMETRY_MACHINE_CONDITION" \
   --arg config "$TELEMETRY_CONFIG_SHA" --arg started "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-  '{attemptClass:"real",source:"firstmate",taskRootId:(if $root=="" then null else $root end),parentAttemptId:(if $parent=="" then null else $parent end),projectRef:$project,taskClass:$taskClass,tuple:{harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:null,cliVersion:null},selection:{matchedRule:null,configSha256:(if $config=="" then null else $config end),fitReasons:[],candidateAssessments:[{tuple:{harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:null,cliVersion:null},eligibility:"selected",reasons:[]}],quota:{decision:"unknown",headroom:"unknown",runway:"unknown",observedAt:null}},neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},exploration:{kind:$exploration,machineCondition:$machine},startedAt:$started,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}')
+  '{attemptClass:"real",source:"firstmate",taskRootId:(if $root=="" then null else $root end),parentAttemptId:(if $parent=="" then null else $parent end),projectRef:$project,taskClass:$taskClass,tuple:{harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:$modelVersion,cliVersion:$cliVersion},selection:{matchedRule:null,configSha256:(if $config=="" then null else $config end),fitReasons:[],candidateAssessments:[{tuple:{harness:$harness,provider:null,model:(if $model=="" then null else $model end),effort:$effort,modelVersion:$modelVersion,cliVersion:$cliVersion},eligibility:"selected",reasons:[]}],quota:{decision:"unknown",headroom:"unknown",runway:"unknown",observedAt:null}},neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},exploration:{kind:$exploration,machineCondition:$machine},startedAt:$started,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}')
 if ! TELEMETRY_RESULT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     "$FM_ROOT/bin/fm-model-telemetry.sh" intake --state "$STATE" --task "$ID" --payload "$TELEMETRY_INTAKE"); then
   echo "error: model telemetry intake refused; no model launch was submitted" >&2

@@ -3082,7 +3082,7 @@ seed_teardown_telemetry() {
   mkdir -p "$case_dir/data"
   result=$(FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
     "$TELEMETRY" intake --state "$case_dir/state" --task task-x1 --payload \
-    '{"attemptClass":"real","source":"firstmate","taskRootId":null,"parentAttemptId":null,"projectRef":"project_0123456789abcdef","taskClass":"unresolved","tuple":{"harness":"codex","provider":null,"model":null,"effort":"default","modelVersion":null,"cliVersion":null},"selection":{"matchedRule":null,"configSha256":null,"fitReasons":[],"candidateAssessments":[],"quota":{"decision":"unknown","headroom":"unknown","runway":"unknown","observedAt":null}},"neutralExecution":{"correlation":null,"capabilityProfile":"not-applicable","owner":"not-applicable","phase":null,"behavioralResult":"not-applicable"},"evaluation":{"kind":"none","fixtureId":null,"fixtureManifestSha256":null,"oracleId":null,"oracleSha256":null,"sourceCommit":null},"startedAt":"2026-08-02T00:00:00Z","privacy":{"classification":"operational-minimized","contentPolicy":"ids-codes-hashes-bounded-evidence-only"}}') || return 1
+    '{"attemptClass":"real","source":"firstmate","taskRootId":null,"parentAttemptId":null,"projectRef":"project_0123456789abcdef","taskClass":"unresolved","tuple":{"harness":"codex","provider":null,"model":"default","effort":"default","modelVersion":"default","cliVersion":"codex-cli fixture"},"selection":{"matchedRule":null,"configSha256":null,"fitReasons":[],"candidateAssessments":[],"quota":{"decision":"unknown","headroom":"unknown","runway":"unknown","observedAt":null}},"neutralExecution":{"correlation":null,"capabilityProfile":"not-applicable","owner":"not-applicable","phase":null,"behavioralResult":"not-applicable"},"evaluation":{"kind":"none","fixtureId":null,"fixtureManifestSha256":null,"oracleId":null,"oracleSha256":null,"sourceCommit":null},"startedAt":"2026-08-02T00:00:00Z","privacy":{"classification":"operational-minimized","contentPolicy":"ids-codes-hashes-bounded-evidence-only"}}') || return 1
   printf 'telemetry_attempt=%s\n' "$(printf '%s' "$result" | jq -r .attemptId)" >> "$case_dir/state/task-x1.meta"
   printf 'telemetry_task_root=%s\n' "$(printf '%s' "$result" | jq -r .taskRootId)" >> "$case_dir/state/task-x1.meta"
 }
@@ -3128,7 +3128,7 @@ test_teardown_derives_quality_and_cost_from_observable_facts() {
 }
 
 test_local_only_delivery_seals_true_outcome_and_usage() {
-  local case_dir ledger task_base advanced_main wt_head session_dir sheet
+  local case_dir ledger task_base advanced_main wt_head session_dir sheet terminal
   case_dir=$(make_case telemetry-local-only-delivery)
   reuse_lane_after_landed_prior_task "$case_dir"
   write_meta "$case_dir" local-only ship
@@ -3172,9 +3172,10 @@ EOF
 {"timestamp":"2026-08-02T00:02:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3210,"output_tokens":98}}}}
 EOF
 
+  terminal='{"classification":"failed","refusalQuality":"not-applicable","endedAt":"2026-08-02T00:01:00Z","wallSeconds":60,"firstPassAccepted":false,"correctionCount":1,"interventionCount":0,"evidence":{"tests":"fail","reviewer":"not-run","oracle":"fail","refs":[{"kind":"test","id":"contradictory-caller-payload"}]},"outcomeLink":{"kind":"none","id":null},"usage":{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null},"primaryFailureClass":"capability","flags":{"tool":false,"transport":false,"environment":false,"externalWait":false,"scopeChange":false,"quota":false},"reclassification":{"fromTaskClass":null,"toTaskClass":null,"reasonCodes":["none"],"escalated":false}}'
   FM_CODEX_SESSIONS_OVERRIDE="$case_dir/codex-sessions" \
     FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
-    run_teardown "$case_dir" >/dev/null || fail "local-only delivery teardown failed"
+    run_teardown "$case_dir" --force --terminal-payload "$terminal" >/dev/null || fail "forced local-only delivery teardown failed"
 
   ledger="$case_dir/data/routing-outcomes.jsonl"
   jq -e --arg head "$wt_head" '
@@ -3190,7 +3191,7 @@ EOF
     fail "local-only delivery telemetry sheet failed"
   printf '%s' "$sheet" | jq -e '.[0].classification=="accepted" and .[0].wallSeconds==120 and .[0].inputTokens==3210 and .[0].outputTokens==98' >/dev/null ||
     fail "the read-only sheet hid the accepted outcome, active duration, or exact-session token totals"
-  pass "a completed local-only task seals accepted with active duration and token usage from only its exact session"
+  pass "a completed local-only task stays accepted under force and contradictory caller payload, with usage from its exact session"
 }
 
 test_local_only_zero_work_does_not_seal_accepted() {
@@ -3408,8 +3409,8 @@ mutations = {
         "recorded_pr_is_merged_deleted() {  # <pr-url>",
     ),
     "unreachable": (
-        '    elif [ "$KIND" = ship ] && [ -n "$PR_URL" ] && recorded_pr_is_merged "$PR_URL"; then',
-        '    elif [ "$KIND" = ship ] && [ -n "$PR_URL" ] && false && recorded_pr_is_merged "$PR_URL"; then',
+        '  elif [ "$KIND" = ship ] && [ -n "$PR_URL" ] && recorded_pr_is_merged "$PR_URL"; then',
+        '  elif [ "$KIND" = ship ] && [ -n "$PR_URL" ] && false && recorded_pr_is_merged "$PR_URL"; then',
     ),
     "weakened-unmerged": (
         "    MERGED|merged) return 0 ;;",
@@ -3534,22 +3535,42 @@ test_teardown_keeps_a_green_gate_accepted_and_a_cancelled_gate_distinct() {
   pass "an unreadable step-rerun count keeps a green gate accepted and a cancelled run stays distinct from failed"
 }
 
-test_teardown_seals_explicit_terminal_and_missing_as_incomplete() {
-  local case_dir terminal ledger rc
-  terminal='{"classification":"accepted","refusalQuality":"not-applicable","endedAt":"2026-08-02T00:01:00Z","wallSeconds":60,"firstPassAccepted":true,"correctionCount":0,"interventionCount":0,"evidence":{"tests":"pass","reviewer":"not-run","oracle":"not-run","refs":[{"kind":"test","id":"teardown-suite"}]},"outcomeLink":{"kind":"commit","id":"0123456789abcdef"},"usage":{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null},"primaryFailureClass":"none","flags":{"tool":false,"transport":false,"environment":false,"externalWait":false,"scopeChange":false,"quota":false},"reclassification":{"fromTaskClass":null,"toTaskClass":null,"reasonCodes":["none"],"escalated":false}}'
-  case_dir=$(make_case telemetry-explicit-terminal)
+test_teardown_records_failed_terminal_status_and_forced_cancellation() {
+  local case_dir ledger sheet
+  case_dir=$(make_case telemetry-failed-status)
   write_meta "$case_dir" local-only ship
-  seed_teardown_telemetry "$case_dir" || fail "could not seed explicit teardown telemetry"
-  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" --force --terminal-payload "$terminal" >/dev/null || fail "teardown with explicit terminal failed"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed failed-status telemetry"
+  printf 'failed: implementation exhausted its retry budget\n' > "$case_dir/state/task-x1.status"
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" --force >/dev/null || fail "failed-status teardown failed"
   ledger="$case_dir/data/routing-outcomes.jsonl"
-  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="accepted" and .terminal.evidence.refs[0].id=="teardown-suite")' "$ledger" >/dev/null || fail "teardown lost explicit terminal evidence"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="failed" and .terminal.firstPassAccepted==false and .terminal.correctionCount==null and .terminal.gateFacts=={source:"delivery",result:"failed",stepReruns:null} and .terminal.evidence.refs==[{kind:"transition",id:"task-terminal"}])' \
+    "$ledger" >/dev/null || fail "operator-visible failed terminal status was sealed as an indistinguishable incomplete row"
+  sheet=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$TELEMETRY" sheet --format json) || fail "failed-status sheet failed"
+  printf '%s' "$sheet" | jq -e '.[0].quality=="failed" and .[0].firstPassAccepted==false and .[0].correctionCount==null' >/dev/null ||
+    fail "sheet omitted the failed attempt outcome fields"
 
-  case_dir=$(make_case telemetry-incomplete-terminal)
+  case_dir=$(make_case telemetry-forced-cancellation)
   write_meta "$case_dir" local-only ship
-  seed_teardown_telemetry "$case_dir" || fail "could not seed incomplete teardown telemetry"
-  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" --force >/dev/null || fail "teardown incomplete seal failed"
-  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="incomplete" and .terminal.endedAt!=null and .terminal.wallSeconds==null and .terminal.gateFacts.result=="incomplete" and .terminal.usage.cost==null)' "$case_dir/data/routing-outcomes.jsonl" >/dev/null || fail "teardown did not record an explicit incomplete result with absent spend and no invented duration"
+  seed_teardown_telemetry "$case_dir" || fail "could not seed forced-cancellation telemetry"
+  printf 'working: attempt stopped by explicit discard decision\n' > "$case_dir/state/task-x1.status"
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" --force >/dev/null || fail "forced cancellation teardown failed"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="cancelled" and .terminal.firstPassAccepted==null and .terminal.correctionCount==null and .terminal.gateFacts=={source:"delivery",result:"cancelled",stepReruns:null} and .terminal.evidence.refs==[{kind:"transition",id:"teardown"}])' \
+    "$case_dir/data/routing-outcomes.jsonl" >/dev/null || fail "explicit forced discard was sealed as incomplete instead of cancelled"
 
+  case_dir=$(make_case telemetry-forced-scout-without-report)
+  write_meta "$case_dir" local-only scout
+  seed_teardown_telemetry "$case_dir" || fail "could not seed forced-scout telemetry"
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    run_teardown "$case_dir" --force >/dev/null || fail "forced scout teardown failed"
+  jq -e 'select(.eventType=="attempt-terminal" and .terminal.classification=="cancelled" and .terminal.outcomeLink=={kind:"none",id:null})' \
+    "$case_dir/data/routing-outcomes.jsonl" >/dev/null || fail "forced scout claimed acceptance or a report link without a report"
+  pass "terminal failure, explicit cancellation, and a forced scout without a report remain distinguishable"
+}
+
+test_teardown_preserves_telemetry_across_safety_refusals() {
+  local case_dir rc
   case_dir=$(make_case telemetry-safety-refusal)
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "unlanded telemetry boundary"
@@ -3558,7 +3579,7 @@ test_teardown_seals_explicit_terminal_and_missing_as_incomplete() {
   FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" run_teardown "$case_dir" >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || fail "unlanded work unexpectedly passed teardown"
   [ "$(jq -s 'map(select(.eventType=="attempt-terminal"))|length' "$case_dir/data/routing-outcomes.jsonl")" -eq 0 ] || fail "teardown sealed telemetry before its safety gates passed"
-  pass "teardown seals explicit terminal evidence and otherwise records an incomplete with no invented duration before cleanup"
+  pass "teardown seals telemetry only after every safety refusal has passed"
 }
 
 test_forced_teardown_still_requires_ledger_repair() {
@@ -3582,6 +3603,7 @@ test_forced_teardown_still_requires_ledger_repair() {
   pass "a damaged ledger blocks even a forced teardown and prints its repair-then-re-run route"
 }
 
+test_teardown_records_failed_terminal_status_and_forced_cancellation
 test_local_only_zero_work_does_not_seal_accepted
 test_local_only_sync_to_advanced_main_does_not_seal_accepted
 test_local_only_missing_task_base_is_diagnosed
@@ -3627,7 +3649,7 @@ test_teardown_finishes_returned_ship_with_recorded_merged_pr
 test_returned_ship_with_recorded_unmerged_pr_stays_incomplete
 test_recorded_pr_merge_predicate_kills_required_mutations
 test_teardown_keeps_a_green_gate_accepted_and_a_cancelled_gate_distinct
-test_teardown_seals_explicit_terminal_and_missing_as_incomplete
+test_teardown_preserves_telemetry_across_safety_refusals
 test_forced_teardown_still_requires_ledger_repair
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head

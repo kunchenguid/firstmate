@@ -794,6 +794,7 @@ test_telemetry_precedes_submission_and_metadata_is_opaque() {
   id=profile-telemetry-z20
   rec=$(make_spawn_case profile-telemetry pi "$id")
   read_case_record "$rec"
+  fm_fake_version_tool "$FAKEBIN_DIR" pi FM_TEST_PI_VERSION 'pi 0.82.0'
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort high --task-class bounded-implementation-proven-root-fix --exploration)
   status=$?
   expect_code 0 "$status" "telemetry-backed spawn should succeed"
@@ -802,7 +803,7 @@ test_telemetry_precedes_submission_and_metadata_is_opaque() {
   grep -Eq '^telemetry_attempt=mra_' "$meta" || fail "spawn meta missing opaque telemetry attempt id"
   grep -Eq '^telemetry_task_root=mrt_' "$meta" || fail "spawn meta missing opaque telemetry task root"
   [ "$(grep -c '^telemetry_' "$meta")" -eq 2 ] || fail "spawn metadata contains telemetry fields beyond the two opaque ids"
-  jq -e 'select(.eventType=="attempt-intake" and .intake.tuple.harness=="pi" and .intake.tuple.model=="gpt-5" and .intake.tuple.effort=="high" and .intake.taskClass=="bounded-implementation-proven-root-fix" and .intake.exploration.kind=="deliberate" and (.intake.exploration.machineCondition.loadAverage1m|type)=="number" and (.intake.exploration.machineCondition.logicalCpuCount|type)=="number")' "$ledger" >/dev/null || fail "spawn did not durably record the exploration tuple and observed machine condition before submission"
+  jq -e 'select(.eventType=="attempt-intake" and .intake.tuple.harness=="pi" and .intake.tuple.model=="gpt-5" and .intake.tuple.modelVersion=="gpt-5" and .intake.tuple.cliVersion=="pi 0.82.0" and .intake.tuple.effort=="high" and .intake.taskClass=="bounded-implementation-proven-root-fix" and .intake.exploration.kind=="deliberate" and (.intake.exploration.machineCondition.loadAverage1m|type)=="number" and (.intake.exploration.machineCondition.logicalCpuCount|type)=="number")' "$ledger" >/dev/null || fail "spawn did not durably record the model/version, task class, exploration tuple, and observed machine condition before submission"
   ! grep -F -- "$PROJ_DIR" "$ledger" >/dev/null || fail "spawn telemetry exposed the project path instead of its opaque reference"
 
   attempt=$(sed -n 's/^telemetry_attempt=//p' "$meta")

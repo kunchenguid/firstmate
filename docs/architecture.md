@@ -244,14 +244,19 @@ That gate is bypassable only by `--force` after a durable append to `data/teardo
 ## Model-run telemetry informs judgment but never auto-tunes
 
 Every Firstmate-launched model attempt leaves one immutable intake row and at most one terminal row in the canonical private ledger `data/routing-outcomes.jsonl`.
-`bin/fm-model-telemetry.sh` is the single validator, writer, sealer, crash-recovery owner, and read-only sheet reader of that ledger; nothing else appends to it, repairs it, or reads it as an authority.
+The same ledger may hold a pre-registered routing-candidate comparison and at most one `adopted` or `discarded` verdict for it under an additive candidate schema that older attempt-only readers treat as opaque; this is deliberately not a second decision ledger.
+`bin/fm-model-telemetry.sh` is the single validator, writer, sealer, crash-recovery owner, routing-candidate evidence guard, and read-only sheet reader of that ledger; nothing else appends to it, repairs it, or reads it as an authority.
 The mechanism boundary is deliberately narrow: it hooks the resolved-profile spawn boundary in `bin/fm-spawn.sh` after the profile, backend, and worktree checks already passed, publishes only opaque attempt and task-root identifiers into the existing task metadata, and seals through `bin/fm-teardown.sh` after every existing safety, report, and public-followup gate but before any endpoint, worktree, or task state is deleted.
 Routing judgment, quota queries, model selection, scheduling, task-state ownership, runtime backend behavior, and harness behavior keep the owners they already had: the ledger records the axes and evidence a decision already produced, and firstmate may read that record back through the owner's read-only sheet as one inspectable input to its own next choice at intake.
-The deliberate exploration rotation owned by the [`harness-adapters` skill](../.agents/skills/harness-adapters/SKILL.md) is exactly that lookup, and the choice it informs stays firstmate's, made at intake and recorded on the attempt it produced.
+The deliberate exploration rotation and candidate-to-adopted-or-discarded transition are owned by the [`harness-adapters` skill](../.agents/skills/harness-adapters/SKILL.md); the rotation is exactly that lookup, and the choice it informs stays firstmate's, made at intake and recorded on the attempt it produced.
+That transition requires the telemetry owner to freeze its method, exact model/version tuples, task-class cells, sample minimum, time window, and rollback criterion before outcomes.
+It counts one eligible quality outcome per distinct task root, excludes cancellation, incompleteness, quota stops, and known execution-environment failures, reports model/version/CLI plus task class, n, accepted-first-pass count, and rate for every cell, and enforces the frozen threshold for adoption plus rollback evidence for either verdict; the guard owns no other approval.
 The forbidden thing is the telemetry closed loop, not the lookup: no code path derives, ranks, weights, or rewrites a routing rule, dispatch profile, effort default, or harness pin from model-run ledger data, and that ledger never changes routing behavior without a human decision, so this mechanism holds no scheduler, scorer, control plane, or auto-tuner.
 A selection candidate is still resolved exactly as the [dispatch profiles](#dispatch-profiles) section describes.
 Recording is fail-closed at both ends because a silently missing outcome is worse than a stopped lifecycle step: a refused intake stops before the launch command is submitted, and a refused seal preserves the endpoint, worktree, and task state instead of cleaning up, with no bypass flag, `--force` included.
-Absent terminal evidence is sealed as an explicit incomplete outcome rather than inferred from cleanup, and legacy rows written before this schema are preserved byte-for-byte and projected as opaque legacy records.
+Absent terminal evidence is sealed as an explicit incomplete outcome rather than inferred from cleanup; a final operator-visible `failed:` event records failure, and a forced cleanup without stronger evidence records cancellation.
+Those two initiating triggers are retained as bounded transition evidence refs while the original V1 gate-source enum remains unchanged for rollback compatibility.
+Legacy rows written before this schema are preserved byte-for-byte and projected as opaque legacy records.
 
 ## Optional X mode
 

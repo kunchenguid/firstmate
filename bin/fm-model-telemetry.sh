@@ -7,6 +7,8 @@
 #   fm-model-telemetry.sh terminal-facts --state <dir> --task <id> [--attempt <mra_uuid>] --payload <json>
 #   fm-model-telemetry.sh seal-or-incomplete --state <dir> --task <id> [--attempt <mra_uuid>] [--terminal-payload <json>]
 #   fm-model-telemetry.sh usage --attempt <mra_uuid> --worktree <absolute-path>
+#   fm-model-telemetry.sh candidate-register --candidate <id> --payload <json>
+#   fm-model-telemetry.sh candidate-verdict --comparison <mrc_uuid> --verdict <adopted|discarded> --rollback-evidence <tested|documented>:<id>
 #   fm-model-telemetry.sh sheet [--format json|csv|md]
 #
 # The ledger is FM_DATA_OVERRIDE/data/routing-outcomes.jsonl when that override
@@ -48,6 +50,25 @@
 # classification, first-pass acceptance, correction count, and end time at the
 # immutable terminal seal, and preserves the observed wall time without
 # substituting intake-to-seal elapsed time.
+# Routing candidate registration and verdict rows share this canonical ledger
+# under the additive firstmate.model-routing-candidate/v1 schema, so an older
+# attempt-only reader treats them as opaque foreign rows instead of rejecting
+# its V1 ledger during rollback.
+# Registration freezes a task-class-blocked comparison method, exact candidate
+# and comparator model/version tuples, minimum observations per model/class,
+# time window, and rollback criterion before outcomes. A verdict counts one
+# eligible quality outcome per distinct task root after registration and inside
+# that window. Cancelled, incomplete, quota-stopped, and known execution-
+# environment failures do not count. Every model/version/CLI and task-class
+# cell reports its n, accepted-first-pass count, and rate; every cell must meet
+# the frozen minimum (at least six), adoption must meet the frozen rollback
+# threshold, and either verdict requires concrete rollback evidence. These two
+# commands own only the
+# candidate-to-adopted-or-
+# discarded transition; they are not a general approval workflow.
+# Task-terminal failure and forced-cancellation triggers remain compatible with
+# the original V1 gate-source enum: terminal-facts records the trigger as a
+# bounded transition evidence ref and keeps gateFacts.source=delivery.
 # The read-only usage command derives the harness and attempt start from the
 # immutable intake, then returns token totals and active wall time from durable
 # harness sessions whose recorded cwd and start time identify that exact attempt.
@@ -62,7 +83,7 @@
 # two step reruns. The V1 correctionCount field mirrors it on this mechanical
 # path, but the sheet's stepReruns column reads gateFacts.stepReruns and nothing
 # else, because correctionCount also carries a caller-authored correction count
-# on the explicit terminal path and a hardcoded 0 on the incomplete seal. A row
+# on the explicit terminal path. A row
 # with no observed gate therefore reports stepReruns absent, never 0, so a
 # superseded or caller-sealed attempt never reads like a clean first pass.
 # A green gate whose step-rerun count could not be read stays accepted with a
@@ -96,6 +117,7 @@ LEDGER="$DATA/routing-outcomes.jsonl"
 RECEIPT_DIR="$STATE/model-telemetry-receipts"
 LOCK="$STATE/.model-telemetry.lock"
 SCHEMA_VERSION=firstmate.model-run-telemetry/v1
+CANDIDATE_SCHEMA_VERSION=firstmate.model-routing-candidate/v1
 RECEIPT_VERSION=firstmate.model-run-telemetry-receipt/v1
 MAX_EVENT_BYTES=65536
 
@@ -136,6 +158,7 @@ require_opaque_id() {
   case "$kind" in
     attempt) pattern='^mra_[0-9a-f-]{36}$' ;;
     root) pattern='^mrt_[0-9a-f-]{36}$' ;;
+    comparison) pattern='^mrc_[0-9a-f-]{36}$' ;;
     *) die "internal id validator error" ;;
   esac
   printf '%s' "$value" | grep -Eq "$pattern" || die "unsafe $kind id"
@@ -171,6 +194,14 @@ new_uuid() {
 }
 
 now_rfc3339() {
+  # Test-only wall-clock seam; production leaves the override unset.
+  if [ -n "${FM_MODEL_TELEMETRY_NOW_OVERRIDE:-}" ]; then
+    printf '%s' "$FM_MODEL_TELEMETRY_NOW_OVERRIDE" |
+      grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' ||
+      die "invalid telemetry clock override"
+    printf '%s\n' "$FM_MODEL_TELEMETRY_NOW_OVERRIDE"
+    return
+  fi
   date -u '+%Y-%m-%dT%H:%M:%SZ'
 }
 
@@ -244,6 +275,24 @@ validate_intake() {
   ' >/dev/null || die "intake payload violates the V1 whitelist"
 }
 
+# Every axis but model must be a concrete non-empty string on a new intake, so
+# the eligibility bucketing this guards has an exact tuple to key on. The model
+# axis alone may be explicit null: that is the one spelling of "no model was
+# selected" (bin/fm-spawn.sh), and the literal string "default" is not a safe
+# stand-in because it is indistinguishable from a dispatch profile literally
+# named "default". An empty string or a missing field remain rejected.
+validate_new_intake_versions() {
+  printf '%s' "$1" | jq -e '
+    (.tuple.model==null or (.tuple.model|type=="string" and length>=1)) and
+    (.tuple.modelVersion|type=="string" and length>=1) and
+    (.tuple.cliVersion|type=="string" and length>=1) and
+    all(.selection.candidateAssessments[].tuple;
+      (.model==null or (.model|type=="string" and length>=1)) and
+      (.modelVersion|type=="string" and length>=1) and
+      (.cliVersion|type=="string" and length>=1))
+  ' >/dev/null || die "new intake requires a concrete model version and CLI version on every tuple, and the model axis itself must be null or a non-empty string"
+}
+
 validate_terminal() {
   printf '%s' "$1" | jq -e '
     def keys_are($a): (keys|sort)==($a|sort);
@@ -287,7 +336,7 @@ validate_terminal_facts() {
     def safeid: type=="string" and length>=1 and length<=160;
     (keys_are(["gate","outcomeLink","usage"]) or keys_are(["gate","outcomeLink","usage","wallSeconds"])) and
     (.gate|keys_are(["source","result","stepReruns"]) and
-      (.source|oneof(["no-mistakes","delivery"])) and
+      (.source|oneof(["no-mistakes","delivery","task-terminal","teardown"])) and
       (.result|oneof(["green","failed","cancelled","incomplete"])) and
       (.stepReruns==null or (.stepReruns|type=="number" and floor==. and .>=0))) and
     (.outcomeLink|keys_are(["kind","id"]) and
@@ -300,21 +349,87 @@ validate_terminal_facts() {
   ' >/dev/null || die "terminal facts payload violates the whitelist"
 }
 
+validate_candidate_plan() {
+  printf '%s' "$1" | jq -e '
+    def keys_are($a): (keys|sort)==($a|sort);
+    def harness_selector: type=="string" and length>=1 and length<=160 and test("^[A-Za-z0-9._:+/-]+$");
+    def version: type=="string" and length>=1 and length<=160 and test("^[ -~]+$") and .!="unreported";
+    def dt: type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") and
+      ((try fromdateiso8601 catch null) != null);
+    def task_class: IN("rote-reversible-edit","bounded-implementation-proven-root-fix","unknown-root-diagnosis","adversarial-review-security-review","evidence-heavy-research","long-horizon-repository-work","visual-browser-sensitive-work","documentation-specification-decision-extraction","external-wait-integration-work");
+    def tuple:
+      keys_are(["harness","model","modelVersion","cliVersion"]) and
+      (.harness|harness_selector) and (.model|version and .!="default") and
+      (.modelVersion|version and .!="default") and (.cliVersion|version);
+    keys_are(["method","candidate","comparator","taskClasses","minimumPerModelClass","window","rollbackCriteria"]) and
+    .method=="task-class-blocked" and (.candidate|tuple) and (.comparator|tuple) and
+    .candidate!=.comparator and
+    (.taskClasses as $classes | ($classes|type)=="array" and ($classes|length)>=1 and ($classes|length)<=10 and ($classes|unique|length)==($classes|length)) and
+    all(.taskClasses[]; task_class) and
+    (.minimumPerModelClass|type=="number" and floor==. and .>=6) and
+    (.window|keys_are(["startedAt","endedAt"]) and (.startedAt|dt) and (.endedAt|dt) and .startedAt<.endedAt) and
+    (.rollbackCriteria|keys_are(["metric","operator","threshold"]) and
+      .metric=="accepted-first-pass-rate" and .operator=="below" and
+      (.threshold|type=="number" and .>=0 and .<=1))
+  ' >/dev/null || die "candidate comparison plan violates the whitelist"
+}
+
+validate_candidate_registration() {
+  printf '%s' "$1" | jq -e '
+    (keys|sort)==(["schemaVersion","eventType","eventId","comparisonId","candidateId","recordedAt","privacy","plan"]|sort) and
+    (.comparisonId|test("^mrc_[0-9a-f-]{36}$")) and
+    (.candidateId|type=="string" and length>=1 and length<=96 and test("^[A-Za-z0-9._-]+$")) and
+    (.privacy=={classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"})
+  ' >/dev/null || die "candidate registration violates the envelope whitelist"
+  validate_candidate_plan "$(printf '%s' "$1" | jq -cS .plan)"
+}
+
+validate_candidate_verdict() {
+  printf '%s' "$1" | jq -e '
+    (keys|sort)==(["schemaVersion","eventType","eventId","comparisonId","candidateId","recordedAt","privacy","verdict","rollbackEvidence","sample"]|sort) and
+    (.comparisonId|test("^mrc_[0-9a-f-]{36}$")) and
+    (.candidateId|type=="string" and length>=1 and length<=96 and test("^[A-Za-z0-9._-]+$")) and
+    (.verdict|IN("adopted","discarded")) and
+    (.rollbackEvidence|keys|sort)==(["kind","id"]|sort) and
+    (.rollbackEvidence.kind|IN("tested","documented")) and
+    (.rollbackEvidence.id|type=="string" and length>=1 and length<=96 and test("^[A-Za-z0-9._:-]+$")) and
+    (.sample|keys|sort)==(["method","minimumPerModelClass","cells"]|sort) and
+    .sample.method=="task-class-blocked" and
+    (.sample.minimumPerModelClass|type=="number" and floor==. and .>=6) and
+    (.sample.cells|type=="array" and length>=2 and all(.[];
+      (keys|sort)==(["arm","harness","model","modelVersion","cliVersion","taskClass","observations","acceptedFirstPass","acceptedFirstPassRate"]|sort) and
+      (.arm|IN("candidate","comparator")) and
+      (.harness|type=="string") and (.model|type=="string") and
+      (.modelVersion|type=="string") and (.cliVersion|type=="string") and
+      (.taskClass|type=="string") and
+      (.observations|type=="number" and floor==. and .>=0) and
+      (.acceptedFirstPass|type=="number" and floor==. and .>=0) and
+      .acceptedFirstPass<=.observations and
+      (.acceptedFirstPassRate==null or (.acceptedFirstPassRate|type=="number" and .>=0 and .<=1)))) and
+    (.privacy=={classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"})
+  ' >/dev/null || die "candidate verdict violates the envelope whitelist"
+}
+
 validate_event() {
-  local event=$1 expected=$2
+  local event=$1 expected=$2 version=$SCHEMA_VERSION
+  case "$expected" in routing-candidate-*) version=$CANDIDATE_SCHEMA_VERSION ;; esac
   [ "$(printf '%s' "$event" | LC_ALL=C wc -c | tr -d ' ')" -le "$MAX_EVENT_BYTES" ] || die "event exceeds 64 KiB"
-  printf '%s' "$event" | jq -e --arg version "$SCHEMA_VERSION" --arg type "$expected" '
+  printf '%s' "$event" | jq -e --arg version "$version" --arg type "$expected" '
     (.schemaVersion==$version) and (.eventType==$type) and
     (.eventId|type=="string" and test("^mre_[0-9a-f-]{36}$")) and
-    (.attemptId|type=="string" and test("^mra_[0-9a-f-]{36}$")) and
     (.recordedAt|type=="string") and
-    (if $type=="attempt-intake" then (keys|sort)==(["schemaVersion","eventType","eventId","attemptId","recordedAt","privacy","intake"]|sort)
-     else (keys|sort)==(["schemaVersion","eventType","eventId","attemptId","recordedAt","privacy","terminal"]|sort) end)
+    (if $type=="attempt-intake" then
+       (.attemptId|type=="string" and test("^mra_[0-9a-f-]{36}$")) and
+       (keys|sort)==(["schemaVersion","eventType","eventId","attemptId","recordedAt","privacy","intake"]|sort)
+     elif $type=="attempt-terminal" then
+       (.attemptId|type=="string" and test("^mra_[0-9a-f-]{36}$")) and
+       (keys|sort)==(["schemaVersion","eventType","eventId","attemptId","recordedAt","privacy","terminal"]|sort)
+     else true end)
   ' >/dev/null 2>&1 || die "generated event violates the envelope whitelist"
 }
 
 validate_ledger() {
-  local line compact event_type payload lineno=0
+  local line compact event_type payload lineno=0 verdict_line registration_line comparison event_id plan expected_sample recorded_sample
   [ ! -L "$LEDGER" ] || die "ledger is a symlink"
   [ ! -e "$LEDGER" ] || [ -f "$LEDGER" ] || die "ledger is not a regular non-symlink file"
   [ -e "$LEDGER" ] || return 0
@@ -339,19 +454,55 @@ validate_ledger() {
           ;;
         *) die "ledger contains an unknown event type" ;;
       esac
+    elif [ "$(printf '%s' "$compact" | jq -r '.schemaVersion // empty')" = "$CANDIDATE_SCHEMA_VERSION" ]; then
+      event_type=$(printf '%s' "$compact" | jq -r .eventType)
+      case "$event_type" in
+        routing-candidate-registered)
+          validate_event "$line" routing-candidate-registered
+          validate_candidate_registration "$compact"
+          ;;
+        routing-candidate-verdict)
+          validate_event "$line" routing-candidate-verdict
+          validate_candidate_verdict "$compact"
+          ;;
+        *) die "ledger contains an unknown event type" ;;
+      esac
     fi
     DIAG_CONTEXT=
   done < "$LEDGER"
   DIAG_CONTEXT="$LEDGER"
-  jq -eRcs --arg v "$SCHEMA_VERSION" '
-    split("\n") | map(select(length>0)|fromjson) | map(select(.schemaVersion==$v)) as $events |
+  jq -eRcs --arg v "$SCHEMA_VERSION" --arg cv "$CANDIDATE_SCHEMA_VERSION" '
+    split("\n") | map(select(length>0)|fromjson) |
+    map(select(.schemaVersion==$v or .schemaVersion==$cv)) as $events |
     ($events | map(select(.eventType=="attempt-intake")) | group_by(.attemptId) | all(.[]; length==1)) and
     ($events | map(select(.eventType=="attempt-terminal")) | group_by(.attemptId) | all(.[]; length<=1)) and
     (all($events[] | select(.eventType=="attempt-terminal"); .attemptId as $a | any($events[]; .eventType=="attempt-intake" and .attemptId==$a))) and
     (all($events[] | select(.eventType=="attempt-intake" and .intake.parentAttemptId!=null);
       .intake.parentAttemptId as $p | .intake.taskRootId as $r |
-      any($events[]; .eventType=="attempt-intake" and .attemptId==$p and .intake.taskRootId==$r)))
+      any($events[]; .eventType=="attempt-intake" and .attemptId==$p and .intake.taskRootId==$r))) and
+    ($events | map(select(.eventType=="routing-candidate-registered")) | group_by(.comparisonId) | all(.[]; length==1)) and
+    ($events | map(select(.eventType=="routing-candidate-registered")) | group_by(.candidateId) | all(.[]; length==1)) and
+    ($events | map(select(.eventType=="routing-candidate-verdict")) | group_by(.comparisonId) | all(.[]; length<=1)) and
+    (all($events | to_entries[] | select(.value.eventType=="routing-candidate-verdict");
+      .key as $verdictIndex | .value as $verdict |
+      any($events | to_entries[]; .key<$verdictIndex and .value.eventType=="routing-candidate-registered" and
+        .value.comparisonId==$verdict.comparisonId and .value.candidateId==$verdict.candidateId)))
   ' "$LEDGER" >/dev/null || die "ledger violates attempt identity or sealing invariants"
+  while IFS= read -r verdict_line; do
+    comparison=$(printf '%s' "$verdict_line" | jq -r .comparisonId)
+    event_id=$(printf '%s' "$verdict_line" | jq -r .eventId)
+    registration_line=$(jq -c --arg v "$CANDIDATE_SCHEMA_VERSION" --arg comparison "$comparison" \
+      'select(.schemaVersion==$v and .eventType=="routing-candidate-registered" and .comparisonId==$comparison)' "$LEDGER")
+    plan=$(printf '%s' "$registration_line" | jq -cS .plan)
+    expected_sample=$(candidate_sample "$comparison" "$plan" "$event_id") || die "recorded candidate verdict has an inadmissible sample"
+    recorded_sample=$(printf '%s' "$verdict_line" | jq -cS .sample)
+    [ "$(printf '%s' "$expected_sample" | jq -cS .)" = "$recorded_sample" ] || die "recorded candidate verdict sample does not match its frozen plan and preceding evidence"
+    if [ "$(printf '%s' "$verdict_line" | jq -r .verdict)" = adopted ]; then
+      printf '%s' "$recorded_sample" | jq -e --argjson threshold "$(printf '%s' "$plan" | jq -c .rollbackCriteria.threshold)" \
+        'all(.cells[] | select(.arm=="candidate"); .acceptedFirstPassRate >= $threshold)' >/dev/null ||
+        die "recorded adoption falls below its frozen rollback criterion"
+    fi
+  done < <(jq -c --arg v "$CANDIDATE_SCHEMA_VERSION" 'select(.schemaVersion==$v and .eventType=="routing-candidate-verdict")' "$LEDGER")
   DIAG_CONTEXT=
 }
 
@@ -441,6 +592,36 @@ find_terminal() {
   ' "$LEDGER"
 }
 
+find_candidate_registration() {
+  local comparison=$1
+  [ -e "$LEDGER" ] || return 1
+  jq -eRcs --arg v "$CANDIDATE_SCHEMA_VERSION" --arg comparison "$comparison" '
+    split("\n") | map(select(length>0)|fromjson) |
+    map(select(.schemaVersion==$v and .eventType=="routing-candidate-registered" and .comparisonId==$comparison)) |
+    if length==1 then .[0] else empty end
+  ' "$LEDGER"
+}
+
+find_candidate_registration_by_id() {
+  local candidate=$1
+  [ -e "$LEDGER" ] || return 1
+  jq -eRcs --arg v "$CANDIDATE_SCHEMA_VERSION" --arg candidate "$candidate" '
+    split("\n") | map(select(length>0)|fromjson) |
+    map(select(.schemaVersion==$v and .eventType=="routing-candidate-registered" and .candidateId==$candidate)) |
+    if length==1 then .[0] else empty end
+  ' "$LEDGER"
+}
+
+find_candidate_verdict() {
+  local comparison=$1
+  [ -e "$LEDGER" ] || return 1
+  jq -eRcs --arg v "$CANDIDATE_SCHEMA_VERSION" --arg comparison "$comparison" '
+    split("\n") | map(select(length>0)|fromjson) |
+    map(select(.schemaVersion==$v and .eventType=="routing-candidate-verdict" and .comparisonId==$comparison)) |
+    if length==1 then .[0] else empty end
+  ' "$LEDGER"
+}
+
 recorded_intake_identity() {
   printf '%s' "$1" | jq -cS '.intake + {privacy:.privacy} | .taskRootId=null' | sha256_text
 }
@@ -455,6 +636,7 @@ intake_command() {
   require_safe_task_id "$task"
   canonical=$(canonical_json "$payload")
   validate_intake "$canonical"
+  validate_new_intake_versions "$canonical"
   hash=$(printf '%s' "$canonical" | sha256_text)
   path=$(receipt_path "$task")
   with_lock_begin
@@ -523,7 +705,7 @@ intake_command() {
 }
 
 incomplete_terminal() {
-  jq -cn '{classification:"incomplete",refusalQuality:"unknown",endedAt:null,wallSeconds:null,firstPassAccepted:null,correctionCount:0,interventionCount:0,evidence:{tests:"unknown",reviewer:"unknown",oracle:"unknown",refs:[]},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},primaryFailureClass:"unknown",flags:{tool:false,transport:false,environment:false,externalWait:false,scopeChange:false,quota:false},reclassification:{fromTaskClass:null,toTaskClass:null,reasonCodes:["none"],escalated:false}}'
+  jq -cn '{classification:"incomplete",refusalQuality:"unknown",endedAt:null,wallSeconds:null,firstPassAccepted:null,correctionCount:null,interventionCount:0,evidence:{tests:"unknown",reviewer:"unknown",oracle:"unknown",refs:[]},outcomeLink:{kind:"none",id:null},usage:{inputTokens:null,outputTokens:null,cost:null,currency:null},primaryFailureClass:"unknown",flags:{tool:false,transport:false,environment:false,externalWait:false,scopeChange:false,quota:false},reclassification:{fromTaskClass:null,toTaskClass:null,reasonCodes:["none"],escalated:false}}'
 }
 
 append_terminal_event() {
@@ -633,12 +815,12 @@ terminal_facts_command() {
        endedAt:$ended,wallSeconds:$wall,
        firstPassAccepted:(if $result=="green" then (if $reruns==null then null else $reruns==0 end) elif $result=="failed" then false else null end),
        correctionCount:$reruns,interventionCount:0,
-       evidence:{tests:(if $facts.gate.source=="no-mistakes" and $result=="green" then "pass" elif $facts.gate.source=="no-mistakes" and $result=="failed" then "fail" else "unknown" end),reviewer:(if $facts.gate.source=="no-mistakes" and $result=="green" then "pass" else "unknown" end),oracle:(if $result=="green" then "pass" elif $result=="failed" then "fail" else "not-run" end),refs:[]},
+       evidence:{tests:(if $facts.gate.source=="no-mistakes" and $result=="green" then "pass" elif $facts.gate.source=="no-mistakes" and $result=="failed" then "fail" else "unknown" end),reviewer:(if $facts.gate.source=="no-mistakes" and $result=="green" then "pass" else "unknown" end),oracle:(if $result=="green" then "pass" elif $result=="failed" then "fail" else "not-run" end),refs:(if ($facts.gate.source|IN("task-terminal","teardown")) then [{kind:"transition",id:$facts.gate.source}] else [] end)},
        outcomeLink:$facts.outcomeLink,usage:$facts.usage,
        primaryFailureClass:(if $result=="green" then "none" else "unknown" end),
        flags:{tool:false,transport:false,environment:false,externalWait:false,scopeChange:false,quota:false},
        reclassification:{fromTaskClass:null,toTaskClass:null,reasonCodes:["none"],escalated:false},
-       gateFacts:$facts.gate}')
+       gateFacts:($facts.gate | .source=(if (.source|IN("task-terminal","teardown")) then "delivery" else .source end))}')
     validate_terminal "$terminal"
     append_terminal_event "$attempt" "$terminal"
     status=recorded
@@ -646,6 +828,110 @@ terminal_facts_command() {
   rm -f "$path"
   with_lock_end
   jq -cn --arg status "$status" --arg attempt "$attempt" '{status:$status,attemptId:$attempt}'
+}
+
+candidate_register_command() {
+  local candidate=$1 payload=$2 canonical comparison event recorded window_end
+  require_safe_task_id "$candidate"
+  canonical=$(canonical_json "$payload")
+  validate_candidate_plan "$canonical"
+  window_end=$(printf '%s' "$canonical" | jq -r .window.endedAt)
+  comparison="mrc_$(new_uuid)"
+  with_lock_begin
+  validate_ledger_for_write
+  ! find_candidate_registration_by_id "$candidate" >/dev/null 2>&1 || die "routing candidate already has a registered transition"
+  recorded=$(now_rfc3339)
+  [[ "$recorded" < "$window_end" ]] || die "candidate comparison window has already ended"
+  event=$(jq -cnS --arg v "$CANDIDATE_SCHEMA_VERSION" --arg eid "mre_$(new_uuid)" \
+    --arg comparison "$comparison" --arg candidate "$candidate" --arg at "$recorded" \
+    --argjson plan "$canonical" \
+    '{schemaVersion:$v,eventType:"routing-candidate-registered",eventId:$eid,comparisonId:$comparison,candidateId:$candidate,recordedAt:$at,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"},plan:$plan}')
+  validate_event "$event" routing-candidate-registered
+  validate_candidate_registration "$event"
+  durable_append "$event"
+  with_lock_end
+  jq -cn --arg comparison "$comparison" --arg candidate "$candidate" '{status:"recorded",comparisonId:$comparison,candidateId:$candidate}'
+}
+
+candidate_sample() {
+  local comparison=$1 plan=$2 max_event=${3:-}
+  jq -eRcs --arg v "$SCHEMA_VERSION" --arg cv "$CANDIDATE_SCHEMA_VERSION" --arg comparison "$comparison" --arg maxEvent "$max_event" --argjson plan "$plan" '
+    def instant: type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") and
+      ((try fromdateiso8601 catch null) != null);
+    split("\n") | map(select(length>0)|fromjson) | to_entries as $events |
+    ($events | map(select(.value.schemaVersion==$cv and .value.eventType=="routing-candidate-registered" and .value.comparisonId==$comparison)) | first) as $registration |
+    ($registration.key) as $registered |
+    (if $maxEvent=="" then ($events|length) else ($events | map(select(.value.eventId==$maxEvent)) | first.key) end) as $limit |
+    [ $plan.taskClasses[] as $class |
+      ["candidate","comparator"][] as $arm |
+      $plan[$arm] as $tuple |
+      ([$events[] |
+          select(.key>$registered and .key<$limit and .value.schemaVersion==$v and .value.eventType=="attempt-terminal" and
+            (.value.terminal.classification|IN("accepted","rejected","failed","refused","timed-out")) and
+            (all([.value.terminal.flags.tool,.value.terminal.flags.transport,.value.terminal.flags.environment,
+              .value.terminal.flags.externalWait,.value.terminal.flags.scopeChange,.value.terminal.flags.quota][]; .==false)) and
+            (.value.terminal.primaryFailureClass|IN("tool","transport","environment","external-wait","scope-change","quota")|not) and
+            ((.value.terminal.classification=="accepted" and (.value.terminal.firstPassAccepted|type)=="boolean") or
+              .value.terminal.classification!="accepted") and
+            (.value.terminal.endedAt|instant) and
+            .value.terminal.endedAt >= $registration.value.recordedAt and
+            .value.terminal.endedAt >= $plan.window.startedAt and .value.terminal.endedAt <= $plan.window.endedAt and
+            .value.recordedAt >= $plan.window.startedAt and .value.recordedAt <= $plan.window.endedAt) |
+          .key as $eventIndex |
+          .value as $terminal |
+          ($events | map(.value) | map(select(.schemaVersion==$v and .eventType=="attempt-intake" and .attemptId==$terminal.attemptId)) | first) as $intake |
+          select($intake!=null and $intake.intake.taskClass==$class and
+            ($intake.intake.startedAt|instant) and
+            $terminal.terminal.endedAt >= $intake.intake.startedAt and
+            $intake.intake.startedAt >= $plan.window.startedAt and $intake.intake.startedAt <= $plan.window.endedAt and
+            $intake.intake.tuple.harness==$tuple.harness and $intake.intake.tuple.model==$tuple.model and
+            $intake.intake.tuple.modelVersion==$tuple.modelVersion and $intake.intake.tuple.cliVersion==$tuple.cliVersion) |
+          {taskRoot:$intake.intake.taskRootId,eventIndex:$eventIndex,
+           firstPass:($terminal.terminal.classification=="accepted" and $terminal.terminal.firstPassAccepted==true)}] |
+        group_by(.taskRoot) | map(min_by(.eventIndex))) as $observed |
+      ($observed | map(select(.firstPass==true)) | length) as $accepted |
+      {arm:$arm,harness:$tuple.harness,model:$tuple.model,modelVersion:$tuple.modelVersion,cliVersion:$tuple.cliVersion,
+       taskClass:$class,observations:($observed|length),acceptedFirstPass:$accepted,
+       acceptedFirstPassRate:(if ($observed|length)==0 then null else $accepted/($observed|length) end)}
+    ] as $cells |
+    {method:$plan.method,minimumPerModelClass:$plan.minimumPerModelClass,cells:$cells} |
+    .minimumPerModelClass as $minimum | select(all(.cells[]; .observations >= $minimum))
+  ' "$LEDGER"
+}
+
+candidate_verdict_command() {
+  local comparison=$1 verdict=$2 rollback=$3 registration plan sample candidate kind evidence_id event
+  require_opaque_id comparison "$comparison"
+  case "$verdict" in adopted|discarded) ;; *) die "candidate verdict must be adopted or discarded" ;; esac
+  kind=${rollback%%:*}
+  evidence_id=${rollback#*:}
+  [ "$kind" != "$rollback" ] && [ -n "$evidence_id" ] || die "rollback evidence must be tested:<id> or documented:<id>"
+  case "$kind" in tested|documented) ;; *) die "rollback evidence must be tested:<id> or documented:<id>" ;; esac
+  printf '%s' "$evidence_id" | jq -eR 'length>=1 and length<=96 and test("^[A-Za-z0-9._:-]+$")' >/dev/null || die "unsafe rollback evidence id"
+  with_lock_begin
+  validate_ledger_for_write
+  registration=$(find_candidate_registration "$comparison") || die "candidate comparison is not registered"
+  ! find_candidate_verdict "$comparison" >/dev/null 2>&1 || die "candidate comparison already has a verdict"
+  plan=$(printf '%s' "$registration" | jq -cS .plan)
+  if ! sample=$(candidate_sample "$comparison" "$plan"); then
+    die "insufficient sample for every predeclared model and task-class cell"
+  fi
+  if [ "$verdict" = adopted ] && ! printf '%s' "$sample" | jq -e --argjson threshold "$(printf '%s' "$plan" | jq -c .rollbackCriteria.threshold)" '
+      all(.cells[] | select(.arm=="candidate"); .acceptedFirstPassRate >= $threshold)
+    ' >/dev/null; then
+    die "candidate evidence falls below the predeclared adoption threshold"
+  fi
+  candidate=$(printf '%s' "$registration" | jq -r .candidateId)
+  event=$(jq -cnS --arg v "$CANDIDATE_SCHEMA_VERSION" --arg eid "mre_$(new_uuid)" \
+    --arg comparison "$comparison" --arg candidate "$candidate" --arg at "$(now_rfc3339)" \
+    --arg verdict "$verdict" --arg kind "$kind" --arg evidence "$evidence_id" --argjson sample "$sample" \
+    '{schemaVersion:$v,eventType:"routing-candidate-verdict",eventId:$eid,comparisonId:$comparison,candidateId:$candidate,recordedAt:$at,privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"},verdict:$verdict,rollbackEvidence:{kind:$kind,id:$evidence},sample:$sample}')
+  validate_event "$event" routing-candidate-verdict
+  validate_candidate_verdict "$event"
+  durable_append "$event"
+  with_lock_end
+  jq -cn --arg comparison "$comparison" --arg candidate "$candidate" --arg verdict "$verdict" --argjson sample "$sample" \
+    '{status:"recorded",comparisonId:$comparison,candidateId:$candidate,verdict:$verdict,sample:$sample}'
 }
 
 usage_command() {
@@ -666,20 +952,20 @@ usage_command() {
 
 sheet_json() {
   [ -e "$LEDGER" ] || { printf '[]\n'; return; }
-  jq -Rcs --arg v "$SCHEMA_VERSION" '
-    def blank($raw): {recordType:"legacy",schemaVersion:null,attemptId:null,taskRootId:null,parentAttemptId:null,source:null,attemptClass:null,projectRef:null,taskClass:null,harness:null,provider:null,model:null,effort:null,exploration:null,machineLoadAverage1m:null,machineLogicalCpuCount:null,state:"legacy",classification:null,quality:null,stepReruns:null,gateSource:null,primaryFailureClass:null,startedAt:null,endedAt:null,wallSeconds:null,inputTokens:null,outputTokens:null,costReported:false,cost:null,currency:null,costPerAcceptedDelivery:null,legacyRaw:$raw};
+  jq -Rcs --arg v "$SCHEMA_VERSION" --arg cv "$CANDIDATE_SCHEMA_VERSION" '
+    def blank($raw): {recordType:"legacy",schemaVersion:null,attemptId:null,taskRootId:null,parentAttemptId:null,source:null,attemptClass:null,projectRef:null,taskClass:null,harness:null,provider:null,model:null,modelVersion:null,cliVersion:null,effort:null,exploration:null,machineLoadAverage1m:null,machineLogicalCpuCount:null,state:"legacy",classification:null,quality:null,firstPassAccepted:null,correctionCount:null,stepReruns:null,gateSource:null,primaryFailureClass:null,startedAt:null,endedAt:null,wallSeconds:null,inputTokens:null,outputTokens:null,costReported:false,cost:null,currency:null,costPerAcceptedDelivery:null,legacyRaw:$raw};
     split("\n") | map(select(length>0)|fromjson) as $rows |
-    ($rows | map(select(.schemaVersion!=$v) | blank(.))) +
+    ($rows | map(select(.schemaVersion!=$v and .schemaVersion!=$cv) | blank(.))) +
     ($rows | map(select(.schemaVersion==$v and .eventType=="attempt-intake")) | map(. as $i |
       ($rows | map(select(.schemaVersion==$v and .eventType=="attempt-terminal" and .attemptId==$i.attemptId)) | first) as $t |
       ($t.terminal.classification // null) as $classification |
       ($t.terminal.gateFacts.stepReruns // null) as $reruns |
       ($t.terminal.usage.cost // null) as $cost |
-      {recordType:"attempt",schemaVersion:$v,attemptId:$i.attemptId,taskRootId:$i.intake.taskRootId,parentAttemptId:$i.intake.parentAttemptId,source:$i.intake.source,attemptClass:$i.intake.attemptClass,projectRef:$i.intake.projectRef,taskClass:$i.intake.taskClass,harness:$i.intake.tuple.harness,provider:$i.intake.tuple.provider,model:$i.intake.tuple.model,effort:$i.intake.tuple.effort,
+      {recordType:"attempt",schemaVersion:$v,attemptId:$i.attemptId,taskRootId:$i.intake.taskRootId,parentAttemptId:$i.intake.parentAttemptId,source:$i.intake.source,attemptClass:$i.intake.attemptClass,projectRef:$i.intake.projectRef,taskClass:$i.intake.taskClass,harness:$i.intake.tuple.harness,provider:$i.intake.tuple.provider,model:$i.intake.tuple.model,modelVersion:$i.intake.tuple.modelVersion,cliVersion:$i.intake.tuple.cliVersion,effort:$i.intake.tuple.effort,
        exploration:($i.intake.exploration.kind // null),machineLoadAverage1m:($i.intake.exploration.machineCondition.loadAverage1m // null),machineLogicalCpuCount:($i.intake.exploration.machineCondition.logicalCpuCount // null),
        state:(if $t==null then "open" else "terminal" end),classification:$classification,
        quality:(if $t==null then null elif $classification!="accepted" then $classification elif $reruns==null then "accepted-step-reruns-unknown" elif $reruns==0 then "accepted-first-pass" else "accepted-after-step-reruns" end),
-       stepReruns:$reruns,gateSource:($t.terminal.gateFacts.source // null),primaryFailureClass:($t.terminal.primaryFailureClass // null),startedAt:$i.intake.startedAt,endedAt:($t.terminal.endedAt // null),wallSeconds:($t.terminal.wallSeconds // null),inputTokens:($t.terminal.usage.inputTokens // null),outputTokens:($t.terminal.usage.outputTokens // null),
+       firstPassAccepted:($t.terminal.firstPassAccepted),correctionCount:($t.terminal.correctionCount // null),stepReruns:$reruns,gateSource:($t.terminal.gateFacts.source // null),primaryFailureClass:($t.terminal.primaryFailureClass // null),startedAt:$i.intake.startedAt,endedAt:($t.terminal.endedAt // null),wallSeconds:($t.terminal.wallSeconds // null),inputTokens:($t.terminal.usage.inputTokens // null),outputTokens:($t.terminal.usage.outputTokens // null),
        costReported:($cost|type=="number"),cost:$cost,currency:($t.terminal.usage.currency // null),costPerAcceptedDelivery:(if $classification=="accepted" then $cost else null end),legacyRaw:null}))
   ' "$LEDGER"
 }
@@ -691,13 +977,13 @@ sheet_command() {
   case "$format" in
     json) printf '%s\n' "$json" ;;
     csv)
-      printf '%s\n' 'recordType,schemaVersion,attemptId,taskRootId,parentAttemptId,source,attemptClass,projectRef,taskClass,harness,provider,model,effort,exploration,machineLoadAverage1m,machineLogicalCpuCount,state,classification,quality,stepReruns,gateSource,primaryFailureClass,startedAt,endedAt,wallSeconds,inputTokens,outputTokens,costReported,cost,currency,costPerAcceptedDelivery,legacyRaw'
-      printf '%s' "$json" | jq -r '.[] | [.recordType,.schemaVersion,.attemptId,.taskRootId,.parentAttemptId,.source,.attemptClass,.projectRef,.taskClass,.harness,.provider,.model,.effort,.exploration,.machineLoadAverage1m,.machineLogicalCpuCount,.state,.classification,.quality,.stepReruns,.gateSource,.primaryFailureClass,.startedAt,.endedAt,.wallSeconds,.inputTokens,.outputTokens,.costReported,.cost,.currency,.costPerAcceptedDelivery,(.legacyRaw|if .==null then null else tojson end)] | @csv'
+      printf '%s\n' 'recordType,schemaVersion,attemptId,taskRootId,parentAttemptId,source,attemptClass,projectRef,taskClass,harness,provider,model,effort,exploration,machineLoadAverage1m,machineLogicalCpuCount,state,classification,quality,stepReruns,gateSource,primaryFailureClass,startedAt,endedAt,wallSeconds,inputTokens,outputTokens,costReported,cost,currency,costPerAcceptedDelivery,modelVersion,cliVersion,firstPassAccepted,correctionCount,legacyRaw'
+      printf '%s' "$json" | jq -r '.[] | [.recordType,.schemaVersion,.attemptId,.taskRootId,.parentAttemptId,.source,.attemptClass,.projectRef,.taskClass,.harness,.provider,.model,.effort,.exploration,.machineLoadAverage1m,.machineLogicalCpuCount,.state,.classification,.quality,.stepReruns,.gateSource,.primaryFailureClass,.startedAt,.endedAt,.wallSeconds,.inputTokens,.outputTokens,.costReported,.cost,.currency,.costPerAcceptedDelivery,.modelVersion,.cliVersion,.firstPassAccepted,.correctionCount,(.legacyRaw|if .==null then null else tojson end)] | @csv'
       ;;
     md)
-      printf '%s\n' '| type | attempt | root | parent | tuple | exploration | load | state | quality | step reruns | seconds | tokens in/out | cost | cost/accepted | failure | legacy |'
-      printf '%s\n' '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|'
-      printf '%s' "$json" | jq -r '.[] | def esc: if .==null then "" else tostring|gsub("\\|";"\\\\|")|gsub("\\n";" ") end; "| \(.recordType|esc) | \(.attemptId|esc) | \(.taskRootId|esc) | \(.parentAttemptId|esc) | \(([.harness,.model,.effort]|map(select(.!=null))|join("/"))|esc) | \(.exploration|esc) | \(([.machineLoadAverage1m,.machineLogicalCpuCount]|map(select(.!=null))|join("/"))|esc) | \(.state|esc) | \(.quality|esc) | \(.stepReruns|esc) | \(.wallSeconds|esc) | \(([.inputTokens,.outputTokens]|map(select(.!=null))|join("/"))|esc) | \((if .costReported then ((.currency // "")+" "+(.cost|tostring)) else "absent" end)|esc) | \(.costPerAcceptedDelivery|esc) | \(.primaryFailureClass|esc) | \((.legacyRaw|if .==null then "" else tojson end)|esc) |"'
+      printf '%s\n' '| type | attempt | root | parent | tuple | CLI | exploration | load | state | quality | first pass | corrections | step reruns | seconds | tokens in/out | cost | cost/accepted | failure | legacy |'
+      printf '%s\n' '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|'
+      printf '%s' "$json" | jq -r '.[] | def esc: if .==null then "" else tostring|gsub("\\|";"\\\\|")|gsub("\\n";" ") end; "| \(.recordType|esc) | \(.attemptId|esc) | \(.taskRootId|esc) | \(.parentAttemptId|esc) | \(([.harness,.model,.modelVersion,.effort]|map(select(.!=null))|join("/"))|esc) | \(.cliVersion|esc) | \(.exploration|esc) | \(([.machineLoadAverage1m,.machineLogicalCpuCount]|map(select(.!=null))|join("/"))|esc) | \(.state|esc) | \(.quality|esc) | \(.firstPassAccepted|esc) | \(.correctionCount|esc) | \(.stepReruns|esc) | \(.wallSeconds|esc) | \(([.inputTokens,.outputTokens]|map(select(.!=null))|join("/"))|esc) | \((if .costReported then ((.currency // "")+" "+(.cost|tostring)) else "absent" end)|esc) | \(.costPerAcceptedDelivery|esc) | \(.primaryFailureClass|esc) | \((.legacyRaw|if .==null then "" else tojson end)|esc) |"'
       ;;
     *) die "sheet format must be json, csv, or md" ;;
   esac
@@ -773,6 +1059,59 @@ case "$COMMAND" in
     [ -n "$attempt_arg" ] || die "--attempt is required"
     [ -n "$worktree" ] || die "--worktree is required"
     usage_command "$attempt_arg" "$worktree"
+    ;;
+  candidate-register)
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$SCRIPT_DIR/fm-wake-lib.sh"
+    secure_dirs
+    candidate=''
+    payload=''
+    want=''
+    while [ "$#" -gt 0 ]; do
+      if [ -n "$want" ]; then
+        case "$want" in candidate) candidate=$1 ;; payload) payload=$1 ;; esac
+        want=
+      else
+        case "$1" in
+          --candidate) want=candidate ;;
+          --payload) want=payload ;;
+          *) die "unknown argument $1" ;;
+        esac
+      fi
+      shift
+    done
+    [ -z "$want" ] || die "--$want requires a value"
+    [ -n "$candidate" ] || die "--candidate is required"
+    [ -n "$payload" ] || die "--payload is required"
+    candidate_register_command "$candidate" "$payload"
+    ;;
+  candidate-verdict)
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$SCRIPT_DIR/fm-wake-lib.sh"
+    secure_dirs
+    comparison=''
+    verdict=''
+    rollback=''
+    want=''
+    while [ "$#" -gt 0 ]; do
+      if [ -n "$want" ]; then
+        case "$want" in comparison) comparison=$1 ;; verdict) verdict=$1 ;; rollback) rollback=$1 ;; esac
+        want=
+      else
+        case "$1" in
+          --comparison) want=comparison ;;
+          --verdict) want=verdict ;;
+          --rollback-evidence) want=rollback ;;
+          *) die "unknown argument $1" ;;
+        esac
+      fi
+      shift
+    done
+    [ -z "$want" ] || die "--$want requires a value"
+    [ -n "$comparison" ] || die "--comparison is required"
+    [ -n "$verdict" ] || die "--verdict is required"
+    [ -n "$rollback" ] || die "--rollback-evidence is required"
+    candidate_verdict_command "$comparison" "$verdict" "$rollback"
     ;;
   sheet)
     [ ! -L "$DATA" ] || die "data directory is a symlink"

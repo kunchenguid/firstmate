@@ -7,6 +7,7 @@ set -u
 
 TELEMETRY="$ROOT/bin/fm-model-telemetry.sh"
 TMP_ROOT=$(fm_test_tmproot fm-model-telemetry)
+CANDIDATE_NOW=2026-08-02T12:00:00Z
 
 make_home() {
   local name=$1 home
@@ -25,7 +26,7 @@ file_mode() {
 
 intake_payload() {
   local model=${1:-gpt-5} effort=${2:-high} root=${3:-} parent=${4:-}
-  jq -cn --arg model "$model" --arg effort "$effort" --arg root "$root" --arg parent "$parent" '{attemptClass:"real",source:"firstmate",taskRootId:(if $root=="" then null else $root end),parentAttemptId:(if $parent=="" then null else $parent end),projectRef:"project_0123456789abcdef",taskClass:"bounded-implementation-proven-root-fix",tuple:{harness:"codex",provider:"openai",model:$model,effort:$effort,modelVersion:null,cliVersion:null},selection:{matchedRule:"rule-1",configSha256:"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",fitReasons:["task-class"],candidateAssessments:[{tuple:{harness:"codex",provider:"openai",model:$model,effort:$effort,modelVersion:null,cliVersion:null},eligibility:"selected",reasons:["class-fit"]}],quota:{decision:"selected",headroom:"sufficient",runway:"sufficient",observedAt:"2026-08-02T00:00:00Z"}},neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},startedAt:"2026-08-02T00:00:00Z",privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}'
+  jq -cn --arg model "$model" --arg effort "$effort" --arg root "$root" --arg parent "$parent" '{attemptClass:"real",source:"firstmate",taskRootId:(if $root=="" then null else $root end),parentAttemptId:(if $parent=="" then null else $parent end),projectRef:"project_0123456789abcdef",taskClass:"bounded-implementation-proven-root-fix",tuple:{harness:"codex",provider:"openai",model:$model,effort:$effort,modelVersion:$model,cliVersion:"codex-cli 1.2.3"},selection:{matchedRule:"rule-1",configSha256:"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",fitReasons:["task-class"],candidateAssessments:[{tuple:{harness:"codex",provider:"openai",model:$model,effort:$effort,modelVersion:$model,cliVersion:"codex-cli 1.2.3"},eligibility:"selected",reasons:["class-fit"]}],quota:{decision:"selected",headroom:"sufficient",runway:"sufficient",observedAt:"2026-08-02T00:00:00Z"}},neutralExecution:{correlation:null,capabilityProfile:"not-applicable",owner:"not-applicable",phase:null,behavioralResult:"not-applicable"},evaluation:{kind:"none",fixtureId:null,fixtureManifestSha256:null,oracleId:null,oracleSha256:null,sourceCommit:null},startedAt:"2026-08-02T00:00:00Z",privacy:{classification:"operational-minimized",contentPolicy:"ids-codes-hashes-bounded-evidence-only"}}'
 }
 
 terminal_payload() {
@@ -205,12 +206,21 @@ test_missing_intake_requires_ledger_repair() {
 }
 
 test_validation_privacy_and_private_files() {
-  local home payload huge rc ledger receipt_home
+  local home payload huge rc ledger receipt_home result attempt
   home=$(make_home validation)
   payload=$(intake_payload)
   if run_intake "$home" unsafe/id "$payload" >/dev/null 2>&1; then fail "unsafe task id accepted"; fi
   if run_intake "$home" unsafe-root "$(printf '%s' "$payload" | jq -c '.taskRootId="mrt_../../secret"')" >/dev/null 2>&1; then fail "unsafe opaque root id accepted"; fi
   if run_intake "$home" unknown "$(printf '%s' "$payload" | jq -c '.prompt="secret"')" >/dev/null 2>&1; then fail "prohibited/unknown prompt field accepted"; fi
+  # An explicit null is the one spelling of "no model was selected" (bin/fm-spawn.sh);
+  # an empty string is not a second spelling of that sentinel and stays refused.
+  result=$(run_intake "$home" unset-model "$(printf '%s' "$payload" | jq -c '.tuple.model=null')") || fail "new intake refused an explicit null model, the unset-model sentinel"
+  attempt=$(printf '%s' "$result" | jq -r .attemptId)
+  jq -e --arg attempt "$attempt" 'select(.eventType=="attempt-intake" and .attemptId==$attempt and .intake.tuple.model==null)' "$home/data/routing-outcomes.jsonl" >/dev/null \
+    || fail "an explicit null model was not recorded verbatim as the unset sentinel"
+  if run_intake "$home" empty-model "$(printf '%s' "$payload" | jq -c '.tuple.model=""')" >/dev/null 2>&1; then fail "new intake accepted an empty-string model instead of the null sentinel"; fi
+  if run_intake "$home" missing-version "$(printf '%s' "$payload" | jq -c '.tuple.modelVersion=null')" >/dev/null 2>&1; then fail "new intake accepted a row without model version"; fi
+  if run_intake "$home" missing-cli-version "$(printf '%s' "$payload" | jq -c '.tuple.cliVersion=null')" >/dev/null 2>&1; then fail "new intake accepted a row without CLI version"; fi
   if run_intake "$home" malformed '{' >/dev/null 2>&1; then fail "malformed payload accepted"; fi
   huge=$(printf '%070000d' 0)
   if run_intake "$home" huge "$(printf '%s' "$payload" | jq -c --arg huge "$huge" '.tuple.model=$huge')" >/dev/null 2>&1; then fail "oversized event accepted"; fi
@@ -323,6 +333,170 @@ test_mechanical_quality_cost_and_exploration_projection() {
   pass "mechanical gate facts, exploration load, distinct non-accepted outcomes, zero-versus-absent cost and step reruns, and markdown retry lineage stay comparable"
 }
 
+candidate_plan() {
+  local minimum=${1:-6}
+  jq -cn --argjson minimum "$minimum" '{method:"task-class-blocked",candidate:{harness:"codex",model:"gpt-5.6-luna",modelVersion:"gpt-5.6-luna",cliVersion:"codex-cli 1.2.3"},comparator:{harness:"codex",model:"gpt-5.6-sol",modelVersion:"gpt-5.6-sol",cliVersion:"codex-cli 1.2.3"},taskClasses:["bounded-implementation-proven-root-fix"],minimumPerModelClass:$minimum,window:{startedAt:"2026-08-01T00:00:00Z",endedAt:"2026-08-31T23:59:59Z"},rollbackCriteria:{metric:"accepted-first-pass-rate",operator:"below",threshold:0.8}}'
+}
+
+record_candidate_observation() {
+  local home=$1 task=$2 model=$3 result=$4 reruns=$5
+  FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" \
+    run_intake "$home" "$task" "$(intake_payload "$model")" >/dev/null || fail "$task intake failed"
+  FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" terminal-facts --state "$home/state" --task "$task" \
+    --payload "$(terminal_facts_payload "$result" "$reruns")" >/dev/null || fail "$task terminal failed"
+}
+
+record_candidate_terminal_observation() {
+  local home=$1 task=$2 model=$3 classification=$4 failure=$5 ended=${6:-2026-08-02T00:01:00Z} first_pass=${7:-false}
+  FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" \
+    run_intake "$home" "$task" "$(intake_payload "$model")" >/dev/null || fail "$task intake failed"
+  FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" terminal \
+    --state "$home/state" --task "$task" \
+    --payload "$(terminal_payload "$classification" not-applicable "$failure" | jq -c --arg ended "$ended" --argjson firstPass "$first_pass" '.endedAt=$ended | .firstPassAccepted=$firstPass')" >/dev/null || fail "$task terminal failed"
+}
+
+test_routing_candidate_verdict_requires_preregistered_comparable_evidence() {
+  local home registration comparison err verdict n root attempt output
+  home=$(make_home candidate-guard)
+  registration=$(FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" candidate-register --candidate cheaper-bounded-work \
+    --payload "$(candidate_plan 6)") || fail "candidate registration failed"
+  comparison=$(printf '%s' "$registration" | jq -r .comparisonId)
+  printf '%s' "$comparison" | grep -Eq '^mrc_' || fail "candidate registration did not return an opaque comparison id"
+  jq -e --arg comparison "$comparison" 'select(.schemaVersion=="firstmate.model-routing-candidate/v1" and .eventType=="routing-candidate-registered" and .comparisonId==$comparison)' \
+    "$home/data/routing-outcomes.jsonl" >/dev/null || fail "candidate registration reused the attempt V1 schema instead of an additive rollback-compatible schema"
+
+  set +e
+  err=$(FM_HOME="$home" "$TELEMETRY" candidate-verdict --comparison "$comparison" --verdict adopted \
+    --rollback-evidence tested:rollback-fixture 2>&1)
+  verdict=$?
+  [ "$verdict" -ne 0 ] || fail "candidate was adopted before its predeclared sample existed"
+  assert_contains "$err" "insufficient sample" "early verdict refusal did not name the sample deficit"
+
+  n=1
+  while [ "$n" -le 6 ]; do
+    if [ "$n" -eq 1 ]; then
+      record_candidate_terminal_observation "$home" "candidate-a$n" gpt-5.6-luna failed capability "$CANDIDATE_NOW" null
+    else
+      record_candidate_observation "$home" "candidate-a$n" gpt-5.6-luna green 0
+    fi
+    record_candidate_observation "$home" "comparator-a$n" gpt-5.6-sol green 0
+    n=$((n + 1))
+  done
+
+  root=$(jq -r 'select(.eventType=="attempt-intake" and .intake.taskRootId!=null and .intake.tuple.model=="gpt-5.6-luna") | .intake.taskRootId' "$home/data/routing-outcomes.jsonl" | head -1)
+  attempt=$(jq -r --arg root "$root" 'select(.eventType=="attempt-intake" and .intake.taskRootId==$root) | .attemptId' "$home/data/routing-outcomes.jsonl" | head -1)
+  FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" run_intake "$home" candidate-retry \
+    "$(intake_payload gpt-5.6-luna high "$root" "$attempt")" >/dev/null || fail "same-root retry intake failed"
+  FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" terminal-facts \
+    --state "$home/state" --task candidate-retry --payload "$(terminal_facts_payload green 0)" >/dev/null || fail "same-root retry terminal failed"
+
+  output=$(FM_HOME="$home" "$TELEMETRY" candidate-verdict --comparison "$comparison" --verdict adopted \
+    --rollback-evidence tested:rollback-fixture) || fail "adequately sampled candidate verdict was refused"
+  printf '%s' "$output" | jq -e '.sample.cells|length==2 and
+    all(.[]; .observations==6 and (.modelVersion|length)>0 and (.cliVersion|length)>0 and (.taskClass|length)>0) and
+    (any(.[]; .arm=="candidate" and .acceptedFirstPass==5 and .acceptedFirstPassRate==(5/6))) and
+    (any(.[]; .arm=="comparator" and .acceptedFirstPass==6 and .acceptedFirstPassRate==1))' >/dev/null ||
+    fail "verdict did not report self-describing cells or laundered a failed root through its successful retry"
+  jq -e --arg comparison "$comparison" 'select(.eventType=="routing-candidate-verdict" and .comparisonId==$comparison and .verdict=="adopted" and .rollbackEvidence=={kind:"tested",id:"rollback-fixture"} and (.sample.cells|length)==2 and all(.sample.cells[]; .observations==6) and any(.sample.cells[]; .arm=="candidate" and .acceptedFirstPass==5))' \
+    "$home/data/routing-outcomes.jsonl" >/dev/null || fail "accepted routing verdict was not recorded in the canonical ledger"
+  pass "routing candidates require a predeclared method, comparator, per-model/class sample, window, and rollback evidence"
+}
+
+test_routing_candidate_guard_rejects_post_outcome_registration_and_missing_plan_fields() {
+  local home registration comparison err rc malformed past parameterized
+  home=$(make_home candidate-guard-order)
+  record_candidate_observation "$home" prior-candidate gpt-5.6-luna green 0
+  record_candidate_observation "$home" prior-comparator gpt-5.6-sol green 0
+  registration=$(FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" candidate-register --candidate late-plan \
+    --payload "$(candidate_plan 6)") || fail "late candidate registration failed"
+  comparison=$(printf '%s' "$registration" | jq -r .comparisonId)
+  set +e
+  err=$(FM_HOME="$home" "$TELEMETRY" candidate-verdict --comparison "$comparison" --verdict discarded \
+    --rollback-evidence documented:rollback-note 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "post-outcome registration counted evidence that predated the comparison method"
+  assert_contains "$err" "insufficient sample" "post-outcome refusal did not exclude pre-registration outcomes"
+
+  malformed=$(candidate_plan 6 | jq -c 'del(.comparator)')
+  if FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" candidate-register --candidate no-comparator --payload "$malformed" >/dev/null 2>&1; then
+    fail "candidate registration accepted a comparison plan with no comparator"
+  fi
+  malformed=$(candidate_plan 6 | jq -c 'del(.rollbackCriteria)')
+  if FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" candidate-register --candidate no-rollback --payload "$malformed" >/dev/null 2>&1; then
+    fail "candidate registration accepted a comparison plan with no rollback criteria"
+  fi
+  if FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" candidate-register --candidate underpowered --payload "$(candidate_plan 5)" >/dev/null 2>&1; then
+    fail "candidate registration accepted the known-insufficient five observations per model/class"
+  fi
+  malformed=$(candidate_plan 6 | jq -c '.candidate.modelVersion="unreported"')
+  if FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" candidate-register --candidate unreported-model --payload "$malformed" >/dev/null 2>&1; then
+    fail "candidate registration accepted an unreported model version"
+  fi
+  if FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" candidate-register --candidate late-plan --payload "$(candidate_plan 6)" >/dev/null 2>&1; then
+    fail "candidate registration accepted a second transition for the same candidate"
+  fi
+  past=$(candidate_plan 6 | jq -c '.window={startedAt:"2026-07-01T00:00:00Z",endedAt:"2026-07-31T23:59:59Z"}')
+  if FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" candidate-register --candidate past-window --payload "$past" >/dev/null 2>&1; then
+    fail "candidate registration accepted a comparison window that had already ended"
+  fi
+  parameterized=$(candidate_plan 6 | jq -c '.candidate.model="claude-opus-4-8[context=1m,effort=high,fast=false]" | .candidate.modelVersion=.candidate.model')
+  FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" candidate-register \
+    --candidate parameterized-model --payload "$parameterized" >/dev/null ||
+    fail "candidate registration rejected a bounded printable parameterized model selector"
+  pass "routing evidence must be pre-registered and every required plan field fails closed"
+}
+
+test_candidate_sample_excludes_non_quality_outcomes_and_binds_frozen_verdict() {
+  local home registration comparison n rc ledger rewritten output
+  home=$(make_home candidate-quality-only)
+  registration=$(FM_MODEL_TELEMETRY_NOW_OVERRIDE="$CANDIDATE_NOW" FM_HOME="$home" "$TELEMETRY" candidate-register \
+    --candidate quality-only --payload "$(candidate_plan 6)") || fail "quality-only candidate registration failed"
+  comparison=$(printf '%s' "$registration" | jq -r .comparisonId)
+  n=1
+  while [ "$n" -le 6 ]; do
+    record_candidate_observation "$home" "cancelled-candidate-$n" gpt-5.6-luna cancelled null
+    record_candidate_observation "$home" "cancelled-comparator-$n" gpt-5.6-sol cancelled null
+    n=$((n + 1))
+  done
+  rc=0
+  FM_HOME="$home" "$TELEMETRY" candidate-verdict --comparison "$comparison" --verdict adopted \
+    --rollback-evidence documented:rollback-note >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "cancelled attempts satisfied the quality-evidence minimum"
+
+  n=1
+  while [ "$n" -le 6 ]; do
+    record_candidate_terminal_observation "$home" "quality-candidate-$n" gpt-5.6-luna refused refusal 2026-08-02T13:00:00+02:00
+    record_candidate_observation "$home" "quality-comparator-$n" gpt-5.6-sol green 0
+    n=$((n + 1))
+  done
+  rc=0
+  FM_HOME="$home" "$TELEMETRY" candidate-verdict --comparison "$comparison" --verdict discarded \
+    --rollback-evidence documented:rollback-note >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "outcomes that ended before registration were backfilled into the frozen sample"
+  n=1
+  while [ "$n" -le 6 ]; do
+    record_candidate_observation "$home" "current-candidate-$n" gpt-5.6-luna failed null
+    n=$((n + 1))
+  done
+  rc=0
+  FM_HOME="$home" "$TELEMETRY" candidate-verdict --comparison "$comparison" --verdict adopted \
+    --rollback-evidence documented:rollback-note >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "refusal-heavy candidate evidence bypassed the frozen adoption threshold"
+  output=$(FM_HOME="$home" "$TELEMETRY" candidate-verdict --comparison "$comparison" --verdict discarded \
+    --rollback-evidence documented:rollback-note) || fail "adequately sampled discarded verdict was refused"
+  printf '%s' "$output" | jq -e '(.sample.cells[] | select(.arm=="candidate") | .observations==6 and .acceptedFirstPass==0 and .acceptedFirstPassRate==0)' >/dev/null ||
+    fail "model refusals were excluded instead of counted as first-pass failures"
+  ledger="$home/data/routing-outcomes.jsonl"
+  rewritten="$home/data/rewritten.jsonl"
+  jq -c 'if .eventType=="routing-candidate-verdict" then .candidateId="forged-candidate" else . end' "$ledger" > "$rewritten"
+  mv "$rewritten" "$ledger"
+  chmod 0600 "$ledger"
+  if FM_HOME="$home" "$TELEMETRY" sheet --format json >/dev/null 2>&1; then
+    fail "ledger validation accepted a verdict whose candidate identity did not match its frozen registration"
+  fi
+  pass "only independent quality outcomes count and verdict rows remain bound to the frozen candidate and sample"
+}
+
 test_legacy_lossless_and_read_only_sheets() {
   local home ledger legacy foreign checksum result attempt format empty_home n
   home=$(make_home sheets)
@@ -364,5 +538,8 @@ test_caller_attempt_outranks_a_diverging_receipt
 test_missing_intake_requires_ledger_repair
 test_validation_privacy_and_private_files
 test_mechanical_quality_cost_and_exploration_projection
+test_routing_candidate_verdict_requires_preregistered_comparable_evidence
+test_routing_candidate_guard_rejects_post_outcome_registration_and_missing_plan_fields
+test_candidate_sample_excludes_non_quality_outcomes_and_binds_frozen_verdict
 test_legacy_lossless_and_read_only_sheets
 printf 'All model telemetry tests passed.\n'

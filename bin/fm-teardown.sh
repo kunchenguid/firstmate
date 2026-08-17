@@ -170,6 +170,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1508,8 +1510,14 @@ telemetry_step_reruns_from_stats() {  # <worktree> <run-id>
   '
 }
 
+scout_delivery_is_accepted() {
+  [ -s "$DATA/$ID/report.md" ] && [ ! -L "$DATA/$ID/report.md" ] || return 1
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$ID" >/dev/null 2>&1
+}
+
 observe_telemetry_gate_facts() {  # <worktree>
-  local wt=$1 out reruns
+  local wt=$1 out reruns status_line status_verb
   TELEMETRY_GATE_SOURCE=delivery
   TELEMETRY_GATE_RESULT=incomplete
   TELEMETRY_STEP_RERUNS=null
@@ -1541,38 +1549,50 @@ observe_telemetry_gate_facts() {  # <worktree>
   # a PR ship is accepted only when the forge confirms its recorded PR merged,
   # independent of the former task checkout;
   # and a scout is accepted only after the report and decision gates above.
-  if [ "$FORCE" != --force ]; then
-    if [ "$KIND" = scout ]; then
+  if [ "$KIND" = scout ] && scout_delivery_is_accepted; then
+    TELEMETRY_GATE_RESULT=green
+    return 0
+  fi
+  if [ "$KIND" = ship ] && [ "$MODE" = local-only ] && [ -d "$wt" ]; then
+    local default_name delivered_commits worktree_head
+    if default_name=$(default_branch) \
+      && worktree_head=$(git -C "$wt" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
+      && [[ "$BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+      && [[ "$LOCAL_DELIVERY_BASE" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+      && [[ "$LOCAL_DELIVERY_HEAD" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
+      && [ "$LOCAL_DELIVERY_HEAD" = "$worktree_head" ] \
+      && git -C "$wt" cat-file -e "$BASE_COMMIT^{commit}" 2>/dev/null \
+      && git -C "$wt" cat-file -e "$LOCAL_DELIVERY_BASE^{commit}" 2>/dev/null \
+      && git -C "$wt" cat-file -e "$LOCAL_DELIVERY_HEAD^{commit}" 2>/dev/null \
+      && git -C "$wt" merge-base --is-ancestor "$BASE_COMMIT" "$LOCAL_DELIVERY_BASE" 2>/dev/null \
+      && git -C "$wt" merge-base --is-ancestor "$LOCAL_DELIVERY_BASE" "$LOCAL_DELIVERY_HEAD" 2>/dev/null \
+      && delivered_commits=$(git -C "$wt" rev-list --count "$LOCAL_DELIVERY_BASE..$LOCAL_DELIVERY_HEAD" 2>/dev/null) \
+      && [ "$delivered_commits" -gt 0 ] \
+      && ! git -C "$wt" diff --quiet "$LOCAL_DELIVERY_BASE" "$LOCAL_DELIVERY_HEAD" -- \
+      && git -C "$wt" merge-base --is-ancestor "$LOCAL_DELIVERY_HEAD" "refs/heads/$default_name" 2>/dev/null; then
       TELEMETRY_GATE_RESULT=green
       return 0
     fi
-    if [ "$KIND" = ship ] && [ "$MODE" = local-only ] && [ -d "$wt" ]; then
-      local default_name delivered_commits worktree_head
-      if default_name=$(default_branch) \
-        && worktree_head=$(git -C "$wt" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
-        && [[ "$BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
-        && [[ "$LOCAL_DELIVERY_BASE" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
-        && [[ "$LOCAL_DELIVERY_HEAD" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
-        && [ "$LOCAL_DELIVERY_HEAD" = "$worktree_head" ] \
-        && git -C "$wt" cat-file -e "$BASE_COMMIT^{commit}" 2>/dev/null \
-        && git -C "$wt" cat-file -e "$LOCAL_DELIVERY_BASE^{commit}" 2>/dev/null \
-        && git -C "$wt" cat-file -e "$LOCAL_DELIVERY_HEAD^{commit}" 2>/dev/null \
-        && git -C "$wt" merge-base --is-ancestor "$BASE_COMMIT" "$LOCAL_DELIVERY_BASE" 2>/dev/null \
-        && git -C "$wt" merge-base --is-ancestor "$LOCAL_DELIVERY_BASE" "$LOCAL_DELIVERY_HEAD" 2>/dev/null \
-        && delivered_commits=$(git -C "$wt" rev-list --count "$LOCAL_DELIVERY_BASE..$LOCAL_DELIVERY_HEAD" 2>/dev/null) \
-        && [ "$delivered_commits" -gt 0 ] \
-        && ! git -C "$wt" diff --quiet "$LOCAL_DELIVERY_BASE" "$LOCAL_DELIVERY_HEAD" -- \
-        && git -C "$wt" merge-base --is-ancestor "$LOCAL_DELIVERY_HEAD" "refs/heads/$default_name" 2>/dev/null; then
-        TELEMETRY_GATE_RESULT=green
-        return 0
-      fi
-      if ! [[ "$BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
-        TELEMETRY_GATE_REFUSAL='missing or invalid task base commit'
-      fi
-    elif [ "$KIND" = ship ] && [ -n "$PR_URL" ] && recorded_pr_is_merged "$PR_URL"; then
-      TELEMETRY_GATE_RESULT=green
-      return 0
+    if ! [[ "$BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+      TELEMETRY_GATE_REFUSAL='missing or invalid task base commit'
     fi
+  elif [ "$KIND" = ship ] && [ -n "$PR_URL" ] && recorded_pr_is_merged "$PR_URL"; then
+    TELEMETRY_GATE_RESULT=green
+    return 0
+  fi
+
+  # A final, parseable failed event is the task's operator-visible terminal
+  # outcome when no stronger delivery oracle exists. Earlier failed events do
+  # not leak through a later resolved/working event. Forced teardown without a
+  # failure is cancellation, never an indistinguishable incomplete attempt.
+  status_line=$(last_status_line "$STATE/$ID.status")
+  status_verb=$(status_line_verb "$status_line")
+  if [ "$status_verb" = failed ]; then
+    TELEMETRY_GATE_SOURCE='task-terminal'
+    TELEMETRY_GATE_RESULT=failed
+  elif [ "$FORCE" = --force ]; then
+    TELEMETRY_GATE_SOURCE=teardown
+    TELEMETRY_GATE_RESULT=cancelled
   fi
 
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
@@ -2633,7 +2653,7 @@ fi
 # facts. Spend stays absent because no harness reports billed spend; every
 # harness cost rendering is derived from its own token counts and price catalog,
 # which this ledger refuses on purpose.
-# Cleanup itself never supplies success.
+# Cleanup itself never supplies success; a forced cleanup supplies cancellation.
 TELEMETRY_ATTEMPT=$(fm_meta_get "$META" telemetry_attempt)
 if [ -n "$TELEMETRY_ATTEMPT" ]; then
   TELEMETRY_USAGE='{"inputTokens":null,"outputTokens":null,"cost":null,"currency":null}'
@@ -2659,8 +2679,10 @@ if [ -n "$TELEMETRY_ATTEMPT" ]; then
   TELEMETRY_OUTCOME_KIND=none
   TELEMETRY_OUTCOME_ID=null
   if [ "$KIND" = scout ]; then
-    TELEMETRY_OUTCOME_KIND=report
-    TELEMETRY_OUTCOME_ID=$(jq -Rn --arg value "data/$ID/report.md" '$value')
+    if [ -s "$DATA/$ID/report.md" ] && [ ! -L "$DATA/$ID/report.md" ]; then
+      TELEMETRY_OUTCOME_KIND=report
+      TELEMETRY_OUTCOME_ID=$(jq -Rn --arg value "data/$ID/report.md" '$value')
+    fi
   elif [ -n "$PR_URL" ]; then
     TELEMETRY_OUTCOME_KIND=pull-request
     TELEMETRY_OUTCOME_ID=$(jq -Rn --arg value "$PR_URL" '$value')
@@ -2673,9 +2695,11 @@ if [ -n "$TELEMETRY_ATTEMPT" ]; then
     --argjson outcomeId "$TELEMETRY_OUTCOME_ID" --argjson usage "$TELEMETRY_USAGE" \
     --argjson wallSeconds "$TELEMETRY_WALL_SECONDS" \
     '{gate:{source:$source,result:$result,stepReruns:$reruns},outcomeLink:{kind:$kind,id:$outcomeId},usage:$usage,wallSeconds:$wallSeconds}')
-  if [ "$TELEMETRY_GATE_SOURCE" = no-mistakes ] || [ -z "$TERMINAL_PAYLOAD" ]; then
+  if [ "$TELEMETRY_GATE_SOURCE" = no-mistakes ] \
+    || [ "$TELEMETRY_GATE_RESULT" = green ] \
+    || [ -z "$TERMINAL_PAYLOAD" ]; then
     [ -z "$TERMINAL_PAYLOAD" ] ||
-      echo "note: task $ID has an observed no-mistakes gate result ($TELEMETRY_GATE_RESULT), so its mechanical quality facts were sealed and --terminal-payload was not recorded" >&2
+      echo "note: task $ID has an observed terminal result ($TELEMETRY_GATE_RESULT), so its mechanical quality facts were sealed and --terminal-payload was not recorded" >&2
     telemetry_args=(terminal-facts --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT" --payload "$TELEMETRY_FACTS")
   else
     telemetry_args=(seal-or-incomplete --state "$STATE" --task "$ID" --attempt "$TELEMETRY_ATTEMPT" --terminal-payload "$TERMINAL_PAYLOAD")
