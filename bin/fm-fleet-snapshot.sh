@@ -140,11 +140,12 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 
 usage() {
   cat <<'EOF'
-usage: fm-fleet-snapshot.sh --json
+usage: fm-fleet-snapshot.sh --json [--no-remote-probe]
        fm-fleet-snapshot.sh --secondmate-home-summary
 
 Print a read-only structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract.
+--no-remote-probe keeps --json local-only and reports remote state as unknown.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -168,12 +169,19 @@ EOF
 }
 
 OUTPUT_MODE=json
-case "${1:---json}" in
-  --json) ;;
-  --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
+REMOTE_PROBE=1
+[ "$#" -gt 0 ] || set -- --json
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --json) OUTPUT_MODE=json ;;
+    --no-remote-probe) REMOTE_PROBE=0 ;;
+    --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
+[ "$OUTPUT_MODE" = json ] || [ "$REMOTE_PROBE" -eq 1 ] || { usage >&2; exit 2; }
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
 
@@ -483,7 +491,7 @@ task_json_lines() {
 
     endpoint_exists=null
     agent_alive=not_checked
-    if [ -n "$remote_host" ]; then
+    if [ -n "$remote_host" ] && [ "$REMOTE_PROBE" -eq 1 ]; then
       if remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
         "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
         remote_rc=0
@@ -1173,7 +1181,9 @@ secondmate_current_json() {  # <parent-tasks-json>
       esac
     fi
     if [ -z "$reason" ]; then
-      if [ "$remote" = true ]; then
+      if [ "$remote" = true ] && [ "$REMOTE_PROBE" -eq 0 ]; then
+        reason="remote probe disabled"
+      elif [ "$remote" = true ]; then
         [ -n "$host" ] || reason="invalid remote route: missing SSH host"
         case " $seen_homes " in
           *" $host:$home "*) reason="invalid home: duplicate resolved remote route" ;;

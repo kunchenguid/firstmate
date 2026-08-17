@@ -194,7 +194,7 @@ dashboard_snapshot() {
     printf '%s\n' '{"schema":"fm-dashboard.v1","generated":"","fm_home":null,"refresh_seconds":0,"error":"jq not found","tasks":[],"errors":["jq not found"]}'
     return 0
   fi
-  if ! snapshot=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>&1); then
+  if ! snapshot=$("$SCRIPT_DIR/fm-fleet-snapshot.sh" --json --no-remote-probe 2>&1); then
     snapshot=""
   fi
   if ! printf '%s' "$snapshot" | jq -e '.schema == "fm-fleet-snapshot.v1"' >/dev/null 2>&1; then

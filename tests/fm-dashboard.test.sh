@@ -245,14 +245,8 @@ test_remote_pane_notice_without_capture() {
   ssh_log="$home/ssh.log"
   cat > "$fake_ssh" <<'SH'
 #!/usr/bin/env bash
-argv_b64=${@: -1}
-if [ "$(uname)" = Darwin ]; then
-  printf '%s' "$argv_b64" | base64 -D
-else
-  printf '%s' "$argv_b64" | base64 --decode
-fi | tr '\0' ' ' >> "${SSH_LOG:?}"
-printf '\n' >> "$SSH_LOG"
-printf 'alive\n'
+printf 'invoked\n' >> "${SSH_LOG:?}"
+exit 1
 SH
   chmod +x "$fake_ssh"
   out=$(PATH="$fakebin:$PATH" FM_SSH_BIN="$fake_ssh" SSH_LOG="$ssh_log" FM_HOME="$home" "$DASH" --snapshot)
@@ -262,10 +256,8 @@ SH
       and .tasks[0].pane_tail.error == "remote worker - live view not available from the dashboard; open its remote session"
       and (.tasks[0].pane_tail.lines | length) == 0
   ' >/dev/null || fail "remote workers must carry an explicit unavailable live-view notice: $out"
-  if grep -q ' capture ' "$ssh_log"; then
-    fail "dashboard must not transport remote pane capture: $(cat "$ssh_log")"
-  fi
-  pass "dashboard reports remote live view unavailable without remote capture"
+  [ ! -e "$ssh_log" ] || fail "dashboard must not invoke remote transport: $(cat "$ssh_log")"
+  pass "dashboard reports remote live view unavailable without remote probes"
 }
 
 test_run_step_validation_active() {
