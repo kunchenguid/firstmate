@@ -18,6 +18,11 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
 #
+# A full, matched active run can also append `activity-age-seconds: <n>`.
+# This is positive liveness evidence from no-mistakes' active-step
+# `last_activity`; it is omitted for coarse, terminal, mismatched, absent, or
+# unreadable run state so consumers fail closed.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
@@ -283,6 +288,75 @@ nm_effective_ci_step_status() {
   if [ "${RUN_STATUS:-}" = ci ]; then
     printf 'running'
   fi
+}
+
+# Convert no-mistakes' compact activity duration (for example 12s, 4m3s,
+# 2h5m, or 1d2h) to whole seconds. The renderer emits only these units, but
+# reject every malformed or partial value so an unreadable activity row can
+# never become positive liveness evidence.
+nm_compact_duration_seconds() {  # <duration>
+  local rest=$1 total=0 value
+  [ -n "$rest" ] || return 1
+  while [ -n "$rest" ]; do
+    if [[ $rest =~ ^([0-9]+)d ]]; then
+      value=${BASH_REMATCH[1]}
+      total=$(( total + value * 86400 ))
+    elif [[ $rest =~ ^([0-9]+)h ]]; then
+      value=${BASH_REMATCH[1]}
+      total=$(( total + value * 3600 ))
+    elif [[ $rest =~ ^([0-9]+)m ]]; then
+      value=${BASH_REMATCH[1]}
+      total=$(( total + value * 60 ))
+    elif [[ $rest =~ ^([0-9]+)s ]]; then
+      value=${BASH_REMATCH[1]}
+      total=$(( total + value ))
+    else
+      return 1
+    fi
+    rest=${rest#"${BASH_REMATCH[0]}"}
+  done
+  printf '%s' "$total"
+}
+
+# Freshest readable last_activity age among full-status active step rows.
+# RUN_OUT has already passed branch and current-code attribution before this is
+# consumed. Keep the active_steps table parser here with the current-state
+# owner; watcher callers consume only the canonical output field below.
+nm_active_step_activity_age() {
+  local line row rest step_status activity duration age freshest='' in_active=0
+  while IFS= read -r line; do
+    if [[ $line =~ ^[[:space:]]*active_steps\[[0-9]+\]\{.*\}:[[:space:]]*$ ]]; then
+      in_active=1
+      continue
+    fi
+    [ "$in_active" = 1 ] || continue
+    case "$line" in
+      [[:space:]]*) ;;
+      *) break ;;
+    esac
+    row=$(trim "$line")
+    [ -n "$row" ] || continue
+    rest=${row#*,}
+    [ "$rest" != "$row" ] || continue
+    step_status=$(strip_quotes "$(trim "${rest%%,*}")")
+    case "$step_status" in running|fixing) ;; *) continue ;; esac
+    rest=${rest#*,}
+    rest=${rest#*,}
+    if [ "${rest#\"}" != "$rest" ]; then
+      rest=${rest#\"}
+      activity=${rest%%\"*}
+    else
+      activity=${rest%%,*}
+    fi
+    activity=${activity#quiet }
+    case "$activity" in *' ago'|*' ago: '*) ;; *) continue ;; esac
+    duration=${activity%% ago*}
+    age=$(nm_compact_duration_seconds "$duration") || continue
+    if [ -z "$freshest" ] || [ "$age" -lt "$freshest" ]; then
+      freshest=$age
+    fi
+  done <<< "$RUN_OUT"
+  [ -n "$freshest" ] && printf '%s' "$freshest"
 }
 
 # Root cause of the PR #252 incident (2026-07): for a repo where merge is left
@@ -605,6 +679,13 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
       ;;
   esac
+
+  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" = full ]; then
+    ACTIVITY_AGE=$(nm_active_step_activity_age)
+    if [ -n "$ACTIVITY_AGE" ]; then
+      RUN_DETAIL="$RUN_DETAIL${SEP}activity-age-seconds: $ACTIVITY_AGE"
+    fi
+  fi
 
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi

@@ -205,6 +205,48 @@ test_stale_terminal_escalates() {
   pass "stale + terminal status escalates immediately"
 }
 
+test_stale_terminal_log_yields_to_recent_runstep_activity() {
+  local dir state fakebin win out pane marker key
+  dir=$(make_supercase stale-terminal-progress)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  win="sess:fm-fin-progress"
+  pane="$dir/pane.txt"
+  printf 'idle prompt $\n' > "$pane"
+  printf 'done: implementation complete before validation\n' > "$state/fin-progress.status"
+
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity-age-seconds: 12'
+  export FM_FAKE_CREW_STATE
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in progress\|*matched\ run\ step\ active*) ;;
+    *) fail "recent matched run-step activity did not supersede stale terminal log: $out" ;;
+  esac
+
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STATE_OVERRIDE="$state" \
+    handle_wake "stale: $win" "$state"
+  key=$(printf '%s' "fin-progress" | tr ':/.' '___')
+  marker="$state/.subsuper-stale-$key"
+  [ -e "$marker" ] || fail "recent run-step activity over a terminal log did not retain wedge tracking"
+
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity-age-seconds: 500'
+  out=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in escalate\|*) ;;
+    *) fail "quiet matched run-step activity masked a stale terminal log: $out" ;;
+  esac
+  echo $(( $(date +%s) - 500 )) > "$marker"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "terminal-log stale did not escalate after its active step went quiet"
+  [ ! -e "$marker" ] || fail "terminal-log stale marker remained after quiet-step escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "away-mode terminal-looking stale logs yield only while matched run-step activity stays recent"
+}
+
 # A DECLARED external-wait pause (paused:) is neither a wedge nor a terminal
 # escalation: classify_stale returns the `pause` action so handle_wake records a
 # pause marker (long re-surface cadence) rather than a wedge stale marker.
@@ -438,6 +480,41 @@ test_housekeeping_persistent_stale_escalates() {
   [ -s "$state/.subsuper-escalations" ] || fail "persistent stale was not escalated"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale marker not cleared after escalation"
   pass "persistent stale escalates after threshold and clears its marker"
+}
+
+test_housekeeping_runstep_progress_defers_then_quiet_escalates() {
+  local dir state fakebin win pane key marker age
+  dir=$(make_supercase stale-runstep-progress)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  make_fake_crew_state "$fakebin" >/dev/null
+  win="sess:fm-progress-w5"
+  pane="$dir/pane.txt"
+  printf 'working\n' > "$state/progress-w5.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "progress-w5" | tr ':/.' '___')
+  marker="$state/.subsuper-stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$marker"
+
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity-age-seconds: 12'
+  export FM_FAKE_CREW_STATE
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -e "$marker" ] || fail "recent run-step activity cleared rather than refreshed the stale marker"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "recent run-step activity escalated as a stale wedge"
+  age=$(( $(date +%s) - $(cat "$marker") ))
+  [ "$age" -lt 60 ] || fail "recent run-step activity did not refresh the stale marker: age ${age}s"
+
+  echo $(( $(date +%s) - 500 )) > "$marker"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity-age-seconds: 500'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] || fail "quiet active step did not preserve stale escalation"
+  [ ! -e "$marker" ] || fail "quiet active step retained stale tracking after escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "away-mode stale recheck defers on recent run-step activity and escalates a quiet step"
 }
 
 test_housekeeping_resumed_stale_cleared() {
@@ -1842,6 +1919,7 @@ test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_stale_terminal_escalates
+test_stale_terminal_log_yields_to_recent_runstep_activity
 test_stale_paused_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
@@ -1850,6 +1928,7 @@ test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
+test_housekeeping_runstep_progress_defers_then_quiet_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_paused_resumed_cleared

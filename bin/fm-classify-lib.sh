@@ -1128,6 +1128,30 @@ crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }
 
+# Print the age in seconds and return 0 only when fm-crew-state positively
+# proves that <id> has a full, current-code-matched active run step whose
+# last_activity is newer than <max-age>. Terminal, coarse, mismatched, absent,
+# malformed, and unreadable state all return 1 without output.
+#
+# The current-state owner performs run attribution and active_steps parsing;
+# this consumer deliberately understands only its canonical output field.
+crew_recent_runstep_activity_age() {  # <id> <max-age-seconds>
+  local id=$1 max_age=$2 line state src age
+  [ -n "$id" ] || return 1
+  case "$max_age" in ''|*[!0-9]*) return 1 ;; esac
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ] || return 1
+  case "$line" in *'activity-age-seconds: '*) ;; *) return 1 ;; esac
+  age=${line##*activity-age-seconds: }
+  case "$age" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$age" -lt "$max_age" ] || return 1
+  printf '%s' "$age"
+}
+
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.
 # The stale path absorbs such a crew (on a long re-surface cadence) instead of
 # escalating a possible wedge.

@@ -194,6 +194,23 @@ run:
 EOF
 }
 
+run_running_with_activity() {  # <branch> <last-activity>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,running,0,0
+  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+    review,"running",8m0s,"$2: log activity",,round 1
+EOF
+}
+
 run_fixing() {  # <branch>
   cat <<EOF
 run:
@@ -419,6 +436,55 @@ test_active_run_is_authoritative() {
   assert_contains "$out" "source: run-step" "active run -> run-step source"
   assert_contains "$out" "validating (running)" "active run reports the step"
   pass "active run-step is authoritative"
+}
+
+test_active_run_reports_freshest_activity_age() {
+  reset_fakes
+  local d; d=$(new_case active-step-activity)
+  make_repo_on_branch "$d/wt" fm/feat-activity
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-activity.meta" "window=fm:fm-feat-activity" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running_with_activity fm/feat-activity 'quiet 1d2h ago')"
+  local out; out=$(run_crew_state "$d" feat-activity)
+  assert_contains "$out" "state: working" "active activity run -> working"
+  assert_contains "$out" "source: run-step" "active activity run -> run-step source"
+  assert_contains "$out" "activity-age-seconds: 93600" "compact last_activity becomes canonical seconds"
+  pass "matched active run exposes its no-mistakes last_activity age"
+}
+
+test_activity_age_omitted_without_readable_active_step() {
+  reset_fakes
+  local d out
+
+  d=$(new_case activity-absent)
+  make_repo_on_branch "$d/wt" fm/feat-activity-absent
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/activity-absent.meta" "window=fm:fm-activity-absent" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation complete\n' > "$d/state/activity-absent.status"
+  FM_FAKE_AXI_STATUS=""
+  arm_idle_record "$d/state" activity-absent
+  out=$(run_crew_state "$d" activity-absent)
+  assert_not_contains "$out" "activity-age-seconds:" "absent run has no activity proof"
+
+  d=$(new_case activity-unreadable)
+  make_repo_on_branch "$d/wt" fm/feat-activity-unreadable
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/activity-unreadable.meta" "window=fm:fm-activity-unreadable" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation complete\n' > "$d/state/activity-unreadable.status"
+  FM_FAKE_AXI_STATUS="not a readable run object"
+  arm_idle_record "$d/state" activity-unreadable
+  out=$(run_crew_state "$d" activity-unreadable)
+  assert_not_contains "$out" "activity-age-seconds:" "unreadable run state has no activity proof"
+
+  d=$(new_case activity-no-active-row)
+  make_repo_on_branch "$d/wt" fm/feat-activity-no-row
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/activity-no-row.meta" "window=fm:fm-activity-no-row" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-activity-no-row)"
+  out=$(run_crew_state "$d" activity-no-row)
+  assert_contains "$out" "source: run-step" "active run without diagnostics remains authoritative"
+  assert_not_contains "$out" "activity-age-seconds:" "missing active-step diagnostics have no activity proof"
+  pass "absent and unreadable active-step state omit positive activity evidence"
 }
 
 # (b) needs-decision log + a resumed (running/fixing) run = SUPERSEDED
@@ -731,6 +797,7 @@ test_terminal_passed() {
   local out; out=$(run_crew_state "$d" feat-d)
   assert_contains "$out" "state: done" "passed run -> done"
   assert_contains "$out" "source: run-step" "passed -> run-step source"
+  assert_not_contains "$out" "activity-age-seconds:" "terminal run has no active-step liveness proof"
   pass "terminal passed run is authoritative"
 }
 
@@ -841,6 +908,7 @@ EOF
   arm_idle_record "$d/state" feat-g
   local out; out=$(run_crew_state "$d" feat-g)
   assert_not_contains "$out" "source: run-step" "another branch's run not misattributed"
+  assert_not_contains "$out" "activity-age-seconds:" "mismatched branch has no activity proof"
   assert_contains "$out" "source: status-log" "no own run -> falls back to status-log"
   assert_contains "$out" "state: done" "falls back to the log verb"
   pass "another branch's run is ignored, falls back"
@@ -1303,6 +1371,7 @@ test_historical_same_branch_rewritten_head_not_current() {
   arm_idle_record "$d/state" wishlist
   out=$(run_crew_state "$d" wishlist)
   assert_not_contains "$out" "source: run-step" "historical rewritten head must not use run-step"
+  assert_not_contains "$out" "activity-age-seconds:" "mismatched code identity has no activity proof"
   assert_not_contains "$out" "parked at" "historical parked run must not mask current state"
   assert_contains "$out" "source: status-log" "falls back to status-log after head mismatch"
   assert_contains "$out" "state: working" "status-log working: remains current"
@@ -1448,6 +1517,8 @@ test_missing_run_head_falls_back_to_current_state() {
 }
 
 test_active_run_is_authoritative
+test_active_run_reports_freshest_activity_age
+test_activity_age_omitted_without_readable_active_step
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded

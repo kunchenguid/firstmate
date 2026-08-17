@@ -43,8 +43,9 @@
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
 #     escalated only after it has been idle for STALE_ESCALATE_SECS
-#     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
+#     (configurable), rechecked once. A current-code-matched active no-mistakes
+#     step with newer last_activity refreshes that bound; missing, quiet,
+#     terminal, mismatched, or unreadable run state does not. A declared pause instead
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
@@ -369,7 +370,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+  local win=$1 state=$2 task last seen activity_age stale_secs
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_paused "$last"; then
@@ -382,6 +383,15 @@ classify_stale() {  # <window> <state>
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
+    stale_secs=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}
+    if activity_age=$(crew_recent_runstep_activity_age "$task" "$stale_secs"); then
+      # Distinguish this from generic self-handling: an old terminal-looking log
+      # normally clears wedge tracking, but positive active-step progress must
+      # keep a marker so housekeeping can escalate if that step later goes quiet.
+      printf 'progress|transient stale (%s): matched run step active %ss ago, status log superseded: %s' \
+        "$win" "$activity_age" "$last"
+      return
+    fi
     # Independent of free-text captain-relevant matching: a nonterminal progress
     # verb (working:) must never take the terminal stale path. Seen-status dedupe
     # must not permanently suppress or clear possible-wedge aging merely because
@@ -959,7 +969,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs activity_age stale_secs
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1011,7 +1021,13 @@ housekeeping() {  # <state>
       continue
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
-    [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
+    stale_secs=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}
+    [ "$age" -ge "$stale_secs" ] || continue
+    if activity_age=$(crew_recent_runstep_activity_age "$task" "$stale_secs"); then
+      printf '%s\n' $(( now - activity_age )) > "$marker"
+      log "stale deferred: matched run step active ${activity_age}s ago: $win"
+      continue
+    fi
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
@@ -1245,6 +1261,16 @@ handle_wake() {  # <reason> <state>
         pause_marker_record "$arg" "$state"
       fi
       log "self-handle (paused): $reason -> $distilled"
+      ;;
+    progress)
+      # A full matched run proves that a terminal-looking status log is stale,
+      # but only its recent last_activity proves present liveness. Retain wedge
+      # aging so the same static pane surfaces if that active step goes quiet.
+      if [ "$kind" = "stale" ]; then
+        pause_marker_remove "$arg" "$state"
+        stale_marker_record "$arg" "$state"
+      fi
+      log "self-handle (run-step progress): $reason -> $distilled"
       ;;
     *)
       # Transient (non-terminal) stale: record/refresh the wedge marker so

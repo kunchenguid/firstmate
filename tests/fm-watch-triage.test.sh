@@ -275,6 +275,38 @@ test_crew_is_provably_working_classifier() {
   pass "crew_is_provably_working: only working+run-step/pane is provable; idle/finished/parked/failed/unknown surface"
 }
 
+test_runstep_activity_classifier_fails_closed() {
+  local dir fakebin age
+  dir=$(make_case classify-runstep-activity); fakebin="$dir/fakebin"
+
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity-age-seconds: 12'
+  export FM_FAKE_CREW_STATE
+  age=$(FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" crew_recent_runstep_activity_age task 240) \
+    || fail "recent matched run-step activity was not accepted"
+  [ "$age" = 12 ] || fail "recent matched run-step returned the wrong age: $age"
+
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity-age-seconds: 500'
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" crew_recent_runstep_activity_age task 240 >/dev/null \
+    && fail "genuinely quiet active step was accepted as recent"
+  FM_FAKE_CREW_STATE='state: working · source: status-log · mismatched run ignored · activity-age-seconds: 12'
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" crew_recent_runstep_activity_age task 240 >/dev/null \
+    && fail "mismatched-code fallback was accepted as run-step activity"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · run passed · activity-age-seconds: 12'
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" crew_recent_runstep_activity_age task 240 >/dev/null \
+    && fail "terminal run was accepted as active progress"
+  FM_FAKE_CREW_STATE='state: unknown · source: none · no matching run'
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" crew_recent_runstep_activity_age task 240 >/dev/null \
+    && fail "absent run was accepted as active progress"
+  FM_FAKE_CREW_STATE='unreadable current-state response'
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" crew_recent_runstep_activity_age task 240 >/dev/null \
+    && fail "unreadable state was accepted as active progress"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · activity-age-seconds: 12 trailing-garbage'
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" crew_recent_runstep_activity_age task 240 >/dev/null \
+    && fail "malformed activity evidence was accepted as active progress"
+  unset FM_FAKE_CREW_STATE
+  pass "run-step activity proof accepts only recent matched active state and fails closed otherwise"
+}
+
 # status_is_paused: the shared pause verb test both consumers read (so neither
 # hardcodes the literal). Matches only the verb before the first colon, so a reason
 # that merely mentions "paused" does not false-match, and a genuine blocker stays a
@@ -629,7 +661,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   # The crew's pipeline is actively running: a static pane is normal (waiting on CI).
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running · activity-age-seconds: 12'
 
   # Phase A: a high escalation threshold means the first sighting is absorbed.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -646,8 +678,27 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
 
-  # Phase B: backdate the idle timer past the threshold; the next run escalates.
-  # (The subsequent-sight timer path does not re-read the crew state.)
+  # Phase B: backdate the pane timer past the threshold while no-mistakes shows
+  # recent active-step progress. The watcher rechecks only at this boundary and
+  # moves the timer anchor to that positive last_activity evidence.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher escalated despite recent matched run-step activity: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "recent run-step activity enqueued a stale wake"; }
+  [ "$(( $(date +%s) - $(cat "$state/.stale-since-$key") ))" -lt 60 ] \
+    || { reap "$pid"; fail "recent run-step activity did not refresh the stale timer anchor"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional progressing-run watcher stop"
+
+  # Phase C: the disconfirming case. The same matched active run is now quiet
+  # beyond the established threshold, so it must retain the stale escalation.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running · activity-age-seconds: 500'
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -660,7 +711,8 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer was not cleared after escalation"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the wedge escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "wedge escalation was not queued"
-  pass "provably-working non-terminal stale is absorbed on first sight, then wedge-escalated past the threshold"
+  unset FM_FAKE_CREW_STATE
+  pass "recent matched run-step activity suppresses stale escalation while a genuinely quiet step still escalates"
 }
 
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
@@ -1930,6 +1982,7 @@ test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier
+test_runstep_activity_classifier_fails_closed
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
 test_signal_crew_provably_working_classifier
