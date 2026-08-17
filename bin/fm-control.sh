@@ -130,6 +130,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-codex-tier-lib.sh
+. "$SCRIPT_DIR/fm-codex-tier-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -701,6 +703,14 @@ resolve_relaunch_profile() {
   esac
 }
 
+preflight_relaunch_profile() {
+  [ "$TARGET_HARNESS" = codex ] && [ "$TARGET_TIER" = fast ] || return 0
+  fm_codex_fast_tier_runtime_resolve || return 1
+  fm_codex_fast_tier_supported \
+    "$WT" "$TARGET_MODEL" \
+    "$FM_CODEX_FAST_TIER_BIN" "$FM_CODEX_FAST_TIER_HOME"
+}
+
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
 # must preserve is actually there and recoverable afterwards. Fills
 # CHECKPOINT_LINES with the journal lines describing what it proved, and
@@ -827,6 +837,8 @@ do_relaunch() {
     note_line="note=none"
   fi
   safe_checkpoint
+  preflight_relaunch_profile \
+    || die "Codex fast-tier capability could not be verified; refusing relaunch before stopping its agent"
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
   journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"

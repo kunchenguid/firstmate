@@ -257,6 +257,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-codex-tier-lib.sh
+. "$SCRIPT_DIR/fm-codex-tier-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -369,6 +371,33 @@ case "$TIER" in
   *) echo "error: --tier must be one of standard, fast" >&2; exit 1 ;;
 esac
 
+resolve_secondmate_recovery_tier() {
+  local id=$1 harness=$2 meta recorded_tier recorded_harness recorded_family target_family
+  [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = secondmate ] && [ "$TIER_SET" -eq 0 ] || return 0
+  meta="$STATE/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] \
+    && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || return 0
+  recorded_tier=$(fm_meta_get "$meta" tier)
+  if [ -z "$recorded_tier" ] && [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+    echo "error: remote secondmate $id has no recorded tier; refusing recovery until it is explicitly migrated or safely replaced" >&2
+    return 1
+  fi
+  [ -n "$recorded_tier" ] || recorded_tier=standard
+  case "$recorded_tier" in
+    standard|fast) ;;
+    *) echo "error: secondmate $id has invalid recorded tier '$recorded_tier'; refusing recovery" >&2; return 1 ;;
+  esac
+  recorded_harness=$(fm_meta_get "$meta" harness)
+  recorded_family=$(fm_control_harness_family "$recorded_harness" 2>/dev/null || printf '%s' "$recorded_harness")
+  target_family=$(fm_control_harness_family "$harness" 2>/dev/null || printf '%s' "$harness")
+  if [ "$target_family" = "$recorded_family" ]; then
+    TIER=$recorded_tier
+  else
+    TIER=standard
+  fi
+  TIER_SET=1
+}
+
 # --relaunch reuses an existing task's endpoint, worktree, project, and kind,
 # so every axis this block resolves for a fresh spawn instead comes from that
 # task's own durable record below. Contradicting it on the command line is a
@@ -466,6 +495,11 @@ spawn_remote_secondmate() {
       return 1
       ;;
   esac
+  if ! resolve_secondmate_recovery_tier "$id" "$harness"; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    return 1
+  fi
   model=${MODEL:--}
   effort=${EFFORT:--}
   tier=$TIER
@@ -955,25 +989,6 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = secondmate ] && [ "$TIER_SET" -eq 0 ]; then
-  existing_secondmate_meta="$STATE/$ID.meta"
-  if [ -f "$existing_secondmate_meta" ] && [ ! -L "$existing_secondmate_meta" ] \
-     && [ "$(fm_meta_get "$existing_secondmate_meta" kind)" = secondmate ]; then
-    recorded_secondmate_tier=$(fm_meta_get "$existing_secondmate_meta" tier)
-    if [ -z "$recorded_secondmate_tier" ] \
-       && [ -n "$(fm_meta_get "$existing_secondmate_meta" remote_host)" ]; then
-      echo "error: remote secondmate $ID has no recorded tier; refusing recovery until it is explicitly migrated or safely replaced" >&2
-      exit 1
-    fi
-    [ -n "$recorded_secondmate_tier" ] || recorded_secondmate_tier=standard
-    case "$recorded_secondmate_tier" in
-      standard|fast) ;;
-      *) echo "error: secondmate $ID has invalid recorded tier '$recorded_secondmate_tier'; refusing recovery" >&2; exit 1 ;;
-    esac
-    TIER=$recorded_secondmate_tier
-    TIER_SET=1
-  fi
-fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -1182,41 +1197,6 @@ resolve_pi_executable() {
   esac
 }
 
-resolve_codex_executable() {
-  local candidate dir
-  candidate=$(type -P -- codex 2>/dev/null) || return 1
-  [ -x "$candidate" ] || return 1
-  case "$candidate" in
-    /*) printf '%s\n' "$candidate" ;;
-    *)
-      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || return 1
-      printf '%s/%s\n' "$dir" "$(basename "$candidate")"
-      ;;
-  esac
-}
-
-resolve_codex_home() {
-  local path
-  if [ "${CODEX_HOME+x}" = x ]; then
-    path=$CODEX_HOME
-    [ -n "$path" ] || {
-      echo "error: CODEX_HOME is set but empty; cannot pin the Codex launch configuration" >&2
-      return 1
-    }
-  else
-    [ -n "${HOME:-}" ] || {
-      echo "error: HOME is unset; cannot resolve Codex's default config home" >&2
-      return 1
-    }
-    path=$HOME/.codex
-  fi
-  [ -d "$path" ] || {
-    echo "error: effective CODEX_HOME directory does not exist: $path" >&2
-    return 1
-  }
-  resolve_directory_input CODEX_HOME "$path"
-}
-
 # Pi's CLI surface is version-dependent, so probe the resolved executable's help
 # before composing the optional regular-TUI flag. An absent or inconclusive probe
 # omits the flag so older Pi versions can still spawn.
@@ -1349,6 +1329,8 @@ case "$ARG3" in
     ;;
 esac
 
+resolve_secondmate_recovery_tier "$ID" "$HARNESS" || exit 1
+
 if [ "$HARNESS" = codex ] && [ "$TIER" = fast ] && [ "$CANONICAL_LAUNCH" != 1 ]; then
   echo "error: --tier fast requires Firstmate's canonical Codex launch template; raw Codex launch commands cannot be verified or rewritten safely" >&2
   exit 1
@@ -1369,11 +1351,9 @@ case "$HARNESS" in
   codex)
     CODEX_COMMAND=codex
     if [ "$TIER" = fast ]; then
-      CODEX_BIN=$(resolve_codex_executable) || {
-        echo "error: Codex executable not found; cannot verify --tier fast support" >&2
-        exit 1
-      }
-      CODEX_HOME_EFFECTIVE=$(resolve_codex_home) || exit 1
+      fm_codex_fast_tier_runtime_resolve || exit 1
+      CODEX_BIN=$FM_CODEX_FAST_TIER_BIN
+      CODEX_HOME_EFFECTIVE=$FM_CODEX_FAST_TIER_HOME
       CODEX_COMMAND="CODEX_HOME=$(shell_quote "$CODEX_HOME_EFFECTIVE") $(shell_quote "$CODEX_BIN")"
     fi
     ;;
@@ -1592,61 +1572,6 @@ tier_flag_for_harness() {
       esac
       ;;
   esac
-}
-
-codex_fast_tier_supported() {
-  local worktree=$1 model=$2 doctor catalog
-  [ "$HARNESS" = codex ] && [ "$TIER" = fast ] || return 0
-  if [ -z "$model" ] || [ "$model" = default ]; then
-    doctor=$(cd "$worktree" && CODEX_HOME="$CODEX_HOME_EFFECTIVE" "$CODEX_BIN" doctor --json 2>/dev/null) || true
-    case "$doctor" in
-      \{*\}) ;;
-      *)
-        echo "error: could not resolve Codex's effective model; refusing --tier fast" >&2
-        return 1
-        ;;
-    esac
-    if ! model=$(printf '%s\n' "$doctor" | awk '
-      { json = json $0 }
-      END {
-        count = split(json, checks, /"id"[[:space:]]*:[[:space:]]*"/)
-        for (i = 2; i <= count; i++) {
-          id = checks[i]
-          sub(/".*/, "", id)
-          if (id != "config.load") continue
-          if (!match(checks[i], /"model"[[:space:]]*:[[:space:]]*"[^"]+"/)) exit 1
-          model = substr(checks[i], RSTART, RLENGTH)
-          sub(/^[^:]*:[[:space:]]*"/, "", model)
-          sub(/"$/, "", model)
-          print model
-          exit 0
-        }
-        exit 1
-      }
-    '); then
-      echo "error: could not resolve Codex's effective model; refusing --tier fast" >&2
-      return 1
-    fi
-  fi
-  if ! catalog=$(cd "$worktree" && CODEX_HOME="$CODEX_HOME_EFFECTIVE" "$CODEX_BIN" debug models 2>/dev/null); then
-    echo "error: could not inspect the installed Codex model catalog; refusing --tier fast" >&2
-    return 1
-  fi
-  if ! printf '%s\n' "$catalog" | awk -v wanted="$model" '
-    { json = json $0 }
-    END {
-      count = split(json, models, /"slug"[[:space:]]*:[[:space:]]*"/)
-      for (i = 2; i <= count; i++) {
-        slug = models[i]
-        sub(/".*/, "", slug)
-        if (slug == wanted && models[i] ~ /"service_tiers"[[:space:]]*:[[:space:]]*\[[^]]*"id"[[:space:]]*:[[:space:]]*"priority"/) exit 0
-      }
-      exit 1
-    }
-  '; then
-    echo "error: Codex model '$model' does not advertise the priority service tier; refusing --tier fast" >&2
-    return 1
-  fi
 }
 
 case "$LAUNCH" in
@@ -2074,9 +1999,9 @@ if [ "$HARNESS" = codex ] && [ "$TIER" = fast ]; then
   if [ "$RELAUNCH" -eq 1 ]; then
     CODEX_PREFLIGHT_CWD=$WT
     [ "$KIND" = secondmate ] || CODEX_PREFLIGHT_CWD=$RELAUNCH_WT
-    codex_fast_tier_supported "$CODEX_PREFLIGHT_CWD" "$MODEL" || exit 1
+    fm_codex_fast_tier_supported "$CODEX_PREFLIGHT_CWD" "$MODEL" "$CODEX_BIN" "$CODEX_HOME_EFFECTIVE" || exit 1
   elif [ "$KIND" = secondmate ]; then
-    codex_fast_tier_supported "$WT" "$MODEL" || exit 1
+    fm_codex_fast_tier_supported "$WT" "$MODEL" "$CODEX_BIN" "$CODEX_HOME_EFFECTIVE" || exit 1
   elif [ "$BACKEND" != orca ]; then
     TREEHOUSE_GET_STATUS=0
     WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || TREEHOUSE_GET_STATUS=$?
@@ -2102,7 +2027,7 @@ if [ "$HARNESS" = codex ] && [ "$TIER" = fast ]; then
     TREEHOUSE_ABORT_FORCE=1
     freshen_spawn_worktree_base "$WT" || exit 1
     WORKTREE_REFRESHED=1
-    codex_fast_tier_supported "$WT" "$MODEL" || exit 1
+    fm_codex_fast_tier_supported "$WT" "$MODEL" "$CODEX_BIN" "$CODEX_HOME_EFFECTIVE" || exit 1
     PREACQUIRED_WORKTREE=1
   fi
 fi
@@ -2350,7 +2275,7 @@ EOF
     if [ "$HARNESS" = codex ] && [ "$TIER" = fast ]; then
       freshen_spawn_worktree_base "$WT" || exit 1
       WORKTREE_REFRESHED=1
-      codex_fast_tier_supported "$WT" "$MODEL" || exit 1
+      fm_codex_fast_tier_supported "$WT" "$MODEL" "$CODEX_BIN" "$CODEX_HOME_EFFECTIVE" || exit 1
     fi
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
