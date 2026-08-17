@@ -74,15 +74,17 @@ if [ "$DOC_MODE" = 1 ]; then
   shift
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (%s via-helper)\n' "$VERB" "$token" "$NOTE" "$DOC_PATH" >> "$STATUS_FILE"
+    line=$(printf '%s [%s]: %s (%s via-helper)' "$VERB" "$token" "$NOTE" "$DOC_PATH")
   else
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$DOC_PATH" >> "$STATUS_FILE"
+    line=$(printf '%s [%s]: %s (via-helper)' "$VERB" "$token" "$DOC_PATH")
   fi
 else
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$NOTE" >> "$STATUS_FILE"
+    line=$(printf '%s [%s]: %s (via-helper)' "$VERB" "$token" "$NOTE")
   else
-    printf '%s [%s]: (via-helper)\n' "$VERB" "$token" >> "$STATUS_FILE"
+    line=$(printf '%s [%s]: (via-helper)' "$VERB" "$token")
   fi
 fi
+
+"$SCRIPT_DIR/fm-status-report.sh" "$STATUS_FILE" "$line" >/dev/null
