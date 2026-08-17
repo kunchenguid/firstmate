@@ -195,7 +195,7 @@ fms_auth_header_release() {
 fms_api_post() {
   local method=$1 data=$2 ofile=$3 auth_header curl_bin=${FM_SLACK_CURL_BIN:-curl} rc
   case "$method" in
-    auth.test|chat.postMessage|chat.update|conversations.history|conversations.replies) ;;
+    auth.test|chat.postMessage|chat.update|conversations.history|conversations.replies|reactions.add|reactions.remove) ;;
     *) return 1 ;;
   esac
   command -v "$curl_bin" >/dev/null 2>&1 || return 1
@@ -281,9 +281,52 @@ fms_message_has_text() {
   [ -n "$text" ]
 }
 
-# Fixed, contentless acknowledgement posted by the poll check before waking firstmate.
-fms_ack_text() {
-  printf '%s' 'On it.'
+# Slack reactions used for captain-message acknowledgement and progress.
+# Keep this vocabulary as data so acknowledgement and later activity updates
+# cannot drift into separate state-to-emoji conditionals.
+FMS_REACTION_MAP='received=eyes working=hammer_and_wrench investigating=mag done=white_check_mark failed=x waiting=hourglass'
+
+fms_reaction_name() {
+  local state=$1 entry key value
+  for entry in $FMS_REACTION_MAP; do
+    key=${entry%%=*}
+    value=${entry#*=}
+    [ "$key" = "$state" ] && { printf '%s' "$value"; return 0; }
+  done
+  return 1
+}
+
+fms_add_reaction() {
+  local message_ts=$1 state=$2 body_file=${3:-} name data
+  fms_message_ts_valid "$message_ts" || return 1
+  fms_channel_configured || return 1
+  name=$(fms_reaction_name "$state") || return 1
+  if [ -z "$body_file" ]; then
+    body_file=$(mktemp "${TMPDIR:-/tmp}/fm-slack-reaction.XXXXXX") || return 1
+  fi
+  data="channel=$(printf '%s' "$FMS_CHANNEL_ID" | jq -sRr @uri)"
+  data="${data}&timestamp=$(printf '%s' "$message_ts" | jq -sRr @uri)"
+  data="${data}&name=$(printf '%s' "$name" | jq -sRr @uri)"
+  fms_api_post reactions.add "$data" "$body_file" || return 1
+  fms_api_json_ok "$body_file"
+}
+
+fms_set_reaction() {
+  local message_ts=$1 state=$2 target entry name data body_file
+  target=$(fms_reaction_name "$state") || return 1
+  fms_message_ts_valid "$message_ts" || return 1
+  fms_channel_configured || return 1
+  for entry in $FMS_REACTION_MAP; do
+    name=${entry#*=}
+    [ "$name" = "$target" ] && continue
+    data="channel=$(printf '%s' "$FMS_CHANNEL_ID" | jq -sRr @uri)"
+    data="${data}&timestamp=$(printf '%s' "$message_ts" | jq -sRr @uri)"
+    data="${data}&name=$(printf '%s' "$name" | jq -sRr @uri)"
+    body_file=$(mktemp "${TMPDIR:-/tmp}/fm-slack-reaction.XXXXXX") || return 1
+    fms_api_post reactions.remove "$data" "$body_file" >/dev/null 2>&1 || true
+    rm -f -- "$body_file"
+  done
+  fms_add_reaction "$message_ts" "$state"
 }
 
 fms_message_text_oneline() {
@@ -292,20 +335,15 @@ fms_message_text_oneline() {
 }
 
 fms_post_ack() {
-  local message_ts=$1 body_file=${2:-} data text
+  local message_ts=$1 body_file=${2:-}
   fms_message_ts_valid "$message_ts" || return 1
   fms_channel_configured || return 1
-  text=$(fms_ack_text)
-  [ -n "$text" ] || return 1
   if [ -z "$body_file" ]; then
     body_file=$(mktemp "${TMPDIR:-/tmp}/fm-slack-ack.XXXXXX") || return 1
   fi
-  data="channel=$(printf '%s' "$FMS_CHANNEL_ID" | jq -sRr @uri)"
-  data="${data}&text=$(printf '%s' "$text" | jq -sRr @uri)"
-  data="${data}&thread_ts=$(printf '%s' "$message_ts" | jq -sRr @uri)"
-  fms_api_post chat.postMessage "$data" "$body_file" || return 1
-  fms_api_json_ok "$body_file" || return 1
-  fms_api_response_channel_ok "$body_file" || return 1
+  if ! fms_add_reaction "$message_ts" received "$body_file"; then
+    printf 'slack-captain-warning received reaction failed for %s\n' "$message_ts" >&2
+  fi
   return 0
 }
 

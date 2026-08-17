@@ -36,6 +36,8 @@ done
 case "$url" in
   */auth.test) body='{"ok":true,"user_id":"U0BR5SQ4WN4"}' ;;
   */chat.postMessage) body='{"ok":true,"ts":"1786735224.700000","channel":"C0BQ9K1TJKG"}' ;;
+  */reactions.add) body='{"ok":true}' ;;
+  */reactions.remove) body='{"ok":true}' ;;
   *) body='{"ok":false,"error":"unexpected_method"}' ;;
 esac
 if [ -n "$ofile" ]; then printf '%s' "$body" > "$ofile"; else printf '%s' "$body"; fi
@@ -148,8 +150,9 @@ test_captain() {
   printf -v expected 'slack-captain-message %s\t%s' 1786735224.690829 status
   [ "$out" = "$expected" ] || fail "captain wake differs from poll contract: $out"
   [ -f "$home/state/slack-inbox/1786735224.690829.json" ] || fail "captain event was not stashed"
-  [ "$(grep -c '^method=chat.postMessage' "$log")" -eq 1 ] || fail "captain event was not acknowledged once"
-  pass "captain event produces the poll wake, inbox, and threaded acknowledgement"
+  [ "$(grep -c '^method=reactions.add' "$log")" -eq 1 ] || fail "captain event was not acknowledged once"
+  [ "$(grep -c '^method=chat.postMessage' "$log")" -eq 0 ] || fail "captain event posted an acknowledgement message"
+  pass "captain event produces the poll wake, inbox, and received reaction"
 }
 
 assert_refused() {

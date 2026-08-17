@@ -13,7 +13,6 @@ TMP_ROOT=$(fm_test_tmproot fm-slack-captain-tests)
 CHANNEL_ID=C0BQ9K1TJKG
 BOT_USER=U_BOT12345
 CAPTAIN_USER=U_CAPTAIN1
-ACK_TEXT='On it.'
 
 make_fake_curl() {
   local dir=$1 fakebin
@@ -63,6 +62,16 @@ case "$url" in
     else
       body=$(printf '{"ok":true,"ts":"1786735224.690829","channel":"%s"}' "${FAKE_SLACK_CHANNEL:-C0BQ9K1TJKG}")
     fi
+    ;;
+  */reactions.add)
+    if [ -n "${FAKE_SLACK_REACTION_FAIL:-}" ]; then
+      body='{"ok":false,"error":"reaction_failed"}'
+    else
+      body='{"ok":true}'
+    fi
+    ;;
+  */reactions.remove)
+    body='{"ok":true}'
     ;;
   *)
     body='{"ok":false,"error":"unknown_method"}'
@@ -114,13 +123,14 @@ private_mode() {
   fi
 }
 
+count_ack_reactions() {
+  local log=$1
+  awk 'index($0, "method=reactions.add") && index($0, "name=eyes") { n++ } END { print n + 0 }' "$log"
+}
+
 count_ack_posts() {
-  local log=$1 encoded
-  encoded=$(printf '%s' "$ACK_TEXT" | jq -sRr @uri)
-  awk -v t="$encoded" '
-    index($0, "method=chat.postMessage") && index($0, "thread_ts=") && index($0, "text=" t) { n++ }
-    END { print n + 0 }
-  ' "$log"
+  local log=$1
+  awk 'index($0, "method=chat.postMessage") && index($0, "thread_ts=") { n++ } END { print n + 0 }' "$log"
 }
 
 test_poll_continues_after_bot_cache_write_failure() {
@@ -204,16 +214,18 @@ printf -v expected 'slack-captain-message %s\t%s' "1786735224.690829" "status"
 [ "$out" = "$expected" ] || fail "poll wake line wrong: $out"
 [ -f "$home/state/slack-inbox/1786735224.690829.json" ] \
   || fail "poll must stash inbox payload"
-[ "$(count_ack_posts "$log")" -eq 1 ] \
-  || fail "poll must post exactly one threaded ack"
-grep -F 'thread_ts=1786735224.690829' "$log" >/dev/null \
-  || fail "ack must thread on the captain message"
-pass "fm-slack-poll acks and wakes with captain message text"
+[ "$(count_ack_reactions "$log")" -eq 1 ] \
+  || fail "poll must add exactly one received reaction"
+[ "$(count_ack_posts "$log")" -eq 0 ] \
+  || fail "poll must not post a threaded ack message"
+grep -F 'timestamp=1786735224.690829' "$log" >/dev/null \
+  || fail "ack reaction must target the captain message"
+pass "fm-slack-poll reacts and wakes with captain message text"
 
 out=$(run_poll "$home" "$fakebin"); rc=$?
 [ "$rc" -eq 0 ] && [ -z "$out" ] \
   || fail "poll must stay silent for an already offered message"
-[ "$(count_ack_posts "$log")" -eq 1 ] \
+[ "$(count_ack_reactions "$log")" -eq 1 ] \
   || fail "poll must not re-ack an already acked message"
 pass "fm-slack-poll does not re-wake or re-ack an offered message"
 
@@ -237,8 +249,8 @@ out=$(run_poll "$home" "$fakebin"); rc=$?
 [ "$rc" -eq 0 ] || fail "restart poll exited $rc"
 printf -v expected 'slack-captain-message %s\t%s' "1786735225.111111" "ping"
 [ "$out" = "$expected" ] || fail "restart poll wake wrong: $out"
-[ "$(count_ack_posts "$log")" -eq 0 ] \
-  || fail "restart poll must not re-post the ack when marker survives"
+[ "$(count_ack_reactions "$log")" -eq 0 ] \
+  || fail "restart poll must not re-add the ack when marker survives"
 pass "fm-slack-poll keeps ack idempotent across watcher restart"
 
 # --- ack marker without offer marker (independent of offer dedup) ------------
@@ -255,13 +267,13 @@ export FAKE_SLACK_HISTORY='{"ok":true,"messages":[{"type":"message","user":"'"$C
 out=$(run_poll "$home" "$fakebin"); rc=$?
 [ "$rc" -eq 0 ] || fail "ack-only setup poll exited $rc"
 [ -n "$out" ] || fail "ack-only setup poll must wake once"
-[ "$(count_ack_posts "$log")" -eq 1 ] || fail "ack-only setup must post one ack"
+[ "$(count_ack_reactions "$log")" -eq 1 ] || fail "ack-only setup must add one reaction"
 rm -f "$home/state/slack-offered/1786735227.333333"
 out=$(run_poll "$home" "$fakebin"); rc=$?
 [ "$rc" -eq 0 ] || fail "ack-only retry poll exited $rc"
 [ -n "$out" ] || fail "ack-only retry must wake without the offer marker"
-[ "$(count_ack_posts "$log")" -eq 1 ] \
-  || fail "ack-only retry must not re-post when the ack marker survives alone"
+[ "$(count_ack_reactions "$log")" -eq 1 ] \
+  || fail "ack-only retry must not re-add when the ack marker survives alone"
 pass "fm-slack-poll keeps ack idempotent without the offer marker"
 
 # --- thread reply after older parents were offered ----------------------------
@@ -362,13 +374,35 @@ log="$home/curl-bot.log"
 : > "$log"
 export FM_SLACK_CURL_LOG=$log
 export FAKE_SLACK_BOT_USER=$BOT_USER
-export FAKE_SLACK_HISTORY='{"ok":true,"messages":[{"type":"message","user":"'"$BOT_USER"'","text":"'"$ACK_TEXT"'","ts":"1786735226.222222"}]}'
+export FAKE_SLACK_HISTORY='{"ok":true,"messages":[{"type":"message","user":"'"$BOT_USER"'","text":"eyes","ts":"1786735226.222222"}]}'
 out=$(run_poll "$home" "$fakebin"); rc=$?
 [ "$rc" -eq 0 ] && [ -z "$out" ] \
   || fail "poll must ignore the bot's own messages"
 [ "$(count_ack_posts "$log")" -eq 0 ] \
   || fail "poll must not ack bot messages"
 pass "fm-slack-poll ignores bot messages including its own ack"
+
+# --- reaction failure must not suppress wake --------------------------------
+
+home="$TMP_ROOT/reaction-failure"
+make_home "$home"
+fakebin=$(make_fake_curl "$home/fake-reaction-failure")
+log="$home/curl-reaction-failure.log"
+: > "$log"
+export FM_SLACK_CURL_LOG=$log
+export FAKE_SLACK_BOT_USER=$BOT_USER
+export FAKE_SLACK_CHANNEL=$CHANNEL_ID
+export FAKE_SLACK_REACTION_FAIL=1
+export FAKE_SLACK_HISTORY='{"ok":true,"messages":[{"type":"message","user":"'"$CAPTAIN_USER"'","text":"still wake","ts":"1786735226.333333"}]}'
+out=$(run_poll "$home" "$fakebin"); rc=$?
+[ "$rc" -eq 0 ] || fail "poll must survive a failed reaction (rc=$rc)"
+printf -v expected 'slack-captain-message %s\t%s' "1786735226.333333" "still wake"
+[ "$out" = "$expected" ] || fail "failed reaction must not suppress wake: $out"
+[ -f "$home/state/slack-acked/1786735226.333333" ] || fail "failed reaction must retain ack marker"
+[ "$(count_ack_posts "$log")" -eq 0 ] || fail "failed reaction must not fall back to a message post"
+unset FAKE_SLACK_REACTION_FAIL
+unset FAKE_SLACK_HISTORY
+pass "fm-slack-poll wakes even when the received reaction fails"
 
 # --- channel enforcement ----------------------------------------------------
 

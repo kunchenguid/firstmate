@@ -9,7 +9,7 @@
 # Reads exclusively the configured channel id via conversations.history and
 # conversations.replies. Never calls conversations.list or any discovery API.
 # Each newly offered captain message is stashed at state/slack-inbox/<ts>.json,
-# acknowledged once in-thread with a fixed constant, then wakes firstmate once
+# acknowledged once with a received reaction, then wakes firstmate once
 # with: slack-captain-message <ts><TAB><text>
 set -u
 
