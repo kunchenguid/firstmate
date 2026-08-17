@@ -164,6 +164,7 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+#     __CODEXCOMMAND__ resolved Codex executable with its effective config home
 #     __TIERFLAG__  quoted Codex per-spawn service-tier override
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
@@ -743,7 +744,6 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
-  local -a treehouse_return_args
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -817,10 +817,12 @@ spawn_abort_cleanup() {
   fi
   if [ "$TREEHOUSE_ABORT_CLEANUP" = 1 ]; then
     TREEHOUSE_ABORT_CLEANUP=0
-    treehouse_return_args=(return --if-lease-holder "$ID")
-    [ "$TREEHOUSE_ABORT_FORCE" != 1 ] || treehouse_return_args+=(--force)
-    if ! (cd "$PROJ_ABS" && treehouse "${treehouse_return_args[@]}" "$TREEHOUSE_ABORT_WORKTREE" </dev/null); then
-      echo "warning: could not return pre-acquired worktree '$TREEHOUSE_ABORT_WORKTREE' after aborted spawn of $ID" >&2
+    if [ "$TREEHOUSE_ABORT_FORCE" = 1 ]; then
+      (cd "$PROJ_ABS" && treehouse return --force "$TREEHOUSE_ABORT_WORKTREE" </dev/null) \
+        || echo "warning: could not return pre-acquired worktree '$TREEHOUSE_ABORT_WORKTREE' after aborted spawn of $ID" >&2
+    else
+      (cd "$PROJ_ABS" && treehouse return "$TREEHOUSE_ABORT_WORKTREE" </dev/null) \
+        || echo "warning: could not return pre-acquired worktree '$TREEHOUSE_ABORT_WORKTREE' after aborted spawn of $ID" >&2
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -1176,6 +1178,41 @@ resolve_pi_executable() {
   esac
 }
 
+resolve_codex_executable() {
+  local candidate dir
+  candidate=$(type -P -- codex 2>/dev/null) || return 1
+  [ -x "$candidate" ] || return 1
+  case "$candidate" in
+    /*) printf '%s\n' "$candidate" ;;
+    *)
+      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || return 1
+      printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+      ;;
+  esac
+}
+
+resolve_codex_home() {
+  local path
+  if [ "${CODEX_HOME+x}" = x ]; then
+    path=$CODEX_HOME
+    [ -n "$path" ] || {
+      echo "error: CODEX_HOME is set but empty; cannot pin the Codex launch configuration" >&2
+      return 1
+    }
+  else
+    [ -n "${HOME:-}" ] || {
+      echo "error: HOME is unset; cannot resolve Codex's default config home" >&2
+      return 1
+    }
+    path=$HOME/.codex
+  fi
+  [ -d "$path" ] || {
+    echo "error: effective CODEX_HOME directory does not exist: $path" >&2
+    return 1
+  }
+  resolve_directory_input CODEX_HOME "$path"
+}
+
 # Pi's CLI surface is version-dependent, so probe the resolved executable's help
 # before composing the optional regular-TUI flag. An absent or inconclusive probe
 # omits the flag so older Pi versions can still spawn.
@@ -1203,9 +1240,9 @@ launch_template() {
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG____TIERFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__CODEXCOMMAND__ __MODELFLAG____EFFORTFLAG____TIERFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG____TIERFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' '__CODEXCOMMAND__ __MODELFLAG____EFFORTFLAG____TIERFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1317,6 +1354,17 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
 fi
 
 case "$HARNESS" in
+  codex)
+    CODEX_COMMAND=codex
+    if [ "$TIER" = fast ]; then
+      CODEX_BIN=$(resolve_codex_executable) || {
+        echo "error: Codex executable not found; cannot verify --tier fast support" >&2
+        exit 1
+      }
+      CODEX_HOME_EFFECTIVE=$(resolve_codex_home) || exit 1
+      CODEX_COMMAND="CODEX_HOME=$(shell_quote "$CODEX_HOME_EFFECTIVE") $(shell_quote "$CODEX_BIN")"
+    fi
+    ;;
   pi|pi-signed)
     PI_BIN=$(resolve_pi_executable "$HARNESS") || {
       echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
@@ -1535,14 +1583,10 @@ tier_flag_for_harness() {
 }
 
 codex_fast_tier_supported() {
-  local worktree=$1 model=$2 codex_bin doctor catalog
+  local worktree=$1 model=$2 doctor catalog
   [ "$HARNESS" = codex ] && [ "$TIER" = fast ] || return 0
-  codex_bin=$(type -P -- codex 2>/dev/null) || {
-    echo "error: Codex executable not found; cannot verify --tier fast support" >&2
-    return 1
-  }
   if [ -z "$model" ] || [ "$model" = default ]; then
-    doctor=$(cd "$worktree" && "$codex_bin" doctor --json 2>/dev/null) || true
+    doctor=$(cd "$worktree" && CODEX_HOME="$CODEX_HOME_EFFECTIVE" "$CODEX_BIN" doctor --json 2>/dev/null) || true
     case "$doctor" in
       \{*\}) ;;
       *)
@@ -1572,7 +1616,7 @@ codex_fast_tier_supported() {
       return 1
     fi
   fi
-  if ! catalog=$(cd "$worktree" && "$codex_bin" debug models 2>/dev/null); then
+  if ! catalog=$(cd "$worktree" && CODEX_HOME="$CODEX_HOME_EFFECTIVE" "$CODEX_BIN" debug models 2>/dev/null); then
     echo "error: could not inspect the installed Codex model catalog; refusing --tier fast" >&2
     return 1
   fi
@@ -2025,10 +2069,6 @@ if [ "$HARNESS" = codex ] && [ "$TIER" = fast ]; then
     TREEHOUSE_GET_STATUS=0
     WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || TREEHOUSE_GET_STATUS=$?
     if [ "$TREEHOUSE_GET_STATUS" -ne 0 ]; then
-      if [ -n "$WT" ]; then
-        TREEHOUSE_ABORT_CLEANUP=1
-        TREEHOUSE_ABORT_WORKTREE=$WT
-      fi
       echo "error: treehouse get --lease failed to acquire a worktree for $ID" >&2
       exit 1
     fi
@@ -2935,6 +2975,7 @@ sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 TIERFLAG=$(tier_flag_for_harness "$HARNESS" "$TIER")
+[ "$HARNESS" != codex ] || LAUNCH=${LAUNCH//__CODEXCOMMAND__/$CODEX_COMMAND}
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__TIERFLAG__/$TIERFLAG}

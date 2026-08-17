@@ -72,6 +72,9 @@ case "${1:-}" in
     printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
     ;;
   return)
+    case " $* " in
+      *' --if-lease-holder '*) exit 64 ;;
+    esac
     [ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf 'return cwd=%s args=%s\n' "$PWD" "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
     ;;
 esac
@@ -98,13 +101,13 @@ case "${1:-} ${2:-}" in
     if [ -f .codex/fake-effective-model ]; then
       IFS= read -r effective_model < .codex/fake-effective-model
     fi
-    [ -z "${FM_FAKE_CODEX_CWD_LOG:-}" ] || printf 'doctor %s\n' "$PWD" >> "$FM_FAKE_CODEX_CWD_LOG"
+    [ -z "${FM_FAKE_CODEX_CWD_LOG:-}" ] || printf 'doctor %s bin=%s home=%s\n' "$PWD" "$0" "${CODEX_HOME:-}" >> "$FM_FAKE_CODEX_CWD_LOG"
     printf '{"checks":[{"id":"config.load","details":{"model":"%s"}}]}\n' \
       "$effective_model"
     exit "${FM_FAKE_CODEX_DOCTOR_STATUS:-0}"
     ;;
   'debug models')
-    [ -z "${FM_FAKE_CODEX_CWD_LOG:-}" ] || printf 'models %s\n' "$PWD" >> "$FM_FAKE_CODEX_CWD_LOG"
+    [ -z "${FM_FAKE_CODEX_CWD_LOG:-}" ] || printf 'models %s bin=%s home=%s\n' "$PWD" "$0" "${CODEX_HOME:-}" >> "$FM_FAKE_CODEX_CWD_LOG"
     [ "${FM_FAKE_CODEX_CATALOG_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CODEX_CATALOG_STATUS}"
     printf '%s\n' '{"models":[{"slug":"gpt-5.4","service_tiers":[{"id":"priority"}]},{"slug":"gpt-5.4-mini","service_tiers":[]}]}'
     ;;
@@ -125,7 +128,7 @@ make_spawn_case() {
   wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
-  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" "$home/codex-home"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
@@ -163,6 +166,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    CODEX_HOME="$home/codex-home" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_ENDPOINT_LOG="$launchlog.endpoint" \
@@ -542,18 +546,44 @@ SH
   expect_code 0 "$status" "codex spawn with fast tier should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex default default fast
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex -c 'service_tier=\"priority\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "CODEX_HOME='$HOME_DIR/codex-home' '$FAKEBIN_DIR/codex' -c 'service_tier=\"priority\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex fast tier was not threaded as the verified priority override"
   assert_not_contains "$launch" "service_tier=\"default\"" "fast tier launch must not contain the standard override"
   assert_grep "doctor $WT_DIR" "$LAUNCH_LOG.codex-cwd" \
     "Codex fast preflight did not resolve configuration from the finalized worktree"
-  assert_grep "models $WT_DIR" "$LAUNCH_LOG.codex-cwd" \
-    "Codex fast catalog inspection did not run from the finalized worktree"
+  assert_grep "doctor $WT_DIR bin=$FAKEBIN_DIR/codex home=$HOME_DIR/codex-home" "$LAUNCH_LOG.codex-cwd" \
+    "Codex fast preflight did not use the pinned executable and config home"
+  assert_grep "models $WT_DIR bin=$FAKEBIN_DIR/codex home=$HOME_DIR/codex-home" "$LAUNCH_LOG.codex-cwd" \
+    "Codex fast catalog inspection did not use the pinned executable and config home"
   assert_grep "get cwd=$PROJ_DIR args=get --lease --lease-holder $id" "$LAUNCH_LOG.treehouse" \
     "Codex fast spawn did not lease its worktree before endpoint creation"
   assert_no_grep "return " "$LAUNCH_LOG.treehouse" \
     "successful Codex fast spawn returned its live worktree lease"
   pass "codex fast tier is an explicit opt-in"
+}
+
+test_codex_fast_secondmate_pins_runtime() {
+  local rec id sm out status launch
+  id=profile-codex-fast-secondmate-z3aa
+  rec=$(make_spawn_case profile-codex-fast-secondmate codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" --secondmate --tier fast)
+  status=$?
+  expect_code 0 "$status" "Codex fast secondmate spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$HOME_DIR/codex-home' '$FAKEBIN_DIR/codex' -c 'service_tier=\"priority\"' --dangerously-bypass-approvals-and-sandbox" \
+    "Codex fast secondmate launch did not pin its preflight runtime"
+  assert_not_contains "$launch" "notify=" \
+    "Codex secondmate launch gained the task turn-end hook variant"
+  assert_grep "doctor $sm bin=$FAKEBIN_DIR/codex home=$HOME_DIR/codex-home" "$LAUNCH_LOG.codex-cwd" \
+    "Codex fast secondmate preflight did not use its pinned launch runtime"
+  assert_grep "models $sm bin=$FAKEBIN_DIR/codex home=$HOME_DIR/codex-home" "$LAUNCH_LOG.codex-cwd" \
+    "Codex fast secondmate catalog inspection did not use its pinned launch runtime"
+  pass "Codex fast secondmates pin the validated executable and config home"
 }
 
 test_codex_fast_tier_requires_model_support() {
@@ -594,7 +624,7 @@ test_codex_fast_tier_requires_model_support() {
   assert_absent "$LAUNCH_LOG.endpoint" "unsupported configured fast model created an endpoint"
   assert_grep "doctor $WT_DIR" "$LAUNCH_LOG.codex-cwd" \
     "configured-model refusal did not inspect the refreshed launch worktree"
-  assert_grep "return cwd=$PROJ_DIR args=return --if-lease-holder $id --force $WT_DIR" "$LAUNCH_LOG.treehouse" \
+  assert_grep "return cwd=$PROJ_DIR args=return --force $WT_DIR" "$LAUNCH_LOG.treehouse" \
     "failed Codex fast preflight did not return its pre-acquired worktree"
   pass "Codex fast tier requires priority support from the resolved model"
 }
@@ -1007,6 +1037,7 @@ test_claude_threads_model_and_effort
 test_non_codex_tier_is_omitted_with_warning
 test_codex_threads_model_and_effort
 test_codex_fast_tier_opt_in
+test_codex_fast_secondmate_pins_runtime
 test_codex_fast_tier_requires_model_support
 test_codex_fast_tier_fails_closed_without_catalog
 test_codex_omits_invalid_max_effort
