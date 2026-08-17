@@ -842,6 +842,8 @@ It is read-only in secondmate homes and must not be edited there.
 Changes return through a marked status document pointer.
 current post-spawn preference
 EOF
+serialized_reads_before=$(grep -c '^pane read ' "$HERDR_LOG" || true)
+serialized_sends_before=$(grep -c '^pane send-text ' "$HERDR_LOG" || true)
 remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/spawn-concurrent-push.out" 2>&1 &
 spawn_config_push=$!
 sleep 0.2
@@ -852,7 +854,65 @@ wait "$spawn_concurrent" || fail "serialized remote spawn failed"
 wait "$spawn_config_push" || fail "config push failed after serialized remote spawn"$'\n'"$(cat "$TMP_ROOT/spawn-concurrent-push.out")"
 [ "$(tail -1 "$REMOTE_HOME/data/captain-shared.md")" = 'current post-spawn preference' ] \
   || fail "stale spawn inheritance overwrote later config convergence"
+serialized_reads_after=$(grep -c '^pane read ' "$HERDR_LOG" || true)
+serialized_sends_after=$(grep -c '^pane send-text ' "$HERDR_LOG" || true)
+[ "$serialized_reads_after" -gt "$serialized_reads_before" ] \
+  || fail "serialized config push never read the live Herdr composer before steering"
+[ "$serialized_sends_after" -gt "$serialized_sends_before" ] \
+  || fail "serialized config push did not steer after the Herdr composer classified empty"
+serialized_last_read=$(grep -n '^pane read ' "$HERDR_LOG" | tail -1 | cut -d: -f1)
+serialized_last_send=$(grep -n '^pane send-text ' "$HERDR_LOG" | tail -1 | cut -d: -f1)
+[ "$serialized_last_read" -lt "$serialized_last_send" ] \
+  || fail "serialized config push did not preflight the composer before typing"
 pass "remote spawn serializes inheritance through launch publication"
+
+# A real but unreadable Herdr composer is not the same state as the empty bare
+# Codex composer above. Force pane read itself to fail, then drive the same
+# config-push -> remote-control -> fm-send production path and prove the
+# unknown verdict refuses before either text or Enter is sent.
+composer_state_tmp="$HERDR_STATE.composer-unreadable"
+if ! jq '.composer_readable = false' "$HERDR_STATE" > "$composer_state_tmp" \
+  || ! mv -f "$composer_state_tmp" "$HERDR_STATE"; then
+  fail "could not make the Herdr composer unreadable"
+fi
+cat > "$PARENT/data/captain-shared.md" <<'EOF'
+# Shared captain preferences
+This file is main-authoritative and maintained by the main firstmate.
+It is read-only in secondmate homes and must not be edited there.
+Changes return through a marked status document pointer.
+unreadable composer must retain this reread
+EOF
+unreadable_reads_before=$(grep -c '^pane read ' "$HERDR_LOG" || true)
+unreadable_sends_before=$(grep -c '^pane send-text ' "$HERDR_LOG" || true)
+unreadable_enters_before=$(grep -c '^pane send-keys .* enter ' "$HERDR_LOG" || true)
+if remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-unreadable-composer.out" 2>&1; then
+  fail "remote config push steered despite an unreadable Herdr composer"
+fi
+unreadable_reads_after=$(grep -c '^pane read ' "$HERDR_LOG" || true)
+unreadable_sends_after=$(grep -c '^pane send-text ' "$HERDR_LOG" || true)
+unreadable_enters_after=$(grep -c '^pane send-keys .* enter ' "$HERDR_LOG" || true)
+[ "$unreadable_reads_after" -gt "$unreadable_reads_before" ] \
+  || fail "unreadable-composer refusal never exercised the production preflight"
+[ "$unreadable_sends_after" -eq "$unreadable_sends_before" ] \
+  || fail "unreadable Herdr composer received text before refusal"
+[ "$unreadable_enters_after" -eq "$unreadable_enters_before" ] \
+  || fail "unreadable Herdr composer received Enter before refusal"
+assert_grep 'config-reread: send failed; retry retained' "$TMP_ROOT/config-unreadable-composer.out" \
+  "unreadable Herdr composer did not retain the failed reread"
+UNREADABLE_NUDGE_MARKER="$PARENT/state/.secondmate-nudge-pending/ios.pending"
+assert_grep 'remote=1' "$UNREADABLE_NUDGE_MARKER" \
+  "unreadable Herdr composer lost its retry marker"
+if ! jq '.composer_readable = true' "$HERDR_STATE" > "$composer_state_tmp" \
+  || ! mv -f "$composer_state_tmp" "$HERDR_STATE"; then
+  fail "could not restore the readable Herdr composer"
+fi
+remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-readable-composer-retry.out" \
+  || fail "readable empty Herdr composer did not accept the retained reread"
+assert_absent "$UNREADABLE_NUDGE_MARKER" \
+  "readable Herdr composer retry left its nudge marker"
+assert_grep 'config-reread: sent' "$TMP_ROOT/config-readable-composer-retry.out" \
+  "readable Herdr composer retry was not reported"
+pass "remote config reread distinguishes an empty Herdr composer from an unreadable one"
 
 # A normal marked parent request traverses SSH, reaches the remote endpoint once,
 # and resolves only after the correlated remote log delta is ingested.

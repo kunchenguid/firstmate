@@ -168,6 +168,7 @@ Send routed requests normally:
 FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
 ```
 
+The remote host applies the fleet-wide pre-typing composer guard; [Composer and injection safety](herdr-backend.md#composer-and-injection-safety) owns its verdict and refusal contract.
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
 A process-event source performs a non-destructive, cursor-anchored delta read, fetches only referenced `data/*.md` documents through the confined reader, mirrors every content-bearing line at most once into the primary status channel, and does not carry blank separators.

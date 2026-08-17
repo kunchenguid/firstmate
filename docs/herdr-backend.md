@@ -243,7 +243,9 @@ ANSI capture preserves de-emphasized placeholder style.
 If the ANSI capture ever fails, the plain fallback declares itself unstyled and the classifier degrades a glyph row carrying trailing text to `unknown` instead of misreading ghost suggestions as typed input, which safely defers injection and eventually raises the wedge alarm.
 
 A bare shell prompt is never an empty agent composer.
-Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
+Every `fm-send.sh` text request inspects the existing composer before typing and proceeds only on an affirmative `empty` result.
+Pending, pending-unproven, unknown (including an unreadable capture), and future verdicts refuse before either text or Enter is sent; a remote secondmate send applies the same guard through `fm-send.sh` on the remote host.
+Away-mode injection follows the same affirmative-empty boundary and defers every other verdict.
 This prevents a dead agent pane from receiving and possibly executing an escalation as shell input.
 
 The current operational envelope starts with U+2063 and `FIRSTMATE_OP: `.
