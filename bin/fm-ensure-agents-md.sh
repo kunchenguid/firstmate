@@ -20,8 +20,22 @@
 # link would have carried for that same mismatch.
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
+# Refuses outright when the local config/project-memory knob (bin/fm-project-memory-lib.sh;
+# docs/configuration.md "Project memory") is "off", making the opt-out structural
+# rather than only a matter of bin/fm-brief.sh omitting the instruction to run this
+# script. A crewmate normally has no FM_HOME in its environment (bin/fm-spawn.sh
+# injects it only for a secondmate launch), so this check resolves the config
+# directory from FM_HOME/FM_CONFIG_OVERRIDE when set, else from this script's own
+# tracked-code-root location - correct for the common case of an ordinary
+# crewmate invoking the exact path baked into its brief at scaffold time, but it
+# cannot see a secondmate home's own distinct knob value when that secondmate
+# shares the primary's tracked checkout.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
 set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-project-memory-lib.sh
+. "$SCRIPT_DIR/fm-project-memory-lib.sh"
 
 usage() {
   echo "usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]" >&2
@@ -34,6 +48,12 @@ case "${1:-}" in
     ;;
 esac
 [ "$#" -le 1 ] || { usage; exit 1; }
+
+PROJECT_MEMORY_CONFIG="${FM_CONFIG_OVERRIDE:-${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}/config}"
+if ! fm_project_memory_enabled "$PROJECT_MEMORY_CONFIG"; then
+  echo "error: config/project-memory is off; this firstmate home does not commit project AGENTS.md/CLAUDE.md files (docs/configuration.md \"Project memory\")" >&2
+  exit 1
+fi
 
 DIR=${1:-.}
 [ -d "$DIR" ] || { echo "error: not a directory: $DIR" >&2; exit 1; }

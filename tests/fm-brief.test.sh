@@ -362,6 +362,8 @@ test_ship_project_memory_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
+  assert_grep "# Project memory" "$brief" \
+    "project-memory section missing with config/project-memory absent (default on)"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
     "project-memory contract lost the durable-knowledge bar"
   assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
@@ -369,6 +371,38 @@ test_ship_project_memory_wording() {
   assert_grep "lacks \`## Maintaining this file\`, add that short self-governance section" "$brief" \
     "project-memory contract lost the self-governance add-in-same-pass rule"
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
+}
+
+test_ship_project_memory_knob_on_explicit() {
+  local home id brief
+  home="$TMP_ROOT/project-memory-home-on"
+  mkdir -p "$home/data" "$home/config"
+  printf 'on\n' > "$home/config/project-memory"
+  id="brief-memory-c2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "# Project memory" "$brief" \
+    "project-memory section missing with config/project-memory explicitly on"
+  pass "fm-brief.sh: explicit config/project-memory=on keeps the section"
+}
+
+test_ship_project_memory_knob_off_omits_section() {
+  local home id brief
+  home="$TMP_ROOT/project-memory-home-off"
+  mkdir -p "$home/data" "$home/config"
+  printf 'off\n' > "$home/config/project-memory"
+  id="brief-memory-c3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_no_grep "Project memory" "$brief" \
+    "project-memory section (or a stub of it) leaked into the brief with config/project-memory=off"
+  assert_no_grep "fm-ensure-agents-md.sh" "$brief" \
+    "brief still tells the crewmate to run fm-ensure-agents-md.sh with config/project-memory=off"
+  assert_grep "# Definition of done" "$brief" \
+    "brief lost the Definition of done section entirely"
+  pass "fm-brief.sh: config/project-memory=off omits the Project memory section with no stub"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
@@ -720,6 +754,8 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_ship_project_memory_knob_on_explicit
+test_ship_project_memory_knob_off_omits_section
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

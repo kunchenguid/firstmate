@@ -353,6 +353,41 @@ test_lowercase_agents_md_refuses_case_fragile_pointer() {
   pass "fm-ensure-agents-md.sh: refuses a case-variant lowercase agents.md (issue #389)"
 }
 
+test_project_memory_knob_off_refuses_loudly() {
+  local repo home out rc
+  repo="$TMP_ROOT/project-memory-off-project"
+  home="$TMP_ROOT/project-memory-off-home"
+  mkdir -p "$repo" "$home/config"
+  printf 'off\n' > "$home/config/project-memory"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "expected a non-zero exit when config/project-memory is off"
+  assert_contains "$out" "project-memory" "refusal did not name the config/project-memory knob"
+  assert_contains "$out" "off" "refusal did not explain the knob is off"
+  assert_absent "$repo/AGENTS.md" "AGENTS.md was created despite config/project-memory=off"
+  assert_absent "$repo/CLAUDE.md" "CLAUDE.md was created despite config/project-memory=off"
+  pass "fm-ensure-agents-md.sh: refuses loudly when config/project-memory is off"
+}
+
+test_project_memory_knob_on_and_absent_still_write() {
+  local repo home
+  repo="$TMP_ROOT/project-memory-on-project"
+  home="$TMP_ROOT/project-memory-on-home"
+  mkdir -p "$repo" "$home/config"
+  printf 'on\n' > "$home/config/project-memory"
+  FM_HOME="$home" "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed with config/project-memory=on"
+  assert_present "$repo/AGENTS.md" "AGENTS.md was not created with config/project-memory=on"
+
+  repo="$TMP_ROOT/project-memory-absent-project"
+  home="$TMP_ROOT/project-memory-absent-home"
+  mkdir -p "$repo" "$home/config"
+  FM_HOME="$home" "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed with config/project-memory absent"
+  assert_present "$repo/AGENTS.md" "AGENTS.md was not created with config/project-memory absent (default on)"
+  pass "fm-ensure-agents-md.sh: config/project-memory=on and absent both keep the default write-enabled behavior"
+}
+
 test_created_agents_md_includes_self_governance
 test_fresh_setup_writes_real_claude_pointer
 test_promoted_claude_md_includes_self_governance
@@ -369,3 +404,5 @@ test_agents_md_symlink_is_refused
 test_wrong_target_symlink_is_refused
 test_non_regular_claude_md_is_refused
 test_lowercase_agents_md_refuses_case_fragile_pointer
+test_project_memory_knob_off_refuses_loudly
+test_project_memory_knob_on_and_absent_still_write

@@ -47,6 +47,17 @@ Set the local, gitignored `config/backlog-backend` file to `manual` to force man
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+## Project memory (config/project-memory)
+
+`bin/fm-brief.sh` includes a "Project memory" section in every generated ship brief, instructing the crewmate to record durable project-intrinsic knowledge in the project's own `AGENTS.md` via `bin/fm-ensure-agents-md.sh` (AGENTS.md section 6, "Route durable knowledge to its most specific owner").
+Some captains forbid committing `AGENTS.md`/`CLAUDE.md` into a project repo at all, for example because agent rules live in a machine-level `CLAUDE.md` instead.
+The local, gitignored `config/project-memory` file opts a firstmate home out of that contract.
+Absent or `on` keeps the section in every generated ship brief, unchanged from the pre-existing default.
+`off` omits the section entirely rather than leaving a weakened stub, and also makes `bin/fm-ensure-agents-md.sh` itself refuse to run rather than only relying on the brief never mentioning it.
+That refusal resolves its own config directory from `FM_HOME` (or `FM_CONFIG_OVERRIDE`) when set, else from the script's own tracked-code-root location, so it reliably sees the knob for an ordinary crewmate invoking the exact path baked into its brief, but not necessarily a secondmate home's own distinct value when that secondmate shares the primary's tracked checkout.
+Any file content other than the exact literal `off` is treated as `on`, so an unrecognized value fails open to the pre-existing default rather than silently disabling the contract.
+This preference is local to each firstmate home and is not part of secondmate inherited configuration.
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
