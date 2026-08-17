@@ -20,16 +20,20 @@
 #     requires_child_metadata, blocked_by_ids, unresolved_blocker_ids, and
 #     captain_actionable fields. Repeated blocker tokens remain ordered; a blocker
 #     resolves only when its structured record is Done, and missing ids stay open.
-#   tasks[]: one row per state/<id>.meta, sorted by id.
+#   tasks[]: one row per state/<id>.meta, sorted by id, including recorded
+#     harness and model identity.
 #     current_state is parsed from bin/fm-crew-state.sh <id> and preserves
-#     state, source, detail, and raw line separately.
+#     state, source, detail, and raw line separately. With --no-remote-probe,
+#     remote rows use their local status history and explicitly report unknown
+#     when that history does not establish current state.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
-#     endpoint.exists is the cheap backend endpoint-presence read.
+#     endpoint.exists is the cheap backend endpoint-presence read; it is unknown
+#     for remote rows when --no-remote-probe is set.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
