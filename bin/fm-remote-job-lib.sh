@@ -164,7 +164,12 @@ fm_remote_job_homebrew_prefixes() {
 # first, by version sort rather than by name, so python@3.13 outranks python@3.9
 # and node@24 outranks node@8. Plain byte ordering would silently hand every
 # remote worker the older keg whenever the versions differ in digit count.
-fm_remote_job_sort_versions_desc() { # <newline-separated paths>
+#
+# The sort key is the keg directory <name>@<version>, never the discovered
+# <keg>/bin path. A trailing component inverts every strict-prefix version pair:
+# after the shared text of openssl@3 and openssl@3.6, version comparison would
+# weigh `/` against `.` and rank the bare openssl@3 higher.
+fm_remote_job_sort_versions_desc() { # <newline-separated names>
   local lines=$1 sorted
   [ -n "$lines" ] || return 0
   # Both BSD and GNU sort implement -V; an implementation without it falls back
@@ -175,12 +180,15 @@ fm_remote_job_sort_versions_desc() { # <newline-separated paths>
 }
 
 fm_remote_job_append_keg_only_bins() { # <homebrew-prefix>
-  local prefix=$1 directory matches
-  matches=$(compgen -G "$prefix/opt/*@*/bin" 2>/dev/null || true)
-  [ -n "$matches" ] || return 0
+  local prefix=$1 directory kegs=''
   while IFS= read -r directory; do
-    [ -z "$directory" ] || fm_remote_job_path_append_if_dir "$directory"
-  done < <(fm_remote_job_sort_versions_desc "$matches")
+    [ -n "$directory" ] || continue
+    kegs="${kegs}${directory%/bin}"$'\n'
+  done < <(compgen -G "$prefix/opt/*@*/bin" 2>/dev/null || true)
+  [ -n "$kegs" ] || return 0
+  while IFS= read -r directory; do
+    [ -z "$directory" ] || fm_remote_job_path_append_if_dir "$directory/bin"
+  done < <(fm_remote_job_sort_versions_desc "$kegs")
 }
 
 fm_remote_job_nvm_default_selector() { # <account-home>

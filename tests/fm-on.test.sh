@@ -214,12 +214,16 @@ OPTIONAL_DIRS=(
 # this expectation, so a host with such a formula, a host with only unversioned
 # kegs, and a host with no Homebrew each exercise a real direction.
 BREW_PREFIXES=(/opt/homebrew /usr/local)
+# Sorted on the <name>@<version> keg directory, not on the discovered
+# <keg>/bin path, because a trailing component inverts strict-prefix version
+# pairs such as openssl@3 and openssl@3.6.
 keg_dirs_for_prefix() { # <homebrew-prefix>
-  local matches
-  matches=$(compgen -G "$1/opt/*@*/bin" 2>/dev/null || true)
-  [ -n "$matches" ] || return 0
-  printf '%s\n' "$matches" | LC_ALL=C sort -rV 2>/dev/null \
-    || printf '%s\n' "$matches" | LC_ALL=C sort -r
+  local kegs sorted
+  kegs=$(compgen -G "$1/opt/*@*/bin" 2>/dev/null | sed 's|/bin$||' || true)
+  [ -n "$kegs" ] || return 0
+  sorted=$(printf '%s\n' "$kegs" | LC_ALL=C sort -rV 2>/dev/null) || sorted=
+  [ -n "$sorted" ] || sorted=$(printf '%s\n' "$kegs" | LC_ALL=C sort -r)
+  printf '%s\n' "$sorted" | sed 's|$|/bin|'
 }
 KEG_DIRS=()
 for prefix in "${BREW_PREFIXES[@]}"; do

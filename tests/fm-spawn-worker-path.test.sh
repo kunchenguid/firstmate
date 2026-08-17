@@ -178,9 +178,12 @@ SH
   pass "fm-spawn: a provider shell missing node receives the exact caller PATH, resolves a versioned formula's node/npx, runs env-node, and preserves quoted entries"
 }
 
-# Cursor is the only verified worker adapter whose launch template already
-# carries an `env` prefix of its own, so it is the one runtime where a later
-# change could plausibly clear the shared handoff. Drive its real template.
+# Two launch templates carry an `env` prefix of their own - cursor and muse -
+# and every harness except cursor is additionally wrapped in the shared
+# `env -u CURSOR_AGENT -u CURSOR_INVOKED_AS`. Cursor is therefore the one
+# adapter whose `env` prefix is its own template's alone, with no shared wrapper
+# behind it, so it is the launch shape where a later change could most easily
+# clear the handoff unnoticed. Drive its real template.
 test_cursor_template_env_prefix_preserves_the_caller_path() {
   local record versioned caller_path out status result
   record=$(make_spawn_case cursor-harness)

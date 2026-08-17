@@ -164,21 +164,30 @@ KEG_LINKED="$KEG_PREFIX/bin"
 KEG_NEW="$KEG_PREFIX/Cellar/node@24/24.14.1/bin"
 KEG_OLD="$KEG_PREFIX/Cellar/node@22/22.9.0/bin"
 KEG_UNVERSIONED="$KEG_PREFIX/opt/libpq/bin"
-# python@3.9 sorts AHEAD of python@3.13 in byte order, so this pair fails
-# whenever the ordering rule is not a version sort.
+# Two ordering shapes that byte order and path-suffixed version sort each get
+# wrong. python@3.9 sorts AHEAD of python@3.13 in byte order. openssl@3.6 sorts
+# BELOW openssl@3 whenever the trailing /bin rides along in the sort key,
+# because version comparison then weighs `/` against `.` after the shared text.
 KEG_PY_NEW="$KEG_PREFIX/Cellar/python@3.13/3.13.2/bin"
 KEG_PY_OLD="$KEG_PREFIX/Cellar/python@3.9/3.9.21/bin"
+KEG_SSL_NEW="$KEG_PREFIX/Cellar/openssl@3.6/3.6.1/bin"
+KEG_SSL_OLD="$KEG_PREFIX/Cellar/openssl@3/3.0.18/bin"
 mkdir -p "$KEG_HOME" "$KEG_LINKED" "$KEG_NEW" "$KEG_OLD" "$KEG_UNVERSIONED" \
-  "$KEG_PY_NEW" "$KEG_PY_OLD" "$KEG_PREFIX/opt"
+  "$KEG_PY_NEW" "$KEG_PY_OLD" "$KEG_SSL_NEW" "$KEG_SSL_OLD" "$KEG_PREFIX/opt"
 ln -s ../Cellar/node@24/24.14.1 "$KEG_PREFIX/opt/node@24"
 ln -s ../Cellar/node@22/22.9.0 "$KEG_PREFIX/opt/node@22"
 ln -s ../Cellar/python@3.13/3.13.2 "$KEG_PREFIX/opt/python@3.13"
 ln -s ../Cellar/python@3.9/3.9.21 "$KEG_PREFIX/opt/python@3.9"
-# A name no system directory provides, so the assertion observes the keg
+ln -s ../Cellar/openssl@3.6/3.6.1 "$KEG_PREFIX/opt/openssl@3.6"
+ln -s ../Cellar/openssl@3/3.0.18 "$KEG_PREFIX/opt/openssl@3"
+# Names no system directory provides, so the assertions observe the keg
 # ordering itself rather than the system tail that deliberately outranks it.
 printf '#!/bin/bash\nprintf "keg-python-3.13\\n"\n' > "$KEG_PY_NEW/fm-keg-python"
 printf '#!/bin/bash\nprintf "keg-python-3.9\\n"\n' > "$KEG_PY_OLD/fm-keg-python"
-chmod +x "$KEG_PY_NEW/fm-keg-python" "$KEG_PY_OLD/fm-keg-python"
+printf '#!/bin/bash\nprintf "keg-openssl-3.6\\n"\n' > "$KEG_SSL_NEW/fm-keg-openssl"
+printf '#!/bin/bash\nprintf "keg-openssl-3\\n"\n' > "$KEG_SSL_OLD/fm-keg-openssl"
+chmod +x "$KEG_PY_NEW/fm-keg-python" "$KEG_PY_OLD/fm-keg-python" \
+  "$KEG_SSL_NEW/fm-keg-openssl" "$KEG_SSL_OLD/fm-keg-openssl"
 printf '#!/bin/bash\ncase "${1:-}" in */npx) printf "keg-npx-ok\\n" ;; *) printf "keg-node-24\\n" ;; esac\n' > "$KEG_NEW/node"
 printf '#!/usr/bin/env node\n' > "$KEG_NEW/npx"
 printf '#!/bin/bash\nprintf "keg-shadow\\n"\n' > "$KEG_NEW/ls"
@@ -190,6 +199,9 @@ fm_remote_job_compose_operator_path "$KEG_HOME" >/dev/null
 KEG_PYTHON=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" fm-keg-python 2>/dev/null || printf 'MISSING\n')
 [ "$KEG_PYTHON" = keg-python-3.13 ] \
   || fail "keg-only formula versions were not ordered by version (got '$KEG_PYTHON')"
+KEG_OPENSSL=$(PATH="$FM_REMOTE_JOB_OPERATOR_PATH" fm-keg-openssl 2>/dev/null || printf 'MISSING\n')
+[ "$KEG_OPENSSL" = keg-openssl-3.6 ] \
+  || fail "a strict-prefix keg version pair was ordered by path rather than by version (got '$KEG_OPENSSL')"
 # A distribution that ships /usr/bin/node keeps that system copy ahead of an
 # unlinked keg on purpose, so the executable node/npx proof only runs where the
 # system tail is silent. The always-portable proof that a worker resolves node

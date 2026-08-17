@@ -62,7 +62,10 @@ ok - fm-spawn: a control byte in PATH refuses before endpoint creation and never
 
 Applicability was inspected across every supported axis.
 All verified worker harnesses - Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse - launch after the one shared export, and their existing narrower launch prefixes do not clear `PATH`.
-Cursor is the only one whose template already carried an `env` prefix of its own; it unsets four foreign primary markers and never touches `PATH`, and Cursor is crewmate/scout only, so no Cursor secondmate axis exists to inspect.
+Two templates carry an `env` prefix of their own: Cursor unsets five foreign primary markers, and Muse unsets four and sets `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and one Muse privacy variable.
+Every harness except Cursor is additionally wrapped in the shared `env -u CURSOR_AGENT -u CURSOR_INVOKED_AS`, so a Muse launch runs through two stacked `env` invocations.
+None of those invocations clears or replaces `PATH` - each only unsets named markers or sets unrelated variables - so the shared export survives every one.
+Cursor's is the only template-level `env` prefix with no shared wrapper behind it, which is why the regression drives Cursor's real template; Cursor is also crewmate/scout only, so no Cursor secondmate axis exists to inspect.
 Tmux, Herdr, Zellij, Orca, and cmux all submit that export in the existing backend-neutral literal launch line immediately before the harness command, so no provider-specific environment mutation was added.
 Fresh spawns and recovery relaunches converge by replacing the shell value with the current caller snapshot instead of appending directories.
 Orca and cmux secondmate launches remain not applicable because those backend-kind combinations are still unsupported, while their ordinary worker launches use the shared handoff.
