@@ -188,7 +188,13 @@ printf '#!/bin/bash\nprintf "keg-openssl-3.6\\n"\n' > "$KEG_SSL_NEW/fm-keg-opens
 printf '#!/bin/bash\nprintf "keg-openssl-3\\n"\n' > "$KEG_SSL_OLD/fm-keg-openssl"
 chmod +x "$KEG_PY_NEW/fm-keg-python" "$KEG_PY_OLD/fm-keg-python" \
   "$KEG_SSL_NEW/fm-keg-openssl" "$KEG_SSL_OLD/fm-keg-openssl"
-printf '#!/bin/bash\ncase "${1:-}" in */npx) printf "keg-npx-ok\\n" ;; *) printf "keg-node-24\\n" ;; esac\n' > "$KEG_NEW/node"
+cat > "$KEG_NEW/node" <<'SH'
+#!/bin/bash
+case "${1:-}" in
+  */npx) printf 'keg-npx-ok\n' ;;
+  *) printf 'keg-node-24\n' ;;
+esac
+SH
 printf '#!/usr/bin/env node\n' > "$KEG_NEW/npx"
 printf '#!/bin/bash\nprintf "keg-shadow\\n"\n' > "$KEG_NEW/ls"
 printf '#!/bin/bash\nprintf "keg-node-22\\n"\n' > "$KEG_OLD/node"
