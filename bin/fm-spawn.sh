@@ -3975,7 +3975,21 @@ fi
 # LAUNCH for the tracking pane.
 if [ "$SPAWN_CLOUD" = azure ]; then
   CLOUD_WORKER_LAUNCH=$LAUNCH
-  LAUNCH="exec $(printf '%q' "$SCRIPT_DIR/fm-spawn-cloud-monitor.sh") $(printf '%q' "$ID") $(printf '%q' "$SPAWN_GENERATION_ID")"
+  # Cloud state files are keyed by task ID while the queue is keyed
+  # ID@GENERATION: a re-spawn of the same task must not inherit the previous
+  # generation's result (the monitor would exit on it at once), dispatch
+  # marker (both owners would stand down and the new worker would never
+  # execute), or logs. Swept HERE, before the tracking pane exists, so the
+  # new monitor can never observe them.
+  rm -f "$STATE/$ID.cloud-entrypoint" "$STATE/$ID.cloud-env" \
+    "$STATE/$ID.cloud-execute-dispatched" \
+    "$STATE/$ID.worker-result.json" "$STATE/$ID.worker-execute.log"
+  # The Herdr server starts endpoint panes in its closed environment, so the
+  # monitor's own FM_HOME (and any state override the spawn ran with) must
+  # travel inside the launch string; without FM_HOME the monitor's
+  # required-environment guard exits at once and the tracking pane dies at
+  # spawn time.
+  LAUNCH="FM_HOME=$(printf '%q' "$FM_HOME") FM_STATE_OVERRIDE=$(printf '%q' "$STATE") exec $(printf '%q' "$SCRIPT_DIR/fm-spawn-cloud-monitor.sh") $(printf '%q' "$ID") $(printf '%q' "$SPAWN_GENERATION_ID")"
 fi
 case "$BACKEND" in
   tmux)
@@ -4238,13 +4252,59 @@ spawn_cloud_record_assignment() {  # <assignment-generation>
 # the crewmate entrypoint (CLOUD_WORKER_LAUNCH, the exact launch string every
 # local backend uses) runs on the worker through a detached bounded
 # `execute`, whose digest-bound result lands in state/<id>.worker-result.json.
+# The exact worker-lane environment names read by bin/fm-worker-lifecycle.py
+# and bin/fm-azure-worker-provider.py (regenerate with:
+#   grep -ohE 'FM_AZURE_[A-Z0-9_]+' bin/fm-worker-lifecycle.py \
+#     bin/fm-azure-worker-provider.py | sort -u
+# ). An explicit allowlist, not a prefix glob, so a future secret-bearing
+# FM_AZURE_* variable can never land on disk silently.
+SPAWN_CLOUD_ENV_ALLOWLIST='FM_AZURE_AUTHOR_CAPACITY_MODE FM_AZURE_CAPACITY_PROFILE FM_AZURE_DEPLOYMENT_GENERATION FM_AZURE_NAMING_PREFIX FM_AZURE_OWNER_TAG FM_AZURE_RESOURCE_GROUP FM_AZURE_STORAGE_NAME FM_AZURE_SUBSCRIPTION_ID FM_AZURE_WORKER_ADMISSION_HOURS FM_AZURE_WORKER_ALLOW_UNTRAINED_FORECAST FM_AZURE_WORKER_COMMISSIONING_CEILING_USD FM_AZURE_WORKER_COST_ATTRIBUTION FM_AZURE_WORKER_HOUR_PLANNING_THRESHOLD FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS FM_AZURE_WORKER_MAX FM_AZURE_WORKER_POLICY_PHASE FM_AZURE_WORKER_STATE_DIR FM_AZURE_WORKER_STEADY_TARGET_USD FM_AZURE_WORKER_WARM_IDLE'
+spawn_cloud_persist_convergence_artifacts() {
+  # A queued request outlives this process, but the entrypoint argv and the
+  # FM_AZURE_* identity environment exist only here. Persist both so the
+  # tracking monitor can dispatch the execute after a LATER reconcile
+  # converges the assignment (the spawn-time reconcile may be refused on
+  # transient evidence like a throttled pricing read). Ids and paths only -
+  # never secret values (enforced by the allowlist above).
+  local var wall
+  wall=${FM_SPAWN_CLOUD_WALL_SECONDS:-3600}
+  case "$wall" in ''|*[!0-9]*) wall=3600 ;; esac
+  if [ "$wall" -lt 1 ] || [ "$wall" -gt 21600 ]; then
+    wall=3600
+  fi
+  (
+    umask 077
+    printf '%s\n' "$CLOUD_WORKER_LAUNCH" > "$STATE/$ID.cloud-entrypoint" || exit 1
+    {
+      printf 'export FM_SPAWN_CLOUD_WALL_SECONDS=%q\n' "$wall"
+      [ -z "${FM_WORKER_PROVIDER_COMMAND:-}" ] \
+        || printf 'export FM_WORKER_PROVIDER_COMMAND=%q\n' "$FM_WORKER_PROVIDER_COMMAND"
+      for var in $SPAWN_CLOUD_ENV_ALLOWLIST; do
+        [ -n "${!var+x}" ] || continue
+        printf 'export %s=%q\n' "$var" "${!var}"
+      done
+    } > "$STATE/$ID.cloud-env"
+  ) || return 1
+}
+spawn_cloud_claim_execute_dispatch() {
+  # Exactly-once execute dispatch, shared with the tracking monitor: whichever
+  # owner creates the marker first (O_EXCL) dispatches; the other stands down.
+  (set -C; : > "$STATE/$ID.cloud-execute-dispatched") 2>/dev/null
+}
 spawn_cloud_dispatch() {
   local owner_kind=primary assignment wall
   CLOUD_PLACEMENT_STATE=queued
   [ ! -f "$FM_HOME/$SUB_HOME_MARKER" ] || owner_kind=secondmate
+  spawn_cloud_persist_convergence_artifacts || {
+    echo "error: cloud worker convergence artifacts could not be persisted for $ID" >&2
+    return 1
+  }
   spawn_cloud_lifecycle request \
     --task "$ID" --task-generation "$SPAWN_GENERATION_ID" \
     --owner-kind "$owner_kind" --eligible >&2 || {
+    # No durable queue entry exists, so the convergence artifacts have no
+    # owner; remove them with the rolled-back spawn.
+    rm -f "$STATE/$ID.cloud-entrypoint" "$STATE/$ID.cloud-env"
     echo "error: cloud worker request was refused for $ID" >&2
     return 1
   }
@@ -4266,6 +4326,11 @@ spawn_cloud_dispatch() {
   CLOUD_PLACEMENT_STATE=assigned
   wall=${FM_SPAWN_CLOUD_WALL_SECONDS:-3600}
   case "$wall" in ''|*[!0-9]*) echo "error: invalid FM_SPAWN_CLOUD_WALL_SECONDS '$wall'" >&2; return 1 ;; esac
+  spawn_cloud_claim_execute_dispatch || {
+    echo "notice: cloud execute for $ID already claimed by the tracking monitor" >&2
+    CLOUD_PLACEMENT_STATE=executing
+    return 0
+  }
   nohup env FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-worker-lifecycle.sh" execute \
     --task "$ID" --task-generation "$SPAWN_GENERATION_ID" \
     --assignment-generation "$assignment" --wall-seconds "$wall" \

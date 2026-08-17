@@ -592,9 +592,159 @@ test_cloud_switch_off_and_on_share_the_same_base_metadata() {
   pass "cloud metadata stays additive over the local metadata shape"
 }
 
+test_cloud_monitor_launch_carries_fm_home() {
+  # The Herdr server starts endpoint panes in a closed environment; the
+  # monitor's launch string must therefore carry FM_HOME inline or the
+  # tracking pane dies at spawn time on the monitor's required-env guard.
+  local record id out
+  id=cloud-mon-c11
+  record=$(make_cloud_case monitor-env "$id")
+  read_cloud_case "$record"
+  out=$(FM_TEST_ACTUAL_USD=2000 run_cloud_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  expect_code 0 $? "the monitor-env cloud spawn should succeed: $out"
+  grep -F 'fm-spawn-cloud-monitor.sh' "$CASE_DIR/herdr.log" | grep -qF "FM_HOME=$HOME_DIR" \
+    || fail "the Herdr monitor launch string does not carry FM_HOME: $(grep -F 'fm-spawn-cloud-monitor.sh' "$CASE_DIR/herdr.log" | head -1)"
+  grep -F 'fm-spawn-cloud-monitor.sh' "$CASE_DIR/herdr.log" | grep -qF "FM_STATE_OVERRIDE=$HOME_DIR/state" \
+    || fail "the Herdr monitor launch string does not carry the spawn's state directory"
+  pass "the cloud monitor launch string carries FM_HOME and the state override for the closed Herdr pane environment"
+}
+
+test_respawn_sweeps_stale_cloud_artifacts() {
+  # Cloud state files are keyed by task ID while the queue is keyed by
+  # ID@GENERATION. A re-spawn that inherits the previous generation's result
+  # would kill the new monitor at once, and an inherited dispatch marker
+  # would make BOTH owners stand down, so the new worker would never run its
+  # entrypoint. The spawn must sweep them before the tracking pane exists.
+  local record id out
+  id=cloud-swp-c14
+  record=$(make_cloud_case respawn-sweep "$id")
+  read_cloud_case "$record"
+  printf '{"stale":"previous-generation"}\n' > "$HOME_DIR/state/$id.worker-result.json"
+  : > "$HOME_DIR/state/$id.cloud-execute-dispatched"
+  printf 'stale execute log\n' > "$HOME_DIR/state/$id.worker-execute.log"
+  printf 'stale entrypoint\n' > "$HOME_DIR/state/$id.cloud-entrypoint"
+  out=$(run_cloud_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  expect_code 0 $? "a spawn over stale cloud artifacts should succeed: $out"
+  assert_contains "$out" "placement=azure worker=executing" \
+    "the spawn over stale artifacts did not reach the executing state: $out"
+  local deadline
+  deadline=$(( $(date +%s) + 30 ))
+  while :; do
+    if [ -s "$HOME_DIR/state/$id.worker-result.json" ] \
+      && grep -F '"exit_code":0' "$HOME_DIR/state/$id.worker-result.json" >/dev/null 2>&1; then
+      break
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      fail "the re-spawn never produced a fresh bounded result: $(cat "$HOME_DIR/state/$id.worker-execute.log" 2>/dev/null)"
+    fi
+    sleep 0.2
+  done
+  grep -F 'previous-generation' "$HOME_DIR/state/$id.worker-result.json" >/dev/null 2>&1 \
+    && fail "the fresh result still carries the stale generation's content"
+  grep -F 'stale entrypoint' "$HOME_DIR/state/$id.cloud-entrypoint" >/dev/null 2>&1 \
+    && fail "the stale entrypoint survived the re-spawn sweep"
+  pass "a re-spawn sweeps the previous generation's cloud artifacts before the tracking pane exists"
+}
+
+test_queued_spawn_converges_through_the_monitor() {
+  # A spawn whose admission is refused leaves the request durably queued; a
+  # LATER reconcile assigns the worker after the spawn process is gone. The
+  # tracking monitor must then dispatch the persisted entrypoint through the
+  # real bounded execute, exactly once.
+  local record id out meta deadline monitor_pid
+  id=cloud-cvg-c12
+  record=$(make_cloud_case converge-lane "$id")
+  read_cloud_case "$record"
+  out=$(FM_TEST_ACTUAL_USD=2000 run_cloud_spawn "$CASE_DIR" "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" "$id" "$PROJECT_DIR")
+  expect_code 0 $? "the queued spawn should succeed: $out"
+  assert_contains "$out" "placement=azure worker=queued" "the spawn did not stay queued: $out"
+  assert_present "$HOME_DIR/state/$id.cloud-entrypoint" "a queued cloud spawn did not persist its entrypoint"
+  test -s "$HOME_DIR/state/$id.cloud-entrypoint" || fail "the persisted entrypoint is empty"
+  assert_present "$HOME_DIR/state/$id.cloud-env" "a queued cloud spawn did not persist its azure environment"
+  assert_grep 'export FM_AZURE_SUBSCRIPTION_ID=' "$HOME_DIR/state/$id.cloud-env" \
+    "the persisted environment lost the subscription id"
+  assert_grep 'export FM_WORKER_PROVIDER_COMMAND=' "$HOME_DIR/state/$id.cloud-env" \
+    "the persisted environment lost the provider command override"
+  assert_absent "$HOME_DIR/state/$id.cloud-execute-dispatched" "a queued spawn claimed the execute dispatch"
+  assert_absent "$HOME_DIR/state/$id.worker-result.json" "a queued spawn started an execution"
+  # Later operator reconcile with healthy admission evidence: converges to
+  # assigned, but (by design) runs no entrypoint itself.
+  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_AZURE_SUBSCRIPTION_ID="$SUB" FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+    FM_AZURE_OWNER_TAG=owner FM_AZURE_NAMING_PREFIX=fmtest \
+    FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0 \
+    FM_WORKER_PROVIDER_COMMAND="python3 $CASE_DIR/provider.py" \
+    FIXTURE_STATE="$CASE_DIR/provider-state.json" \
+    "$ROOT/bin/fm-worker-lifecycle.sh" reconcile --apply --confirm-subscription "$SUB" 2>&1)
+  expect_code 0 $? "the later reconcile should converge the queued request: $out"
+  assert_grep '"status":"assigned"' "$HOME_DIR/state/azure-workers/controller.json" \
+    "the later reconcile did not assign the queued task"
+  assert_absent "$HOME_DIR/state/$id.worker-result.json" "reconcile itself started an execution"
+  # The monitor (in the closed Herdr pane environment: FM_HOME only) must
+  # pick up the assignment and drive the real lifecycle execute.
+  local spawn_generation
+  spawn_generation=$(sed -n 's/^generation_id=//p' "$HOME_DIR/state/$id.meta" | head -1)
+  test -n "$spawn_generation" || fail "the queued spawn recorded no generation_id"
+  env -u FM_WORKER_PROVIDER_COMMAND FM_HOME="$HOME_DIR" \
+    FIXTURE_STATE="$CASE_DIR/provider-state.json" \
+    FM_SPAWN_CLOUD_MONITOR_INTERVAL_SECONDS=1 \
+    "$ROOT/bin/fm-spawn-cloud-monitor.sh" "$id" "$spawn_generation" \
+    > "$CASE_DIR/monitor.log" 2>&1 &
+  monitor_pid=$!
+  deadline=$(( $(date +%s) + 30 ))
+  while :; do
+    if [ -s "$HOME_DIR/state/$id.worker-result.json" ] \
+      && grep -F '"exit_code":0' "$HOME_DIR/state/$id.worker-result.json" >/dev/null 2>&1; then
+      break
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      kill "$monitor_pid" 2>/dev/null || true
+      fail "the monitor never converged the assigned task into a bounded result: $(cat "$CASE_DIR/monitor.log" 2>/dev/null; cat "$HOME_DIR/state/$id.worker-execute.log" 2>/dev/null)"
+    fi
+    sleep 0.2
+  done
+  wait "$monitor_pid" 2>/dev/null || true
+  assert_present "$HOME_DIR/state/$id.cloud-execute-dispatched" "the monitor dispatched without claiming the marker"
+  assert_grep 'dispatching bounded execute' "$CASE_DIR/monitor.log" "the monitor did not announce its converged dispatch"
+  assert_grep '"request_digest"' "$HOME_DIR/state/$id.worker-result.json" \
+    "the converged execution result is not digest-bound"
+  assert_no_grep 'fm-spawn-cloud-monitor.sh' "$HOME_DIR/state/$id.worker-execute.log" \
+    "the converged entrypoint was replaced by the local monitor command"
+  pass "a queued spawn converges through the monitor into a digest-bound execute, exactly once"
+}
+
+test_monitor_stands_down_when_dispatch_already_claimed() {
+  # A pre-existing dispatch marker means the spawn (or an earlier monitor)
+  # already owns the execute; the monitor must never dispatch a second one.
+  local record id monitor_pid
+  id=cloud-cvg-c13
+  record=$(make_cloud_case claimed-lane "$id")
+  read_cloud_case "$record"
+  mkdir -p "$HOME_DIR/state/azure-workers"
+  printf '{"queue":{"%s@gen-1":{"status":"assigned","assignment_generation":"asg-00000001"}}}\n' "$id" \
+    > "$HOME_DIR/state/azure-workers/controller.json"
+  printf 'echo entrypoint\n' > "$HOME_DIR/state/$id.cloud-entrypoint"
+  printf 'export FM_AZURE_SUBSCRIPTION_ID=%s\n' "$SUB" > "$HOME_DIR/state/$id.cloud-env"
+  : > "$HOME_DIR/state/$id.cloud-execute-dispatched"
+  FM_HOME="$HOME_DIR" FM_SPAWN_CLOUD_MONITOR_INTERVAL_SECONDS=1 \
+    "$ROOT/bin/fm-spawn-cloud-monitor.sh" "$id" gen-1 > "$CASE_DIR/monitor.log" 2>&1 &
+  monitor_pid=$!
+  sleep 3
+  kill "$monitor_pid" 2>/dev/null || true
+  wait "$monitor_pid" 2>/dev/null || true
+  assert_absent "$HOME_DIR/state/$id.worker-execute.log" "a claimed dispatch was executed a second time"
+  assert_absent "$HOME_DIR/state/$id.worker-result.json" "a claimed dispatch produced a second result"
+  assert_grep 'worker=assigned' "$CASE_DIR/monitor.log" "the monitor did not keep rendering the assigned state"
+  pass "the monitor stands down when the execute dispatch is already claimed"
+}
+
 test_cloud_switch_off_keeps_the_local_path_and_metadata_shape
 test_cloud_spawn_places_worker_and_runs_the_entrypoint
 test_cloud_spawn_stays_durably_queued_without_admission
+test_cloud_monitor_launch_carries_fm_home
+test_respawn_sweeps_stale_cloud_artifacts
+test_queued_spawn_converges_through_the_monitor
+test_monitor_stands_down_when_dispatch_already_claimed
 test_cloud_spawn_config_file_default_and_env_override
 test_cloud_spawn_refuses_unknown_switch_value
 test_cloud_spawn_fails_closed_when_the_lifecycle_refuses_the_request
