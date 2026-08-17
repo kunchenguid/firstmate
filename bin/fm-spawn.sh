@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--base <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -16,6 +16,16 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   --base <branch> is this ship task's PR base (epic gitflow, gflow-04). The
+#   brief records the base as a fixed "PR base: <branch>" line, which is the
+#   source of truth: a fresh spawn's --base must match it (the same drift guard
+#   as --mode), and relaunch re-reads it (so --base is refused with --relaunch).
+#   When the resolved base is an epic/<slug> branch the task is an epic story:
+#   the spawn REFUSES (fail closed) unless --base is given AND bin/fm-epic-branch.sh
+#   verify confirms epic/<slug> exists on the repo. A non-epic base (e.g.
+#   --base main for the bootstrap gflow epic) is the documented explicit escape
+#   and skips the epic-existence gate; omitting --base entirely keeps the
+#   historical default-branch behavior. --base is ship-only.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
@@ -283,6 +293,7 @@ EFFORT=
 BACKEND_ARG=
 MODE=
 YOLO=
+BASE=
 TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
@@ -290,6 +301,7 @@ EFFORT_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
+BASE_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
 POS=()
@@ -306,6 +318,7 @@ for a in "$@"; do
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      base) BASE=$a; BASE_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
@@ -328,6 +341,8 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --base) want_value=base ;;
+    --base=*) BASE=${a#--base=}; BASE_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
     *) POS+=("$a") ;;
@@ -340,6 +355,7 @@ done
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
+[ "$BASE_SET" -eq 0 ] || [ -n "$BASE" ] || { echo "error: --base requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
@@ -368,6 +384,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  [ "$BASE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded PR base from its brief; --base cannot override it" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -400,6 +417,10 @@ else
     }
     [ "$YOLO_SET" -eq 0 ] || {
       echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
+      exit 1
+    }
+    [ "$BASE_SET" -eq 0 ] || {
+      echo "error: --base applies only to ship spawns; a scout delivers a report and a secondmate has no PR base" >&2
       exit 1
     }
   fi
@@ -877,6 +898,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  [ "$BASE_SET" -eq 0 ] || shared_args+=(--base "$BASE")
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -1680,6 +1702,7 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
+EFFECTIVE_BASE=
 if [ "$KIND" = ship ]; then
   PROJ_NAME=$(basename "$PROJ_ABS")
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
@@ -1699,6 +1722,46 @@ if [ "$KIND" = ship ]; then
      && [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
+
+  # PR base / epic gitflow gate (gflow-04). fm-brief.sh records the task's PR base
+  # as a fixed "PR base: <branch>" line when firstmate scaffolds an epic story with
+  # --base; that recorded line is the source of truth (relaunch re-reads it, since
+  # --base is refused on relaunch). A fresh spawn's own --base must confirm it, the
+  # same drift guard the mode check applies. When the resolved base names an
+  # epic/<slug> branch this is an epic story: refuse (fail closed) unless the
+  # branch exists on the repo (gflow-03 verify). A non-epic base (e.g. --base main
+  # for the bootstrap gflow epic itself) is the documented, explicit escape and
+  # skips the epic-existence gate. No base at all is the historical default-branch
+  # behavior, unchanged.
+  BRIEF_BASE=$(sed -n 's/^PR base: \([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  if [ "$RELAUNCH" -eq 0 ] && [ "$BASE_SET" -eq 1 ]; then
+    if [ -z "$BRIEF_BASE" ]; then
+      echo "warning: $BRIEF records no PR base line (scaffolded before base recording, or firstmate passed --base without re-scaffolding); launching on the explicit --base $BASE - confirm the brief's branch/PR-base instructions match" >&2
+    elif [ "$BRIEF_BASE" != "$BASE" ]; then
+      echo "error: PR base mismatch for $ID: the brief records PR base $BRIEF_BASE but this spawn passed --base $BASE; correct the flag or re-scaffold the brief so the worker's branch/PR base and the spawn agree" >&2
+      exit 1
+    fi
+  fi
+  EFFECTIVE_BASE=${BRIEF_BASE:-$BASE}
+  case "$EFFECTIVE_BASE" in
+    epic/*)
+      # Belt-and-suspenders for HIGH-RISK live dispatch: a fresh spawn of an epic
+      # story must confirm the base explicitly with --base; relaunch reuses the
+      # recorded task and is exempt.
+      if [ "$RELAUNCH" -eq 0 ] && [ "$BASE_SET" -eq 0 ]; then
+        echo "error: $ID is an epic story (brief records PR base $EFFECTIVE_BASE) but this spawn passed no --base; re-run with --base $EFFECTIVE_BASE so the epic base is confirmed at dispatch" >&2
+        exit 1
+      fi
+      epic_slug=${EFFECTIVE_BASE#epic/}
+      # Resolve against the absolute project path so the verify is independent of
+      # this home's projects/ layout; the branch must exist on origin or we refuse.
+      if ! epic_verify_out=$("$FM_ROOT/bin/fm-epic-branch.sh" verify "$epic_slug" "$PROJ_ABS" 2>&1); then
+        echo "error: refusing to spawn $ID onto epic base $EFFECTIVE_BASE - could not confirm it exists on $PROJ_NAME: ${epic_verify_out:-verify failed}" >&2
+        echo "cut it first with bin/fm-epic-branch.sh create $epic_slug <project> (gflow) if it is genuinely missing, then re-dispatch." >&2
+        exit 1
+      fi
+      ;;
+  esac
 fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
@@ -2918,4 +2981,5 @@ fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
+[ -z "$EFFECTIVE_BASE" ] || SPAWN_DELIVERY="$SPAWN_DELIVERY base=$EFFECTIVE_BASE"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"

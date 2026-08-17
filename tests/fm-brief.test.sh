@@ -217,6 +217,39 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# --base (epic gitflow, gflow-04): a ship brief with --base records the fixed
+# "PR base: <branch>" machine line, cuts the crew branch FROM the base, and names
+# the base as the PR/merge target; omitting --base records no base line at all.
+test_base_records_pr_base_and_branch_wiring() {
+  local home id mode brief status
+  home="$TMP_ROOT/base-home"
+  write_registry "$home"
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-base-${mode}"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --base epic/gflow >/dev/null 2>&1
+    status=$?
+    expect_code 0 "$status" "fm-brief.sh $id --mode $mode --base should exit 0"
+    brief="$home/data/$id/brief.md"
+    grep -qx "PR base: epic/gflow" "$brief" \
+      || fail "$id: --base did not record the fixed 'PR base: epic/gflow' machine line"
+    assert_grep "git fetch origin epic/gflow && git checkout -b fm/$id FETCH_HEAD" "$brief" \
+      "$id: --base did not cut the crew branch FROM the base"
+  done
+  # PR modes name the base as the PR target.
+  assert_grep "The PR must target \`epic/gflow\`" "$home/data/brief-base-direct-PR/brief.md" \
+    "direct-PR --base must name the PR target"
+  assert_grep "The PR must target \`epic/gflow\`" "$home/data/brief-base-no-mistakes/brief.md" \
+    "no-mistakes --base must name the PR target"
+  # local-only has no PR: it names the base as the merge target instead.
+  assert_grep "merges it into local \`epic/gflow\`" "$home/data/brief-base-local-only/brief.md" \
+    "local-only --base must name the base as the merge target"
+  # A no-base brief records no PR base line (historical default preserved).
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-nobase some-proj --mode direct-PR >/dev/null 2>&1
+  assert_no_grep "PR base:" "$home/data/brief-nobase/brief.md" \
+    "an ordinary brief must record no PR base line"
+  pass "fm-brief.sh: --base records the PR base, branches from it, and names the target"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -286,6 +319,8 @@ yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yol
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
+base on a scout brief|brief-refused-b5 some-proj --scout --base epic/gflow|--base applies only to ship briefs
+base with an empty value|brief-refused-b6 some-proj --mode direct-PR --base=|--base must be a non-empty branch name
 ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
@@ -755,6 +790,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_base_records_pr_base_and_branch_wiring
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

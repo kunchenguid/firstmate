@@ -6,9 +6,17 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--base <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   --base <branch> is this ship task's PR base (epic gitflow, gflow-04). When
+#   set, the generated brief records a fixed machine-readable "PR base: <branch>"
+#   line and its Setup/DOD name the base: the crew branches fm/<task-id> FROM
+#   <branch> and its PR targets <branch> only, never the default branch. Firstmate
+#   passes it for an epic story so the worker ships on the epic/<slug> branch;
+#   bin/fm-spawn.sh reads the recorded line to gate the spawn. Omitting --base is
+#   the current behavior (branch from and PR to the default branch), so ordinary
+#   tasks are byte-identical. --base is ship-only.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -109,6 +117,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+BASE=
+BASE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -118,6 +128,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      base) BASE=$a; BASE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -130,6 +141,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --base) want_value=base ;;
+    --base=*) BASE=${a#--base=}; BASE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -156,6 +169,22 @@ if [ "$KIND" = ship ]; then
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+
+# --base is the ship task's PR base (epic gitflow). Ship-only, and a real branch
+# name: reject an empty value or one carrying whitespace/a leading dash so a
+# malformed base cannot slip into the recorded contract line or the git command
+# the brief hands the worker.
+if [ "$BASE_SET" -eq 1 ]; then
+  [ "$KIND" = ship ] || {
+    echo "error: --base applies only to ship briefs; a scout delivers a report and a secondmate charter has no PR base" >&2
+    exit 1
+  }
+  case "$BASE" in
+    ''|-*|*[[:space:]]*)
+      echo "error: --base must be a non-empty branch name without spaces or a leading dash (got '$BASE')" >&2
+      exit 1 ;;
+  esac
 fi
 ID=${POS[0]}
 
@@ -375,6 +404,32 @@ fi
 # delivery mode, validated above. The generated DOD opens with the fixed
 # "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
 # explicit --mode before launching.
+#
+# Epic gitflow (gflow-04): when --base is set the brief records a fixed
+# "PR base: <branch>" machine line right under the mode contract, branches the
+# crew FROM that base, and points its PR at that base only. bin/fm-spawn.sh reads
+# the recorded line to gate the spawn. Unset keeps the historical default-branch
+# behavior byte-identical, so BASE_CONTRACT_LINE / PR_TARGET_NOTE stay empty and
+# BRANCH_STEP is the original checkout.
+if [ "$BASE_SET" -eq 1 ]; then
+  BASE_CONTRACT_LINE="PR base: $BASE
+"
+  BRANCH_STEP="First action: fetch the PR base and cut your branch FROM it: \`git fetch origin $BASE && git checkout -b fm/$ID FETCH_HEAD\`"
+  PR_TARGET_NOTE=" The PR must target \`$BASE\` (the epic branch), never the default branch."
+  # local-only names its base branch in three places; keep them consistent with
+  # the recorded base rather than the default \`main\`, so the worker is not told
+  # to merge into main while the contract line records an epic base.
+  LOCAL_RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`$BASE\`."
+  LOCAL_REBASE_LINE="Keep your branch a clean fast-forward onto \`$BASE\` - if it has advanced, rebase onto it so the eventual merge stays a fast-forward."
+  LOCAL_MERGE_LINE="The configured merge authority approves the ready branch, then firstmate merges it into local \`$BASE\` through the guarded fast-forward path."
+else
+  BASE_CONTRACT_LINE=""
+  BRANCH_STEP="First action: create your branch: \`git checkout -b fm/$ID\`"
+  PR_TARGET_NOTE=""
+  LOCAL_RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+  LOCAL_REBASE_LINE="Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward."
+  LOCAL_MERGE_LINE="The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path."
+fi
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -382,23 +437,23 @@ case "$MODE" in
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=direct-PR
-This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+${BASE_CONTRACT_LINE}This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.${PR_TARGET_NOTE}
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
+    RULE1="$LOCAL_RULE1"
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=local-only
-This task ships **local-only**: no remote, no PR, no pipeline.
+${BASE_CONTRACT_LINE}This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+$LOCAL_REBASE_LINE
 When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+$LOCAL_MERGE_LINE
 EOF
     ;;
   *)  # no-mistakes
@@ -408,7 +463,7 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
+${BASE_CONTRACT_LINE}The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
@@ -423,7 +478,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.${PR_TARGET_NOTE}
 EOF
     ;;
 esac
@@ -448,7 +503,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. $BRANCH_STEP$SETUP2
 
 # Rules
 $RULE1
