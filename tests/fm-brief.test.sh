@@ -212,6 +212,12 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "Never add a co-author trailer naming an AI model or assistant" "$brief" \
+      "$id: brief missing the AI co-author trailer ban"
+    assert_grep "never add an AI-attribution line" "$brief" \
+      "$id: brief AI-attribution ban does not cover the pull request body and comments"
+    assert_grep "to the pull request body or any pull request comment" "$brief" \
+      "$id: brief missing the pull request body and comment coverage of the AI ban"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
@@ -699,6 +705,8 @@ test_scout_and_secondmate_scaffold() {
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
+  assert_no_grep "AI-attribution" "$brief" \
+    "scout brief must omit the ship-only AI-attribution ban"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
