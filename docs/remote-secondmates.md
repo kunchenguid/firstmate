@@ -154,6 +154,7 @@ bin/fm-spawn.sh <id> --secondmate
 
 The primary resolves the verified secondmate harness, optional model and effort, and serving tier, then runs the same readiness gate the seed runs, transfers the inherited-material allowlist, and asks the remote host to launch on Herdr in `fm-remote`.
 The recorded tier defaults to standard, an explicit `--tier fast` opts only a Codex spawn into fast service, and recovery preserves the tier recorded for the existing endpoint.
+The primary never falls back to a pre-tier remote launch: an older remote code root refuses before mutation and must be updated before retrying.
 All remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
 An explicit request for any other backend is refused rather than honored, and the remote host refuses one too.
 An existing remote endpoint recorded in another Herdr session, including `default`, is classified as unverified and left untouched; launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it instead of attempting a live cutover.
