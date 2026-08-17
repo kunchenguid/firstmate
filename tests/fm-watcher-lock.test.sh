@@ -967,21 +967,20 @@ test_stopped_watcher_is_retired_and_rearms_without_session_restart() {
   esac
   case "$(uname)" in
     Linux)
-      # SIGKILL stays pending for a stopped process on Linux, so the accepted
-      # WATCH_CHILD_RC=124 retirement takes the release-failed shape: the
-      # stopped watcher survives, the expected-pid hardening retains its lock,
-      # and the ledger records the refused release.
-      is_live_non_zombie "$watcher_pid" \
-        || fail "bounded retirement did not leave the stopped watcher alive on Linux"
-      [ -e "$state/.watch.lock" ] || [ -L "$state/.watch.lock" ] \
-        || fail "expected-pid hardening did not retain the live stopped holder's lock on Linux"
-      grep -q 'reason=stale-beacon-release-failed' "$state/.watch-cycle-exits.log" \
-        || fail "bounded retirement did not record the release-failed outcome in the lifecycle ledger"
-      kill -CONT "$watcher_pid" 2>/dev/null || true
-      wait_for_exit "$watcher_pid" 40 || true
+      # SIGKILL is never held pending for a stopped process on Linux: the
+      # retirement's KILL kills the stopped watcher immediately, the arm's
+      # wait reaps it before the expected-pid hardening runs, and the
+      # retirement takes the released-lock shape (stale-beacon-retired), not
+      # the release-failed shape.
       ! is_live_non_zombie "$watcher_pid" \
-        || fail "continued Linux watcher did not reap the pending KILL"
-      pass "owned arm bounds its retirement of an unkillable stopped watcher and fails loudly on Linux"
+        || fail "bounded retirement did not kill the stopped watcher on Linux"
+      [ ! -e "$state/.watch.lock" ] && [ ! -L "$state/.watch.lock" ] \
+        || fail "stalled watcher retained singleton ownership after retirement on Linux"
+      grep -q 'reason=stale-beacon-retired' "$state/.watch-cycle-exits.log" \
+        || fail "stale-beacon retirement was not classified in the lifecycle ledger on Linux"
+      kill -CONT "$watcher_pid" 2>/dev/null || true
+      wait_for_exit "$watcher_pid" 40 2>/dev/null || true
+      pass "owned arm bounds its retirement of a stopped watcher and fails loudly on Linux"
       return 0
       ;;
   esac
