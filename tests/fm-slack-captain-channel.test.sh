@@ -497,6 +497,18 @@ pass "fm-slack-poll stays inert with an invalid channel id"
 
 # --- watcher cadence stays narrow -------------------------------------------
 
+# shellcheck disable=SC2016 # single quotes are deliberate: the grep needle is the literal ${...} default expression
+grep -F 'CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}' "$ROOT/bin/fm-watch.sh" >/dev/null \
+  || fail "fm-watch.sh must keep the global CHECK_INTERVAL default at 300"
+# shellcheck disable=SC2016 # single quotes are deliberate: the grep needle is the literal ${...} default expression
+grep -F 'SLACK_CHECK_INTERVAL=${FM_SLACK_CHECK_INTERVAL:-$POLL}' "$ROOT/bin/fm-watch.sh" >/dev/null \
+  || fail "fm-watch.sh must use a dedicated Slack fast interval"
+! grep -E '^CHECK_INTERVAL=\$\{FM_SLACK_CHECK_INTERVAL' "$ROOT/bin/fm-watch.sh" >/dev/null \
+  || fail "fm-watch.sh must not route Slack cadence through CHECK_INTERVAL"
+awk '/elif.*slack-watch\.check\.sh/ { getline; if ($0 ~ /continue/) found=1 } END { exit found ? 0 : 1 }' \
+  "$ROOT/bin/fm-watch.sh" \
+  || fail "fm-watch.sh must skip the Slack shim in the slow sweep"
+pass "fm-watch.sh keeps the global check interval and a dedicated Slack fast path"
 home="$TMP_ROOT/watch-cadence"
 make_home "$home"
 fakebin=$(make_fake_curl "$home/fake-watch-cadence")

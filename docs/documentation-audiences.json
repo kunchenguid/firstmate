@@ -325,6 +325,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/vendor-telemetry.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/dispatch-auth.md",
       "audience": "maintainer-verification"
     },
