@@ -441,6 +441,148 @@ test_gate_block_parked_not_superseded() {
   pass "gate block parked run is not flagged superseded"
 }
 
+# --- stale unconfirmed run-step vs a recorded PR + a later status-log verb --
+# Regression for the dev-tailscale-router-fix (w20) incident (2026-08-16): a
+# no-mistakes run object kept answering "running" long after this branch's PR
+# was already posted (meta pr= recorded, a durable fact independent of any one
+# run object) and the crew had since declared a pause. Because the plain
+# "validating (running)" reading carries no corroborating detail (no outcome,
+# no gate, no confirmed CI-green transition), it must defer to the crew's own
+# later status-log verb instead of silently superseding it forever - unlike
+# the needs-decision/blocked reconciliation above, which trusts an ACTIVE
+# (running/fixing) run over a stale log precisely because that run has fresh
+# corroborating detail.
+test_stale_running_with_recorded_pr_defers_to_paused_log() {
+  reset_fakes
+  local d; d=$(new_case stale-running-paused)
+  make_repo_on_branch "$d/wt" fm/feat-w20
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20.meta" "window=fm:fm-feat-w20" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/9"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\npaused: awaiting external team review/merge\n' \
+    > "$d/state/feat-w20.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-w20)"
+  local out; out=$(run_crew_state "$d" feat-w20)
+  assert_contains "$out" "state: paused" "stale running run + recorded PR defers to the declared pause"
+  assert_contains "$out" "source: status-log" "deferred paused state comes from the status log"
+  assert_contains "$out" "awaiting external team review/merge" "the pause reason is carried in the detail"
+  assert_not_contains "$out" "state: working" "the stale run-step reading must not supersede the pause"
+  pass "stale unconfirmed running run + recorded PR defers to a later paused log"
+}
+
+# Same, but the crew's later log line is a plain done: report rather than the
+# specific "checks green" text log_reports_ci_ready matches - this is the
+# generalization beyond that narrower reconciliation.
+test_stale_running_with_recorded_pr_defers_to_done_log() {
+  reset_fakes
+  local d; d=$(new_case stale-running-done)
+  make_repo_on_branch "$d/wt" fm/feat-w20b
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20b.meta" "window=fm:fm-feat-w20b" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/10"
+  printf 'done: merged\n' > "$d/state/feat-w20b.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-w20b)"
+  local out; out=$(run_crew_state "$d" feat-w20b)
+  assert_contains "$out" "state: done" "stale running run + recorded PR defers to a plain done log"
+  assert_contains "$out" "source: status-log" "deferred done state comes from the status log"
+  assert_not_contains "$out" "state: working" "the stale run-step reading must not supersede done"
+  pass "stale unconfirmed running run + recorded PR defers to a later plain done log"
+}
+
+# Same reconciliation via the coarse (cross-branch runs-list) source, which has
+# even less corroborating detail than the full axi status TOON.
+test_stale_coarse_running_with_recorded_pr_defers_to_paused_log() {
+  reset_fakes
+  local d; d=$(new_case stale-coarse-paused)
+  make_repo_on_branch "$d/wt" fm/feat-w20c
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20c.meta" "window=fm:fm-feat-w20c" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/11"
+  printf 'paused: awaiting external team review/merge\n' > "$d/state/feat-w20c.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-branch)"
+  FM_FAKE_RUNS_LIST="running fm/feat-w20c ${FM_FAKE_RUN_HEAD:-abc1234} 2026-08-10T00:00:00Z"
+  local out; out=$(run_crew_state "$d" feat-w20c)
+  assert_contains "$out" "state: paused" "stale coarse running + recorded PR defers to the declared pause"
+  assert_contains "$out" "source: status-log" "deferred coarse paused state comes from the status log"
+  assert_contains "$out" "run-step stale" "reconciliation went through the coarse run-step path, not the no-run fallback"
+  assert_not_contains "$out" "state: working" "the stale coarse reading must not supersede the pause"
+  pass "stale unconfirmed coarse running run + recorded PR defers to a later paused log"
+}
+
+# The reconciliation must not fire without a recorded PR: this is the same
+# stale-looking "validating (running)" reading, but with no pr= in meta the
+# durable corroborating fact is missing, so the run-step stays authoritative -
+# a genuinely wedged task never legitimately has meta pr= before its first PR.
+test_stale_running_without_recorded_pr_stays_working() {
+  reset_fakes
+  local d; d=$(new_case stale-running-no-pr)
+  make_repo_on_branch "$d/wt" fm/feat-w20d
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20d.meta" "window=fm:fm-feat-w20d" "worktree=$d/wt" "kind=ship"
+  printf 'paused: awaiting external team review/merge\n' > "$d/state/feat-w20d.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-w20d)"
+  local out; out=$(run_crew_state "$d" feat-w20d)
+  assert_contains "$out" "state: working" "no recorded PR -> run-step stays authoritative"
+  assert_contains "$out" "source: run-step" "no recorded PR -> run-step source"
+  pass "stale-looking running run with no recorded PR is not overridden"
+}
+
+# The reconciliation must not fire when the crew's own last line still says
+# working: a real resumed run must keep escalating like any other wedge.
+test_stale_running_with_recorded_pr_and_working_log_stays_working() {
+  reset_fakes
+  local d; d=$(new_case stale-running-working-log)
+  make_repo_on_branch "$d/wt" fm/feat-w20e
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20e.meta" "window=fm:fm-feat-w20e" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/12"
+  printf 'working: rebasing onto a new base\n' > "$d/state/feat-w20e.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-w20e)"
+  local out; out=$(run_crew_state "$d" feat-w20e)
+  assert_contains "$out" "state: working" "a working: log still trusts the run-step"
+  assert_contains "$out" "source: run-step" "a working: log does not defer to the status log"
+  pass "recorded PR does not mask genuinely active work reported as working:"
+}
+
+# A genuinely active auto-fix (top-level status=fixing) has its own
+# corroborating detail and must not be treated as unconfirmed, even with a
+# recorded PR and a paused log.
+test_stale_fixing_with_recorded_pr_and_paused_log_stays_working() {
+  reset_fakes
+  local d; d=$(new_case fixing-recorded-pr-paused)
+  make_repo_on_branch "$d/wt" fm/feat-w20f
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20f.meta" "window=fm:fm-feat-w20f" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/13"
+  printf 'paused: awaiting external team review/merge\n' > "$d/state/feat-w20f.status"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-w20f)"
+  local out; out=$(run_crew_state "$d" feat-w20f)
+  assert_contains "$out" "state: working" "an active fixing run stays working despite a recorded PR"
+  assert_contains "$out" "source: run-step" "an active fixing run is not deferred to the status log"
+  pass "a genuinely active fixing run is not treated as unconfirmed"
+}
+
+# The reconciliation must apply regardless of pane liveness (run-step
+# precedence is pane-liveness-independent by design): a bare-shell pane left
+# after the agent exited must not generate a wedge-suspect "working" verdict
+# for a task the crew already declared paused.
+test_dead_window_stale_running_with_recorded_pr_defers_to_paused_log() {
+  reset_fakes
+  local d; d=$(new_case dead-stale-running-paused)
+  make_repo_on_branch "$d/wt" fm/feat-w20g
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-w20g.meta" "window=fm:fm-feat-w20g" "worktree=$d/wt" "kind=ship" \
+    "pr=https://github.com/o/r/pull/14"
+  printf 'paused: awaiting external team review/merge\n' > "$d/state/feat-w20g.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-w20g)"
+  FM_FAKE_TMUX_MISSING=1   # the agent process exited, leaving a bare shell
+  local out; out=$(run_crew_state "$d" feat-w20g)
+  assert_contains "$out" "state: paused" "bare-shell pane still defers to the declared pause"
+  assert_contains "$out" "source: status-log" "bare-shell pane deferral comes from the status log"
+  assert_not_contains "$out" "state: working" "a bare-shell pane must not read as a wedge-suspect working state"
+  pass "a bare-shell pane on a stale-running + recorded-PR + paused task reports paused, not working"
+}
+
 test_ci_ready_done_log_beats_monitoring_run() {
   reset_fakes
   local d; d=$(new_case ci-ready)
@@ -1414,6 +1556,13 @@ test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
+test_stale_running_with_recorded_pr_defers_to_paused_log
+test_stale_running_with_recorded_pr_defers_to_done_log
+test_stale_coarse_running_with_recorded_pr_defers_to_paused_log
+test_stale_running_without_recorded_pr_stays_working
+test_stale_running_with_recorded_pr_and_working_log_stays_working
+test_stale_fixing_with_recorded_pr_and_paused_log_stays_working
+test_dead_window_stale_running_with_recorded_pr_defers_to_paused_log
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done

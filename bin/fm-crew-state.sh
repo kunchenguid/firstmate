@@ -470,6 +470,13 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
+  # 1 iff RUN_STATE=working came from the plain "still validating" catch-all
+  # with no corroborating detail (no outcome, no gate, no confirmed CI-green
+  # transition): the run object says "running" and nothing else backs that up.
+  # Consulted below to decide whether a stale run-step reading may be
+  # overridden by a durable, independent fact (meta's recorded pr=) plus the
+  # crew's own later status-log verb.
+  RUN_STATE_UNCONFIRMED=0
   if [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
     # true/working, done, or failed. A crew genuinely parked at a gate still
@@ -479,7 +486,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     # surfaced through signal_reason_is_actionable regardless of this
     # coarse-vs-full distinction, so a real gate is never silently missed.
     case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
+      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)"; RUN_STATE_UNCONFIRMED=1 ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
@@ -520,7 +527,8 @@ if [ "$HAVE_RUN" = 1 ]; then
     else
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
-        running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
+        running)        RUN_STATE=working; RUN_DETAIL="validating (running)"; RUN_STATE_UNCONFIRMED=1 ;;
+        fixing)         RUN_STATE=working; RUN_DETAIL="validating (fixing)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
         failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
         cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
@@ -560,6 +568,27 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ "$CI_LOG_STATE" != not-ready ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
     fi
+  fi
+
+  # A plain "still validating" run-step reading with no corroborating detail
+  # (RUN_STATE_UNCONFIRMED) is not trustworthy evidence of CURRENT activity once
+  # this branch's PR was already recorded in meta (pr=, written once by
+  # fm-pr-check.sh after an earlier "done: PR ... checks green" report) and the
+  # crew's own most recent status line has since moved to a declared pause or a
+  # captain-relevant terminal verb: the crew already reported past this run, so
+  # the run object is answering for a stale record that never advanced, not a
+  # fresh restart. Defer to the status log instead of letting that reading
+  # supersede it - generalizes log_reports_ci_ready's narrower done+"checks
+  # green" text match to every terminal/paused verb, and applies regardless of
+  # pane liveness since run-step precedence itself is pane-liveness-independent
+  # by design.
+  if [ "$RUN_STATE" = working ] && [ "$RUN_STATE_UNCONFIRMED" = 1 ] && [ -n "$(meta_value pr)" ]; then
+    LOG_OVERRIDE=$(map_log_state "$LOG_LINE")
+    case "$LOG_OVERRIDE" in
+      paused|done|blocked|parked|failed)
+        emit "$LOG_OVERRIDE" status-log "$(status_line_note "$LOG_LINE")${SEP}run-step stale: PR already recorded"
+        ;;
+    esac
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
