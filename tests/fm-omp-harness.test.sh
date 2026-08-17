@@ -474,9 +474,13 @@ test_omp_forces_trace_off_and_clears_ambient_carrier() {
   [ -n "$launch" ] || fail "no OMP launch command was delivered"
   assert_contains "$launch" '-u TRACEPARENT' "the OMP child must explicitly clear an ambient carrier"
   assert_not_contains "$launch" "$carrier" "the ambient carrier must not reach the OMP child argv"
-  assert_no_grep '^export TRACEPARENT=' "$tmux_log" "the enabled home must not export trace context to OMP"
+  # assert_no_grep is a FIXED-string search, so a leading ^ would be matched
+  # literally and the assertion could never fail. These two carry the enforced
+  # half of the suppression - that omp never resolves trace on - so they must
+  # stay anchorless to actually bite.
+  assert_no_grep 'export TRACEPARENT=' "$tmux_log" "the enabled home must not export trace context to OMP"
   meta="$HOME_DIR/state/$id.meta"
-  assert_no_grep '^traceparent=' "$meta" "OMP metadata must not record a trace carrier"
+  assert_no_grep 'traceparent=' "$meta" "OMP metadata must not record a trace carrier"
   pass "OMP forces effective trace propagation off and clears an ambient TRACEPARENT carrier"
 }
 
