@@ -1710,33 +1710,40 @@ fm_backend_herdr_server_ensure() {  # <session>
 # duplicate means for them - fm_backend_herdr_workspace_ensure refuses to guess
 # which one is the caller's, while the read-only recovery path below keeps its
 # historical first-match behavior.
-fm_backend_herdr_workspace_find_all() {  # <session>
-  local session=$1 label list base ids id lbl legacy
+# fm_backend_herdr_workspace_find_all_labelled: the same matches as
+# fm_backend_herdr_workspace_find_all, one "<workspace_id>\t<label>" per line,
+# so a caller reporting an ambiguity can name each Space's ACTUAL title. A
+# home's own Spaces can legitimately carry different titles now: an earlier
+# identity title survives until it is reconciled.
+fm_backend_herdr_workspace_find_all_labelled() {  # <session>
+  local session=$1 label list base rows id lbl legacy
   label=$(fm_backend_herdr_workspace_label)
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
   base=$(fm_backend_herdr_workspace_identity_base_label 2>/dev/null) || base=""
+  rows=$(printf '%s' "$list" | jq -r \
+    '.result.workspaces[]? | "\(.workspace_id)\t\(.label)"' 2>/dev/null) || return 0
   if [ -n "$base" ] && [ "$label" != "Unassigned crew" ]; then
     # A home's registered project set is mutable, so an existing Space of this
     # same home can still carry an earlier identity title. Ownership, not the
     # exact current title, decides what belongs to this home.
-    ids=$(printf '%s' "$list" | jq -r \
-      '.result.workspaces[]? | "\(.workspace_id)\t\(.label)"' 2>/dev/null) || return 0
     legacy=$(fm_backend_herdr_workspace_legacy_label)
-    printf '%s\n' "$ids" | while IFS=$'\t' read -r id lbl; do
+    printf '%s\n' "$rows" | while IFS=$'\t' read -r id lbl; do
       [ -n "$id" ] || continue
       [ "$lbl" != "$legacy" ] || continue
       fm_backend_herdr_workspace_label_is_own "$lbl" "$base" || continue
-      printf '%s\n' "$id"
+      printf '%s\t%s\n' "$id" "$lbl"
     done
     return 0
   fi
-  # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
-  # keyword (label/break), so declaring a jq variable named "label" is a
-  # compile error that `2>/dev/null` would silently swallow, making this find
-  # ALWAYS return empty and every spawn mint a fresh "firstmate" workspace
-  # (the workspace leak).
-  printf '%s' "$list" | jq -r --arg want "$label" \
-    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null
+  printf '%s\n' "$rows" | while IFS=$'\t' read -r id lbl; do
+    [ -n "$id" ] || continue
+    [ "$lbl" = "$label" ] || continue
+    printf '%s\t%s\n' "$id" "$lbl"
+  done
+}
+
+fm_backend_herdr_workspace_find_all() {  # <session>
+  fm_backend_herdr_workspace_find_all_labelled "$1" | cut -f1
 }
 
 # fm_backend_herdr_workspace_find: this HOME's own workspace id inside
@@ -2000,7 +2007,7 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 # Returns 0 on success, 3 for a refusal whose exact reason is already on
 # stderr, and 1 for a failed or unparseable herdr call.
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship>]
-  local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label matches count status
+  local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label matches count status described
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
   if [ "$relationship" = launcher-home ]; then
@@ -2024,15 +2031,24 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
     echo "error: crew identity config is active but this persistent home is unassigned; refusing an ambiguous Herdr Space title" >&2
     return 3
   fi
-  matches=$(fm_backend_herdr_workspace_find_all "$session")
+  matches=$(fm_backend_herdr_workspace_find_all_labelled "$session")
   count=$(printf '%s' "$matches" | grep -c '[^[:space:]]' || true)
   if [ "$count" -gt 1 ]; then
-    echo "error: ${count} herdr workspaces in session '$session' are labeled '$label' (${matches//$'\n'/ }) and this spawn has no herdr parent pane to identify which one is its own; rename or close the extras, or run firstmate inside the workspace its workers belong in" >&2
+    described=$(printf '%s\n' "$matches" | while IFS=$'\t' read -r match_id match_label; do
+      [ -n "$match_id" ] || continue
+      printf "%s labeled '%s'; " "$match_id" "$match_label"
+    done)
+    described=${described%'; '}
+    echo "error: ${count} herdr workspaces in session '$session' belong to this home (${described}) and this spawn has no herdr parent pane to identify which one is its own; rename or close the extras, or run firstmate inside the workspace its workers belong in" >&2
     return 3
   fi
   wsid=${matches%%$'\n'*}
+  wsid=${wsid%%$'\t'*}
   if [ -n "$wsid" ]; then
     FM_BACKEND_HERDR_WS_ID=$wsid
+    if fm_backend_herdr_crew_identity_config_present; then
+      fm_backend_herdr_workspace_identity_rename_exact "$session" "$wsid" || return 3
+    fi
     printf '%s' "$wsid"
     return 0
   fi

@@ -667,9 +667,63 @@ test_workspace_ensure_refuses_an_ambiguous_label_with_no_launcher() {
   status=$?
   expect_code 3 "$status" "two same-labeled home workspaces with no launcher identity must refuse"
   assert_contains "$out" "labeled 'firstmate'" "the ambiguity refusal did not name the duplicated label"
-  assert_contains "$out" "w1 w7" "the ambiguity refusal did not name the candidate workspaces"
+  assert_contains "$out" "w1 labeled 'firstmate'; w7 labeled 'firstmate'" \
+    "the ambiguity refusal did not name each candidate workspace with its actual title"
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "an ambiguous placement must not mint a third same-labeled workspace"
   pass "fm_backend_herdr_workspace_ensure: refuses to guess between two same-labeled home workspaces"
+}
+
+test_workspace_ensure_reconciles_an_adopted_drifted_identity_title() {
+  local base home dir log resp fb out
+  base="$TMP_ROOT/ensure-adopt-drift"
+  home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/config" "$home/data" "$resp"; : > "$log"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"gentech":"john-allen"}}' \
+    > "$home/config/crew-identities.json"
+  printf 'gentech\n' > "$home/.fm-secondmate-home"
+  printf -- '- npi-brain - a (added 2026-01-01)\n- developer-setup - b (added 2026-01-01)\n' > "$home/data/projects.md"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-sm","label":"Mr Allen — developer-setup"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sm","label":"Mr Allen — developer-setup"}}}' > "$resp/2.out"
+  : > "$resp/3.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sm","label":"Mr Allen"}}}' > "$resp/4.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp other-home' "$ROOT" 2>&1) \
+    || fail "adopting this home's own drifted Space failed: $out"
+  [ "$out" = "w-sm" ] || fail "adoption returned the wrong mechanical workspace id: $out"
+  assert_contains "$(cat "$log")" $'workspace\x1frename\x1fw-sm\x1fMr Allen' \
+    "a Space adopted without launcher ancestry kept its stale identity title"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' \
+    "an adoptable Space was duplicated instead of reconciled"
+  pass "fm_backend_herdr_workspace_ensure: reconciles an adopted Space's drifted identity title"
+}
+
+test_workspace_ensure_names_each_ambiguous_space_with_its_actual_title() {
+  local base home dir log resp fb out status
+  base="$TMP_ROOT/ensure-adopt-ambiguous"
+  home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/config" "$home/data" "$resp"; : > "$log"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"gentech":"john-allen"}}' \
+    > "$home/config/crew-identities.json"
+  printf 'gentech\n' > "$home/.fm-secondmate-home"
+  printf -- '- npi-brain - a (added 2026-01-01)\n' > "$home/data/projects.md"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-old","label":"Mr Allen — developer-setup"},{"workspace_id":"w-new","label":"Mr Allen — npi-brain"}]}}' \
+    > "$resp/1.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp other-home' "$ROOT" 2>&1)
+  status=$?
+  expect_code 3 "$status" "two owned Spaces with no launcher identity must refuse"
+  assert_contains "$out" "w-old labeled 'Mr Allen — developer-setup'" \
+    "the ambiguity refusal did not name the stale Space's actual title"
+  assert_contains "$out" "w-new labeled 'Mr Allen — npi-brain'" \
+    "the ambiguity refusal did not name the current Space's actual title"
+  assert_not_contains "$(cat "$log")" "rename" "an ambiguous adoption renamed a Space anyway"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' \
+    "an ambiguous adoption minted a third Space"
+  pass "fm_backend_herdr_workspace_ensure: names every ambiguous owned Space with its actual title"
 }
 
 test_workspace_ensure_other_home_ignores_the_launcher_identity() {
@@ -4575,6 +4629,8 @@ test_launcher_identity_refuses_a_workspace_missing_from_the_session
 test_workspace_ensure_prefers_the_launcher_over_the_first_label_match
 test_workspace_ensure_refuses_an_ambiguous_label_with_no_launcher
 test_workspace_ensure_other_home_ignores_the_launcher_identity
+test_workspace_ensure_reconciles_an_adopted_drifted_identity_title
+test_workspace_ensure_names_each_ambiguous_space_with_its_actual_title
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace
