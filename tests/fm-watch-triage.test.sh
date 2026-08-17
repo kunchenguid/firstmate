@@ -470,6 +470,7 @@ test_empty_write_prune_widens_the_probe() {
 # sourced. An empty exported value must survive as empty, because defaulting it with
 # the colon form reads "explicitly cleared" as "never set" and hands the default skip
 # list straight back to the one home that asked for a wider walk.
+# shellcheck disable=SC2016 # single quotes are deliberate: the library path, state dir, and anchor expand inside the bash -c child, not here
 test_empty_write_prune_from_the_environment_widens_the_probe() {
   local dir state anchor wt
   dir=$(make_case classify-empty-write-prune-env); state="$dir/state"
