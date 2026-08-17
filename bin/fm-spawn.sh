@@ -58,6 +58,13 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   Every treehouse-get spawn first claims this home's OWN worktree pool
+#   (bin/fm-pool-root.sh, which refuses rather than sharing a pool), then asks
+#   the project to release its delivered copies when it published a
+#   `pool:release-delivered` script, and finally refuses the acquired copy if
+#   another task in this home already claims it - before the base refresh
+#   touches that copy. docs/configuration.md "Worktree pools" is the
+#   operator-facing owner.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -258,6 +265,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
+# shellcheck source=bin/fm-project-script-lib.sh
+. "$SCRIPT_DIR/fm-project-script-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -1727,6 +1736,66 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# A pool runs out when delivered copies are never handed back, and a dispatch
+# then fails for want of a slot rather than for want of work. Only the project
+# knows which of its copies are delivered, so a project may publish that
+# housekeeping as a `pool:release-delivered` script and firstmate calls it once,
+# before asking for a slot (opt-in by presence, per bin/fm-project-script-lib.sh;
+# the script owns its own idempotency and pool lock, and exits 0 with nothing to
+# release). This is capacity, not safety: a release that cannot run warns and
+# the spawn continues, because refusing to dispatch over failed housekeeping
+# would be a worse outage than the one it prevents.
+RELEASE_DELIVERED_SCRIPT=pool:release-delivered
+RELEASE_DELIVERED_TIMEOUT=${FM_SPAWN_RELEASE_DELIVERED_TIMEOUT:-60}
+case "$RELEASE_DELIVERED_TIMEOUT" in ''|*[!0-9]*) RELEASE_DELIVERED_TIMEOUT=60 ;; esac
+
+release_delivered_pool_copies() {  # <project>
+  local project=$1 out rc=0 declared=0
+  fm_project_script_declared "$project" "$RELEASE_DELIVERED_SCRIPT" || declared=$?
+  if [ "$declared" = "$FM_PROJECT_SCRIPT_ABSENT" ]; then
+    return 0
+  fi
+  if [ "$declared" = "$FM_PROJECT_SCRIPT_UNCONFIRMED" ]; then
+    echo "warning: $project names a $RELEASE_DELIVERED_SCRIPT step but node is unavailable to confirm it; leasing without releasing delivered copies" >&2
+    return 0
+  fi
+  out=$(fm_project_script_run "$project" "$RELEASE_DELIVERED_SCRIPT" \
+    "$RELEASE_DELIVERED_TIMEOUT" --yes 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  echo "warning: $RELEASE_DELIVERED_SCRIPT failed for $project (exit $rc); leasing without releasing delivered copies" >&2
+  printf '%s\n' "$out" >&2
+  return 0
+}
+
+# A pooled copy has exactly one owner, and the pool cannot tell you who it is.
+# Treehouse re-leases a slot as soon as the shell that held it is gone, but this
+# home's durable records outlive that shell: a task whose agent died still names
+# that copy in state/<id>.meta, and that task's cleanup still hard-resets it.
+# Launching a second task into the same copy gives it two owners, and whichever
+# task is torn down first destroys the other's work. Run this after the slot is
+# acquired and BEFORE anything uses it - the base refresh below already resets
+# the copy - so the refusal lands while both tasks' work is still intact.
+#
+# The refusal deliberately does NOT return the slot. `treehouse return`
+# terminates the processes inside a copy and hard-resets it, which is exactly
+# the damage this guard exists to prevent, and the conflicting task may still be
+# working in there. Firstmate reconciles the claim instead; the copy, its
+# processes, and this spawn's endpoint are all left exactly as they are.
+assert_worktree_unclaimed() {  # <worktree>
+  local worktree=$1 meta claimed claimed_real other_id wt_real
+  wt_real=$(real_path_or_raw "$worktree")
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    other_id=$(basename "$meta" .meta)
+    [ "$other_id" != "$ID" ] || continue
+    claimed=$(fm_backend_meta_exact_value "$meta" worktree) || continue
+    claimed_real=$(real_path_or_raw "$claimed")
+    [ "$claimed_real" = "$wt_real" ] || continue
+    echo "error: task $other_id already claims the working copy '$claimed' that treehouse just handed task $ID; refusing to launch a second owner into it, because either task's cleanup would hard-reset the other's work. Nothing was returned or reset - reconcile $other_id first (tear it down once its work has landed, or correct its record), then spawn $ID again. Endpoint $T is parked in that copy." >&2
+    exit 1
+  done
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
   if ! git -C "$worktree" fetch --quiet origin; then
@@ -2212,6 +2281,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # Claim this home's own worktree pool before asking treehouse for a slot.
+  # Treehouse keys a pool by the repository, so without this two homes cloning
+  # the same project draw from one pool and hand each other's live slots out.
+  # bin/fm-pool-root.sh owns the derivation and refuses rather than guessing.
+  "$FM_ROOT/bin/fm-pool-root.sh" "$PROJ_ABS" >/dev/null || {
+    echo "error: could not give this home its own worktree pool for $PROJ_ABS; refusing to lease a slot another home may already have handed out" >&2
+    exit 1
+  }
+  release_delivered_pool_copies "$PROJ_ABS"
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -2259,6 +2337,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  assert_worktree_unclaimed "$WT"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1

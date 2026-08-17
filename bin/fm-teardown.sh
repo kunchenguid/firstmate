@@ -22,6 +22,11 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
+# Landing is not the only question: a pooled copy can hold landed work and still
+# belong to somebody else. A project that published a `check:worktree-custody`
+# script is asked for that verdict after the landed check and before anything
+# destructive, and its exit 1 refuses cleanup (docs/configuration.md "Worktree
+# pools"; opt-in and runner mechanics in bin/fm-project-script-lib.sh).
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -168,6 +173,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-project-script-lib.sh
+. "$SCRIPT_DIR/fm-project-script-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1198,6 +1205,44 @@ validate_worktree_teardown_safety() {
       return 1
     fi
   fi
+}
+
+# The landed-work check above answers "would work be lost?". It does not answer
+# "does this copy still have exactly one owner?" - a pooled copy handed to a
+# second task, or one whose branch was advanced from another checkout, passes
+# the first and fails the second. Only the project knows how to read its own
+# working copy, so a project may publish that verdict as a
+# `check:worktree-custody` script and firstmate refuses on its exit 1.
+#
+# Opt-in by presence, per bin/fm-project-script-lib.sh: a project that published
+# no such script tears down exactly as before. A project that DID publish one
+# and cannot be asked refuses rather than tearing down on an unread verdict.
+CUSTODY_CHECK_SCRIPT=check:worktree-custody
+CUSTODY_CHECK_TIMEOUT=${FM_TEARDOWN_CUSTODY_TIMEOUT:-120}
+case "$CUSTODY_CHECK_TIMEOUT" in ''|*[!0-9]*) CUSTODY_CHECK_TIMEOUT=120 ;; esac
+
+validate_worktree_custody() {  # <worktree>
+  local wt=$1 out rc=0 declared=0
+  fm_project_script_declared "$wt" "$CUSTODY_CHECK_SCRIPT" || declared=$?
+  if [ "$declared" = "$FM_PROJECT_SCRIPT_ABSENT" ]; then
+    return 0
+  fi
+  if [ "$declared" = "$FM_PROJECT_SCRIPT_UNCONFIRMED" ]; then
+    echo "REFUSED: worktree $wt names a $CUSTODY_CHECK_SCRIPT check but node is unavailable to confirm it." >&2
+    echo "Install node, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
+  out=$(fm_project_script_run "$wt" "$CUSTODY_CHECK_SCRIPT" "$CUSTODY_CHECK_TIMEOUT" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  if [ "$rc" -eq 127 ]; then
+    echo "REFUSED: worktree $wt publishes a $CUSTODY_CHECK_SCRIPT check but $(fm_project_script_manager "$wt") is unavailable to run it." >&2
+    echo "Install it, or get the captain's explicit OK to discard, then --force." >&2
+    return 1
+  fi
+  echo "REFUSED: $CUSTODY_CHECK_SCRIPT says worktree $wt is not this task's to discard (exit $rc)." >&2
+  printf '%s\n' "$out" >&2
+  echo "Resolve what that check reports first, or get the captain's explicit OK to discard, then --force." >&2
+  return 1
 }
 
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
@@ -2389,6 +2434,13 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+fi
+
+# Custody comes after the landed-work verdict and before anything destructive:
+# a copy whose work has landed can still be somebody else's copy. Not for
+# kind=secondmate, whose home is not a pooled task working copy.
+if [ -d "$WT" ] && [ "$FORCE" != "--force" ] && [ "$KIND" != secondmate ]; then
+  validate_worktree_custody "$WT" || exit 1
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped

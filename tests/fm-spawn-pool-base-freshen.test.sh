@@ -104,6 +104,11 @@ test_stale_pool_base_refreshes_before_branching() {
       "$branch_head" "$current" "$(cat "$POOL_DIR/advanced-main.txt")"
   fi
 
+  # The repeat models a LATER task receiving this same recycled slot, so the
+  # first task's claim on it is released first: a pooled copy has exactly one
+  # owner at a time, and spawn refuses a copy another task still names
+  # (tests/fm-worktree-custody.test.sh).
+  rm -f "$HOME_DIR/state/$id.meta"
   id='pool-current-base-repeat-r1'
   mkdir -p "$HOME_DIR/data/$id"
   printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
