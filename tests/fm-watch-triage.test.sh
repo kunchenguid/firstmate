@@ -465,6 +465,76 @@ test_empty_write_prune_widens_the_probe() {
   pass "an empty FM_WORKTREE_WRITE_PRUNE widens the probe to the whole depth-bounded tree instead of disabling it"
 }
 
+# The same widening, reached the way a home actually configures it: through the
+# process ENVIRONMENT, not an in-process assignment made after the library was
+# sourced. An empty exported value must survive as empty, because defaulting it with
+# the colon form reads "explicitly cleared" as "never set" and hands the default skip
+# list straight back to the one home that asked for a wider walk.
+test_empty_write_prune_from_the_environment_widens_the_probe() {
+  local dir state anchor wt
+  dir=$(make_case classify-empty-write-prune-env); state="$dir/state"
+  anchor="$state/anchor"; wt="$dir/wt"
+  mkdir -p "$wt/.git/objects"
+  : > "$anchor"
+  set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
+  printf 'window=test:fm-wenv\nkind=ship\nworktree=%s\n' "$wt" > "$state/wenv.meta"
+  # The one thing written since the anchor sits exactly where the DEFAULT list prunes.
+  printf 'pack\n' > "$wt/.git/objects/fresh"
+  env -u FM_WORKTREE_WRITE_PRUNE \
+    bash -c '. "$1"; crew_worktree_written_since wenv "$2" "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$state" "$anchor" \
+    && fail "the default skip list let .git churn count as write evidence"
+  FM_WORKTREE_WRITE_PRUNE='' \
+    bash -c '. "$1"; crew_worktree_written_since wenv "$2" "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$state" "$anchor" \
+    || fail "an empty FM_WORKTREE_WRITE_PRUNE in the environment fell back to the default skip list instead of widening the probe"
+  pass "an empty FM_WORKTREE_WRITE_PRUNE exported into the environment prunes nothing, widening the probe"
+}
+
+# The probe's walk runs synchronously inside the poll that was about to escalate, so
+# it must be wall-clock bounded: -xdev keeps it out of a nested mount, but a worktree
+# root that is ITSELF on a hung mount would otherwise stall the very supervisor that
+# exists to notice a wedge. A fake find that never returns in time stands in for that
+# mount. Hitting the bound must read as NO evidence, exactly like every other
+# negative outcome, so the caller's escalation schedule is untouched.
+test_worktree_write_probe_is_wall_clock_bounded() {
+  local dir state anchor wt slowbin fastbin started elapsed
+  dir=$(make_case classify-write-probe-bound); state="$dir/state"
+  anchor="$state/anchor"; wt="$dir/wt"; slowbin="$dir/slowbin"; fastbin="$dir/fastbin"
+  mkdir -p "$wt/src" "$slowbin" "$fastbin"
+  : > "$anchor"
+  set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
+  printf 'window=test:fm-slow\nkind=ship\nworktree=%s\n' "$wt" > "$state/slow.meta"
+  # Both stand-ins report the same hit; only one of them takes longer than the bound
+  # to do it, so the prompt one shows what a positive outcome looks like and the
+  # bounded assertion below cannot pass merely because the fake failed.
+  cat > "$fastbin/find" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$1/hit"
+SH
+  cat > "$slowbin/find" <<'SH'
+#!/usr/bin/env bash
+set -u
+sleep 30
+printf '%s\n' "$1/hit"
+SH
+  chmod +x "$fastbin/find" "$slowbin/find"
+  PATH="$fastbin:$PATH" \
+    bash -c '. "$1"; crew_worktree_written_since slow "$2" "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$state" "$anchor" \
+    || fail "a walk that reported a hit inside its bound was not read as write evidence"
+  started=$(date +%s)
+  PATH="$slowbin:$PATH" FM_WORKTREE_WRITE_TIMEOUT=1 \
+    bash -c '. "$1"; crew_worktree_written_since slow "$2" "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$state" "$anchor" \
+    && fail "a walk that outlived its bound was reported as write evidence"
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 10 ] \
+    || fail "the worktree write probe was not wall-clock bounded: one walk held the caller for ${elapsed}s"
+  pass "the worktree write probe is wall-clock bounded, and hitting the bound reads as no write evidence"
+}
+
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
 # task it references is provably working; if any crew has stopped, or no task can be
 # resolved, it surfaces. Files map to ids by stripping .status / .turn-ended.
@@ -2488,6 +2558,8 @@ test_status_is_paused_classifier
 test_crew_absorb_class_classifier
 test_crew_worktree_written_since_classifier
 test_empty_write_prune_widens_the_probe
+test_empty_write_prune_from_the_environment_widens_the_probe
+test_worktree_write_probe_is_wall_clock_bounded
 test_signal_crew_provably_working_classifier
 test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
