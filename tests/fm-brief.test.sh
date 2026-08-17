@@ -241,6 +241,8 @@ empty --mode value|--mode|requires a value
 unknown mode value|--mode nope|must be one of no-mistakes, direct-PR, local-only
 conditional policy is not a task mode|--mode no-mistakes-prod-only|classify this task's surface
 invalid forge value|brief-refused-b5 some-proj --mode direct-PR --forge bitbucket|--forge must be one of github or gitlab
+internal auto sentinel is not a user value|--mode direct-PR --forge auto|--forge must be one of github or gitlab
+internal auto sentinel is not a user value with =|--mode direct-PR --forge=auto|--forge must be one of github or gitlab
 forge on a secondmate charter|brief-refused-b6 --secondmate --no-projects --forge github|--forge applies only to crewmate ship or scout briefs
 ROWS
   pass "fm-brief.sh: ship --mode is required and closed-set validated"
@@ -832,6 +834,25 @@ test_forge_auto_detection() {
     || fail "explicit --forge should override auto-detection"
   assert_grep "open a merge request with \`glab\`" "$home/data/det-flag-a5/brief.md" \
     "explicit --forge gitlab was overridden by github-host detection"
+
+  # A projects/<repo> directory that is not the clone's own root must not inherit
+  # the enclosing repo's origin. FM_HOME defaults to the firstmate checkout, so a
+  # placeholder or interrupted clone would otherwise report firstmate's own
+  # github.com origin and silently mis-flag a GitLab project as GitHub.
+  local enclosing
+  enclosing="$TMP_ROOT/forge-enclosing-home"
+  mkdir -p "$enclosing/data" "$enclosing/projects/placeholder-proj"
+  git init -q -b main "$enclosing"
+  git -C "$enclosing" remote add origin https://github.com/acme/firstmate.git
+  out=$(FM_HOME="$enclosing" "$ROOT/bin/fm-brief.sh" det-enclosing-a6 placeholder-proj --mode direct-PR 2>&1); status=$?
+  expect_code 0 "$status" "non-clone project directory should still scaffold"
+  assert_contains "$out" "no origin remote found" \
+    "non-clone project directory did not warn loudly"
+  brief="$enclosing/data/det-enclosing-a6/brief.md"
+  assert_grep "open a PR/MR with \`your forge CLI\`" "$brief" \
+    "non-clone project directory inherited the enclosing repo's forge instead of staying neutral"
+  assert_grep "3. Use your forge CLI" "$brief" \
+    "non-clone project directory neutral brief lost the neutral forge rule"
   pass "fm-brief.sh: forge auto-detection covers github, gitlab, unknown, and missing clones"
 }
 

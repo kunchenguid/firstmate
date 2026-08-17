@@ -8,19 +8,22 @@
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--forge <github|gitlab>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--forge <github|gitlab>] [--herdr-lab]
+#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   --scout writes the scout contract instead: the deliverable is a report at
+#   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --forge selects the forge vocabulary in generated crewmate briefs:
 #   gh-axi and "PR" on GitHub, glab and "merge request" (MR) on GitLab.
 #   It is best-effort by default: the clone's origin remote is read from
 #   $FM_HOME/projects/<repo-name> and its host decides the vocabulary.
+#   That directory must itself be the clone's root; a placeholder or partial
+#   directory inside an enclosing repo is treated as no clone at all rather
+#   than inheriting the enclosing repo's origin.
 #   github.com means GitHub, any host whose name contains "gitlab" means
 #   GitLab, and anything else - a missing clone, a local path, or a
 #   self-hosted host with no "gitlab" in its name - means unknown.
 #   Unknown scaffolds forge-neutral wording ("your forge CLI", "PR/MR") and
 #   warns loudly at scaffold time; pass --forge to choose explicitly.
 #   Secondmate charters are forge-neutral and refuse this flag.
-#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
-#   --scout writes the scout contract instead: the deliverable is a report at
-#   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
 #   is cloned into the secondmate home, while the natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
@@ -169,10 +172,12 @@ elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
-case "$FORGE" in
-  auto|github|gitlab) ;;
-  *) echo "error: --forge must be one of github or gitlab (got '$FORGE'); omit it to auto-detect from the project's origin remote" >&2; exit 1 ;;
-esac
+if [ "$FORGE_SET" -eq 1 ]; then
+  case "$FORGE" in
+    github|gitlab) ;;
+    *) echo "error: --forge must be one of github or gitlab (got '$FORGE'); omit it to auto-detect from the project's origin remote" >&2; exit 1 ;;
+  esac
+fi
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
@@ -295,11 +300,21 @@ REPO=${POS[1]}
 # unrecognized or missing origin scaffolds forge-neutral wording and warns
 # loudly at scaffold time, so a self-hosted GitLab host without "gitlab" in
 # its name is a supported outcome rather than a silent mis-flag.
+# The project directory only counts as a clone when it is that clone's own root:
+# git resolves a repository by walking upward, and FM_HOME defaults to the
+# firstmate checkout, so a placeholder or half-finished projects/<repo-name>
+# directory would otherwise report the firstmate repo's own origin.
 if [ "$FORGE" = auto ]; then
   FORGE_ORIGIN=
-  if [ -d "$FM_HOME/projects/$REPO" ] && \
-     git -C "$FM_HOME/projects/$REPO" rev-parse --git-dir >/dev/null 2>&1; then
-    FORGE_ORIGIN=$(git -C "$FM_HOME/projects/$REPO" remote get-url origin 2>/dev/null || true)
+  PROJECT_DIR=$(CDPATH='' cd -- "$FM_HOME/projects/$REPO" 2>/dev/null && pwd -P) || PROJECT_DIR=
+  if [ -n "$PROJECT_DIR" ]; then
+    PROJECT_TOPLEVEL=$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null || true)
+    if [ -n "$PROJECT_TOPLEVEL" ]; then
+      PROJECT_TOPLEVEL=$(CDPATH='' cd -- "$PROJECT_TOPLEVEL" 2>/dev/null && pwd -P) || PROJECT_TOPLEVEL=
+    fi
+    if [ -n "$PROJECT_TOPLEVEL" ] && [ "$PROJECT_TOPLEVEL" = "$PROJECT_DIR" ]; then
+      FORGE_ORIGIN=$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/null || true)
+    fi
   fi
   if [ -n "$FORGE_ORIGIN" ]; then
     ORIGIN_HOST=$(printf '%s\n' "$FORGE_ORIGIN" | sed -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' -e 's#^[^/]*@##' -e 's#[:/].*##')
