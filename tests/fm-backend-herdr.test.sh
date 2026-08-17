@@ -451,8 +451,8 @@ test_workspace_find_all_tolerates_registered_project_drift() {
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
       '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find_all s' "$ROOT")
-  [ "$out" = "w-sm" ] \
-    || fail "find_all did not resolve this home's own Space across a registered-project change: '$out'"
+  [ "$out" = "$(printf 'w-sm\nw-legacy')" ] \
+    || fail "find_all did not resolve exactly this home's own Spaces (drifted identity title and home-unique legacy title): '$out'"
   pass "Herdr home Space lookup follows its own identity across registered-project drift"
 }
 
@@ -724,6 +724,67 @@ test_workspace_ensure_names_each_ambiguous_space_with_its_actual_title() {
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' \
     "an ambiguous adoption minted a third Space"
   pass "fm_backend_herdr_workspace_ensure: names every ambiguous owned Space with its actual title"
+}
+
+test_workspace_ensure_adopts_a_legacy_titled_secondmate_space() {
+  local base home dir log resp fb out
+  base="$TMP_ROOT/ensure-adopt-legacy"
+  home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/config" "$home/data" "$resp"; : > "$log"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"gentech":"john-allen"}}' \
+    > "$home/config/crew-identities.json"
+  printf 'gentech\n' > "$home/.fm-secondmate-home"
+  printf -- '- npi-brain - a (added 2026-01-01)\n' > "$home/data/projects.md"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-sm","label":"2ndmate-gentech"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sm","label":"2ndmate-gentech"}}}' > "$resp/2.out"
+  : > "$resp/3.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sm","label":"Mr Allen — npi-brain"}}}' > "$resp/4.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp other-home' "$ROOT" 2>&1) \
+    || fail "adopting this home's pre-feature legacy Space failed: $out"
+  [ "$out" = "w-sm" ] || fail "legacy adoption returned the wrong mechanical workspace id: $out"
+  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' \
+    "enabling crew identities minted a duplicate Space instead of adopting the legacy one"
+  assert_contains "$(cat "$log")" $'workspace\x1frename\x1fw-sm\x1fMr Allen — npi-brain' \
+    "the adopted legacy Space was not renamed to its identity title"
+  pass "fm_backend_herdr_workspace_ensure: adopts and renames a home-unique legacy-titled Space"
+}
+
+test_workspace_ensure_never_adopts_a_shared_firstmate_legacy_space() {
+  local base home dir log resp fb out
+  base="$TMP_ROOT/ensure-legacy-primary"
+  home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/config" "$resp"; : > "$log"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{}}' \
+    > "$home/config/crew-identities.json"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-any","label":"firstmate"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-new","label":"Lt Pullings"},"tab":{"tab_id":"w-new:t1"}}}' > "$resp/2.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp other-home' "$ROOT" 2>&1) \
+    || fail "a primary home with only a shared legacy Space failed to stand one up: $out"
+  [ "$out" = "w-new" ] || fail "a session-shared 'firstmate' Space was adopted by label: $out"
+  assert_not_contains "$(cat "$log")" "rename" \
+    "a session-shared 'firstmate' Space was renamed by another home"
+  pass "fm_backend_herdr_workspace_ensure: never adopts the session-shared 'firstmate' legacy title"
+}
+
+test_workspace_ensure_ambiguity_message_claims_ownership_only_when_established() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/ensure-ambiguous-wording"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w7","label":"firstmate"}]}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /tmp' "$ROOT" 2>&1)
+  assert_not_contains "$out" "belong to this home" \
+    "a same-label collision claimed ownership the query never established"
+  assert_contains "$out" "may belong to another home or to the captain" \
+    "a same-label collision did not describe its candidates as a label collision"
+  pass "fm_backend_herdr_workspace_ensure: claims Space ownership only where the query established it"
 }
 
 test_workspace_ensure_other_home_ignores_the_launcher_identity() {
@@ -4631,6 +4692,9 @@ test_workspace_ensure_refuses_an_ambiguous_label_with_no_launcher
 test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_workspace_ensure_reconciles_an_adopted_drifted_identity_title
 test_workspace_ensure_names_each_ambiguous_space_with_its_actual_title
+test_workspace_ensure_adopts_a_legacy_titled_secondmate_space
+test_workspace_ensure_never_adopts_a_shared_firstmate_legacy_space
+test_workspace_ensure_ambiguity_message_claims_ownership_only_when_established
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
 test_container_ensure_reuses_existing_workspace

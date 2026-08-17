@@ -1726,10 +1726,14 @@ fm_backend_herdr_workspace_find_all_labelled() {  # <session>
     # A home's registered project set is mutable, so an existing Space of this
     # same home can still carry an earlier identity title. Ownership, not the
     # exact current title, decides what belongs to this home.
+    # The legacy title is adoptable only when it is home-unique: "2ndmate-<id>"
+    # names exactly one home, while every primary home in the session shares
+    # "firstmate", so a legacy-titled primary Space stays out of this query.
     legacy=$(fm_backend_herdr_workspace_legacy_label)
+    [ "$legacy" = firstmate ] || legacy=""
     printf '%s\n' "$rows" | while IFS=$'\t' read -r id lbl; do
       [ -n "$id" ] || continue
-      [ "$lbl" != "$legacy" ] || continue
+      [ -z "$legacy" ] || [ "$lbl" != "$legacy" ] || continue
       fm_backend_herdr_workspace_label_is_own "$lbl" "$base" || continue
       printf '%s\t%s\n' "$id" "$lbl"
     done
@@ -2007,7 +2011,7 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 # Returns 0 on success, 3 for a refusal whose exact reason is already on
 # stderr, and 1 for a failed or unparseable herdr call.
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship>]
-  local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label matches count status described
+  local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label matches count status described relation
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
   if [ "$relationship" = launcher-home ]; then
@@ -2039,7 +2043,12 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
       printf "%s labeled '%s'; " "$match_id" "$match_label"
     done)
     described=${described%'; '}
-    echo "error: ${count} herdr workspaces in session '$session' belong to this home (${described}) and this spawn has no herdr parent pane to identify which one is its own; rename or close the extras, or run firstmate inside the workspace its workers belong in" >&2
+    if [ -n "$(fm_backend_herdr_workspace_identity_base_label 2>/dev/null)" ]; then
+      relation="belong to this home"
+    else
+      relation="are labeled '$label', so any of them may belong to another home or to the captain"
+    fi
+    echo "error: ${count} herdr workspaces in session '$session' ${relation} (${described}) and this spawn has no herdr parent pane to identify which one is its own; rename or close the extras, or run firstmate inside the workspace its workers belong in" >&2
     return 3
   fi
   wsid=${matches%%$'\n'*}
