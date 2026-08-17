@@ -153,7 +153,7 @@ assert_meta_profile() {
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
-  local rec id out status expected launch
+  local rec id out status expected launch worker_token
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
@@ -165,7 +165,9 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  worker_token=$(awk -F= '$1 == "worker_token" { print $2; exit }' "$HOME_DIR/state/$id.meta")
+  [[ "$worker_token" =~ ^[0-9a-f]{32}$ ]] || fail "spawn metadata did not record a valid task worker token"
+  expected="FM_WORKER_TOKEN=$worker_token env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -401,7 +403,7 @@ test_active_dispatch_profile_allows_positional_harness() {
 }
 
 test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch
+  local rec id out status launch worker_token
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
@@ -414,8 +416,10 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+  worker_token=$(awk -F= '$1 == "worker_token" { print $2; exit }' "$HOME_DIR/state/$id.meta")
+  [[ "$worker_token" =~ ^[0-9a-f]{32}$ ]] || fail "raw launch metadata omitted its task worker token"
+  [ "$launch" = "FM_WORKER_TOKEN=$worker_token custom-agent --flag" ] || fail "raw launch command lost its task identity binding"$'\n'"actual: $launch"
+  pass "active crew-dispatch profile allows a task-bound raw launch command"
 }
 
 test_claude_threads_model_and_effort() {
@@ -523,7 +527,7 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
 }
 
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
-  local rec id out status launch
+  local rec id out status launch wt_real
   id=profile-cursor-z6c
   rec=$(make_spawn_case profile-cursor cursor "$id")
   read_case_record "$rec"
@@ -534,7 +538,8 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
+  wt_real=$(cd "$WT_DIR" && pwd -P)
+  assert_contains "$launch" "--trust --yolo --model 'cursor-grok-4.5-high' --workspace '$wt_real'" \
     "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
   # The executable is RESOLVED, never named: `cursor` is not the CLI, so a
   # literal `cursor agent` command cannot run on a machine that has only the

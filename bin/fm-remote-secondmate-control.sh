@@ -9,6 +9,7 @@
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
+#   fm-remote-secondmate-control.sh liveness <id> <interval-ms> <evidence-timeout-secs>
 #   fm-remote-secondmate-control.sh sync <id>
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
@@ -221,6 +222,18 @@ cmd_observe() {
   printf '\n'
 }
 
+cmd_liveness() {
+  local id=$1 interval=$2 evidence_timeout=$3
+  validate_id "$id"
+  validate_home "$id"
+  case "$interval" in ''|*[!0-9]*|0) die "liveness interval must be a positive integer" ;; esac
+  case "$evidence_timeout" in ''|*[!0-9]*|0) die "liveness evidence timeout must be a positive integer" ;; esac
+  [ -f "$(meta_path "$id")" ] || die "remote secondmate has no endpoint metadata"
+  FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$CONTROL_STATE" \
+    FM_LIVENESS_INTERVAL_MS="$interval" FM_LIVENESS_EVIDENCE_TIMEOUT="$evidence_timeout" \
+    "$SCRIPT_DIR/fm-liveness-snapshot.sh" --json --id "$id"
+}
+
 cmd_sync() {
   local id=$1 target dirty head current
   validate_id "$id"
@@ -297,6 +310,7 @@ case "${1:-}" in
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
+  liveness) shift; [ "$#" -eq 3 ] || usage; cmd_liveness "$@" ;;
   sync) shift; [ "$#" -eq 1 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
