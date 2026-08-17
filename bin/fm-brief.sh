@@ -265,6 +265,7 @@ exit 0
 fi
 
 REPO=${POS[1]}
+LEARNINGS_PROJECT_SLUG=$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._-')
 
 # Ship and scout workers do not receive the captain's gstack SessionStart hooks,
 # so their written briefs may carry relevant learnings. Secondmate charters exit
@@ -306,7 +307,7 @@ while IFS= read -r tok; do
   LEARNINGS_TOKENS+=("$tok")
 done < <(learnings_tokens "$ID" "$REPO")
 if [ "${#LEARNINGS_TOKENS[@]}" -gt 0 ]; then
-  learnings_output=$("$SCRIPT_DIR/fm-learnings-search.sh" --limit 5 "${LEARNINGS_TOKENS[@]}") || learnings_output=
+  learnings_output=$(GSTACK_PROJECT_SLUG="$LEARNINGS_PROJECT_SLUG" "$SCRIPT_DIR/fm-learnings-search.sh" --limit 5 "${LEARNINGS_TOKENS[@]}") || learnings_output=
   if [ -n "$learnings_output" ]; then
     LEARNINGS_BLOCK=$'\n\n# Relevant project learnings\n\n'"$learnings_output"
   fi

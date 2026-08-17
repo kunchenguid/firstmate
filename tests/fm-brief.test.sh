@@ -739,7 +739,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$query" ] || exit 0
-printf 'LEARNINGS: %s loaded (2 pitfalls)\n\n## Pitfalls\n- [fixture] (confidence: 9/10, observed, 2026-01-01)\n  insight for: %s\n' "$limit" "$query"
+printf 'LEARNINGS: %s loaded (2 pitfalls)\n\n## Pitfalls\n- [fixture] (confidence: 9/10, observed, 2026-01-01)\n  scope: %s\n  insight for: %s\n' "$limit" "${GSTACK_PROJECT_SLUG:-}" "$query"
 SH
       ;;
   esac
@@ -758,6 +758,7 @@ test_learnings_embedded_when_searcher_present() {
   brief="$home/data/tinas-second-brain-fix-issue-698/brief.md"
   assert_grep "# Relevant project learnings" "$brief" "ship brief did not embed the learnings heading"
   assert_grep "LEARNINGS: 5 loaded (2 pitfalls)" "$brief" "ship brief did not embed the searcher summary"
+  assert_grep "scope: tinas-second-brain" "$brief" "ship brief did not scope the search to the target repository"
   assert_grep "insight for: tinas second brain 698" "$brief" \
     "ship brief did not derive tokens from the title and repo (noise stripped, issue number kept)"
   assert_grep "{TASK}" "$brief" "learnings insertion broke the task placeholder"
