@@ -92,16 +92,12 @@ def description_span(frontmatter: list[bytes], path: str) -> tuple[int, int]:
     return start, end
 
 
-def skill_refresh(previous: bytes, upstream: bytes, overlay: bytes, path: str) -> bytes:
-    previous_front, _ = split_frontmatter(previous, path)
+def skill_refresh(upstream: bytes, overlay: bytes, path: str, preserve_compact: bool) -> bytes:
     upstream_front, upstream_body = split_frontmatter(upstream, path)
     overlay_front, _ = split_frontmatter(overlay, path)
-    p0, p1 = description_span(previous_front, path)
     u0, u1 = description_span(upstream_front, path)
     o0, o1 = description_span(overlay_front, path)
-    compact = overlay_front[o0:o1]
-    prior = previous_front[p0:p1]
-    description = compact if compact != prior else upstream_front[u0:u1]
+    description = overlay_front[o0:o1] if preserve_compact else upstream_front[u0:u1]
     refreshed = upstream_front[:u0] + description + upstream_front[u1:] + upstream_body
     if len(b"".join(description).decode("utf-8")) > 1100:
         raise Refusal(f"unmapped semantic owner: {path} compact discovery description exceeds its bound")
@@ -210,6 +206,10 @@ def transform_sources(
         )
         updates.update({path: value for path, value in refreshed.items() if value != owners[path]})
         evidence.extend(mapped)
+    compact_description_owners = lineage.get("compact_skill_description_owners", [])
+    if not isinstance(compact_description_owners, list) or any(not isinstance(path, str) for path in compact_description_owners):
+        raise Refusal("lineage has malformed compact skill description ownership")
+    compact_description_owners = set(compact_description_owners)
     for path in changes:
         if path == AGENTS:
             continue
@@ -217,7 +217,7 @@ def transform_sources(
         new = file_at(repo, upstream, path)
         current = file_at(repo, overlay, path)
         if path.startswith(".agents/skills/") and path.endswith("/SKILL.md") and None not in (old, new, current):
-            updates[path] = skill_refresh(old, new, current, path)  # type: ignore[arg-type]
+            updates[path] = skill_refresh(new, current, path, path in compact_description_owners)  # type: ignore[arg-type]
             evidence.append({"source_path": path, "owner": path, "kind": "skill-body-with-compact-description"})
         elif old != new and new != current:
             raise Refusal(f"unmapped semantic owner: {path}")

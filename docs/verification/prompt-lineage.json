@@ -156,6 +156,27 @@
     "docs/architecture.md",
     "docs/scripts.md"
   ],
+  "compact_skill_description_owners": [
+    ".agents/skills/afk/SKILL.md",
+    ".agents/skills/ahoy/SKILL.md",
+    ".agents/skills/ask-user-authority/SKILL.md",
+    ".agents/skills/bearings/SKILL.md",
+    ".agents/skills/bootstrap-diagnostics/SKILL.md",
+    ".agents/skills/decision-hold-lifecycle/SKILL.md",
+    ".agents/skills/diagnostic-reasoning/SKILL.md",
+    ".agents/skills/firstmate-codexapp/SKILL.md",
+    ".agents/skills/firstmate-coding-guidelines/SKILL.md",
+    ".agents/skills/firstmate-orca/SKILL.md",
+    ".agents/skills/fmx-respond/SKILL.md",
+    ".agents/skills/harness-adapters/SKILL.md",
+    ".agents/skills/process-event-sources/SKILL.md",
+    ".agents/skills/project-management/SKILL.md",
+    ".agents/skills/quota-array-dispatch/SKILL.md",
+    ".agents/skills/secondmate-provisioning/SKILL.md",
+    ".agents/skills/stow/SKILL.md",
+    ".agents/skills/stuck-crewmate-recovery/SKILL.md",
+    ".agents/skills/updatefirstmate/SKILL.md"
+  ],
   "live_authority_sha256": {
     ".agents/prompt-roles/secondmate.md": "c395ced30b0b78e1c92d63db0c8aa8efaa202e77bedb7f9c1782438a6dcdd132",
     ".agents/skills/afk/SKILL.md": "57b1bdcafb8720326ff3c4ca30ecdeb894893f128bc7e3c54fb63895eed2d886",

@@ -395,6 +395,7 @@ live={'generation':1,'kind':'live-overlay','upstream_commit':sys.argv[2],
       'generated_parity_archive_sha256':hashlib.sha256(encoded).hexdigest()}
 v={'schema_version':4,'generations':[{'generation':0},live],
    'overlay_paths':owners+[artifact,'bin/fm-operation-disclosure.py','bin/fm-prompt-overlay.py','bin/fm-prompt-semantic-refresh.py','docs/verification/prompt-lineage.json'],
+   'compact_skill_description_owners':['.agents/skills/demo/SKILL.md'],
    'live_authority_sha256':{x:hashlib.sha256((root/x).read_bytes()).hexdigest() for x in owners}}
 p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps(v)+'\n')
 PY
@@ -425,6 +426,52 @@ test_semantic_forward_port_reaches_optimized_owners() {
   git -C "$w/main" show "$candidate:.agents/skills/demo/SKILL.md" | grep -qF 'New body rule.' || fail "skill body change was omitted"
   git -C "$w/main" show "$candidate:.agents/skills/demo/SKILL.md" | grep -qF 'description: Load for demo work.' || fail "compact skill discovery description was lost"
   pass "T13 mapped AGENTS and skill semantics forward-port through optimized owners"
+}
+
+test_compact_description_survives_upstream_convergence() {
+  local w out approval candidate plan ref token
+  w=$(new_semantic_overlay_world t-description-convergence)
+  python3 - "$w/seed/.agents/skills/demo/SKILL.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace(
+    'A deliberately verbose upstream discovery description for the demo skill.',
+    'Load for demo work.',
+))
+PY
+  git -C "$w/seed" add -A && git -C "$w/seed" commit -qm 'upstream description converges'
+  git -C "$w/seed" push -q origin main
+
+  out=$(run_update "$w")
+  approval=$(printf '%s\n' "$out" | grep '^overlay-install: approval-required')
+  candidate=$(printf '%s\n' "$approval" | sed -n 's/.* candidate=\([^ ]*\).*/\1/p')
+  ref=$(printf '%s\n' "$approval" | sed -n 's/.* ref=\([^ ]*\).*/\1/p')
+  plan=$(printf '%s\n' "$approval" | sed -n 's/.* plan=\([^ ]*\).*/\1/p')
+  token=$(printf '%s\n' "$approval" | sed -n 's/.* token=\([^ ]*\).*/\1/p')
+  FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" --install-overlay \
+    --plan "$plan" --candidate-ref "$ref" --token "$token" --approve-candidate "$candidate" >/dev/null
+
+  python3 - "$w/seed/.agents/skills/demo/SKILL.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace(
+    'description: Load for demo work.',
+    'description: Newly expanded upstream discovery guidance for demo work.',
+) + 'Newest body rule.\n')
+PY
+  git -C "$w/seed" add -A && git -C "$w/seed" commit -qm 'upstream changes converged description'
+  git -C "$w/seed" push -q origin main
+
+  out=$(run_update "$w")
+  approval=$(printf '%s\n' "$out" | grep '^overlay-install: approval-required')
+  candidate=$(printf '%s\n' "$approval" | sed -n 's/.* candidate=\([^ ]*\).*/\1/p')
+  git -C "$w/main" show "$candidate:.agents/skills/demo/SKILL.md" | grep -qF \
+    'description: Load for demo work.' || fail "explicitly owned compact description was lost after convergence"
+  git -C "$w/main" show "$candidate:.agents/skills/demo/SKILL.md" | grep -qF \
+    'Newest body rule.' || fail "skill body did not follow upstream after description convergence"
+  pass "T14 compact description ownership survives upstream convergence"
 }
 
 test_unrelated_update_refreshes_exact_lineage_bindings() {
@@ -521,6 +568,7 @@ test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_verified_overlay_requires_explicit_install_approval
 test_semantic_forward_port_reaches_optimized_owners
+test_compact_description_survives_upstream_convergence
 test_unrelated_update_refreshes_exact_lineage_bindings
 test_hash_bound_overlay_cannot_mask_unmapped_semantics
 test_ambiguous_overlay_refuses_without_ref_moves
