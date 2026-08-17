@@ -1585,15 +1585,7 @@
                 },
                 "storageProfile": {
                   "imageReference": "[if(equals(parameters('workerImageId'), ''), createObject('publisher', 'Canonical', 'offer', 'ubuntu-24_04-lts', 'sku', 'server', 'version', parameters('ubuntuImageVersion')), createObject('id', parameters('workerImageId')))]",
-                  "osDisk": {
-                    "name": "[format('disk-{0}-wkr-{1}-os', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0'))]",
-                    "createOption": "FromImage",
-                    "deleteOption": "Delete",
-                    "diskSizeGB": 64,
-                    "managedDisk": {
-                      "storageAccountType": "StandardSSD_LRS"
-                    }
-                  },
+                  "osDisk": "[if(equals(parameters('workerImageId'), ''), createObject('name', format('disk-{0}-wkr-{1}-os', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0')), 'createOption', 'FromImage', 'deleteOption', 'Delete', 'diskSizeGB', 64, 'managedDisk', createObject('storageAccountType', 'StandardSSD_LRS')), createObject('name', format('disk-{0}-wkr-{1}-os', parameters('namingPrefix'), padLeft(string(parameters('workerSlots')[copyIndex()]), 2, '0')), 'createOption', 'FromImage', 'deleteOption', 'Delete', 'managedDisk', createObject('storageAccountType', 'StandardSSD_LRS')))]",
                   "dataDisks": [
                     {
                       "lun": 0,

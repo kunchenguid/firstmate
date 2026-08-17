@@ -45,6 +45,10 @@ RESPONSE_SCHEMA = "fm.worker-provider-response/v1"
 INVENTORY_SCHEMA = "fm.worker-provider-inventory/v1"
 MAX_INPUT_BYTES = 2 * 1024 * 1024
 AZ_TIMEOUT_SECONDS = 300
+# A guest run is staging (archive fetches plus the repository clone) BEFORE the
+# wall starts, then the wall, then collection after it ends. Any bound that has
+# to cover a whole guest run measures wall plus this, never wall alone.
+GUEST_RUN_SLACK_SECONDS = 2400
 RESOURCE_API = {
     "vm": "2024-03-01",
     "nic": "2023-09-01",
@@ -175,13 +179,13 @@ def require_landed_code():
         raise ProviderError("Azure worker mutation is allowed only from code landed on origin's default branch")
 
 
-def az(controller, args, check=True):
+def az(controller, args, check=True, timeout=AZ_TIMEOUT_SECONDS):
     command = ["az"] + list(args) + [
         "--subscription", controller["subscription"], "--only-show-errors",
     ]
     if "--output" not in command and "-o" not in command:
         command += ["--output", "json"]
-    result = run(command, check=check)
+    result = run(command, check=check, timeout=timeout)
     stderr = result.stderr.decode("utf-8", errors="replace").strip()
     if result.returncode != 0:
         return None, result.returncode, stderr
@@ -1914,7 +1918,14 @@ printf 'FM-WORKER-RESULT:%s\\n' "$(cat /var/lib/firstmate-worker/result.json)"
     ]
     if protected_parameters:
         update_command += ["--protected-parameters"] + protected_parameters
-    _, rc, stderr = az(controller, update_command, check=False)
+    # This call BLOCKS until the guest script finishes, so it cannot share the
+    # ordinary control-plane bound: a wall of up to six hours under a
+    # 300-second CLI timeout means no real crewmate task can ever return its
+    # result, and every smoke that passed before was a sub-second command.
+    _, rc, stderr = az(
+        controller, update_command, check=False,
+        timeout=int(request["wall_seconds"]) + GUEST_RUN_SLACK_SECONDS,
+    )
     if rc != 0:
         raise ProviderError("exact private worker execution failed: {}".format(stderr))
     # The update response body has no instance view; only the explicit

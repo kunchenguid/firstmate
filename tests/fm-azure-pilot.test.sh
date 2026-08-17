@@ -9,6 +9,9 @@ set -u
 
 SCRIPT="$ROOT/bin/fm-azure-pilot.sh"
 TEMPLATE="$ROOT/docs/azure-pilot/main.json"
+WORKER_PROVIDER="$ROOT/bin/fm-azure-worker-provider.py"
+# A separate handle from TEMPLATE, which later cases reassign in subshells.
+WORKER_TEMPLATE="$ROOT/docs/azure-pilot/main.json"
 DOC="$ROOT/docs/azure-pilot.md"
 
 run_static_template_checks() {
@@ -767,5 +770,127 @@ run_bounded_mutation_deadline_checks
 run_subscription_deployment_cli_shape_check
 run_capacity_contract_checks
 run_documentation_contract_checks
+
+run_guest_run_bound_check() {
+  # The one az call that blocks until the guest script finishes ran under the
+  # ordinary 300-second CLI bound while --wall-seconds accepts 21600, so no
+  # crewmate task longer than about five minutes could ever return a result.
+  # Driven through the REAL mutate_execute so the bound is proved at its call
+  # site, not at the constant.
+  local tmp out
+  fm_test_tmproot_into tmp fm-azure-guest-run-bound
+  cat >"$tmp/driver.py" <<'GUESTBOUND'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+provider_path, tmp = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("fm_provider", provider_path)
+provider = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(provider)
+
+root = Path(tmp)
+controller = {
+    "subscription": "00000000-0000-0000-0000-000000000000",
+    "resource_group": "rg-test", "prefix": "fmtest", "owner": "owner",
+    "deployment_generation": "dep-one", "home_binding": "a" * 64,
+}
+bindings = {
+    "home_binding": "a" * 64, "task": "task-one", "task_generation": "gen-1",
+    "assignment_generation": "asg-00000001", "account_binding": "b" * 64,
+    "worktree_binding": "c" * 64, "repository_binding": "d" * 64,
+    "repository_generation": "repo-gen",
+}
+request = dict(bindings)
+request.update({
+    "schema": "fm.worker-execution/v1", "cloud_instance_id": "vm-instance",
+    "argv": ["/usr/bin/true"], "wall_seconds": 3600,
+})
+request["request_digest"] = "f" * 64
+action = {
+    "type": "execute", "slot": 1, "cloud_instance_id": "vm-instance",
+    "bindings": bindings, "request": request,
+    "request_digest": request["request_digest"], "idempotency_key": "e" * 64,
+}
+execution = {
+    "schema": "fm.worker-execution-result/v1",
+    "request_digest": request["request_digest"], "task": "task-one",
+    "task_generation": "gen-1", "assignment_generation": "asg-00000001",
+    "cloud_instance_id": "vm-instance", "repository_binding": "d" * 64,
+    "repository_generation": "repo-gen", "exit_code": 0, "timed_out": False,
+    "stdout_sha256": "0" * 64, "stderr_sha256": "1" * 64,
+    "stdout_truncated": False, "stderr_truncated": False,
+}
+execution["result_digest"] = provider.hashlib.sha256(
+    provider.canonical_bytes(execution)
+).hexdigest()
+
+worker = {"slot": 1, "resources": {"vm": {"power_state": "VM running"}}}
+provider.inventory = lambda controller, include_metrics=True: {"workers": [worker]}
+provider.worker_by_slot = lambda snapshot, slot: worker
+provider.recorded_exact = lambda action, worker, **kwargs: worker["resources"]
+provider.action_tags = lambda controller, action: {}
+provider.upload_json_blob = lambda *a, **k: "0" * 64
+provider.run_command_instance_view = lambda controller, vm, name: {
+    "executionState": "Succeeded",
+    "output": "FM-WORKER-RESULT:" + json.dumps(execution, sort_keys=True, separators=(",", ":")),
+    "error": "",
+}
+seen = {}
+
+
+def fake_az(controller, args, check=True, timeout=provider.AZ_TIMEOUT_SECONDS):
+    if "update" in args and "run-command" in args:
+        seen["timeout"] = timeout
+    return {}, 0, ""
+
+
+provider.az = fake_az
+provider.mutate_execute(controller, action)
+
+# The blocking call must clear the wall by far more than the ordinary
+# control-plane bound. An absolute floor, not the constant under test: a
+# comparison against GUEST_RUN_SLACK_SECONDS would pass with it set to zero.
+assert seen.get("timeout") is not None, "the run-command update carried no explicit bound"
+assert seen["timeout"] >= request["wall_seconds"] + 1800, (
+    "the blocking run-command bound does not cover a whole guest run", seen["timeout"],
+)
+print("OK")
+GUESTBOUND
+  out=$(python3 "$tmp/driver.py" "$WORKER_PROVIDER" "$tmp" 2>&1)
+  expect_code 0 $? "the blocking execute call must cover a whole guest run: $out"
+  assert_contains "$out" "OK" "the guest-run bound driver did not complete: $out"
+  pass "the blocking worker execute call is bounded by the whole guest run"
+}
+
+run_worker_os_disk_image_check() {
+  # A captured golden image carries its own OS disk size, and Azure refuses any
+  # smaller pin outright ("disk size 64 GB is smaller than ... 96 GB"), so the
+  # worker template must not assert a size it cannot know.
+  python3 - "$WORKER_TEMPLATE" <<'OSDISK' || fail "the worker OS disk pins a size it cannot know"
+import json
+import re
+import sys
+
+body = open(sys.argv[1], encoding="utf-8").read()
+template = json.loads(body)
+worker_os_disk = [
+    line for line in body.splitlines()
+    if '"osDisk"' in line and "wkr-{1}-os" in line
+]
+assert len(worker_os_disk) == 1, worker_os_disk
+expression = worker_os_disk[0]
+assert "workerImageId" in expression, "the worker OS disk does not branch on the custom image"
+default_branch, custom_branch = expression.split("createObject", 1)[1], expression.rsplit("createObject('name'", 1)[1]
+assert "diskSizeGB" in default_branch, "the Canonical branch lost its explicit size"
+assert "diskSizeGB" not in custom_branch, "the custom-image branch still pins a size"
+assert isinstance(template, dict)
+OSDISK
+  pass "the worker OS disk inherits a custom image's size instead of pinning one"
+}
+
+run_guest_run_bound_check
+run_worker_os_disk_image_check
 
 echo "# fm-azure-pilot.test.sh: all assertions passed"
