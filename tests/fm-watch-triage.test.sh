@@ -255,7 +255,7 @@ EOF
 # verb or the threshold. A declared-work line states an intention; only pairing it
 # with a measured idle age turns it into a stall.
 test_declared_work_stall_classifier() {
-  local dir state
+  local dir state open_line closed_line held_line
   dir=$(make_case classify-declared-work); state="$dir/state"
   status_declares_work 'working: relaunching the remaining six one by one' \
     || fail "the declared-work verb was not recognized"
@@ -287,20 +287,30 @@ test_declared_work_stall_classifier() {
   status_work_declared_unresumed "$state/absent.status" \
     && fail "a missing status file was classed as declaring unresumed work"
 
-  status_declared_work_stalled "$state/open.status" 500 240 \
+  # The stall verdict is taken on the line the caller ALREADY holds, so one read
+  # both decides it and supplies the line the wake quotes back. These cases feed
+  # it the same three streams above, resolved once through the file-level helper.
+  open_line=$(last_status_line "$state/open.status")
+  closed_line=$(last_status_line "$state/closed.status")
+  held_line=$(last_status_line "$state/held.status")
+  status_declared_work_stalled "$open_line" 500 240 \
     || fail "declared work idle past the threshold was not classed stalled"
-  status_declared_work_stalled "$state/open.status" 239 240 \
+  status_declared_work_stalled "$open_line" 239 240 \
     && fail "declared work inside the threshold was classed stalled"
-  status_declared_work_stalled "$state/open.status" 240 240 \
+  status_declared_work_stalled "$open_line" 240 240 \
     || fail "declared work exactly at the threshold was not classed stalled"
-  status_declared_work_stalled "$state/closed.status" 5000 240 \
-    && fail "a superseded declaration was classed stalled"
-  status_declared_work_stalled "$state/held.status" 5000 240 \
+  status_declared_work_stalled "$closed_line" 5000 240 \
+    && fail "a superseded terminal event was classed stalled"
+  status_declared_work_stalled "$held_line" 5000 240 \
     && fail "a declared external wait was classed stalled"
-  status_declared_work_stalled "$state/open.status" '' 240 \
+  status_declared_work_stalled '' 5000 240 \
+    && fail "an empty last line was treated as a proven stall"
+  status_declared_work_stalled "$open_line" '' 240 \
     && fail "an unreadable idle age was treated as a proven stall"
-  status_declared_work_stalled "$state/open.status" 500 '' \
+  status_declared_work_stalled "$open_line" 500 '' \
     && fail "an unreadable threshold was treated as a proven stall"
+  status_declared_work_stalled "$open_line" 500 later \
+    && fail "a non-numeric threshold was treated as a proven stall"
   [ "$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT" -gt "${FM_STALE_ESCALATE_SECS:-240}" ] \
     || fail "the stall threshold is not more generous than the ordinary wedge threshold"
   [ "$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT" -lt "$FM_PAUSE_RESURFACE_SECS_DEFAULT" ] \
@@ -1052,7 +1062,8 @@ watch_secondmate_case() {  # <dir> <task> <stall-secs> [extra env...]
     FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_STATE_OVERRIDE="$dir/state" \
     FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
     FM_DECLARED_WORK_SILENCE_SECS="$stall" FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$dir/watch.out" &
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" \
+    > "$dir/watch.out" 2> "$dir/watch.err" &
 }
 
 test_secondmate_declared_work_stall_surfaces() {
@@ -1100,6 +1111,58 @@ test_secondmate_declared_work_below_threshold_is_silent() {
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "declared work inside the threshold stays silent, so a mate that is legitimately thinking is never nagged"
+}
+
+# An unusable threshold must never be able to switch this detector off. The
+# decision refuses to guess a verdict from a non-numeric threshold, so an operator
+# typing a duration ("20m") instead of seconds would otherwise leave the mate that
+# declared work permanently unwatched - silently, and in the one path whose whole
+# purpose is to end that blindness. The watcher rejects the value loudly and keeps
+# supervising on the default, which BOTH halves below pin: past the default the
+# stall still surfaces, and inside the default it still stays quiet, so the
+# fallback is the real default and not a degenerate "always fire".
+test_secondmate_declared_work_malformed_threshold_falls_back() {
+  local dir state task pid err
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle secondmate endpoint'
+
+  task=secondmate-misconfigurado
+  dir=$(make_secondmate_work_case secondmate-declared-work-bad-knob "$task" \
+    'working: relaunching the remaining six one by one' 5000) \
+    || fail "could not build the malformed-threshold stall fixture"
+  state="$dir/state"; err="$dir/watch.err"
+  watch_secondmate_case "$dir" "$task" 20m
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "a malformed threshold silently disabled the declared-work detector"
+  grep -F "check: secondmate-stalled $task" "$dir/watch.out" >/dev/null \
+    || fail "the stall did not surface on the default threshold: $(cat "$dir/watch.out")"
+  grep -F "FM_DECLARED_WORK_SILENCE_SECS=20m" "$err" >/dev/null \
+    || fail "the rejected threshold was not reported on stderr: $(cat "$err")"
+  grep -F "$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT" "$err" >/dev/null \
+    || fail "the diagnostic did not name the default it fell back to: $(cat "$err")"
+  [ "$(grep -c -F "FM_DECLARED_WORK_SILENCE_SECS" "$err")" -eq 1 ] \
+    || fail "the rejected threshold was reported more than once: $(cat "$err")"
+  grep -F "FM_DECLARED_WORK_SILENCE_SECS=20m" "$state/.watch-triage.log" >/dev/null \
+    || fail "the rejected threshold left no triage record"
+
+  task=secondmate-misconfigurado-fresco
+  dir=$(make_secondmate_work_case secondmate-declared-work-bad-knob-fresh "$task" \
+    'working: reading the six open PRs before deciding the order' 60) \
+    || fail "could not build the malformed-threshold below-default fixture"
+  err="$dir/watch.err"
+  watch_secondmate_case "$dir" "$task" 20m
+  pid=$!
+  if ! wait_live "$pid" 25; then
+    reap "$pid"; fail "the rejected threshold fell back to firing immediately: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || { reap "$pid"; fail "a mate inside the default window was surfaced: $(cat "$dir/watch.out")"; }
+  [ ! -s "$dir/state/.wake-queue" ] || { reap "$pid"; fail "a mate inside the default window enqueued a wake"; }
+  [ "$(grep -c -F "FM_DECLARED_WORK_SILENCE_SECS" "$err")" -eq 1 ] \
+    || { reap "$pid"; fail "the rejected threshold was re-reported per poll: $(cat "$err")"; }
+  reap "$pid"
+
+  unset FM_FAKE_CREW_STATE
+  pass "a malformed silence threshold is rejected loudly and supervision continues on the default, never disabled"
 }
 
 test_secondmate_declared_pause_never_stalls() {
@@ -2298,6 +2361,7 @@ test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_declared_work_stall_surfaces
 test_secondmate_declared_work_below_threshold_is_silent
+test_secondmate_declared_work_malformed_threshold_falls_back
 test_secondmate_declared_pause_never_stalls
 test_secondmate_terminal_status_never_stalls
 test_secondmate_remote_declared_work_stall_surfaces

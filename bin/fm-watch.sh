@@ -188,7 +188,20 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # bounds how long that mate's own status stream may then stay SILENT before the
 # combination surfaces under its own reason; fm-classify-lib.sh owns the decision
 # and the default's rationale.
+# An override that is not a whole number of seconds cannot bound anything, and
+# the decision refuses to guess from one - so it would leave this detector
+# permanently silent, which is the blindness it exists to end. Reject it loudly
+# once and keep supervising on the default: a misconfigured knob must never be
+# able to switch supervision off, and it is never worth killing the watcher over.
 DECLARED_WORK_SILENCE_SECS=${FM_DECLARED_WORK_SILENCE_SECS:-$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT}
+case "$DECLARED_WORK_SILENCE_SECS" in
+  ''|*[!0-9]*)
+    printf 'watcher: FM_DECLARED_WORK_SILENCE_SECS=%s is not a whole number of seconds; supervising declared-work silence on the %ss default instead\n' \
+      "$DECLARED_WORK_SILENCE_SECS" "$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT" >&2
+    triage_log "rejected FM_DECLARED_WORK_SILENCE_SECS=$DECLARED_WORK_SILENCE_SECS, using the ${FM_DECLARED_WORK_SILENCE_SECS_DEFAULT}s default"
+    DECLARED_WORK_SILENCE_SECS=$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT
+    ;;
+esac
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -395,7 +408,7 @@ secondmate_declared_work_check() {  # <task> <last-status-line> <marker-key>
     return 0
   fi
   age=$(age_of "$STATE/$task.status")
-  if ! status_declared_work_stalled "$STATE/$task.status" "$age" "$DECLARED_WORK_SILENCE_SECS"; then
+  if ! status_declared_work_stalled "$last" "$age" "$DECLARED_WORK_SILENCE_SECS"; then
     rm -f "$STATE/.stalled-$key"
     return 0
   fi

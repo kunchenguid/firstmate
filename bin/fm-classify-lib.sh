@@ -196,24 +196,29 @@ status_work_declared_unresumed() {  # <status-file>
   status_declares_work "$(last_status_line "$1")"
 }
 
-# 0 if declared work has gone SILENT: the stream still declares unresumed work
-# AND that stream has been quiet for at least <threshold> seconds.
+# 0 if declared work has gone SILENT: the stream's last event still declares
+# unresumed work AND that stream has been quiet for at least <threshold> seconds.
 # Neither half means anything alone - a declared-work line is the healthy state
 # of any worker mid-task, and a quiet stream is the healthy state of a worker
 # with nothing supervisor-actionable to report - which is exactly why every
 # existing detector let the combination through: the stale path exempts a
 # secondmate's idle endpoint by design, and a working: line is not
 # captain-relevant, so the heartbeat backstop correctly absorbs it.
+# Takes the caller's ALREADY-READ last line, not the file, so ONE read both
+# decides the verdict and supplies the line the caller quotes back; a second read
+# could disagree with the first if the worker appends between them. A caller that
+# does not already hold the line resolves it through
+# status_work_declared_unresumed above.
 # The caller measures <silence-age-secs> so this stays a pure decision both
 # supervisors share; status files are append-only (see the cursor contract
 # below), so the file's own age IS the time since its last event. A caller that
 # cannot measure the age, or has no threshold, passes a non-numeric value and
 # gets no verdict rather than a guess.
-status_declared_work_stalled() {  # <status-file> <silence-age-secs> <threshold-secs>
-  local f=$1 age=$2 threshold=$3
+status_declared_work_stalled() {  # <last-status-line> <silence-age-secs> <threshold-secs>
+  local line=$1 age=$2 threshold=$3
   case "$age" in ''|*[!0-9]*) return 1 ;; esac
   case "$threshold" in ''|*[!0-9]*) return 1 ;; esac
-  status_work_declared_unresumed "$f" || return 1
+  status_declares_work "$line" || return 1
   [ "$age" -ge "$threshold" ]
 }
 
