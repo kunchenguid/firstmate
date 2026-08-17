@@ -1135,17 +1135,21 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
 # harness name, which is exactly what fm_backend_tmux_agent_state reads to
 # return `alive` (`zsh` returns `dead`, the case the sibling test above covers).
 #
-# Phases A and C are a differential. They share the fixture - same live agent,
-# same idle pane, same inconclusive authoritative verdict - and differ ONLY in
-# whether the crew declared a wait, so the absorb is pinned to the declaration
-# and to nothing else. A crew that goes quiet having written no declaration must
-# still surface on the unchanged schedule; that is the property this change is
-# not allowed to trade away.
+# Phases A and C are a differential. Every phase pins the SAME inconclusive
+# authoritative verdict, so the fixture is identical - same live agent, same idle
+# pane, same `state: unknown` that crew_absorb_class reduces to `none` - and the
+# declaration is the only varied input, which is what pins the absorb to the
+# declaration and to nothing else. That single variable is also the riskiest
+# shape: with no authoritative help at all, the declaration alone carries the
+# absorb. The declaration-plus-authoritative-`paused`-verdict shape is pinned
+# separately by test_nonterminal_stale_paused_absorbed_then_resurfaced above. A
+# crew that goes quiet having written no declaration must still surface on the
+# unchanged schedule; that is the property this change is not allowed to trade
+# away.
 test_live_declared_wait_is_absorbed_on_the_bounded_cadence() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare queuelog
-  local paused_state='state: paused · source: status-log · awaiting the upstream release'
-  # Every phase pins its own authoritative verdict rather than inheriting one, so
-  # neither half of the differential can go vacuous on an ambient value.
+  # Pinned per phase rather than inherited from an ambient export, so no half of
+  # the differential can go vacuous on a verdict leaked by an earlier test.
   local inconclusive_state='state: unknown · source: none · no current-state source available'
 
   # Phase A: a live agent, an idle pane, and a FRESH declared wait under a high
@@ -1163,7 +1167,7 @@ test_live_declared_wait_is_absorbed_on_the_bounded_cadence() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$paused_state" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$inconclusive_state" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
@@ -1194,7 +1198,7 @@ test_live_declared_wait_is_absorbed_on_the_bounded_cadence() {
   while [ "$round" -le 6 ]; do
     printf 'idle awaiting the upstream release (token %s)\n' "$round" > "$capture_file"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-      FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$paused_state" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$inconclusive_state" \
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
@@ -1238,6 +1242,74 @@ test_live_declared_wait_is_absorbed_on_the_bounded_cadence() {
   grep -Fx "stale: $window" "$out" >/dev/null || fail "an undeclared quiet crew did not surface its immediate stale wake"
   [ ! -e "$state/.paused-$key" ] || fail "an undeclared quiet crew was given the pause cadence"
   pass "a LIVE crew's declared wait is absorbed on the bounded cadence, while an undeclared quiet crew still surfaces at once"
+}
+
+# --- an authoritative gate behind a declared wait keeps its recheck throttle ---
+# .paused-rechecked-<key> is the throttle clock bounding the crew_absorb_class
+# read, which may shell out to no-mistakes. It used to be DELETED whenever that
+# read returned `actionable`, so a window whose crew had declared a wait while its
+# authoritative state was a real gate re-read crew state on EVERY poll for as long
+# as the absorb held - the unbounded per-poll read this change exists to remove.
+# The second half is why the recorded verdict matters rather than just the clock:
+# a throttled poll must replay `actionable`, never `paused`, or a pane repaint
+# inside the throttle window would route a live gate onto the bounded pause
+# cadence and hide it for a whole STALE_ESCALATE_SECS.
+test_actionable_gate_behind_a_declared_wait_keeps_its_recheck_throttle() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back gate_state
+  dir=$(make_case actionable-gate-throttle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate-throttle.status"
+  window="test:fm-gate-throttle"
+  printf 'idle at an external-decision gate\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate-throttle.meta"
+  printf 'paused: awaiting an external decision\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate-throttle_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle at an external-decision gate")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Already absorbed on the bounded cadence at this exact hash, with the throttle
+  # stamp aged past the recheck window so the next poll pays for the real read.
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  : > "$state/.paused-$key"
+  : > "$state/.paused-rechecked-$key"
+  date +%s > "$state/.paused-resurfaced-$key"
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$state/.paused-rechecked-$key"
+  gate_state='state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: authority decision)'
+
+  # The recheck lands and reports the gate, and the absorb still holds at this
+  # unchanged hash, so the throttle clock must survive to bound the next read.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$gate_state" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "an absorbed gate behind a declared wait surfaced instead of holding its cadence: $(cat "$out")"
+  fi
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "an absorbed gate at an unchanged hash enqueued a wake"; }
+  [ -e "$state/.paused-rechecked-$key" ] \
+    || { reap "$pid"; fail "an actionable recheck dropped its throttle clock, so crew state is re-read every poll"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the interrupted actionable-recheck cycle"
+
+  # A repaint inside that throttle window must still be given the GATE, not a
+  # declared wait served out of the throttle: the pane loses the bounded cadence
+  # and the gate surfaces at once as its own bare stale.
+  : > "$out"
+  printf 'idle at an external-decision gate (token 2)\n' > "$capture_file"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$gate_state" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 120 || fail "a repainted gate inside the throttle window was absorbed instead of surfaced: $(cat "$out")"
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    || fail "a repainted gate inside the throttle window did not surface its own stale wake: $(cat "$out")"
+  grep -F "awaiting external" "$out" >/dev/null \
+    && fail "a repainted gate inside the throttle window was served back as a declared pause"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a surfaced gate retained the wedge timer"
+  pass "an actionable verdict behind a declared wait keeps its recheck throttle and is never replayed as a pause"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -2726,6 +2798,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_live_declared_wait_is_absorbed_on_the_bounded_cadence
+test_actionable_gate_behind_a_declared_wait_keeps_its_recheck_throttle
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking

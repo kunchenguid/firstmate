@@ -492,13 +492,22 @@ clear_pause_tracking() {  # <window-key>
 # bound, not liveness, is what keeps absorbing safe here - the wait still
 # re-surfaces once every PAUSE_RESURFACE_SECS with its age in the reason.
 # Callers run this for EVERY first-sight non-terminal stale pane, declared wait
-# or not; a window with no declaration takes the early return below, which hands
-# back crew_absorb_class's verdict alone and so leaves a crew that goes quiet
-# having written nothing on the unchanged wedge schedule. Only a declared wait
-# reaches the bounded cadence past that early return.
+# or not; a window with no declaration takes the early return below and gets
+# crew_absorb_class's verdict alone, which is what leaves an undeclared quiet
+# crew on the unchanged schedule - surfaced at once unless it is provably
+# working (the non-terminal case site below and docs/architecture.md own that
+# routing). Only a declared wait reaches the bounded cadence past that early
+# return.
 #
 # .paused-rechecked-<key> throttles the crew_absorb_class read (which may shell
-# out to no-mistakes) to once per STALE_ESCALATE_SECS while the absorb holds.
+# out to no-mistakes) to once per STALE_ESCALATE_SECS while the absorb holds. Its
+# CONTENT is the verdict that read returned, so a throttled poll replays the same
+# token instead of assuming the declared wait won: an authoritative gate keeps
+# the routing it earned for the whole window rather than being served back as an
+# external wait. Only paused or actionable can be recorded, since working returns
+# before the stamp; any other content - the epoch stamp surface_nonterminal_stale
+# writes, or one left by a build from before the content mattered - reads as
+# paused, which is what this function recorded there in every such case.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class
   key=$(window_key "$win")
@@ -510,19 +519,21 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    printf 'paused'
+    case "$(cat "$recheck_file" 2>/dev/null || true)" in
+      actionable) printf 'actionable' ;;
+      *)          printf 'paused' ;;
+    esac
     return
   fi
   class=$(crew_absorb_class "$task")
-  case "$class" in
-    working|actionable)
-      rm -f "$recheck_file"
-      printf '%s' "$class"
-      return
-      ;;
-  esac
-  date +%s > "$recheck_file"
-  printf 'paused'
+  if [ "$class" = working ]; then
+    rm -f "$recheck_file"
+    printf 'working'
+    return
+  fi
+  [ "$class" = actionable ] || class=paused
+  printf '%s' "$class" > "$recheck_file"
+  printf '%s' "$class"
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
