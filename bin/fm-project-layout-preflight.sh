@@ -24,6 +24,11 @@ FM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Prevent `git status` and other read-only porcelain from refreshing the index.
 export GIT_OPTIONAL_LOCKS=0
 
+AMBIENT_GIT_ALTERNATES=${GIT_ALTERNATE_OBJECT_DIRECTORIES:-}
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
+  GIT_GRAFT_FILE GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
+
 # shellcheck source=bin/fm-project-layout-lib.sh
 . "$SCRIPT_DIR/fm-project-layout-lib.sh"
 
@@ -136,13 +141,15 @@ if fmp_path_has_symlink_component "$HOME_ARG"; then
 fi
 
 CURRENT_UID=$(id -u)
-HOME_UID=$(fmp_stat_uid "$HOME_PHYSICAL" 2>/dev/null) || HOME_UID=unknown
-HOME_MODE=$(fmp_stat_mode "$HOME_PHYSICAL" 2>/dev/null) || HOME_MODE=unknown
-if [ "$HOME_UID" != unknown ] && [ "$HOME_UID" != "$CURRENT_UID" ]; then
-  add_blocker home_owner_mismatch "Firstmate home is not owned by the current user"
+HOME_UID=$(fmp_stat_uid "$HOME_PHYSICAL" 2>/dev/null) || HOME_UID=
+HOME_MODE=$(fmp_stat_mode "$HOME_PHYSICAL" 2>/dev/null) || HOME_MODE=
+[ -n "$HOME_UID" ] || HOME_UID=unknown
+[ -n "$HOME_MODE" ] || HOME_MODE=unknown
+if [ "$HOME_UID" != "$CURRENT_UID" ]; then
+  add_blocker home_owner_mismatch "Firstmate home is not verifiably owned by the current user"
 fi
-if [ "$HOME_MODE" != unknown ] && fmp_mode_group_or_world_writable "$HOME_MODE"; then
-  add_blocker home_writable_by_others "Firstmate home is group- or world-writable"
+if [ "$HOME_MODE" = unknown ] || fmp_mode_group_or_world_writable "$HOME_MODE"; then
+  add_blocker home_writable_by_others "Firstmate home is not verifiably owner-only"
 fi
 
 case "$PROJECT_ARG" in
@@ -215,13 +222,15 @@ else
     if [ -z "$PROJECTS_PHYSICAL" ] || ! fmp_path_is_within "$PROJECTS_PHYSICAL" "$PROJECT_PHYSICAL"; then
       add_blocker project_path_escape "Project does not resolve beneath the supplied home's projects directory"
     fi
-    PROJECT_UID=$(fmp_stat_uid "$PROJECT_PHYSICAL" 2>/dev/null) || PROJECT_UID=unknown
-    PROJECT_MODE=$(fmp_stat_mode "$PROJECT_PHYSICAL" 2>/dev/null) || PROJECT_MODE=unknown
-    if [ "$PROJECT_UID" != unknown ] && [ "$PROJECT_UID" != "$CURRENT_UID" ]; then
-      add_blocker project_owner_mismatch "Project is not owned by the current user"
+    PROJECT_UID=$(fmp_stat_uid "$PROJECT_PHYSICAL" 2>/dev/null) || PROJECT_UID=
+    PROJECT_MODE=$(fmp_stat_mode "$PROJECT_PHYSICAL" 2>/dev/null) || PROJECT_MODE=
+    [ -n "$PROJECT_UID" ] || PROJECT_UID=unknown
+    [ -n "$PROJECT_MODE" ] || PROJECT_MODE=unknown
+    if [ "$PROJECT_UID" != "$CURRENT_UID" ]; then
+      add_blocker project_owner_mismatch "Project is not verifiably owned by the current user"
     fi
-    if [ "$PROJECT_MODE" != unknown ] && fmp_mode_group_or_world_writable "$PROJECT_MODE"; then
-      add_blocker project_writable_by_others "Project is group- or world-writable"
+    if [ "$PROJECT_MODE" = unknown ] || fmp_mode_group_or_world_writable "$PROJECT_MODE"; then
+      add_blocker project_writable_by_others "Project is not verifiably owner-only"
     fi
 
     if ! git -C "$PROJECT_PHYSICAL" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -311,7 +320,7 @@ else
         ALTERNATE=true
         add_blocker unexpected_alternate "Project already borrows from an alternate object store"
       fi
-      if [ -n "${GIT_ALTERNATE_OBJECT_DIRECTORIES:-}" ]; then
+      if [ -n "$AMBIENT_GIT_ALTERNATES" ]; then
         ALTERNATE=true
         add_blocker ambient_alternate "GIT_ALTERNATE_OBJECT_DIRECTORIES is set in the preflight environment"
       fi

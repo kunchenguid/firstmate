@@ -452,7 +452,49 @@ test_spaces_and_metacharacters_are_literal() {
   pass "spaces and shell metacharacters remain literal and deterministic"
 }
 
+test_ambient_git_environment_cannot_substitute_another_repository() {
+  local home="$TMP_ROOT/ambient" project decoy clean ambient rc
+  setup_home "$home" sample
+  project="$home/projects/sample"
+  decoy="$TMP_ROOT/ambient-decoy"
+  git clone --quiet "$ORIGIN_URL" "$decoy" || fail "could not clone ambient decoy"
+  git -C "$decoy" remote set-url origin https://decoy.invalid/team/decoy.git
+  git -C "$decoy" switch -q -c decoy-branch
+  printf 'decoy\n' >> "$decoy/README.md"
+  clean=$(run_json "$home" sample) || fail "ambient baseline preflight blocked"
+  ambient=$(GIT_DIR="$decoy/.git" GIT_WORK_TREE="$decoy" \
+    GIT_INDEX_FILE="$decoy/.git/index" GIT_OBJECT_DIRECTORY="$decoy/.git/objects" \
+    run_json "$home" sample)
+  rc=$?
+  expect_code 0 "$rc" "ambient git environment preflight"
+  [ "$ambient" = "$clean" ] \
+    || fail "ambient GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_OBJECT_DIRECTORY changed reported repository facts"
+  assert_not_contains "$ambient" "decoy.invalid" "ambient repository origin leaked into the report"
+  assert_not_contains "$ambient" "decoy-branch" "ambient repository branch leaked into the report"
+  pass "hostile ambient Git environment cannot substitute another repository"
+}
+
+test_unverifiable_ownership_fails_closed() {
+  local home="$TMP_ROOT/unverifiable" stub="$TMP_ROOT/stat-stub" out rc
+  setup_home "$home" sample
+  mkdir -p "$stub"
+  printf '#!/bin/sh\nexit 1\n' > "$stub/stat"
+  chmod 0755 "$stub/stat"
+  out=$(PATH="$stub:$PATH" run_json "$home" sample)
+  rc=$?
+  expect_code 1 "$rc" "unverifiable ownership preflight"
+  json_valid "$out"
+  assert_json_code "$out" blockers home_owner_mismatch
+  assert_json_code "$out" blockers home_writable_by_others
+  assert_json_code "$out" blockers project_owner_mismatch
+  assert_json_code "$out" blockers project_writable_by_others
+  [ "$(json_value "$out" 'd["status"]')" != ready ] || fail "unverifiable ownership reported ready"
+  pass "unverifiable ownership and permissions fail closed"
+}
+
 test_help_and_ready_json
+test_ambient_git_environment_cannot_substitute_another_repository
+test_unverifiable_ownership_fails_closed
 test_idempotence_and_byte_invariance
 test_dirty_off_default_and_unpushed
 test_secret_redaction
