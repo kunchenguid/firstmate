@@ -174,6 +174,8 @@ test_list_files_reports_the_shell_inventory() {
 #   FM_TEST_GIT_MERGE_BASE_OK    1 (default) or 0
 #   FM_TEST_GIT_MERGE_BASE       merge-base value to print when OK
 #   FM_TEST_GIT_DIFF_FILE        path to a file of NUL-separated changed paths
+#   FM_TEST_GIT_DIFF_RECHECK_OK  1 (default) or 0, for the non-NUL diff form
+#                                fm-lint.sh re-asks when it selected no roots
 fm_lint_stub_git() {
   local fakebin=$1
   cat > "$fakebin/git" <<'SH'
@@ -204,6 +206,16 @@ case "$*" in
   "diff --name-only --diff-filter=ACMR -z "*)
     if [ -n "${FM_TEST_GIT_DIFF_FILE:-}" ] && [ -f "$FM_TEST_GIT_DIFF_FILE" ]; then
       cat "$FM_TEST_GIT_DIFF_FILE"
+    fi
+    exit 0
+    ;;
+  "diff --name-only --diff-filter=ACMR "*)
+    [ "${FM_TEST_GIT_DIFF_RECHECK_OK:-1}" = 1 ] || {
+      printf 'fatal: simulated git failure\n' >&2
+      exit 128
+    }
+    if [ -n "${FM_TEST_GIT_DIFF_FILE:-}" ] && [ -f "$FM_TEST_GIT_DIFF_FILE" ]; then
+      tr '\0' '\n' < "$FM_TEST_GIT_DIFF_FILE"
     fi
     exit 0
     ;;
@@ -432,7 +444,7 @@ test_provisioning_is_opt_in_and_never_degrades_to_a_pass() {
   # Default behavior is refuse, not fetch: a gate that reaches the network as a
   # side effect of validating is harder to trust and breaks offline. Opting in
   # provisions the pin; an opt-in that FAILS still refuses rather than passing.
-  local tmp isolated target out rc
+  local tmp isolated target out rc repaired
   tmp=$(fm_test_tmproot fm-lint-provision)
   # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
   fm_lint_isolated_bin "$tmp" $FM_LINT_RUN_PATH_COMMANDS install
@@ -463,6 +475,22 @@ test_provisioning_is_opt_in_and_never_degrades_to_a_pass() {
   [ "$rc" -eq 0 ] || fail "FM_LINT_PROVISION_SHELLCHECK did not provision the pin"$'\n'"$out"
   [ -x "$tmp/provisioned-env/shellcheck" ] || fail "FM_LINT_PROVISION_SHELLCHECK installed no ShellCheck"
 
+  # "Ensure the pin" means a directory holding some OTHER build is repaired, not
+  # accepted and not refused: with the download working, a wrong-version binary
+  # already in the opt-in directory must be reinstalled and the lint must pass.
+  # This is the half of the skip decision that a guard keying only on "some build
+  # is already present here" would silently get wrong.
+  fm_lint_write_stale_shellcheck "$tmp/stale-repaired"
+  rc=0
+  out=$(PATH="$isolated" CI=true FM_LINT_JOBS=1 \
+    "$LINT" --provision-shellcheck "$tmp/stale-repaired" "$target" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "an opt-in directory holding an older build was not repaired"$'\n'"$out"
+  assert_not_contains "$out" "LINT NOT RUN" "repairing an older build in the opt-in directory refused instead"
+  repaired=$(PATH="$isolated" "$tmp/stale-repaired/shellcheck" --version \
+    | awk '/^version:/ {print $2; exit}')
+  [ "$repaired" = "$REQUIRED" ] \
+    || fail "the repaired opt-in directory reports '$repaired', not the pin '$REQUIRED'"
+
   # From here the network is unreachable, exactly as on an offline host.
   printf '#!/usr/bin/env bash\nexit 22\n' > "$isolated/curl"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$isolated/sleep"
@@ -471,7 +499,8 @@ test_provisioning_is_opt_in_and_never_degrades_to_a_pass() {
   # The opt-in ENSURES the pin rather than always fetching it: a directory that
   # already holds the pinned build must lint without reaching the network, or the
   # documented env-var form would refetch on every validation run and refuse
-  # offline while the correct binary sits on disk.
+  # offline while the correct binary sits on disk. With the network down, a pass
+  # here can only mean the download was skipped.
   rc=0
   out=$(PATH="$isolated" CI=true FM_LINT_JOBS=1 \
     "$LINT" --provision-shellcheck "$tmp/provisioned" "$target" 2>&1) || rc=$?
@@ -479,28 +508,37 @@ test_provisioning_is_opt_in_and_never_degrades_to_a_pass() {
     || fail "an already-provisioned pin refused with the network unreachable"$'\n'"$out"
   assert_not_contains "$out" "LINT NOT RUN" "reusing an already-provisioned pin still refused"
 
-  # Skipping the download must never skip the pin: a binary in the opt-in
-  # directory that is not the pinned version refuses like any other version skew.
-  mkdir -p "$tmp/tampered"
-  cat > "$tmp/tampered/shellcheck" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf 'ShellCheck - shell script analysis tool\nversion: 0.9.9\n'
-fi
-exit 0
-SH
-  chmod +x "$tmp/tampered/shellcheck"
+  # A build that is not the pin is never simply used: when it cannot be repaired
+  # either, that is a refusal, not a pass on whatever was sitting there.
+  fm_lint_write_stale_shellcheck "$tmp/stale-offline"
   rc=0
   out=$(PATH="$isolated" CI=true \
-    "$LINT" --provision-shellcheck "$tmp/tampered" "$target" 2>&1) || rc=$?
-  fm_lint_assert_refusal "$out" "$rc" "an opt-in directory holding a ShellCheck that is not the pin"
+    "$LINT" --provision-shellcheck "$tmp/stale-offline" "$target" 2>&1) || rc=$?
+  fm_lint_assert_refusal "$out" "$rc" "an unrepairable older build in the opt-in directory"
 
   # A failed opt-in must refuse, never quietly lint with nothing or pass.
   rc=0
   out=$(PATH="$isolated" CI=true \
     "$LINT" --provision-shellcheck "$tmp/failed" "$target" 2>&1) || rc=$?
   fm_lint_assert_refusal "$out" "$rc" "a failed opt-in provisioning"
-  pass "fm-lint.sh provisions only on request, reuses an existing pin, and refuses when that request fails"
+  pass "fm-lint.sh provisions only on request, reuses a present pin, repairs another build, and refuses on failure"
+}
+
+# fm_lint_write_stale_shellcheck <dir>: put an executable in <dir> that answers
+# --version with a version other than the pin, for the ensure-semantics cases
+# above: the opt-in must repair it when it can and refuse when it cannot, and
+# must never put it on PATH as though it were the pin.
+fm_lint_write_stale_shellcheck() {
+  local dir=$1
+  mkdir -p "$dir"
+  cat > "$dir/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.9.9\n'
+fi
+exit 0
+SH
+  chmod +x "$dir/shellcheck"
 }
 
 test_unusable_temp_directory_refuses_on_the_could_not_run_status() {
@@ -562,6 +600,100 @@ SH
     || fail "a lost worker result exited $rc, not the could-not-run status $FM_LINT_REFUSED_EXIT"$'\n'"$out"
   assert_contains "$out" "LINT NOT RUN" "a lost worker result did not visibly mark the lint as not run"
   pass "fm-lint.sh refuses on the could-not-run status when a worker result never arrives"
+}
+
+# fm_lint_run_path_without <command>: the run-path command list with <command>
+# left out, so a test can drive "one required tool is missing" without
+# hardcoding - and later drifting from - the rest of the list.
+fm_lint_run_path_without() {
+  local drop=$1 cmd list=
+  # shellcheck disable=SC2086 # Deliberate word splitting of the command list.
+  for cmd in $FM_LINT_RUN_PATH_COMMANDS; do
+    [ "$cmd" = "$drop" ] || list="${list:+$list }$cmd"
+  done
+  printf '%s\n' "$list"
+}
+
+test_incomplete_shard_manifest_refuses_instead_of_passing_clean() {
+  # The regression: with `sort` missing, the shard manifests came out empty, each
+  # worker took its no-roots branch and recorded a clean result, and the gate
+  # exited 0 having asked ShellCheck to check nothing. A truncated or failed sort
+  # and a failed mv land in the same place: files silently unchecked, every shard
+  # reporting clean. A run that cannot hand its workers the files it selected must
+  # refuse on the could-not-run status, not report a clean lint.
+  local tmp isolated log target out rc
+  tmp=$(fm_test_tmproot fm-lint-manifest)
+  # shellcheck disable=SC2046 # Deliberate word splitting of the command list.
+  fm_lint_isolated_bin "$tmp" $(fm_lint_run_path_without sort)
+  isolated=$FM_TEST_ISOLATED_BIN
+  log="$tmp/shellcheck.log"
+  fm_lint_stub_shellcheck "$isolated" "$log"
+  target="$tmp/good.sh"
+  printf '#!/usr/bin/env bash\nset -eu\nprintf "ok\\n"\n' > "$target"
+
+  rc=0
+  out=$(PATH="$isolated" CI=true FM_LINT_JOBS=1 "$LINT" "$target" 2>&1) || rc=$?
+  [ "$rc" -eq "$FM_LINT_REFUSED_EXIT" ] \
+    || fail "an unbuildable shard manifest exited $rc, not the could-not-run status $FM_LINT_REFUSED_EXIT"$'\n'"$out"
+  assert_contains "$out" "LINT NOT RUN" "an unbuildable shard manifest did not mark the lint as not run"
+  [ ! -s "$log" ] \
+    || fail "the manifest refusal fired after ShellCheck had checked files"$'\n'"$(cat "$log")"
+  pass "fm-lint.sh refuses when its shard manifests do not account for every selected file"
+}
+
+test_changed_mode_proves_an_empty_target_set_before_passing() {
+  # "no changed lint targets" is the one clean exit that checks no file at all,
+  # and the changed-file read cannot report its own failure: it runs in a process
+  # substitution, so a git or a sort that died there is indistinguishable from an
+  # empty diff. That is this gate's own production mode - .no-mistakes.yaml pins
+  # `lint: bin/fm-lint.sh` with no arguments, which on a feature branch outside CI
+  # selects changed files - so the defect read as a clean step, twice.
+  local tmp isolated log diff_file empty_diff out rc
+  tmp=$(fm_test_tmproot fm-lint-changed-zero)
+  # shellcheck disable=SC2046 # Deliberate word splitting of the command list.
+  fm_lint_isolated_bin "$tmp" $(fm_lint_run_path_without sort)
+  isolated=$FM_TEST_ISOLATED_BIN
+  fm_lint_stub_git "$isolated"
+  log="$tmp/shellcheck.log"
+  fm_lint_stub_shellcheck "$isolated" "$log"
+  diff_file="$tmp/diff.nul"
+  empty_diff="$tmp/empty.nul"
+  : > "$empty_diff"
+  # A real canonical target plus a non-canonical file: with the read path broken,
+  # zero roots reach the lint even though bin/fm-lint.sh changed.
+  fm_lint_write_diff_file "$diff_file" "bin/fm-lint.sh" "README.md"
+
+  # Clear CI/GITHUB_ACTIONS so changed-file mode is live; a CI run forces a full
+  # lint and cannot reach this branch at all.
+  rc=0
+  out=$(PATH="$isolated" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq "$FM_LINT_REFUSED_EXIT" ] \
+    || fail "a changed-file read that dropped every target exited $rc, not $FM_LINT_REFUSED_EXIT"$'\n'"$out"
+  assert_contains "$out" "LINT NOT RUN" "a dropped changed-file read did not mark the lint as not run"
+  assert_not_contains "$out" "no changed lint targets" \
+    "a dropped changed-file read still reported an empty target set as clean"
+  [ ! -s "$log" ] || fail "the refusal fired after ShellCheck had checked files"$'\n'"$(cat "$log")"
+
+  # git failing while answering that question must refuse too, rather than being
+  # discarded into an unexplained empty set.
+  ln -sf "$(command -v sort)" "$isolated/sort" || fail "could not restore sort on the isolated PATH"
+  rc=0
+  out=$(PATH="$isolated" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_DIFF_FILE="$empty_diff" \
+    FM_TEST_GIT_DIFF_RECHECK_OK=0 "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq "$FM_LINT_REFUSED_EXIT" ] \
+    || fail "git failing to confirm an empty target set exited $rc, not $FM_LINT_REFUSED_EXIT"$'\n'"$out"
+  assert_contains "$out" "LINT NOT RUN" "an unconfirmable empty target set did not mark the lint as not run"
+
+  # ...and a branch that genuinely changed no lint target must still pass with its
+  # existing note, so proving the empty set never turns an empty diff into failure.
+  rc=0
+  out=$(PATH="$isolated" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_DIFF_FILE="$empty_diff" "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a genuinely empty changed set no longer exits 0, got $rc"$'\n'"$out"
+  assert_contains "$out" "no changed lint targets" "a genuinely empty changed set lost its note"
+  pass "fm-lint.sh proves an empty changed target set with git before reporting a clean lint"
 }
 
 # fm_lint_stub_download <dir>: stub the network and archive tools
@@ -1219,6 +1351,8 @@ test_ci_provisioned_shape_never_refuses
 test_provisioning_is_opt_in_and_never_degrades_to_a_pass
 test_unusable_temp_directory_refuses_on_the_could_not_run_status
 test_lost_worker_result_refuses_on_the_could_not_run_status
+test_incomplete_shard_manifest_refuses_instead_of_passing_clean
+test_changed_mode_proves_an_empty_target_set_before_passing
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
