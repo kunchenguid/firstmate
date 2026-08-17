@@ -13,23 +13,53 @@ The `hold` subcommand maps an originating work id and stable decision key to `<o
 It creates a kind `captain` backlog item when absent and invokes `tasks-axi hold <id> --reason <reason> --kind captain` on every retry.
 It rejects an identity collision, a changed title, and attempts to reopen an already resolved identity.
 
-The `complete` subcommand unions the reviewed keys into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
+Creating a new identity while the home already holds other open captain decisions exits 3 and prints that open set with each decision's age.
+Exact-key repetition never reaches this branch, so idempotent retry and recovery are unaffected.
+The refusal is deliberate rather than a warning: success output is not reliably read, and semantic duplicate matching needs the open set in context before the write, not after it.
+It is not a hard block, because a genuinely distinct decision must still be registrable; `--distinct` clears it and records the attestation in the new decision's body.
+The `open` subcommand prints the same listing on demand, with `--aging-only` for the threshold subset.
+
+The `fold` subcommand is the alternative path when the finding belongs to a decision that is already open.
+It appends `Also raised by <origin>: <note>` to the target's body through `tasks-axi update --body-file`, skipping the write when the same marker is already present, and unions the target identity into the origin's `decision_folds=` metadata.
+It refuses a target that is not an actively held captain decision and refuses an origin folding into its own decision namespace.
+It also refuses, before writing anything to the target, an origin with no `state/<origin>.meta` to record the fold in, because a fold that cannot be recorded would report success and then be rejected at sign-off.
+Reading the target body decodes the JSON string literal tasks-axi emits, so `jq` is required for `fold` and `resolve`.
+
+## Where folding ends and accounting begins
+
+`fold` does not touch the origin's status log and takes no decision key.
+Which live question a fold answers for is a judgement about the reviewed surface, and a fold cannot be trusted to imply it: a fold about one question, applied to whichever entry happened to be open, would mark that entry as owned by a decision that never mentions it.
+So folding records only two facts - the finding is on the target decision, and the origin folded into it - and `complete` owns every statement about the live status log.
+
+`complete` requires every structured decision still open in the origin's status log to be explicitly accounted for.
+An entry is accounted for when its decision key is supplied, so this origin's own captain hold carries it, or when that exact key is named with `--folded-key`, so a recorded fold carries it.
+Nothing is inferred from how many entries are open, and no path satisfies an entry the caller did not name, so a question can only leave the live log by someone saying which durable decision now holds it.
+`--folded-key` is refused for a key that is not open, was not already accounted for, and has no recorded transfer, so an entry that never existed cannot be attested away; the three tolerances exist so re-running sign-off stays idempotent.
+This makes the mixed pass expressible in one call: register the genuinely new question with its own key, fold the duplicate finding, then `complete <origin> <new-key> --folded-key <folded-entry-key>`.
+
+The `complete` subcommand unions the reviewed keys into `decision_keys=`, the accounted-for folded keys into `decision_folded_keys=`, and appends `decisions_reviewed=1` while originating task metadata is live.
 A post-teardown visual review can complete against the surviving report and durable holds without recreating volatile task metadata.
-It accepts `--none` as an explicit semantic inventory result, not as inferred absence.
-It verifies every listed identity against tasks-axi before recording completion.
-For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` transfer event only after the matching backlog hold is durable.
+It accepts `--none` as an explicit semantic inventory result, not as inferred absence, and refuses it while any fold is recorded or any status entry is open, so neither folding nor a live question can become a way to attest an empty surface.
+It accepts `--folded` when every unresolved decision the pass found is already owned by a hold the origin folded into.
+It verifies every listed identity and every recorded fold identity against tasks-axi before recording completion.
+`complete` is the only subcommand that appends a `captain-held [key=<key>]: ...` transfer event, and it names the durable owner that carries the entry - this origin's hold for a supplied key, the recorded folds for a key named as folded.
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
+`verify` applies the identical accounting check through the same helper, reading the keys and folded keys sign-off recorded, so the completion gate and the teardown gate cannot drift.
 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The `resolve`, `answer`, and `decline` subcommands close active holds, while `repair` attests a hold already closed outside the script.
-All four require a non-empty captain decision file and record the same resolution block in the hold body with the decision digest, routed identities, and a `Resolution mode:` naming the path.
+All four take the captain's answer as `--decision <text>` or `--decision-file <path>` and record the same resolution block in the hold body with the decision digest, routed identities, and a `Resolution mode:` naming the path.
 An exact retry is idempotent, while a changed decision or, for `resolve`, a changed routed-task set is rejected.
 
-The `resolve` subcommand is the routed path and additionally requires at least one existing dependent task whose structured `blocked-by` edge points to the hold.
-It clears each dependency edge through tasks-axi and marks the hold Done only after those writes succeed.
-An exact retry can finish a partial routing operation, and a failed intermediate step leaves the hold open.
+The `resolve` subcommand is the routed path: it routes dependent work with `--routed-to` or declares its absence with `--no-routed-work`.
+`--routed-to` requires every named task to exist and to carry a structured `blocked-by` edge to the hold.
+`--no-routed-work` is refused whenever `tasks-axi list --blocked` reports any task blocked by the hold, so the routing requirement is enforced by observed state rather than by the caller's claim, and survives wherever dependent work genuinely exists.
+The two lighter inputs exist because the previous shape - write a file, invent a dependent task, block it - made recording an answer more expensive than repeating the question, which is how an answered decision came to be lost while its authority was cited elsewhere.
+It records the decision digest and routed task identities as a retry identity in the hold body, carries the prior registration record forward under `Origin record:` so the distinctness attestation and any folded findings survive closure, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
+An exact retry can finish a partial routing operation and does not nest the carried-forward record, while a changed decision or routed-task set is rejected.
+A failed intermediate step leaves the hold open.
 
 The `answer` and `decline` subcommands share one unrouted close implementation and differ only in the `Resolution mode:` they record and the outcome word they print, so neither can drift into a weaker close than the other.
 Both record `(none)` as the routed identities and refuse while any task in the same backlog is still blocked by the hold, because releasing routed work without recording it is `resolve`'s job.
@@ -69,6 +99,31 @@ After capture, a bound source has its result passed to `bin/fm-procevent-<adapte
 Feeding is independent of handling: it never acknowledges a result and never suppresses a wake, so recording the captain's answer cannot retire the notification firstmate needs in order to act on it.
 `bin/fm-procevent-lavish.sh answers` is one such adapter command; it reports the structured choices a review captured and stops there, reading only rows tagged `choice` so freeform captain prose can never forge a decision key.
 
+## What counts as durably resolved
+
+`verify_hold_durable` backs both the completion gate and the teardown gate, and accepts four shapes.
+A decision is still actively held; or it carries this script's canonical resolution record; or it is closed with some other decision record in its body; or Done retention has rotated it into `data/done-archive.md`.
+
+The third and fourth shapes exist because the gate was rejecting on formatting rather than on substance.
+A decision closed by hand with a written record - because firstmate decided it, or because an earlier captain answer already settled it - is resolved, and a decision that aged out of the live backlog through ordinary retention is resolved too.
+Rejecting either strands the finished investigation that found the decision, which is a failure of the gate rather than a defence of it.
+
+The gate is not weakened, because each accepted shape still requires durable evidence that the decision was answered.
+A closed decision whose body is empty, or whose body still carries the untouched registration record saying `State: awaiting captain decision.`, is refused: it says in its own words that no answer was ever written down, which is exactly the loss this gate exists to prevent.
+The archive preserves an entry's indented body lines verbatim, so the fourth shape reads them and applies that same record test through one shared predicate.
+Retention therefore only changes where a decision's record lives, never whether the gate accepts it: a recordless closure that is refused in the live backlog stays refused after it rotates into the archive.
+`--decided-by firstmate` records a firstmate-decided closure honestly rather than attributing it to the captain.
+
+## Ageing
+
+Every captain-actionable backlog row carries `waiting_days`, the whole days since its `since` date, and `decision_aging`, true once that reaches `FM_DECISION_AGING_DAYS` (default 3).
+That is one variable for one policy: `bin/fm-fleet-snapshot.sh` and `bin/fm-decision-hold.sh` read the same name, so the fleet view and `open --aging-only` cannot disagree about which decisions are ageing.
+They cannot disagree about the decision set either: the CLI listing applies the same `captain_actionable` predicate the fleet view applies - queued, kind `captain`, held for the captain with a reason, and carrying no unresolved blocker - so a refusal can never cite a decision Bearings does not show.
+Both day counts anchor each endpoint at midnight UTC explicitly, so two reads straddling a second boundary cannot shorten a decision's age by a day and drop it out of the ageing set.
+Both are computed in `bin/fm-fleet-snapshot.sh` from the existing `since` metadata that `tasks-axi add` already writes, so every decision registered before this behavior existed reports its age with no migration and no schema change.
+`bin/fm-bearings-snapshot.sh` carries `since`, `waiting_days`, and `aging` into `decisions_open` and orders it ageing-first then oldest-first, so an ageing decision leads the section and cannot be truncated away by the bounded cap.
+The threshold is three days because that is the shortest span that always covers a full working day plus a weekend edge, so it cannot fire on a decision the captain has simply not reached yet, while still surfacing a stalled decision long before the week-long silences it exists to prevent.
+
 ## Structured read surfaces
 
 `bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)` and `(hold-kind: captain)` metadata alongside existing backlog fields.
@@ -84,6 +139,8 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Duplicate refusal, folding, ageing, lightweight resolution, and externally closed recognition verification date: 2026-08-02.
+Sign-off-owned status accounting, with folding decoupled from it, verification date: 2026-08-04.
 Unrouted close-path verification date: 2026-08-13.
 Answer-time closure verification date: 2026-08-16.
 
@@ -110,6 +167,14 @@ The final verification commands and their exact summarized outputs follow.
 ```text
 $ bash tests/fm-decision-hold-lifecycle.test.sh
 ok - report-only unresolved decision is reproduced and completion refuses before loss
+ok - externally closed and archived decisions are durably resolved, recordless closure is not
+ok - sign-off owns status accounting and the mixed fold-and-register pass works
+ok - folding a finished investigation needs no status accounting
+ok - a decision at exactly the ageing threshold is ageing and one below it is not
+ok - a fold that cannot be recorded refuses instead of reporting success
+ok - a firstmate-decided closure is first-class and attributed honestly
+ok - a second pass cannot silently duplicate an open decision and can fold into it
+ok - an answer is recorded in one call and routing survives where dependent work exists
 ok - non-forced scout teardown always requires durable inventory verification
 ok - a declined decision closes with a recorded answer and no routed work
 ok - a decision closed outside the script is repairable and then clears teardown
@@ -134,6 +199,7 @@ ok - snapshot parses tasks-axi rows and respects operational overrides
 $ bash tests/fm-bearings-snapshot.test.sh
 ok - a completed scout with decision-like report prose is a pointer, not pending
 ok - an authoritative captain hold surfaces end-to-end
+ok - an ageing open decision carries its age, leads the section, and survives the cap
 ok - action-free items (working/done/queued/landed) do not leak into Captain's Call
 ok - main and secondmate captain actionability use the same blocker readiness
 

@@ -1,8 +1,8 @@
 ---
 name: ask-user-authority
 description: >-
-  Agent-only decision procedure for ask-user findings.
-  Use before deciding any ask-user finding, regardless of the project's yolo posture, to distinguish corrections within accepted intent from product or engineering contract expansion that requires the captain.
+  Agent-only decision procedure for ask-user findings and for any other question about to be escalated to the captain.
+  Use before deciding any ask-user finding, regardless of the project's yolo posture, and before registering a captain decision from an investigation or review, to distinguish corrections within accepted intent from product or engineering contract expansion that requires the captain.
 user-invocable: false
 metadata:
   internal: true
@@ -10,8 +10,41 @@ metadata:
 
 # ask-user-authority
 
-This skill is the single owner of the decision procedure for ask-user findings.
+This skill is the single owner of the escalate-or-decide boundary.
+It governs every question about to reach the captain, whether it arrived as an ask-user finding from a validation gate or as an unresolved choice found by an investigation or review, which `decision-hold-lifecycle` routes here before registering anything.
 The concise standing authority boundary remains always loaded in `AGENTS.md` section 7.
+
+## The bar for asking
+
+Escalation is expensive and the queue compounds, so the default is to decide.
+Ask only when the answer is genuinely not derivable from the accepted contract, the code, and the evidence in front of you.
+
+Apply this test before escalating anything:
+
+1. Is there a defensible answer a careful engineer would reach from the accepted contract and the evidence?
+   If yes, take it and record the reasoning; a difficult or debatable call is still yours.
+2. Would the two candidate answers commit the project to materially different products, costs, or accepted risks?
+   If yes, it is the captain's.
+3. Does answering it require preference the evidence cannot supply, such as which of two defensible products to build, how much risk or spend to accept, or what an external commitment should say?
+   If yes, it is the captain's.
+4. Is it destructive, irreversible, or genuinely security-sensitive?
+   If yes, it is the captain's under the stronger existing boundary.
+
+An engineering trade-off with a defensible answer is Firstmate's call even when the trade-off is real, the alternatives are close, or getting it wrong would cost rework.
+Difficulty, reviewer emphasis, and the presence of two options are not evidence that a question belongs to the captain.
+Uncertainty about which answer is best is the ordinary condition of engineering work, not grounds to escalate.
+
+Worked examples on both sides:
+
+- The order in which two related pull requests should land, where one order is clearly safer, is Firstmate's call: the evidence settles it and neither order changes what gets built.
+- Where a piece of infrastructure should live within an accepted architecture is Firstmate's call, even when two placements are defensible, because the choice does not change the product's behavior or its accepted risk.
+- Whether to fix a defect in place or split it across two pull requests is Firstmate's call when both routes deliver the same accepted behavior; it becomes the captain's only if splitting changes what ships or when.
+- Which of two documents is authoritative for a team's rules is the captain's: it is a standing policy choice about how the team works, and the evidence cannot rank the options.
+- Accepting a known risk in order to ship sooner is the captain's, because it trades product risk for time.
+- Anything that changes an outward-facing commitment, a cost, or a security posture is the captain's.
+
+When a question fails this bar, do not register it as a captain decision and do not park the work waiting for one.
+Decide it, record the reasoning where the work lives, and continue.
 
 ## Decide who has authority
 

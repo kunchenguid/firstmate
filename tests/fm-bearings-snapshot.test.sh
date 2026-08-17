@@ -945,6 +945,56 @@ test_open_decision_surfaces_end_to_end() {
   pass "an authoritative captain hold surfaces end-to-end"
 }
 
+# An unanswered decision from last week must not read like one raised an hour ago.
+# Age has to reach the fleet view on its own, and the oldest must survive the
+# bounded decisions_open cap so it cannot be truncated into silence.
+test_open_decision_age_surfaces_and_leads() {
+  local home fakebin json i
+  home=$(make_home decision-age)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-stalled-decision - Stalled question (repo: sample) (kind: captain) (since 2026-07-26) (hold: waiting on the captain) (hold-kind: captain)
+- [ ] sample-fresh-decision - Fresh question (repo: sample) (kind: captain) (since 2026-08-02) (hold: raised today) (hold-kind: captain)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-08-02T12:00:00Z \
+    FM_SNAPSHOT_NOW=2026-08-02T12:00:00Z NET_LOG="$home/net.log" "$BEARINGS" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | map(select(.id == "sample-stalled-decision"))[0]) as $old
+    | (.decisions_open | map(select(.id == "sample-fresh-decision"))[0]) as $new
+    | $old.waiting_days == 7 and $old.aging == true and $old.since == "2026-07-26"
+      and $new.waiting_days == 0 and $new.aging == false
+      and (.decisions_open[0].id == "sample-stalled-decision")
+  ' >/dev/null || fail "an ageing decision must carry its age and lead the section: $json"
+
+  # Under the bounded cap, the ageing decision must still be the one shown. The
+  # filler rows have to land in Queued: a Done row is not captain-actionable, so
+  # appending them past the `## Done` heading would leave the cap unexercised.
+  {
+    printf '## In flight\n\n## Queued\n'
+    printf -- '- [ ] sample-stalled-decision - Stalled question (repo: sample) (kind: captain) (since 2026-07-26) (hold: waiting on the captain) (hold-kind: captain)\n'
+    printf -- '- [ ] sample-fresh-decision - Fresh question (repo: sample) (kind: captain) (since 2026-08-02) (hold: raised today) (hold-kind: captain)\n'
+    for i in $(seq 1 30); do
+      printf -- '- [ ] sample-noise-%s - Noise %s (repo: sample) (kind: captain) (since 2026-08-02) (hold: raised today) (hold-kind: captain)\n' \
+        "$i" "$i"
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-08-02T12:00:00Z \
+    FM_SNAPSHOT_NOW=2026-08-02T12:00:00Z NET_LOG="$home/net.log" "$BEARINGS" --json)
+  printf '%s' "$json" | jq -e --argjson cap "${FM_BEARINGS_DECISIONS:-20}" '
+    (.decisions_open | length) == $cap and $cap < 32
+  ' >/dev/null || fail "the filler decisions must actually exceed the bounded cap: $json"
+  printf '%s' "$json" | jq -e '
+    .decisions_open | any(.[]; .id == "sample-stalled-decision" and .aging == true)
+  ' >/dev/null || fail "the ageing decision must survive the bounded cap: $json"
+  pass "an ageing open decision carries its age, leads the section, and survives the cap"
+}
+
 test_report_pointers_surface() {
   local home fakebin json
   home=$(make_home reports); write_fixture "$home"
@@ -1926,6 +1976,7 @@ test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
+test_open_decision_age_surfaces_and_leads
 test_report_pointers_surface
 test_superseded_queued_item_dropped_by_default
 test_include_prs_is_the_only_fetch_path

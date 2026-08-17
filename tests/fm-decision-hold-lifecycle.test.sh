@@ -128,6 +128,24 @@ run_decisions() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$@"
 }
 
+run_decisions_now() {  # <home> <today> <command args...>
+  local home=$1 now=$2
+  shift 2
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_DECISION_NOW="$now" \
+    "$ROOT/bin/fm-decision-hold.sh" "$@"
+}
+
+# Backdate one queued row's registration date, which is what tasks-axi reports as
+# its created date and what the ageing threshold is measured from.
+set_since() {  # <home> <id> <date>
+  local home=$1 id=$2 date=$3
+  sed "/^- \[ \] $id - /s/(since [0-9][0-9-]*)/(since $date)/" \
+    "$home/data/backlog.md" > "$home/backlog.since"
+  mv "$home/backlog.since" "$home/data/backlog.md"
+}
+
 write_origin_meta() {  # <home> <id> [kind]
   local home=$1 id=$2 kind=${3:-scout}
   fm_write_meta "$home/state/$id.meta" \
@@ -176,7 +194,7 @@ EOF
     fail "completion succeeded while one of two distinct decisions lacked a hold"
   fi
   access_hold=$(run_decisions "$home" hold "$id" access \
-    --title "Choose the sample access level" --reason "captain access choice pending" --repo sample) \
+    --title "Choose the sample access level" --reason "captain access choice pending" --repo sample --distinct) \
     || fail "could not register access hold"
   [ "$access_hold" = "$id-decision-access" ] || fail "access hold identity was not distinct: $access_hold"
   [ "$(grep -cE "^- \[ \] $route_hold -" "$home/data/backlog.md")" = 1 ] \
@@ -504,13 +522,13 @@ test_resolve_matches_quoted_blocked_by_edges() {
     --title "First edge decision" --reason "captain first pending" --repo sample) \
     || fail "could not register first-edge hold"
   hold_mid=$(run_decisions "$home" hold "$origin" edge-mid \
-    --title "Middle edge decision" --reason "captain mid pending" --repo sample) \
+    --title "Middle edge decision" --reason "captain mid pending" --repo sample --distinct) \
     || fail "could not register mid-edge hold"
   hold_last=$(run_decisions "$home" hold "$origin" edge-last \
-    --title "Last edge decision" --reason "captain last pending" --repo sample) \
+    --title "Last edge decision" --reason "captain last pending" --repo sample --distinct) \
     || fail "could not register last-edge hold"
   hold_absent=$(run_decisions "$home" hold "$origin" edge-absent \
-    --title "Absent edge decision" --reason "captain absent pending" --repo sample) \
+    --title "Absent edge decision" --reason "captain absent pending" --repo sample --distinct) \
     || fail "could not register absent-edge hold"
 
   tasks_in "$home" add pad-a "Pad A" --kind ship --repo sample >/dev/null \
@@ -579,6 +597,457 @@ test_resolve_matches_quoted_blocked_by_edges() {
   assert_contains "$show" "held: yes" "failed absent resolve must leave the hold held"
 
   pass "resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id"
+}
+
+# A second review pass of the same subject reaches the same question under a
+# different key. That is how the queue compounds, so registering the duplicate
+# must not be possible without the open set being seen first, and folding must
+# leave exactly one captain decision behind.
+test_second_pass_cannot_silently_duplicate_an_open_decision() {
+  local home first second rc out show open_out
+  home=$(make_home duplicate-guard)
+  first=sample-handbook-review
+  second=sample-handbook-audit
+  mkdir -p "$home/data/$first" "$home/data/$second"
+  printf '# first pass\n' > "$home/data/$first/report.md"
+  printf '# second pass\n' > "$home/data/$second/report.md"
+  write_origin_meta "$home" "$first"
+  write_origin_meta "$home" "$second"
+
+  run_decisions "$home" hold "$first" handbook-authority \
+    --title "Which handbook is authoritative for the coding rules" \
+    --reason "standing policy choice" --repo sample >/dev/null \
+    || fail "could not register the first-pass decision"
+
+  # The second pass asks the same question under its own key.
+  set +e
+  run_decisions "$home" hold "$second" canonical-handbook \
+    --title "Which text is canonical for the coding rules" \
+    --reason "same authority question" --repo sample \
+    > "$home/dup.out" 2> "$home/dup.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a same-subject duplicate registered without review (exit $rc)"
+  assert_grep "$first-decision-handbook-authority" "$home/dup.err" \
+    "the refusal must put the open decision set in front of the agent"
+  assert_grep "fold" "$home/dup.err" "the refusal must offer folding as the first-class alternative"
+  ! grep -F -- "$second-decision-canonical-handbook" "$home/data/backlog.md" >/dev/null \
+    || fail "the refused duplicate still reached the backlog"
+
+  # Folding records the finding on the decision that already owns the question.
+  run_decisions "$home" fold "$second" --into "$first-decision-handbook-authority" \
+    --note "the audit pass reaches the same question" >/dev/null \
+    || fail "could not fold the second pass into the open decision"
+  run_decisions "$home" fold "$second" --into "$first-decision-handbook-authority" \
+    --note "the audit pass reaches the same question" >/dev/null \
+    || fail "folding the same finding twice must be idempotent"
+  [ "$(grep -cE "^- \[ \] .*-decision-.* -" "$home/data/backlog.md")" = 1 ] \
+    || fail "folding created a second captain decision"
+  show=$(tasks_in "$home" show "$first-decision-handbook-authority" --full)
+  assert_contains "$show" "Also raised by $second" \
+    "the folded finding must be durable on the decision that owns the question"
+  assert_grep "decision_folds=$first-decision-handbook-authority" "$home/state/$second.meta" \
+    "the fold must be recorded against the origin that found it"
+
+  # The completion gate stays intact: --none would be a false attestation.
+  if run_decisions "$home" complete "$second" --none > "$home/none.out" 2> "$home/none.err"; then
+    fail "--none passed while the origin had folded a real unresolved decision"
+  fi
+  assert_grep "contradicts the folds" "$home/none.err" \
+    "the refusal must name the folds it contradicts"
+  run_decisions "$home" complete "$second" --folded >/dev/null \
+    || fail "--folded must satisfy the gate for a fully folded review pass"
+  run_decisions "$home" verify "$second" >/dev/null \
+    || fail "teardown verification must accept a folded inventory"
+
+  # A genuinely different question still gets through, once attested.
+  out=$(run_decisions "$home" hold "$second" rollout-window \
+    --title "When should the rollout window open" \
+    --reason "schedule choice" --repo sample --distinct) \
+    || fail "--distinct must let a genuinely distinct decision through"
+  [ "$out" = "$second-decision-rollout-window" ] || fail "distinct decision identity was wrong: $out"
+  show=$(tasks_in "$home" show "$out" --full)
+  assert_contains "$show" "Distinct-from-open: attested" \
+    "the distinctness attestation must be durable"
+
+  # Repeating an existing identity is a retry, never a new registration.
+  run_decisions "$home" hold "$first" handbook-authority \
+    --title "Which handbook is authoritative for the coding rules" \
+    --reason "standing policy choice" --repo sample >/dev/null \
+    || fail "an exact-key retry must stay idempotent and ungated"
+
+  open_out=$(run_decisions "$home" open) || fail "open listing failed"
+  assert_contains "$open_out" "open captain decisions in" "open must report the current set"
+  assert_contains "$open_out" "$first-decision-handbook-authority" "open must list the folded-into decision"
+
+  # The listing must cite only decisions the captain can actually see, so an
+  # unresolved blocker removes a decision here exactly as it does in Bearings.
+  tasks_in "$home" add sample-prerequisite "Land the prerequisite first" --kind ship --repo sample >/dev/null \
+    || fail "could not create the blocking prerequisite"
+  tasks_in "$home" block "$first-decision-handbook-authority" --by sample-prerequisite >/dev/null \
+    || fail "could not block the decision by its prerequisite"
+  open_out=$(run_decisions "$home" open) || fail "open listing failed while a decision was blocked"
+  case "$open_out" in
+    *"$first-decision-handbook-authority"*)
+      fail "open listed a blocked decision the fleet view does not show as actionable" ;;
+  esac
+  tasks_in "$home" unblock "$first-decision-handbook-authority" --by sample-prerequisite >/dev/null \
+    || fail "could not clear the prerequisite edge"
+  open_out=$(run_decisions "$home" open) || fail "open listing failed after unblocking"
+  assert_contains "$open_out" "$first-decision-handbook-authority" \
+    "clearing the blocker must return the decision to the actionable listing"
+  pass "a second pass cannot silently duplicate an open decision and can fold into it"
+}
+
+# An answer must be recordable in the turn it arrives. The ceremony that made
+# answers go unrecorded - write a file, invent a dependent task, block it - must
+# survive only where dependent work genuinely exists.
+test_answer_is_recorded_without_inventing_dependent_work() {
+  local home origin hold show
+  home=$(make_home light-resolve)
+  origin=sample-sequencing-review
+  mkdir -p "$home/data/$origin"
+  printf '# sequencing\n' > "$home/data/$origin/report.md"
+  write_origin_meta "$home" "$origin"
+  hold=$(run_decisions "$home" hold "$origin" accepted-risk \
+    --title "Accept the known gap to ship sooner" --reason "risk the captain owns" --repo sample) \
+    || fail "could not register the decision"
+
+  run_decisions "$home" resolve "$origin" accepted-risk \
+    --decision "Captain accepted the gap and asked to ship." --no-routed-work >/dev/null \
+    || fail "an answer with no dependent work must be recordable in one call"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "the answered decision must be closed"
+  assert_contains "$show" "Captain accepted the gap and asked to ship." \
+    "the captain's exact words must be preserved durably"
+  assert_contains "$show" "Origin record:" \
+    "closing must not erase the registration record"
+  run_decisions "$home" resolve "$origin" accepted-risk \
+    --decision "Captain accepted the gap and asked to ship." --no-routed-work >/dev/null \
+    || fail "recording the same answer twice must be idempotent"
+
+  # Where dependent work genuinely exists, routing is still mandatory.
+  hold=$(run_decisions "$home" hold "$origin" split-or-fix \
+    --title "Split the change or fix in place" --reason "captain scope call" --repo sample --distinct) \
+    || fail "could not register the routed-work decision"
+  tasks_in "$home" add sample-followup "Apply the chosen shape" --kind ship --repo sample >/dev/null \
+    || fail "could not create dependent work"
+  tasks_in "$home" block sample-followup --by "$hold" >/dev/null \
+    || fail "could not block dependent work by the decision"
+  if run_decisions "$home" resolve "$origin" split-or-fix \
+    --decision "Split it." --no-routed-work > "$home/skip.out" 2> "$home/skip.err"; then
+    fail "--no-routed-work bypassed genuinely existing dependent work"
+  fi
+  assert_grep "sample-followup" "$home/skip.err" "the refusal must name the work that must be routed"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" "a refused resolve must leave the decision open"
+  run_decisions "$home" resolve "$origin" split-or-fix \
+    --decision "Split it." --routed-to sample-followup >/dev/null \
+    || fail "routing the answer to real dependent work must still work"
+  show=$(tasks_in "$home" show sample-followup --full)
+  assert_contains "$show" "blocked: no" "routing must clear the dependency edge"
+  pass "an answer is recorded in one call and routing survives where dependent work exists"
+}
+
+# Decisions closed outside this script - firstmate decided them, or an earlier
+# captain answer already settled them - carry a real decision record but not this
+# script's formatting, and Done retention rotates older ones into the archive.
+# Neither may strand a finished investigation at the completion gate, and a
+# decision closed with no record at all must still be refused.
+test_externally_closed_decisions_are_durably_resolved() {
+  local home origin hold
+  home=$(make_home external-closure)
+  origin=sample-answered-review
+  mkdir -p "$home/data/$origin"
+  printf '# answered\n' > "$home/data/$origin/report.md"
+  write_origin_meta "$home" "$origin"
+
+  # Closed by hand with a decision record, exactly as a bulk close does it.
+  hold=$(run_decisions "$home" hold "$origin" already-answered \
+    --title "Bound the retry budget or fail fast" --reason "captain policy call" --repo sample) \
+    || fail "could not register the decision"
+  tasks_in "$home" update "$hold" --body \
+    "CLOSED as ALREADY ANSWERED - the captain settled this on 2026-01-05 under key retry-budget." >/dev/null \
+    || fail "could not record the external decision record"
+  tasks_in "$home" unhold "$hold" >/dev/null || fail "could not release the hold"
+  tasks_in "$home" "done" "$hold" >/dev/null || fail "could not close the decision"
+  run_decisions "$home" complete "$origin" already-answered >/dev/null \
+    || fail "a decision closed with a real record must pass the completion gate"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "a decision closed with a real record must pass the teardown gate"
+
+  # Retention rotates the closed decision out of the live backlog.
+  tasks_in "$home" prune --keep 0 >/dev/null 2>&1 || tasks_in "$home" "done" "$hold" --keep 0 >/dev/null 2>&1 || true
+  if ! grep -F -- "- [x] $hold - " "$home/data/backlog.md" >/dev/null 2>&1; then
+    assert_present "$home/data/done-archive.md" "retention must archive the closed decision"
+    run_decisions "$home" verify "$origin" >/dev/null \
+      || fail "Done retention alone must not make a reviewed inventory unverifiable"
+  fi
+
+  # Closure with no record at all is still the loss this gate prevents.
+  hold=$(run_decisions "$home" hold "$origin" no-record \
+    --title "Closed with nothing written down" --reason "captain call" --repo sample --distinct) \
+    || fail "could not register the second decision"
+  tasks_in "$home" unhold "$hold" >/dev/null || fail "could not release the second hold"
+  tasks_in "$home" "done" "$hold" >/dev/null || fail "could not close the second decision"
+  if run_decisions "$home" complete "$origin" already-answered no-record \
+    > "$home/norec.out" 2> "$home/norec.err"; then
+    fail "a decision closed with no record at all passed the gate"
+  fi
+  assert_grep "no decision record" "$home/norec.err" \
+    "the refusal must name the missing record rather than the formatting"
+
+  # Ordinary Done retention must not launder that refusal into an acceptance: the
+  # archive keeps the untouched registration body, so the archived shape is held
+  # to the same record test as the live one.
+  tasks_in "$home" prune --keep 0 >/dev/null 2>&1 || true
+  if ! grep -F -- "- [x] $hold - " "$home/data/backlog.md" >/dev/null 2>&1; then
+    assert_grep "State: awaiting captain decision." "$home/data/done-archive.md" \
+      "the archive must preserve the untouched registration body"
+    if run_decisions "$home" complete "$origin" already-answered no-record \
+      > "$home/archived-norec.out" 2> "$home/archived-norec.err"; then
+      fail "retention turned a refused recordless closure into an accepted one"
+    fi
+    assert_grep "no decision record" "$home/archived-norec.err" \
+      "the archived refusal must name the missing record too"
+  fi
+  pass "externally closed and archived decisions are durably resolved, recordless closure is not"
+}
+
+# A fold that cannot be recorded must not report success: the origin would then
+# fail `complete --folded` and could attest `--none` over a live decision.
+test_unrecordable_fold_refuses_rather_than_reporting_success() {
+  local home origin other hold show
+  home=$(make_home unrecordable-fold)
+  origin=sample-owning-review
+  other=sample-later-review
+  mkdir -p "$home/data/$origin" "$home/data/$other"
+  printf '# owning\n' > "$home/data/$origin/report.md"
+  printf '# later\n' > "$home/data/$other/report.md"
+  write_origin_meta "$home" "$origin"
+
+  hold=$(run_decisions "$home" hold "$origin" scope \
+    --title "Choose the sample scope" --reason "captain scope call" --repo sample) \
+    || fail "could not register the decision to fold into"
+
+  # The later review is known only by its report - the post-teardown shape - so no
+  # state/<origin>.meta exists to record the fold in.
+  [ ! -f "$home/state/$other.meta" ] || fail "fixture must have no runtime metadata"
+  if run_decisions "$home" fold "$other" --into "$hold" --note "the same scope question" \
+    > "$home/fold.out" 2> "$home/fold.err"; then
+    fail "fold reported success while it could not record the fold: $(cat "$home/fold.out")"
+  fi
+  assert_grep "no runtime metadata" "$home/fold.err" \
+    "the refusal must name the missing origin metadata"
+  show=$(tasks_in "$home" show "$hold" --full)
+  case "$show" in
+    *"Also raised by $other"*) fail "a refused fold still mutated the target body" ;;
+  esac
+  pass "a fold that cannot be recorded refuses instead of reporting success"
+}
+
+# A question that turns out to be firstmate's own call must be closable as such,
+# without pretending the captain answered it.
+test_firstmate_decided_closure_is_first_class() {
+  local home origin hold show
+  home=$(make_home firstmate-decided)
+  origin=sample-sequencing
+  mkdir -p "$home/data/$origin"
+  printf '# sequencing\n' > "$home/data/$origin/report.md"
+  write_origin_meta "$home" "$origin"
+  hold=$(run_decisions "$home" hold "$origin" merge-order \
+    --title "Which of the two changes lands first" --reason "sequencing" --repo sample) \
+    || fail "could not register the decision"
+  run_decisions "$home" resolve "$origin" merge-order \
+    --decision "Firstmate decided: land the schema change first; the evidence settles it." \
+    --decided-by firstmate --no-routed-work >/dev/null \
+    || fail "a firstmate-decided closure must be a first-class resolve"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "the firstmate-decided closure must close the decision"
+  assert_contains "$show" "Decided by: firstmate" \
+    "the record must not attribute a firstmate decision to the captain"
+  run_decisions "$home" resolve "$origin" merge-order \
+    --decision "Firstmate decided: land the schema change first; the evidence settles it." \
+    --decided-by firstmate --no-routed-work >/dev/null \
+    || fail "a firstmate-decided closure must stay idempotent on retry"
+  if run_decisions "$home" resolve "$origin" merge-order \
+    --decision "Firstmate decided: land the schema change first; the evidence settles it." \
+    --decided-by captain --no-routed-work > "$home/attr.out" 2> "$home/attr.err"; then
+    fail "a retry reattributing the same answer to the captain reported success"
+  fi
+  assert_grep "different decider" "$home/attr.err" \
+    "attribution must be part of the retry identity, not outside it"
+  run_decisions "$home" complete "$origin" merge-order >/dev/null \
+    || fail "a firstmate-decided closure must satisfy the completion gate"
+  pass "a firstmate-decided closure is first-class and attributed honestly"
+}
+
+# Folding records a finding against the decision that already owns the question and
+# says nothing about the live status log. Sign-off is the single owner of that
+# accounting: every open entry must be named, either by its own key or as carried by
+# a recorded fold, and the mixed pass - one genuinely new question plus one folded
+# duplicate - must be expressible without inverting the documented order.
+test_status_accounting_is_owned_by_sign_off() {
+  local home owner origin hold
+  home=$(make_home folded-status)
+  owner=sample-policy-review
+  origin=sample-policy-audit
+  mkdir -p "$home/data/$owner" "$home/data/$origin"
+  printf '# owner\n' > "$home/data/$owner/report.md"
+  printf '# audit\n' > "$home/data/$origin/report.md"
+  write_origin_meta "$home" "$owner"
+  write_origin_meta "$home" "$origin"
+  hold=$(run_decisions "$home" hold "$owner" retention-window \
+    --title "How long should sample records be retained" \
+    --reason "policy the captain owns" --repo sample) \
+    || fail "could not register the owning decision"
+
+  # The audit's crewmate left two live questions: one this pass judges a duplicate
+  # of the open decision, one that is genuinely its own new captain question.
+  printf 'working: auditing retention\n' > "$home/state/$origin.status"
+  printf 'needs-decision [key=retention-span]: how long are sample records retained\n' \
+    >> "$home/state/$origin.status"
+  printf 'needs-decision [key=export-shape]: which export shape is authoritative\n' \
+    >> "$home/state/$origin.status"
+
+  run_decisions "$home" fold "$origin" --into "$hold" \
+    --note "the audit pass reaches the same retention question" >/dev/null \
+    || fail "could not fold the duplicate finding into the owning decision"
+  assert_no_grep "captain-held" "$home/state/$origin.status" \
+    "folding must not touch the origin status log"
+  assert_grep "decision_folds=$hold" "$home/state/$origin.meta" \
+    "the fold must be recorded in the origin metadata"
+  run_decisions "$home" fold "$origin" --into "$hold" \
+    --note "the audit pass reaches the same retention question" >/dev/null \
+    || fail "repeating the fold must stay idempotent"
+  [ "$(grep -cF "decision_folds=$hold" "$home/state/$origin.meta")" = 1 ] \
+    || fail "repeating the fold recorded the same fold twice"
+
+  # The genuinely new question gets its own captain decision.
+  run_decisions "$home" hold "$origin" export-shape \
+    --title "Which export shape is authoritative" \
+    --reason "format the captain owns" --repo sample --distinct >/dev/null \
+    || fail "could not register the genuinely new question"
+
+  # Sign-off that leaves either entry unnamed is refused, whatever else it names.
+  if run_decisions "$home" complete "$origin" --folded \
+    > "$home/unnamed.out" 2> "$home/unnamed.err"; then
+    fail "a fold attestation alone accounted for entries the caller never named"
+  fi
+  assert_grep "unaccounted for" "$home/unnamed.err" \
+    "the refusal must say the entry is unaccounted for"
+  if run_decisions "$home" complete "$origin" export-shape \
+    > "$home/half.out" 2> "$home/half.err"; then
+    fail "an entry carried only by a fold passed without being named"
+  fi
+  assert_grep "retention-span" "$home/half.err" "the refusal must name the unaccounted entry"
+  if run_decisions "$home" complete "$origin" --none \
+    > "$home/none.out" 2> "$home/none.err"; then
+    fail "--none passed while a fold was recorded"
+  fi
+  assert_grep "contradicts the folds" "$home/none.err" \
+    "--none must stay refused while any fold is recorded"
+  if run_decisions "$home" complete "$origin" --folded-key not-a-live-question \
+    > "$home/ghost.out" 2> "$home/ghost.err"; then
+    fail "a key that was never open was attested away as folded"
+  fi
+  assert_grep "no open structured decision under key not-a-live-question" \
+    "$home/ghost.err" "the refusal must name the key that was never open"
+  assert_no_grep "captain-held" "$home/state/$origin.status" \
+    "a refused sign-off must not transfer any status decision"
+
+  # The mixed pass in one call: own key for the new question, --folded-key for the
+  # entry the recorded fold carries.
+  run_decisions "$home" complete "$origin" export-shape --folded-key retention-span >/dev/null \
+    || fail "the mixed pass must be expressible in one sign-off"
+  assert_grep "captain-held [key=export-shape]: tracked by $origin-decision-export-shape" \
+    "$home/state/$origin.status" "a supplied key must be transferred to this origin's own hold"
+  assert_grep "captain-held [key=retention-span]: tracked by $hold" \
+    "$home/state/$origin.status" "a folded key must be transferred to the decision that carries it"
+  assert_grep "decision_folded_keys=retention-span" "$home/state/$origin.meta" \
+    "sign-off must record which entries a fold accounted for"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "teardown verification must accept the accounted-for inventory"
+  run_decisions "$home" complete "$origin" export-shape --folded-key retention-span >/dev/null \
+    || fail "re-running the same sign-off must stay idempotent"
+  [ "$(grep -cF "captain-held [key=retention-span]: tracked by $hold" "$home/state/$origin.status")" = 1 ] \
+    || fail "re-running sign-off duplicated the folded transfer"
+  [ "$(grep -cE '^- \[ \] .*-decision-.* -' "$home/data/backlog.md")" = 2 ] \
+    || fail "accounting for the folded entry created an extra captain decision"
+  pass "sign-off owns status accounting and the mixed fold-and-register pass works"
+}
+
+# The shape this policy is most often invoked on: the investigation has finished, so
+# its status stream ends in a terminal event and no entry is open. Folding must work
+# there with nothing to name, and sign-off must accept the fold attestation alone.
+test_fold_on_a_finished_investigation_needs_no_accounting() {
+  local home owner origin hold
+  home=$(make_home finished-fold)
+  owner=sample-owning-pass
+  origin=sample-finished-pass
+  mkdir -p "$home/data/$owner" "$home/data/$origin"
+  printf '# owner\n' > "$home/data/$owner/report.md"
+  printf '# finished\n' > "$home/data/$origin/report.md"
+  write_origin_meta "$home" "$owner"
+  write_origin_meta "$home" "$origin"
+  hold=$(run_decisions "$home" hold "$owner" ordering-rule \
+    --title "Which ordering rule is authoritative" \
+    --reason "policy the captain owns" --repo sample) \
+    || fail "could not register the owning decision"
+  printf 'needs-decision: which ordering rule is authoritative\ndone: report complete\n' \
+    > "$home/state/$origin.status"
+
+  run_decisions "$home" fold "$origin" --into "$hold" \
+    --note "the finished pass reaches the same ordering question" >/dev/null \
+    || fail "folding on a finished investigation must not require anything to name"
+  run_decisions "$home" complete "$origin" --folded >/dev/null \
+    || fail "a fold attestation must satisfy sign-off when no entry is open"
+  run_decisions "$home" verify "$origin" >/dev/null \
+    || fail "teardown verification must accept a finished folded pass"
+  assert_no_grep "captain-held" "$home/state/$origin.status" \
+    "nothing was open, so nothing may be transferred"
+  pass "folding a finished investigation needs no status accounting"
+}
+
+# The threshold is inclusive, and both day-boundary reads are anchored at midnight,
+# so a decision at exactly FM_DECISION_AGING_DAYS cannot lose a day and drop out of
+# the set that resurfaces on its own.
+test_decision_at_exactly_the_ageing_threshold_is_ageing() {
+  local home origin at_threshold below out
+  home=$(make_home ageing-threshold)
+  origin=sample-threshold-review
+  mkdir -p "$home/data/$origin"
+  printf '# threshold\n' > "$home/data/$origin/report.md"
+  write_origin_meta "$home" "$origin"
+  at_threshold=$(run_decisions "$home" hold "$origin" cutover-date \
+    --title "Which cutover date is authoritative" \
+    --reason "schedule the captain owns" --repo sample) \
+    || fail "could not register the threshold decision"
+  below=$(run_decisions "$home" hold "$origin" rollout-shape \
+    --title "Which rollout shape should be used" \
+    --reason "shape the captain owns" --repo sample --distinct) \
+    || fail "could not register the younger decision"
+  set_since "$home" "$at_threshold" 2026-07-23
+  set_since "$home" "$below" 2026-07-24
+
+  out=$(run_decisions_now "$home" 2026-07-26 open --aging-only) \
+    || fail "the ageing listing failed"
+  assert_contains "$out" "$at_threshold" \
+    "a decision at exactly the threshold must be reported as ageing"
+  assert_contains "$out" "waiting 3 days" \
+    "the age at the threshold must be reported as the whole days waited"
+  case "$out" in
+    *"$below"*) fail "a decision below the threshold leaked into the ageing set" ;;
+  esac
+
+  out=$(run_decisions_now "$home" 2026-07-25 open --aging-only) \
+    || fail "the ageing listing failed one day earlier"
+  case "$out" in
+    *"$at_threshold"*) fail "a decision one day below the threshold was reported as ageing" ;;
+  esac
+  out=$(run_decisions_now "$home" 2026-07-26 open) || fail "the full listing failed"
+  assert_contains "$out" "$below" "the full listing must still carry the younger decision"
+  pass "a decision at exactly the ageing threshold is ageing and one below it is not"
 }
 
 # A captain who declines a held decision leaves no follow-up work to route, so the
@@ -800,7 +1269,7 @@ test_unanswered_decision_still_blocks_completion_and_teardown() {
 # hold open, so the captain was asked to re-answer decisions already on his own
 # disk. Capturing the answer must now BE closing the hold.
 test_bound_channel_answers_close_their_holds_at_answer_time() {
-  local home id sid artifact result out show key rc
+  local home id sid artifact result out show key rc first
   home=$(make_home lavish-answer-closure)
   id=sample-eval-proposal
   mkdir -p "$home/data/$id"
@@ -809,10 +1278,18 @@ test_bound_channel_answers_close_their_holds_at_answer_time() {
   write_origin_meta "$home" "$id"
   printf 'done: proposal deck ready for the captain\n' > "$home/state/$id.status"
   printf '# Sample eval proposal\n\nFour captain choices remain.\n' > "$home/data/$id/report.md"
+  first=1
   for key in diversified-membership precision-headline fp-approve-merge eval-holdout routed-phase forged-choice; do
-    run_decisions "$home" hold "$id" "$key" \
-      --title "Captain call: $key" --reason "captain $key choice pending" --repo sample >/dev/null \
-      || fail "could not register the $key hold"
+    if [ "$first" = 1 ]; then
+      run_decisions "$home" hold "$id" "$key" \
+        --title "Captain call: $key" --reason "captain $key choice pending" --repo sample >/dev/null \
+        || fail "could not register the $key hold"
+      first=0
+    else
+      run_decisions "$home" hold "$id" "$key" \
+        --title "Captain call: $key" --reason "captain $key choice pending" --repo sample --distinct >/dev/null \
+        || fail "could not register the $key hold"
+    fi
   done
   run_decisions "$home" complete "$id" \
     diversified-membership precision-headline fp-approve-merge eval-holdout routed-phase forged-choice >/dev/null \
@@ -1115,6 +1592,14 @@ SH
 }
 
 test_uninventoried_report_decision_refuses_completion
+test_externally_closed_decisions_are_durably_resolved
+test_status_accounting_is_owned_by_sign_off
+test_fold_on_a_finished_investigation_needs_no_accounting
+test_decision_at_exactly_the_ageing_threshold_is_ageing
+test_unrecordable_fold_refuses_rather_than_reporting_success
+test_firstmate_decided_closure_is_first_class
+test_second_pass_cannot_silently_duplicate_an_open_decision
+test_answer_is_recorded_without_inventing_dependent_work
 
 test_scout_teardown_always_requires_inventory_verification
 test_declined_decision_closes_without_routed_work
