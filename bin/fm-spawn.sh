@@ -1550,7 +1550,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$HARNESS" = omp ]; then
     exit 1
   fi
   require_omp_launch_model || exit 1
-  require_omp_orca_backend || exit 1
+  if [ "$BACKEND" != orca ]; then
+    echo "error: omp requires backend=orca; resolved backend '$BACKEND' is not authorized for this adapter" >&2
+    exit 1
+  fi
 fi
 
 case "$HARNESS" in
