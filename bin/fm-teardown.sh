@@ -2043,7 +2043,7 @@ migrate_firstmate_home_children_endpoint_bindings() {  # <home>
     child_backend=$(fm_backend_meta_exact_value "$child_meta" backend 2>/dev/null || true)
     case "$child_backend" in
       herdr|zellij|orca|cmux)
-        FM_HOME="$home" FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= \
+        FM_HOME="$home" FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
           "$SCRIPT_DIR/fm-endpoint-binding-migrate.sh" "$child_id" || return 1
         ;;
     esac

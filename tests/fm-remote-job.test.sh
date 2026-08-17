@@ -18,6 +18,7 @@ FAKE_PERL_LOG="$TMP_ROOT/perl.log"
 REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
+COMMAND_PROBE_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -25,6 +26,7 @@ mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 cleanup_remote_job_fixture() {
   [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
+  [ -z "$COMMAND_PROBE_PID" ] || kill "$COMMAND_PROBE_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -162,6 +164,27 @@ case ":$FM_REMOTE_JOB_OPERATOR_PATH:" in
   *) fail "the composed PATH omitted a resolved Nix profile bin link" ;;
 esac
 pass "operator PATH resolves the authorized Nix profile bin link"
+
+LONG_COMMAND_DIR="$TMP_ROOT/command-path-long-enough-to-exceed-a-narrow-ps-display-width"
+mkdir -p "$LONG_COMMAND_DIR"
+cat > "$LONG_COMMAND_DIR/fm-command-width-probe.sh" <<'SH'
+#!/bin/bash
+trap 'exit 0' TERM
+while :; do sleep 1; done
+SH
+chmod +x "$LONG_COMMAND_DIR/fm-command-width-probe.sh"
+"$LONG_COMMAND_DIR/fm-command-width-probe.sh" &
+COMMAND_PROBE_PID=$!
+COMMAND_PROBE=$(COLUMNS=40 fm_remote_job_process_command "$COMMAND_PROBE_PID") \
+  || fail "the process-command reader failed on a long command path"
+case "$COMMAND_PROBE" in
+  *fm-command-width-probe.sh*) ;;
+  *) fail "the process-command reader truncated a long command path" ;;
+esac
+kill "$COMMAND_PROBE_PID" 2>/dev/null || true
+wait "$COMMAND_PROBE_PID" 2>/dev/null || true
+COMMAND_PROBE_PID=
+pass "process-command reads ignore narrow display widths"
 
 HOME="$ACCOUNT_HOME" PATH="$RUNTIME_BIN:/usr/bin:/bin:/usr/sbin:/sbin" FM_FAKE_PERL_LOG="$FAKE_PERL_LOG" \
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \

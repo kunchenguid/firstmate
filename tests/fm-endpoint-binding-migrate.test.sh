@@ -40,6 +40,7 @@ resolve_prebinding_spawn_ref() {
 historical_spawn_meta_block() {  # <ref>
   local body close open
   body=$(git -C "$ROOT" show "$1:bin/fm-spawn.sh") || return 1
+  # shellcheck disable=SC2016 # The historical block terminator contains literal variable names.
   close=$(printf '%s\n' "$body" | grep -n '^} > "\$STATE/\$ID\.meta"' | head -1 | cut -d: -f1)
   [ -n "$close" ] || return 1
   open=$(printf '%s\n' "$body" | head -n "$close" | grep -n '^{$' | tail -1 | cut -d: -f1)
@@ -355,6 +356,7 @@ test_legacy_fixture_matches_historical_spawn_schema() {
   case "$(git -C "$ROOT" show "$ref:bin/fm-spawn.sh")" in
     *'endpoint_task_id='*) fail "resolve_prebinding_spawn_ref returned a spawn script that already binds" ;;
   esac
+  # shellcheck disable=SC2016 # The spawn record is checked for its literal producer-side variable.
   grep -q 'endpoint_task_id=\$ID' "$ROOT/bin/fm-spawn.sh" \
     || fail "current fm-spawn.sh no longer publishes the endpoint binding this migration exists to backfill"
 
