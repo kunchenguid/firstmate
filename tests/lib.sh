@@ -217,11 +217,12 @@ fm_git_add_origin() {
   git -C "$repo" remote add origin "file://$remote_abs"
 }
 
-# fm_git_worktree <repo> <worktree> <branch>: init <repo> with one commit, then
-# add a worktree on a fresh branch.
+# fm_git_worktree <repo> <worktree> <branch>: initialize <repo> with one commit
+# and a local bare origin, then add a worktree on a fresh branch.
 fm_git_worktree() {
   local repo=$1 worktree=$2 branch=$3
   fm_git_init_commit "$repo"
+  fm_git_add_origin "$repo" "$repo.origin.git"
   git -C "$repo" worktree add --quiet -b "$branch" "$worktree"
 }
 

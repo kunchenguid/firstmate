@@ -170,9 +170,11 @@ jobs:
   tests-herdr:
     name: Behavior tests (Herdr)
     runs-on: ubuntu-latest
-    # Real Herdr is slower than the portable suite; this is a hang tripwire,
-    # not the expected healthy end of the lane (estimate 15-40 min first cut).
-    timeout-minutes: 40
+    # Healthy runs finish around 7 minutes. This job cap is a last-resort hang
+    # tripwire, not the expected end of the lane. The family-run step owns the
+    # tighter bound so a wedged suite fails fast with always() cleanup and
+    # timing artifacts still uploaded (docs/fm-test-portable-shards.md).
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
         with:
@@ -252,6 +254,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/fm-herdr"
           bin/fm-herdr-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-herdr/sessions-before.json"
       - name: Run real-Herdr family (serial, required)
+        # Comfortably above the ~7 min healthy wall and far below the 75 min
+        # job backstop. A hang must fail this step so cleanup still runs.
+        timeout-minutes: 20
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
@@ -368,10 +373,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Symlinks must stay intact
+      - name: Compatibility pointers must stay intact
         run: |
           set -eu
-          [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "::error::CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
+          [ ! -L CLAUDE.md ] || { echo "::error::CLAUDE.md must be a real @AGENTS.md pointer file, not a symlink"; exit 1; }
+          tmp=$(mktemp)
+          trap 'rm -f "$tmp"' EXIT
+          printf '%s\n' \
+            '<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->' \
+            '@AGENTS.md' >"$tmp"
+          cmp -s CLAUDE.md "$tmp" || { echo "::error::CLAUDE.md must be the canonical @AGENTS.md pointer"; exit 1; }
           [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
       - name: Personal fleet paths must not be tracked
         run: |

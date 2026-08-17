@@ -308,6 +308,10 @@ if [ "$lock_held" -ne 1 ]; then
   echo "PR_CHECK_MIGRATION: watcher exclusion could not be acquired; review state/.watch.lock before rearming polls" >&2
   exit 1
 fi
+watch_recovery_required=0
+if [ "$stopped_watcher" -eq 1 ] || [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
+  watch_recovery_required=1
+fi
 
 MIGRATION_MARKER_TMP=
 MIGRATION_SCAN_MARKER_TMP=
@@ -323,7 +327,14 @@ migration_cleanup() {
   [ -z "$MIGRATION_LOG_TMP" ] || rm -f -- "$MIGRATION_LOG_TMP"
   [ -z "$MIGRATION_MARKER_TMP" ] || rm -f -- "$MIGRATION_MARKER_TMP"
   [ -z "$MIGRATION_SCAN_MARKER_TMP" ] || rm -f -- "$MIGRATION_SCAN_MARKER_TMP"
-  [ "$lock_held" -ne 1 ] || fm_lock_release "$WATCH_LOCK"
+  if [ "$lock_held" -eq 1 ]; then
+    if [ "$watch_recovery_required" -eq 1 ]; then
+      fm_recovery_transition "$STATE/.watcher-down" release-lock "$WATCH_LOCK" downtime \
+        || echo "PR_CHECK_MIGRATION: watcher recovery state could not be persisted; retaining stale lock evidence" >&2
+    else
+      fm_lock_release "$WATCH_LOCK"
+    fi
+  fi
 }
 trap migration_cleanup EXIT
 trap 'exit 1' HUP INT TERM

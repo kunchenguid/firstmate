@@ -59,10 +59,12 @@ Everything files to a local destination by default; an external system such as a
    If the fallback is unwritable and the user doesn't want a new convention, say so plainly and leave that finding unfiled rather than fabricate a destination.
 
 6. **Read the destination before writing: inspect-then-update, never blind-append.**
-   Before writing any finding, read the destination file's current contents in full.
-   Then ask, for each finding: which existing entry does it supersede; can it be a one-sentence rewrite of an existing entry instead of a new one; and should a stale entry now be refreshed, archived, or replaced in a way that preserves its fact in the same pass?
+   Before writing any finding, read the destination file's current contents in full - and for a `TODO`/`BACKLOG`/`NOTES` entry, the full existing item, not just its title.
+   Then classify the finding against what is already there: new, duplicate, superseding an existing entry, or evidence that an existing entry is now obsolete.
+   Write the considered replacement that classification implies - a duplicate folds into the entry that already carries it, a superseding finding rewrites the entry it supersedes, and an obsolete entry is refreshed, archived, or replaced in a way that preserves its fact in the same pass - rather than blindly appending a new entry or overwriting the file wholesale.
+   Prefer a one-sentence rewrite of an existing entry over a second entry saying nearly the same thing.
+   A superseded body worth keeping leaves through one of step 7's exits, so it stays recoverable instead of being lost silently in the rewrite.
    Mark each entry written into a memory file or `.stow-notes.md` per the tier contract below, but never add tier markers to an existing `TODO`/`BACKLOG`/`NOTES` file.
-   For an existing `TODO`/`BACKLOG`/`NOTES` item, inspect the full item, classify the change as new, duplicate, superseding, or obsolete, then write a considered replacement body rather than appending to it.
    File each undone next step with what it is waiting on, when it is genuinely blocked on something.
 
 7. **Curate every memory file this pass has open, not only the one a finding routes to.**
