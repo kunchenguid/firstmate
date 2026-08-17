@@ -401,7 +401,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind harness model mode yolo project worktree home projects backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -413,6 +413,7 @@ task_json_lines() {
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     harness=$(meta_value "$meta" harness)
+    model=$(meta_value "$meta" model)
     mode=$(meta_value "$meta" mode)
     yolo=$(meta_value "$meta" yolo)
     project=$(meta_value "$meta" project)
@@ -532,6 +533,7 @@ task_json_lines() {
       --arg id "$id" \
       --arg kind "$kind" \
       --arg harness "$harness" \
+      --arg model "$model" \
       --arg mode "$mode" \
       --arg yolo "$yolo" \
       --arg project "$project" \
@@ -562,6 +564,7 @@ task_json_lines() {
         id:$id,
         kind:$kind,
         harness:($harness // ""),
+        model:($model // ""),
         mode:($mode // ""),
         yolo:($yolo // ""),
         project:($project // ""),
