@@ -558,7 +558,7 @@ test_unrelated_update_refreshes_exact_lineage_bindings() {
   assert_contains "$out" "overlay-install: approval-required" "unrelated update reaches overlay readiness"
   approval=$(printf '%s\n' "$out" | grep '^overlay-install: approval-required')
   candidate=$(printf '%s\n' "$approval" | sed -n 's/.* candidate=\([^ ]*\).*/\1/p')
-  python3 - "$w/main" "$candidate" "$upstream" "$installed" <<'PY'
+  python3 - "$w/main" "$candidate" "$upstream" "$installed" <<'PY' || fail "unrelated candidate lineage bindings are stale"
 import base64, hashlib, json, subprocess, sys
 from pathlib import Path
 repo, candidate, upstream, installed = Path(sys.argv[1]), *sys.argv[2:]
@@ -580,7 +580,6 @@ archive = base64.b64decode(artifact.strip(), validate=True)
 assert hashlib.sha256(artifact).hexdigest() == live['generated_parity_artifact_sha256']
 assert hashlib.sha256(archive).hexdigest() == live['generated_parity_archive_sha256']
 PY
-  [ $? -eq 0 ] || fail "unrelated candidate lineage bindings are stale"
   pass "T14 unrelated upstream updates refresh exact lineage and parity bindings"
 }
 
