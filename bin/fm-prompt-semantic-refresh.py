@@ -266,11 +266,10 @@ def refresh(repo: Path, args: argparse.Namespace) -> dict:
     previous, upstream, overlay = (commit(repo, value) for value in (args.previous_upstream, args.upstream, args.overlay))
     lineage = json.loads((repo / args.lineage).read_text())
     changes = changed_semantic_paths(repo, previous, upstream)
-    if not changes:
-        transformer_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-        return {"schema_version": SCHEMA, "previous_upstream": previous, "upstream": upstream, "overlay": overlay,
-                "transformer_sha256": transformer_hash, "changes": [], "updates": []}
-    updates, evidence = transform_sources(repo, previous, upstream, overlay, lineage, changes)
+    updates: dict[str, bytes] = {}
+    evidence: list[dict] = []
+    if changes:
+        updates, evidence = transform_sources(repo, previous, upstream, overlay, lineage, changes)
     transformer_hash = refresh_bindings(repo, previous, upstream, overlay, args.lineage, lineage, changes, updates, evidence)
     return {
         "schema_version": SCHEMA, "previous_upstream": previous, "upstream": upstream,

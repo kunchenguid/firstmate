@@ -330,7 +330,7 @@ test_verified_overlay_requires_explicit_install_approval() {
 }
 
 new_semantic_overlay_world() {
-  local w base
+  local w base update_mode=${2:-semantic} path
   w=$(new_world "$1")
   cat > "$w/seed/AGENTS.md" <<'EOF'
 # Firstmate
@@ -347,6 +347,19 @@ description: A deliberately verbose upstream discovery description for the demo 
 # Demo
 Old body rule.
 EOF
+  for path in \
+    .claude/settings.json .codex/hooks.json bin/fm-brief.sh \
+    bin/fm-classify-lib.sh bin/fm-harness.sh bin/fm-marker-lib.sh \
+    bin/fm-operational-input.sh bin/fm-supervision-instructions.sh \
+    docs/supervision-protocols/claude.md docs/supervision-protocols/codex.md \
+    docs/supervision-protocols/cursor.md docs/supervision-protocols/grok.md \
+    docs/supervision-protocols/opencode.md docs/supervision-protocols/pi.md \
+    docs/supervision-protocols/unknown.md; do
+    mkdir -p "$w/seed/$(dirname "$path")"
+    printf 'parity fixture: %s\n' "$path" > "$w/seed/$path"
+  done
+  mkdir -p "$w/seed/docs/verification/prompt-preservation/upstream"
+  printf 'initial parity artifact\n' > "$w/seed/docs/verification/prompt-preservation/upstream/generated-parity.tar.gz.b64"
   git -C "$w/seed" add -A && git -C "$w/seed" commit -qm semantic-base
   git -C "$w/seed" push -q origin main
   git -C "$w/main" pull -q --ff-only
@@ -374,16 +387,27 @@ import hashlib,json,sys
 from pathlib import Path
 p=Path(sys.argv[1]); root=p.parents[2]
 owners=['AGENTS.md','FIRSTMATE_DETAIL.md','.agents/skills/demo/SKILL.md']
-v={'schema_version':4,'generations':[{'generation':0},{'generation':1,'kind':'live-overlay','upstream_commit':sys.argv[2]}],
-   'overlay_paths':owners+['bin/fm-operation-disclosure.py','bin/fm-prompt-overlay.py','bin/fm-prompt-semantic-refresh.py','docs/verification/prompt-lineage.json'],
+artifact='docs/verification/prompt-preservation/upstream/generated-parity.tar.gz.b64'
+encoded=(root/artifact).read_bytes()
+live={'generation':1,'kind':'live-overlay','upstream_commit':sys.argv[2],
+      'generated_parity_artifact':artifact,
+      'generated_parity_artifact_sha256':hashlib.sha256(encoded).hexdigest(),
+      'generated_parity_archive_sha256':hashlib.sha256(encoded).hexdigest()}
+v={'schema_version':4,'generations':[{'generation':0},live],
+   'overlay_paths':owners+[artifact,'bin/fm-operation-disclosure.py','bin/fm-prompt-overlay.py','bin/fm-prompt-semantic-refresh.py','docs/verification/prompt-lineage.json'],
    'live_authority_sha256':{x:hashlib.sha256((root/x).read_bytes()).hexdigest() for x in owners}}
 p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps(v)+'\n')
 PY
   git -C "$w/main" add -A && git -C "$w/main" commit -qm optimized-overlay
   git -C "$w/main" update-ref refs/firstmate/overlays/live HEAD
-  printf 'New upstream semantic rule.\n' >> "$w/seed/AGENTS.md"
-  printf 'New body rule.\n' >> "$w/seed/.agents/skills/demo/SKILL.md"
-  git -C "$w/seed" add -A && git -C "$w/seed" commit -qm semantic-upstream
+  if [ "$update_mode" = semantic ]; then
+    printf 'New upstream semantic rule.\n' >> "$w/seed/AGENTS.md"
+    printf 'New body rule.\n' >> "$w/seed/.agents/skills/demo/SKILL.md"
+  else
+    mkdir -p "$w/seed/.github/workflows"
+    printf 'name: unrelated\n' > "$w/seed/.github/workflows/ci.yml"
+  fi
+  git -C "$w/seed" add -A && git -C "$w/seed" commit -qm "$update_mode-upstream"
   git -C "$w/seed" push -q origin main
   printf '%s\n' "$w"
 }
@@ -401,6 +425,41 @@ test_semantic_forward_port_reaches_optimized_owners() {
   git -C "$w/main" show "$candidate:.agents/skills/demo/SKILL.md" | grep -qF 'New body rule.' || fail "skill body change was omitted"
   git -C "$w/main" show "$candidate:.agents/skills/demo/SKILL.md" | grep -qF 'description: Load for demo work.' || fail "compact skill discovery description was lost"
   pass "T13 mapped AGENTS and skill semantics forward-port through optimized owners"
+}
+
+test_unrelated_update_refreshes_exact_lineage_bindings() {
+  local w out approval candidate upstream installed
+  w=$(new_semantic_overlay_world t-unrelated unrelated)
+  installed=$(git -C "$w/main" rev-parse HEAD)
+  out=$(run_update "$w")
+  upstream=$(git -C "$w/main" rev-parse origin/main)
+  assert_contains "$out" "overlay-install: approval-required" "unrelated update reaches overlay readiness"
+  approval=$(printf '%s\n' "$out" | grep '^overlay-install: approval-required')
+  candidate=$(printf '%s\n' "$approval" | sed -n 's/.* candidate=\([^ ]*\).*/\1/p')
+  python3 - "$w/main" "$candidate" "$upstream" "$installed" <<'PY'
+import base64, hashlib, json, subprocess, sys
+from pathlib import Path
+repo, candidate, upstream, installed = Path(sys.argv[1]), *sys.argv[2:]
+def git(*args):
+    return subprocess.check_output(('git', *args), cwd=repo).strip()
+assert git('show', '-s', '--format=%P', candidate).decode() == upstream
+assert git('rev-parse', f'{candidate}:.github/workflows/ci.yml') == git('rev-parse', f'{upstream}:.github/workflows/ci.yml')
+for path in ('AGENTS.md', '.agents/skills/demo/SKILL.md'):
+    assert git('rev-parse', f'{candidate}:{path}') == git('rev-parse', f'{installed}:{path}')
+lineage = json.loads(git('show', f'{candidate}:docs/verification/prompt-lineage.json'))
+live = next(item for item in lineage['generations'] if item.get('kind') == 'live-overlay')
+assert live['upstream_commit'] == upstream
+refresh = lineage['semantic_refresh']
+assert refresh['previous_upstream'] != upstream
+assert refresh['upstream'] == upstream
+assert refresh['changes'] == []
+artifact = subprocess.check_output(('git', 'show', f"{candidate}:{live['generated_parity_artifact']}"), cwd=repo)
+archive = base64.b64decode(artifact.strip(), validate=True)
+assert hashlib.sha256(artifact).hexdigest() == live['generated_parity_artifact_sha256']
+assert hashlib.sha256(archive).hexdigest() == live['generated_parity_archive_sha256']
+PY
+  [ $? -eq 0 ] || fail "unrelated candidate lineage bindings are stale"
+  pass "T14 unrelated upstream updates refresh exact lineage and parity bindings"
 }
 
 test_hash_bound_overlay_cannot_mask_unmapped_semantics() {
@@ -462,6 +521,7 @@ test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
 test_verified_overlay_requires_explicit_install_approval
 test_semantic_forward_port_reaches_optimized_owners
+test_unrelated_update_refreshes_exact_lineage_bindings
 test_hash_bound_overlay_cannot_mask_unmapped_semantics
 test_ambiguous_overlay_refuses_without_ref_moves
 
