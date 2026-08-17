@@ -30,6 +30,7 @@ case "${1:-}" in
         unauthorized) printf "Error:\n   0: 401 Unauthorized\n" >&2; exit 1 ;;
         forbidden) printf "Error:\n   0: 403 Forbidden\n" >&2; exit 1 ;;
         not_found) printf "Error:\n   0: 404 Not Found\n" >&2; exit 1 ;;
+        local_permission) printf "Error: Permission denied reading config\n" >&2; exit 1 ;;
         absent) exit 127 ;;
         *) printf "Error: unknown mode %s\n" "$MODE" >&2; exit 1 ;;
       esac
@@ -132,6 +133,13 @@ test_probe_not_found() {
   pass 'probe leaves ambiguous not-found response indeterminate'
 }
 
+test_probe_local_permission_failure() {
+  local out
+  out=$(run_with_fake local_permission env BWS_ACCESS_TOKEN=set "$HELPER" probe)
+  assert_contains "$out" 'status=indeterminate' 'local permission failure should report indeterminate'
+  pass 'probe leaves local permission failures indeterminate'
+}
+
 test_redact_metadata() {
   local out
   out=$(printf '%s\n' '{"id":"x","key":"k","value":"secret","note":"credential note"}' | "$HELPER" redact-json)
@@ -168,6 +176,7 @@ test_probe_invalid_token
 test_probe_unauthorized_token
 test_probe_authenticated_read_only
 test_probe_not_found
+test_probe_local_permission_failure
 test_redact_metadata
 test_list_metadata_redacts
 test_resolve_duplicate_names

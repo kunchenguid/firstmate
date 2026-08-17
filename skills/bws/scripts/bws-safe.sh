@@ -72,7 +72,7 @@ classify_bws_stderr() {
   case "$err" in
     *"Missing access token"*) printf 'no_token\n' ;;
     *"Doesn't contain a decryption key"*|*"401"*) printf 'invalid_token\n' ;;
-    *"403"*|*"Forbidden"*|*"forbidden"*|*"permission"*|*"Permission"*)
+    *"403"*|*"Forbidden"*|*"forbidden"*)
       printf 'forbidden\n'
       ;;
     *) printf 'indeterminate\n' ;;
