@@ -146,13 +146,22 @@ cmd_list_metadata() {
 }
 
 cmd_resolve_id() {
-  local project_id=$1 key=$2 json matches count id
+  local project_id=$1 key=$2 json matches count id list_stderr list_error
   [ -n "$project_id" ] && [ -n "$key" ] || die_usage "resolve-id requires PROJECT_ID and KEY"
   require_jq
-  if ! json=$(run_bws secret list "$project_id" -o json); then
+  list_stderr=$(mktemp)
+  chmod 600 "$list_stderr"
+  if ! json=$(bws secret list "$project_id" -o json 2>"$list_stderr"); then
+    list_error=$(<"$list_stderr")
+    rm -f "$list_stderr"
+    case "$list_error" in
+      *"404"*) ;;
+      *) exit 3 ;;
+    esac
     run_bws project get "$project_id" -o none >/dev/null || exit 3
     exit 1
   fi
+  rm -f "$list_stderr"
   matches=$(jq -r --arg key "$key" '
     [.[] | select(.key == $key)] as $items
     | if any($items[]; ((.id | type) != "string") or (.id == "")) then

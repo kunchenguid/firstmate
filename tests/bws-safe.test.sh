@@ -39,8 +39,10 @@ case "${1:-}" in
       esac
       ;;
     get)
-      [ "$MODE" = empty_project ] && exit 0
-      exit 1
+      case "$MODE" in
+        empty_project|transient_list) exit 0 ;;
+        *) exit 1 ;;
+      esac
       ;;
   esac
   ;;
@@ -59,6 +61,10 @@ case "${1:-}" in
           ;;
         empty_project)
           printf "Error:\n   0: 404 Not Found\n" >&2
+          exit 1
+          ;;
+        transient_list)
+          printf "Error: request timed out\n" >&2
           exit 1
           ;;
         authenticated|read_only)
@@ -228,6 +234,17 @@ test_resolve_empty_project() {
   pass 'resolve-id handles empty projects as absent keys'
 }
 
+test_resolve_transient_list_failure() {
+  local rc=0 out
+  set +e
+  out=$(run_with_fake transient_list env BWS_ACCESS_TOKEN=ok "$HELPER" resolve-id proj-1 ONLY)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "transient list failure should exit 3, got $rc"
+  [ -z "$out" ] || fail "transient list failure must not produce output, got $out"
+  pass 'resolve-id preserves transient list failures'
+}
+
 test_probe_absent
 test_probe_broken_version
 test_probe_no_token
@@ -242,3 +259,4 @@ test_resolve_duplicate_names
 test_resolve_malformed_json
 test_resolve_invalid_id
 test_resolve_empty_project
+test_resolve_transient_list_failure
