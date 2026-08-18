@@ -12,10 +12,9 @@ Credential paths below are shown with the home directory replaced by `<home>`.
 
 ## Quota granularity the judgment depends on
 
-Verified 2026-07-30 against quota-axi 0.1.16.
-
-`quota-axi --json` reports availability at whatever granularity the vendor supplies, and names the applied bound in each scope's `boundedBy`.
-`quotaSemantics.description` is `--full` only; the dispatch skill reads `boundedBy` rather than that prose.
+Verified 2026-07-30 against quota-axi 0.1.16 for the provider and model-scope relationships below.
+That release's captured default output included `quotaSemantics.description`; the current default field placement is verified against 0.1.29 in the next section.
+Current dispatch reads each scope's `boundedBy`, which names the applied bound without relying on the `--full`-only description.
 
 ```json
 {
@@ -23,6 +22,7 @@ Verified 2026-07-30 against quota-axi 0.1.16.
   "state": { "status": "fresh", "stale": false },
   "quotaSemantics": {
     "status": "known",
+    "description": "Codex base account windows bound every model. Named model windows add bounds for that model; code-review windows describe a separate workload and are not included in model availability.",
     "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 64, "boundedBy": ["weekly"] },
       { "scope": "model:codex_bengalfox", "status": "known", "effectivePercentRemaining": 64, "boundedBy": ["weekly", "model:codex_bengalfox:7d"] }
