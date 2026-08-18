@@ -188,6 +188,7 @@ family_for_basename() {
       ;;
     fm-afk-pi-herdr-return-e2e.test.sh|\
     fm-allowance-park-live-e2e.test.sh|\
+    fm-claude-stop-autoarm-live-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
@@ -632,6 +633,10 @@ select_lane() {
   [ "$found" -eq 1 ] || die "lane '$want' selected no tests"
 }
 
+# Every comparison below runs `comm` under LC_ALL=C because its inputs were
+# produced by `LC_ALL=C sort`: an ordering `comm` reads under the caller's own
+# collation is not the ordering it was written in, and the mismatch made this
+# guard warn and fail on any host whose locale is not C.
 run_coverage_guard() {
   local tmp missing extra a b shard
   local -a saved_scripts=()

@@ -50,17 +50,23 @@
 # guard ignores stop_hook_active and instead cooperates with the Stop-owned
 # auto-arm (bin/fm-claude-stop-autoarm.sh), which fires on the same Stop event:
 #   1. a live identity-matched watcher with a fresh beacon allows immediately;
-#   2. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 800ms)
-#      for the auto-arm to claim this home (state/.claude-autoarm.lock owner
-#      alive, with a supervision decision still open rather than a claim its own
-#      ledger entry or recorded pid-identity already settles as finished) or to
-#      record a fresh actionable exit-2 outcome
-#      (state/.claude-autoarm-epoch) for this event epoch - either proof allows
-#      without consuming a continuation, so one event epoch yields exactly one recovery turn;
-#      the first fresh exhausted-failure epoch preserves the bounded progression,
-#      while later fresh failed epochs consume it instead of resetting it;
-#   3. only when neither materializes is the auto-arm genuinely absent: re-block
-#      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
+#   2. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 800ms of
+#      ELAPSED time, not a pass count) for any of three proofs: the auto-arm's
+#      owner lock (state/.claude-autoarm.lock owner alive, with a supervision
+#      decision still open rather than a claim its own ledger entry or recorded
+#      pid-identity already settles as finished), its in-progress claim
+#      (state/.claude-autoarm-claim, published before its identity gate and the
+#      only proof that exists during that gate's ancestry walk), or a fresh
+#      actionable exit-2 outcome for this event epoch
+#      (state/.claude-autoarm-epoch). Any of them allows without consuming a
+#      continuation, so one event epoch yields exactly one recovery turn; the
+#      first fresh exhausted-failure epoch preserves the bounded progression,
+#      while later fresh failed epochs consume it instead of resetting it.
+#      docs/turnend-guard.md "Claim publication ordering" owns why the
+#      in-progress claim has to be the cheapest proof to publish;
+#   3. only when none of the three materializes is the auto-arm genuinely
+#      absent: re-block with the repair banner, bounded to
+#      FM_CLAUDE_TURNEND_BLOCK_BUDGET
 #      (default 3) consecutive blocks per session - safely below Claude Code's
 #      hard 8-consecutive-block override - then allow one loud attended
 #      fail-open only for an already verified failure episode.
@@ -96,6 +102,8 @@ done
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-hook-host-lib.sh
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
+# shellcheck source=bin/fm-timing-lib.sh
+. "$SCRIPT_DIR/fm-timing-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -150,6 +158,7 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
+AUTOARM_CLAIM="$STATE/.claude-autoarm-claim"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
@@ -256,6 +265,24 @@ budget_account_current_epoch() {
   return 0
 }
 
+# True while bin/fm-claude-stop-autoarm.sh is still working on this home for this
+# Stop event. It publishes the record before its identity gate, so this is the
+# ONLY proof available during that gate's 0.9-3.5s ancestry walk; without it this
+# guard blocked a healthy arming turn every time the machine was busy enough for
+# the walk to outlast the cooperative window (docs/turnend-guard.md "Claim
+# publication ordering"). The recorded process identity is what makes liveness
+# trustworthy here: a killed hook leaves the record behind, and a bare pid check
+# would accept whatever unrelated process later reused that pid.
+autoarm_claim_in_progress() {
+  local pid identity current
+  pid=$(sed -n '1s/^pid=//p' "$AUTOARM_CLAIM" 2>/dev/null || true)
+  identity=$(sed -n '2s/^identity=//p' "$AUTOARM_CLAIM" 2>/dev/null || true)
+  [ -n "$identity" ] || return 1
+  fm_pid_alive "$pid" || return 1
+  current=$(fm_pid_identity "$pid" 2>/dev/null || true)
+  [ -n "$current" ] && [ "$current" = "$identity" ]
+}
+
 autoarm_owns_recovery() {
   local pid role outcome age
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
@@ -273,9 +300,13 @@ autoarm_owns_recovery() {
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
+  if autoarm_claim_in_progress; then
+    [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
+    return 0
+  fi
   outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
-    rewake)
+    arming|rewake)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
       if [ "$age" -lt "$EPOCH_FRESH" ]; then
         [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
@@ -373,16 +404,22 @@ failure_episode_verified() {
   esac
 }
 
-i=0
-while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
+# A wall-clock deadline, not a fixed iteration count: each pass forks through
+# fm_watcher_healthy and fm_pid_identity, so a budget spent as a pass COUNT runs
+# for an unbounded multiple of the milliseconds it names - a nominal 800ms spent
+# as eight passes ran for 29.8s at a real turn boundary during the reproduction.
+# Bounding elapsed time makes FM_CLAUDE_AUTOARM_SYNC_WAIT_MS mean what it says on
+# every host; the claim above is what makes a short wait sufficient.
+WAIT_DEADLINE_MS=$(( $(fm_timing_now_ms) + SYNC_WAIT_MS ))
+while :; do
   if autoarm_owns_recovery; then
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
       fm_failure_episode_reset "$STATE" || exit 2
     fi
     exit 0
   fi
+  [ "$(fm_timing_now_ms)" -lt "$WAIT_DEADLINE_MS" ] || break
   sleep 0.1
-  i=$((i + 1))
 done
 if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then

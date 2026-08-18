@@ -10,16 +10,24 @@
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
-#   - Identity: only when THIS session's harness ancestor holds state/.lock.
-#     When an existing numeric owner fails the shared harness-liveness predicate,
-#     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
 #   - Need: arms only while work is in flight (state/*.meta) or X mode has a
 #     relay poll to run (state/x-watch.check.sh); an idle home exits 0.
+#   - Claim: state/.claude-autoarm-claim is published HERE, after the three
+#     cheap read-only gates above and before the expensive identity gate below,
+#     because the synchronous guard fires on this same Stop event and can only
+#     see what already exists. The ordering is the contract, not an
+#     optimization; docs/turnend-guard.md "Claim publication ordering" owns why.
+#     It carries this pid and its fm_pid_identity, is removed by this process's
+#     own exit trap and only while it still owns it, and is a hint rather than
+#     authority: an auto-arm that cannot publish one still arms.
+#   - Identity: only when THIS session's harness ancestor holds state/.lock.
+#     When an existing numeric owner fails the shared harness-liveness predicate,
+#     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
+#     ownership. A live owner, missing lock, malformed lock, or unresolved
+#     ancestry remains inert, so a competing session never arms or rewakes.
 #   - Single-flight: Claude does not dedupe async hooks, so a home-scoped owner
 #     lock (state/.claude-autoarm.lock) admits exactly one owner; every other
 #     concurrent firing exits 0 without translating, which keeps one event
@@ -45,7 +53,9 @@
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim and
 # outcome so the synchronous Stop guard (bin/fm-turnend-guard.sh --claude) can
 # allow a stop whose recovery this hook already owns, instead of forcing a
-# duplicate continuation for the same event epoch. The failure marker
+# duplicate continuation for the same event epoch. The in-progress claim above
+# covers the window before that ledger exists, which is the whole identity gate.
+# The failure marker
 # state/.claude-autoarm-failure-notified deduplicates the last-resort notice,
 # and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
 # suppresses any later automatic continuation in that unresolved episode.
@@ -100,12 +110,66 @@ fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# --- AFK: the away daemon owns the watcher and triage; never rewake ----------
+[ -e "$STATE/.afk" ] && exit 0
+
+# --- need: in-flight work or an X-mode relay poll ----------------------------
+need_supervision() {
+  fm_supervision_needed "$STATE" "$GRACE"
+}
+need_supervision || exit 0
+
+# --- in-progress claim: publish BEFORE the expensive identity gate -----------
+# The synchronous guard (bin/fm-turnend-guard.sh --claude) fires on this same
+# Stop event and can only allow the stop while it can SEE that recovery is under
+# way. Until this record existed the earliest such evidence was the owner lock
+# below, taken after the identity gate, whose ancestry walk costs three `ps`
+# forks per hop over up to sixteen hops - measured at 0.9-3.5s on a loaded host
+# against the guard's sub-second cooperative window. The guard therefore reported
+# "the auto-arm did not claim this home" while this hook was healthy and arming,
+# and consumed a forced continuation every turn (docs/turnend-guard.md "Claim
+# publication ordering").
+# Publishing here, after the cheap scope, AFK, and need gates, makes the claim
+# observable within this hook's own fork-light prefix (0.11-0.29s measured) and
+# keeps an idle or away home byte-for-byte inert exactly as before.
+# The record carries this process identity, so the guard's liveness check is
+# immune to pid reuse; it is removed on every exit path, and only while it still
+# records THIS process, so a concurrent firing never deletes another's claim.
+CLAIM="$STATE/.claude-autoarm-claim"
+CLAIM_PID=${BASHPID:-$$}
+CLAIM_HELD=0
+# shellcheck disable=SC2329 # Registered by the EXIT traps below.
+claim_release() {
+  [ "$CLAIM_HELD" -eq 1 ] || return 0
+  [ "$(sed -n '1s/^pid=//p' "$CLAIM" 2>/dev/null || true)" = "$CLAIM_PID" ] || return 0
+  rm -f "$CLAIM" 2>/dev/null || true
+  CLAIM_HELD=0
+}
+claim_publish() {
+  local identity tmp
+  identity=$(fm_pid_identity "$CLAIM_PID" 2>/dev/null || true)
+  [ -n "$identity" ] || return 1
+  tmp="$CLAIM.tmp.$CLAIM_PID"
+  if ! printf 'pid=%s\nidentity=%s\nstarted_at=%s\n' "$CLAIM_PID" "$identity" "$(date +%s)" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv -f "$tmp" "$CLAIM" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  CLAIM_HELD=1
+}
+# A claim that cannot be published is not fatal: this hook still arms, and the
+# guard falls back to the same evidence it used before.
+claim_publish || true
+trap claim_release EXIT
+
 # --- identity: only the lock-owning session's hooks may arm ------------------
 # A prior session may have died after leaving its numeric harness pid in .lock.
 # Use the shared liveness predicate to recognize only that stale-owner case.
-# Defer the mutating claim until after the unchanged AFK and need gates, so an
-# idle or away home remains byte-for-byte inert. Missing or malformed locks are
-# uncertainty rather than stale-owner evidence and remain inert.
+# Missing or malformed locks are uncertainty rather than stale-owner evidence
+# and remain inert. Every exit below releases the claim through the trap.
 RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
@@ -115,15 +179,6 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   fm_harness_pid_alive "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
 fi
-
-# --- AFK: the away daemon owns the watcher and triage; never rewake ----------
-[ -e "$STATE/.afk" ] && exit 0
-
-# --- need: in-flight work or an X-mode relay poll ----------------------------
-need_supervision() {
-  fm_supervision_needed "$STATE" "$GRACE"
-}
-need_supervision || exit 0
 
 # --- stale session-lock recovery ---------------------------------------------
 # Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics
@@ -160,7 +215,7 @@ if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
   fm_lock_release "$OWNER_LOCK"
   exit 0
 fi
-trap 'fm_lock_release "$OWNER_LOCK"' EXIT
+trap 'fm_lock_release "$OWNER_LOCK"; claim_release' EXIT
 
 write_epoch() {  # <outcome>
   local outcome=$1 seq tmp
