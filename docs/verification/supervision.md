@@ -476,6 +476,76 @@ Observed output:
 fm-claude-stop-autoarm: ok
 ```
 
+### Claude Stop claim publication ordering, 2026-08-18
+
+Repeated silent supervision drops in the primary home on 2026-08-17 and 2026-08-18 were reproduced end to end against Claude Code 2.1.234 with the real tracked Stop registration, then driven to one cause.
+Two reported premises were disproven by measurement before any fix was written.
+The `asyncRewake` sibling fires within about a millisecond of the blocking hook and runs to completion even when that sibling exits 2, so the auto-arm was never absent.
+The exit-2 continuation turn does not start until the outstanding `asyncRewake` hook completes, observed as a block at 941.25s, the async hook ending at 961.92s, and the first model tool call at 965.90s, so the next turn's start does not race the arm.
+
+What did happen is a visibility window.
+In the instrumented lab the guard printed its blind-turn banner and exited 2 on two consecutive cycles while the auto-arm was healthy and completed successfully in the same event, recording `epoch=2 outcome=rewake` and then `epoch=4 outcome=rewake`.
+The identity gate's ancestry walk measured 1.375 to 1.624 seconds live and 8.857 seconds under xtrace, the gate as a whole 0.946 to 3.511 seconds, and the auto-arm's first durable evidence at 11.300 seconds under xtrace, against a nominal 800 millisecond cooperative window.
+A sampler run measured the owner lock appearing at +1.70s and its `autoarm` role at +1.77s while the guard gave up at +1.81s, a 20 millisecond margin.
+The guard's own wait was an iteration count over fork-heavy passes, so it ran for 2.87s and 29.85s on those two cycles for the same nominal 800 milliseconds.
+
+The portable regression reproduces that window with real concurrent processes rather than fixtures, parking a real auto-arm inside its identity gate behind a `ps` shim and asking the guard for a verdict with the claim as the only evidence on disk.
+
+```sh
+tests/fm-turnend-guard.test.sh
+```
+
+Observed output, last four lines:
+
+```text
+ok - fm-turnend-guard --claude: the early claim is the whole difference in the pre-identity window (incident regression)
+ok - fm-turnend-guard --claude: an in-progress claim is trusted only while its publisher is alive and unchanged
+ok - fm-turnend-guard --claude: a fresh arming epoch is recovery under way, not a missing claim
+ok - fm-turnend-guard --claude: the cooperative wait is bounded by elapsed time, not by a pass count
+```
+
+Each of the four fails against an unpacked pre-fix tree, checked by running them there one at a time:
+
+```text
+not ok - no in-progress claim appeared before the auto-arm's identity gate: firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after 2 bounded attempts, and no live watcher with a fresh beacon was verified.
+not ok - a live identity-matched claim must be accepted as recovery under way: expected exit 0, got 2
+not ok - --claude must not force a turn against a fresh arming epoch: expected exit 0, got 2
+not ok - an 800ms cooperative wait ran 9s on a slow host: it is counting passes, not elapsed time
+```
+
+The harness-emitted half is the opt-in live guard, which now runs its whole session behind a shim that costs every pid query a fixed slice, so the identity gate reliably outlasts the cooperative wait.
+The run below recorded 86 delayed pid queries and no forced continuation.
+
+```sh
+FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - Claude 2.1.234 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles under a loaded identity gate, and preserved the competing-live-owner boundary
+```
+
+Two adjacent defects were repaired in the same change rather than left silent.
+`bin/fm-test-run.sh --check-coverage` compared `LC_ALL=C sort` inventories with a locale-sensitive `comm`, so it warned and failed on any host whose locale is not C; it now reports `FM_TEST_COVERAGE ok total=149 parallel=24 serial=113 serial_shards=4 herdr=12` under `en_US.UTF-8`.
+The live auto-arm regression still asserted that the model types the session start command, which the run-tier `SessionStart` hook has made unnecessary, so it could not pass at all; it now asserts that session start ran for that home and that the model issued exactly its two wake drains.
+
+The repo lint gate did not complete on this host and must not be reported as a pass.
+
+```sh
+bin/fm-lint.sh
+```
+
+Observed output, exit 127:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint-workflows.sh: actionlint not found; install actionlint 1.7.12 for CI parity.
+```
+
+ShellCheck 0.11.0 ran over the canonical shell set and reported no findings; the workflow half did not run at all, and no workflow file changed here.
+`tests/fm-test-run.test.sh` likewise cannot complete on this host because its CI YAML assertion requires ruby, which is absent.
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
