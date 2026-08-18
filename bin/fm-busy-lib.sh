@@ -872,15 +872,18 @@ fm_busy_grok_tail_busy() {
 # Matching is anchored to the COMPOSER REGION of the captured tail, and that
 # region is EXACTLY: at most FM_BUSY_CLAUDE_LIMIT_REGION_LINES lines
 # immediately above the composer box's top border, the box's own rows (top
-# border through bottom border), and the status/hint line immediately below it
-# (e.g. "? for shortcuts"). That is where Claude Code renders the limit widget
-# and nothing else. Transcript lines further up are NEVER
-# consulted, so scrollback, a diff, a transcript, or this very file's comments
-# can never trigger the override no matter what they contain. A tail with no
-# composer box in it has no region at all and simply does not match.
+# border through bottom border), and at most the same number of lines
+# immediately below its bottom border. The below-box budget is a budget, not a
+# single line, because a real pane renders BOTH the status/hint line (e.g.
+# "? for shortcuts") AND the limit widget down there, in either order. That is
+# where Claude Code renders the limit widget and nothing else. Transcript lines
+# further up are NEVER consulted, so scrollback, a diff, a transcript, or this
+# very file's comments can never trigger the override no matter what they
+# contain. A tail with no composer box in it has no region at all and simply
+# does not match.
 #
-# Inside the region a BLOCKING auto-continue widget phrase is REQUIRED for the
-# paused verdict: "press enter to continue", "continuing automatically", or
+# Inside the region a BLOCKING auto-continue widget phrase is REQUIRED for any
+# verdict: "press enter to continue", "continuing automatically", or
 # "Automatic continue stopped after repeated usage-limit hits". That phrase
 # must sit on a line that also carries the widget's own "usage limit" /
 # "usage-limit" token, exactly as all three verified renderings do ("Your
@@ -890,10 +893,22 @@ fm_busy_grok_tail_busy() {
 # happens to say "press enter to continue" - a grep hit, a diff, this file's
 # own comments scrolling one line above the composer - would still qualify
 # inside the region, so the token is what makes the match provably the widget.
-# The limit NAME
-# is used only to enrich the detail - a name on the same or an adjacent line
-# as the widget prints that name line (it carries the reset hint), otherwise
-# the detail reports the limit type as unspecified.
+#
+# The three renderings do NOT mean the same thing, so the matcher prints
+# "<state>\t<detail>" and bin/fm-crew-state.sh emits that state verbatim:
+#   continuing automatically at <time>  -> paused  (self-resolving external
+#                                         wait: the agent resumes by itself)
+#   press enter to continue             -> paused  (the reset already landed
+#                                         and only a keypress is outstanding)
+#   Automatic continue stopped after    -> blocked (Claude Code's own give-up
+#   repeated usage-limit hits                     state: the agent will NEVER
+#                                         resume on its own, so it must keep
+#                                         the watcher's wedge/escalation path
+#                                         instead of being absorbed as a wait)
+# A give-up line anywhere in the region wins over an armed/reset widget. For
+# the two paused renderings the limit NAME enriches the detail - the name line
+# NEAREST the widget anywhere in the region is printed (it carries the reset
+# hint), otherwise the detail reports the limit type as unspecified.
 #
 # DELIBERATE, CAPTAIN-ACCEPTED LIMITATION (one owner: this header): a named
 # limit notice ALONE never reports paused. Claude Code renders the same
@@ -908,6 +923,7 @@ fm_busy_grok_tail_busy() {
 # is still caught by the existing stale/idle pane detection in bin/fm-watch.sh,
 # just on that path's cadence rather than at once.
 FM_BUSY_CLAUDE_LIMIT_REGION_LINES=${FM_BUSY_CLAUDE_LIMIT_REGION_LINES:-2}
+FM_BUSY_CLAUDE_LIMIT_GIVEUP_DETAIL='usage-limit give-up - agent will not resume on its own; relaunch or captain needed'
 
 # Print the composer region of the tail on stdin (see the header above), or
 # fail when the tail carries no composer box. Lowercasing goes through tr, not
@@ -927,7 +943,7 @@ fm_busy_claude_composer_region() {
   last=$(( ${#lines[@]} - 1 ))
   start=$((top - FM_BUSY_CLAUDE_LIMIT_REGION_LINES))
   [ "$start" -lt 0 ] && start=0
-  if [ "$bottom" -ge 0 ]; then end=$((bottom + 1)); else end=$last; fi
+  if [ "$bottom" -ge 0 ]; then end=$((bottom + FM_BUSY_CLAUDE_LIMIT_REGION_LINES)); else end=$last; fi
   [ "$end" -gt "$last" ] && end=$last
   for ((idx = start; idx <= end; idx++)); do
     printf '%s\n' "${lines[idx]}"
@@ -935,7 +951,7 @@ fm_busy_claude_composer_region() {
 }
 
 fm_busy_claude_limit_banner() {
-  local rl low idx widget=-1
+  local rl low idx dist widget=-1 state=''
   local -a region_lines=() region_lower=()
   while IFS= read -r rl; do
     low=$(printf '%s' "$rl" | tr '[:upper:]' '[:lower:]')
@@ -949,20 +965,28 @@ fm_busy_claude_limit_banner() {
       *) continue ;;
     esac
     case "${region_lower[idx]}" in
-      *'press enter to continue'*|*'continuing automatically'*|*'automatic continue stopped after repeated usage-limit hits'*)
-        widget=$idx ;;
+      *'automatic continue stopped after repeated usage-limit hits'*)
+        widget=$idx; state=blocked ;;
+      *'press enter to continue'*|*'continuing automatically'*)
+        if [ "$state" != blocked ]; then widget=$idx; state=paused; fi ;;
     esac
   done
-  [ "$widget" -ge 0 ] || return 1
-  for idx in "$widget" "$((widget - 1))" "$((widget + 1))"; do
-    [ "$idx" -ge 0 ] && [ "$idx" -lt "${#region_lines[@]}" ] || continue
-    case "${region_lower[idx]}" in
-      *'session limit'*|*'weekly limit'*|*'opus limit'*|*'sonnet limit'*|*'fable 5 limit'*|*'usage credit limit'*)
-        printf '%s' "${region_lines[idx]}"
-        return 0 ;;
-    esac
+  [ -n "$state" ] || return 1
+  if [ "$state" = blocked ]; then
+    printf 'blocked\t%s' "$FM_BUSY_CLAUDE_LIMIT_GIVEUP_DETAIL"
+    return 0
+  fi
+  for ((dist = 0; dist < ${#region_lines[@]}; dist++)); do
+    for idx in "$((widget - dist))" "$((widget + dist))"; do
+      [ "$idx" -ge 0 ] && [ "$idx" -lt "${#region_lines[@]}" ] || continue
+      case "${region_lower[idx]}" in
+        *'session limit'*|*'weekly limit'*|*'opus limit'*|*'sonnet limit'*|*'fable 5 limit'*|*'usage credit limit'*)
+          printf 'paused\t%s' "${region_lines[idx]}"
+          return 0 ;;
+      esac
+    done
   done
-  printf 'limit type unspecified - %s' "${region_lines[widget]}"
+  printf 'paused\tlimit type unspecified - %s' "${region_lines[widget]}"
 }
 
 # fm_busy_claude_limit_notice: the WEAKER companion signal - 0 when a limit

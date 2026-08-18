@@ -936,7 +936,8 @@ Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
     --source claude-hook --event user-prompt-submit
   local out; out=$(run_crew_state "$d" feat-limitlast)
   assert_contains "$out" "state: paused" "a widget on the last captured line still overrides busy to paused"
-  assert_contains "$out" "continuing automatically at 3:00pm" "the detail quotes the widget on that last line"
+  assert_contains "$out" "session limit" "the detail still names the limit that was hit"
+  assert_contains "$out" "resets 2:30pm" "the detail still carries the banner's reset hint"
   pass "the limit widget on the pane's last captured line is not dropped"
 }
 
@@ -1052,13 +1053,12 @@ Usage limit reached · continuing automatically at 3:00pm · esc to cancel
 }
 
 # The named notice scrolls out of the capture window while the persistent
-# auto-continue widget stays on screen; the widget alone is still an external
-# wait, and the auto-continue-stopped state is the most wedged wait of all.
+# auto-continue widget stays on screen; a self-resolving widget alone is still
+# an external wait.
 test_no_run_claude_widget_only_tail_paused() {
   local widget
   for widget in "Usage limit reached · continuing automatically at 3:00pm · esc to cancel" \
-                "Your usage limit has reset · press enter to continue" \
-                "Automatic continue stopped after repeated usage-limit hits"; do
+                "Your usage limit has reset · press enter to continue"; do
     reset_fakes
     local d; d=$(new_case "claude-widget-${#widget}")
     make_repo_on_branch "$d/wt" fm/feat-widget
@@ -1081,6 +1081,65 @@ test_no_run_claude_widget_only_tail_paused() {
     assert_contains "$out" "unspecified" "a widget-only match reports the limit type as unspecified"
   done
   pass "the auto-continue widget alone reads paused without naming a limit"
+}
+
+# Claude Code's give-up rendering is NOT a self-resolving wait: the agent never
+# resumes without a human, so absorbing it as a pause would silence it for a
+# whole re-surface window instead of letting the watcher's wedge path escalate.
+test_no_run_claude_giveup_widget_blocked() {
+  reset_fakes
+  local d; d=$(new_case claude-giveup)
+  make_repo_on_branch "$d/wt" fm/feat-giveup
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-giveup.meta" "window=fm:fm-feat-giveup" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
+Automatic continue stopped after repeated usage-limit hits
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-giveup)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-giveup busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-giveup)
+  assert_contains "$out" "state: blocked" "the give-up widget reports blocked, not an absorbed pause"
+  assert_not_contains "$out" "state: paused" "the give-up widget must not read as a self-resolving wait"
+  assert_contains "$out" "usage-limit give-up - agent will not resume on its own; relaunch or captain needed" \
+    "the blocked detail names the give-up state and what it needs"
+  pass "Claude Code's usage-limit give-up widget reads blocked, keeping the wedge path"
+}
+
+# The realistic below-box layout: Claude Code renders the status/hint line
+# directly under the composer box and the limit widget under THAT, so both must
+# sit inside the anchored region or the block is never seen.
+test_no_run_claude_widget_two_lines_below_box_paused() {
+  reset_fakes
+  local d; d=$(new_case claude-below-box)
+  make_repo_on_branch "$d/wt" fm/feat-belowbox
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-belowbox.meta" "window=fm:fm-feat-belowbox" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-belowbox)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-belowbox busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-belowbox)
+  assert_contains "$out" "state: paused" "a widget two lines below the box is still inside the region"
+  assert_contains "$out" "session limit" "the detail names the limit found anywhere in the region"
+  assert_contains "$out" "resets 2:30pm" "the detail carries the banner's reset hint"
+  pass "the hint line and the widget both below the composer box are both in the region"
 }
 
 # A genuinely busy crewmate editing this repo's own limit-banner code has both
@@ -2140,6 +2199,8 @@ test_no_run_claude_ordinary_busy_tail_stays_working
 test_no_run_non_claude_harness_ignores_limit_banner_text
 test_no_run_claude_named_limit_variants_paused
 test_no_run_claude_widget_only_tail_paused
+test_no_run_claude_giveup_widget_blocked
+test_no_run_claude_widget_two_lines_below_box_paused
 test_no_run_claude_scrollback_limit_words_stay_working
 test_parked_run_claude_limit_banner_paused
 test_active_run_claude_limit_banner_annotates_working
