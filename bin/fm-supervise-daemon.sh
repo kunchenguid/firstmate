@@ -46,6 +46,12 @@
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     A failed capture is retried a bounded number of times, then
+#     fm_backend_agent_state decides: only an authoritatively missing endpoint
+#     drops its marker with no escalation, so a torn-down pane stays quiet
+#     while a present or unreadable pane is surfaced and kept on the same
+#     cadence (the watcher cannot recapture an unreadable pane, so dropping
+#     the marker would forget it).
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -89,6 +95,11 @@
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
+#          FM_STALE_CAPTURE_RETRIES extra capture attempts after the first
+#                                   failure before a gone/unreadable verdict
+#                                   (default 2; total attempts = retries + 1)
+#          FM_STALE_CAPTURE_RETRY_SLEEP seconds between those extra capture
+#                                   attempts (default 0.4)
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
 #                                   re-surfaces as a recheck (default 3600)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
@@ -191,6 +202,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
+STALE_CAPTURE_RETRIES_DEFAULT=2
+STALE_CAPTURE_RETRY_SLEEP_DEFAULT=0.4
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
@@ -616,11 +629,12 @@ task_window_harness() {  # <window> <state>
   grep '^harness=' "$meta" 2>/dev/null | cut -d= -f2- || true
 }
 
-# stale_window_is_busy: 0 when the task is PROVABLY working through the
-# semantic busy-state contract (bin/fm-busy-lib.sh), 1 when it is not, and 2
-# when the endpoint could not be read at all. Only an exact busy verdict is
-# working: unknown semantic state never becomes busy and never becomes a
-# silent idle, so a stale pane whose state cannot be proven surfaces.
+# stale_window_is_busy: one capture. 0 when the task is PROVABLY working
+# through the semantic busy-state contract (bin/fm-busy-lib.sh), 1 when it is
+# not, and 2 when the endpoint could not be read at all. Only an exact busy
+# verdict is working: unknown semantic state never becomes busy and never
+# becomes a silent idle. Housekeeping must not treat 2 as gone; that split is
+# owned by stale_window_recheck below.
 stale_window_is_busy() {  # <window> <state>
   local win=$1 state=$2 backend harness label task tail40 verdict
   backend=$(task_window_backend "$win" "$state")
@@ -630,6 +644,62 @@ stale_window_is_busy() {  # <window> <state>
   tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
   verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
   [ "${verdict%% *}" = busy ]
+}
+
+# stale_window_recheck: the single housekeeping decision both the stale-wedge
+# and pause-resurface paths call. Prints exactly one of busy, idle, gone, or
+# unreadable. A single failed capture is not a verdict: the read is retried
+# FM_STALE_CAPTURE_RETRIES extra times (default 2) with
+# FM_STALE_CAPTURE_RETRY_SLEEP between attempts (default 0.4s). After those
+# retries still fail, only fm_backend_agent_state=missing is gone. dead means
+# the endpoint exists as an agent-less shell and is ordinary idle. Every other
+# agent state - including unreadable, unverified, and an empty or failed
+# probe - is unreadable, never a second silent-drop. target_exists is not
+# consulted: on tmux it can fall back to the active window, and on Orca it is
+# itself a capture, so a failed existence read cannot prove the pane is gone.
+stale_window_recheck() {  # <window> <state> -> busy|idle|gone|unreadable
+  local win=$1 state=$2 backend retries sleep_s attempts attempt rc agent_state
+  backend=$(task_window_backend "$win" "$state")
+  retries=${FM_STALE_CAPTURE_RETRIES:-$STALE_CAPTURE_RETRIES_DEFAULT}
+  case "$retries" in
+    ''|*[!0-9]*) retries=$STALE_CAPTURE_RETRIES_DEFAULT ;;
+  esac
+  sleep_s=${FM_STALE_CAPTURE_RETRY_SLEEP:-$STALE_CAPTURE_RETRY_SLEEP_DEFAULT}
+  [ -n "$sleep_s" ] || sleep_s=$STALE_CAPTURE_RETRY_SLEEP_DEFAULT
+  attempts=$((retries + 1))
+  attempt=1
+  while [ "$attempt" -le "$attempts" ]; do
+    stale_window_is_busy "$win" "$state"
+    rc=$?
+    case "$rc" in
+      0) printf 'busy\n'; return 0 ;;
+      2)
+        if [ "$attempt" -lt "$attempts" ]; then
+          sleep "$sleep_s"
+          attempt=$((attempt + 1))
+          continue
+        fi
+        ;;
+      *) printf 'idle\n'; return 0 ;;
+    esac
+    break
+  done
+  agent_state=$(fm_backend_agent_state "$backend" "$win" 2>/dev/null || printf 'unreadable')
+  [ -n "$agent_state" ] || agent_state=unreadable
+  case "$agent_state" in
+    missing)
+      log "stale recheck: $win capture failed after ${attempts} attempt(s); agent_state=missing -> gone"
+      printf 'gone\n'
+      ;;
+    dead)
+      log "stale recheck: $win capture failed after ${attempts} attempt(s); agent_state=dead -> idle"
+      printf 'idle\n'
+      ;;
+    *)
+      log "stale recheck: $win capture failed after ${attempts} attempt(s); agent_state=${agent_state} -> unreadable"
+      printf 'unreadable\n'
+      ;;
+  esac
 }
 
 escalate_add() {  # <state> <distilled-item>
@@ -952,14 +1022,17 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
-#     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
+#     stale_window_recheck decides: busy/gone -> clear; unreadable -> escalate
+#     and reset the marker so the pane stays watched; idle -> escalate as a
+#     wedge and clear.
 #  2b) pause re-surface: for each declared-pause marker past PAUSE_RESURFACE_SECS,
-#     re-peek; busy/gone -> clear; still idle + still paused -> escalate a recheck
-#     digest and reset the window (repeating bounded re-surface, never a wedge).
+#     same helper; busy/gone -> clear; still paused and idle or unreadable ->
+#     escalate a recheck digest and reset the window (repeating bounded
+#     re-surface, never a wedge).
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs verdict
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1012,21 +1085,26 @@ housekeeping() {  # <state>
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
-    stale_window_is_busy "$win" "$state"
-    case "$?" in
-      0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-         stale_marker_remove "$win" "$state" ;;
+    verdict=$(stale_window_recheck "$win" "$state")
+    case "$verdict" in
+      busy|gone) rm -f "$marker" ;;
+      unreadable)
+        escalate_add "$state" "stale persisted ${age}s (pane present but unreadable): $win"
+        _now > "$marker"
+        ;;
+      *)
+        escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+        stale_marker_remove "$win" "$state"
+        ;;
     esac
   done
 
   # (2b) pause re-surface recheck. A DECLARED external-wait pause idles by design,
   # so it is rechecked on a much longer cadence than a wedge (PAUSE_RESURFACE_SECS)
   # and never escalated as one - but it MUST re-surface, so a forgotten pause cannot
-  # rot invisibly. Past the window: busy (resumed) or gone -> drop; still idle and
-  # still declaring the pause -> escalate a recheck digest and reset the marker so
-  # the window repeats.
+  # rot invisibly. Past the window: busy (resumed) or gone -> drop; still idle or
+  # unreadable and still declaring the pause -> escalate a recheck digest and
+  # reset the marker so the window repeats.
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
@@ -1043,14 +1121,17 @@ housekeeping() {  # <state>
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "$pause_secs" ] || continue
-    stale_window_is_busy "$win" "$state"
-    case "$?" in
-      0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
+    verdict=$(stale_window_recheck "$win" "$state")
+    case "$verdict" in
+      busy|gone) rm -f "$marker" ;;
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_paused "$last"; then
-          escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          if [ "$verdict" = unreadable ]; then
+            escalate_add "$state" "paused ${age}s (pane present but unreadable, recheck whether the wait still holds): $win"
+          else
+            escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          fi
           _now > "$marker"
         else
           rm -f "$marker"

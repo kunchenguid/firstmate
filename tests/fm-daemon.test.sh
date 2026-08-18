@@ -583,6 +583,157 @@ test_housekeeping_orca_persistent_stale_resolves_terminal() {
   pass "persistent Orca stale resolves the terminal from metadata"
 }
 
+# Shared fixture for the gone / unreadable / retry housekeeping matrix.
+# kind=stale writes an aged wedge marker; kind=pause writes an aged pause
+# marker plus a still-declared paused: status. The caller stubs capture and
+# agent_state in a subshell and invokes housekeeping.
+_recheck_fixture() {  # <dir-name> <kind:stale|pause>
+  local name=$1 kind=$2 dir state task win key
+  dir=$(make_supercase "$name")
+  state="$dir/state"
+  task="recheck-$name"
+  win="sess:fm-$task"
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "kind=ship"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  case "$kind" in
+    pause)
+      printf 'paused: holding for the upstream release\n' > "$state/$task.status"
+      echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+      ;;
+    *)
+      printf 'working: still running\n' > "$state/$task.status"
+      echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+      ;;
+  esac
+  printf '%s\t%s\t%s\t%s' "$dir" "$state" "$win" "$key"
+}
+
+test_housekeeping_gone_pane_drops_without_escalation() {
+  local kind dir state win key captures
+  for kind in stale pause; do
+    IFS=$(printf '\t') read -r dir state win key < <(_recheck_fixture "gone-$kind" "$kind")
+    captures="$dir/captures"
+    : > "$captures"
+    (
+      fm_backend_capture() { printf 'c\n' >> "$captures"; return 1; }
+      fm_backend_agent_state() { printf 'missing\n'; }
+      FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 \
+        FM_STALE_CAPTURE_RETRIES=2 FM_STALE_CAPTURE_RETRY_SLEEP=0 \
+        housekeeping "$state"
+    ) || fail "$kind gone-pane housekeeping failed"
+    [ ! -e "$state/.subsuper-stale-$key" ] || fail "$kind gone pane left a stale marker"
+    [ ! -e "$state/.subsuper-paused-$key" ] || fail "$kind gone pane left a pause marker"
+    [ ! -s "$state/.subsuper-escalations" ] || fail "$kind gone pane escalated: $(cat "$state/.subsuper-escalations")"
+    [ "$(wc -l < "$captures" | tr -d ' ')" = 3 ] \
+      || fail "$kind gone pane did not exhaust the capture retry budget, got $(wc -l < "$captures" | tr -d ' ')"
+  done
+  pass "housekeeping drops a genuinely gone pane at both call sites with no escalation"
+}
+
+test_housekeeping_unreadable_present_escalates() {
+  local kind agent_state dir state win key captures age
+  for kind in stale pause; do
+    for agent_state in alive unreadable unverified; do
+      IFS=$(printf '\t') read -r dir state win key < <(_recheck_fixture "unread-$kind-$agent_state" "$kind")
+      captures="$dir/captures"
+      : > "$captures"
+      (
+        fm_backend_capture() { printf 'c\n' >> "$captures"; return 1; }
+        fm_backend_agent_state() { printf '%s\n' "$agent_state"; }
+        fm_backend_target_exists() { fail "$kind $agent_state must not treat target_exists as a gone proof"; }
+        FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 \
+          FM_STALE_CAPTURE_RETRIES=2 FM_STALE_CAPTURE_RETRY_SLEEP=0 \
+          housekeeping "$state"
+      ) || fail "$kind $agent_state unreadable housekeeping failed"
+      grep -F "unreadable" "$state/.subsuper-escalations" >/dev/null \
+        || fail "$kind $agent_state present-but-unreadable pane was not escalated: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+      grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+        && fail "$kind $agent_state unreadable pane was labeled a possible wedge"
+      grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null \
+        && fail "$kind $agent_state unreadable pane was labeled an ordinary pause recheck"
+      if [ "$kind" = stale ]; then
+        [ -e "$state/.subsuper-stale-$key" ] \
+          || fail "stale $agent_state unreadable marker was dropped (watcher cannot recapture it)"
+        age=$(( $(date +%s) - $(cat "$state/.subsuper-stale-$key") ))
+        [ "$age" -lt 60 ] || fail "stale $agent_state unreadable marker was not reset (age ${age}s)"
+      else
+        [ -e "$state/.subsuper-paused-$key" ] \
+          || fail "pause $agent_state unreadable marker was dropped"
+        age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key") ))
+        [ "$age" -lt 60 ] || fail "pause $agent_state unreadable marker was not reset (age ${age}s)"
+      fi
+    done
+  done
+  pass "housekeeping surfaces a present or unreadable pane at both call sites and keeps watching it"
+}
+
+test_housekeeping_capture_retry_is_ordinary_reading() {
+  local kind dir state win key captures agent_hits
+  for kind in stale pause; do
+    IFS=$(printf '\t') read -r dir state win key < <(_recheck_fixture "retry-$kind" "$kind")
+    captures="$dir/captures"
+    agent_hits="$dir/agent_state"
+    : > "$captures"
+    : > "$agent_hits"
+    (
+      fm_backend_capture() {
+        printf 'c\n' >> "$captures"
+        if [ "$(wc -l < "$captures" | tr -d ' ')" -eq 1 ]; then
+          return 1
+        fi
+        printf 'idle prompt $\n'
+      }
+      # File tripwire: a failing function is swallowed by
+      # `agent_state=$(... 2>/dev/null || printf unreadable)`.
+      fm_backend_agent_state() { printf 'hit\n' >> "$agent_hits"; printf 'missing\n'; }
+      FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 \
+        FM_STALE_CAPTURE_RETRIES=2 FM_STALE_CAPTURE_RETRY_SLEEP=0 \
+        housekeeping "$state"
+    ) || fail "$kind retry housekeeping failed"
+    [ ! -s "$agent_hits" ] || fail "$kind retry success consulted agent_state"
+    [ "$(wc -l < "$captures" | tr -d ' ')" = 2 ] \
+      || fail "$kind retry did not stop after the first successful capture, got $(wc -l < "$captures" | tr -d ' ')"
+    grep -F "unreadable" "$state/.subsuper-escalations" >/dev/null \
+      && fail "$kind retry success was treated as unreadable: $(cat "$state/.subsuper-escalations")"
+    if [ "$kind" = stale ]; then
+      grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+        || fail "stale retry success was not the ordinary idle wedge: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+      [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale retry success left a marker (ordinary idle drops it)"
+    else
+      grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null \
+        || fail "pause retry success was not the ordinary pause recheck: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+      [ -e "$state/.subsuper-paused-$key" ] || fail "pause retry success cleared the marker instead of resetting it"
+    fi
+  done
+  pass "housekeeping treats a capture that fails once then succeeds as the ordinary reading at both call sites"
+}
+
+test_housekeeping_dead_shell_is_idle_not_gone() {
+  local kind dir state win key
+  for kind in stale pause; do
+    IFS=$(printf '\t') read -r dir state win key < <(_recheck_fixture "dead-$kind" "$kind")
+    (
+      fm_backend_capture() { return 1; }
+      fm_backend_agent_state() { printf 'dead\n'; }
+      FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 \
+        FM_STALE_CAPTURE_RETRIES=0 FM_STALE_CAPTURE_RETRY_SLEEP=0 \
+        housekeeping "$state"
+    ) || fail "$kind dead-shell housekeeping failed"
+    [ -s "$state/.subsuper-escalations" ] || fail "$kind dead shell was silently dropped"
+    grep -F "unreadable" "$state/.subsuper-escalations" >/dev/null \
+      && fail "$kind dead shell was labeled unreadable instead of ordinary idle"
+    if [ "$kind" = stale ]; then
+      grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+        || fail "stale dead shell was not the ordinary idle wedge"
+      [ ! -e "$state/.subsuper-stale-$key" ] || fail "stale dead shell left a wedge marker"
+    else
+      grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null \
+        || fail "pause dead shell was not the ordinary pause recheck"
+    fi
+  done
+  pass "housekeeping treats a present agent-less pane as ordinary idle, never gone"
+}
+
 test_escalate_batches_into_one_digest() {
   local dir state fakebin sent capture n
   dir=$(make_supercase batch)
@@ -1870,6 +2021,10 @@ test_housekeeping_herdr_persistent_stale_resolves_meta
 test_housekeeping_herdr_idle_busy_record_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
+test_housekeeping_gone_pane_drops_without_escalation
+test_housekeeping_unreadable_present_escalates
+test_housekeeping_capture_retry_is_ordinary_reading
+test_housekeeping_dead_shell_is_idle_not_gone
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
