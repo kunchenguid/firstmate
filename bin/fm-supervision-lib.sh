@@ -2,10 +2,13 @@
 # Shared "supervision missing" predicate.
 # Usage: . bin/fm-supervision-lib.sh
 #
-# Reports whether a firstmate home needs supervision because it has in-flight
-# work (a state/<id>.meta exists) or an X-mode relay poll
-# (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
-# (state/.last-watcher-beat, touched every poll cycle, within the grace window).
+# Reports whether a firstmate home needs supervision because it has active work
+# (a state/<id>.meta exists, except a secondmate already idle on a local done
+# status), an X-mode relay poll (state/x-watch.check.sh), or an active
+# process-event source (remote-reply sources count only while that secondmate
+# has an open pending reply), and whether its watcher has a fresh liveness
+# beacon (state/.last-watcher-beat, touched every poll cycle, within the grace
+# window).
 # bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
 # bin/fm-wake-lib.sh for its block decision. bin/fm-guard.sh uses the model-aware
 # fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh), which owns what a
@@ -21,10 +24,57 @@ fm_sup_stat_mtime() {
   fi
 }
 
+fm_sup_record_value() {  # <file> <key>
+  local file=$1 key=$2
+  [ -f "$file" ] || return 0
+  sed -n "s/^${key}=//p" "$file" | tail -1
+}
+
+fm_sup_task_has_open_pending_reply() {  # <state-dir> <task-id>
+  local state=$1 task_id=$2 dir rec tid phase
+  dir="$state/pending-replies"
+  [ -d "$dir" ] || return 1
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    tid=$(fm_sup_record_value "$rec" task_id)
+    [ "$tid" = "$task_id" ] || continue
+    phase=$(fm_sup_record_value "$rec" phase)
+    [ "$phase" != resolved ] || continue
+    return 0
+  done
+  return 1
+}
+
+fm_sup_secondmate_idle() {  # <state-dir> <task-id> <meta-file>
+  local state=$1 task_id=$2 meta=$3 kind status_file last verb
+  kind=$(fm_sup_record_value "$meta" kind)
+  [ "$kind" = secondmate ] || return 1
+  fm_sup_task_has_open_pending_reply "$state" "$task_id" && return 1
+  status_file="$state/$task_id.status"
+  [ -f "$status_file" ] || return 1
+  last=$(awk 'NF { line=$0 } END { print line }' "$status_file")
+  verb=${last%%[[:space:]:]*}
+  [ "$verb" = "done" ]
+}
+
+fm_sup_source_counts() {  # <state-dir> <source-file>
+  local state=$1 source=$2 base id
+  base=${source##*/}
+  case "$base" in
+    remote-reply-*.source)
+      id=${base#remote-reply-}
+      id=${id%.source}
+      fm_sup_task_has_open_pending_reply "$state" "$id"
+      return
+      ;;
+  esac
+  return 0
+}
+
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
-#   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
-#   FM_SUP_SOURCES        count of registered process-to-event sources
+#   FM_SUP_IN_FLIGHT      count of active state/*.meta records
+#   FM_SUP_SOURCES        count of active registered process-to-event sources
 #   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, or a
 #                         registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata)
@@ -34,7 +84,7 @@ fm_sup_stat_mtime() {
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source beat m age
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source task_id beat m age
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
@@ -43,11 +93,17 @@ fm_supervision_status() {
 
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
+    task_id=${meta##*/}
+    task_id=${task_id%.meta}
+    if fm_sup_secondmate_idle "$state" "$task_id" "$meta"; then
+      continue
+    fi
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
   FM_SUP_SOURCES=0
   for source in "$state"/procevent/*.source; do
     [ -e "$source" ] || continue
+    fm_sup_source_counts "$state" "$source" || continue
     FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
   done
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \

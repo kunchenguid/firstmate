@@ -98,6 +98,45 @@ test_predicate_source_needs_supervision() {
   pass "fm_supervision_unhealthy: source-only home needs supervision"
 }
 
+test_predicate_idle_secondmate_done_does_not_need_supervision() {
+  local state="$TMP_ROOT/pred-idle-secondmate/state"
+  mkdir -p "$state"
+  printf 'kind=secondmate\n' > "$state/studio.meta"
+  printf 'done [corr=abcdef0123456789]: orientation summary delivered\n' > "$state/studio.status"
+  if fm_supervision_needed "$state" 300; then
+    fail "idle secondmate with a done status must not require supervision"
+  fi
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "idle secondmate must not count as in-flight"
+  pass "fm_supervision_needed: idle secondmate with done status is quiet"
+}
+
+test_predicate_remote_reply_without_pending_is_quiet() {
+  local state="$TMP_ROOT/pred-remote-reply-idle/state"
+  mkdir -p "$state/procevent"
+  : > "$state/procevent/remote-reply-studio.source"
+  if fm_supervision_needed "$state" 300; then
+    fail "idle remote-reply source without an open pending reply must not require supervision"
+  fi
+  [ "$FM_SUP_SOURCES" -eq 0 ] || fail "idle remote-reply source must not count as active"
+  pass "fm_supervision_needed: idle remote-reply source is quiet"
+}
+
+test_predicate_remote_reply_with_pending_needs_supervision() {
+  local state="$TMP_ROOT/pred-remote-reply-pending/state"
+  mkdir -p "$state/procevent" "$state/pending-replies"
+  : > "$state/procevent/remote-reply-studio.source"
+  {
+    printf 'schema=fm-pending-reply.v1\n'
+    printf 'corr_id=abcdef0123456789\n'
+    printf 'task_id=studio\n'
+    printf 'phase=awaiting_report\n'
+  } > "$state/pending-replies/abcdef0123456789"
+  fm_supervision_needed "$state" 300 || fail "remote-reply source with an open pending reply must require supervision"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "remote-reply source must not count as an in-flight task"
+  [ "$FM_SUP_SOURCES" -eq 1 ] || fail "open remote-reply source must count as active"
+  pass "fm_supervision_needed: remote-reply source with pending reply needs supervision"
+}
+
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
@@ -1608,6 +1647,9 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
+test_predicate_idle_secondmate_done_does_not_need_supervision
+test_predicate_remote_reply_without_pending_is_quiet
+test_predicate_remote_reply_with_pending_needs_supervision
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
