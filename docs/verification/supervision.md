@@ -412,7 +412,7 @@ The exact maintainer live-verification sequence is:
 2. Let the Stop-owned watcher produce one actionable close and confirm that the resulting handling turn has no live watcher, a stale `state/.last-watcher-beat`, `state/.claude-autoarm-epoch` with `outcome=rewake` and `session_pid` equal to `state/.lock`, and a matching `state/.claude-rewake-turn` proof.
 3. From that same handling turn after the one-second grace, run `FM_GUARD_READ_ONLY=1 bin/fm-guard.sh` and confirm it is silent.
 4. Copy the isolated state, replace only the epoch's `session_pid` with a dead or foreign pid, run the same read-only guard outside the owning session, and confirm it prints `WATCHER DOWN - SUPERVISION IS OFF`.
-5. End the real handling turn, confirm its next Stop clears `state/.claude-rewake-turn`, and confirm the PID-strict turn-end guard still requires a live successor or a current auto-arm claim.
+5. End the real handling turn, confirm its synchronous Stop guard clears `state/.claude-rewake-turn` even if the async auto-arm hook does not execute, and confirm the PID-strict turn-end guard still requires a live successor or a current auto-arm claim.
 
 Two runs of `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` on 2026-08-18 did not reach that complete sequence.
 The first run produced one hook-owned arm cycle where the script requested two and reported `expected exactly 2 hook-owned arm cycles, got 1`.

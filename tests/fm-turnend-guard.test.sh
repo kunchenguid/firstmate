@@ -1164,6 +1164,18 @@ test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy() {
   pass "fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)"
 }
 
+test_hook_claude_mode_retires_prior_rewake_proof() {
+  local dir out status marker
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-retires-rewake")
+  : > "$dir/state/task1.meta"
+  marker="$dir/state/.claude-rewake-turn"
+  printf 'epoch=3 session_pid=999\n' > "$marker"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=10 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "an unhealthy Stop without auto-arm ownership must remain blocked"
+  assert_absent "$marker" "the synchronous Stop guard left the prior turn's rewake proof active"
+  pass "fm-turnend-guard --claude: every Stop retires the prior active-rewake proof"
+}
+
 test_hook_claude_mode_reblocks_x_mode_without_tasks() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-x-mode")
@@ -1648,6 +1660,7 @@ test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
+test_hook_claude_mode_retires_prior_rewake_proof
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open

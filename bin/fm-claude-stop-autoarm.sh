@@ -158,23 +158,23 @@ trap 'fm_lock_release "$OWNER_LOCK"' EXIT
 EPOCH_SEQUENCE=
 EPOCH_SESSION_PID=
 EPOCH_WRITE_OK=0
+VERIFIED_SESSION_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+case "$VERIFIED_SESSION_PID" in
+  ''|*[!0-9]*) exit 0 ;;
+esac
 write_epoch() {  # <outcome>
-  local outcome=$1 seq tmp session_pid
+  local outcome=$1 seq tmp
   seq=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$EPOCH" 2>/dev/null || true)
   case "$seq" in
     ''|*[!0-9]*) seq=0 ;;
   esac
   seq=$((seq + 1))
-  session_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$session_pid" in
-    ''|*[!0-9]*) session_pid=unknown ;;
-  esac
   tmp="$EPOCH.tmp.$$"
   EPOCH_SEQUENCE=$seq
-  EPOCH_SESSION_PID=$session_pid
+  EPOCH_SESSION_PID=$VERIFIED_SESSION_PID
   EPOCH_WRITE_OK=0
   if printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s session_pid=%s\n' \
-    "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" "$session_pid" > "$tmp" 2>/dev/null \
+    "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" "$VERIFIED_SESSION_PID" > "$tmp" 2>/dev/null \
     && mv -f "$tmp" "$EPOCH" 2>/dev/null; then
     EPOCH_WRITE_OK=1
   fi
@@ -182,11 +182,14 @@ write_epoch() {  # <outcome>
 }
 
 publish_active_rewake_turn() {
-  local tmp value
+  local tmp value current_session_pid
   [ "$EPOCH_WRITE_OK" -eq 1 ] || return 1
   for value in "$EPOCH_SEQUENCE" "$EPOCH_SESSION_PID"; do
     case "$value" in ''|*[!0-9]*) return 1 ;; esac
   done
+  current_session_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  [ "$current_session_pid" = "$VERIFIED_SESSION_PID" ] || return 1
+  fm_session_lock_owned_by_self "$STATE" || return 1
   tmp="$ACTIVE_REWAKE_TURN.tmp.$$"
   printf 'epoch=%s session_pid=%s\n' "$EPOCH_SEQUENCE" "$EPOCH_SESSION_PID" > "$tmp" 2>/dev/null \
     && mv -f "$tmp" "$ACTIVE_REWAKE_TURN" 2>/dev/null

@@ -356,6 +356,29 @@ test_actionable_close_rewakes_with_reason() {
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"
 }
 
+test_lock_replacement_cannot_rebind_rewake_proof() {
+  local dir hook_pid other status
+  dir=$(make_primary_dir "$TMP_ROOT/lock-replaced")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" slow-actionable
+  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    printf "%s\n" "{\"session_id\":\"lock-replaced\"}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+  ' >/dev/null 2>&1 &
+  hook_pid=$!
+  while [ ! -e "$dir/state/arm-ran" ]; do sleep 0.05; done
+  "$FAKE_CLAUDE" -c 'sleep 5; :' &
+  other=$!
+  printf '%s\n' "$other" > "$dir/state/.lock"
+  wait "$hook_pid"; status=$?
+  expect_code 2 "$status" "the delivered actionable close still owns its exit-2 result"
+  assert_absent "$dir/state/.claude-rewake-turn" "an old hook rebound its active-turn proof to a replacement session"
+  [ "$(epoch_session_pid "$dir")" != "$other" ] || fail "the epoch rebound to the replacement lock owner"
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  pass "auto-arm: lock replacement cannot rebind an old hook's rewake proof"
+}
+
 test_actionable_close_with_live_successor_rewakes_once() {
   local dir out out2 status status2 pid identity
   dir=$(make_primary_dir "$TMP_ROOT/actionable-live-successor")
@@ -595,6 +618,7 @@ test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
+test_lock_replacement_cannot_rebind_rewake_proof
 test_actionable_close_with_live_successor_rewakes_once
 test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying
