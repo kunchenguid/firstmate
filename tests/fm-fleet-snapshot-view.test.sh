@@ -799,8 +799,62 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# The Linux per-argument cap (MAX_ARG_STRLEN, 131072 bytes) is what an --argjson
+# backlog used to hit: once the backlog grew past it, every jq exec died with
+# "Argument list too long" and the whole snapshot failed. Both output modes must
+# survive a backlog whose parsed JSON is comfortably over that cap.
+ARGV_CAP_BYTES=131072
+
+write_oversized_backlog() {  # <home>
+  local home=$1 i reason
+  reason="captain must choose between the long-standing option A and the equally"
+  reason="$reason long-standing option B before this queued item can proceed"
+  {
+    printf '## In flight\n\n## Queued\n'
+    i=1
+    while [ "$i" -le 400 ]; do
+      printf -- '- [ ] hold-%03d - Captain decision %03d (repo: alpha) (kind: captain) (hold: %s) (hold-kind: captain)\n' \
+        "$i" "$i" "$reason"
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+}
+
+test_oversized_backlog_survives_argv_cap() {
+  local home fakebin out err rc bytes
+  home=$(make_home oversized-backlog)
+  write_oversized_backlog "$home"
+  fakebin=$(make_fakebin "$home")
+
+  err="$home/snapshot.err"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json 2>"$err") && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] || fail "oversized backlog snapshot failed (rc=$rc): $(cat "$err")"
+  assert_no_grep 'Argument list too long' "$err" \
+    "oversized backlog must not push jq arguments past the argv cap"
+
+  bytes=$(printf '%s' "$out" | jq -c '.backlog' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$bytes" -gt "$ARGV_CAP_BYTES" ] \
+    || fail "fixture backlog JSON is only $bytes bytes; it must exceed $ARGV_CAP_BYTES to exercise the cap"
+  printf '%s' "$out" | jq -e '
+    (.backlog.records | length) == 400
+      and .main_inventory.valid == true
+      and .main_inventory.unstructured_current_count == 0
+  ' >/dev/null || fail "oversized backlog produced an incomplete snapshot: $(printf '%s' "$out" | head -c 400)"
+
+  err="$home/summary.err"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary 2>"$err") && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] || fail "oversized backlog home summary failed (rc=$rc): $(cat "$err")"
+  assert_no_grep 'Argument list too long' "$err" \
+    "the home-summary mode must not push jq arguments past the argv cap either"
+  printf '%s' "$out" | jq -e '.counts.queued == 400' >/dev/null \
+    || fail "oversized backlog home summary lost queued rows: $(printf '%s' "$out" | head -c 400)"
+  pass "a backlog larger than the argv cap still snapshots in both output modes"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_oversized_backlog_survives_argv_cap
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state
