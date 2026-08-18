@@ -98,6 +98,37 @@ run_host_waits_for_the_guest_agent() {
   pass "the bake waits for the builder guest agent before invoking a VM extension"
 }
 
+run_guest_script_never_deprovisions_itself() {
+  # Deprovisioning stops the guest agent, and the guest agent is what carries a
+  # run command's output back to the caller. Doing it inside the bake script
+  # means the completion marker can never be delivered, so the invoking CLI
+  # blocks until Azure's extension timeout NO MATTER HOW WELL THE BAKE WENT.
+  # That is exactly what happened: a bake that had installed everything
+  # correctly hung for 90 minutes and captured nothing. It stayed hidden while
+  # an earlier bug killed the script on line 1, because a script that dies
+  # instantly never reaches deprovision.
+  local guest
+  guest=$(awk '/^cat >"\$BAKE" <<EOF/,/^EOF$/' "$SCRIPT")
+  printf '%s' "$guest" | grep -vE '^\s*#' | grep -q 'deprovision' \
+    && fail "the guest bake script deprovisions itself, so its marker can never be delivered"
+  printf '%s' "$guest" | grep -q 'FM-BAKE-COMPLETE' \
+    || fail "the guest bake script no longer emits its completion marker"
+
+  # The host still has to deprovision before generalize, and must not wait on a
+  # call whose reporter it is killing.
+  local deprov
+  deprov=$(grep -n 'waagent -deprovision' "$SCRIPT" | head -1 | cut -d: -f1)
+  [ -n "$deprov" ] || fail "nothing deprovisions the builder, so generalize will refuse"
+  sed -n "${deprov}p;$((deprov+1))p;$((deprov-1))p" "$SCRIPT" | grep -q -- '--no-wait' \
+    || fail "the host waits on the deprovision call that kills the agent reporting it"
+
+  local generalize
+  generalize=$(grep -n 'az vm generalize' "$SCRIPT" | head -1 | cut -d: -f1)
+  [ -n "$generalize" ] && [ "$deprov" -lt "$generalize" ] \
+    || fail "deprovision does not precede generalize"
+  pass "the bake emits its marker before deprovision, and deprovisions without waiting"
+}
+
 run_failed_bake_does_not_leak_the_builder() {
   # The builder is billable compute. A bake that refuses to capture used to
   # leave a running D4as_v6 behind with nothing owning it, reclaimed only
@@ -138,6 +169,7 @@ PROBE
 run_guest_script_survives_dash
 run_guest_waits_for_egress_before_downloading
 run_host_waits_for_the_guest_agent
+run_guest_script_never_deprovisions_itself
 run_failed_bake_does_not_leak_the_builder
 
 echo "# fm-azure-cell-image.test.sh: all assertions passed"

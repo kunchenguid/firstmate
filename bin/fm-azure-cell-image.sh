@@ -131,7 +131,15 @@ test -x "\$(command -v pi)"
 installed=\$(node -p "require('/usr/lib/node_modules/@earendil-works/pi-coding-agent/package.json').version")
 test "\$installed" = 0.84.1
 apt-get clean
-waagent -deprovision+user -force
+# The marker goes out BEFORE deprovision, and deprovision is not run here at
+# all. Deprovisioning stops the guest agent, and the guest agent is what carries
+# a run command's output back to the caller: doing it inside this script means
+# the marker can never be delivered, so the invoking CLI blocks until Azure's
+# extension timeout no matter how well the bake went. That is not theoretical. It is why a bake that had
+# installed everything correctly still hung for 90 minutes and captured
+# nothing; it stayed hidden while an earlier bug killed this script on line 1,
+# because a script that dies instantly never reaches deprovision. The host runs
+# deprovision as its own fire-and-forget call once this one has returned.
 echo FM-BAKE-COMPLETE
 EOF
 # RunCommandLinux is a VM EXTENSION, so it cannot provision until the guest
@@ -168,6 +176,16 @@ case "$BAKE_MESSAGE" in
     exit 1
     ;;
 esac
+
+# Deprovision now, as a SEPARATE call whose output nobody waits for: it stops
+# the guest agent, so it can never report its own completion. Azure requires it
+# before generalize.
+echo "fm-azure-cell-image: deprovisioning the builder" >&2
+az vm run-command invoke --resource-group "$RESOURCE_GROUP" --name "$BUILDER" \
+  --command-id RunShellScript --scripts "waagent -deprovision+user -force" \
+  --no-wait --output none 2>/dev/null || true
+# Give the agent time to act on it before deallocating out from under it.
+sleep 60
 
 echo "fm-azure-cell-image: capturing image $IMAGE" >&2
 az vm deallocate --resource-group "$RESOURCE_GROUP" --name "$BUILDER" --output none
