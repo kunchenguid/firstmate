@@ -180,7 +180,7 @@ write_epoch() {  # <outcome>
 }
 
 publish_active_rewake_turn() {
-  local tmp value current_session_pid boundary i
+  local tmp value current_session_pid boundary i boundary_lock_held
   [ "$EPOCH_WRITE_OK" -eq 1 ] || return 1
   for value in "$EPOCH_SEQUENCE" "$EPOCH_SESSION_PID"; do
     case "$value" in ''|*[!0-9]*) return 1 ;; esac
@@ -196,7 +196,17 @@ publish_active_rewake_turn() {
     i=$((i + 1))
   done
   [ "$boundary" = "generation=$BOUNDARY_GENERATION status=acked session_pid=$EPOCH_SESSION_PID owner_pid=$AUTOARM_PID" ] || return 1
-  fm_lock_try_acquire "$REWAKE_BOUNDARY_LOCK" || return 1
+  boundary_lock_held=0
+  i=0
+  while [ "$i" -lt 20 ]; do
+    if fm_lock_try_acquire "$REWAKE_BOUNDARY_LOCK"; then
+      boundary_lock_held=1
+      break
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$boundary_lock_held" -eq 1 ] || return 1
   boundary=$(cat "$REWAKE_BOUNDARY" 2>/dev/null || true)
   current_session_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
   if [ "$boundary" != "generation=$BOUNDARY_GENERATION status=acked session_pid=$EPOCH_SESSION_PID owner_pid=$AUTOARM_PID" ] \
