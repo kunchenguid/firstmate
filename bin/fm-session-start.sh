@@ -19,7 +19,7 @@
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
 # install <tools> after consent, /updatefirstmate, the afk daemon, existing
 # tests) still call them directly. The one seam this script needed -
-# bootstrap running its detect-only diagnostics without its six mutating
+# bootstrap running its detect-only diagnostics without its seven mutating
 # sweeps - is an opt-in FM_BOOTSTRAP_DETECT_ONLY=1 flag on fm-bootstrap.sh
 # itself (default unset/0 = unchanged behavior), not a fork.
 #
@@ -30,11 +30,11 @@
 #                       mutating step runs.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
-#                       diagnostics always run. Bootstrap's six MUTATING sweeps
-#                       (legacy PR-check migration, secondmate convergence,
-#                       secondmate liveness, pending remote handoff retry,
-#                       X-mode artifact writes, fleet sync) also run only when
-#                       locked; the four network sweeps run in the deferred
+#                       diagnostics always run. Bootstrap's seven MUTATING sweeps
+#                       (legacy PR-check migration, fork-upstream probing,
+#                       secondmate convergence, secondmate liveness, pending
+#                       remote handoff retry, X-mode artifact writes, fleet sync)
+#                       also run only when locked; the five network sweeps run in the deferred
 #                       stage rather than this synchronous bootstrap section.
 #   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
 #                       reconciliation before presenting durable wakes and advancing
@@ -66,12 +66,13 @@
 # entire FM_SESSION_START_TIMEOUT and truncate the digest, so a slow network
 # could cost the work queue itself.
 # So no step between here and the last line below makes an external-network
-# call. The five that did - `gh auth status`, secondmate liveness, secondmate
-# convergence, pending remote handoff delivery, and the fleet-sync fetch - are
-# started as one detached bounded worker right after the lock (step 1) and
-# harvested at step 7 without ever blocking on it. bin/fm-startup-network.sh
-# owns that stage and its safety argument; bin/fm-bootstrap.sh remains the owner
-# of the sweeps themselves and still runs every one of them.
+# call. All six that a session start owes - `gh auth status`, the fork-upstream
+# probe, secondmate liveness, secondmate convergence, pending remote handoff
+# delivery, and the fleet-sync fetch - are started as one detached bounded
+# worker right after the lock (step 1) and harvested at step 7 without ever
+# blocking on it. bin/fm-startup-network.sh owns that stage and its safety
+# argument; bin/fm-bootstrap.sh remains the owner of the sweeps themselves and
+# still runs every one of them.
 # The digest is therefore composed from local reads and local subprocesses only,
 # and an unreachable host now delays a reported check rather than the startup.
 # What this deliberately trades: on a slow network the digest prints "IN
@@ -116,8 +117,8 @@
 # and all of which are safe to compute without verified lock ownership.
 # It deliberately skips the network-only GitHub-auth probe because a read-only
 # session has no dispatch, spawn, steer, or merge action for that verdict to gate.
-# Only projection cleanup, the six bootstrap mutating sweeps, and wake-queue
-# presentation are skipped.
+# Only projection cleanup, the seven bootstrap mutating sweeps, inactive-outcome
+# reconciliation, and wake-queue presentation are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
 #
@@ -187,10 +188,11 @@
 #   --reemit  This process ALREADY took the helm at its own startup and has
 #             only lost its context (a /clear or a compaction). Skip the
 #             mutating sweeps that startup already reconciled - the stale Herdr
-#             projection cleanup and bootstrap's six mutating sweeps (fleet
-#             sync, secondmate convergence and liveness, PR-check migration,
-#             pending remote handoff retry, X-mode artifact writes) - and
-#             re-emit the rest. Wake-queue presentation is NOT skipped: queued
+#             projection cleanup and bootstrap's seven mutating sweeps (fleet
+#             sync, fork-upstream probing, secondmate convergence and liveness,
+#             PR-check migration, pending remote handoff retry, X-mode artifact writes) - and
+#             re-emit the rest. Inactive-outcome reconciliation and wake-queue
+#             presentation are NOT skipped: queued
 #             records are this turn's work queue, they arrived after startup,
 #             and a session that owns the lock is exactly the session that must
 #             handle and acknowledge them. Lock acquisition still runs, because

@@ -9,7 +9,10 @@
 # remote host dimension in data/secondmates.md, gates the host on
 # fm-remote-doctor.sh readiness before touching it, sends a bounded provisioning
 # manifest through fm-on.sh, and lets the remote host clone its own Firstmate
-# home and project origins. No project tree or secret environment is copied.
+# home and project origins. When the primary has validated fork-main remotes,
+# the paired URLs also converge the remote code root and new home through the
+# guarded topology owner; classic single-origin homes send no pair. No project
+# tree or secret environment is copied.
 #
 # Each project needs an origin the remote account can clone. Firstmate resolves
 # that origin and names it as <project>=<origin-url>, so seeding never requires
@@ -154,10 +157,21 @@ while IFS= read -r line || [ -n "$line" ]; do
   printf '%s\n' "${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}"
 done < "$BRIEF" > "$TMP/charter.remote"
 
+FIRSTMATE_FORK_B64=
+FIRSTMATE_UPSTREAM_B64=
+FIRSTMATE_UPSTREAM=$(git -C "$FM_ROOT" remote get-url --all upstream 2>/dev/null || true)
+if [ -n "$FIRSTMATE_UPSTREAM" ]; then
+  "$SCRIPT_DIR/fm-fork-remotes.sh" check "$FM_ROOT" >/dev/null \
+    || die "primary Firstmate fork topology is invalid"
+  FIRSTMATE_FORK=$(git -C "$FM_ROOT" remote get-url --all origin 2>/dev/null || true)
+  FIRSTMATE_FORK_B64=$(printf '%s' "$FIRSTMATE_FORK" | encode)
+  FIRSTMATE_UPSTREAM_B64=$(printf '%s' "$FIRSTMATE_UPSTREAM" | encode)
+fi
+
 PROJECTS_CSV=
 : > "$TMP/project.records"
 PROJECT_INDEX=0
-for project in "${PROJECT_NAMES[@]}"; do
+for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
   ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
   MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")
@@ -200,6 +214,10 @@ done
   # back; the parent's real filesystem path is never sent, since it names
   # nothing on the remote filesystem.
   printf 'parent_host_b64=%s\n' "$(printf '%s' "$HOST" | encode)"
+  if [ -n "$FIRSTMATE_UPSTREAM_B64" ]; then
+    printf 'firstmate_fork_b64=%s\n' "$FIRSTMATE_FORK_B64"
+    printf 'firstmate_upstream_b64=%s\n' "$FIRSTMATE_UPSTREAM_B64"
+  fi
   printf 'project_count=%s\n' "${#PROJECT_NAMES[@]}"
   cat "$TMP/project.records"
 } > "$TMP/manifest"
