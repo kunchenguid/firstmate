@@ -105,6 +105,42 @@
         "tests/fm-update.test.sh",
         "tests/lib.sh"
       ]
+    },
+    {
+      "id": "supervision-owner-aware-recovery",
+      "summary": "Claude primary-session supervision fix: session-ownership alignment for the Stop auto-arm and turn-end guard, a bounded volatile entry trace, one-shot repeated-block escalation, a single supervision snapshot behind queue warnings, queued delivery treated as a supervision need until post-handling acknowledgement, and the BASH_SUBSHELL lock-ownership check stock macOS Bash 3.2 requires.",
+      "class": "pending",
+      "topic": "fm/divergence/supervision-owner-aware-recovery",
+      "introduced": "2026-08-17",
+      "upstream_pr": {
+        "url": "https://github.com/kunchenguid/firstmate/pull/2392",
+        "disposition": "open"
+      },
+      "retire_when": "Upstream pull request 2392 is merged into official upstream main, so official upstream ships owner-aware durable supervision recovery itself.",
+      "paths": [
+        ".agents/skills/harness-adapters/SKILL.md",
+        "AGENTS.md",
+        "bin/fm-claude-stop-autoarm.sh",
+        "bin/fm-guard.sh",
+        "bin/fm-supervision-lib.sh",
+        "bin/fm-turnend-guard.sh",
+        "bin/fm-wake-lib.sh",
+        "docs/architecture.md",
+        "docs/configuration.md",
+        "docs/supervision-protocols/claude.md",
+        "docs/turnend-guard.md",
+        "docs/verification/process-event-sources.md",
+        "docs/verification/supervision.md",
+        "docs/watcher-continuity.md",
+        "tests/fm-claude-stop-autoarm-live-e2e.test.sh",
+        "tests/fm-claude-stop-autoarm.test.sh",
+        "tests/fm-guard-stale-banner.test.sh",
+        "tests/fm-turnend-guard.test.sh",
+        "tests/fm-wake-queue.test.sh",
+        "tests/fm-watch-triage.test.sh",
+        "tests/fm-watcher-lock.test.sh",
+        "tests/wake-helpers.sh"
+      ]
     }
   ],
   "retired_upstream": []
