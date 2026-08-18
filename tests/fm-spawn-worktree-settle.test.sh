@@ -67,7 +67,7 @@ make_settle_case() {
   local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
-  proj="$case_dir/project"
+  proj="$home/projects/project"
   wt="$case_dir/wt"
   stale="$case_dir/stale-other-checkout"
   countfile="$case_dir/pane-call-count"
@@ -89,7 +89,7 @@ EOF
 }
 
 run_settle_spawn() {
-  local id=$1
+  local id=$1 project=${2:-$PROJ_DIR}
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -97,7 +97,7 @@ run_settle_spawn() {
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "$id" "$project" --mode no-mistakes --yolo off 2>&1
 }
 
 # A single stale first read (the exact incident) must not be accepted: the
@@ -141,7 +141,33 @@ test_already_settled_pane_costs_one_confirm_sleep() {
   pass "an already-settled pane confirms via the existing inter-poll sleep, not an extra full cycle"
 }
 
+# The caller-facing relative form resolves `projects/<repo>` through the active
+# home's projects directory. Its metadata must still carry the pane cwd that
+# treehouse selected, not the primary project path used to create the pane.
+test_relative_project_records_launched_pane_cwd() {
+  local rec id out status meta_project meta_worktree
+  id=settle-relative-project-z3
+  rec=$(make_settle_case settle-relative-project "$id" 0)
+  read_settle_record "$rec"
+
+  out=$(run_settle_spawn "$id" projects/project)
+  status=$?
+  expect_code 0 "$status" "relative-project spawn should succeed"$'\n'"$out"
+  meta_worktree=$(sed -n 's/^worktree=//p' "$HOME_DIR/state/$id.meta")
+  meta_project=$(sed -n 's/^project=//p' "$HOME_DIR/state/$id.meta")
+  [ "$meta_worktree" = "$WT_DIR" ] \
+    || fail "relative-project meta worktree '$meta_worktree' does not equal launched pane cwd '$WT_DIR'"
+  [ "$(cd "$meta_project" && pwd -P)" = "$(cd "$PROJ_DIR" && pwd -P)" ] \
+    || fail "relative-project meta project '$meta_project' does not equal primary project '$PROJ_DIR'"
+  [ "$meta_worktree" != "$meta_project" ] \
+    || fail "relative-project meta collapsed worktree and project to '$meta_worktree'"
+  assert_contains "$out" "worktree=$WT_DIR" \
+    "relative-project success output did not report the launched pane cwd"
+  pass "a relative projects/<repo> spawn records the launched pane cwd as worktree"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
+test_relative_project_records_launched_pane_cwd
 
 echo "# all fm-spawn-worktree-settle tests passed"
