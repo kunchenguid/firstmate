@@ -1364,6 +1364,50 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
   pass "a busy worker whose pane hash changes every poll still escalates once its completed-turn age reaches the bound"
 }
 
+# The busy-turn bound is the ONE wedge path that never yields to matched
+# run-step activity. The incident it exists for is a hung FOREGROUND call behind
+# a busy signature, and a background no-mistakes step making real progress says
+# nothing about whether that call is alive - so a crew with a genuinely
+# progressing pipeline must still escalate once its completed-turn age reaches
+# the bound, exactly as it would with no run at all.
+test_busy_pane_past_turn_age_bound_ignores_live_runstep_activity() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case busy-live-runstep-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-live-run"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-live-run.meta"
+  record_pi_busy "$state" busy-live-run
+  printf 'working: validating\n' > "$state/busy-live-run.status"
+  sig=$(seen_sig "$state/busy-live-run.status"); printf '%s' "$sig" > "$state/.seen-busy-live-run_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # No completed turn ever recorded: the spawn record itself is past the bound.
+  touch -t 200001010000 "$state/busy-live-run.meta"
+  # The wedge timer is already past the escalation threshold, and the crew's
+  # matched run step reports activity seconds old - the exact evidence the two
+  # stale paths accept and this one must not.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity-age-seconds: 12'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || { unset FM_FAKE_CREW_STATE; fail "live run-step activity deferred a busy pane past its completed-turn bound"; }
+  grep -F "stale: $window" "$out" >/dev/null \
+    || { unset FM_FAKE_CREW_STATE; fail "busy turn-age escalation with a live run did not print the stale wake"; }
+  grep -F "possible wedge" "$out" >/dev/null \
+    || { unset FM_FAKE_CREW_STATE; fail "busy turn-age escalation with a live run did not flag a possible wedge"; }
+  [ ! -e "$state/.stale-since-$key" ] \
+    || { unset FM_FAKE_CREW_STATE; fail "live run-step activity refreshed the busy-turn wedge timer"; }
+  unset FM_FAKE_CREW_STATE
+  pass "a busy worker past its completed-turn bound escalates even while its matched run step is actively progressing"
+}
+
 test_busy_pane_turn_end_touch_resets_age() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case busy-turn-end-resets-age); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2002,6 +2046,7 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
+test_busy_pane_past_turn_age_bound_ignores_live_runstep_activity
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s

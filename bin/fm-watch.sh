@@ -159,8 +159,10 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a stale e
 # same STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
 # non-busy stale, so it escalates via the existing stale reason, escalation
 # counter, and demand-deep-inspection marker for human inspection only - never
-# an automatic interrupt, signal, or restart. A completed turn touches
-# turn-ended and resets the age. Set generously above any legitimate interval
+# an automatic interrupt, signal, or restart. This bound alone is never refreshed
+# by the stale paths' matched run-step activity: it exists to expose a hung
+# foreground call, which a live background pipeline cannot vouch for.
+# A completed turn touches turn-ended and resets the age. Set generously above any legitimate interval
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
@@ -281,14 +283,21 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working. It repairs a missing/corrupt timer or escalates
-# once STALE_ESCALATE_SECS have elapsed. At the escalation boundary only, it
-# re-reads the authoritative crew state: a full, current-code-matched active
-# run step with last_activity newer than the same threshold moves the timer
-# anchor to that proven activity; every non-positive result preserves the
-# escalation. Shared by the plain non-terminal and stale-terminal-overridden
-# paths.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason task activity_age now
+# once STALE_ESCALATE_SECS have elapsed. Shared by the plain non-terminal
+# stale, stale-terminal-overridden, and busy-turn-age paths.
+#
+# The final argument decides whether the escalation boundary may be refreshed by
+# a re-read of the authoritative crew state. With `runstep-refresh` (the two
+# stale paths) a full, current-code-matched active run step with last_activity
+# newer than the same threshold moves the timer anchor to that proven activity,
+# and every non-positive result preserves the escalation. The busy-turn-age path
+# passes `no-runstep-refresh`: BUSY_TURN_MAX_SECS bounds a pane that already
+# renders busy, precisely because that liveness signal can hide a hung
+# FOREGROUND call, and a background pipeline step's own progress is not evidence
+# that the crew's stalled turn is alive. Refreshing there would let a matched run
+# defer that bound indefinitely.
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <runstep-refresh|no-runstep-refresh>
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 refresh=$5 since age n reason task activity_age now
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -298,12 +307,14 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        task=$(window_to_task "$win" "$STATE")
-        if activity_age=$(crew_recent_runstep_activity_age "$task" "$STALE_ESCALATE_SECS"); then
-          now=$(date +%s)
-          echo $(( now - activity_age )) > "$since_file"
-          triage_log "absorbed $label: matched run step active ${activity_age}s ago: $win"
-          return
+        if [ "$refresh" = runstep-refresh ]; then
+          task=$(window_to_task "$win" "$STATE")
+          if activity_age=$(crew_recent_runstep_activity_age "$task" "$STALE_ESCALATE_SECS"); then
+            now=$(date +%s)
+            echo $(( now - activity_age )) > "$since_file"
+            triage_log "absorbed $label: matched run step active ${activity_age}s ago: $win"
+            return
+          fi
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
@@ -1098,7 +1109,7 @@ EOF
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
+            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" runstep-refresh
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
@@ -1141,12 +1152,12 @@ EOF
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
+                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" runstep-refresh
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" runstep-refresh
             fi
           fi
         fi
@@ -1155,7 +1166,7 @@ EOF
         # unless a genuinely busy pane has gone too long with no completed turn -
         # then route it through the same wedge timer instead of erasing it.
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" no-runstep-refresh
         else
           rm -f "$ssf" "$ewf"
         fi
@@ -1167,7 +1178,7 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" no-runstep-refresh
       else
         rm -f "$ssf" "$ewf"
       fi

@@ -66,21 +66,18 @@ WORKTREE=$2
 SINCE=$3
 UNTIL=$4
 
+# Emitted by the shell alone: one of the notes below reports that python3 itself
+# is unavailable, so the emitter for it cannot be the one thing that needs
+# python3 - the header's "prints one JSON object on stdout and exits 0" contract
+# has to hold on a host without it. Only the note varies, and it is escaped as a
+# JSON string because a harness name reaches it from recorded task metadata.
 token_usage_null() {  # <note>
-  python3 - "$1" <<'PY'
-import json
-import sys
-
-print(json.dumps({
-    "tokens": None,
-    "source": None,
-    "sessions": None,
-    "input": None,
-    "cached_input": None,
-    "output": None,
-    "note": sys.argv[1],
-}, separators=(",", ":")))
-PY
+  local note=$1
+  note=${note//\\/\\\\}
+  note=${note//\"/\\\"}
+  note=${note//[[:cntrl:]]/ }
+  printf '{"tokens":null,"source":null,"sessions":null,"input":null,"cached_input":null,"output":null,"note":"%s"}\n' \
+    "$note"
 }
 
 if [ -z "$WORKTREE" ]; then

@@ -9,8 +9,9 @@
 #
 # These tests drive the real capture functions over crafted status files. They
 # assert the recorded observation, that a first observation is never rewritten by
-# later polls, and that a SECOND terminal report (a relaunched task that finishes
-# again) is observed as its own event.
+# later polls, that the recorded scan cursor keeps an observed task off the
+# per-poll re-count, and that a SECOND terminal report (a relaunched task that
+# finishes again) is observed as its own event.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -29,6 +30,17 @@ case_state() {  # <name>
 
 record_field() {  # <record> <key>
   sed -n "s/^$2=//p" "$1"
+}
+
+# The observation itself, without the scan cursor: what a later poll must never
+# move. The cursor is separate durable bookkeeping and does advance.
+observation_of() {  # <record>
+  printf '%s|%s|%s' "$(record_field "$1" observed_at)" "$(record_field "$1" verb)" \
+    "$(record_field "$1" events)"
+}
+
+status_size_of() {  # <file>
+  LC_ALL=C wc -c < "$1" | tr -d '[:space:]'
 }
 
 test_a_terminal_report_is_observed_once() {
@@ -57,15 +69,49 @@ test_a_later_poll_never_rewrites_the_first_observation() {
   record="$state/alpha.terminal-at"
 
   status_terminal_capture "$state" alpha || fail "capture failed"
-  before=$(cat "$record")
+  before=$(observation_of "$record")
   # Every later poll re-reads the same file, and an unrelated append must not be
   # mistaken for a second completion.
   status_terminal_capture "$state" alpha || fail "repeat capture failed"
   printf 'working: cleaning up\n' >> "$state/alpha.status"
   status_terminal_capture "$state" alpha || fail "capture after an append failed"
-  [ "$(cat "$record")" = "$before" ] \
+  [ "$(observation_of "$record")" = "$before" ] \
     || fail "a later poll moved the recorded completion time"
+  [ "$(record_field "$record" status_size)" = "$(status_size_of "$state/alpha.status")" ] \
+    || fail "the scan cursor did not follow the grown log"
   pass "terminal capture: the first observation is the recorded completion time and later polls leave it alone"
+}
+
+# The cursor is what keeps an already-observed task off the per-poll rescan: an
+# append-only log whose byte size is unchanged since the last look cannot have
+# gained a terminal event, so it must not be counted again. A cursor left behind
+# at the size the completion was observed at re-counts that task on every poll
+# for the rest of its life.
+test_an_unchanged_size_log_is_not_recounted() {
+  local state record size_before size_after
+  state=$(case_state cursor-short-circuit)
+  printf 'done: PR ready\n' > "$state/alpha.status"
+  record="$state/alpha.terminal-at"
+
+  status_terminal_capture "$state" alpha || fail "capture failed"
+  printf 'working: cleaning up\n' >> "$state/alpha.status"
+  status_terminal_capture "$state" alpha || fail "capture after an append failed"
+
+  # Rewrite the log to the SAME byte size with a second terminal event in it.
+  # Only a re-count could see that event, and the size bound says there is
+  # nothing to re-count - so the observation must stand.
+  size_before=$(status_size_of "$state/alpha.status")
+  printf 'done: PR ready\nfailed: aaaaaaaaaaaa\n' > "$state/alpha.status"
+  size_after=$(status_size_of "$state/alpha.status")
+  [ "$size_before" = "$size_after" ] \
+    || fail "the fixture rewrite changed the log size, so the size bound is not what is under test"
+
+  status_terminal_capture "$state" alpha || fail "capture after the same-size rewrite failed"
+  [ "$(record_field "$record" events)" = 1 ] \
+    || fail "a status log of unchanged size was counted again"
+  [ "$(record_field "$record" verb)" = done ] \
+    || fail "a status log of unchanged size restamped the observation"
+  pass "terminal capture: an observed task whose log has not grown is never re-counted"
 }
 
 test_a_second_terminal_report_is_its_own_observation() {
@@ -128,6 +174,7 @@ test_an_unsafe_status_record_is_left_alone() {
 
 test_a_terminal_report_is_observed_once
 test_a_later_poll_never_rewrites_the_first_observation
+test_an_unchanged_size_log_is_not_recounted
 test_a_second_terminal_report_is_its_own_observation
 test_a_task_that_has_not_finished_records_nothing
 test_the_scan_covers_every_task_in_a_home

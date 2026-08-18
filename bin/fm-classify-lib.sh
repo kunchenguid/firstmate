@@ -1241,10 +1241,13 @@ scan_captain_relevant_statuses() {  # <state>
 # implying an exact completion instant. A file mtime is never used as the value.
 #
 # The scan is bounded by the status file's byte size: an append-only log that has
-# not grown cannot hold a new terminal event, so quiet fleets pay one size read
-# per task per poll. Only a grown log is re-counted, and only a NEW terminal
-# event takes a fresh timestamp, so a later unrelated append never restamps a
-# completion that was already observed.
+# not grown cannot hold a new terminal event, so an already-observed task pays
+# one size read per poll no matter how much its log grows afterwards - the
+# recorded cursor advances on every append, not only on a new observation. A task
+# with no observation yet carries no record to hold that cursor, so its log is
+# re-counted each poll, and the count stays fork-free for that reason. Only a NEW
+# terminal event takes a fresh timestamp, so a later unrelated append never
+# restamps a completion that was already observed.
 _fm_terminal_capture_path() {  # <state> <task-id>
   printf '%s/%s.terminal-at' "$1" "$2"
 }
@@ -1263,10 +1266,30 @@ _fm_terminal_capture_count() {  # <record>
   printf '%s\n' "$value"
 }
 
+# Write the record atomically. The observation fields and the scan cursor are
+# written together, so an unchanged observation can advance its cursor without
+# restating a completion time it did not move.
+_fm_terminal_capture_write() {  # <record> <observed-at> <verb> <events> <status-size>
+  local record=$1 tmp
+  tmp="$record.tmp.$$"
+  {
+    printf 'observed_at=%s\n' "$2"
+    printf 'verb=%s\n' "$3"
+    printf 'events=%s\n' "$4"
+    printf 'status_size=%s\n' "$5"
+    printf 'source=supervision-observation\n'
+  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+  mv -f "$tmp" "$record" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+  return 0
+}
+
 # Record a task's terminal observation when its status log has grown and holds
-# more done/failed events than the last record. Silent no-op otherwise.
+# more done/failed events than the last record. A grown log with no new terminal
+# event only advances the recorded scan cursor, leaving the observation itself
+# untouched. Silent no-op otherwise.
 status_terminal_capture() {  # <state> <task-id>
-  local state=$1 id=$2 f record size recorded_size='' events=0 verb='' line tmp
+  local state=$1 id=$2 f record size recorded_size='' recorded_observed='' recorded_verb=''
+  local have_record=0 recorded_events events=0 verb='' line line_verb
   f="$state/$id.status"
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   record=$(_fm_terminal_capture_path "$state" "$id")
@@ -1274,32 +1297,34 @@ status_terminal_capture() {  # <state> <task-id>
   size=${size//[[:space:]]/}
   case "$size" in ''|*[!0-9]*) return 0 ;; esac
   if [ -f "$record" ] && [ -r "$record" ] && [ ! -L "$record" ]; then
+    have_record=1
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
         status_size=*) recorded_size=${line#status_size=} ;;
+        observed_at=*) recorded_observed=${line#observed_at=} ;;
+        verb=*) recorded_verb=${line#verb=} ;;
       esac
     done < "$record"
     [ "$recorded_size" != "$size" ] || return 0
   fi
-  local line_verb
   while IFS= read -r line || [ -n "$line" ]; do
-    line_verb=$(status_line_verb "$line")
+    line_verb=${line%%:*}
+    line_verb=${line_verb%%\[*}
+    line_verb=${line_verb#"${line_verb%%[![:space:]]*}"}
+    line_verb=${line_verb%"${line_verb##*[![:space:]]}"}
     case "$line_verb" in
       done|failed) events=$((events + 1)); verb=$line_verb ;;
     esac
   done < "$f"
-  if [ "$events" -le "$(_fm_terminal_capture_count "$record")" ]; then
+  recorded_events=$(_fm_terminal_capture_count "$record")
+  if [ "$events" -le "$recorded_events" ]; then
+    [ "$have_record" = 1 ] && [ -n "$recorded_observed" ] || return 0
+    _fm_terminal_capture_write "$record" "$recorded_observed" "$recorded_verb" \
+      "$recorded_events" "$size" || return 0
     return 0
   fi
-  tmp="$record.tmp.$$"
-  {
-    printf 'observed_at=%s\n' "$(LC_ALL=C date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    printf 'verb=%s\n' "$verb"
-    printf 'events=%s\n' "$events"
-    printf 'status_size=%s\n' "$size"
-    printf 'source=supervision-observation\n'
-  } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 0; }
-  mv -f "$tmp" "$record" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 0; }
+  _fm_terminal_capture_write "$record" "$(LC_ALL=C date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    "$verb" "$events" "$size" || return 0
   return 0
 }
 

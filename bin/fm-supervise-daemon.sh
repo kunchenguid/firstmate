@@ -44,8 +44,11 @@
 #   - Bounded wedge latency: a stale pane without a declared external wait is
 #     escalated only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A current-code-matched active no-mistakes
-#     step with newer last_activity refreshes that bound; missing, quiet,
-#     terminal, mismatched, or unreadable run state does not. A declared pause instead
+#     step refreshes that bound only while its own last_activity age is under the
+#     same threshold: the numeric age is the whole test, so no-mistakes' `quiet `
+#     prefix is not itself a veto and a quiet-marked step still refreshes while it
+#     stays under the threshold. Missing, terminal, mismatched, or unreadable run
+#     state never refreshes it. A declared pause instead
 #     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.

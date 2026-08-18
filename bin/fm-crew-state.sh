@@ -21,7 +21,9 @@
 # A full, matched active run can also append `activity-age-seconds: <n>`.
 # This is positive liveness evidence from no-mistakes' active-step
 # `last_activity`; it is omitted for coarse, terminal, mismatched, absent, or
-# unreadable run state so consumers fail closed.
+# unreadable run state so consumers fail closed. A `quiet `-prefixed
+# last_activity is reported as its plain age, since how old the activity is - not
+# no-mistakes' own quiet threshold - is what a consumer compares against its own.
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
