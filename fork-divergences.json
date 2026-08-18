@@ -141,6 +141,22 @@
         "tests/fm-watcher-lock.test.sh",
         "tests/wake-helpers.sh"
       ]
+    },
+    {
+      "id": "firstmate-brief-scaffold-trim-v2",
+      "summary": "Trim generated brief scaffolds to retain only load-bearing worker instructions and current status protocol.",
+      "class": "pending",
+      "topic": "fm/divergence/firstmate-brief-scaffold-trim-v2",
+      "introduced": "2026-08-17",
+      "upstream_pr": {
+        "url": "https://github.com/kunchenguid/firstmate/pull/2538",
+        "disposition": "open"
+      },
+      "retire_when": "upstream main carries this scaffold trim or an equivalent",
+      "paths": [
+        "bin/fm-brief.sh",
+        "tests/fm-brief.test.sh"
+      ]
     }
   ],
   "retired_upstream": []
