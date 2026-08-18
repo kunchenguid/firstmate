@@ -80,6 +80,24 @@ run_guest_waits_for_egress_before_downloading() {
   pass "the guest bake script proves egress before its first download"
 }
 
+run_host_waits_for_the_guest_agent() {
+  # RunCommandLinux is a VM extension and cannot provision until the guest agent
+  # is up. Invoking it the instant `az vm create` returns raced that and failed
+  # the bake with VMExtensionProvisioningTimeout without running a single line
+  # of the script. The guest-side egress wait cannot cover this: the guest
+  # script never runs when the extension itself will not provision.
+  local wait_line invoke_line
+  wait_line=$(grep -n 'agent_ready=1' "$SCRIPT" | head -1 | cut -d: -f1)
+  [ -n "$wait_line" ] || fail "the bake never waits for the builder guest agent"
+  invoke_line=$(grep -n 'az vm run-command invoke' "$SCRIPT" | head -1 | cut -d: -f1)
+  [ -n "$invoke_line" ] || fail "no run-command invoke found, so this ordering proves nothing"
+  [ "$wait_line" -lt "$invoke_line" ] \
+    || fail "the agent wait runs AFTER the invoke it is supposed to protect"
+  grep -q 'guest agent never reported ready' "$SCRIPT" \
+    || fail "a builder whose agent never comes up does not refuse"
+  pass "the bake waits for the builder guest agent before invoking a VM extension"
+}
+
 run_failed_bake_does_not_leak_the_builder() {
   # The builder is billable compute. A bake that refuses to capture used to
   # leave a running D4as_v6 behind with nothing owning it, reclaimed only
@@ -119,6 +137,7 @@ PROBE
 
 run_guest_script_survives_dash
 run_guest_waits_for_egress_before_downloading
+run_host_waits_for_the_guest_agent
 run_failed_bake_does_not_leak_the_builder
 
 echo "# fm-azure-cell-image.test.sh: all assertions passed"

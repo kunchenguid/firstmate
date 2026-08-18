@@ -134,6 +134,27 @@ apt-get clean
 waagent -deprovision+user -force
 echo FM-BAKE-COMPLETE
 EOF
+# RunCommandLinux is a VM EXTENSION, so it cannot provision until the guest
+# agent is up and can reach the extension endpoints. Invoking the instant
+# `az vm create` returns raced that and failed the whole bake with
+# VMExtensionProvisioningTimeout, having never run a line of the script. The
+# guest-side egress wait cannot help here: the guest script does not run at all
+# when the extension itself will not provision, so the wait has to be host-side.
+echo "fm-azure-cell-image: waiting for the builder guest agent" >&2
+agent_ready=0
+for _ in $(seq 1 60); do
+  agent_status=$(az vm get-instance-view --resource-group "$RESOURCE_GROUP" --name "$BUILDER" \
+    --query "instanceView.vmAgent.statuses[0].displayStatus" -o tsv 2>/dev/null || true)
+  case "$agent_status" in
+    *Ready*) agent_ready=1; break ;;
+  esac
+  sleep 10
+done
+if [ "$agent_ready" != 1 ]; then
+  echo "fm-azure-cell-image: builder guest agent never reported ready; refusing to bake" >&2
+  exit 1
+fi
+
 echo "fm-azure-cell-image: baking (packages + closure)" >&2
 # The invoke returns rc 0 regardless of the guest script's exit; the
 # terminal marker is the only proof the whole bake actually ran.
