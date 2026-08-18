@@ -304,6 +304,10 @@ autoarm_owns_recovery() {
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
+  if autoarm_claim_in_progress; then
+    [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
+    return 0
+  fi
   outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
     arming|rewake)
