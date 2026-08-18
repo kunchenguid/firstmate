@@ -255,7 +255,7 @@ EOF
 # verb or the threshold. A declared-work line states an intention; only pairing it
 # with a measured idle age turns it into a stall.
 test_declared_work_stall_classifier() {
-  local dir state open_line closed_line held_line
+  local dir state open_line closed_line held_line override_open
   dir=$(make_case classify-declared-work); state="$dir/state"
   status_declares_work 'working: relaunching the remaining six one by one' \
     || fail "the declared-work verb was not recognized"
@@ -317,6 +317,28 @@ test_declared_work_stall_classifier() {
     || fail "the stall threshold is not more generous than the ordinary wedge threshold"
   [ "$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT" -lt "$FM_PAUSE_RESURFACE_SECS_DEFAULT" ] \
     || fail "unresumed declared work waits as long as a legitimately declared pause"
+
+  # The constant is the library's ONE definition of the verb, so an override has
+  # to move EVERY reading of it together. The stall decision and the keyed
+  # activity fold are two such readings of the same line: the fold is what the
+  # fleet view renders as the mate's open phase, so a verb the stall wake fires
+  # on while the fold drops it would surface a mate whose declared phase the
+  # snapshot has already lost.
+  printf 'wip [key=aterrizaje]: relanzando los seis\n' > "$state/override.status"
+  FM_CLASSIFY_DECLARED_WORK_VERB=wip \
+    status_declares_work "$(last_status_line "$state/override.status")" \
+    || fail "the overridden declared-work verb was not recognized as a declaration"
+  override_open=$(FM_CLASSIFY_DECLARED_WORK_VERB=wip \
+    status_open_activities "$state/override.status")
+  printf '%s' "$override_open" | grep -F $'aterrizaje\twip\trelanzando los seis' >/dev/null \
+    || fail "the overridden declared-work verb opened no keyed activity phase"
+  printf 'wip [key=aterrizaje]: relanzando los seis\ndone [key=aterrizaje]: los seis aterrizaron\n' \
+    > "$state/override-closed.status"
+  [ -z "$(FM_CLASSIFY_DECLARED_WORK_VERB=wip status_open_activities "$state/override-closed.status")" ] \
+    || fail "a terminal event did not close the overridden declared-work phase"
+  [ -z "$(FM_CLASSIFY_DECLARED_WORK_VERB=wip status_open_activities "$state/open.status")" ] \
+    || fail "the replaced default verb still opened an activity phase under the override"
+  unset FM_CLASSIFY_DECLARED_WORK_VERB
   pass "status_declares_work and status_declared_work_stalled: a declaration plus measured silence, never either alone"
 }
 

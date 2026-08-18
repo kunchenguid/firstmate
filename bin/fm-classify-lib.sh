@@ -1091,7 +1091,9 @@ EOF
 }
 
 # Fold material routed-work phases in the same keyed event stream.
-# A working or declared-pause event opens or replaces one phase for its key.
+# A declared-work or declared-pause event - both read from the configured verbs
+# above, so an override moves this fold with the rest of the library - opens or
+# replaces one phase for its key.
 # A later done, failed, needs-decision, blocked, or resolved event carrying that
 # key closes the phase, because it has moved to a terminal or separately tracked
 # state.
@@ -1100,17 +1102,18 @@ EOF
 # It is never authoritative current crew state, and consumers must not let an open
 # phase outrank a structured home snapshot or fm-crew-state result.
 _fm_status_open_activities_stream() {
-  local line verb key note resolve held open='' stripped pause
+  local line verb key note resolve held open='' stripped pause work
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  work=${FM_CLASSIFY_DECLARED_WORK_VERB:-$FM_CLASSIFY_DECLARED_WORK_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
     verb=$(status_line_verb "$line")
     key=$(_fm_decision_key "$line") || continue
     case "$verb" in
-      working|"$pause")
+      "$work"|"$pause")
         note=$(status_line_note "$line")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'

@@ -52,15 +52,16 @@
 #                          status stream has then been SILENT past
 #                          FM_DECLARED_WORK_SILENCE_SECS. Nothing here reads the
 #                          endpoint: the status log is a durable record this host
-#                          already holds, so this works identically for a remote
-#                          mate, needs no launch wiring, and reads no rendered
-#                          surface. Deliberately not a "stale:" reason: the mate's
-#                          idle endpoint is healthy by design and stays exempt
-#                          from the stale loop. It is a RECONCILIATION wake, not
-#                          an alarm - the silence may be long legitimate work, a
-#                          phase finished without closing its record, or work
-#                          nothing resumed - so the reason asks for a cheap check
-#                          before acting. Surfaced EXACTLY ONCE per declared-work
+#                          already holds, so this reads a remote mate through the
+#                          same path, needs no launch wiring, and reads no
+#                          rendered surface. Deliberately not a "stale:" reason:
+#                          the mate's idle endpoint is healthy by design and stays
+#                          exempt from the stale loop. It is a RECONCILIATION
+#                          wake, not an alarm - the silence may be long legitimate
+#                          work, a phase finished without closing its record, work
+#                          nothing resumed, or, for a remote mate, a relay that
+#                          stopped delivering - so the reason asks for a cheap
+#                          check before acting. Surfaced EXACTLY ONCE per declared-work
 #                          episode, until a later status event ends it, and never
 #                          for a declared paused: wait or a terminal last event.
 #   check: rejected unauthenticated state checks: <paths>
@@ -380,23 +381,29 @@ busy_turn_over_age() {  # <task>
 # the turn boundary that keeps the mate's own supervision alive. Reading its pane
 # instead was rejected: rendered text is a fragile surface and a false-alarm
 # source. Measuring the log needs no launch wiring, no capture, and no per-host
-# branch, and it covers a REMOTE mate identically, because its escalations are
-# ingested into this same state directory and its stream goes quiet the same way.
+# branch, and it reads a REMOTE mate through the same path, because its
+# escalations are ingested into this same state directory and its stream goes
+# quiet the same way. What that reading measures for a remote mate is the
+# PARENT-SIDE copy the ingest writes, so a relay that stopped delivering leaves
+# the same frozen record as a mate that stopped: the wake names that cause
+# alongside the others, and telling the two apart would take transport health
+# this watcher deliberately does not build here.
 # Ordered cheapest-first: the last status line the caller already read decides
 # first and rejects almost every mate outright, before anything else is computed.
 # RECONCILIATION, NOT ALARM. Silence is not proof of a stall. The mate may be
 # doing long legitimate work with nothing supervisor-actionable to report, may
-# have finished a phase without closing its record, or may genuinely be stopped -
-# from outside these are indistinguishable, which is why the threshold is
-# generous and the wake asks for a cheap check before acting rather than
-# asserting a stall.
+# have finished a phase without closing its record, may genuinely be stopped, or
+# - remotely - may be reporting normally behind a relay that stopped delivering
+# its events here. From outside these are indistinguishable, which is why the
+# threshold is generous and the wake asks for a cheap check before acting rather
+# than asserting a stall.
 # SINGLE-FIRE. The .stalled-* marker is a LATCH, not a throttle: a declared-work
 # episode surfaces exactly once and stays silent until a later status event ends
 # the episode (which resets the silence age, so the gate fails and the latch
 # clears). One wake suffices because the wake queue is durable and is
 # acknowledged only after the handling turn, so a single wake cannot be lost.
 # That bound is also what makes the accepted false readings cheap: whichever of
-# the three it turns out to be, the mate is worth one look, and suppressing the
+# the four it turns out to be, the mate is worth one look, and suppressing the
 # finished-but-unclosed reading was deliberately NOT built, since it would need a
 # cross-home backlog read this watcher has no business making.
 # <key> is the caller's already-computed marker key (pure parameter expansion in
@@ -413,7 +420,7 @@ secondmate_declared_work_check() {  # <task> <last-status-line> <marker-key>
     return 0
   fi
   [ ! -e "$STATE/.stalled-$key" ] || return 0
-  reason="check: secondmate-stalled $task: declared work, then no status event for ${age}s - may be long legitimate work with nothing to report, a phase it finished without closing its record, or work nothing resumed; check cheaply before acting (last report: $last)"
+  reason="check: secondmate-stalled $task: declared work, then no status event for ${age}s - may be long legitimate work with nothing to report, a phase it finished without closing its record, work nothing resumed, or, for a remote mate, a relay that stopped delivering its events here; check cheaply before acting (last report: $last)"
   fm_wake_append check "secondmate-stalled:$task" "$reason" || exit 1
   : > "$STATE/.stalled-$key"
   wake "$reason"
