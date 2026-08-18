@@ -136,7 +136,7 @@ test_brief_assertion_precedes_branch() {
     "brief is missing the isolation blocked-status contract"
   assert_grep "primary_clone='$primary_real'" "$brief" \
     "brief must emit the resolved primary clone path"
-  assert_grep 'cd -- "$primary_clone" && pwd -P' "$brief" \
+  assert_grep "cd -- \"\$primary_clone\" && pwd -P" "$brief" \
     "brief must make the primary-clone comparison executable"
   assert_grep "A linked worktree normally has" "$brief" \
     "brief must explain that a linked worktree git-dir under the primary clone is normal"
