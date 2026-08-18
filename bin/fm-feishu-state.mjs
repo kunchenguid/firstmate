@@ -431,7 +431,12 @@ function validateOutbound(outbox) {
     if (chunk.idempotency_key !== stableId("fm", `${outbox.event_id}\0${index}`, 44)) throw new Error("Feishu outbound idempotency identity mismatch");
     combined += chunk.chunk;
   }
-  if (combined !== outbox.text) throw new Error("Feishu outbound chunks changed final text");
+  if (outbox.rendered_text_hash === undefined) {
+    if (combined !== outbox.text) throw new Error("legacy Feishu outbound chunks changed final text");
+  } else {
+    if (outbox.rendered_text_hash !== `sha256:${sha(combined)}`) throw new Error("Feishu outbound rendered text hash mismatch");
+    if (combined !== renderFeishuPostMarkdown(outbox.text)) throw new Error("Feishu outbound rendering changed after persistence");
+  }
   requireIso(outbox.session_entry_timestamp, "outbound Assistant entry time");
   requireIso(outbox.created_at, "outbound creation time");
   return outbox;
@@ -1627,12 +1632,310 @@ function markdownAutolinkEnd(text, index) {
   return end + 1;
 }
 
+function lineAt(text, index) {
+  const lineEnd = text.indexOf("\n", index);
+  const end = lineEnd < 0 ? text.length : lineEnd + 1;
+  return { content: text.slice(index, lineEnd < 0 ? text.length : lineEnd), end };
+}
+
+function inlineLiteral(source) {
+  const runs = source.match(/`+/gu) ?? [];
+  const marker = "`".repeat(Math.max(1, ...runs.map((run) => run.length + 1)));
+  const padding = /^[ `]|[ `]$/u.test(source) ? " " : "";
+  return `${marker}${padding}${source}${padding}${marker}`;
+}
+
+function fencedLiteral(source, language) {
+  const runs = source.match(/`+/gu) ?? [];
+  const marker = "`".repeat(Math.max(3, ...runs.map((run) => run.length + 1)));
+  const separator = source.endsWith("\n") ? "" : "\n";
+  const suffix = source.endsWith("\n") ? "\n" : "";
+  return `${marker}${language}\n${source}${separator}${marker}${suffix}`;
+}
+
+function findDelimited(text, start, opener, closer) {
+  const end = text.indexOf(closer, start + opener.length);
+  return end < 0 ? -1 : end + closer.length;
+}
+
+function inlinePostMarkdown(text) {
+  let rendered = "";
+  for (let cursor = 0; cursor < text.length;) {
+    let end = markdownCodeSpanEnd(text, cursor);
+    if (end >= 0) {
+      rendered += text.slice(cursor, end);
+      cursor = end;
+      continue;
+    }
+    end = markdownLinkEnd(text, cursor);
+    if (end >= 0) {
+      const source = text.slice(cursor, end);
+      rendered += text[cursor] === "!" ? inlineLiteral(source) : source;
+      cursor = end;
+      continue;
+    }
+    if (text[cursor] === "!") {
+      const imageReference = text.slice(cursor).match(/^!\[(?:\\.|[^\]\n])*\](?:\[(?:\\.|[^\]\n])*\])?/u);
+      if (imageReference) {
+        rendered += inlineLiteral(imageReference[0]);
+        cursor += imageReference[0].length;
+        continue;
+      }
+    }
+    end = markdownAutolinkEnd(text, cursor);
+    if (end >= 0) {
+      rendered += text.slice(cursor, end);
+      cursor = end;
+      continue;
+    }
+    if (text[cursor] === "<") {
+      const mention = text.slice(cursor).match(/^<at\b[^>]*>(?:[\s\S]*?<\/at>)?/iu);
+      const email = text.slice(cursor).match(/^<[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}>/iu);
+      const html = text.slice(cursor).match(/^<\/?[A-Za-z][^>]*>/u);
+      const source = mention?.[0] ?? email?.[0] ?? html?.[0];
+      if (source) {
+        rendered += inlineLiteral(source);
+        cursor += source.length;
+        continue;
+      }
+    }
+    if (text[cursor] === "[" && /^\[\^[^\]\n]+\]/u.test(text.slice(cursor))) {
+      const source = text.slice(cursor).match(/^\[\^[^\]\n]+\]/u)[0];
+      rendered += inlineLiteral(source);
+      cursor += source.length;
+      continue;
+    }
+    if (text[cursor] === "\\" && text[cursor + 1] === "(") {
+      end = findDelimited(text, cursor, "\\(", "\\)");
+      if (end >= 0) {
+        rendered += inlineLiteral(text.slice(cursor, end));
+        cursor = end;
+        continue;
+      }
+    }
+    if (text[cursor] === "$" && text[cursor + 1] === "$" && !/\s/u.test(text[cursor + 2] ?? "")) {
+      end = findDelimited(text, cursor, "$$", "$$");
+      if (end >= 0) {
+        rendered += inlineLiteral(text.slice(cursor, end));
+        cursor = end;
+        continue;
+      }
+    }
+    if (text[cursor] === "$" && text[cursor + 1] !== "$" && !/\s/u.test(text[cursor + 1] ?? "")) {
+      for (let candidate = cursor + 1; candidate < text.length; candidate += 1) {
+        if (text[candidate] === "\\") {
+          candidate += 1;
+          continue;
+        }
+        if (text[candidate] === "$" && !/\s/u.test(text[candidate - 1] ?? "")) {
+          end = candidate + 1;
+          break;
+        }
+      }
+      if (end >= 0) {
+        rendered += inlineLiteral(text.slice(cursor, end));
+        cursor = end;
+        continue;
+      }
+    }
+    const broadMention = text[cursor] === "@" ? text.slice(cursor).match(/^@(?:all|everyone|here)\b/iu) : null;
+    if (broadMention && (cursor === 0 || /[\s([{]/u.test(text[cursor - 1]))) {
+      rendered += inlineLiteral(broadMention[0]);
+      cursor += broadMention[0].length;
+      continue;
+    }
+    rendered += text[cursor];
+    cursor += 1;
+  }
+  return rendered;
+}
+
+function blockUntil(text, index, closePattern) {
+  let cursor = index;
+  while (cursor < text.length) {
+    const line = lineAt(text, cursor);
+    cursor = line.end;
+    if (closePattern.test(line.content)) return cursor;
+  }
+  return text.length;
+}
+
+function rawHtmlBlockEnd(text, index) {
+  const line = lineAt(text, index);
+  const trimmed = line.content.trimStart();
+  if (/^<details(?:\s|>)/iu.test(trimmed)) return blockUntil(text, index, /<\/details\s*>/iu);
+  if (/^<!--/u.test(trimmed)) return blockUntil(text, index, /-->/u);
+  if (/^<\?/u.test(trimmed)) return blockUntil(text, index, /\?>/u);
+  if (/^<!\[CDATA\[/iu.test(trimmed)) return blockUntil(text, index, /\]\]>/u);
+  const tag = trimmed.match(/^<(script|pre|style|address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:\s|\/?>)/iu);
+  if (!tag) return -1;
+  const closing = new RegExp(`<\\/${tag[1]}\\s*>`, "iu");
+  if (closing.test(trimmed)) return line.end;
+  let cursor = line.end;
+  while (cursor < text.length) {
+    const next = lineAt(text, cursor);
+    if (closing.test(next.content)) return next.end;
+    if (next.content.trim().length === 0) return cursor;
+    cursor = next.end;
+  }
+  return text.length;
+}
+
+function indentedBlockEnd(text, index) {
+  const first = lineAt(text, index);
+  if (first.content.trim().length === 0 || !/^(?: {4}|\t)/u.test(first.content)) return -1;
+  let cursor = index;
+  let contentEnd = index;
+  while (cursor < text.length) {
+    const line = lineAt(text, cursor);
+    if (line.content.trim().length !== 0 && !/^(?: {4}|\t)/u.test(line.content)) break;
+    if (line.content.trim().length !== 0) contentEnd = line.end;
+    cursor = line.end;
+  }
+  return contentEnd;
+}
+
+function footnoteDefinitionEnd(text, index) {
+  if (!/^ {0,3}\[\^[^\]\n]+\]:/u.test(lineAt(text, index).content)) return -1;
+  let cursor = lineAt(text, index).end;
+  let contentEnd = cursor;
+  while (cursor < text.length) {
+    const line = lineAt(text, cursor);
+    if (line.content.trim().length !== 0 && !/^(?: {2,}|\t)/u.test(line.content)) break;
+    if (line.content.trim().length !== 0) contentEnd = line.end;
+    cursor = line.end;
+  }
+  return contentEnd;
+}
+
+function blockMathEnd(text, index) {
+  const line = lineAt(text, index);
+  const trimmed = line.content.trim();
+  if (trimmed.startsWith("$$")) {
+    if (trimmed.length > 2 && trimmed.endsWith("$$")) return line.end;
+    let cursor = line.end;
+    while (cursor < text.length) {
+      const candidate = lineAt(text, cursor);
+      cursor = candidate.end;
+      if (/\$\$\s*$/u.test(candidate.content)) return cursor;
+    }
+    return text.length;
+  }
+  if (trimmed.startsWith("\\[")) return blockUntil(text, index, /\\\]\s*$/u);
+  const environment = trimmed.match(/^\\begin\{([^{}]+)\}/u);
+  if (environment) return blockUntil(text, index, new RegExp(`\\\\end\\{${environment[1].replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}\\}\\s*$`, "u"));
+  return -1;
+}
+
+export function renderFeishuPostMarkdown(text) {
+  if (typeof text !== "string") throw new Error("Feishu post Markdown source is not text");
+  let rendered = "";
+  for (let cursor = 0; cursor < text.length;) {
+    let end = markdownFenceEnd(text, cursor);
+    if (end >= 0) {
+      rendered += text.slice(cursor, end);
+      cursor = end;
+      continue;
+    }
+    const line = lineAt(text, cursor);
+    const next = line.end < text.length ? lineAt(text, line.end) : undefined;
+    if (line.content.trim().length > 0 && next && /^ {0,3}(?:=+|-+)\s*$/u.test(next.content)) {
+      end = next.end;
+      rendered += fencedLiteral(text.slice(cursor, end), "markdown");
+      cursor = end;
+      continue;
+    }
+    end = blockMathEnd(text, cursor);
+    if (end >= 0) {
+      rendered += fencedLiteral(text.slice(cursor, end), "text");
+      cursor = end;
+      continue;
+    }
+    end = rawHtmlBlockEnd(text, cursor);
+    if (end >= 0) {
+      rendered += fencedLiteral(text.slice(cursor, end), "html");
+      cursor = end;
+      continue;
+    }
+    end = footnoteDefinitionEnd(text, cursor);
+    if (end >= 0) {
+      rendered += fencedLiteral(text.slice(cursor, end), "markdown");
+      cursor = end;
+      continue;
+    }
+    end = indentedBlockEnd(text, cursor);
+    if (end >= 0) {
+      rendered += fencedLiteral(text.slice(cursor, end), "markdown");
+      cursor = end;
+      continue;
+    }
+    rendered += inlinePostMarkdown(text.slice(cursor, line.end));
+    cursor = line.end;
+  }
+  const maximumBytes = Math.max(4096, utf8Bytes(text) * 4);
+  if (utf8Bytes(rendered) > maximumBytes) throw new Error("Feishu post Markdown rendering exceeded its fixed expansion bound");
+  return rendered;
+}
+
+function markdownTableEnd(text, index) {
+  const header = lineAt(text, index);
+  if (!header.content.includes("|") || header.end >= text.length) return -1;
+  const delimiter = lineAt(text, header.end);
+  if (!/^ {0,3}\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$/u.test(delimiter.content)) return -1;
+  let cursor = delimiter.end;
+  while (cursor < text.length) {
+    const line = lineAt(text, cursor);
+    if (line.content.trim().length === 0 || !line.content.includes("|")) break;
+    cursor = line.end;
+  }
+  return cursor;
+}
+
+function markdownQuoteEnd(text, index) {
+  if (!/^ {0,3}>/u.test(lineAt(text, index).content)) return -1;
+  let cursor = index;
+  while (cursor < text.length) {
+    const line = lineAt(text, cursor);
+    if (!/^ {0,3}>/u.test(line.content)) break;
+    cursor = line.end;
+  }
+  return cursor;
+}
+
+function markdownListEnd(text, index) {
+  const marker = /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+/u;
+  if (!marker.test(lineAt(text, index).content)) return -1;
+  let cursor = index;
+  let separated = false;
+  while (cursor < text.length) {
+    const line = lineAt(text, cursor);
+    if (line.content.trim().length === 0) {
+      separated = true;
+      cursor = line.end;
+      continue;
+    }
+    if (separated && !marker.test(line.content) && !/^(?: {2,}|\t)/u.test(line.content)) break;
+    separated = false;
+    cursor = line.end;
+  }
+  return cursor;
+}
+
+function markdownStructuralBlockEnd(text, index) {
+  if (index !== 0 && text[index - 1] !== "\n") return -1;
+  for (const detector of [markdownFenceEnd, markdownTableEnd, markdownQuoteEnd, markdownListEnd]) {
+    const end = detector(text, index);
+    if (end >= 0) return end;
+  }
+  return -1;
+}
+
 function markdownUnits(text, maxBytes) {
   const units = [];
   let plainStart = 0;
   let cursor = 0;
   while (cursor < text.length) {
-    let protectedEnd = markdownFenceEnd(text, cursor);
+    let protectedEnd = markdownStructuralBlockEnd(text, cursor);
     if (protectedEnd < 0) protectedEnd = markdownCodeSpanEnd(text, cursor);
     if (protectedEnd < 0) protectedEnd = markdownLinkEnd(text, cursor);
     if (protectedEnd < 0) protectedEnd = markdownAutolinkEnd(text, cursor);
@@ -1938,9 +2241,20 @@ export function registerAssistantOutbound(home, input) {
     const alert = createLocalAlert(paths, "outbound-secret-refused", eventId, "A finalized Assistant response matched a fixed credential pattern. The entire response stayed local; inspect it in the TUI before deciding what to send.");
     return { status: "secret-refused", pattern, alert };
   }
+  let renderedText;
+  try {
+    renderedText = renderFeishuPostMarkdown(text);
+  } catch (error) {
+    const alert = createLocalAlert(paths, "outbound-chunk-refused", eventId, "A finalized Assistant response could not be rendered within the fixed Feishu Markdown boundary. It stayed local.");
+    return { status: "chunk-refused", error: String(error), alert };
+  }
+  if (utf8Bytes(renderedText) > maxOutboundBytes) {
+    const alert = createLocalAlert(paths, "outbound-resource-refused", eventId, "A finalized Assistant response exceeded the local outbound resource policy after deterministic Markdown rendering. The entire response stayed local.");
+    return { status: "resource-refused", reason: "resource-limit", alert };
+  }
   let chunks;
   try {
-    chunks = deterministicChunks(text, input.maxChunkBytes ?? process.env.FM_FEISHU_MAX_OUTBOUND_CHUNK_BYTES);
+    chunks = deterministicChunks(renderedText, input.maxChunkBytes ?? process.env.FM_FEISHU_MAX_OUTBOUND_CHUNK_BYTES);
   } catch (error) {
     const alert = createLocalAlert(paths, "outbound-chunk-refused", eventId, "A finalized Assistant response could not be split without breaking a complete URL or Markdown construct. It stayed local.");
     return { status: "chunk-refused", error: String(error), alert };
@@ -1984,6 +2298,7 @@ export function registerAssistantOutbound(home, input) {
       destination_chat_id: binding.chat_id,
       text,
       text_hash: `sha256:${sha(text)}`,
+      rendered_text_hash: `sha256:${sha(renderedText)}`,
       chunks: chunks.map((chunk, index) => ({ index, count: chunks.length, chunk, chunk_hash: `sha256:${sha(chunk)}`, idempotency_key: stableId("fm", `${eventId}\0${index}`, 44) })),
       created_at: nowIso(),
     };

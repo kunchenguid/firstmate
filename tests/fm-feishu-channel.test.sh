@@ -64,6 +64,7 @@ import {
   persistAssistantOutboundIntent,
   publishFeishuInbound,
   receiptOutbound,
+  renderFeishuPostMarkdown,
   registerAssistantOutbound,
   repairOutboundState,
   statusSummary,
@@ -355,6 +356,7 @@ const historicalRoutineText = "Captain，shipshape.";
 historicalOutbox.text = historicalRoutineText;
 historicalOutbox.text_hash = `sha256:${sha(historicalRoutineText)}`;
 historicalOutbox.chunks = [{ index: 0, count: 1, chunk: historicalRoutineText, chunk_hash: `sha256:${sha(historicalRoutineText)}`, idempotency_key: historicalOutbox.chunks[0].idempotency_key }];
+delete historicalOutbox.rendered_text_hash;
 writeFileSync(historicalOutboxPath, `${JSON.stringify(historicalOutbox)}\n`);
 repairOutboundState(home);
 assert.equal(statusSummary(home).outbound_pending, 0, "restart validation kept a terminal-delivered fullwidth routine record local without corrupting state");
@@ -381,6 +383,7 @@ function seedPendingRoutineRecord(entryId, order, timestamp, ordinaryText, routi
   outbox.text = routineText;
   outbox.text_hash = `sha256:${sha(routineText)}`;
   outbox.chunks = [{ index: 0, count: 1, chunk: routineText, chunk_hash: `sha256:${sha(routineText)}`, idempotency_key: outbox.chunks[0].idempotency_key }];
+  delete outbox.rendered_text_hash;
   writeFileSync(outboxPath, `${JSON.stringify(outbox)}\n`);
   return { filename, eventId: reg.eventId, ledgerPath: join(paths.outboundLedger, filename), pendingPath: join(paths.outboundPending, filename), outboxPath, outbox };
 }
@@ -456,6 +459,121 @@ assert(markdownChunks.some((chunk) => chunk.includes("`inline code`")), "Markdow
 assert(markdownChunks.some((chunk) => chunk.includes("[link](https://example.test/markdown)")), "Markdown chunking split a link");
 assert(markdownChunks.some((chunk) => chunk.includes('```js\nconst marker = "<&>";\n```')), "Markdown chunking split a fenced code block");
 assert.throws(() => deterministicChunks(`\`${"x".repeat(80)}\``, 60), /complete Markdown construct/, "oversize Markdown syntax was split into malformed cards");
+
+const tableBlock = "| Name | State |\n| --- | --- |\n| first | ready |";
+const quoteBlock = "> quoted first line\n> quoted second line";
+const listBlock = "1. ordered item\n2. second item\n   - [x] nested task";
+const structuredMarkdown = ["Prelude.", tableBlock, quoteBlock, listBlock, "Tail."].join("\n\n");
+const structuredChunks = deterministicChunks(structuredMarkdown, 64);
+assert(structuredChunks.length > 1, "structured Markdown fixture did not cross a chunk boundary");
+assert.equal(structuredChunks.join(""), structuredMarkdown, "structured Markdown chunking changed output text");
+for (const block of [tableBlock, quoteBlock, listBlock]) {
+  assert(structuredChunks.some((chunk) => chunk.includes(block)), `structured Markdown chunking split ${block.split("\n", 1)[0]}`);
+}
+assert.throws(() => deterministicChunks(`${tableBlock}\n| ${"x".repeat(80)} | ready |`, 64), /complete Markdown construct/, "oversize table was split into invalid messages");
+
+const singleColumnTable = "| only |\n| --- |\n| alpha |\n| beta |";
+const singleColumnSource = ["Introduction paragraph text.", singleColumnTable, "Tail paragraph text."].join("\n\n");
+const singleColumnChunks = deterministicChunks(singleColumnSource, 48);
+assert(singleColumnChunks.length > 1, "single-column table fixture did not cross a chunk boundary");
+assert.equal(singleColumnChunks.join(""), singleColumnSource, "single-column table chunking changed output text");
+assert(singleColumnChunks.some((chunk) => chunk.includes(singleColumnTable)), "single-column GFM table was split across chunk boundaries");
+const bareDelimiterTable = "| only |\n---\n| alpha |";
+const bareDelimiterChunks = deterministicChunks(["Intro paragraph text.", bareDelimiterTable, "Tail paragraph text."].join("\n\n"), 40);
+assert(bareDelimiterChunks.some((chunk) => chunk.includes(bareDelimiterTable)), "bare-delimiter single-column GFM table was split across chunk boundaries");
+assert.throws(() => deterministicChunks(`| only |\n| --- |\n| ${"x".repeat(80)} |`, 64), /complete Markdown construct/, "oversize single-column table was split into invalid messages");
+
+const postSource = [
+  "# Supported heading",
+  "",
+  "**bold** *emphasis* ~~strike~~ and `inline code` with [link](https://example.test/safe).",
+  "",
+  tableBlock,
+  "",
+  quoteBlock,
+  "",
+  "- unordered",
+  "- [x] task",
+  "",
+  "```mermaid",
+  "graph TD; A-->B;",
+  "```",
+  "",
+  "Inline math $x^2 + y^2$ and email <captain@example.test> with footnote [^safe].",
+  "Image ![diagram](img_v2_fixture) and mention <at id=all></at> remain literal.",
+  "",
+  "Setext source",
+  "=============",
+  "",
+  "    printf 'indented code\\n'",
+  "",
+  "<details>",
+  "<summary>More</summary>",
+  "Literal details body.",
+  "</details>",
+  "",
+  "<section>",
+  "Raw HTML body.",
+  "</section>",
+  "",
+  "[^safe]: Footnote destination.",
+].join("\n");
+const postRendered = renderFeishuPostMarkdown(postSource);
+assert.equal(renderFeishuPostMarkdown(postRendered), postRendered, "post Markdown rendering was not idempotent");
+for (const supported of ["# Supported heading", tableBlock, quoteBlock, "- [x] task", "```mermaid\ngraph TD; A-->B;\n```", "[link](https://example.test/safe)", "**bold**", "~~strike~~"]) {
+  assert(postRendered.includes(supported), `post Markdown rendering lost supported source: ${supported}`);
+}
+for (const literal of ["`$x^2 + y^2$`", "`<captain@example.test>`", "`[^safe]`", "`![diagram](img_v2_fixture)`", "`<at id=all></at>`", "```markdown\nSetext source\n=============\n```", "```markdown\n    printf 'indented code\\n'\n```", "```html\n<details>", "```html\n<section>", "```markdown\n[^safe]: Footnote destination.\n```"]) {
+  assert(postRendered.includes(literal), `post Markdown rendering did not preserve unsupported source literally: ${literal}`);
+}
+for (const whitespaceIndented of ["hello\n    \nworld", "hello\n\t\nworld", "trailing\n    "]) {
+  const whitespaceRendered = renderFeishuPostMarkdown(whitespaceIndented);
+  for (const word of whitespaceIndented.split(/\s+/u).filter(Boolean)) {
+    assert(whitespaceRendered.includes(word), `post Markdown rendering lost ${word} around a whitespace-only indented line`);
+  }
+  assert.equal(renderFeishuPostMarkdown(whitespaceRendered), whitespaceRendered, "post Markdown rendering was not idempotent for whitespace-only indented lines");
+}
+const displayMathSource = "The result is $$E=mc^2$$ exactly.";
+const displayMathRendered = renderFeishuPostMarkdown(displayMathSource);
+assert(displayMathRendered.includes("`$$E=mc^2$$`"), "inline double-dollar display math was not preserved as one literal code span");
+assert.equal(renderFeishuPostMarkdown(displayMathRendered), displayMathRendered, "post Markdown rendering was not idempotent for inline double-dollar display math");
+const postRegistration = registerAssistantOutbound(home, {
+  text: postSource,
+  assistantEntryId: "0000001b",
+  sessionOrder: session.entries.length + 4,
+  sessionEntryTimestamp: "2026-08-12T00:00:15.000Z",
+  sessionId,
+  bindingGeneration: binding.generation,
+});
+assert.equal(postRegistration.status, "registered", "mixed post Markdown did not register through the public state interface");
+const postClaim = claimNextOutbound(home);
+assert.equal(postClaim.outbox.text, postSource, "post registration changed exact Assistant source identity");
+assert.equal(postClaim.outbox.rendered_text_hash, `sha256:${sha(postRendered)}`, "post registration lost exact rendered-output identity");
+assert.equal(postClaim.outbox.chunks.map((chunk) => chunk.chunk).join(""), postRendered, "post registration chunks changed rendered output");
+receiptOutbound(home, postClaim, { messageId: "om_postMarkdown1234", chatId: "oc_chat1234" });
+const oversizedTableSource = `${tableBlock}\n| ${"x".repeat(80)} | ready |`;
+const oversizedTable = registerAssistantOutbound(home, {
+  text: oversizedTableSource,
+  assistantEntryId: "0000001c",
+  sessionOrder: session.entries.length + 5,
+  sessionEntryTimestamp: "2026-08-12T00:00:16.000Z",
+  sessionId,
+  bindingGeneration: binding.generation,
+  maxChunkBytes: 64,
+});
+assert.equal(oversizedTable.status, "chunk-refused", "oversize indivisible table did not stay local");
+assert(!JSON.stringify(oversizedTable).includes("x".repeat(40)), "chunk refusal diagnostic leaked Assistant content");
+const renderedResourceRefusal = registerAssistantOutbound(home, {
+  text: "$x$",
+  assistantEntryId: "0000001d",
+  sessionOrder: session.entries.length + 6,
+  sessionEntryTimestamp: "2026-08-12T00:00:17.000Z",
+  sessionId,
+  bindingGeneration: binding.generation,
+  maxOutboundBytes: 4,
+});
+assert.equal(renderedResourceRefusal.status, "resource-refused", "render expansion bypassed the outbound resource limit");
+assert.equal(claimNextOutbound(home), undefined, "refused post Markdown created outbound work");
 
 const unsafeHome = join(home, "unsafe-home");
 mkdirSync(join(unsafeHome, "data"), { recursive: true });
@@ -794,12 +912,12 @@ async function send(kind, payload) {
     try { mkdirSync(lock); }
     catch { if (process.env.FM_FAKE_SDK_OVERLAP) writeFileSync(process.env.FM_FAKE_SDK_OVERLAP, "overlap\n"); }
   }
-  const card = JSON.parse(payload.data.content);
-  const markdown = card?.elements?.length === 1 && card.elements[0]?.tag === "markdown"
-    ? card.elements[0].content
+  const post = JSON.parse(payload.data.content);
+  const markdown = post?.zh_cn?.content?.length === 1 && post.zh_cn.content[0]?.length === 1 && post.zh_cn.content[0][0]?.tag === "md"
+    ? post.zh_cn.content[0][0].text
     : undefined;
-  log({ type: "send", kind, uuid: payload.data.uuid, msgType: payload.data.msg_type, card, markdown, replyTo: payload.path?.message_id ?? null, receiveId: payload.data.receive_id ?? null });
-  if (payload.data.msg_type !== "interactive" || typeof markdown !== "string" || card?.config?.wide_screen_mode !== true) {
+  log({ type: "send", kind, uuid: payload.data.uuid, msgType: payload.data.msg_type, post, markdown, replyTo: payload.path?.message_id ?? null, receiveId: payload.data.receive_id ?? null });
+  if (payload.data.msg_type !== "post" || typeof markdown !== "string" || Object.keys(post).length !== 1 || post.zh_cn?.title !== "") {
     const error = new Error("unsupported outbound fixture format");
     error.response = { status: 400, data: { code: 230099 } };
     throw error;
@@ -823,7 +941,7 @@ async function send(kind, payload) {
   if (mode === "unsupported-once" && mark && !existsSync(mark)) {
     writeFileSync(mark, "unsupported\n");
     if (lock) rmSync(lock, { recursive: true, force: true });
-    return { code: 230099, msg: "unsupported interactive fixture" };
+    return { code: 230099, msg: "unsupported post fixture" };
   }
   await sleep(Number(process.env.FM_FAKE_SDK_SEND_DELAY_MS || 0));
   let count = 0;
@@ -1087,12 +1205,40 @@ import { bindSession, createPairing, registerAssistantOutbound } from "./bin/fm-
 const home = process.env.FM_HOME;
 createPairing(home, { appIdFingerprint: process.env.APP_FINGERPRINT, allowedUser: "ou_captain1234", allowedChat: "oc_chat1234" });
 const binding = bindSession(home, { sessionId: process.env.SID, sessionFile: process.env.SESSION_FILE, sessionCwd: process.env.SESSION_DIR, headerId: process.env.SID, headerCwd: process.env.SESSION_DIR });
+const routine = registerAssistantOutbound(home, {
+  text: " Captain，shipshape. ",
+  assistantEntryId: "feed0000",
+  sessionOrder: 0,
+  sessionEntryTimestamp: "2026-08-12T00:00:00.000Z",
+  sessionId: binding.session_id,
+  bindingGeneration: binding.generation,
+});
+if (routine.status !== "skipped" || routine.reason !== "routine") throw new Error(JSON.stringify(routine));
 const markdown = [
-  "# Markdown reply",
+  "# Post Markdown reply",
   "",
-  'Special characters: "quotes", \\ backslash, <tag>, &, and snowman ☃.',
+  "| Form | State |",
+  "| --- | --- |",
+  "| table | kept |",
   "",
-  "[full link](https://example.test/kept?x=1&y=two) and `inline *code*`.",
+  "> quote line one",
+  "> quote line two",
+  "",
+  "1. ordered",
+  "2. [x] task",
+  "",
+  "[full link](https://example.test/kept?x=1&y=two), `inline *code*`, **bold**, and ~~strike~~.",
+  "Unsupported $x^2$ <captain@example.test> [^note] ![image](img_v2_fixture) <at id=all></at>.",
+  "",
+  "Setext source",
+  "--------------",
+  "",
+  "<details>",
+  "<summary>Literal</summary>",
+  "Body",
+  "</details>",
+  "",
+  "[^note]: Literal footnote definition.",
   "",
   "```sh",
   `printf '%s\\n' 'literal $(touch ${process.env.TOUCH_SENTINEL})'`,
@@ -1199,13 +1345,14 @@ const sends = rows.filter((row) => row.type === "send");
 const outboxDir = join(process.env.FM_HOME, "state", "feishu", "outbox");
 const outbox = readdirSync(outboxDir).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(outboxDir, name), "utf8"))).find((record) => record.assistant_entry_id === "feed0001");
 if (!outbox || sends.length !== 2 || new Set(sends.map((row) => row.uuid)).size !== 1) process.exit(1);
-if (sends.some((row) => row.kind !== "create" || row.receiveId !== "oc_chat1234" || row.replyTo !== null || row.msgType !== "interactive")) process.exit(1);
-if (sends.some((row) => row.markdown !== outbox.text || row.card?.elements?.length !== 1 || row.card.elements[0]?.tag !== "markdown" || row.card?.config?.wide_screen_mode !== true)) process.exit(1);
-if (!sends.every((row) => row.markdown.includes("\n") && row.markdown.includes("[full link](https://example.test/kept?x=1&y=two)") && row.markdown.includes("`inline *code*`") && row.markdown.includes("```sh"))) process.exit(1);
+if (sends.some((row) => row.markdown.includes("shipshape"))) process.exit(1);
+if (sends.some((row) => row.kind !== "create" || row.receiveId !== "oc_chat1234" || row.replyTo !== null || row.msgType !== "post")) process.exit(1);
+if (sends.some((row) => row.markdown !== outbox.chunks[0].chunk || Object.keys(row.post).join(",") !== "zh_cn" || row.post.zh_cn?.title !== "" || row.post.zh_cn?.content?.length !== 1 || row.post.zh_cn.content[0]?.length !== 1 || row.post.zh_cn.content[0][0]?.tag !== "md")) process.exit(1);
+if (!sends.every((row) => row.markdown.includes("| Form | State |") && row.markdown.includes("> quote line one") && row.markdown.includes("2. [x] task") && row.markdown.includes("[full link](https://example.test/kept?x=1&y=two)") && row.markdown.includes("`inline *code*`") && row.markdown.includes("`$x^2$`") && row.markdown.includes("`<captain@example.test>`") && row.markdown.includes("`![image](img_v2_fixture)`") && row.markdown.includes("`<at id=all></at>`") && row.markdown.includes("```markdown\nSetext source") && row.markdown.includes("```html\n<details>") && row.markdown.includes("```sh"))) process.exit(1);
 if (!rows.some((row) => row.type === "ws-start") || !rows.some((row) => row.type === "client" && row.hasSecret === true) || rows.some((row) => JSON.stringify(row).includes(secret))) process.exit(1);
 JS
 then
-  fail "SDK Markdown card encoding, canonical bound-chat message.create, stable UUID, or credential-redaction evidence was wrong"
+  fail "SDK post Markdown encoding, canonical bound-chat message.create, stable UUID, or credential-redaction evidence was wrong"
 fi
 [ "$(FM_HOME="$TRANSPORT_HOME" node bin/fm-feishu-state.mjs status --public | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).outbound_pending)))')" -eq 0 ] \
   || fail "SDK success did not publish a durable outbound receipt"
@@ -1226,7 +1373,7 @@ sleep 1.1
 env PATH="$FAKE_BIN:$PATH" "${COMMON_SDK_ENV[@]}" FM_FAKE_SDK_SEND_MODE=unsupported-once FM_FEISHU_ONCE_SETTLE_MS=20 \
   node bin/fm-feishu-transport.mjs run --once
 # shellcheck disable=SC2016 # Backticks are literal JavaScript fixture data.
-node -e 'const fs=require("fs");const sends=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse).filter(r=>r.type==="send");if(sends.length!==2||new Set(sends.map(r=>r.uuid)).size!==1||sends.some(r=>r.msgType!=="interactive"||r.markdown!=="Unsupported delivery keeps **Markdown** with `code` and no plain-text fallback."||Object.hasOwn(r.card,"text")))process.exit(1)' "$SDK_LOG" \
+node -e 'const fs=require("fs");const sends=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse).filter(r=>r.type==="send");if(sends.length!==2||new Set(sends.map(r=>r.uuid)).size!==1||sends.some(r=>r.msgType!=="post"||r.markdown!=="Unsupported delivery keeps **Markdown** with `code` and no plain-text fallback."||r.post?.zh_cn?.content?.[0]?.[0]?.tag!=="md"||Object.hasOwn(r.post,"text")))process.exit(1)' "$SDK_LOG" \
   || fail "an unsupported Markdown delivery changed payload type, content, or stable retry identity"
 
 FM_HOME="$TRANSPORT_HOME" SESSION_ID="$SID" node --input-type=module <<'JS'
@@ -1242,7 +1389,7 @@ env PATH="$FAKE_BIN:$PATH" "${COMMON_SDK_ENV[@]}" FM_FAKE_SDK_SEND_MODE=rate-lim
 sleep 1.1
 env PATH="$FAKE_BIN:$PATH" "${COMMON_SDK_ENV[@]}" FM_FAKE_SDK_SEND_MODE=rate-limit-once FM_FEISHU_ONCE_SETTLE_MS=20 \
   node bin/fm-feishu-transport.mjs run --once
-node -e 'const fs=require("fs");const sends=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse).filter(r=>r.type==="send");if(sends.length!==2||sends[1].at-sends[0].at<900||new Set(sends.map(r=>r.uuid)).size!==1||sends.some(r=>r.msgType!=="interactive"))process.exit(1)' "$SDK_LOG" \
+node -e 'const fs=require("fs");const sends=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse).filter(r=>r.type==="send");if(sends.length!==2||sends[1].at-sends[0].at<900||new Set(sends.map(r=>r.uuid)).size!==1||sends.some(r=>r.msgType!=="post"))process.exit(1)' "$SDK_LOG" \
   || fail "SDK Retry-After mapping shortened the delay, changed UUID, or fell back from Markdown"
 
 rm -f "$SDK_SEND_MARK" "$SDK_OVERLAP" "$SDK_SEND_LOCK"
@@ -1265,13 +1412,24 @@ const text = [
   "",
   "[chunk-safe link](https://example.test/chunk-safe)",
   "",
+  "| Column | State |",
+  "| --- | --- |",
+  "| table | whole |",
+  "",
+  "> quote line one",
+  "> quote line two",
+  "",
+  "- list item one",
+  "- [x] list task two",
+  "  continuation stays attached",
+  "",
   "```js",
   'const value = "<&>";',
   "```",
   "",
   "Multiline tail ☃.",
 ].join("\n");
-const result = registerAssistantOutbound(process.env.FM_HOME, { text, assistantEntryId: "feed0004", sessionOrder: 4, sessionEntryTimestamp: "2026-08-12T00:00:04.000Z", sessionId: process.env.SESSION_ID, bindingGeneration: binding.generation, maxChunkBytes: 60 });
+const result = registerAssistantOutbound(process.env.FM_HOME, { text, assistantEntryId: "feed0004", sessionOrder: 4, sessionEntryTimestamp: "2026-08-12T00:00:04.000Z", sessionId: process.env.SESSION_ID, bindingGeneration: binding.generation, maxChunkBytes: 72 });
 if (result.status !== "registered" || result.chunks < 2) throw new Error(JSON.stringify(result));
 JS
 settled=0
@@ -1297,10 +1455,13 @@ const sends = rows.filter((row) => row.type === "send");
 const outboxDir = join(process.env.FM_HOME, "state", "feishu", "outbox");
 const outbox = readdirSync(outboxDir).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(outboxDir, name), "utf8"))).find((record) => record.assistant_entry_id === "feed0004");
 assert(outbox && outbox.chunks.length > 1, "multi-chunk Markdown outbox was absent");
-assert.equal(sends.length, outbox.chunks.length, "one Markdown card was not sent per deterministic chunk");
-assert.equal(sends.map((row) => row.markdown).join(""), outbox.text, "Markdown card chunks changed finalized Assistant text");
+assert.equal(sends.length, outbox.chunks.length, "one Markdown post was not sent per deterministic chunk");
+assert.equal(sends.map((row) => row.markdown).join(""), outbox.chunks.map((chunk) => chunk.chunk).join(""), "Markdown post chunks changed rendered Assistant output");
 assert.deepEqual(sends.map((row) => row.uuid), outbox.chunks.map((chunk) => chunk.idempotency_key), "Markdown chunk delivery changed stable identities or order");
-assert(sends.every((row) => row.msgType === "interactive" && row.card?.elements?.length === 1 && row.card.elements[0]?.tag === "markdown"), "a chunk did not use the supported Markdown card envelope");
+for (const block of ["| Column | State |\n| --- | --- |\n| table | whole |", "> quote line one\n> quote line two", "- list item one\n- [x] list task two\n  continuation stays attached"]) {
+  assert(sends.some((row) => row.markdown.includes(block)), `structured post Markdown was split across messages: ${block.split("\n", 1)[0]}`);
+}
+assert(sends.every((row) => row.msgType === "post" && row.post?.zh_cn?.content?.length === 1 && row.post.zh_cn.content[0]?.length === 1 && row.post.zh_cn.content[0][0]?.tag === "md"), "a chunk did not use the fixed Markdown post envelope");
 JS
 
 OWNER_BACKUP="$TMP_ROOT/owner.json"
@@ -1314,4 +1475,4 @@ cp "$OWNER_BACKUP" "$OWNER_PATH"
 FM_HOME="$TRANSPORT_HOME" bash bin/fm-feishu-transport.sh stop >"$TMP_ROOT/owner-stop.out"
 grep -Fq 'feishu transport stopped' "$TMP_ROOT/owner-stop.out" || fail "verified SDK transport owner did not stop gracefully"
 
-pass "official-SDK long-connection transport is inert, identity-fenced, deduplicated, and durably serialized Markdown outbound"
+pass "official-SDK long-connection transport is inert, identity-fenced, deduplicated, and durably serialized post Markdown outbound"

@@ -9,9 +9,9 @@ The network side uses the official `@larksuiteoapi/node-sdk` long-connection cli
 
 The MVP allows one exact Feishu user in one exact P2P chat.
 Inbound supports plain text only.
-Outbound mirrors every finalized non-empty Assistant text persisted after the binding boundary as Feishu message-card Markdown, regardless of whether Feishu, native TUI, watcher, turn-end, or another normal Pi source caused the turn.
+Outbound mirrors every finalized non-empty Assistant text persisted after the binding boundary as Feishu post rich text containing one Markdown element, regardless of whether Feishu, native TUI, watcher, turn-end, or another normal Pi source caused the turn.
 The exact fixed responses `Captain, shipshape.`, `Captain，shipshape.`, and `船长，处理中。` stay local and are never pushed.
-Mirroring adds no classification, summarization, rewriting, or second model call.
+Mirroring adds no model classification, summarization, semantic rewrite, or second model call beyond the deterministic carrier-safety renderer described in the outbound contract.
 Group chats, inbound cards, card interactions, attachments, webhooks, multi-home routing, remote slash commands, and attachment downloads are unsupported.
 Slash-like Feishu text is ordinary user content and cannot invoke a Pi slash command or prompt template.
 
@@ -91,7 +91,7 @@ Automatic startup invokes `bin/fm-feishu-transport.sh` for configuration validat
 `bin/fm-feishu-transport.sh status` prints a body-free and identifier-free health summary.
 
 The transport creates one SDK `WSClient` and one `EventDispatcher` for `im.message.receive_v1`.
-It uses one SDK `Client` for P2P chat verification and canonical outbound interactive-card `message.create` calls to the bound chat.
+It uses one SDK `Client` for P2P chat verification and canonical outbound post `message.create` calls to the bound chat.
 It verifies the configured app ID against the derived paired fingerprint and verifies `chat_mode=p2p` before changing a configured binding, before starting the long connection, and after reconnect.
 A current owner and binding generation must still match before any outbound claim or inbound publication.
 A second transport owner for the same Firstmate home is refused.
@@ -145,19 +145,27 @@ The exact fixed responses `Captain, shipshape.`, `Captain，shipshape.`, and `�
 Only surrounding whitespace is normalized before that exact match, so a longer response that merely contains one of these phrases as a substring is still delivered, and a historical outbound record persisted by an earlier build whose exact match missed surrounding whitespace is neutralized locally at the next reconciliation without any remote send.
 Thinking blocks, partial streams, tool calls and results, user/system/custom messages, and TUI-only alerts are not mirrored.
 
-Each eligible message is sent with SDK `message.create` to the exact bound P2P chat as an `interactive` message card containing exactly one `markdown` element.
-The element content is the exact finalized Assistant chunk, structurally encoded with JSON so quotes, backslashes, angle brackets, ampersands, Unicode, multiline text, links, inline code, and fenced code are never interpolated into the envelope.
+Each eligible message is sent with SDK `message.create` to the exact bound P2P chat with `msg_type: "post"`.
+Its deterministic `zh_cn` locale object has an empty title and exactly one content row containing one `{ "tag": "md", "text": <chunk> }` element.
+There is no ordinary-reply interactive-card path, carrier negotiation, or fallback between carriers.
 General Assistant delivery never requires or replies to an originating Feishu message.
 A fixed credential-pattern match refuses the whole message before its text is persisted in channel state and raises one local alert.
 
-Long output is split only at deterministic UTF-8, paragraph, line, word, and Markdown-construct boundaries.
-Complete URLs, Markdown links, inline code spans, autolinks, and fenced code blocks are never split or truncated.
-If one such construct exceeds the per-chunk limit, the entire response stays local and raises one local alert rather than sending malformed Markdown.
-Concatenating all Markdown element contents reproduces the exact finalized Assistant text.
+The renderer preserves headings, GFM tables, block quotes, ordered, unordered, and task lists, fenced code blocks and their language labels, inline code, links, emphasis, and strikethrough as Markdown.
+It keeps fenced Mermaid source visible as code rather than claiming that Feishu rendered a diagram.
+Math, Setext headings, indented code blocks, raw HTML blocks, `<details>` blocks, email autolinks, and footnote references and definitions are represented as inline or fenced literal source.
+Markdown images, reference images, Feishu mention markup, and broad mention spellings remain literal rather than uploading an image, inventing a user, or producing a mention side effect.
+The transformation is deterministic, bounded to a fixed multiple of the source size, and idempotent.
+
+Long rendered output is split only at deterministic UTF-8, paragraph, line, word, and Markdown-construct boundaries.
+Complete URLs, Markdown links, inline code spans, autolinks, fenced code blocks, GFM tables, contiguous block quotes, and list structures are never split or truncated.
+If one indivisible construct exceeds the per-chunk limit, the entire response stays local and raises one local alert rather than sending malformed Markdown.
+The durable source text and hash remain exact, while the ordered chunks and one rendered-output hash carry the exact post Markdown identity without storing a second complete rendered-text field.
+Concatenating all Markdown element contents reproduces that exact rendered output.
 Every chunk carries a stable SDK `uuid` derived from the durable event and chunk index.
 The SDK response message ID and chat ID become the durable receipt.
-A definite unsupported response or SDK error remains retryable with its bounded delay and never falls back to plain text.
-An ambiguous request-without-response retries the same interactive-card payload and UUID only inside the one-hour idempotency window and then becomes delivery uncertainty.
+A definite unsupported response or SDK error remains retryable with its bounded delay and never falls back to a card or plain text.
+An ambiguous request-without-response retries the same post payload and UUID only inside the one-hour idempotency window and then becomes delivery uncertainty.
 
 ## Private state and diagnostics
 
@@ -178,7 +186,7 @@ A missing SDK dependency reports its existing optional-feature prerequisite with
 
 The focused regression uses a local mock of the official SDK constructor, long-connection callbacks, reconnect callbacks, P2P chat API, and message APIs.
 It performs no real authentication, network connection, app configuration, event consumption, Pi-session mutation, or Feishu send.
-It proves absent and disabled inertness, strict data parsing, ownership and permission refusal, symlink refusal, silent idempotent activation, session replacement, owner replacement, transport recovery, durable disable, credential rejection and redaction, native TUI non-interception, direct operational follow-up delivery, native Feishu steer submission, exact session and generation fencing, all-origin finalized Assistant mirroring, pre-binding-history exclusion, exact routine-response exclusion, restart deduplication, non-Assistant exclusion, Markdown-aware chunking and refusal, exact interactive-card Markdown encoding, canonical bound-chat `message.create`, replay deduplication, app/chat refusal, stable outbound UUIDs, definite failure without plain-text fallback, ambiguous retry handling, owner-verified stop, and absence of the former command transport path.
+It proves absent and disabled inertness, strict data parsing, ownership and permission refusal, symlink refusal, silent idempotent activation, session replacement, owner replacement, transport recovery, durable disable, credential rejection and redaction, native TUI non-interception, direct operational follow-up delivery, native Feishu steer submission, exact session and generation fencing, all-origin finalized Assistant mirroring, pre-binding-history exclusion, exact routine-response exclusion and historical-record neutralization, restart deduplication, non-Assistant exclusion, deterministic post rendering, supported-structure preservation, unsupported-source literal preservation, table, quote, and list-aware chunking and refusal, exact post locale and `md` element encoding, canonical bound-chat `message.create`, replay deduplication, app/chat refusal, stable outbound UUIDs, definite failure without carrier fallback, ambiguous retry handling, single-flight serialization, owner-verified stop, and absence of the former command transport path.
 
 That mock does not prove a real app's scopes, developer-console long-connection selection, tenant policy, or production network reachability.
 A future live integration check requires explicit operator authorization and disposable app credentials.
