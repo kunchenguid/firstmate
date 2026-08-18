@@ -146,7 +146,8 @@
 #   catch when firstmate itself is the project and its homes are worktrees of
 #   that same repository. The marker alone is enough to refuse; keeping a
 #   returned pool worktree free of one belongs to the home lifecycle
-#   (remove_firstmate_home in bin/fm-teardown.sh), not to this gate.
+#   (bin/fm-home-return-lib.sh, called by retirement and by failed-seed
+#   rollback), not to this gate.
 #   Secondmate spawns keep skipping this assertion.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
@@ -1724,8 +1725,9 @@ git_common_dir_real() {  # <dir>
 # demanding more of the shape would arm a worker inside a marked home that had
 # lost any one of its operational directories. The marker outliving a worktree's
 # return to the pool is a lifecycle defect and is fixed at the lifecycle owner
-# (remove_firstmate_home in bin/fm-teardown.sh clears identity before the
-# return), never by teaching this gate to overlook an identity it can see.
+# (bin/fm-home-return-lib.sh clears identity before the return, on both paths
+# that release a lease), never by teaching this gate to overlook an identity it
+# can see.
 firstmate_home_reason() {  # <resolved-dir>
   local dir=$1 candidate owner
   if [ -z "$dir" ]; then

@@ -186,7 +186,7 @@ Path shape carries no weight in either decision, because any other repository is
 | --- | --- | --- |
 | tmux, herdr, zellij, cmux | Treehouse pools the worktree, and each adapter opens the task endpoint with the project as its working directory, so `treehouse get` acquires a worktree of the project's own repository | Verified live: a pooled worktree and its project checkout resolve to the same git common directory, and a worktree created from an already linked worktree resolves there too, so the pooled shape passes membership and is separated from a firstmate home by the isolation check alone |
 | orca | Orca registers the project repository and returns its own worktree path, which the spawn validates directly from that result instead of a pane path | Verified against the Orca call site with a fake Orca CLI: a foreign worktree refuses and a worktree of the project's repository still spawns |
-| relaunch, every backend | The worktree recorded in the task's metadata | Same assertion applies before a ship or scout replacement is armed; a secondmate relaunch skips it exactly as a secondmate spawn does |
+| relaunch, every backend | The worktree recorded in the task's metadata | Verified at that call site: a task whose recorded worktree belongs to another repository is refused before a ship or scout replacement is armed, where the unfixed assertion armed one; a secondmate relaunch skips it exactly as a secondmate spawn does |
 | self-hosted fleet, every backend | firstmate is its own project, so its active home and its leased secondmate homes are linked worktrees of the project's repository and pass membership | Refused by the isolation check on its own diagnostic, while an ordinary linked worktree of that same repository still spawns |
 | secondmate spawns | Not applicable after inspecting the spawn path: a secondmate home is a firstmate home rather than a project worktree, so the assertion is deliberately skipped there and is unchanged | Unchanged |
 
@@ -213,12 +213,14 @@ ok - a symlinked operational override still identifies the home it points into
 ok - an isolated worktree still spawns when firstmate's own homes share that repository
 ok - a project nested inside another repository refuses the launch instead of borrowing its identity
 ok - a project below its own repository's top level is refused without accusing a foreign repository
+ok - a relaunch whose recorded worktree belongs to another repository is refused
 ok - an Orca worktree belonging to another repository is refused
 ok - an Orca worktree of the project's own repository still spawns
 ```
 
 The unreadable-identity case drives the query to fail, to return empty, and to return an unresolvable path, and every one of the three refuses.
 The self-hosted cases and the nested-project case were each run against the unfixed assertion first, where all three spawned instead of refusing, reporting `worktree=<firstmate home>`, `worktree=<seeded home>`, and `worktree=<enclosing repository's worktree>` respectively.
+The relaunch case reuses a recorded worktree rather than acquiring one, and was run against the unfixed assertion too, where it armed a replacement agent into the foreign worktree the earlier acceptance had recorded.
 The isolation refusal names what identified the home: the active firstmate home, the firstmate repository root, the seeded-home marker, or a directory holding the running fleet's operational directories.
 Each of those four signals has its own case, so the enumeration claims nothing that is not driven through the executable.
 The marker decides on its own: a checkout a secondmate identity was written into is refused whatever else of that home survives, and a marked home whose operational directory was symlinked away is refused too, so breaking a home's shape cannot argue it into being an ordinary task worktree.
@@ -237,7 +239,7 @@ Both lifecycle paths that hand a leased home back call it - retirement in `bin/f
 What counts as a retirable home is one boundary shared by the pooled and the standalone path, `validate_firstmate_operational_dirs_for_removal`, and the pooled path adds no rule of its own.
 It stages exactly what removing the home outright would have removed: every link entry, plus that link's resolved target whenever the target lives inside the home, folded into whichever owned path already contains it.
 That covers an identity file's target as much as an operational directory's, and a target outside the home is never followed, which is also what removing the home would have left alone.
-A target that escapes the home, dangles, resolves nowhere, or is the home itself is refused on both paths by that one validator.
+An operational directory whose target escapes the home, dangles, resolves nowhere, or is the home itself is refused on both paths by that one validator.
 Which refusals may release a pooled lease is a boundary of its own: proven foreign ownership - the marker present and naming a different secondmate - answers with its own outcome and is the only one that hands the lease back, because it is the only refusal that touched nothing this run wrote.
 Every other refusal or failure keeps the lease, since releasing a slot that still carries this run's markers hands the pool a worktree the spawn-time isolation guard refuses for every task dispatched into it, so nothing is handed back half cleared.
 

@@ -170,7 +170,7 @@ For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved tas
 Membership is positive proof that the worktree and the project share one git common directory rather than an inference from the path, because any other repository is a real worktree root distinct from the project too, and that identity is the project's own only when the configured project directory is itself its repository's top level.
 Membership is not isolation, so a second, independent check refuses a worker root that is one of firstmate's own homes.
 That check is what covers the self-hosted fleet, where firstmate is its own project and its homes are linked worktrees of the very repository the task belongs to, so repository identity alone would accept them.
-A secondmate identity marker is by itself enough to refuse a checkout, because a directory an identity was written into is not a task worktree whatever else of that home is still on disk; keeping a pooled checkout free of one is retirement's job rather than the launch gate's.
+A secondmate identity marker is by itself enough to refuse a checkout, because a directory an identity was written into is not a task worktree whatever else of that home is still on disk; keeping a pooled checkout free of one is the home lifecycle's job rather than the launch gate's.
 Either property that cannot be established refuses the launch instead of passing, and secondmate spawns and secondmate relaunches are outside this assertion because a secondmate home is a firstmate home rather than a project worktree.
 
 Giving a leased secondmate home back to the pool is the other half of that boundary, and `fm-home-return-lib.sh` owns it.

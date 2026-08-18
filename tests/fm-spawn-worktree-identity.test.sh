@@ -20,6 +20,13 @@
 # repository identity cannot be read, and a project whose repository identity
 # cannot be read.
 #
+# All three call sites are driven, because each reaches the assertion with a
+# worktree from a different source: the treehouse-get path from the settled pane
+# cwd, the Orca path from its own worktree-create result, and relaunch from the
+# worktree already recorded in state/<id>.meta - which is where an acceptance
+# this gate should have refused ends up, so a replacement agent would inherit it
+# without any acquisition running again.
+#
 # Repository membership alone does not prove isolation, so the self-hosted
 # cases cover the configuration where firstmate IS the project: a firstmate home
 # there is a linked worktree of the project's own repository, so it shares the
@@ -68,10 +75,16 @@ case "$*" in
     printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
     exit 0
     ;;
+  *"#{pane_current_command}"*)
+    # Only the relaunch case, which has to reach a positively agent-free
+    # endpoint, asks for anything but the default here.
+    printf '%s\n' "${FM_FAKE_PANE_COMMAND:-firstmate}"
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows) [ -z "${FM_FAKE_WINDOWS:-}" ] || printf '%s\n' "$FM_FAKE_WINDOWS"; exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys) exit 0 ;;
 esac
@@ -245,6 +258,23 @@ run_identity_spawn() {
     FM_FAKE_GIT_COMMON_DIR_MODE="${FM_FAKE_GIT_COMMON_DIR_MODE:-}" \
     PATH="$CASE_FAKEBIN:$PATH" \
     "$SPAWN" "$id" "$CASE_PROJ" --mode no-mistakes --yolo off 2>&1
+}
+
+# Relaunch reaches the assertion from the worktree already recorded in
+# state/<id>.meta instead of from a fresh acquisition, so it needs an existing
+# task record rather than a project positional. The fake tmux answers the
+# endpoint's cwd with that same recorded path, which is what a pane that never
+# moved reports, and its empty list-windows answer leaves the endpoint agent-free
+# so the relaunch reaches the isolation gate rather than the live-agent refusal.
+run_relaunch_identity_spawn() {  # <id> <recorded-worktree>
+  local id=$1 pane=$2
+  FM_ROOT_OVERRIDE="${CASE_FM_ROOT:-}" FM_HOME="$CASE_HOME" \
+    FM_STATE_OVERRIDE="${CASE_STATE:-$CASE_HOME/state}" FM_DATA_OVERRIDE="$CASE_HOME/data" \
+    FM_PROJECTS_OVERRIDE="$CASE_HOME/projects" FM_CONFIG_OVERRIDE="$CASE_HOME/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$pane" FM_FAKE_PANE_COMMAND=zsh FM_FAKE_WINDOWS="fm-$id" \
+    PATH="$CASE_FAKEBIN:$PATH" \
+    "$SPAWN" "$id" --relaunch 2>&1
 }
 
 # Orca reaches the same assertion from its own worktree-create result instead of
@@ -655,6 +685,38 @@ test_own_repository_subdirectory_project_is_refused() {
   pass "a project below its own repository's top level is refused without accusing a foreign repository"
 }
 
+# Relaunch is the call site the live incident hands its damage to next: the
+# foreign worktree the unfixed assertion recorded in state/<id>.meta is the very
+# path a relaunch reuses, without ever running treehouse get again, so a
+# replacement agent would be armed against that repository on the strength of the
+# earlier acceptance alone. The endpoint agrees with the record here - the pane
+# is sitting in exactly the recorded worktree - so the pre-relaunch endpoint
+# check passes and the refusal has to come from the identity gate.
+test_relaunch_into_foreign_repository_worktree_is_refused() {
+  local id out status
+  id=identity-relaunch-other-repo-if
+  make_identity_case identity-relaunch-other-repo "$id"
+  {
+    printf 'window=%s\n' "firstmate:fm-$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s\n' "$CASE_OTHER_WT"
+    printf 'project=%s\n' "$CASE_PROJ"
+    printf 'harness=codex\n'
+    printf 'kind=ship\n'
+    printf 'mode=no-mistakes\n'
+    printf 'yolo=off\n'
+  } > "$CASE_HOME/state/$id.meta"
+
+  out=$(run_relaunch_identity_spawn "$id" "$CASE_OTHER_WT")
+  status=$?
+  [ "$status" -ne 0 ] || fail "relaunch accepted a recorded worktree of an unrelated repository"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "relaunch yielded a worktree that belongs to a different repository" \
+    "the relaunch call site did not refuse on the repository mismatch"
+  assert_not_contains "$out" "spawned $id" \
+    "relaunch launched a replacement agent into an unrelated repository's worktree"
+  pass "a relaunch whose recorded worktree belongs to another repository is refused"
+}
+
 # Orca never runs treehouse get: it hands fm-spawn its own worktree path, so its
 # call site needs the same proof, and must still accept a real worktree of the
 # project's repository.
@@ -706,6 +768,7 @@ test_selfhosted_symlinked_operational_home_is_refused
 test_selfhosted_project_worktree_still_spawns
 test_nested_project_directory_is_refused
 test_own_repository_subdirectory_project_is_refused
+test_relaunch_into_foreign_repository_worktree_is_refused
 if command -v node >/dev/null 2>&1; then
   test_orca_worktree_of_another_repository_is_refused
   test_orca_project_worktree_still_spawns
