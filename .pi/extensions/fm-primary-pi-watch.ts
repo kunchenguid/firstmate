@@ -53,6 +53,8 @@ type SessionGeneration = {
   retryTimer: ReturnType<typeof setTimeout> | null;
   retryFailures: number;
   restoring: boolean;
+  wakePending: boolean;
+  rearmAfterSettle: boolean;
   seq: number;
 };
 
@@ -193,6 +195,8 @@ function createGeneration(): SessionGeneration {
     retryTimer: null,
     retryFailures: 0,
     restoring: false,
+    wakePending: false,
+    rearmAfterSettle: false,
     seq: 0,
   };
 }
@@ -449,6 +453,24 @@ export default function (pi: ExtensionAPI) {
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
         owner.retryFailures = 0;
+        if (owner.wakePending) {
+          // The already-queued wake drains every durable row, including anything
+          // appended while its handling turn is pending. Starting another successor
+          // here can only replay the same recovery episode into Pi's follow-up queue.
+          owner.rearmAfterSettle = true;
+          return;
+        }
+        owner.wakePending = true;
+        if (classification.message === "check: rearm-resurface") {
+          owner.rearmAfterSettle = true;
+          void sendWake(owner, classification.message).catch(() => {
+            if (!generationIsLive(owner)) return;
+            owner.wakePending = false;
+            owner.rearmAfterSettle = false;
+            scheduleRetry(owner, "watcher: FAILED - Pi extension could not deliver the recovery wake", predecessor);
+          });
+          return;
+        }
         owner.restoring = true;
         void (async () => {
           const restoration = await restoreAfterActionableClose(owner, predecessor);
@@ -457,6 +479,11 @@ export default function (pi: ExtensionAPI) {
           const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
           await sendWake(owner, message, restoration.recovery);
         })().catch(() => {
+          if (!generationIsLive(owner)) return;
+          owner.restoring = false;
+          owner.wakePending = false;
+          owner.rearmAfterSettle = false;
+          scheduleRetry(owner, "watcher: FAILED - Pi extension could not deliver the actionable wake", predecessor);
         });
         return;
       }
@@ -486,6 +513,16 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on?.("session_shutdown", () => {
     stopGeneration(generation);
+  });
+  pi.on?.("agent_settled", () => {
+    const owner = generation;
+    if (!generationIsLive(owner)) return;
+    if (owner.restoring) return;
+    owner.wakePending = false;
+    if (!owner.rearmAfterSettle) return;
+    owner.rearmAfterSettle = false;
+    const result = startArm(owner);
+    if (!result.ok) surfaceFailure(owner, `watcher: FAILED - Pi extension could not resume after handling settled\n${result.message}`);
   });
 
   pi.registerCommand?.("fm-watch-arm-pi", {

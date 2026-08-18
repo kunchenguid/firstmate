@@ -409,6 +409,170 @@ EOF
   pass "Pi actionable close starts one successor before wake delivery settles"
 }
 
+test_pi_recovery_resurface_does_not_flood_followups() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-recovery-resurface-root"
+  home="$TMP_ROOT/pi-recovery-resurface-home"
+  log="$TMP_ROOT/pi-recovery-resurface.log"
+  stop="$TMP_ROOT/pi-recovery-resurface.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'check: process-event result captured: fixture\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+  printf 'check: rearm-resurface\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const handlers = new Map();
+const prompts = [];
+const pi = {
+  on(name, handler) {
+    handlers.set(name, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage(message) {
+    prompts.push(message);
+  },
+};
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm="))
+  : [];
+async function waitFor(predicate, message) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-recovery-resurface", {}, undefined, undefined, {});
+await waitFor(() => armRows().length >= 2 && prompts.length >= 1, "initial wake and recovery successor did not complete");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (armRows().length !== 2) throw new Error(`recovery resurface launched ${armRows().length} arms before handling settled`);
+if (prompts.length !== 1) throw new Error(`recovery resurface queued ${prompts.length} follow-ups before handling settled`);
+if (!prompts[0].includes("process-event result captured")) throw new Error(`original wake was lost: ${prompts[0]}`);
+if (prompts[0].includes("rearm-resurface")) throw new Error(`recovery resurface replaced the original wake: ${prompts[0]}`);
+const settled = handlers.get("agent_settled");
+if (!settled) throw new Error("Pi watcher extension did not register agent_settled recovery");
+await settled();
+await waitFor(() => armRows().length >= 3, "handling settlement did not resume supervision");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (armRows().length !== 3) throw new Error(`handling settlement launched ${armRows().length} successor arms`);
+if (prompts.length !== 1) throw new Error(`handling settlement queued ${prompts.length} follow-ups`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi recovery resurface must not flood the follow-up queue"
+  [ -z "$out" ] || fail "Pi recovery-resurface test printed output: $out"
+  pass "Pi recovery resurface queues one wake and resumes after handling settles"
+}
+
+test_pi_standalone_resurface_delivers_once_then_rearms() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-standalone-resurface-root"
+  home="$TMP_ROOT/pi-standalone-resurface-home"
+  log="$TMP_ROOT/pi-standalone-resurface.log"
+  stop="$TMP_ROOT/pi-standalone-resurface.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'check: rearm-resurface\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const handlers = new Map();
+const prompts = [];
+const pi = {
+  on(name, handler) {
+    handlers.set(name, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage(message) {
+    prompts.push(message);
+  },
+};
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm="))
+  : [];
+async function waitFor(predicate, message) {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-standalone-resurface", {}, undefined, undefined, {});
+await waitFor(() => prompts.length >= 1, "standalone resurface wake was not delivered");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts.length !== 1) throw new Error(`standalone resurface queued ${prompts.length} follow-ups before handling settled`);
+if (!prompts[0].includes("rearm-resurface")) throw new Error(`standalone resurface wake carried the wrong reason: ${prompts[0]}`);
+if (armRows().length !== 1) throw new Error(`standalone resurface launched ${armRows().length} arms before handling settled`);
+const settled = handlers.get("agent_settled");
+if (!settled) throw new Error("Pi watcher extension did not register agent_settled recovery");
+await settled();
+await waitFor(() => armRows().length >= 2, "handling settlement did not resume supervision");
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (armRows().length !== 2) throw new Error(`handling settlement launched ${armRows().length} successor arms`);
+if (prompts.length !== 1) throw new Error(`handling settlement queued ${prompts.length} follow-ups`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi standalone resurface must deliver one wake and rearm only after settle"
+  [ -z "$out" ] || fail "Pi standalone-resurface test printed output: $out"
+  pass "Pi standalone resurface delivers one wake then rearms after settle"
+}
+
 test_pi_hung_successor_falls_back_to_typed_wake() {
   local repo home plugin log out status
   repo="$TMP_ROOT/pi-hung-successor-root"
@@ -585,9 +749,12 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 let tool = null;
+const handlers = new Map();
 const prompts = [];
 const pi = {
-  on() {},
+  on(name, handler) {
+    handlers.set(name, handler);
+  },
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
@@ -621,6 +788,9 @@ await waitFor(
 );
 if (rows().length !== 2) throw new Error(`unretired arm overlapped before fallback: ${rows().join(" | ")}`);
 if (!prompts[0]?.includes("original wake")) throw new Error(`missing original fallback: ${prompts.join(" | ")}`);
+const settled = handlers.get("agent_settled");
+if (!settled) throw new Error("Pi watcher extension did not register agent_settled recovery");
+await settled();
 writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
 for (let i = 0; i < 500; i += 1) {
   if (rows().length >= 3 && (process.env.FM_LATE_KIND !== "actionable" || prompts.some((message) => message.includes("late wake")))) break;
@@ -2155,6 +2325,8 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_recovery_resurface_does_not_flood_followups
+test_pi_standalone_resurface_delivers_once_then_rearms
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
