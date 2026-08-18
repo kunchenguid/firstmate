@@ -484,7 +484,13 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
-    clear_pause_tracking "$win" "$state"
+    # A pane-derived pause (fm-crew-state.sh's Claude account-limit-banner
+    # override) writes no paused: line, so the absent verb alone does not make
+    # the marker stale - crew_pause_still_live (bin/fm-classify-lib.sh) is the
+    # shared owner of that question.
+    if ! crew_pause_still_live "$task"; then
+      clear_pause_tracking "$win" "$state"
+    fi
   fi
 }
 

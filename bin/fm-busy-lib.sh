@@ -849,15 +849,19 @@ fm_busy_grok_tail_busy() {
 # busy claude-hook verdict, never by fm_busy_classify itself.
 #
 # Verified against claude-cli 2.1.234 (2026-08-18) by extracting strings from
-# its installed compiled bundle (~/.local/share/claude/versions/2.1.234):
-# the 5-hour window is named "session limit" and the 7-day window "weekly
-# limit" (`wLt = {five_hour:"session limit", seven_day:"weekly limit", ...}`),
+# its installed compiled bundle (~/.local/share/claude/versions/2.1.234). The
+# limit windows and their rendered names come from one source map,
+# `wLt = {five_hour:"session limit", seven_day:"weekly limit",
+# seven_day_opus:"Opus limit", seven_day_sonnet:"Sonnet limit",
+# seven_day_overage_included:"Fable 5 limit", overage:"usage credit limit"}`,
 # and a rejected turn renders "You've hit your <name> \xB7 resets <time>"
-# (functions Y4b/MYe - the \xB7 is a literal middot separator). The companion
-# auto-continue widget renders "Usage limit reached \xB7 continuing
-# automatically at <time> \xB7 esc to cancel" while armed, and "Your usage
-# limit has reset \xB7 press enter to continue" once stale and awaiting a
-# keypress (function meo). This is SOURCE verification (decompiled strings),
+# (functions Y4b/MYe - the \xB7 is a literal middot separator). All six names
+# are matched here, because any of them blocks the worker the same way. The
+# companion auto-continue widget renders "Usage limit reached \xB7 continuing
+# automatically at <time> \xB7 esc to cancel" while armed, "Your usage limit
+# has reset \xB7 press enter to continue" once stale and awaiting a keypress,
+# and "Automatic continue stopped after repeated usage-limit hits" once it
+# gives up (function meo). This is SOURCE verification (decompiled strings),
 # not a live-triggered pane capture - reaching the weekly banner live would
 # require actually exhausting a 7-day quota window, which was not done here.
 # A secondmate fleet note independently observed the rendered pane pairing
@@ -865,23 +869,58 @@ fm_busy_grok_tail_busy() {
 # (data/learnings.md, 2026-08-17), corroborating the session-limit wording
 # above from a real stuck pane.
 #
-# Matching requires the limit's name ("session limit" or "weekly limit")
-# together with one of the verified wait/reset phrases anywhere in the same
-# tail, so a bare on-screen mention of one of those names with no
-# accompanying wait signal never misclassifies. Prints the matched name line
-# as the detail (it already carries the reset hint), or fails when neither
-# banner is present.
+# Matching is anchored to the widget/composer region - the bottom-most
+# FM_BUSY_CLAUDE_LIMIT_REGION_LINES non-empty lines of the captured tail,
+# where Claude Code renders the banner and its composer - so ordinary
+# scrollback that merely mentions a limit name (a crewmate editing this very
+# file, a diff, a doc) can never trigger the override. Within that region:
+#   - a limit NAME plus one of the verified wait/reset hints on the same or an
+#     adjacent line prints that name line as the detail (it carries the reset
+#     hint), or
+#   - one of the verified auto-continue widget phrases ALONE is sufficient
+#     (the named notice scrolls out of the capture window while the widget
+#     persists, and the auto-continue-stopped state is the most wedged wait of
+#     all); the detail then reports the limit type as unspecified rather than
+#     naming a limit that was not on screen.
+# Fails when neither holds.
+FM_BUSY_CLAUDE_LIMIT_NAMES_DEFAULT='session limit|weekly limit|opus limit|sonnet limit|fable 5 limit|usage credit limit'
+FM_BUSY_CLAUDE_LIMIT_HINTS_DEFAULT='resets|press enter|continuing automatically|esc to cancel'
+FM_BUSY_CLAUDE_LIMIT_WIDGETS_DEFAULT='usage limit reached.*continuing automatically|usage limit has reset.*press enter|automatic continue stopped after repeated usage-limit hits'
+FM_BUSY_CLAUDE_LIMIT_REGION_LINES=${FM_BUSY_CLAUDE_LIMIT_REGION_LINES:-12}
+
 fm_busy_claude_limit_banner() {
-  local tail_text name_line
+  local tail_text region name_line='' widget_line
   # `read -d ''` reads all of stdin into one variable using only a bash
   # builtin (no external `cat`), preserving embedded newlines; it always
   # returns non-zero at EOF with no NUL delimiter, so that status is ignored.
   IFS= read -r -d '' tail_text || true
-  name_line=$(printf '%s\n' "$tail_text" | LC_ALL=C grep -iE 'session limit|weekly limit' | tail -1) || return 1
-  [ -n "$name_line" ] || return 1
-  printf '%s\n' "$tail_text" | LC_ALL=C grep -qiE \
-    'resets|press enter|continuing automatically|usage limit has reset|esc to cancel' || return 1
-  printf '%s' "$name_line"
+  region=$(printf '%s\n' "$tail_text" | grep -v '^[[:space:]]*$' \
+    | tail -n "$FM_BUSY_CLAUDE_LIMIT_REGION_LINES")
+  [ -n "$region" ] || return 1
+  local -a region_lines=() region_lower=()
+  local rl idx hit=-1
+  while IFS= read -r rl; do
+    region_lines+=("$rl")
+    region_lower+=("${rl,,}")
+  done <<<"$region"
+  for ((idx = 0; idx < ${#region_lines[@]}; idx++)); do
+    [[ ${region_lower[idx]} =~ $FM_BUSY_CLAUDE_LIMIT_NAMES_DEFAULT ]] || continue
+    if [[ ${region_lower[idx]} =~ $FM_BUSY_CLAUDE_LIMIT_HINTS_DEFAULT ]] \
+      || { [ "$idx" -gt 0 ] && [[ ${region_lower[idx-1]} =~ $FM_BUSY_CLAUDE_LIMIT_HINTS_DEFAULT ]]; } \
+      || { [ "$((idx + 1))" -lt "${#region_lines[@]}" ] \
+           && [[ ${region_lower[idx+1]} =~ $FM_BUSY_CLAUDE_LIMIT_HINTS_DEFAULT ]]; }; then
+      hit=$idx
+    fi
+  done
+  [ "$hit" -ge 0 ] && name_line=${region_lines[hit]}
+  if [ -n "$name_line" ]; then
+    printf '%s' "$name_line"
+    return 0
+  fi
+  widget_line=$(printf '%s\n' "$region" | LC_ALL=C grep -iE \
+    "$FM_BUSY_CLAUDE_LIMIT_WIDGETS_DEFAULT" | tail -1)
+  [ -n "$widget_line" ] || return 1
+  printf 'limit type unspecified - %s' "$widget_line"
 }
 
 # fm_busy_classify: semantic classification for a task whose endpoint the

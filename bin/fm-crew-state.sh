@@ -46,6 +46,13 @@
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
+#      For harness=claude, a pane parked on Claude Code's account/usage-limit
+#      banner (claude_limit_detail below, over bin/fm-busy-lib.sh's
+#      fm_busy_claude_limit_banner) also reports paused when the run is PARKED
+#      - a parked run makes no progress of its own, so the pane's external wait
+#      is the whole story - while an actively running/fixing/ci step keeps
+#      reporting working and only carries `worker pane limit-blocked` in its
+#      detail, since the pipeline step may progress independently of the pane.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
@@ -170,6 +177,25 @@ pane_readable() {  # <target>
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
+# claude_limit_detail: the pane-derived Claude account/usage-limit override's
+# one reader. Prints the banner detail and returns 0 when this crew is a
+# harness=claude worker whose recorded pane is parked on Claude Code's own
+# account/usage-limit banner; returns non-zero otherwise (wrong harness, no
+# readable pane, no banner). fm_busy_claude_limit_banner (bin/fm-busy-lib.sh)
+# owns the verified wordings and the matching contract; both the run-step path
+# and the no-run pane fallback below consult this one helper so the override
+# cannot drift between them.
+claude_limit_detail() {
+  local tail_text detail
+  case "$HARNESS" in claude*) ;; *) return 1 ;; esac
+  [ -n "$BACKEND_TARGET" ] || return 1
+  pane_readable "$BACKEND_TARGET" || return 1
+  tail_text=$(fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
+  detail=$(printf '%s' "$tail_text" | fm_busy_claude_limit_banner) || return 1
+  [ -n "$detail" ] || return 1
+  printf '%s' "$detail"
+}
+
 # crew_busy_verdict: the crew's semantic busy state from the one contract
 # owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
 # adapter answers from its own lifecycle record; Grok answers from its
@@ -691,6 +717,25 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # A limit-blocked Claude pane is an external wait on the worker's side even
+  # when a run is attributed to its branch. A parked run is not itself making
+  # progress, so the pane's wait is the whole story: report paused, exactly as
+  # the no-run fallback does. An actively running/fixing/ci step may progress
+  # independently of this pane, so it keeps reporting working and only carries
+  # the pane's block in its detail.
+  case "$RUN_STATE" in
+    parked)
+      if LIMIT_DETAIL=$(claude_limit_detail); then
+        emit paused pane "account limit: $LIMIT_DETAIL"
+      fi
+      ;;
+    working)
+      if LIMIT_DETAIL=$(claude_limit_detail); then
+        RUN_DETAIL="$RUN_DETAIL${SEP}worker pane limit-blocked ($LIMIT_DETAIL)"
+      fi
+      ;;
+  esac
+
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 
@@ -716,14 +761,9 @@ if [ "$KIND" != secondmate ]; then
       # generic hook-derived busy, per fm_busy_claude_limit_banner's contract
       # (bin/fm-busy-lib.sh). Scoped to harness=claude only; every other
       # harness keeps the plain busy -> working mapping below.
-      case "$HARNESS" in
-        claude*)
-          LIMIT_TAIL=$(fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" 40 "$EXPECTED_LABEL" 2>/dev/null) || LIMIT_TAIL=''
-          if LIMIT_DETAIL=$(printf '%s' "$LIMIT_TAIL" | fm_busy_claude_limit_banner); then
-            emit paused pane "account limit: $LIMIT_DETAIL"
-          fi
-          ;;
-      esac
+      if LIMIT_DETAIL=$(claude_limit_detail); then
+        emit paused pane "account limit: $LIMIT_DETAIL"
+      fi
       emit working pane "harness busy (${BUSY_VERDICT#* })"
       ;;
     idle) ;;

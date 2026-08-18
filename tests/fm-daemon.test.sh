@@ -313,6 +313,64 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear() {
   pass "housekeeping clears an already-resumed watcher pause across both supervisors"
 }
 
+# A pane-derived pause (fm-crew-state.sh's Claude account-limit-banner override)
+# writes NO paused: status line, so the absent verb alone must not make its pause
+# marker stale. Regression: the daemon used to clear the marker and the
+# re-surface throttle on every housekeeping cycle, so the watcher re-surfaced the
+# same limit-blocked crew once per cycle instead of once per PAUSE_RESURFACE_SECS.
+test_housekeeping_keeps_pane_derived_pause_marker() {
+  local dir state watcher_key key win stub
+  dir=$(make_supercase pane-derived-pause)
+  state="$dir/state"
+  win="sess:fm-held-w10-panepause"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-panepause.meta"
+  printf 'working: started the task\n' > "$state/held-w10-panepause.status"
+  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  key=$(printf '%s' "held-w10-panepause" | tr '.:/' '___')
+  : > "$state/.paused-$watcher_key"
+  : > "$state/.paused-resurfaced-$watcher_key"
+  stub="$dir/fakebin/crew-state"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+printf 'state: paused · source: pane · account limit: session limit · resets 2:30pm
+'
+SH
+  chmod +x "$stub"
+  local cycle
+  for cycle in 1 2 3; do
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$stub" housekeeping "$state"
+    [ -e "$state/.paused-$watcher_key" ] \
+      || fail "cycle $cycle cleared a pane-derived pause marker that is still live"
+    [ -e "$state/.paused-resurfaced-$watcher_key" ] \
+      || fail "cycle $cycle wiped the pane-derived pause's re-surface throttle"
+  done
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a live pane-derived pause was tracked as a wedge"
+  pass "a pane-derived limit pause keeps its marker and throttle across housekeeping cycles"
+}
+
+# The same marker MUST still be cleared once the crew is no longer paused, so the
+# new acceptance does not strand a marker after the limit clears.
+test_housekeeping_clears_pane_pause_marker_once_resumed() {
+  local dir state watcher_key win stub
+  dir=$(make_supercase pane-derived-pause-resumed)
+  state="$dir/state"
+  win="sess:fm-held-w10-paneresume"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/held-w10-paneresume.meta"
+  printf 'working: resumed after the limit cleared\n' > "$state/held-w10-paneresume.status"
+  watcher_key=$(printf '%s' "$win" | tr '.:/' '___')
+  : > "$state/.paused-$watcher_key"
+  stub="$dir/fakebin/crew-state"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+printf 'state: working · source: pane · harness busy (claude-hook)
+'
+SH
+  chmod +x "$stub"
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$stub" housekeeping "$state"
+  [ ! -e "$state/.paused-$watcher_key" ] || fail "a resumed crew's pause marker survived housekeeping"
+  pass "a pause marker is still cleared once the crew reports working again"
+}
+
 test_housekeeping_seeds_pause_marker_from_status() {
   local dir state key win
   dir=$(make_supercase seed-paused-status)
@@ -1912,6 +1970,8 @@ test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
+test_housekeeping_keeps_pane_derived_pause_marker
+test_housekeeping_clears_pane_pause_marker_once_resumed
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_stale_absorbed_while_pipeline_advances

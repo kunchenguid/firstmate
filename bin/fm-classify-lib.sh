@@ -1123,6 +1123,23 @@ crew_absorb_class() {  # <id>
   printf 'none'
 }
 
+# 0 if crew <id>'s pause is STILL REAL according to its authoritative current
+# state, even though its status log carries no paused: line. This is the one
+# owner of "may a pause marker be kept?" for the pane-derived pauses that
+# fm-crew-state.sh reports without a declared status-log line (its Claude
+# account/usage-limit-banner override). Both the watcher (bin/fm-watch.sh) and
+# the supervise daemon (bin/fm-supervise-daemon.sh reconcile_pause_tracking)
+# consult it before clearing a pause marker they would otherwise treat as stale;
+# without it the daemon wipes the re-surface throttle every housekeeping cycle
+# and the watcher re-surfaces the same limit-blocked crew once per cycle instead
+# of once per PAUSE_RESURFACE_SECS.
+# Carries crew_absorb_class's cost note: callers gate it on marker presence so
+# the bounded fm-crew-state.sh read happens only for an already-tracked pause.
+crew_pause_still_live() {  # <id>
+  [ -n "${1:-}" ] || return 1
+  [ "$(crew_absorb_class "$1")" = paused ]
+}
+
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
 # reports `working`). This is the "provably working" predicate at the heart of
 # absorb-only-when-provably-working: a no-verb turn-end or stale wake is absorbed

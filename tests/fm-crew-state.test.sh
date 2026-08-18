@@ -979,6 +979,124 @@ test_no_run_non_claude_harness_ignores_limit_banner_text() {
   pass "a non-Claude harness ignores lookalike limit-banner text in its pane"
 }
 
+# Every name in claude-cli 2.1.234's wLt window map blocks the worker the same
+# way, so all six must override busy, not just the 5h/7d pair.
+test_no_run_claude_named_limit_variants_paused() {
+  local name
+  for name in "Opus limit" "Sonnet limit" "Fable 5 limit" "usage credit limit"; do
+    reset_fakes
+    local d; d=$(new_case "claude-limit-${name// /-}")
+    make_repo_on_branch "$d/wt" fm/feat-limitvar
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-limitvar.meta" "window=fm:fm-feat-limitvar" "worktree=$d/wt" "kind=ship" "harness=claude"
+    FM_FAKE_AXI_STATUS=""
+    FM_FAKE_RUNS_LIST=""
+    FM_FAKE_BUSY=1
+    FM_FAKE_BUSY_TEXT="You've hit your $name · resets 2:30pm"
+    export FM_FAKE_BUSY_TEXT
+    local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limitvar)
+    "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limitvar busy --gen "$gen" \
+      --source claude-hook --event user-prompt-submit
+    local out; out=$(run_crew_state "$d" feat-limitvar)
+    assert_contains "$out" "state: paused" "the \"$name\" banner overrides busy to paused"
+    assert_contains "$out" "$name" "the detail names the limit that was hit"
+  done
+  pass "every named Claude limit window (Opus/Sonnet/Fable 5/usage credit) reads paused"
+}
+
+# The named notice scrolls out of the capture window while the persistent
+# auto-continue widget stays on screen; the widget alone is still an external
+# wait, and the auto-continue-stopped state is the most wedged wait of all.
+test_no_run_claude_widget_only_tail_paused() {
+  local widget
+  for widget in "Usage limit reached · continuing automatically at 3:00pm · esc to cancel" \
+                "Your usage limit has reset · press enter to continue" \
+                "Automatic continue stopped after repeated usage-limit hits"; do
+    reset_fakes
+    local d; d=$(new_case "claude-widget-${#widget}")
+    make_repo_on_branch "$d/wt" fm/feat-widget
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-widget.meta" "window=fm:fm-feat-widget" "worktree=$d/wt" "kind=ship" "harness=claude"
+    FM_FAKE_AXI_STATUS=""
+    FM_FAKE_RUNS_LIST=""
+    FM_FAKE_BUSY=1
+    FM_FAKE_BUSY_TEXT="$widget"
+    export FM_FAKE_BUSY_TEXT
+    local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-widget)
+    "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-widget busy --gen "$gen" \
+      --source claude-hook --event user-prompt-submit
+    local out; out=$(run_crew_state "$d" feat-widget)
+    assert_contains "$out" "state: paused" "the auto-continue widget alone overrides busy to paused"
+    assert_contains "$out" "unspecified" "a widget-only match reports the limit type as unspecified"
+  done
+  pass "the auto-continue widget alone reads paused without naming a limit"
+}
+
+# A genuinely busy crewmate editing this repo's own limit-banner code has both
+# "session limit" and "resets"/"press enter" on screen in ordinary scrollback.
+# The override is anchored to the bottom-most widget/composer region, so that
+# content must never flip the worker to paused.
+test_no_run_claude_scrollback_limit_words_stay_working() {
+  reset_fakes
+  local d; d=$(new_case claude-scrollback-words)
+  make_repo_on_branch "$d/wt" fm/feat-scrollback
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-scrollback.meta" "window=fm:fm-feat-scrollback" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="+ # the 5-hour window is named \"session limit\" and the 7-day one
++ # \"weekly limit\"; a rejected turn renders resets <time>, and the widget
++ # says press enter to continue once stale
+$(for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do printf '  editing bin/fm-busy-lib.sh line %s\n' "$i"; done)
+· Thinking…
+esc to interrupt"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-scrollback)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-scrollback busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-scrollback)
+  assert_contains "$out" "state: working" "limit words in ordinary scrollback keep the worker working"
+  assert_not_contains "$out" "state: paused" "scrollback far from the composer never triggers the override"
+  pass "a busy Claude worker editing limit-banner text is not misread as paused"
+}
+
+# The override also applies when a run IS attributed to the crew: a PARKED run
+# makes no progress of its own, so a limit-blocked pane is the whole story.
+test_parked_run_claude_limit_banner_paused() {
+  reset_fakes
+  local d; d=$(new_case claude-limit-parked-run)
+  make_repo_on_branch "$d/wt" fm/feat-limitparked
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-limitparked.meta" "window=fm:fm-feat-limitparked" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-limitparked)"
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your weekly limit · resets Tue 2:30pm"
+  export FM_FAKE_BUSY_TEXT
+  local out; out=$(run_crew_state "$d" feat-limitparked)
+  assert_contains "$out" "state: paused" "a parked run plus a limit-blocked pane reads paused"
+  assert_contains "$out" "weekly limit" "the parked-run override names the limit"
+  pass "a parked run whose Claude pane is limit-blocked reads paused"
+}
+
+# An actively running step may progress independently of this crew's pane, so
+# it keeps reporting working - but the supervisor still sees the pane is stuck.
+test_active_run_claude_limit_banner_annotates_working() {
+  reset_fakes
+  local d; d=$(new_case claude-limit-active-run)
+  make_repo_on_branch "$d/wt" fm/feat-limitactive
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-limitactive.meta" "window=fm:fm-feat-limitactive" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-limitactive)"
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm"
+  export FM_FAKE_BUSY_TEXT
+  local out; out=$(run_crew_state "$d" feat-limitactive)
+  assert_contains "$out" "state: working" "an active run step keeps reporting working"
+  assert_contains "$out" "worker pane limit-blocked" "the active run's detail records the blocked pane"
+  pass "an actively running step with a limit-blocked Claude pane stays working with a note"
+}
+
 test_no_run_herdr_unknown_uses_backend_capture() {
   command -v jq >/dev/null 2>&1 || { pass "herdr pane fallback skipped without jq"; return; }
   reset_fakes
@@ -1804,6 +1922,11 @@ test_no_run_claude_session_limit_banner_paused
 test_no_run_claude_weekly_limit_banner_paused
 test_no_run_claude_ordinary_busy_tail_stays_working
 test_no_run_non_claude_harness_ignores_limit_banner_text
+test_no_run_claude_named_limit_variants_paused
+test_no_run_claude_widget_only_tail_paused
+test_no_run_claude_scrollback_limit_words_stay_working
+test_parked_run_claude_limit_banner_paused
+test_active_run_claude_limit_banner_annotates_working
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
