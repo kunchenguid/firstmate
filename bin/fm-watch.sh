@@ -1191,7 +1191,7 @@ EOF
           rm -f "$ssf" "$ewf"
         fi
         if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
-          clear_pause_tracking_if_settled "$w" "$(window_to_task "$w" "$STATE")" || true
+          clear_pause_tracking_if_settled "$w" "$task" || true
         fi
       fi
     else

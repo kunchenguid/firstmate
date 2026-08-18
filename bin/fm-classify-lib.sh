@@ -1143,13 +1143,11 @@ crew_absorb_class() {  # <id>
 # still live with no read at all, so a sustained account limit across N
 # crewmates costs N bounded reads per cadence window, not per poll. Callers
 # additionally gate it on marker presence, so an unpaused crew never probes.
-crew_pause_livecheck_mtime() {  # <file>
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %m "$1" 2>/dev/null
-  else
-    stat -c %Y "$1" 2>/dev/null
-  fi
-}
+if [ "$(uname)" = Darwin ]; then
+  crew_pause_livecheck_mtime() { stat -f %m "$1" 2>/dev/null; }  # <file>
+else
+  crew_pause_livecheck_mtime() { stat -c %Y "$1" 2>/dev/null; }
+fi
 
 crew_pause_still_live() {  # <id> <state-dir> <key>
   local id=${1:-} state=${2:-} key=${3:-} probe='' mtime age secs
