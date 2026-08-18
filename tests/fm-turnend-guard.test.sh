@@ -1150,6 +1150,16 @@ SH
   chmod +x "$dir/bin/fm-watch-arm.sh"
 }
 
+write_integrated_actionable_arm() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'signal: task.status done: boundary fixture\n'
+exit 0
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
 # The 2026-07-21 incident regression: after a spent forced continuation the old
 # one-shot loop guard ALLOWED a blind stop (stop_hook_active=true) while the
 # watcher was already dead. In --claude mode the guard must re-block instead.
@@ -1174,6 +1184,28 @@ test_hook_claude_mode_retires_prior_rewake_proof() {
   expect_code 2 "$status" "an unhealthy Stop without auto-arm ownership must remain blocked"
   assert_absent "$marker" "the synchronous Stop guard left the prior turn's rewake proof active"
   pass "fm-turnend-guard --claude: every Stop retires the prior active-rewake proof"
+}
+
+test_concurrent_stop_boundary_preserves_new_rewake_proof() {
+  local dir auto_pid auto_status guard_out guard_status marker
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-concurrent-rewake")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_integrated_actionable_arm "$dir"
+  marker="$dir/state/.claude-rewake-turn"
+  printf 'epoch=2 session_pid=999\n' > "$marker"
+  run_integrated_autoarm "$dir" > "$dir/auto.out" 2>&1 &
+  auto_pid=$!
+  while [ ! -e "$dir/state/.claude-rewake-boundary-request" ]; do sleep 0.05; done
+  [ "$(cat "$marker")" = 'epoch=2 session_pid=999' ] \
+    || fail "the async hook replaced the ending turn's proof before the synchronous Stop boundary"
+  guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=500 run_hook_claude "$dir" false); guard_status=$?
+  wait "$auto_pid"; auto_status=$?
+  expect_code 0 "$guard_status" "the synchronous guard must accept the claimed auto-arm cycle"
+  [ -z "$guard_out" ] || fail "the concurrent Stop guard produced output: $guard_out"
+  expect_code 2 "$auto_status" "the actionable auto-arm must deliver its rewake"
+  assert_present "$marker" "the synchronous guard deleted the new turn's rewake proof"
+  pass "fm-turnend-guard --claude: concurrent Stop hooks preserve the new rewake proof"
 }
 
 test_hook_claude_mode_reblocks_x_mode_without_tasks() {
@@ -1661,6 +1693,7 @@ test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_retires_prior_rewake_proof
+test_concurrent_stop_boundary_preserves_new_rewake_proof
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open

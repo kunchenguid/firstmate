@@ -71,6 +71,9 @@ EPOCH="$STATE/.claude-autoarm-epoch"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 ACTIVE_REWAKE_TURN="$STATE/.claude-rewake-turn"
+REWAKE_BOUNDARY_LOCK="$STATE/.claude-rewake-boundary.lock"
+REWAKE_BOUNDARY_REQUEST="$STATE/.claude-rewake-boundary-request"
+REWAKE_BOUNDARY="$STATE/.claude-rewake-boundary"
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
 case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
@@ -120,11 +123,6 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   RECOVER_SESSION_LOCK=1
 fi
 
-# This session reached its next Stop, so any rewake proof from the turn that just
-# ended is no longer active. Clear it before the AFK and need gates: an idle or
-# away Stop still ends that turn. A competing session never reaches this write.
-[ "$RECOVER_SESSION_LOCK" -eq 1 ] || rm -f "$ACTIVE_REWAKE_TURN" 2>/dev/null || true
-
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
 [ -e "$STATE/.afk" ] && exit 0
 
@@ -141,7 +139,6 @@ need_supervision || exit 0
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
-  rm -f "$ACTIVE_REWAKE_TURN" 2>/dev/null || true
 fi
 
 # --- single-flight owner claim ------------------------------------------------
@@ -158,6 +155,7 @@ trap 'fm_lock_release "$OWNER_LOCK"' EXIT
 EPOCH_SEQUENCE=
 EPOCH_SESSION_PID=
 EPOCH_WRITE_OK=0
+BOUNDARY_EPOCH=
 VERIFIED_SESSION_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
 case "$VERIFIED_SESSION_PID" in
   ''|*[!0-9]*) exit 0 ;;
@@ -182,7 +180,7 @@ write_epoch() {  # <outcome>
 }
 
 publish_active_rewake_turn() {
-  local tmp value current_session_pid
+  local tmp value current_session_pid boundary i
   [ "$EPOCH_WRITE_OK" -eq 1 ] || return 1
   for value in "$EPOCH_SEQUENCE" "$EPOCH_SESSION_PID"; do
     case "$value" in ''|*[!0-9]*) return 1 ;; esac
@@ -190,13 +188,43 @@ publish_active_rewake_turn() {
   current_session_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
   [ "$current_session_pid" = "$VERIFIED_SESSION_PID" ] || return 1
   fm_session_lock_owned_by_self "$STATE" || return 1
+  i=0
+  while [ "$i" -lt 20 ]; do
+    boundary=$(cat "$REWAKE_BOUNDARY" 2>/dev/null || true)
+    [ "$boundary" = "epoch=$BOUNDARY_EPOCH session_pid=$EPOCH_SESSION_PID" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$boundary" = "epoch=$BOUNDARY_EPOCH session_pid=$EPOCH_SESSION_PID" ] || return 1
+  fm_lock_try_acquire "$REWAKE_BOUNDARY_LOCK" || return 1
+  boundary=$(cat "$REWAKE_BOUNDARY" 2>/dev/null || true)
+  current_session_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  if [ "$boundary" != "epoch=$BOUNDARY_EPOCH session_pid=$EPOCH_SESSION_PID" ] \
+    || [ "$current_session_pid" != "$VERIFIED_SESSION_PID" ] \
+    || ! fm_session_lock_owned_by_self "$STATE"; then
+    fm_lock_release "$REWAKE_BOUNDARY_LOCK"
+    return 1
+  fi
   tmp="$ACTIVE_REWAKE_TURN.tmp.$$"
-  printf 'epoch=%s session_pid=%s\n' "$EPOCH_SEQUENCE" "$EPOCH_SESSION_PID" > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$ACTIVE_REWAKE_TURN" 2>/dev/null
+  if ! printf 'epoch=%s session_pid=%s\n' "$EPOCH_SEQUENCE" "$EPOCH_SESSION_PID" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$ACTIVE_REWAKE_TURN" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$REWAKE_BOUNDARY_LOCK"
+    return 1
+  fi
   rm -f "$tmp" 2>/dev/null || true
+  fm_lock_release "$REWAKE_BOUNDARY_LOCK"
 }
 
 write_epoch arming
+BOUNDARY_EPOCH=$EPOCH_SEQUENCE
+if fm_lock_try_acquire "$REWAKE_BOUNDARY_LOCK"; then
+  printf 'epoch=%s session_pid=%s\n' "$BOUNDARY_EPOCH" "$EPOCH_SESSION_PID" \
+    > "$REWAKE_BOUNDARY_REQUEST.tmp.$$" 2>/dev/null \
+    && mv -f "$REWAKE_BOUNDARY_REQUEST.tmp.$$" "$REWAKE_BOUNDARY_REQUEST" 2>/dev/null
+  rm -f "$REWAKE_BOUNDARY_REQUEST.tmp.$$" 2>/dev/null || true
+  fm_lock_release "$REWAKE_BOUNDARY_LOCK"
+fi
 
 # X mode cadence: source the generated config so an X instance polls at its
 # 30s cadence (fm-bootstrap.sh x_mode_setup contract).

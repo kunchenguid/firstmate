@@ -323,12 +323,10 @@ test_inert_when_fleet_idle() {
   dir=$(make_primary_dir "$TMP_ROOT/idle")
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
-  printf 'epoch=3 session_pid=999\n' > "$dir/state/.claude-rewake-turn"
   write_arm_fixture "$dir" actionable
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   expect_code 0 "$status" "hook must exit 0 in an idle home with no X-mode poll"
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed an idle home"
-  assert_absent "$dir/state/.claude-rewake-turn" "the next idle Stop left the prior rewake turn active"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "idle state without positive recovery reset the failure notice"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "idle state without positive recovery reset the attended alarm"
   pass "auto-arm: inert with nothing in flight and no X-mode need"
@@ -350,7 +348,6 @@ test_actionable_close_rewakes_with_reason() {
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
   [ "$(epoch_session_pid "$dir")" = "$(cat "$dir/state/.lock")" ] \
     || fail "rewake epoch must bind itself to the live session-lock owner"
-  assert_present "$dir/state/.claude-rewake-turn" "actionable rewake did not publish its active-turn proof"
   [ ! -e "$dir/state/.claude-autoarm.lock" ] || fail "owner lock must be released after the cycle"
   [ -e "$dir/state/arm-ran" ] || fail "hook never foregrounded the arm wrapper"
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"

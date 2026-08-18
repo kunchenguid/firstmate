@@ -141,10 +141,6 @@ fi
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
-if [ "$CLAUDE_MODE" -eq 1 ]; then
-  rm -f "$STATE/.claude-rewake-turn" 2>/dev/null || true
-fi
-
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -154,7 +150,24 @@ BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+REWAKE_BOUNDARY_LOCK="$STATE/.claude-rewake-boundary.lock"
+REWAKE_BOUNDARY_REQUEST="$STATE/.claude-rewake-boundary-request"
+REWAKE_BOUNDARY="$STATE/.claude-rewake-boundary"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+advance_rewake_boundary() {
+  local retire=${1:-0} request tmp
+  fm_lock_try_acquire "$REWAKE_BOUNDARY_LOCK" || return 1
+  [ "$retire" -eq 0 ] || rm -f "$STATE/.claude-rewake-turn" 2>/dev/null || true
+  request=$(cat "$REWAKE_BOUNDARY_REQUEST" 2>/dev/null || true)
+  if [ -n "$request" ] && printf '%s\n' "$request" | grep -Eq '^epoch=[0-9]+ session_pid=[0-9]+$'; then
+    tmp="$REWAKE_BOUNDARY.tmp.$$"
+    printf '%s\n' "$request" > "$tmp" 2>/dev/null \
+      && mv -f "$tmp" "$REWAKE_BOUNDARY" 2>/dev/null
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+  fm_lock_release "$REWAKE_BOUNDARY_LOCK"
+}
+[ "$CLAUDE_MODE" -eq 0 ] || advance_rewake_boundary 1 || true
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0
@@ -264,6 +277,7 @@ autoarm_owns_recovery() {
   pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   if fm_pid_alive "$pid" && [ "$role" = autoarm ]; then
+    advance_rewake_boundary 0 || true
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
