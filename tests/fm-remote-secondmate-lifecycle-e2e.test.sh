@@ -1010,6 +1010,63 @@ printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "local
 pass "fleet snapshot projects mixed local and remote structured state"
 rm -f "$PARENT/state/.wake-queue"
 
+# A remote home summary must not multiply one slow no-mistakes query by every
+# child. Exercise the complete fm-on transport with a healthy named-branch ship
+# child and a deliberately stalled public runs inventory. The smaller inner
+# bound must release pane/status fallback before the historical eight-second
+# outer deadline, while the ordinary malformed/hung-home paths remain covered
+# by fm-bearings-snapshot.test.sh.
+cp "$REMOTE_HOME/data/backlog.md" "$TMP_ROOT/remote-backlog.before-bounded-summary"
+git -C "$REMOTE_HOME/projects/alpha" checkout -qb fm/bounded-summary
+cat > "$REMOTE_HOME/data/backlog.md" <<'EOF'
+## In flight
+- [ ] bounded-summary - Verify bounded remote summary (repo: alpha) (kind: ship) (since 2026-08-17)
+
+## Queued
+
+## Done
+EOF
+fm_write_meta "$REMOTE_HOME/state/bounded-summary.meta" \
+  "window=firstmate:fm-bounded-summary" \
+  "worktree=$REMOTE_HOME/projects/alpha" \
+  "project=alpha" \
+  "harness=claude" \
+  "kind=ship" \
+  "mode=no-mistakes"
+bounded_gen=$(FM_STATE_OVERRIDE="$REMOTE_HOME/state" \
+  "$REMOTE_ROOT/bin/fm-busy-event.sh" arm "$REMOTE_HOME/state" bounded-summary)
+FM_STATE_OVERRIDE="$REMOTE_HOME/state" \
+  "$REMOTE_ROOT/bin/fm-busy-event.sh" apply "$REMOTE_HOME/state" bounded-summary busy \
+    --gen "$bounded_gen" --source claude-hook --event user-prompt-submit
+printf 'working: bounded remote summary fixture\n' > "$REMOTE_HOME/state/bounded-summary.status"
+cat > "$REMOTE_ROOT/bin/no-mistakes" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$TMP_ROOT/remote-summary-nm.log'
+sleep 30
+SH
+chmod +x "$REMOTE_ROOT/bin/no-mistakes"
+started=$(date +%s)
+BOUNDED_SNAPSHOT=$(FM_SNAPSHOT_SECONDMATE_TIMEOUT=8 \
+  remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+elapsed=$(( $(date +%s) - started ))
+[ "$elapsed" -lt 15 ] \
+  || fail "bounded remote fleet snapshot exceeded its transport-plus-summary budget (${elapsed}s)"
+printf '%s' "$BOUNDED_SNAPSHOT" | jq -e '
+  .secondmate_current.records[] | select(.id == "ios")
+  | .provenance.selected == "structured-home"
+    and .current.state == "active_child_work"
+    and [.active_children[].id] == ["bounded-summary"]
+' >/dev/null || fail "bounded remote summary did not retain healthy structured state"
+[ "$(wc -l < "$TMP_ROOT/remote-summary-nm.log" | tr -d ' ')" -eq 1 ] \
+  || fail "remote home summary issued more than one no-mistakes inventory query"
+rm -f "$REMOTE_ROOT/bin/no-mistakes" \
+  "$REMOTE_HOME/state/bounded-summary.meta" "$REMOTE_HOME/state/bounded-summary.status" \
+  "$REMOTE_HOME/state/bounded-summary.busy-state" "$REMOTE_HOME/state/bounded-summary.busy-gen"
+mv "$TMP_ROOT/remote-backlog.before-bounded-summary" "$REMOTE_HOME/data/backlog.md"
+git -C "$REMOTE_HOME/projects/alpha" checkout -q main
+git -C "$REMOTE_HOME/projects/alpha" branch -D fm/bounded-summary >/dev/null 2>&1 || true
+pass "remote fleet snapshot bounds one shared child run inventory below its outer deadline"
+
 # The remote code root updates independently, then the persistent home imports
 # and fast-forwards to that host-local commit without touching project clones.
 REMOTE_SEED="$TMP_ROOT/firstmate-seed"

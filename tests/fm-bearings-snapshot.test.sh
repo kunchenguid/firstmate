@@ -28,6 +28,7 @@ make_fakebin() {  # <dir>
   fb=$(fm_fakebin "$1")
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
+[ -z "${FAKE_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FAKE_NM_LOG"
 [ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 30
 exit 0
 SH
@@ -494,6 +495,54 @@ test_bad_secondmate_homes_never_revive_parent_work() {
       and (.secondmates | any(.[]; .id == "timedout" and (.reason | contains("timed out"))))
   ' >/dev/null || fail "bad home outcomes revived stale work or lacked provenance: $json"
   pass "missing, invalid, unreadable, malformed, and timed-out homes stay explicit unknowns"
+}
+
+test_home_summary_reuses_one_bounded_run_inventory() {
+  local home mate wt fakebin canonical started elapsed calls
+  home=$(make_home bounded-home-state)
+  mate="$TMP_ROOT/bounded-home-state-mate"
+  make_valid_secondmate_home bounded-state "$mate"
+  append_secondmate_registry "$home" bounded-state "$mate"
+  fm_write_secondmate_meta "$home/state/bounded-state.meta" "$mate" \
+    "firstmate:fm-bounded-state" sample
+  wt="$mate/projects/active"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b fm/active
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] active - Active child (repo: sample) (kind: ship) (since 2026-08-17)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/active.meta" \
+    "window=firstmate:fm-active" "worktree=$wt" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" active busy
+  printf 'working: active child fallback\n' > "$mate/state/active.status"
+  fakebin=$(make_fakebin "$home")
+  : > "$home/nm.log"
+  started=$(date +%s)
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_TIMEOUT=8 \
+    FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=1 \
+    FAKE_NM_SLEEP=1 FAKE_NM_LOG="$home/nm.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 8 ] || fail "bounded home summary consumed the old per-home deadline (${elapsed}s)"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "bounded-state")
+    | .provenance.selected == "structured-home"
+      and .current.state == "active_child_work"
+      and [.active_children[].id] == ["active"]
+  ' >/dev/null || fail "bounded coarse inventory did not preserve the structured home: $canonical"
+  calls=$(wc -l < "$home/nm.log" | tr -d ' ')
+  [ "$calls" -eq 1 ] || fail "home summary issued $calls no-mistakes queries instead of one bounded inventory"
+  assert_grep 'runs --limit 200' "$home/nm.log" \
+    "home summary did not use the public coarse run inventory"
+  pass "home summary reuses one bounded run inventory and stays within its outer deadline"
 }
 
 test_oversized_secondmate_summary_stays_strict_unknown() {
@@ -1900,6 +1949,7 @@ test_parent_activity_evidence_is_bounded_and_disclosed
 test_active_child_overrides_old_parent_event
 test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
+test_home_summary_reuses_one_bounded_run_inventory
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only

@@ -78,7 +78,8 @@ case "$SNAPSHOT_EPOCH" in ''|*[!0-9]*) SNAPSHOT_EPOCH=$(date +%s) ;; esac
 # Cross-home bounds are explicit so one broken or unexpectedly large home cannot
 # hang or explode the parent snapshot.
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
-FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-8}
+FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-15}
+FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT:-3}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
 FM_SNAPSHOT_SECONDMATE_QUEUED=${FM_SNAPSHOT_SECONDMATE_QUEUED:-20}
@@ -109,6 +110,7 @@ case "$FM_SNAPSHOT_SECONDMATES" in
     ;;
 esac
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_TIMEOUT "$FM_SNAPSHOT_SECONDMATE_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_CHILDREN "$FM_SNAPSHOT_SECONDMATE_CHILDREN"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_QUEUED "$FM_SNAPSHOT_SECONDMATE_QUEUED"
@@ -134,6 +136,9 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-ff-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"  # validate_secondmate_home: shared seeded-home boundary checks
+# shellcheck source=bin/fm-nm-run-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-nm-run-lib.sh"  # one bounded run inventory for home-summary child state
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
@@ -154,7 +159,10 @@ Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, and plural blocker fields for downstream
 projections. A captain hold is actionable only when every blocker is Done.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
-bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
+bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT (default 15 seconds), and
+FM_SNAPSHOT_SECONDMATE_MAX_BYTES. Home summaries reuse one coarse no-mistakes
+run inventory bounded by FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT (default 3
+seconds) instead of issuing one query per child.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
@@ -601,6 +609,35 @@ task_json_lines() {
           end)
       }'
   done | jq -s 'sort_by(.id)'
+}
+
+# A secondmate home summary needs every child's current classification, but a
+# full no-mistakes status query per ship child makes latency grow with child
+# count and can exceed the parent home's deadline. The top-level runs inventory
+# is the same coarse public fallback fm-crew-state.sh already uses when a full
+# status query cannot be attributed. Capture it once under a smaller inner bound
+# and pass even an empty result explicitly, so every child shares one bounded
+# attempt and then falls back to its pane/status evidence without retrying.
+secondmate_crew_runs_snapshot() {
+  local limit=${FM_CREW_STATE_RUNS_LIMIT:-200}
+  case "$limit" in ''|*[!0-9]*) limit=200 ;; esac
+  command -v no-mistakes >/dev/null 2>&1 || return 0
+  fm_nm_run_bounded "$FM_HOME" "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
+    runs --limit "$limit" 2>/dev/null || true
+}
+
+secondmate_home_needs_runs_snapshot() {
+  local meta kind worktree
+  command -v no-mistakes >/dev/null 2>&1 || return 1
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    kind=$(meta_value "$meta" kind)
+    [ "$kind" = ship ] || continue
+    worktree=$(meta_value "$meta" worktree)
+    [ -d "$worktree" ] || continue
+    git -C "$worktree" symbolic-ref --quiet --short HEAD >/dev/null 2>&1 && return 0
+  done
+  return 1
 }
 
 # Main-home current-inventory validity: same orphan / unstructured-current checks
@@ -1344,6 +1381,14 @@ scout_report_lines() {
     done \
     | jq -s 'sort_by(.id)'
 }
+
+if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
+  FM_CREW_STATE_RUNS_SNAPSHOT=
+  if secondmate_home_needs_runs_snapshot; then
+    FM_CREW_STATE_RUNS_SNAPSHOT=$(secondmate_crew_runs_snapshot)
+  fi
+  export FM_CREW_STATE_RUNS_SNAPSHOT
+fi
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
