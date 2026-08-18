@@ -537,6 +537,9 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 - `bws` - load before any work with Bitwarden Secrets Manager CLI (`bws`, not `bw`): authentication checks, listing projects or secrets, reading secret values, creating, updating, rotating, or deleting secrets.
+- `gitops-knowledge` - load before Flux CD concept questions, CRD manifest generation, or GitOps repository structure guidance covered by the adopted official `fluxcd/agent-skills` skill; also load `flux-classic-gitops` when classic controller installs apply.
+- `gitops-repo-audit` - load before auditing or validating a local Flux GitOps repository with read-only schema, migration, and security checks from the adopted official `fluxcd/agent-skills` skill; also load `flux-classic-gitops` when classic controller installs apply.
+- `flux-classic-gitops` - load with an adopted Flux skill when controllers are installed from tracked gotk manifests rather than Flux Operator; overrides Operator and `flux bootstrap` preference only.
 
 ## 14. Relay
 

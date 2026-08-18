@@ -1,0 +1,87 @@
+# schema source: Flux Operator v0.55.0 https://github.com/controlplaneio-fluxcd/flux-operator
+apiVersion <string> enum=fluxcd.controlplane.io/v1
+kind <string> enum=FluxInstance
+metadata.name <string> (required)
+metadata.namespace <string> (required)
+spec <object>	# FluxInstanceSpec defines the desired state of FluxInstance
+spec.cluster <object>	# Cluster holds the specification of the Kubernetes cluster.
+spec.cluster.domain <string> default="cluster.local"	# Domain is the cluster domain used for generating the FQDN of services. Defaults to 'cluster.local'.
+spec.cluster.multitenant <boolean> default=false	# Multitenant enables the multitenancy lockdown. Defaults to false.
+spec.cluster.multitenantWorkloadIdentity <boolean> default=false	# MultitenantWorkloadIdentity enables the multitenancy lockdown for workload identity. Defaults to false.
+spec.cluster.networkPolicy <boolean> default=true	# NetworkPolicy restricts network access to the current namespace. Defaults to true.
+spec.cluster.objectLevelWorkloadIdentity <boolean>	# ObjectLevelWorkloadIdentity enables the feature gate required for object-level workload identity. This feature is only available in Flux v2.6.0 and later.
+spec.cluster.size <string> enum=small|medium|large	# Size defines the vertical scaling profile of the Flux controllers. The size is used to determine the concurrency and CPU/Memory limits for the Flux controllers. Accepted values are: 'small', 'medium' and 'large'.
+spec.cluster.tenantDefaultDecryptionServiceAccount <string>	# TenantDefaultDecryptionServiceAccount is the name of the service account to use as default for kustomize-controller SOPS decryption when the multitenant lockdown for workload identity is enabled. Defaults to the 'default' service account from the tenant namespace.
+spec.cluster.tenantDefaultKubeConfigServiceAccount <string>	# TenantDefaultKubeConfigServiceAccount is the name of the service account to use as default for kustomize-controller and helm-controller remote cluster access via spec.kubeConfig.configMapRef when the multitenant lockdown for workload identity is enabled. Defaults to the 'default' service account from the tenant namespace.
+spec.cluster.tenantDefaultServiceAccount <string>	# TenantDefaultServiceAccount is the name of the service account to use as default when the multitenant lockdown is enabled, for kustomize-controller and helm-controller. This field will also be used for multitenant workload identity lockdown for source-controller, notification-controller, image-reflector-controller and image-automation-controller. Defaults to the 'default' service account from the tenant namespace.
+spec.cluster.type <string> enum=kubernetes|openshift|aws|azure|gcp default="kubernetes"	# Type specifies the distro of the Kubernetes cluster. Defaults to 'kubernetes'.
+spec.commonMetadata <object>	# CommonMetadata specifies the common labels and annotations that are applied to all resources. Any existing label or annotation will be overridden if its key matches a common one.
+spec.commonMetadata.annotations <map[string]string>	# Annotations to be added to the object's metadata.
+spec.commonMetadata.labels <map[string]string>	# Labels to be added to the object's metadata.
+spec.components <[]string>	# Components is the list of controllers to install. Defaults to the core Flux controllers: - source-controller - kustomize-controller - helm-controller - notification-controller
+spec.distribution <object> (required)	# Distribution specifies the version and container registry to pull images from.
+spec.distribution.artifact <string> pattern="^oci://.*$"	# Artifact is the URL to the OCI artifact containing the latest Kubernetes manifests for the distribution, e.g. 'oci://ghcr.io/controlplaneio-fluxcd/flux-operator-manifests:latest'.
+spec.distribution.artifactPullSecret <string>	# ArtifactPullSecret is the name of the Kubernetes secret to use for pulling the Kubernetes manifests for the distribution specified in the Artifact field.
+spec.distribution.imagePullSecret <string>	# ImagePullSecret is the name of the Kubernetes secret to use for pulling images.
+spec.distribution.registry <string> (required)	# Registry address to pull the distribution images from e.g. 'ghcr.io/fluxcd'.
+spec.distribution.variant <string> enum=upstream-alpine|enterprise-alpine|enterprise-distroless|enterprise-distroless-fips	# Variant specifies the Flux distribution flavor stored in the registry.
+spec.distribution.version <string> (required)	# Version semver expression e.g. '2.x', '2.3.x'.
+spec.kustomize <object>	# Kustomize holds a set of patches that can be applied to the Flux installation, to customize the way Flux operates.
+spec.kustomize.patches <[]object>	# Strategic merge and JSON patches, defined as inline YAML objects, capable of targeting objects based on kind, label and annotation selectors.
+spec.kustomize.patches[].patch <string> (required)	# Patch contains an inline StrategicMerge patch or an inline JSON6902 patch with an array of operation objects.
+spec.kustomize.patches[].target <object>	# Target points to the resources that the patch document should be applied to.
+spec.kustomize.patches[].target.annotationSelector <string>	# AnnotationSelector is a string that follows the label selection expression https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#api It matches with the resource annotations.
+spec.kustomize.patches[].target.group <string>	# Group is the API group to select resources from. Together with Version and Kind it is capable of unambiguously identifying and/or selecting resources. https://github.com/kubernetes/community/blob/master/contributors/design-proposals/api-machinery/api-group.md
+spec.kustomize.patches[].target.kind <string>	# Kind of the API Group to select resources from. Together with Group and Version it is capable of unambiguously identifying and/or selecting resources. https://github.com/kubernetes/community/blob/master/contributors/design-proposals/api-machinery/api-group.md
+spec.kustomize.patches[].target.labelSelector <string>	# LabelSelector is a string that follows the label selection expression https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#api It matches with the resource labels.
+spec.kustomize.patches[].target.name <string>	# Name to match resources with.
+spec.kustomize.patches[].target.namespace <string>	# Namespace to select resources from.
+spec.kustomize.patches[].target.version <string>	# Version of the API Group to select resources from. Together with Group and Kind it is capable of unambiguously identifying and/or selecting resources. https://github.com/kubernetes/community/blob/master/contributors/design-proposals/api-machinery/api-group.md
+spec.migrateResources <boolean> default=true	# MigrateResources instructs the controller to migrate the Flux custom resources from the previous version to the latest API version specified in the CRD. Defaults to true.
+spec.sharding <object>	# Sharding holds the specification of the sharding configuration.
+spec.sharding.key <string> default="sharding.fluxcd.io/key"	# Key is the label key used to shard the resources.
+spec.sharding.shards <[]string> (required) min=1	# Shards is the list of shard names.
+spec.sharding.storage <string> enum=ephemeral|persistent	# Storage defines if the source-controller shards should use an emptyDir or a persistent volume claim for storage. Accepted values are 'ephemeral' or 'persistent', defaults to 'ephemeral'. When set to 'persistent', the '.spec.storage' field must be set.
+spec.storage <object>	# Storage holds the specification of the source-controller persistent volume claim.
+spec.storage.class <string> (required)	# Class is the storage class to use for the PVC.
+spec.storage.size <string> (required)	# Size is the size of the PVC.
+spec.sync <object>	# Sync specifies the source for the cluster sync operation. When set, a Flux source (GitRepository, OCIRepository or Bucket) and Flux Kustomization are created to sync the cluster state with the source repository.
+spec.sync.interval <string> default="1m" pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"	# Interval is the time between syncs.
+spec.sync.kind <string> (required) enum=OCIRepository|GitRepository|Bucket	# Kind is the kind of the source.
+spec.sync.name <string> max=63 (immutable)	# Name is the name of the Flux source and kustomization resources. When not specified, the name is set to the namespace name of the FluxInstance.
+spec.sync.path <string> (required)	# Path is the path to the source directory containing the kustomize overlay or plain Kubernetes manifests.
+spec.sync.provider <string> enum=generic|aws|azure|gcp|github	# Provider specifies OIDC provider for source authentication. For OCIRepository and Bucket the provider can be set to 'aws', 'azure' or 'gcp'. For GitRepository the provider can be set to 'aws' (requires Flux 2.9 or later), 'azure' or 'github'. To disable OIDC authentication the provider can be set to 'generic' or left empty.
+spec.sync.pullSecret <string>	# PullSecret specifies the Kubernetes Secret containing the authentication credentials for the source. For Git over HTTP/S sources, the secret must contain username and password fields. For Git over SSH sources, the secret must contain known_hosts and identity fields. For OCI sources, the secret must be of type kubernetes.io/dockerconfigjson. For Bucket sources, the secret must contain accesskey and secretkey fields.
+spec.sync.ref <string> (required)	# Ref is the source reference, can be a Git ref name e.g. 'refs/heads/main', an OCI tag e.g. 'latest' or a bucket name e.g. 'flux'.
+spec.sync.url <string> (required)	# URL is the source URL, can be a Git repository HTTP/S or SSH address, an OCI repository address or a Bucket endpoint.
+spec.wait <boolean> default=true	# Wait instructs the controller to check the health of all the reconciled resources. Defaults to true.
+status <object>	# FluxInstanceStatus defines the observed state of FluxInstance
+status.components <[]object>	# Components contains the container images used by the components.
+status.components[].digest <string>	# Digest of the container image.
+status.components[].name <string> (required)	# Name of the component.
+status.components[].repository <string> (required)	# Repository address of the container image.
+status.components[].tag <string> (required)	# Tag of the container image.
+status.conditions <[]object>	# Conditions contains the readiness conditions of the object.
+status.conditions[].lastTransitionTime <string> (required) format=date-time	# lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed. If that is not known, then using the time when the API field changed is acceptable.
+status.conditions[].message <string> (required) max=32768	# message is a human readable message indicating details about the transition. This may be an empty string.
+status.conditions[].observedGeneration <integer> format=int64 min=0	# observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+status.conditions[].reason <string> (required) pattern="^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$" min=1 max=1024	# reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+status.conditions[].status <string> (required) enum=True|False|Unknown	# status of the condition, one of True, False, Unknown.
+status.conditions[].type <string> (required) pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$" max=316	# type of condition in CamelCase or in foo.example.com/CamelCase.
+status.history <[]object>	# History contains the reconciliation history of the FluxInstance as a list of snapshots ordered by the last reconciled time.
+status.history[].digest <string> (required)	# Digest is the checksum in the format `<algo>:<hex>` of the resources in this snapshot.
+status.history[].firstReconciled <string> (required) format=date-time	# FirstReconciled is the time when this revision was first reconciled to the cluster.
+status.history[].lastReconciled <string> (required) format=date-time	# LastReconciled is the time when this revision was last reconciled to the cluster.
+status.history[].lastReconciledDuration <string> (required)	# LastReconciledDuration is time it took to reconcile the resources in this revision.
+status.history[].lastReconciledStatus <string> (required)	# LastReconciledStatus is the status of the last reconciliation.
+status.history[].metadata <map[string]string>	# Metadata contains additional information about the snapshot.
+status.history[].totalReconciliations <integer> (required) format=int64	# TotalReconciliations is the total number of reconciliations that have occurred for this snapshot.
+status.inventory <object>	# Inventory contains a list of Kubernetes resource object references last applied on the cluster.
+status.inventory.entries <[]object> (required)	# Entries of Kubernetes resource object references.
+status.inventory.entries[].id <string> (required)	# ID is the string representation of the Kubernetes resource object's metadata, in the format '<namespace>_<name>_<group>_<kind>'.
+status.inventory.entries[].v <string> (required)	# Version is the API version of the Kubernetes resource object's kind.
+status.lastAppliedRevision <string>	# LastAppliedRevision is the version and digest of the distribution config that was last reconcile.
+status.lastArtifactRevision <string>	# LastArtifactRevision is the digest of the last pulled distribution artifact.
+status.lastAttemptedRevision <string>	# LastAttemptedRevision is the version and digest of the distribution config that was last attempted to reconcile.
+status.lastHandledForceAt <string>	# LastHandledForceAt holds the value of the most recent force request value, so a change of the annotation value can be detected.
+status.lastHandledReconcileAt <string>	# LastHandledReconcileAt holds the value of the most recent reconcile request value, so a change of the annotation value can be detected.

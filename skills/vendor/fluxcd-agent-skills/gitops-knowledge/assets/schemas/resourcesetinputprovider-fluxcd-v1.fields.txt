@@ -1,0 +1,48 @@
+# schema source: Flux Operator v0.55.0 https://github.com/controlplaneio-fluxcd/flux-operator
+apiVersion <string> enum=fluxcd.controlplane.io/v1
+kind <string> enum=ResourceSetInputProvider
+metadata.name <string> (required)
+metadata.namespace <string> (required)
+spec <object>	# ResourceSetInputProviderSpec defines the desired state of ResourceSetInputProvider
+spec.certSecretRef <object>	# CertSecretRef specifies the Kubernetes Secret containing either or both of - a PEM-encoded CA certificate (`ca.crt`) - a PEM-encoded client certificate (`tls.crt`) and private key (`tls.key`) When connecting to a Git, OCI, or ExternalService provider that uses self-signed certificates, the CA certificate must be set in the Secret under the 'ca.crt' key to establish the trust relationship. When connecting to a provider that supports client certificates (mTLS), the client certificate and private key must be set in the Secret under the 'tls.crt' and 'tls.key' keys, respectively.
+spec.certSecretRef.name <string> (required)	# Name of the referent.
+spec.defaultValues <object (free-form)>	# DefaultValues contains the default values for the inputs. These values are used to populate the inputs when the provider response does not contain them.
+spec.filter <object>	# Filter defines the filter to apply to the input provider response.
+spec.filter.excludeBranch <string>	# ExcludeBranch specifies the regular expression to filter the branches that the input provider should exclude.
+spec.filter.excludeEnvironment <string>	# ExcludeEnvironment specifies the regular expression to filter the environments that the input provider should exclude.
+spec.filter.excludeTag <string>	# ExcludeTag specifies the regular expression to filter the tags that the input provider should exclude.
+spec.filter.includeBranch <string>	# IncludeBranch specifies the regular expression to filter the branches that the input provider should include.
+spec.filter.includeEnvironment <string>	# IncludeEnvironment specifies the regular expression to filter the environments that the input provider should include.
+spec.filter.includeTag <string>	# IncludeTag specifies the regular expression to filter the tags that the input provider should include.
+spec.filter.labels <[]string>	# Labels specifies the list of labels to filter the input provider response.
+spec.filter.limit <integer> default=100	# Limit specifies the maximum number of input sets to return. When not set, the default limit is 100.
+spec.filter.semver <string>	# Semver specifies a semantic version range to filter and sort the tags. If this field is not specified, the tags will be sorted in reverse alphabetical order. Supported only for tags at the moment.
+spec.insecure <boolean>	# Insecure allows connecting to an ExternalService or OCIArtifactTag provider over plain HTTP without TLS. When not set, the URL must use HTTPS.
+spec.schedule <[]object>	# Schedule defines the schedules for the input provider to run.
+spec.schedule[].cron <string> (required)	# Cron specifies the cron expression for the schedule.
+spec.schedule[].timeZone <string> default="UTC"	# TimeZone specifies the time zone for the cron schedule. Defaults to UTC.
+spec.schedule[].window <string> default="0s" pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"	# Window defines the time window during which the execution is allowed. Defaults to 0s, meaning no window is applied.
+spec.secretRef <object>	# SecretRef specifies the Kubernetes Secret containing the credentials to access the input provider. When connecting to a Git provider, the secret must contain the keys 'username' and 'password', and the password should be a personal access token that grants read-only access to the repository. When connecting to an OCI provider, the secret must contain a Kubernetes Image Pull Secret, as if created by `kubectl create secret docker-registry`. When connecting to an ExternalService provider, the secret must contain either a 'token' key for bearer token authentication, or 'username' and 'password' keys for basic authentication.
+spec.secretRef.name <string> (required)	# Name of the referent.
+spec.serviceAccountName <string>	# ServiceAccountName specifies the name of the Kubernetes ServiceAccount used for authentication with AWS, Azure or GCP services through workload identity federation features. If not specified, the authentication for these cloud providers will use the ServiceAccount of the operator (or any other environment authentication configuration).
+spec.skip <object>	# Skip defines whether we need to skip input provider response updates.
+spec.skip.labels <[]string>	# Labels specifies list of labels to skip input provider response when any of the label conditions matched. When prefixed with !, input provider response will be skipped if it does not have this label.
+spec.type <string> (required) enum=Static|GitHubBranch|GitHubTag|GitHubPullRequest|GitLabBranch|GitLabTag|GitLabMergeRequest|GitLabEnvironment|AzureDevOpsBranch|AzureDevOpsTag|AzureDevOpsPullRequest|AWSCodeCommitBranch|AWSCodeCommitTag|AWSCodeCommitPullRequest|GiteaBranch|GiteaTag|GiteaPullRequest|OCIArtifactTag|ACRArtifactTag|ECRArtifactTag|GARArtifactTag|ExternalService	# Type specifies the type of the input provider.
+spec.url <string> pattern="^((http|https|oci)://.*){0,1}$"	# URL specifies the HTTP/S or OCI address of the input provider API. When connecting to a Git provider, the URL should point to the repository address. When connecting to an OCI provider, the URL should point to the OCI repository address.
+status <object>	# ResourceSetInputProviderStatus defines the observed state of ResourceSetInputProvider.
+status.conditions <[]object>	# Conditions contains the readiness conditions of the object.
+status.conditions[].lastTransitionTime <string> (required) format=date-time	# lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed. If that is not known, then using the time when the API field changed is acceptable.
+status.conditions[].message <string> (required) max=32768	# message is a human readable message indicating details about the transition. This may be an empty string.
+status.conditions[].observedGeneration <integer> format=int64 min=0	# observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+status.conditions[].reason <string> (required) pattern="^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$" min=1 max=1024	# reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+status.conditions[].status <string> (required) enum=True|False|Unknown	# status of the condition, one of True, False, Unknown.
+status.conditions[].type <string> (required) pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$" max=316	# type of condition in CamelCase or in foo.example.com/CamelCase.
+status.exportedInputs <[]object>	# ExportedInputs contains the list of inputs exported by the provider.
+status.lastExportedRevision <string>	# LastExportedRevision is the digest of the inputs that were last reconcile.
+status.lastHandledForceAt <string>	# LastHandledForceAt holds the value of the most recent force request value, so a change of the annotation value can be detected.
+status.lastHandledReconcileAt <string>	# LastHandledReconcileAt holds the value of the most recent reconcile request value, so a change of the annotation value can be detected.
+status.nextSchedule <object>	# NextSchedule is the next schedule when the input provider will run.
+status.nextSchedule.cron <string> (required)	# Cron specifies the cron expression for the schedule.
+status.nextSchedule.timeZone <string> default="UTC"	# TimeZone specifies the time zone for the cron schedule. Defaults to UTC.
+status.nextSchedule.when <string> (required) format=date-time	# When is the next time the schedule will run.
+status.nextSchedule.window <string> default="0s" pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"	# Window defines the time window during which the execution is allowed. Defaults to 0s, meaning no window is applied.

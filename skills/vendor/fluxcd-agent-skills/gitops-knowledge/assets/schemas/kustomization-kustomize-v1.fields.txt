@@ -1,0 +1,113 @@
+# schema source: Flux v2.9.2 https://github.com/fluxcd/flux2
+apiVersion <string> enum=kustomize.toolkit.fluxcd.io/v1
+kind <string> enum=Kustomization
+metadata.name <string> (required)
+metadata.namespace <string> (required)
+spec <object>	# KustomizationSpec defines the configuration to calculate the desired state from a Source using Kustomize.
+spec.buildMetadata <[]string>	# BuildMetadata specifies which kustomize build metadata should be added to the built resources. The allowed values are 'originAnnotations' to annotate resources with their source origin, and 'transformerAnnotations' to annotate resources with the transformers that produced them.
+spec.commonMetadata <object>	# CommonMetadata specifies the common labels and annotations that are applied to all resources. Any existing label or annotation will be overridden if its key matches a common one.
+spec.commonMetadata.annotations <map[string]string>	# Annotations to be added to the object's metadata.
+spec.commonMetadata.labels <map[string]string>	# Labels to be added to the object's metadata.
+spec.components <[]string>	# Components specifies relative paths to kustomize Components.
+spec.decryption <object>	# Decrypt Kubernetes secrets before applying them on the cluster.
+spec.decryption.provider <string> (required) enum=sops	# Provider is the name of the decryption engine.
+spec.decryption.secretRef <object>	# The secret name containing the private OpenPGP keys used for decryption. A static credential for a cloud provider defined inside the Secret takes priority to secret-less authentication with the ServiceAccountName field.
+spec.decryption.secretRef.name <string> (required)	# Name of the referent.
+spec.decryption.serviceAccountName <string>	# ServiceAccountName is the name of the service account used to authenticate with KMS services from cloud providers. If a static credential for a given cloud provider is defined inside the Secret referenced by SecretRef, that static credential takes priority.
+spec.deletionPolicy <string> enum=MirrorPrune|Delete|WaitForTermination|Orphan	# DeletionPolicy can be used to control garbage collection when this Kustomization is deleted. Valid values are ('MirrorPrune', 'Delete', 'WaitForTermination', 'Orphan'). 'MirrorPrune' mirrors the Prune field (orphan if false, delete if true). Defaults to 'MirrorPrune'.
+spec.dependsOn <[]object>	# DependsOn may contain a DependencyReference slice with references to Kustomization resources that must be ready before this Kustomization can be reconciled.
+spec.dependsOn[].name <string> (required)	# Name of the referent.
+spec.dependsOn[].namespace <string>	# Namespace of the referent, defaults to the namespace of the resource object that contains the reference.
+spec.dependsOn[].readyExpr <string>	# ReadyExpr is a CEL expression that can be used to assess the readiness of a dependency. When specified, the built-in readiness check is replaced by the logic defined in the CEL expression. To make the CEL expression additive to the built-in readiness check, the feature gate `AdditiveCELDependencyCheck` must be set to `true`.
+spec.force <boolean> default=false	# Force instructs the controller to recreate resources when patching fails due to an immutable field change.
+spec.healthCheckExprs <[]object>	# HealthCheckExprs is a list of healthcheck expressions for evaluating the health of custom resources using Common Expression Language (CEL). The expressions are evaluated only when Wait or HealthChecks are specified.
+spec.healthCheckExprs[].apiVersion <string> (required)	# APIVersion of the custom resource under evaluation.
+spec.healthCheckExprs[].current <string> (required)	# Current is the CEL expression that determines if the status of the custom resource has reached the desired state.
+spec.healthCheckExprs[].failed <string>	# Failed is the CEL expression that determines if the status of the custom resource has failed to reach the desired state.
+spec.healthCheckExprs[].inProgress <string>	# InProgress is the CEL expression that determines if the status of the custom resource has not yet reached the desired state.
+spec.healthCheckExprs[].kind <string>	# Kind of the custom resource under evaluation.
+spec.healthChecks <[]object>	# A list of resources to be included in the health assessment.
+spec.healthChecks[].apiVersion <string>	# API version of the referent, if not specified the Kubernetes preferred version will be used.
+spec.healthChecks[].kind <string> (required)	# Kind of the referent.
+spec.healthChecks[].name <string> (required)	# Name of the referent.
+spec.healthChecks[].namespace <string>	# Namespace of the referent, when not specified it acts as LocalObjectReference.
+spec.ignore <[]object>	# Ignore is a list of rules for specifying which changes to ignore during drift detection. These rules are applied to the resources managed by the Kustomization and are used to exclude specific JSON pointer paths from the drift detection and apply process.
+spec.ignore[].paths <[]string> (required)	# Paths is a list of JSON Pointer (RFC 6901) paths to be excluded from consideration in a Kubernetes object.
+spec.ignore[].target <object>	# Target is a selector for specifying Kubernetes objects to which this rule applies. If Target is not set, the Paths will be ignored for all Kubernetes objects within the manifest of the Kustomization.
+spec.ignore[].target.annotationSelector <string>	# AnnotationSelector is a string that follows the label selection expression https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#api It matches with the resource annotations.
+spec.ignore[].target.group <string>	# Group is the API group to select resources from. Together with Version and Kind it is capable of unambiguously identifying and/or selecting resources. https://github.com/kubernetes/community/blob/master/contributors/design-proposals/api-machinery/api-group.md
+spec.ignore[].target.kind <string>	# Kind of the API Group to select resources from. Together with Group and Version it is capable of unambiguously identifying and/or selecting resources. https://github.com/kubernetes/community/blob/master/contributors/design-proposals/api-machinery/api-group.md
+spec.ignore[].target.labelSelector <string>	# LabelSelector is a string that follows the label selection expression https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#api It matches with the resource labels.
+spec.ignore[].target.name <string>	# Name to match resources with.
+spec.ignore[].target.namespace <string>	# Namespace to select resources from.
+spec.ignore[].target.version <string>	# Version of the API Group to select resources from. Together with Group and Kind it is capable of unambiguously identifying and/or selecting resources. https://github.com/kubernetes/community/blob/master/contributors/design-proposals/api-machinery/api-group.md
+spec.ignoreMissingComponents <boolean>	# IgnoreMissingComponents instructs the controller to ignore Components paths not found in source by removing them from the generated kustomization.yaml before running kustomize build.
+spec.images <[]object>	# Images is a list of (image name, new name, new tag or digest) for changing image names, tags or digests. This can also be achieved with a patch, but this operator is simpler to specify.
+spec.images[].digest <string>	# Digest is the value used to replace the original image tag. If digest is present NewTag value is ignored.
+spec.images[].name <string> (required)	# Name is a tag-less image name.
+spec.images[].newName <string>	# NewName is the value used to replace the original name.
+spec.images[].newTag <string>	# NewTag is the value used to replace the original tag.
+spec.interval <string> (required) pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"	# The interval at which to reconcile the Kustomization. This interval is approximate and may be subject to jitter to ensure efficient use of resources.
+spec.kubeConfig <object>	# The KubeConfig for reconciling the Kustomization on a remote cluster. When used in combination with KustomizationSpec.ServiceAccountName, forces the controller to act on behalf of that Service Account at the target cluster. If the --default-service-account flag is set, its value will be used as a controller level fallback for when KustomizationSpec.ServiceAccountName is empty.
+spec.kubeConfig.configMapRef <object>	# ConfigMapRef holds an optional name of a ConfigMap that contains the following keys: - `provider`: the provider to use. One of `aws`, `azure`, `gcp`, or `generic`. Required. - `cluster`: the fully qualified resource name of the Kubernetes cluster in the cloud provider API. Not used by the `generic` provider. Required when one of `address` or `ca.crt` is not set. - `address`: the address of the Kubernetes API server. Required for `generic`. For the other providers, if not specified, the first address in the cluster resource will be used, and if specified, it must match one of the addresses in the cluster resource. If audiences is not set, will be used as the audience for the `generic` provider. - `ca.crt`: the optional PEM-encoded CA certificate for the Kubernetes API server. If not set, the controller will use the CA certificate from the cluster resource. - `audiences`: the optional audiences as a list of line-break-separated strings for the Kubernetes ServiceAccount token. Defaults to the `address` for the `generic` provider, or to specific values for the other providers depending on the provider. - `serviceAccountName`: the optional name of the Kubernetes ServiceAccount in the same namespace that should be used for authentication. If not specified, the controller ServiceAccount will be used. Mutually exclusive with SecretRef.
+spec.kubeConfig.configMapRef.name <string> (required)	# Name of the referent.
+spec.kubeConfig.secretRef <object>	# SecretRef holds an optional name of a secret that contains a key with the kubeconfig file as the value. If no key is set, the key will default to 'value'. Mutually exclusive with ConfigMapRef. It is recommended that the kubeconfig is self-contained, and the secret is regularly updated if credentials such as a cloud-access-token expire. Cloud specific `cmd-path` auth helpers will not function without adding binaries and credentials to the Pod that is responsible for reconciling Kubernetes resources. Supported only for the generic provider.
+spec.kubeConfig.secretRef.key <string>	# Key in the Secret, when not specified an implementation-specific default key is used.
+spec.kubeConfig.secretRef.name <string> (required)	# Name of the Secret.
+spec.namePrefix <string> min=1 max=200	# NamePrefix will prefix the names of all managed resources.
+spec.nameSuffix <string> min=1 max=200	# NameSuffix will suffix the names of all managed resources.
+spec.patches <[]object>	# Strategic merge and JSON patches, defined as inline YAML objects, capable of targeting objects based on kind, label and annotation selectors.
+spec.patches[].patch <string> (required)	# Patch contains an inline StrategicMerge patch or an inline JSON6902 patch with an array of operation objects.
+spec.patches[].target <object>	# Target points to the resources that the patch document should be applied to.
+spec.patches[].target.annotationSelector <string>	# AnnotationSelector is a string that follows the label selection expression https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#api It matches with the resource annotations.
+spec.patches[].target.group <string>	# Group is the API group to select resources from. Together with Version and Kind it is capable of unambiguously identifying and/or selecting resources. https://github.com/kubernetes/community/blob/master/contributors/design-proposals/api-machinery/api-group.md
+spec.patches[].target.kind <string>	# Kind of the API Group to select resources from. Together with Group and Version it is capable of unambiguously identifying and/or selecting resources. https://github.com/kubernetes/community/blob/master/contributors/design-proposals/api-machinery/api-group.md
+spec.patches[].target.labelSelector <string>	# LabelSelector is a string that follows the label selection expression https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#api It matches with the resource labels.
+spec.patches[].target.name <string>	# Name to match resources with.
+spec.patches[].target.namespace <string>	# Namespace to select resources from.
+spec.patches[].target.version <string>	# Version of the API Group to select resources from. Together with Group and Kind it is capable of unambiguously identifying and/or selecting resources. https://github.com/kubernetes/community/blob/master/contributors/design-proposals/api-machinery/api-group.md
+spec.path <string>	# Path to the directory containing the kustomization.yaml file, or the set of plain YAMLs a kustomization.yaml should be generated for. Defaults to 'None', which translates to the root path of the SourceRef.
+spec.postBuild <object>	# PostBuild describes which actions to perform on the YAML manifest generated by building the kustomize overlay.
+spec.postBuild.substitute <map[string]string>	# Substitute holds a map of key/value pairs. The variables defined in your YAML manifests that match any of the keys defined in the map will be substituted with the set value. Includes support for bash string replacement functions e.g. ${var:=default}, ${var:position} and ${var/substring/replacement}.
+spec.postBuild.substituteFrom <[]object>	# SubstituteFrom holds references to ConfigMaps and Secrets containing the variables and their values to be substituted in the YAML manifests. The ConfigMap and the Secret data keys represent the var names, and they must match the vars declared in the manifests for the substitution to happen.
+spec.postBuild.substituteFrom[].kind <string> (required) enum=Secret|ConfigMap	# Kind of the values referent, valid values are ('Secret', 'ConfigMap').
+spec.postBuild.substituteFrom[].name <string> (required) min=1 max=253	# Name of the values referent. Should reside in the same namespace as the referring resource.
+spec.postBuild.substituteFrom[].optional <boolean> default=false	# Optional indicates whether the referenced resource must exist, or whether to tolerate its absence. If true and the referenced resource is absent, proceed as if the resource was present but empty, without any variables defined.
+spec.postBuild.substituteStrategy <string> enum=WithVariables|Always	# SubstituteStrategy defines the strategy for substituting variables in the YAML manifests. Valid values are: - WithVariables (the default): require at least one variable to be defined, either through the inline map or through the resolved references to ConfigMaps and Secrets. - Always: perform the substitution even if no variables are defined.
+spec.prune <boolean> (required)	# Prune enables garbage collection.
+spec.retryInterval <string> pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"	# The interval at which to retry a previously failed reconciliation. When not specified, the controller uses the KustomizationSpec.Interval value to retry failures.
+spec.serviceAccountName <string>	# The name of the Kubernetes service account to impersonate when reconciling this Kustomization.
+spec.sourceRef <object> (required)	# Reference of the source where the kustomization file is.
+spec.sourceRef.apiVersion <string>	# API version of the referent.
+spec.sourceRef.kind <string> (required) enum=OCIRepository|GitRepository|Bucket|ExternalArtifact	# Kind of the referent.
+spec.sourceRef.name <string> (required)	# Name of the referent.
+spec.sourceRef.namespace <string>	# Namespace of the referent, defaults to the namespace of the Kubernetes resource object that contains the reference.
+spec.suspend <boolean>	# This flag tells the controller to suspend subsequent kustomize executions, it does not apply to already started executions. Defaults to false.
+spec.targetNamespace <string> min=1 max=63	# TargetNamespace sets or overrides the namespace in the kustomization.yaml file.
+spec.timeout <string> pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"	# Timeout for validation, apply and health checking operations. Defaults to 'Interval' duration.
+spec.wait <boolean>	# Wait instructs the controller to check the health of all the reconciled resources. When enabled, the HealthChecks are ignored. Defaults to false.
+status <object> default={"observedGeneration":-1}	# KustomizationStatus defines the observed state of a kustomization.
+status.conditions <[]object>
+status.conditions[].lastTransitionTime <string> (required) format=date-time	# lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed. If that is not known, then using the time when the API field changed is acceptable.
+status.conditions[].message <string> (required) max=32768	# message is a human readable message indicating details about the transition. This may be an empty string.
+status.conditions[].observedGeneration <integer> format=int64 min=0	# observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+status.conditions[].reason <string> (required) pattern="^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$" min=1 max=1024	# reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+status.conditions[].status <string> (required) enum=True|False|Unknown	# status of the condition, one of True, False, Unknown.
+status.conditions[].type <string> (required) pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$" max=316	# type of condition in CamelCase or in foo.example.com/CamelCase.
+status.history <[]object>	# History contains a set of snapshots of the last reconciliation attempts tracking the revision, the state and the duration of each attempt.
+status.history[].digest <string> (required)	# Digest is the checksum in the format `<algo>:<hex>` of the resources in this snapshot.
+status.history[].firstReconciled <string> (required) format=date-time	# FirstReconciled is the time when this revision was first reconciled to the cluster.
+status.history[].lastReconciled <string> (required) format=date-time	# LastReconciled is the time when this revision was last reconciled to the cluster.
+status.history[].lastReconciledDuration <string> (required)	# LastReconciledDuration is time it took to reconcile the resources in this revision.
+status.history[].lastReconciledStatus <string> (required)	# LastReconciledStatus is the status of the last reconciliation.
+status.history[].metadata <map[string]string>	# Metadata contains additional information about the snapshot.
+status.history[].totalReconciliations <integer> (required) format=int64	# TotalReconciliations is the total number of reconciliations that have occurred for this snapshot.
+status.inventory <object>	# Inventory contains the list of Kubernetes resource object references that have been successfully applied.
+status.inventory.entries <[]object> (required)	# Entries of Kubernetes resource object references.
+status.inventory.entries[].id <string> (required)	# ID is the string representation of the Kubernetes resource object's metadata, in the format '<namespace>_<name>_<group>_<kind>'.
+status.inventory.entries[].v <string> (required)	# Version is the API version of the Kubernetes resource object's kind.
+status.lastAppliedOriginRevision <string>	# The last successfully applied origin revision. Equals the origin revision of the applied Artifact from the referenced Source. Usually present on the Metadata of the applied Artifact and depends on the Source type, e.g. for OCI it's the value associated with the key "org.opencontainers.image.revision".
+status.lastAppliedRevision <string>	# The last successfully applied revision. Equals the Revision of the applied Artifact from the referenced Source.
+status.lastAttemptedRevision <string>	# LastAttemptedRevision is the revision of the last reconciliation attempt.
+status.lastHandledReconcileAt <string>	# LastHandledReconcileAt holds the value of the most recent reconcile request value, so a change of the annotation value can be detected.
+status.observedGeneration <integer> format=int64	# ObservedGeneration is the last reconciled generation.

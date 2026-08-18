@@ -1,0 +1,60 @@
+# schema source: Flux v2.9.2 https://github.com/fluxcd/flux2
+apiVersion <string> enum=source.toolkit.fluxcd.io/v1
+kind <string> enum=OCIRepository
+metadata.name <string> (required)
+metadata.namespace <string> (required)
+spec <object>	# OCIRepositorySpec defines the desired state of OCIRepository
+spec.certSecretRef <object>	# CertSecretRef can be given the name of a Secret containing either or both of - a PEM-encoded client certificate (`tls.crt`) and private key (`tls.key`); - a PEM-encoded CA certificate (`ca.crt`) and whichever are supplied, will be used for connecting to the registry. The client cert and key are useful if you are authenticating with a certificate; the CA cert is useful if you are using a self-signed server certificate. The Secret must be of type `Opaque` or `kubernetes.io/tls`.
+spec.certSecretRef.name <string> (required)	# Name of the referent.
+spec.ignore <string>	# Ignore overrides the set of excluded patterns in the .sourceignore format (which is the same as .gitignore). If not provided, a default will be used, consult the documentation for your version to find out what those are.
+spec.insecure <boolean>	# Insecure allows connecting to a non-TLS HTTP container registry.
+spec.interval <string> (required) pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m|h))+$"	# Interval at which the OCIRepository URL is checked for updates. This interval is approximate and may be subject to jitter to ensure efficient use of resources.
+spec.layerSelector <object>	# LayerSelector specifies which layer should be extracted from the OCI artifact. When not specified, the first layer found in the artifact is selected.
+spec.layerSelector.mediaType <string>	# MediaType specifies the OCI media type of the layer which should be extracted from the OCI Artifact. The first layer matching this type is selected.
+spec.layerSelector.operation <string> enum=extract|copy	# Operation specifies how the selected layer should be processed. By default, the layer compressed content is extracted to storage. When the operation is set to 'copy', the layer compressed content is persisted to storage as it is.
+spec.provider <string> enum=generic|aws|azure|gcp default="generic"	# The provider used for authentication, can be 'aws', 'azure', 'gcp' or 'generic'. When not specified, defaults to 'generic'.
+spec.proxySecretRef <object>	# ProxySecretRef specifies the Secret containing the proxy configuration to use while communicating with the container registry.
+spec.proxySecretRef.name <string> (required)	# Name of the referent.
+spec.ref <object>	# The OCI reference to pull and monitor for changes, defaults to the latest tag.
+spec.ref.digest <string>	# Digest is the image digest to pull, takes precedence over SemVer. The value should be in the format 'sha256:<HASH>'.
+spec.ref.semver <string>	# SemVer is the range of tags to pull selecting the latest within the range, takes precedence over Tag.
+spec.ref.semverFilter <string>	# SemverFilter is a regex pattern to filter the tags within the SemVer range.
+spec.ref.tag <string>	# Tag is the image tag to pull, defaults to latest.
+spec.secretRef <object>	# SecretRef contains the secret name containing the registry login credentials to resolve image metadata. The secret must be of type kubernetes.io/dockerconfigjson.
+spec.secretRef.name <string> (required)	# Name of the referent.
+spec.serviceAccountName <string>	# ServiceAccountName is the name of the Kubernetes ServiceAccount used to authenticate the image pull if the service account has attached pull secrets. For more information: https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#add-imagepullsecrets-to-a-service-account
+spec.suspend <boolean>	# This flag tells the controller to suspend the reconciliation of this source.
+spec.timeout <string> default="60s" pattern="^([0-9]+(\\.[0-9]+)?(ms|s|m))+$"	# The timeout for remote OCI Repository operations like pulling, defaults to 60s.
+spec.url <string> (required) pattern="^oci://.*$"	# URL is a reference to an OCI artifact repository hosted on a remote container registry.
+spec.verify <object>	# Verify contains the secret name containing the trusted public keys used to verify the signature and specifies which provider to use to check whether OCI image is authentic.
+spec.verify.matchOIDCIdentity <[]object>	# MatchOIDCIdentity specifies the identity matching criteria to use while verifying an OCI artifact which was signed using Cosign keyless signing. The artifact's identity is deemed to be verified if any of the specified matchers match against the identity.
+spec.verify.matchOIDCIdentity[].issuer <string> (required)	# Issuer specifies the regex pattern to match against to verify the OIDC issuer in the Fulcio certificate. The pattern must be a valid Go regular expression.
+spec.verify.matchOIDCIdentity[].subject <string> (required)	# Subject specifies the regex pattern to match against to verify the identity subject in the Fulcio certificate. The pattern must be a valid Go regular expression.
+spec.verify.provider <string> (required) enum=cosign|notation default="cosign"	# Provider specifies the technology used to sign the OCI Artifact.
+spec.verify.secretRef <object>	# SecretRef specifies the Kubernetes Secret containing the trusted public keys.
+spec.verify.secretRef.name <string> (required)	# Name of the referent.
+spec.verify.trustedRootSecretRef <object>	# TrustedRootSecretRef specifies the Kubernetes Secret containing a Sigstore trusted_root.json file. This enables verification against self-hosted Sigstore infrastructure (custom Fulcio CA, self-hosted Rekor instance). The Secret must contain a key named "trusted_root.json".
+spec.verify.trustedRootSecretRef.name <string> (required)	# Name of the referent.
+status <object> default={"observedGeneration":-1}	# OCIRepositoryStatus defines the observed state of OCIRepository
+status.artifact <object>	# Artifact represents the output of the last successful OCI Repository sync.
+status.artifact.digest <string> (required) pattern="^[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[a-zA-Z0-9=_-]+$"	# Digest is the digest of the file in the form of '<algorithm>:<checksum>'.
+status.artifact.lastUpdateTime <string> (required) format=date-time	# LastUpdateTime is the timestamp corresponding to the last update of the Artifact.
+status.artifact.metadata <map[string]string>	# Metadata holds upstream information such as OCI annotations.
+status.artifact.path <string> (required)	# Path is the relative file path of the Artifact. It can be used to locate the file in the root of the Artifact storage on the local file system of the controller managing the Source.
+status.artifact.revision <string> (required)	# Revision is a human-readable identifier traceable in the origin source system. It can be a Git commit SHA, Git tag, a Helm chart version, etc.
+status.artifact.size <integer> format=int64	# Size is the number of bytes in the file.
+status.artifact.url <string> (required)	# URL is the HTTP address of the Artifact as exposed by the controller managing the Source. It can be used to retrieve the Artifact for consumption, e.g. by another controller applying the Artifact contents.
+status.conditions <[]object>	# Conditions holds the conditions for the OCIRepository.
+status.conditions[].lastTransitionTime <string> (required) format=date-time	# lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed. If that is not known, then using the time when the API field changed is acceptable.
+status.conditions[].message <string> (required) max=32768	# message is a human readable message indicating details about the transition. This may be an empty string.
+status.conditions[].observedGeneration <integer> format=int64 min=0	# observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+status.conditions[].reason <string> (required) pattern="^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$" min=1 max=1024	# reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+status.conditions[].status <string> (required) enum=True|False|Unknown	# status of the condition, one of True, False, Unknown.
+status.conditions[].type <string> (required) pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$" max=316	# type of condition in CamelCase or in foo.example.com/CamelCase.
+status.lastHandledReconcileAt <string>	# LastHandledReconcileAt holds the value of the most recent reconcile request value, so a change of the annotation value can be detected.
+status.observedGeneration <integer> format=int64	# ObservedGeneration is the last observed generation.
+status.observedIgnore <string>	# ObservedIgnore is the observed exclusion patterns used for constructing the source artifact.
+status.observedLayerSelector <object>	# ObservedLayerSelector is the observed layer selector used for constructing the source artifact.
+status.observedLayerSelector.mediaType <string>	# MediaType specifies the OCI media type of the layer which should be extracted from the OCI Artifact. The first layer matching this type is selected.
+status.observedLayerSelector.operation <string> enum=extract|copy	# Operation specifies how the selected layer should be processed. By default, the layer compressed content is extracted to storage. When the operation is set to 'copy', the layer compressed content is persisted to storage as it is.
+status.url <string>	# URL is the download link for the artifact output of the last OCI Repository sync.
