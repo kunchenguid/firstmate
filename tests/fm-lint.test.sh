@@ -241,13 +241,19 @@ test_ci_invokes_the_owner() {
 test_codebase_pipeline_invokes_the_owner() {
   local pipeline="$ROOT/.codebase/pipelines/ci.yaml"
   assert_present "$pipeline" "the Codebase pipeline is missing"
-  grep -Eq '^ +- bin/fm-lint\.sh$' "$pipeline" \
-    || fail "the Codebase lint job must invoke the one-owner script"
+  grep -Fq 'bin/fm-install-actionlint.sh /opt/firstmate/actionlint/bin' "$pipeline" \
+    || fail "the Codebase lint job must install pinned actionlint in its isolated tool path"
+  grep -Fq 'https_proxy=$relay http_proxy=$relay bin/fm-install-actionlint.sh' "$pipeline" \
+    || fail "the Codebase actionlint install must use the same relay proxy as ShellCheck"
+  grep -Fq 'PATH="/opt/firstmate/actionlint/bin:$PATH" bin/fm-lint.sh' "$pipeline" \
+    || fail "the Codebase lint job must expose its isolated actionlint to the one-owner script"
+  assert_no_grep 'fm-install-actionlint\.sh /usr/local/bin' "$pipeline" \
+    "the Codebase actionlint install must not share ShellCheck's destination"
   # `shellcheck --version` in the install step is fine; re-spelling the file set
   # is what drifts.
   assert_no_grep 'shellcheck bin/' "$pipeline" \
     "the Codebase pipeline must call fm-lint.sh, not re-spell its globs inline"
-  pass "Codebase MR pipeline calls the one-owner script, not an inline command"
+  pass "Codebase MR pipeline installs both pinned linters without path collision and calls the one owner"
 }
 
 test_nomistakes_invokes_the_owner() {
