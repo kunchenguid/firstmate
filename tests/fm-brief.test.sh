@@ -217,6 +217,49 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+test_deliverable_inventory_is_ship_only() {
+  local home id mode brief inventory_line dod_line
+  home="$TMP_ROOT/deliverable-inventory-home"
+  mkdir -p "$home/data"
+
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-inventory-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode brief should scaffold with the deliverable inventory"
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Deliverable inventory" "$brief" \
+      "$mode brief missing the deliverable inventory"
+    assert_grep "list every distinct surface named by the task - files, components, screens, endpoints, config, and documentation" "$brief" \
+      "$mode brief did not inventory every named surface"
+    assert_grep "For each surface, state where you implemented it." "$brief" \
+      "$mode brief did not require implementation locations"
+    assert_grep "Explicitly identify every surface you deliberately skipped and why." "$brief" \
+      "$mode brief did not require deliberate omissions"
+    assert_grep "If you cannot complete this inventory, say so in your completion report rather than blocking the report." "$brief" \
+      "$mode brief turned the inventory prompt into a hard gate"
+    inventory_line=$(grep -nFx "# Deliverable inventory" "$brief" | cut -d: -f1)
+    dod_line=$(grep -nFx "# Definition of done" "$brief" | cut -d: -f1)
+    [ "$inventory_line" -lt "$dod_line" ] \
+      || fail "$mode brief placed the deliverable inventory after Definition of done"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-inventory-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "scout brief should scaffold"
+  assert_no_grep "# Deliverable inventory" "$home/data/brief-inventory-scout/brief.md" \
+    "scout brief must not carry the ship deliverable inventory"
+  assert_no_grep "list every distinct surface named by the task" "$home/data/brief-inventory-scout/brief.md" \
+    "scout brief must not carry the ship deliverable inventory instruction"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise routed work.' \
+    "$ROOT/bin/fm-brief.sh" brief-inventory-secondmate --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "secondmate charter should scaffold"
+  assert_no_grep "# Deliverable inventory" "$home/data/brief-inventory-secondmate/brief.md" \
+    "secondmate charter must not carry the ship deliverable inventory"
+  assert_no_grep "list every distinct surface named by the task" "$home/data/brief-inventory-secondmate/brief.md" \
+    "secondmate charter must not carry the ship deliverable inventory instruction"
+  pass "fm-brief.sh: deliverable inventory appears in every ship mode only"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -714,6 +757,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_deliverable_inventory_is_ship_only
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

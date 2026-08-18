@@ -404,6 +404,16 @@ EOF
     ;;
 esac
 
+# Keep this shared across every ship mode so the completion prompt cannot drift.
+IFS= read -r -d '' DELIVERABLE_INVENTORY <<'EOF' || true
+# Deliverable inventory
+Before reporting done, list every distinct surface named by the task - files, components, screens, endpoints, config, and documentation.
+For each surface, state where you implemented it.
+Explicitly identify every surface you deliberately skipped and why.
+If you cannot complete this inventory, say so in your completion report rather than blocking the report.
+EOF
+DELIVERABLE_INVENTORY=${DELIVERABLE_INVENTORY%$'\n'}
+
 # read -r -d '' preserves the heredoc's trailing newline that the removed
 # $(...) command substitution used to strip. Drop that one newline so generated
 # briefs stay byte-identical to the historical Bash 5 output.
@@ -458,6 +468,8 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+$DELIVERABLE_INVENTORY
 
 $DOD
 EOF
