@@ -4312,9 +4312,94 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+# make_herdr_schema_fakebin: a `herdr` stub whose `api schema --json` emits a
+# large (~300KB) multi-line schema, with the two capability tokens near the top,
+# so a first-match consumer stops reading long before the payload is drained.
+# `$FM_FAKE_SCHEMA_DROP` (events.subscribe | pane.agent_status_changed) omits one
+# token so the incapable path can be exercised. Only the two calls
+# events_capable makes are modeled.
+make_herdr_schema_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "status --json")
+    printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}\n' ;;
+  "api schema")
+    printf '{\n'
+    [ "${FM_FAKE_SCHEMA_DROP:-}" = events.subscribe ] || printf '  "methods": ["events.subscribe"],\n'
+    [ "${FM_FAKE_SCHEMA_DROP:-}" = pane.agent_status_changed ] || printf '  "events": ["pane.agent_status_changed"],\n'
+    i=0
+    while [ "$i" -lt 8000 ]; do
+      printf '  "pad_%d": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",\n' "$i"
+      i=$((i + 1))
+    done
+    printf '  "end": true\n}\n' ;;
+  *) : ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+# A watcher can inherit an ignored SIGPIPE from its launcher. Under that
+# disposition a Bash builtin `printf` piped into a first-match consumer
+# (grep -Fq) does not die silently on the reader's early close - its write
+# returns EPIPE and the builtin spams `printf: write error: Broken pipe` to
+# stderr. fm_backend_herdr_events_capable reads the ~220KB `herdr api schema`,
+# so it must match the schema without a broken-pipe-prone pipe. This case fixes
+# the environment (SIGPIPE ignored, large schema, early tokens), proves that
+# environment really can break a pipe (the control), and asserts the real probe
+# stays quiet while still returning the right verdict.
+test_events_capable_sigpipe_ignored_no_broken_pipe() {
+  local dir fb err rc control
+  dir="$TMP_ROOT/events-capable-sigpipe"; mkdir -p "$dir"
+  fb=$(make_herdr_schema_fakebin "$dir")
+  err="$dir/probe.err"
+
+  # Control: the classic broken-pipe pattern under the same ignored SIGPIPE must
+  # actually emit the message here, or the assertion below would be vacuous.
+  control=$(PATH="$fb:$PATH" /bin/bash -c '
+    trap "" PIPE
+    schema=$(herdr api schema --json 2>/dev/null)
+    printf "%s" "$schema" | grep -Fq "events.subscribe"
+  ' 2>&1 >/dev/null)
+  case "$control" in
+    *[Bb]"roken pipe"*) : ;;
+    *) fail "test harness cannot trigger a broken pipe under ignored SIGPIPE; case is vacuous (control='$control')" ;;
+  esac
+
+  # The real probe, same ignored SIGPIPE, must return capable AND print nothing.
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENT_READER=stub /bin/bash -c '
+    trap "" PIPE
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_events_capable sess
+  ' "$ROOT" 2>"$err"; rc=$?
+  [ "$rc" = 0 ] || fail "events_capable must return capable when both tokens are present, got $rc"
+  if grep -qiE 'broken pipe|write error' "$err"; then
+    fail "events_capable spammed a broken-pipe write error under ignored SIGPIPE: $(cat "$err")"
+  fi
+
+  # A missing token still fails closed to incapable, and still stays quiet.
+  PATH="$fb:$PATH" FM_BACKEND_HERDR_EVENT_READER=stub FM_FAKE_SCHEMA_DROP=pane.agent_status_changed /bin/bash -c '
+    trap "" PIPE
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_events_capable sess
+  ' "$ROOT" 2>"$err"; rc=$?
+  [ "$rc" = 1 ] || fail "events_capable must return incapable when a token is absent, got $rc"
+  if grep -qiE 'broken pipe|write error' "$err"; then
+    fail "events_capable spammed a broken-pipe write error on the incapable path: $(cat "$err")"
+  fi
+  pass "fm_backend_herdr_events_capable: matches the large schema without a broken pipe under ignored SIGPIPE"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
+test_events_capable_sigpipe_ignored_no_broken_pipe
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
 test_version_check_refuses_missing_herdr

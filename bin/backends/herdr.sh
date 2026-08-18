@@ -3135,8 +3135,16 @@ fm_backend_herdr_events_capable() {  # <session>
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
   schema=$(herdr api schema --json 2>/dev/null) || return 1
-  printf '%s' "$schema" | grep -Fq 'events.subscribe' || return 1
-  printf '%s' "$schema" | grep -Fq 'pane.agent_status_changed' || return 1
+  # Match the ~220KB schema with pure Bash glob `case`, NOT `printf '%s' "$schema"
+  # | grep -Fq`. grep -Fq exits on the first match while printf is still writing
+  # the rest of the schema down the pipe; if the watcher inherited an ignored
+  # SIGPIPE from its launcher, that write returns EPIPE instead of dying
+  # silently, and Bash's printf builtin then spams `printf: write error: Broken
+  # pipe` to the watcher's stderr every time this probe runs. `case` is a single
+  # in-process pass with no subprocess and no pipe, so it cannot break a pipe and
+  # is immune to the caller's SIGPIPE disposition.
+  case "$schema" in *events.subscribe*) : ;; *) return 1 ;; esac
+  case "$schema" in *pane.agent_status_changed*) : ;; *) return 1 ;; esac
   return 0
 }
 
