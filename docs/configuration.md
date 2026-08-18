@@ -640,7 +640,7 @@ FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
 ```
 
-A remote secondmate-home summary runs through `bin/fm-on.sh`, and the remote entrypoint executes it under a fixed empty environment, so exporting `FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT`, `FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY`, or `FM_SNAPSHOT_SECONDMATE_CHILDREN` locally cannot reach it as an environment value.
+A remote secondmate-home summary runs through `bin/fm-on.sh`, so under the non-interactive tool contract in [`remote-secondmates.md`](remote-secondmates.md) exporting `FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT`, `FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY`, or `FM_SNAPSHOT_SECONDMATE_CHILDREN` locally cannot reach it as an environment value.
 The calling home therefore passes those three bounds explicitly on the remote command line as `--state-timeout`, `--state-concurrency`, and `--children`, so the caller's own values govern the remote read.
 The same options work for a direct `bin/fm-on.sh <id> fm-fleet-snapshot.sh --secondmate-home-summary` invocation.
 `bin/fm-fleet-snapshot.sh` accepts them only with `--secondmate-home-summary`, requires a positive integer for each, and exits 2 on a missing, malformed, or unsupported option instead of falling back to a default.
