@@ -42,10 +42,13 @@
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared external wait is
-#     escalated only after it has been idle for STALE_ESCALATE_SECS
-#     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
-#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     escalated after STALE_ESCALATE_SECS (configurable) unless its crew is
+#     affirmatively provably working. An affirmative working verdict suppresses
+#     escalation and resets the timer; a readable non-working pane escalates on
+#     schedule; an unreadable-or-gone pane drops its marker. A wedged crewmate is
+#     therefore detected within STALE_ESCALATE_SECS + a tick,
+#     never lost. A declared pause instead gets its own longer PAUSE_RESURFACE_SECS
+#     recheck, never a wedge escalation.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -88,7 +91,8 @@
 #                                   captain-relevant escalation for matching
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
-#                                   as a possible wedge (default 240)
+#                                   as a possible wedge when not provably working
+#                                   (default 240)
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
 #                                   re-surfaces as a recheck (default 3600)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
@@ -1012,13 +1016,18 @@ housekeeping() {  # <state>
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
-    stale_window_is_busy "$win" "$state"
-    case "$?" in
-      0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-         stale_marker_remove "$win" "$state" ;;
-    esac
+    if [ -n "$task" ] && crew_is_provably_working "$task"; then
+      _now > "$marker"
+      log "suppressed stale persistence recheck (provably working): $win"
+    else
+      stale_window_is_busy "$win" "$state"
+      case "$?" in
+        0) rm -f "$marker" ;;
+        2) rm -f "$marker" ;;
+        *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+           stale_marker_remove "$win" "$state" ;;
+      esac
+    fi
   done
 
   # (2b) pause re-surface recheck. A DECLARED external-wait pause idles by design,
@@ -1216,7 +1225,13 @@ handle_wake() {  # <reason> <state>
               decision=$(classify_stale "$arg" "$state")
               case "$stale_detail" in
                 idle\ *s,\ possible\ wedge,\ escalation\ *)
-                  decision="escalate|${reason#stale: }" ;;
+                  task=$(window_to_task "$arg" "$state")
+                  if [ -n "$task" ] && crew_is_provably_working "$task"; then
+                    decision="self|suppressed possible wedge (provably working): $arg"
+                  else
+                    decision="escalate|${reason#stale: }"
+                  fi
+                  ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;

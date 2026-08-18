@@ -23,10 +23,11 @@
 #                          re-surface cadence, never as a wedge. Only when neither
 #                          absorb class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. A provably-working stale past the
-#                          wedge threshold also surfaces, with an "escalation N"
-#                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
-#                          consecutive escalations on the SAME pane, the reason
+#                          both surfaced at once. A stale pane past the wedge
+#                          threshold whose crew is not affirmatively provably
+#                          working surfaces, with an "escalation N" count in the
+#                          reason; at FM_WEDGE_DEMAND_INSPECT_COUNT consecutive
+#                          possible-wedge escalations on the SAME pane, the reason
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
@@ -140,25 +141,26 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # busy pane is SURFACED, so a finish reported only through interactive pane menus
 # (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
 # signal, a no-verb signal whose crew is not provably working, any check, a stale
-# pane whose crew is not provably working, a provably-working stale past the
-# threshold, or anything unknown) is written to the durable queue and exits, which
-# is what wakes the LLM through the background-task completion. The same classifier
-# (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
-# daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
-# wake) and never double-triages - and never runs the costly provably-working read.
-STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# pane whose crew is not provably working, a stale pane past the threshold whose
+# crew is not affirmatively provably working, or anything unknown) is written to
+# the durable queue and exits, which is what wakes the LLM through the
+# background-task completion. The same classifier (fm-classify-lib.sh) backs the
+# away-mode daemon; while state/.afk exists the daemon owns triage, so this
+# watcher reverts to one-shot (enqueue + exit on every wake) and never double-triages
+# - and never runs the costly provably-working read.
+STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a stale pane escalates as a possible wedge when not provably working
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
 # may go with no completed turn: once its task's
 # state/<id>.turn-ended marker (or, before any turn has completed, the task's
 # spawn record) is this old, busy_turn_over_age routes the pane through the
-# same STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
-# non-busy stale, so it escalates via the existing stale reason, escalation
-# counter, and demand-deep-inspection marker for human inspection only - never
-# an automatic interrupt, signal, or restart. A completed turn touches
-# turn-ended and resets the age. Set generously above any legitimate interval
-# between completed turns, including long tool calls, builds, or test runs.
+# same STALE_ESCALATE_SECS-paced wedge_timer_check used for a non-busy stale, so
+# it escalates via the existing stale reason, escalation counter, and
+# demand-deep-inspection marker for human inspection only - never an automatic
+# interrupt, signal, or restart. A completed turn touches turn-ended and resets
+# the age. Set generously above any legitimate interval between completed turns,
+# including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
@@ -279,13 +281,14 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
+# suppresses/escalates once STALE_ESCALATE_SECS have elapsed. Rechecks the crew
+# state at the threshold: if the semantic busy source affirmatively reports working,
+# the possible-wedge escalation is suppressed and the timer reset. Shared by
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason task
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -295,15 +298,21 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
-        echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
-        if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+        task=$(window_to_task "$win" "$STATE")
+        if [ "${label%% *}" != "busy" ] && [ -n "$task" ] && crew_is_provably_working "$task"; then
+          date +%s > "$since_file"
+          triage_log "suppressed $label wedge escalation (provably working): $win"
+        else
+          n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+          echo "$n" > "$escalation_file"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+          if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
+            reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          fi
+          fm_wake_append stale "$win" "$reason" || exit 1
+          rm -f "$since_file"
+          wake "$reason"
         fi
-        fm_wake_append stale "$win" "$reason" || exit 1
-        rm -f "$since_file"
-        wake "$reason"
       fi
       ;;
   esac
