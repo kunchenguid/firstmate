@@ -134,7 +134,7 @@ cmd_route() {
 
 cmd_launch() {
   local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5
-  local current meta out herdr_session launch_arg traceparent= fast_tier=0
+  local current meta out herdr_session launch_arg traceparent='' fast_tier=0
   shift 5
   for launch_arg in "$@"; do
     case "$launch_arg" in
