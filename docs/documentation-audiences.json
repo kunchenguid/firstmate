@@ -59,6 +59,10 @@
       "target": "docs/calm-mode-feasibility.md"
     },
     {
+      "source": "docs/llm-budget.md",
+      "target": "docs/configuration.md"
+    },
+    {
       "source": "docs/calm-mode-feasibility.md",
       "target": "docs/calm.md"
     },
@@ -270,6 +274,10 @@
     },
     {
       "path": "docs/herdr-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/llm-budget.md",
       "audience": "operator-current"
     },
     {

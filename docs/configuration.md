@@ -33,6 +33,13 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## LLM gateway budget meter (state/llm-budget-cache.json)
+
+The personal Rippling LLM-gateway budget meter stores its cache under gitignored `state/` of the effective Firstmate home.
+[`bin/fm-llm-budget.sh`](../bin/fm-llm-budget.sh) owns the cache fields, Datadog query, refresh TTL, and printed line.
+[`docs/llm-budget.md`](llm-budget.md) records the Pi, Claude Code, and Codex attachment points without restating that contract.
+Optional `config/rippling-email` and `config/llm-budget-cap` are home-local overrides for email and the dollar cap; they are not inherited.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
