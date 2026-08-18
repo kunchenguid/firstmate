@@ -647,6 +647,146 @@ test_multi_child_home_summary_stays_bounded() {
   pass "multi-child home summary collects child state in one bounded wave"
 }
 
+# Seed <mate> with <n> ship children, each in its OWN git repository worktree,
+# all idle-but-busy so pane evidence alone keeps them active. Returns nothing;
+# the caller drives the public snapshot or home-summary interface afterwards.
+seed_ship_children() {  # <mate> <prefix> <n>
+  local mate=$1 prefix=$2 n=$3 i wt
+  {
+    printf '## In flight\n'
+    for i in $(seq 1 "$n"); do
+      printf -- '- [ ] %s%s - Child %s (repo: sample) (kind: ship) (since 2026-08-17)\n' "$prefix" "$i" "$i"
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$mate/data/backlog.md"
+  for i in $(seq 1 "$n"); do
+    wt="$mate/projects/$prefix$i"
+    fm_git_init_commit "$wt"
+    git -C "$wt" checkout -q -b "fm/$prefix$i"
+    fm_write_meta "$mate/state/$prefix$i.meta" \
+      "window=firstmate:fm-$prefix$i" "worktree=$wt" "project=sample" \
+      "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$mate/state" "$prefix$i" busy
+    printf 'working: child %s\n' "$i" > "$mate/state/$prefix$i.status"
+  done
+}
+
+# Shrinking the REPORTED child table must not shrink probe concurrency. When the
+# two were one knob, FM_SNAPSHOT_SECONDMATE_CHILDREN=1 turned the up-front wave
+# into one sequential bound per probe, which is exactly the multiplied cost that
+# produces a false "structured home snapshot timed out" for a healthy home.
+test_row_cap_does_not_serialize_child_state() {
+  local home mate fakebin canonical started elapsed ids
+  home=$(make_home rowcap-home-state)
+  mate="$TMP_ROOT/rowcap-home-state-mate"
+  make_valid_secondmate_home rowcap-state "$mate"
+  append_secondmate_registry "$home" rowcap-state "$mate"
+  fm_write_secondmate_meta "$home/state/rowcap-state.meta" "$mate" \
+    "firstmate:fm-rowcap-state" sample
+  seed_ship_children "$mate" rc 6
+  fakebin=$(make_fakebin "$home")
+  started=$(date +%s)
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_TIMEOUT=15 \
+    FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=2 \
+    FM_SNAPSHOT_SECONDMATE_CHILDREN=1 \
+    FAKE_NM_SLEEP=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  elapsed=$(( $(date +%s) - started ))
+  # Six children in six repositories queue twelve probes. Serialized at one row
+  # per wave that is at least 24s and the home times out; concurrent it is about
+  # one bound plus fixed snapshot work.
+  [ "$elapsed" -lt 12 ] \
+    || fail "reported-row cap serialized the child-state wave (${elapsed}s for 6 children)"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "rowcap-state")
+    | .provenance.selected == "structured-home" and .current.reason == null
+  ' >/dev/null || fail "row-capped home summary lost its structured state: $canonical"
+  # The row cap still does what it is for: one reported row, the rest disclosed.
+  ids=$(printf '%s' "$canonical" | jq -c '
+    .secondmate_current.records[] | select(.id == "rowcap-state")
+    | [(.active_children | length), .counts.active_children,
+       (.omitted[] | select(.surface == "active_children") | .count)]')
+  [ "$ids" = '[1,6,5]' ] \
+    || fail "reported-row cap stopped bounding the reported table: $ids"
+  pass "reported-row cap bounds rows only and never serializes child-state collection"
+}
+
+# The remote entrypoint execs a home summary under an empty environment, so the
+# bounds have to travel as argv or they cannot govern a remote read at all.
+# These assertions use the public --secondmate-home-summary interface directly,
+# which is the same argv the parent hands to fm-on.sh.
+test_home_summary_bound_options_govern_collection() {
+  local mate fakebin started elapsed summary rc bad
+  mate="$TMP_ROOT/argv-bounds-mate"
+  make_valid_secondmate_home argv-bounds "$mate"
+  seed_ship_children "$mate" ab 3
+  fakebin=$(make_fakebin "$mate")
+
+  # --state-timeout must beat the environment, which a remote home never has.
+  started=$(date +%s)
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=25 \
+    FAKE_NM_SLEEP=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary --state-timeout 1)
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 12 ] \
+    || fail "--state-timeout did not override the environment bound (${elapsed}s)"
+  printf '%s' "$summary" | jq -e '.schema == "fm-secondmate-home-summary.v1"' >/dev/null \
+    || fail "argv-bounded home summary did not emit its structured contract: $summary"
+
+  # --state-concurrency must be the wave width. Three children in three
+  # repositories queue six probes: at width one that is six sequential bounds.
+  started=$(date +%s)
+  PATH="$fakebin:$PATH" FM_HOME="$mate" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FAKE_NM_SLEEP=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary \
+      --state-timeout 1 --state-concurrency 1 >/dev/null
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -ge 4 ] \
+    || fail "--state-concurrency 1 did not serialize the wave, so the option is inert (${elapsed}s)"
+  started=$(date +%s)
+  PATH="$fakebin:$PATH" FM_HOME="$mate" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FAKE_NM_SLEEP=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary \
+      --state-timeout 1 --state-concurrency 8 >/dev/null
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 4 ] \
+    || fail "--state-concurrency 8 did not run the wave concurrently (${elapsed}s)"
+
+  # --children must be the reported-row bound, with the remainder disclosed.
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary --children 1)
+  printf '%s' "$summary" | jq -e '
+    (.active_children | length) == 1 and .counts.active_children == 3
+    and any(.omitted[]; .surface == "active_children" and .count == 2)
+  ' >/dev/null || fail "--children did not bound the reported child table: $summary"
+
+  # Every malformed or unsupported option is refused fail-closed with no output.
+  for bad in "--state-timeout 0" "--state-timeout x" "--state-timeout" \
+    "--state-concurrency 0" "--state-concurrency -1" "--children 0" \
+    "--children" "--unsupported 1" "--state-timeout 1 --unsupported"; do
+    # shellcheck disable=SC2086
+    summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" \
+      "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary $bad 2>/dev/null) && rc=0 || rc=$?
+    [ "$rc" -eq 2 ] \
+      || fail "home summary accepted the malformed bound option '$bad' (exit $rc)"
+    [ -z "$summary" ] \
+      || fail "home summary emitted a summary despite the malformed option '$bad': $summary"
+  done
+  # Bound options belong to the summary mode alone; the canonical snapshot has
+  # no child-state wave to bound and must not silently ignore them.
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json --state-timeout 1 2>/dev/null) && rc=0 || rc=$?
+  [ "$rc" -eq 2 ] || fail "--json silently accepted a home-summary bound option (exit $rc)"
+  pass "home-summary bound options govern collection and are refused fail-closed when malformed"
+}
+
 # A fatal signal must END the summary, not unwind into the middle of a live
 # collection wave. The handler clears the staging path, so a resumed wave would
 # redirect its next probe to an absolute path under the filesystem root - on a
@@ -2450,6 +2590,8 @@ test_home_summary_reuses_one_bounded_run_inventory
 test_home_summary_keeps_gate_parked_child_decision
 test_home_summary_never_shares_inventory_across_repositories
 test_multi_child_home_summary_stays_bounded
+test_row_cap_does_not_serialize_child_state
+test_home_summary_bound_options_govern_collection
 test_gate_parked_child_without_logged_decision_is_held
 test_ci_phase_children_keep_the_summary_bounded
 test_collected_ci_log_still_reports_checks_green

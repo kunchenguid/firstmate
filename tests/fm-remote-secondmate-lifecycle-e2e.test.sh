@@ -1078,13 +1078,84 @@ while IFS=$'\t' read -r BOUNDED_QUERY_DIR _; do
   [ "$BOUNDED_QUERY_DIR" = "$BOUNDED_ALPHA" ] \
     || fail "remote child state was collected outside the child's repository: $BOUNDED_QUERY_DIR"
 done < "$TMP_ROOT/remote-summary-nm.log"
+pass "remote fleet snapshot bounds its whole child-state wave below its outer deadline"
+
+# The remote entrypoint execs the summary under a fixed empty environment, so a
+# local export of these bounds cannot possibly reach it. They therefore travel as
+# argv over the fm-on transport, and this proves the CALLER's values - not the
+# remote defaults - govern the remote read. Give the home a SECOND child in its
+# own repository so a reported-row cap of one is observable at all.
+fm_git_init_commit "$REMOTE_HOME/projects/beta"
+git -C "$REMOTE_HOME/projects/beta" checkout -qb fm/bounded-summary-2
+cat > "$REMOTE_HOME/data/backlog.md" <<'EOF'
+## In flight
+- [ ] bounded-summary - Verify bounded remote summary (repo: alpha) (kind: ship) (since 2026-08-17)
+- [ ] bounded-summary-2 - Verify propagated bounds (repo: beta) (kind: ship) (since 2026-08-17)
+
+## Queued
+
+## Done
+EOF
+fm_write_meta "$REMOTE_HOME/state/bounded-summary-2.meta" \
+  "window=firstmate:fm-bounded-summary-2" \
+  "worktree=$REMOTE_HOME/projects/beta" \
+  "project=beta" \
+  "harness=claude" \
+  "kind=ship" \
+  "mode=no-mistakes"
+bounded_gen2=$(FM_STATE_OVERRIDE="$REMOTE_HOME/state" \
+  "$REMOTE_ROOT/bin/fm-busy-event.sh" arm "$REMOTE_HOME/state" bounded-summary-2)
+FM_STATE_OVERRIDE="$REMOTE_HOME/state" \
+  "$REMOTE_ROOT/bin/fm-busy-event.sh" apply "$REMOTE_HOME/state" bounded-summary-2 busy \
+    --gen "$bounded_gen2" --source claude-hook --event user-prompt-submit
+printf 'working: propagated bounds fixture\n' > "$REMOTE_HOME/state/bounded-summary-2.status"
+CAPPED_SNAPSHOT=$(FM_SNAPSHOT_SECONDMATE_TIMEOUT=8 FM_SNAPSHOT_SECONDMATE_CHILDREN=1 \
+  remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+printf '%s' "$CAPPED_SNAPSHOT" | jq -e '
+  .secondmate_current.records[] | select(.id == "ios")
+  | .provenance.selected == "structured-home"
+    and (.active_children | length) == 1
+    and .counts.active_children == 2
+    and any(.omitted[]; .surface == "active_children" and .count == 1)
+' >/dev/null || fail "caller reported-row cap did not reach the remote home summary: $CAPPED_SNAPSHOT"
+
+# The same named options must work for a direct public fm-on invocation, and the
+# inner per-query bound has to be the one the caller named: the remote CLI stalls
+# for 30 seconds, so a propagated six-second bound is observable as the wave cost.
+started=$(date +%s)
+DIRECT_SUMMARY=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-fleet-snapshot.sh \
+  --secondmate-home-summary --state-timeout 6 --state-concurrency 8 --children 20 < /dev/null)
+elapsed=$(( $(date +%s) - started ))
+printf '%s' "$DIRECT_SUMMARY" | jq -e '
+  .schema == "fm-secondmate-home-summary.v1" and (.active_children | length) == 2
+' >/dev/null || fail "direct fm-on home summary with named bounds failed: $DIRECT_SUMMARY"
+[ "$elapsed" -ge 5 ] \
+  || fail "propagated --state-timeout did not govern the remote wave (${elapsed}s, expected the named 6s bound)"
+[ "$elapsed" -lt 20 ] \
+  || fail "remote wave ignored the named bound and ran to the stalled CLI (${elapsed}s)"
+
+# A malformed bound is refused fail-closed over the very same remote path, with
+# no summary emitted for a caller to mistake for a healthy home.
+DIRECT_BAD=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-fleet-snapshot.sh \
+  --secondmate-home-summary --state-timeout 0 < /dev/null 2>/dev/null) && direct_rc=0 || direct_rc=$?
+[ "$direct_rc" -eq 2 ] \
+  || fail "remote home summary accepted a malformed --state-timeout (exit $direct_rc)"
+[ -z "$DIRECT_BAD" ] \
+  || fail "remote home summary emitted output despite a malformed bound: $DIRECT_BAD"
+DIRECT_BAD=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-fleet-snapshot.sh \
+  --secondmate-home-summary --unsupported 1 < /dev/null 2>/dev/null) && direct_rc=0 || direct_rc=$?
+[ "$direct_rc" -eq 2 ] \
+  || fail "remote home summary accepted an unsupported option (exit $direct_rc)"
+pass "remote home summary bounds travel as argv and are refused fail-closed when malformed"
+
 rm -f "$REMOTE_ROOT/bin/no-mistakes" \
   "$REMOTE_HOME/state/bounded-summary.meta" "$REMOTE_HOME/state/bounded-summary.status" \
-  "$REMOTE_HOME/state/bounded-summary.busy-state" "$REMOTE_HOME/state/bounded-summary.busy-gen"
+  "$REMOTE_HOME/state/bounded-summary.busy-state" "$REMOTE_HOME/state/bounded-summary.busy-gen" \
+  "$REMOTE_HOME/state/bounded-summary-2.meta" "$REMOTE_HOME/state/bounded-summary-2.status" \
+  "$REMOTE_HOME/state/bounded-summary-2.busy-state" "$REMOTE_HOME/state/bounded-summary-2.busy-gen"
 mv "$TMP_ROOT/remote-backlog.before-bounded-summary" "$REMOTE_HOME/data/backlog.md"
 git -C "$REMOTE_HOME/projects/alpha" checkout -q main
 git -C "$REMOTE_HOME/projects/alpha" branch -D fm/bounded-summary >/dev/null 2>&1 || true
-pass "remote fleet snapshot bounds its whole child-state wave below its outer deadline"
 
 # The remote code root updates independently, then the persistent home imports
 # and fast-forwards to that host-local commit without touching project clones.

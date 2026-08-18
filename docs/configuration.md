@@ -554,8 +554,9 @@ FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail insid
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_SNAPSHOT_SECONDMATE_TIMEOUT=15  # aggregate seconds the calling home allows for one local or remote secondmate-home summary, including transport; one sequential budget per registered home, so the whole secondmate pass scales with home count
-FM_SNAPSHOT_SECONDMATE_CHILDREN=20  # child rows one secondmate-home summary reports, and the same number caps how many no-mistakes child-state queries that summary keeps in flight per wave
-FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=3  # seconds allowed per no-mistakes query in a home summary's up-front child-state collection (wave 1: one axi status per ship child plus one coarse run inventory per distinct child repository; wave 2: the ci step log for each ci-phase child), run concurrently at most FM_SNAPSHOT_SECONDMATE_CHILDREN in flight, so each wave costs ceil(queries / that cap) of these bounds - one per wave while a home stays within the cap - rather than one query per child, and it also clamps fm-crew-state.sh's own per-query bound for that summary; set it in the environment of the home that RUNS the summary - a remote home summary executes under the remote job worker's fixed environment, so a local export never reaches it and the remote home uses its own value or this default
+FM_SNAPSHOT_SECONDMATE_CHILDREN=20  # child rows one secondmate-home summary reports; this is a display bound only and never limits how many child-state queries run concurrently
+FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY=20  # no-mistakes child-state queries a home summary keeps in flight per wave, independent of the reported-row cap, so lowering FM_SNAPSHOT_SECONDMATE_CHILDREN never serializes collection
+FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=3  # seconds allowed per no-mistakes query in a home summary's up-front child-state collection (wave 1: one axi status per ship child plus one coarse run inventory per distinct child repository; wave 2: the ci step log for each ci-phase child), and it also clamps fm-crew-state.sh's own per-query bound for that summary; a wave of Q queries costs ceil(Q / FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY) of these bounds - one per wave while a home stays within the concurrency - rather than one query per child, and the whole summary still has to finish inside the caller's FM_SNAPSHOT_SECONDMATE_TIMEOUT or it stays a fail-closed unknown
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
 FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
@@ -634,6 +635,11 @@ FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher c
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
 ```
+
+A remote secondmate-home summary runs through `bin/fm-on.sh`, and the remote entrypoint executes it under a fixed empty environment, so exporting `FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT`, `FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY`, or `FM_SNAPSHOT_SECONDMATE_CHILDREN` locally cannot reach it as an environment value.
+The calling home therefore passes those three bounds explicitly on the remote command line as `--state-timeout`, `--state-concurrency`, and `--children`, so the caller's own values govern the remote read.
+The same options work for a direct `bin/fm-on.sh <id> fm-fleet-snapshot.sh --secondmate-home-summary` invocation.
+`bin/fm-fleet-snapshot.sh` accepts them only with `--secondmate-home-summary`, requires a positive integer for each, and exits 2 on a missing, malformed, or unsupported option instead of falling back to a default.
 
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.
 `FM_TREEHOUSE_RETURN_LOCK_RETRIES` accepts a nonnegative integer, and an unset, blank, or invalid value uses the default of 3.

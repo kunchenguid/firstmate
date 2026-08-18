@@ -407,6 +407,30 @@ test_genuine_parked_not_superseded() {
   pass "genuine parked run is not flagged superseded"
 }
 
+# A handed-over COARSE inventory is a supplement, never a substitute for the
+# authoritative read. A caller that supplies only FM_CREW_STATE_RUNS_SNAPSHOT
+# (plus the scope it was captured in) and NOT this crew's own `axi status` must
+# still get full gate detail: the runs list reports a gate-parked run as a plain
+# `running` row, so suppressing the authoritative query on the strength of an
+# inventory silently downgrades a parked crew to working.
+test_coarse_inventory_alone_still_queries_authoritative_status() {
+  reset_fakes
+  local d out
+  d=$(new_case coarse-inventory-only)
+  make_repo_on_branch "$d/wt" fm/feat-inv
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-inv.meta" "window=fm:fm-feat-inv" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-inv.status"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-inv)"
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_RUNS_SNAPSHOT="running fm/feat-inv ${FM_FAKE_RUN_HEAD:0:7} 1m" \
+    FM_CREW_STATE_RUNS_SNAPSHOT_REPO="$(cd "$d/wt" && pwd -P)" \
+    "$CREW_STATE" feat-inv)
+  assert_contains "$out" "state: parked" "coarse inventory alone must not suppress authoritative gate detail"
+  assert_contains "$out" "ask-user" "authoritative status still surfaces its gate findings"
+  pass "a coarse inventory alone never suppresses the authoritative run query"
+}
+
 test_scalar_gate_parked_not_superseded() {
   reset_fakes
   local d; d=$(new_case parked-scalar-gate)
@@ -1313,6 +1337,7 @@ test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_genuine_parked_not_superseded
+test_coarse_inventory_alone_still_queries_authoritative_status
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run

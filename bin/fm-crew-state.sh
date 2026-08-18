@@ -27,7 +27,9 @@
 #      carries this crew's own `axi status` output (so the authoritative gate and
 #      step detail below is reached with no query at all), and
 #      FM_CREW_STATE_RUNS_SNAPSHOT plus FM_CREW_STATE_RUNS_SNAPSHOT_REPO carry a
-#      bounded coarse inventory and the repository scope it was captured in. A
+#      bounded coarse inventory and the repository scope it was captured in. The
+#      coarse inventory is a SUPPLEMENT, never a substitute: only handing over
+#      FM_CREW_STATE_RUN_STATUS suppresses the authoritative `axi status` read. A
 #      fleet home summary collects these for every child in bounded parallel
 #      waves, so its child-state cost does not grow with child count.
 #      FM_CREW_STATE_CI_LOG carries the ci step log the same way, for the one
@@ -463,10 +465,14 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   # FM_CREW_STATE_RUN_STATUS, so the authoritative gate/step detail below is
   # still reached without any per-crew query. The variable being SET but empty
   # means that wave already tried and got no answer, so no query is issued here
-  # either; only an entirely uncollected crew calls the CLI itself.
+  # either; only an entirely uncollected crew calls the CLI itself. Handing over
+  # a COARSE repository inventory alone is never enough to skip this query: the
+  # runs list cannot tell a gate-parked run from a running one, so suppressing
+  # the authoritative read on the strength of an inventory would silently
+  # downgrade every crew to coarse classification.
   if [ "${FM_CREW_STATE_RUN_STATUS+x}" = x ]; then
     RUN_OUT=$FM_CREW_STATE_RUN_STATUS
-  elif ! crew_runs_snapshot_applies; then
+  else
     RUN_OUT=$(nm_run axi status)
   fi
   if [ -n "$RUN_OUT" ]; then

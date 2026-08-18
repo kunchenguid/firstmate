@@ -80,6 +80,7 @@ case "$SNAPSHOT_EPOCH" in ''|*[!0-9]*) SNAPSHOT_EPOCH=$(date +%s) ;; esac
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
 FM_SNAPSHOT_SECONDMATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_TIMEOUT:-15}
 FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=${FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT:-3}
+FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY=${FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY:-20}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
 FM_SNAPSHOT_SECONDMATE_CHILDREN=${FM_SNAPSHOT_SECONDMATE_CHILDREN:-20}
 FM_SNAPSHOT_SECONDMATE_QUEUED=${FM_SNAPSHOT_SECONDMATE_QUEUED:-20}
@@ -111,6 +112,7 @@ case "$FM_SNAPSHOT_SECONDMATES" in
 esac
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_TIMEOUT "$FM_SNAPSHOT_SECONDMATE_TIMEOUT"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY "$FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_CHILDREN "$FM_SNAPSHOT_SECONDMATE_CHILDREN"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_QUEUED "$FM_SNAPSHOT_SECONDMATE_QUEUED"
@@ -146,7 +148,14 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
-       fm-fleet-snapshot.sh --secondmate-home-summary
+       fm-fleet-snapshot.sh --secondmate-home-summary [bound options]
+
+Bound options are accepted only with --secondmate-home-summary:
+  --state-timeout SECONDS      per-query bound for the child-state waves
+  --state-concurrency N        probes in flight per wave
+  --children N                 child rows reported by this summary
+Each value must be a positive integer; anything else is refused with exit 2
+rather than silently falling back to a default.
 
 Print a read-only structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract.
@@ -165,15 +174,21 @@ no-mistakes evidence up front in two CONCURRENT waves - `axi status` per ship
 child plus one coarse run inventory per distinct child repository, then the ci
 step log for each ci-phase child - each query bounded by
 FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT (default 3 seconds) and at most
-FM_SNAPSHOT_SECONDMATE_CHILDREN queries in flight, so each wave costs
-ceil(queries / that cap) of those bounds - one bound per wave for a home within
-the cap - instead of one 10-second query per child. The whole summary still sits
-under FM_SNAPSHOT_SECONDMATE_TIMEOUT, and a home that exceeds it stays a
-fail-closed unknown. Children a wave could not answer for fall back to
-pane/status evidence, an unanswered ci log stays fail-closed as unknown
-readiness, and a coarse row never clears a child's open captain decision. A
-remote home summary runs under the remote job worker's fixed environment, so
-these bounds are read from the remote home's own environment, not the caller's.
+FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY queries in flight (default 20), so a
+wave of Q queries costs ceil(Q / that concurrency) of those bounds - one bound
+per wave for a home within the concurrency - instead of one 10-second query per
+child. Probe concurrency is independent of FM_SNAPSHOT_SECONDMATE_CHILDREN,
+which caps only how many child ROWS this summary reports, so shrinking the
+reported table never serializes collection. The whole summary still sits under
+FM_SNAPSHOT_SECONDMATE_TIMEOUT, which the PARENT enforces around the entire
+local or remote summary, and a home that exceeds it stays a fail-closed unknown.
+Children a wave could not answer for fall back to pane/status evidence, an
+unanswered ci log stays fail-closed as unknown readiness, and a coarse row never
+clears a child's open captain decision. A remote home summary runs under the
+remote job worker's fixed empty environment, so it can NOT read these bounds
+from any environment: the parent passes them explicitly as --state-timeout,
+--state-concurrency, and --children over the fm-on argv transport, and the
+caller's own values therefore govern the remote read.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
@@ -188,11 +203,50 @@ EOF
 
 OUTPUT_MODE=json
 case "${1:---json}" in
-  --json) ;;
-  --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
+  --json) [ "$#" -eq 0 ] || shift ;;
+  --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary; shift ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
+
+# Bound options exist because a REMOTE home summary runs under an empty
+# environment: argv is the only transport the caller controls, so the primary
+# local knobs must travel this way or they would not govern a remote read at
+# all. Values are validated here exactly as the environment defaults are, and a
+# malformed or unsupported option is refused rather than silently defaulted.
+bound_option_value() {  # <flag> <argc>
+  if [ "$2" -lt 2 ]; then
+    printf 'fm-fleet-snapshot: %s requires a positive integer value\n' "$1" >&2
+    exit 2
+  fi
+}
+while [ "$#" -gt 0 ]; do
+  if [ "$OUTPUT_MODE" != secondmate-home-summary ]; then
+    usage >&2
+    exit 2
+  fi
+  case "$1" in
+    --state-timeout)
+      bound_option_value "$1" "$#"
+      validate_positive_bound --state-timeout "$2"
+      FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=$2
+      shift 2
+      ;;
+    --state-concurrency)
+      bound_option_value "$1" "$#"
+      validate_positive_bound --state-concurrency "$2"
+      FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY=$2
+      shift 2
+      ;;
+    --children)
+      bound_option_value "$1" "$#"
+      validate_positive_bound --children "$2"
+      FM_SNAPSHOT_SECONDMATE_CHILDREN=$2
+      shift 2
+      ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
 
@@ -644,8 +698,9 @@ task_json_lines() {
 # and issues no query of its own, so a home summary's child-state cost does not
 # scale with child count; as a backstop its own per-query bound is clamped to the
 # wave bound for the duration of this summary. Concurrency is capped at
-# FM_SNAPSHOT_SECONDMATE_CHILDREN probes per wave, so a home with more children
-# than that cap costs ceil(children / cap) bounds per wave instead of one.
+# FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY probes per wave, so a wave of Q
+# queries costs ceil(Q / that cap) bounds instead of one. That cap is separate
+# from FM_SNAPSHOT_SECONDMATE_CHILDREN, which bounds only the reported rows.
 #
 # Repository identity is the scope no-mistakes itself resolves, NOT the task
 # worktree: every ship task runs in its own isolated git worktree leased from the
@@ -689,9 +744,12 @@ secondmate_scope_key() {  # <scope>
   printf '%s' "$((n + 1))"
 }
 
-# Run every queued probe, at most $FM_SNAPSHOT_SECONDMATE_CHILDREN at a time.
+# Run every queued probe, at most $FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY at a
+# time. This is deliberately NOT the reported-row cap: lowering how many child
+# rows a summary prints must never serialize collection into
+# ceil(children / rows) sequential bounds and re-create the false timeout.
 secondmate_child_state_probes() {  # <spec-file>
-  local cap=$FM_SNAPSHOT_SECONDMATE_CHILDREN running=0 probe target arg
+  local cap=$FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY running=0 probe target arg
   local limit=${FM_CREW_STATE_RUNS_LIMIT:-200}
   case "$cap" in ''|*[!0-9]*|0) cap=20 ;; esac
   case "$limit" in ''|*[!0-9]*|0) limit=200 ;; esac
@@ -775,7 +833,8 @@ secondmate_collect_child_state() {
 # fm-crew-state.sh reads it for any child whose run is in the ci phase. That read
 # needs the run id the first wave just collected, so it forms a SECOND bounded
 # wave rather than a per-child call escaping into the sequential summary loop.
-# Each wave costs ceil(probes / concurrency cap) bounds, not one query per child.
+# Each wave costs ceil(probes / FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY) bounds,
+# not one query per child.
 secondmate_collect_child_ci_logs() {
   local status id run_id spec
   [ -n "$SECONDMATE_CHILD_STATE_DIR" ] || return 1
@@ -1401,8 +1460,13 @@ secondmate_current_json() {  # <parent-tasks-json>
     fi
     if [ -z "$reason" ]; then
       if [ "$remote" = true ]; then
+        # The remote entrypoint execs the summary under an empty environment,
+        # so argv is the ONLY way the caller's bounds reach it.
         summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
-          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary < /dev/null 2>/dev/null)
+          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary \
+          --state-timeout "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
+          --state-concurrency "$FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY" \
+          --children "$FM_SNAPSHOT_SECONDMATE_CHILDREN" < /dev/null 2>/dev/null)
         summary_rc=$?
       else
         summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" env \
@@ -1415,6 +1479,8 @@ secondmate_current_json() {  # <parent-tasks-json>
           FM_SNAPSHOT_NOW="$SNAPSHOT_NOW" \
           FM_SNAPSHOT_NOW_EPOCH="$SNAPSHOT_EPOCH" \
           FM_SNAPSHOT_SECONDMATE_CHILDREN="$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
+          FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT="$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
+          FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY="$FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY" \
           FM_SNAPSHOT_SECONDMATE_QUEUED="$FM_SNAPSHOT_SECONDMATE_QUEUED" \
           FM_SNAPSHOT_SECONDMATE_DECISIONS="$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
           FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME="$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
