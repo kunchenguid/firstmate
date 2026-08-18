@@ -1036,6 +1036,70 @@ EOF
   pass "a collected green ci log still drives the checks-green verdict"
 }
 
+# `axi logs` has no length limit, and every collected answer is exported into
+# the environment for the fm-crew-state.sh handoff. An unbounded ci log pushes
+# envp past ARG_MAX, so EVERY exec issued while it is exported fails with
+# E2BIG: the handoff degrades a correctly classified child to `unknown` and the
+# jq that renders the summary fails outright, breaking the home instead of
+# degrading it. The staged log is bounded to its tail - which is what its
+# most-recent-marker reader wants anyway - so a huge log still yields valid
+# JSON and the same terminal ci verdict as a small one.
+test_oversized_ci_log_still_yields_a_valid_bounded_summary() {
+  local home mate wt fakebin canonical summary
+  home=$(make_home cihuge-home-state)
+  mate="$TMP_ROOT/cihuge-home-state-mate"
+  make_valid_secondmate_home cihuge-state "$mate"
+  append_secondmate_registry "$home" cihuge-state "$mate"
+  fm_write_secondmate_meta "$home/state/cihuge-state.meta" "$mate" \
+    "firstmate:fm-cihuge-state" sample
+  wt="$mate/projects/huge"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b fm/huge
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] huge - Huge CI log child (repo: sample) (kind: ship) (since 2026-08-17)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/huge.meta" \
+    "window=firstmate:fm-huge" "worktree=$wt" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" huge busy
+  printf 'working: validating\n' > "$mate/state/huge.status"
+  # Several megabytes of ordinary monitor chatter, with the marker last exactly
+  # as an append-only log has it.
+  awk 'BEGIN{for(i=0;i<40000;i++) printf "waiting on checks, poll %d, nothing conclusive yet\n", i}' \
+    > "$TMP_ROOT/cihuge.log"
+  printf 'all CI checks passed - still monitoring until merged or closed\n' \
+    >> "$TMP_ROOT/cihuge.log"
+  [ "$(wc -c < "$TMP_ROOT/cihuge.log" | tr -d ' ')" -gt 2000000 ] \
+    || fail "the oversized ci log fixture is not large enough to exercise ARG_MAX"
+  fakebin=$(make_fakebin "$home")
+
+  # The home summary itself must stay valid JSON: the exec that renders it runs
+  # while the collected evidence is exported.
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$mate" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FAKE_NM_STATUS_CI=1 FAKE_NM_CILOG="$TMP_ROOT/cihuge.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e '.schema == "fm-secondmate-home-summary.v1"' >/dev/null \
+    || fail "an oversized ci log broke the home summary contract: $summary"
+
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FAKE_NM_STATUS_CI=1 FAKE_NM_CILOG="$TMP_ROOT/cihuge.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "cihuge-state")
+    | .current.state == "unknown"
+      and (.current.reason | test("terminal child state"))
+      and (.current.reason | test("huge=done"))
+  ' >/dev/null || fail "an oversized ci log lost the checks-green verdict: $canonical"
+  pass "an oversized ci log stays bounded and keeps its terminal ci verdict"
+}
+
 # The probe loop reads its spec on its OWN stdin, so a probe that reads stdin
 # and does not have it redirected drains the spec and the loop sees EOF early.
 # Every child queued behind that point silently loses its evidence while still
@@ -2692,6 +2756,7 @@ test_home_summary_bound_options_govern_collection
 test_gate_parked_child_without_logged_decision_is_held
 test_ci_phase_children_keep_the_summary_bounded
 test_collected_ci_log_still_reports_checks_green
+test_oversized_ci_log_still_yields_a_valid_bounded_summary
 test_step_table_less_ci_child_still_collects_its_log
 test_stdin_reading_probe_never_truncates_the_wave
 test_child_state_tempdir_is_cleaned_on_termination

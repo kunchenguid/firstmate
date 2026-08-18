@@ -1150,22 +1150,27 @@ pass "remote home summary bounds travel as argv and are refused fail-closed when
 
 # Rollout skew is ordinary: bin/fm-update.sh updates each remote code root
 # independently and may report "already current" or "skipped", so a calling home
-# can be newer than a remote one. A remote root that predates the bound options
-# rejects them with the usage status, which must NOT turn a healthy home into a
-# failed one. Stand in for that older checkout with a script that accepts only
-# the bare legacy invocation and delegates to the real summary.
+# can be newer than a remote one. Stand in for that older checkout with the
+# parser every pre-option revision actually had: it decides its output mode from
+# "$1" alone via `case "${1:---json}"` and IGNORES every trailing argument. That
+# is why the caller must lead with a bound option - appending the bounds would
+# have this root answer 0 with a summary computed at its own defaults - and why
+# the usage status it returns for an unknown first argument must not turn a
+# healthy home into a failed one.
 cp "$REMOTE_ROOT/bin/fm-fleet-snapshot.sh" "$REMOTE_ROOT/bin/fm-fleet-snapshot-current.sh"
 chmod +x "$REMOTE_ROOT/bin/fm-fleet-snapshot-current.sh"
 LEGACY_LOG="$TMP_ROOT/remote-legacy-argv.log"
 : > "$LEGACY_LOG"
-write_legacy_remote_snapshot() {  # <exit-status-for-flagged-call>
+write_legacy_remote_snapshot() {  # <exit-status-for-unknown-first-argument>
   cat > "$REMOTE_ROOT/bin/fm-fleet-snapshot.sh" <<SH
 #!/usr/bin/env bash
 set -u
 printf '%s\n' "\$*" >> '$LEGACY_LOG'
-[ "\${1:-}" = --secondmate-home-summary ] || exit $1
-[ "\$#" -eq 1 ] || exit $1
-exec '$REMOTE_ROOT/bin/fm-fleet-snapshot-current.sh' --secondmate-home-summary
+case "\${1:---json}" in
+  --secondmate-home-summary)
+    exec '$REMOTE_ROOT/bin/fm-fleet-snapshot-current.sh' --secondmate-home-summary ;;
+  *) exit $1 ;;
+esac
 SH
   chmod +x "$REMOTE_ROOT/bin/fm-fleet-snapshot.sh"
 }
@@ -1180,8 +1185,10 @@ printf '%s' "$LEGACY_SNAPSHOT" | jq -e '
 ' >/dev/null || fail "an un-updated remote code root became a failed home: $LEGACY_SNAPSHOT"
 [ "$(wc -l < "$LEGACY_LOG" | tr -d ' ')" -eq 2 ] \
   || fail "expected exactly one tuned attempt plus one legacy retry: $(cat "$LEGACY_LOG")"
-head -1 "$LEGACY_LOG" | grep -q -- '--state-timeout' \
-  || fail "the first remote attempt did not carry the caller's bounds: $(cat "$LEGACY_LOG")"
+case "$(head -1 "$LEGACY_LOG")" in
+  --state-timeout*) ;;
+  *) fail "the first remote attempt did not lead with a bound option, so a trailing-argv-ignoring root would have answered at its own defaults: $(cat "$LEGACY_LOG")" ;;
+esac
 [ "$(tail -1 "$LEGACY_LOG")" = "--secondmate-home-summary" ] \
   || fail "the retry was not the bare legacy invocation: $(cat "$LEGACY_LOG")"
 

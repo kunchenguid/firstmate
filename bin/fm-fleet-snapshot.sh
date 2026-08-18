@@ -148,9 +148,10 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
-       fm-fleet-snapshot.sh --secondmate-home-summary [bound options]
+       fm-fleet-snapshot.sh [bound options] --secondmate-home-summary
 
-Bound options are accepted only with --secondmate-home-summary:
+Bound options may appear in any order but are accepted only together with
+--secondmate-home-summary:
   --state-timeout SECONDS      per-query bound for the child-state waves
   --state-concurrency N        probes in flight per wave
   --children N                 child rows reported by this summary
@@ -205,30 +206,33 @@ FM_SNAPSHOT_REGISTRY_TIMEOUT, with unavailability and truncation disclosed.
 EOF
 }
 
-OUTPUT_MODE=json
-case "${1:---json}" in
-  --json) [ "$#" -eq 0 ] || shift ;;
-  --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary; shift ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
-
 # Bound options exist because a REMOTE home summary runs under an empty
 # environment: argv is the only transport the caller controls, so the primary
 # local knobs must travel this way or they would not govern a remote read at
 # all. Values are validated here exactly as the environment defaults are, and a
 # malformed or unsupported option is refused rather than silently defaulted.
+#
+# Options and the output mode are parsed in ONE pass over argv in any order,
+# because that is what makes remote capability detection real: every code root
+# that predates these options decides everything from "$1" alone and ignores
+# trailing arguments, so a caller that puts a bound option FIRST gets the usage
+# status from such a root instead of a summary silently computed at the remote
+# defaults. See secondmate_remote_home_summary.
 bound_option_value() {  # <flag> <argc>
   if [ "$2" -lt 2 ]; then
     printf 'fm-fleet-snapshot: %s requires a positive integer value\n' "$1" >&2
     exit 2
   fi
 }
+OUTPUT_MODE=json
+BOUND_OPTION_SEEN=0
 while [ "$#" -gt 0 ]; do
-  if [ "$OUTPUT_MODE" != secondmate-home-summary ]; then
-    usage >&2
-    exit 2
-  fi
+  case "$1" in
+    --json) OUTPUT_MODE=json; shift; continue ;;
+    --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary; shift; continue ;;
+    -h|--help) usage; exit 0 ;;
+  esac
+  BOUND_OPTION_SEEN=1
   case "$1" in
     --state-timeout)
       bound_option_value "$1" "$#"
@@ -251,6 +255,12 @@ while [ "$#" -gt 0 ]; do
     *) usage >&2; exit 2 ;;
   esac
 done
+# Bound options belong to the summary mode alone; the canonical snapshot runs no
+# child-state wave and must refuse them rather than silently ignore them.
+if [ "$BOUND_OPTION_SEEN" -eq 1 ] && [ "$OUTPUT_MODE" != secondmate-home-summary ]; then
+  usage >&2
+  exit 2
+fi
 
 command -v jq >/dev/null 2>&1 || { echo "fm-fleet-snapshot: jq not found" >&2; exit 1; }
 
@@ -721,6 +731,18 @@ task_json_lines() {
 # nothing leaves that child without pre-collected evidence, and fm-crew-state.sh
 # falls back to its pane/status reading exactly as it does when its own query
 # does not answer. No unbounded retry is issued anywhere.
+#
+# Every staged answer is later EXPORTED into the process environment for the
+# fm-crew-state.sh handoff, and `axi logs` has no length limit, so one large ci
+# step log would push envp past ARG_MAX (about 1 MB of combined argv+envp on
+# macOS, 128 KB per single variable on Linux) and make every exec issued while
+# those variables are exported fail with E2BIG - degrading a correctly
+# classified child to `unknown` and breaking the jq that renders the summary.
+# Staged evidence is therefore capped BEFORE anything is exported. A ci log is
+# capped to its tail, which is exactly what its reader wants (it scans for the
+# MOST RECENT marker); any other oversized answer is emptied, which is the same
+# fail-closed "collected, no answer" the reader already handles.
+SECONDMATE_EVIDENCE_MAX_BYTES=65536
 SECONDMATE_CHILD_STATE_DIR=
 SECONDMATE_REMOTE_SUMMARY=
 SECONDMATE_REMOTE_SUMMARY_RC=0
@@ -790,6 +812,34 @@ secondmate_child_state_probes() {  # <spec-file>
     fi
   done < "$1"
   wait
+  secondmate_bound_staged_evidence
+}
+
+# Cap every staged answer to SECONDMATE_EVIDENCE_MAX_BYTES before any of it can
+# reach an exec. Owned by the probe loop rather than the per-child handoff, so
+# no future probe kind can stage an unbounded answer that skips the cap.
+secondmate_bound_staged_evidence() {
+  local f size tmp
+  [ -n "$SECONDMATE_CHILD_STATE_DIR" ] || return 0
+  for f in "$SECONDMATE_CHILD_STATE_DIR"/*; do
+    [ -f "$f" ] || continue
+    case "$f" in *.scope|*.wt) continue ;; esac
+    size=$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    [ "$size" -gt "$SECONDMATE_EVIDENCE_MAX_BYTES" ] || continue
+    case "$f" in
+      *.cilog)
+        tmp="$f.bounded"
+        if tail -c "$SECONDMATE_EVIDENCE_MAX_BYTES" "$f" > "$tmp" 2>/dev/null; then
+          mv -f "$tmp" "$f"
+        else
+          rm -f "$tmp"
+          : > "$f"
+        fi
+        ;;
+      *) : > "$f" ;;
+    esac
+  done
 }
 
 # Collect every ship child's run evidence for this home in one bounded wave.
@@ -1399,10 +1449,17 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
 # One remote home summary, inside ONE aggregate FM_SNAPSHOT_SECONDMATE_TIMEOUT
 # deadline. The remote entrypoint execs under an empty environment, so argv is
 # the only way the caller's bounds reach the remote home - but a remote code root
-# that has not been updated yet does not know those options and answers with the
-# usage status. bin/fm-update.sh updates every remote root independently and may
-# legitimately report "already current" or "skipped", so caller-newer-than-remote
-# is an ordinary rollout state, not a broken home.
+# that has not been updated yet does not know those options. bin/fm-update.sh
+# updates every remote root independently and may legitimately report "already
+# current" or "skipped", so caller-newer-than-remote is an ordinary rollout
+# state, not a broken home.
+#
+# A bound option is therefore sent FIRST, and that ordering is the capability
+# probe itself: every code root that predates the options decides its mode from
+# "$1" alone and ignores trailing arguments, so appending them would have such a
+# root answer 0 with a summary computed at ITS defaults while the caller believed
+# its own bounds governed the read. Leading with `--state-timeout` makes an
+# un-updated root reject the argv outright, which is a detectable skew.
 #
 # So exit 2 - and ONLY exit 2, the one status that means "this argv was not
 # understood" - retries the legacy no-flag call once. A timeout (124), an
@@ -1416,10 +1473,11 @@ secondmate_remote_home_summary() {  # <secondmate-id>
   SECONDMATE_REMOTE_SUMMARY=
   started=$(date +%s)
   SECONDMATE_REMOTE_SUMMARY=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
-    "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary \
+    "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh \
     --state-timeout "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
     --state-concurrency "$FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY" \
-    --children "$FM_SNAPSHOT_SECONDMATE_CHILDREN" < /dev/null 2>/dev/null)
+    --children "$FM_SNAPSHOT_SECONDMATE_CHILDREN" \
+    --secondmate-home-summary < /dev/null 2>/dev/null)
   SECONDMATE_REMOTE_SUMMARY_RC=$?
   [ "$SECONDMATE_REMOTE_SUMMARY_RC" -eq 2 ] || return 0
   elapsed=$(( $(date +%s) - started ))
