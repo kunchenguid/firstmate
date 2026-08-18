@@ -67,9 +67,6 @@ done
 command -v git >/dev/null 2>&1 || die 'git is required'
 command -v gh >/dev/null 2>&1 || die 'gh is required for upstream identity checks'
 
-license=$(gh api "repos/$SOURCE_REPO" --jq '.license.spdx_id // empty')
-[ "$license" = "$LICENSE" ] || die "upstream license mismatch: expected $LICENSE, got ${license:-<none>}"
-
 full_name=$(gh api "repos/$SOURCE_REPO" --jq '.full_name')
 [ "$full_name" = "$SOURCE_REPO" ] || die "upstream identity mismatch: expected $SOURCE_REPO, got $full_name"
 
@@ -80,6 +77,9 @@ fi
 if [ "$(gh api "repos/$SOURCE_REPO/git/tags/$commit" --jq '.object.type' 2>/dev/null || true)" = commit ]; then
   commit=$(gh api "repos/$SOURCE_REPO/git/tags/$commit" --jq '.object.sha')
 fi
+
+license=$(gh api --method GET "repos/$SOURCE_REPO/license" -f "ref=$commit" --jq '.license.spdx_id // empty')
+[ "$license" = "$LICENSE" ] || die "upstream license mismatch at $commit: expected $LICENSE, got ${license:-<none>}"
 
 tmp_parent=${FM_FLUX_SKILLS_VENDOR_TMP:-$(mktemp -d)}
 cleanup() {
