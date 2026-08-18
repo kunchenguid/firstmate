@@ -28,7 +28,8 @@
 # loudly on a stopped or unreadable default.
 # Provision records the running default session, its workspace/tab/pane
 # topology, and its agent identities as a fleet-state tripwire. Teardown
-# requires that record to be identical afterward.
+# refuses default-session identity drift and topology drift attributable to the
+# named lab, while auditing unrelated same-operator fleet churn.
 # FM_HERDR_LAB_PROVISION_TIMEOUT_SECONDS is a whole number from 1 through 600.
 # It defaults to 120 so a loaded fleet gets a fair but bounded startup window.
 set -u
@@ -401,7 +402,7 @@ fm_herdr_lab_provision() { # <session>
 }
 
 fm_herdr_lab_check_tripwire() { # <session>
-  local name=$1 tripwire before after
+  local name=$1 tripwire before after verdict
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
     fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing unverified teardown"
@@ -409,12 +410,29 @@ fm_herdr_lab_check_tripwire() { # <session>
   }
   before=$(cat "$tripwire")
   after=$(fm_herdr_lab_fleet_state "$name") || return 1
-  [ "$before" = "$after" ] || {
-    fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: default session changed during lab work"
-    fm_herdr_lab_error "before: $before"
-    fm_herdr_lab_error "after:  $after"
+  [ "$before" = "$after" ] && return 0
+  verdict=$(jq -nrce --argjson before "$before" --argjson after "$after" --arg name "$name" '
+    def topology: [.workspaces, .tabs, .panes, .agents];
+    if $before.session != $after.session then "identity"
+    elif (($before | topology | tojson | contains($name)) or
+          ($after | topology | tojson | contains($name))) then "attributed"
+    else "external"
+    end
+  ' 2>/dev/null) || {
+    fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: cannot classify default-session drift"
     return 1
   }
+  case "$verdict" in
+    external)
+      fm_herdr_lab_error "fleet-state audit: unrelated default-session topology changed during lab work; guarded teardown may continue"
+      ;;
+    *)
+      fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: default-session drift is attributable to the lab or changed its identity"
+      fm_herdr_lab_error "before: $before"
+      fm_herdr_lab_error "after:  $after"
+      return 1
+      ;;
+  esac
 }
 
 fm_herdr_lab_verify_tripwire() { # <session>

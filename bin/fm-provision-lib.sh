@@ -20,8 +20,10 @@
 #   FM_PROVISION_MAX_COMPONENTS budget allows, a component whose directory lies
 #   deeper below the worktree root than FM_PROVISION_SCAN_DEPTH, a Python
 #   component declaring a pyproject.toml but neither a uv.lock nor a
-#   requirements.txt, a recognized-but-unsupported
-#   package manager (yarn, bun), a JS component whose package manager is neither
+#   requirements.txt, a standalone uv.lock whose root dependency set cannot be
+#   identified without a pyproject.toml, a JS lockfile without a package.json
+#   manifest, a recognized-but-unsupported package manager (yarn, bun), a JS
+#   component whose package manager is neither
 #   named by package.json's packageManager field nor implied by a single
 #   lockfile, a declared Node major that cannot be found under the standard
 #   version-manager directories, components declaring conflicting Node majors,
@@ -84,12 +86,22 @@
 # does not recognize provisions nothing.
 #
 # SUPPORTED ECOSYSTEMS (one component per directory per language)
-#   uv      uv.lock            -> uv sync --frozen
-#   pip     requirements.txt   -> uv venv --clear .venv + uv pip install -r ...
-#   npm     package-lock.json  -> npm ci
-#   pnpm    pnpm-lock.yaml     -> pnpm install --frozen-lockfile
+#   uv       uv.lock + pyproject.toml -> uv sync --frozen
+#   uv-lock  uv.lock only             -> synthetic metadata outside the worktree
+#                                        + uv sync --frozen --no-install-project
+#   pip      requirements.txt         -> uv venv --clear .venv
+#                                        + uv pip install -r ...
+#   npm      package-lock.json        -> npm ci
+#   pnpm     pnpm-lock.yaml           -> pnpm install --frozen-lockfile
 # Python always goes through uv, never pip/venv directly (AGENTS.md toolchain
-# convention). A directory whose pyproject.toml declares a project - a [project],
+# convention). A requirements.txt without package metadata is only a dependency
+# list, so it creates an environment and installs those requirements without
+# building the directory. A standalone uv.lock is also only a dependency list.
+# Its root package name is read from the lock, matching synthetic project
+# metadata is created under the provisioning cache, and uv is told not to
+# install that synthetic project or any workspace package. The real component
+# receives only the resulting .venv and is never presented to uv as a project.
+# A directory whose pyproject.toml declares a project - a [project],
 # [build-system], or [tool.poetry] table - with neither of those
 # two Python manifests is a capability gap: choosing an installer for a lockless
 # project is a design decision this library has not made, and provisioning
@@ -102,12 +114,13 @@
 # buys on the one surface built for signal.
 # The JS package manager is read from what the project DECLARES -
 # package.json's corepack `packageManager` field - and only falls back to the
-# lockfile when the project declares nothing; lockfile-filename precedence is
-# convention, not evidence, and a directory carrying two committed lockfiles
-# would otherwise be resolved by this library's opinion rather than by what the
-# project actually installs with. yarn and bun, and a JS component whose
-# manager cannot be determined, are capability gaps: they are left
-# unprovisioned and reported, never installed with a guessed installer.
+# lockfile when package.json declares no manager; lockfile-filename precedence
+# is convention, not evidence, and a directory carrying two committed
+# lockfiles would otherwise be resolved by this library's opinion rather than
+# by what the project actually installs with. A JS lockfile without
+# package.json, yarn and bun, and a JS component whose manager cannot be
+# determined are capability gaps: they are left unprovisioned and reported,
+# never installed with a guessed or incomplete declaration.
 #
 # CACHING. Every component carries a fingerprint over its own manifests - the
 # installer's configuration files (.npmrc, uv.toml) among them, because they
@@ -403,21 +416,61 @@ fm_provision_scan() {  # <worktree>
   [ "${#deep[@]}" -eq 0 ] || printf 'below-depth %s\n' "${deep[@]}"
 }
 
+# A standalone uv.lock has no project file for uv to discover, but the lock
+# still names the root whose dependency edges select the environment. Return
+# that one root package name only when uv's generated lock shape identifies it
+# unambiguously through a virtual or editable source at "." and every other
+# package source is independent of the original project path. An unreadable,
+# malformed, path-dependent, or rootless lock returns non-zero so detection can
+# record a gap instead of attempting an incomplete project sync.
+fm_provision_uv_lock_root_name() {  # <component-dir>
+  local dir=$1
+  fm_provision_run_bounded "$FM_PROVISION_PROBE_TIMEOUT" "$dir" \
+    python3 - "$dir/uv.lock" <<'PY'
+import re
+import sys
+
+try:
+    text = open(sys.argv[1], encoding="utf-8").read()
+except (OSError, UnicodeDecodeError):
+    raise SystemExit(1)
+
+blocks = re.split(r"(?m)^\s*\[\[package\]\]\s*(?:#.*)?$", text)[1:]
+roots = []
+for block in blocks:
+    name = re.search(r'(?m)^\s*name\s*=\s*"([A-Za-z0-9][A-Za-z0-9._-]*)"\s*(?:#.*)?$', block)
+    source = re.search(r"(?m)^\s*source\s*=\s*\{([^\n]*)\}\s*(?:#.*)?$", block)
+    if not name or not source:
+        continue
+    source_text = source.group(1)
+    if re.search(r'\b(?:editable|virtual)\s*=\s*"\."(?:\s*[,}]|\s*$)', source_text + "}"):
+        roots.append(name.group(1))
+    elif re.search(r'\b(?:editable|virtual|directory|path|workspace)\s*=', source_text):
+        raise SystemExit(1)
+if len(roots) != 1:
+    raise SystemExit(1)
+sys.stdout.write(roots[0])
+PY
+}
+
 # Emit "<ecosystem> <relative-dir>" per detected component, deterministically
-# ordered. A directory can yield at most one Python and one JS component. Three
+# ordered. A directory can yield at most one Python and one JS component. Five
 # pseudo-ecosystems name a component this library will not install but must
 # still report: "js" is a JS component whose package manager could not be
-# determined, "python" is a directory whose pyproject.toml declares a project
-# while carrying neither a uv.lock nor a requirements.txt, and "unscanned" is a
-# directory past FM_PROVISION_SCAN_DEPTH. The caller records each as a
-# capability gap rather than guessing an installer the project does not use.
-# The scan lines can be passed in by a caller that already scanned -
-# fm_provision_worktree does, so its host-prerequisite decision lands before
-# anything here reads a project-controlled file - and are scanned for otherwise.
+# determined, "js-lock" is a JS lockfile without the package.json manifest its
+# installer requires, "python" is a directory whose pyproject.toml declares a
+# project while carrying neither a uv.lock nor a requirements.txt,
+# "python-lock" is a standalone uv.lock whose root dependency set cannot be
+# identified, and "unscanned" is a directory past FM_PROVISION_SCAN_DEPTH.
+# The caller records each as a capability gap rather than guessing an installer
+# the project does not use.
+# The scan lines can be passed in by a caller that already scanned.
+# fm_provision_worktree does so its host-prerequisite decision lands before
+# anything here reads a project-controlled file, and other callers scan here.
 # Returns non-zero when the traversal itself failed, which is a refusal and not
 # the same thing as a traversal that succeeded and found nothing.
 fm_provision_detect() {  # <worktree> [<scan-line>...]
-  local wt=$1 dir rel scope line entry member workspace_info scanned declared declared_rc=0
+  local wt=$1 dir rel scope line entry member workspace_info scanned declared root_name declared_rc=0
   shift
   local -a lines=() js_managers=() candidates=() covered=()
   if [ "$#" -gt 0 ]; then
@@ -476,12 +529,21 @@ fm_provision_detect() {  # <worktree> [<scan-line>...]
       continue
     fi
     dir=$(fm_provision_component_dir "$wt" "$rel")
-    # Python: uv-managed project wins over a bare requirements install, and a
-    # project declaring neither is named rather than passed over in silence.
-    if [ -f "$dir/uv.lock" ]; then
+    # Python: a uv project wins over a bare dependency list. Without project
+    # metadata, requirements.txt is the directly supported dependency-list
+    # declaration even when a standalone uv.lock is also present. A standalone
+    # uv.lock otherwise installs through cache-local synthetic metadata.
+    if [ -f "$dir/uv.lock" ] && [ -f "$dir/pyproject.toml" ]; then
       printf '%s %s\n' uv "$rel"
     elif [ -f "$dir/requirements.txt" ]; then
       printf '%s %s\n' pip "$rel"
+    elif [ -f "$dir/uv.lock" ]; then
+      root_name=$(fm_provision_uv_lock_root_name "$dir") || root_name=
+      if [ -n "$root_name" ]; then
+        printf '%s %s\n' uv-lock "$rel"
+      else
+        printf '%s %s\n' python-lock "$rel"
+      fi
     else
       declared_rc=0
       fm_provision_python_project_declared "$dir" || declared_rc=$?
@@ -504,6 +566,18 @@ fm_provision_detect() {  # <worktree> [<scan-line>...]
     fi
     [ ! -f "$dir/package-lock.json" ] || js_managers+=(npm)
     if [ "${#js_managers[@]}" -gt 0 ]; then
+      if [ ! -f "$dir/package.json" ]; then
+        if [ "${#js_managers[@]}" -eq 1 ]; then
+          case "${js_managers[0]}" in
+            yarn|bun)
+              printf '%s %s\n' "${js_managers[0]}" "$rel"
+              continue
+              ;;
+          esac
+        fi
+        printf 'js-lock %s\n' "$rel"
+        continue
+      fi
       declared=$(fm_provision_declared_js_manager "$dir")
       if [ -n "$declared" ]; then
         if fm_provision_list_has "$declared" "${js_managers[@]}"; then
@@ -934,6 +1008,7 @@ fm_provision_manifests() {  # <worktree> <ecosystem> <relative-dir>
   local -a names=()
   case "$eco" in
     uv) names=(uv.lock uv.toml pyproject.toml .python-version) ;;
+    uv-lock) names=(uv.lock uv.toml .python-version) ;;
     pip)
       names=(requirements.txt requirements-dev.txt requirements-test.txt
              requirements_dev.txt requirements_test.txt
@@ -1221,7 +1296,7 @@ fm_provision_environment_signature() {  # <worktree> <eco> <rel>
   local wt=$1 eco=$2 rel=$3 dir python state
   dir=$(fm_provision_component_dir "$wt" "$rel")
   case "$eco" in
-    uv|pip)
+    uv|uv-lock|pip)
       python="$dir/.venv/bin/python"
       [ -x "$python" ] || return 1
       state=$(fm_provision_run_bounded "$FM_PROVISION_PROBE_TIMEOUT" "$dir" \
@@ -1310,7 +1385,7 @@ fm_provision_declared_packages_ready() {  # <worktree> <eco> <rel>
   local wt=$1 eco=$2 rel=$3 dir name rc=0
   dir=$(fm_provision_component_dir "$wt" "$rel")
   case "$eco" in
-    uv) return 0 ;;
+    uv|uv-lock) return 0 ;;
     pip) ;;
     *) return 2 ;;
   esac
@@ -1357,7 +1432,7 @@ fm_provision_probe() {  # <worktree> <eco> <rel> <log> <runtime> <environment> <
   dir=$(fm_provision_component_dir "$wt" "$rel")
   FM_PROVISION_PROBE_NOTE=
   case "$eco" in
-    uv|pip)
+    uv|uv-lock|pip)
       python="$dir/.venv/bin/python"
       [ -x "$python" ] || return 1
       actual=$(fm_provision_run_bounded "$FM_PROVISION_PROBE_TIMEOUT" "$dir" \
@@ -1410,8 +1485,8 @@ fm_provision_probe() {  # <worktree> <eco> <rel> <log> <runtime> <environment> <
 
 # --- installs ---------------------------------------------------------------
 
-fm_provision_install() {  # <worktree> <eco> <rel> <log>
-  local wt=$1 eco=$2 rel=$3 log=$4 dir name
+fm_provision_install() {  # <worktree> <eco> <rel> <log> <cache-dir>
+  local wt=$1 eco=$2 rel=$3 log=$4 cache=$5 dir name
   dir=$(fm_provision_component_dir "$wt" "$rel")
   case "$eco" in
     uv)
@@ -1431,6 +1506,41 @@ fm_provision_install() {  # <worktree> <eco> <rel> <log>
       fm_provision_run_logged "$FM_PROVISION_INSTALL_TIMEOUT" "$dir" "$log" \
         env -u UV_NO_DEV -u UV_ONLY_DEV -u UV_NO_DEFAULT_GROUPS \
         -u UV_NO_GROUP -u UV_ONLY_GROUP uv "${sync_args[@]}" || return $?
+      ;;
+    uv-lock)
+      local root_name synthetic rc=0 cleanup_rc=0
+      root_name=$(fm_provision_uv_lock_root_name "$dir") || return 1
+      [ -n "$root_name" ] || return 1
+      synthetic=$(mktemp -d "$cache/uv-lock.XXXXXX") || return 1
+      fm_provision_run_bounded "$FM_PROVISION_PROBE_TIMEOUT" "$dir" \
+        python3 - "$dir" "$synthetic" "$root_name" <<'PY' || rc=$?
+import pathlib
+import shutil
+import sys
+
+source = pathlib.Path(sys.argv[1])
+target = pathlib.Path(sys.argv[2])
+root_name = sys.argv[3]
+shutil.copyfile(source / "uv.lock", target / "uv.lock")
+for name in ("uv.toml", ".python-version"):
+    path = source / name
+    if path.is_file():
+        shutil.copyfile(path, target / name)
+(target / "pyproject.toml").write_text(
+    '[project]\nname = "{}"\nversion = "0.0.0"\n'.format(root_name),
+    encoding="utf-8",
+)
+PY
+      if [ "$rc" -eq 0 ]; then
+        fm_provision_run_logged "$FM_PROVISION_INSTALL_TIMEOUT" "$synthetic" "$log" \
+          env -u UV_NO_DEV -u UV_ONLY_DEV -u UV_NO_DEFAULT_GROUPS \
+          -u UV_NO_GROUP -u UV_ONLY_GROUP -u UV_PROJECT \
+          UV_PROJECT_ENVIRONMENT="$dir/.venv" \
+          uv sync --frozen --no-install-project --no-install-workspace || rc=$?
+      fi
+      rm -rf "$synthetic" || cleanup_rc=$?
+      [ "$cleanup_rc" -eq 0 ] || return "$cleanup_rc"
+      [ "$rc" -eq 0 ] || return "$rc"
       ;;
     pip)
       local -a args=(pip install --python .venv/bin/python)
@@ -1460,7 +1570,7 @@ fm_provision_install() {  # <worktree> <eco> <rel> <log>
 fm_provision_artifact_path() {  # <eco> <rel>
   local eco=$1 rel=$2 name
   case "$eco" in
-    uv|pip) name=.venv ;;
+    uv|uv-lock|pip) name=.venv ;;
     npm|pnpm) name=node_modules ;;
     *) return 1 ;;
   esac
@@ -1792,14 +1902,22 @@ fm_provision_worktree() {  # <worktree> <cache-dir> <log> [<needs-file>]
     eco=${line%% *}
     rel=${line#* }
     case "$eco" in
-      uv|pip|npm|pnpm) ;;
+      uv|uv-lock|pip|npm|pnpm) ;;
       js)
         states[index]=$(fm_provision_gap "$log" js "$rel" ambiguous-manager \
           "its package manager is not determined by package.json's packageManager field and it carries no single lockfile that names one")
         ;;
+      js-lock)
+        states[index]=$(fm_provision_gap "$log" js-lock "$rel" no-package-manifest \
+          "it carries a JavaScript lockfile but no package.json, and npm and pnpm both require that manifest before they can install the locked dependencies")
+        ;;
       python)
         states[index]=$(fm_provision_gap "$log" python "$rel" no-python-lockfile \
           "it declares a pyproject.toml but neither a uv.lock nor a requirements.txt, and this firstmate installs Python only from a committed declaration")
+        ;;
+      python-lock)
+        states[index]=$(fm_provision_gap "$log" python-lock "$rel" standalone-uv-lock-unresolved \
+          "it carries a uv.lock without project metadata, but the lock does not identify one root dependency set that can be installed without treating the directory as a project")
         ;;
       unscanned)
         states[index]=$(fm_provision_gap "$log" "$eco" "$rel" below-scan-depth \
@@ -1978,13 +2096,13 @@ fm_provision_worktree() {  # <worktree> <cache-dir> <log> [<needs-file>]
     fi
 
     case "$eco" in
-      uv|pip) installer=$(fm_provision_tool_version uv --version) || installer= ;;
+      uv|uv-lock|pip) installer=$(fm_provision_tool_version uv --version) || installer= ;;
       npm) installer=$(fm_provision_tool_version npm --version) || installer= ;;
       pnpm) installer=$(fm_provision_tool_version pnpm --version) || installer= ;;
     esac
     if [ -z "$installer" ]; then
       case "$eco" in
-        uv|pip)
+        uv|uv-lock|pip)
           states[index]=$(fm_provision_gap "$log" "$eco" "$rel" missing-installer \
             "firstmate provisions Python through uv, never pip or venv, and uv is not installed")
           ;;
@@ -2043,7 +2161,7 @@ fm_provision_worktree() {  # <worktree> <cache-dir> <log> [<needs-file>]
     if [ "$state" = installed ]; then
       echo "fm-spawn: provisioning $eco dependencies in $rel" >&2
       rc=0
-      fm_provision_install "$wt" "$eco" "$rel" "$log" || rc=$?
+      fm_provision_install "$wt" "$eco" "$rel" "$log" "$cache" || rc=$?
       if [ "$rc" -ne 0 ]; then
         if [ "$rc" -eq 124 ]; then
           fm_provision_fail "the $eco install in $rel exceeded its ${FM_PROVISION_INSTALL_TIMEOUT}s bound"
@@ -2053,7 +2171,7 @@ fm_provision_worktree() {  # <worktree> <cache-dir> <log> [<needs-file>]
         return 1
       fi
       case "$eco" in
-        uv|pip)
+        uv|uv-lock|pip)
           runtime=$(fm_provision_run_bounded "$FM_PROVISION_PROBE_TIMEOUT" "$dir" \
             "$dir/.venv/bin/python" -c 'import sys; sys.stdout.write("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null) || runtime=
           if [ -z "$runtime" ]; then

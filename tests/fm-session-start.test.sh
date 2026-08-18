@@ -209,7 +209,7 @@ SH
 run_session_start() {
   local home=$1 root=$2 path=$3
   env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_CONFIG_OVERRIDE="$home/config" PATH="$path" \
     FM_BACKEND_HERDR_TEST_LAB=firstmate-herdr-test-lab-v1 \
     "$SESSION_START"
 }

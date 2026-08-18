@@ -30,6 +30,12 @@ SH
   chmod +x "$FM_ROOT_OVERRIDE/bin/fm-auto-reap.sh"
 fi
 
+# Watcher fixtures must not source the active firstmate home's watcher.env.
+# Keep their default config empty and isolated; config-specific cases override
+# this path explicitly with the fixture they exercise.
+fm_test_tmproot_into FM_CONFIG_OVERRIDE fm-wake-config
+export FM_CONFIG_OVERRIDE
+
 # Wedge-alarm notifier recorder (safety seam). The away-mode wedge alarm fires a
 # real OS-level desktop notification by default. Point its FM_WEDGE_ALARM_EXEC
 # seam at a recorder for every

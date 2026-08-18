@@ -52,20 +52,25 @@ PY
     ;;
   sync)
     [ "${FM_TEST_UV_FAIL:-0}" != 1 ] || exit 3
+    [ -f pyproject.toml ] || {
+      printf 'error: No `pyproject.toml` found in current directory or any parent directory\n' >&2
+      exit 2
+    }
     if [ "${FM_TEST_REQUIRE_UV_DEFAULT_GROUPS:-0}" = 1 ]; then
       [ -z "${UV_NO_DEV:-}${UV_ONLY_DEV:-}${UV_NO_DEFAULT_GROUPS:-}${UV_NO_GROUP:-}${UV_ONLY_GROUP:-}" ] \
         || exit 9
     fi
-    mkdir -p .venv/bin .venv/lib/python3.11/site-packages
-    printf 'fake uv project\n' > .venv/lib/python3.11/site-packages/fake_uv_project.pth
-    cat > .venv/bin/python <<'PY'
+    venv=${UV_PROJECT_ENVIRONMENT:-.venv}
+    mkdir -p "$venv/bin" "$venv/lib/python3.11/site-packages"
+    printf 'fake uv project\n' > "$venv/lib/python3.11/site-packages/fake_uv_project.pth"
+    cat > "$venv/bin/python" <<'PY'
 #!/usr/bin/env bash
 case "${2:-}" in
   *sys.version_info*) printf '%s' "${FM_TEST_PYTHON_VERSION:-3.11.9}" ;;
   *) exec python3 "$@" ;;
 esac
 PY
-    chmod +x .venv/bin/python
+    chmod +x "$venv/bin/python"
     exit 0
     ;;
   pip)
@@ -278,6 +283,229 @@ test_worktree_declaring_nothing_is_a_clean_noop() {
   [ ! -d "$case_dir/cache" ] || [ -z "$(ls -A "$case_dir/cache")" ] \
     || fail "no-op provisioning wrote a cache record"
   pass "a worktree declaring no recognized manifest provisions nothing and succeeds"
+}
+
+# --- library: dependency lists ----------------------------------------------
+
+test_a_bare_requirements_list_installs_dependencies_not_a_project() {
+  local case_dir out fakebin detected
+  case_dir=$(new_case bare-requirements none)
+  fakebin=$(case_fakebin "$case_dir")
+  mkdir -p "$case_dir/wt/dependency-list"
+  printf 'six==1.16.0\n' > "$case_dir/wt/dependency-list/requirements.txt"
+
+  detected=$(PATH="$fakebin:/usr/bin:/bin" bash -c '
+    set -u
+    . "$1"
+    fm_provision_detect "$2"
+  ' _ "$LIB" "$case_dir/wt")
+  [ "$detected" = 'pip dependency-list' ] \
+    || fail "a bare requirements.txt was not classified as a dependency list: $detected"
+
+  out=$(run_provision "$case_dir" "$case_dir/wt" "$fakebin")
+  assert_contains "$out" 'rc=0 summary=pip:dependency-list=installed' \
+    "a bare requirements.txt did not install successfully: $out"
+  assert_grep 'uv venv --clear .venv' "$case_dir/install.log" \
+    "a bare requirements.txt did not create an environment"
+  assert_grep 'uv pip install --python .venv/bin/python -r requirements.txt' "$case_dir/install.log" \
+    "a bare requirements.txt was not installed as dependencies"
+  assert_no_grep 'uv sync' "$case_dir/install.log" \
+    "a bare requirements.txt was treated as a runnable uv project"
+  [ ! -e "$case_dir/wt/dependency-list/pyproject.toml" ] \
+    || fail "provisioning wrote project metadata beside a bare requirements.txt"
+  [ ! -e "$case_dir/wt/dependency-list/setup.py" ] \
+    || fail "provisioning wrote package metadata beside a bare requirements.txt"
+  pass "a bare requirements.txt installs only its dependencies"
+}
+
+test_bare_requirements_take_precedence_over_a_standalone_uv_lock() {
+  local case_dir out fakebin detected
+  case_dir=$(new_case requirements-and-uv-lock none)
+  fakebin=$(case_fakebin "$case_dir")
+  mkdir -p "$case_dir/wt/dependency-list"
+  printf 'six==1.16.0\n' > "$case_dir/wt/dependency-list/requirements.txt"
+  printf 'version = 1\nrevision = 3\nrequires-python = ">=3.11"\n' \
+    > "$case_dir/wt/dependency-list/uv.lock"
+
+  detected=$(PATH="$fakebin:/usr/bin:/bin" bash -c '
+    set -u
+    . "$1"
+    fm_provision_detect "$2"
+  ' _ "$LIB" "$case_dir/wt")
+  [ "$detected" = 'pip dependency-list' ] \
+    || fail "requirements.txt did not take precedence over a standalone uv.lock: $detected"
+
+  out=$(run_provision "$case_dir" "$case_dir/wt" "$fakebin")
+  assert_contains "$out" 'rc=0 summary=pip:dependency-list=installed' \
+    "requirements.txt plus a standalone uv.lock did not install successfully: $out"
+  assert_grep 'uv pip install --python .venv/bin/python -r requirements.txt' "$case_dir/install.log" \
+    "requirements.txt plus a standalone uv.lock did not use the dependency installer"
+  assert_no_grep 'uv sync' "$case_dir/install.log" \
+    "requirements.txt plus a standalone uv.lock reached the project-style installer"
+  pass "bare requirements take precedence over a standalone uv.lock"
+}
+
+test_a_standalone_uv_lock_installs_dependencies_not_a_project() {
+  local case_dir out fakebin detected
+  case_dir=$(new_case standalone-uv-lock none)
+  fakebin=$(case_fakebin "$case_dir")
+  mkdir -p "$case_dir/wt/dependency-list"
+  cat > "$case_dir/wt/dependency-list/uv.lock" <<'LOCK'
+version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[[package]]
+name = "dependency-list"
+version = "0.0.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "six" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "six", specifier = "==1.16.0" }]
+
+[[package]]
+name = "six"
+version = "1.16.0"
+source = { registry = "https://pypi.org/simple" }
+LOCK
+
+  detected=$(PATH="$fakebin:/usr/bin:/bin" bash -c '
+    set -u
+    . "$1"
+    fm_provision_detect "$2"
+  ' _ "$LIB" "$case_dir/wt")
+  [ "$detected" = 'uv-lock dependency-list' ] \
+    || fail "a standalone uv.lock was not classified as a dependency list: $detected"
+
+  out=$(run_provision "$case_dir" "$case_dir/wt" "$fakebin")
+  assert_contains "$out" 'rc=0 summary=uv-lock:dependency-list=installed' \
+    "a standalone uv.lock did not install successfully: $out"
+  assert_grep 'uv sync --frozen --no-install-project --no-install-workspace' "$case_dir/install.log" \
+    "a standalone uv.lock did not exclude the synthetic project from installation"
+  [ -x "$case_dir/wt/dependency-list/.venv/bin/python" ] \
+    || fail "a standalone uv.lock did not install into the component environment"
+  [ ! -e "$case_dir/wt/dependency-list/pyproject.toml" ] \
+    || fail "provisioning wrote synthetic project metadata into the component"
+  [ ! -e "$case_dir/wt/dependency-list/setup.py" ] \
+    || fail "provisioning treated a standalone uv.lock as a package"
+  if find "$case_dir/cache" -type f -name pyproject.toml -print -quit | grep -q .; then
+    fail "provisioning left synthetic project metadata in the cache"
+  fi
+
+  : > "$case_dir/install.log"
+  out=$(run_provision "$case_dir" "$case_dir/wt" "$fakebin")
+  assert_contains "$out" 'rc=0 summary=uv-lock:dependency-list=cached' \
+    "an unchanged standalone uv.lock did not reuse its installed dependencies: $out"
+  assert_no_grep 'uv sync' "$case_dir/install.log" \
+    "an unchanged standalone uv.lock repeated its install"
+  pass "a standalone uv.lock installs only its locked dependencies"
+}
+
+test_an_unresolved_standalone_uv_lock_is_a_gap_not_a_failure() {
+  local case_dir out fakebin
+  case_dir=$(new_case unresolved-uv-lock none)
+  fakebin=$(case_fakebin "$case_dir")
+  mkdir -p "$case_dir/wt/dependency-list"
+  printf 'version = 1\nrevision = 3\nrequires-python = ">=3.11"\n' \
+    > "$case_dir/wt/dependency-list/uv.lock"
+
+  out=$(run_provision "$case_dir" "$case_dir/wt" "$fakebin")
+  assert_contains "$out" 'rc=0 summary=python-lock:dependency-list=skipped:standalone-uv-lock-unresolved' \
+    "an unresolved standalone uv.lock refused the worktree instead of recording a gap: $out"
+  assert_no_grep 'uv sync' "$case_dir/install.log" \
+    "an unresolved standalone uv.lock reached a project installer"
+  pass "an unresolved standalone uv.lock records a capability gap without refusing"
+}
+
+test_a_path_dependent_standalone_uv_lock_is_a_gap() {
+  local case_dir out fakebin detected
+  case_dir=$(new_case path-dependent-uv-lock none)
+  fakebin=$(case_fakebin "$case_dir")
+  mkdir -p "$case_dir/wt/dependency-list"
+  cat > "$case_dir/wt/dependency-list/uv.lock" <<'LOCK'
+version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[[package]]
+name = "dependency-list"
+version = "0.0.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "local-dependency" },
+]
+
+[[package]]
+name = "local-dependency"
+version = "0.0.0"
+source = { editable = "../local-dependency" }
+LOCK
+
+  detected=$(PATH="$fakebin:/usr/bin:/bin" bash -c '
+    set -u
+    . "$1"
+    fm_provision_detect "$2"
+  ' _ "$LIB" "$case_dir/wt")
+  [ "$detected" = 'python-lock dependency-list' ] \
+    || fail "a path-dependent standalone uv.lock was classified as installable: $detected"
+
+  out=$(run_provision "$case_dir" "$case_dir/wt" "$fakebin")
+  assert_contains "$out" 'rc=0 summary=python-lock:dependency-list=skipped:standalone-uv-lock-unresolved' \
+    "a path-dependent standalone uv.lock did not record a capability gap: $out"
+  assert_no_grep 'uv sync' "$case_dir/install.log" \
+    "a path-dependent standalone uv.lock reached the copied-lock installer"
+  pass "a path-dependent standalone uv.lock records a capability gap"
+}
+
+test_an_npm_lock_without_a_package_manifest_is_a_gap_not_a_failure() {
+  local case_dir out fakebin detected
+  case_dir=$(new_case npm-lock-only none)
+  fakebin=$(case_fakebin "$case_dir")
+  mkdir -p "$case_dir/wt/dependency-list"
+  printf '{"name":"dependency-list","lockfileVersion":3,"packages":{"":{}}}\n' \
+    > "$case_dir/wt/dependency-list/package-lock.json"
+
+  detected=$(PATH="$fakebin:/usr/bin:/bin" bash -c '
+    set -u
+    . "$1"
+    fm_provision_detect "$2"
+  ' _ "$LIB" "$case_dir/wt")
+  [ "$detected" = 'js-lock dependency-list' ] \
+    || fail "a package-lock.json without package.json was misclassified: $detected"
+
+  out=$(run_provision "$case_dir" "$case_dir/wt" "$fakebin")
+  assert_contains "$out" 'rc=0 summary=js-lock:dependency-list=skipped:no-package-manifest' \
+    "a package-lock.json without package.json refused the worktree: $out"
+  assert_no_grep 'npm ci' "$case_dir/install.log" \
+    "a package-lock.json without package.json reached npm ci"
+  pass "an npm lock without its required manifest records a capability gap"
+}
+
+test_a_pnpm_lock_without_a_package_manifest_is_a_gap_not_a_failure() {
+  local case_dir out fakebin detected
+  case_dir=$(new_case pnpm-lock-only none)
+  fakebin=$(case_fakebin "$case_dir")
+  mkdir -p "$case_dir/wt/dependency-list"
+  printf 'lockfileVersion: 9\nimporters:\n  .: {}\n' \
+    > "$case_dir/wt/dependency-list/pnpm-lock.yaml"
+
+  detected=$(PATH="$fakebin:/usr/bin:/bin" bash -c '
+    set -u
+    . "$1"
+    fm_provision_detect "$2"
+  ' _ "$LIB" "$case_dir/wt")
+  [ "$detected" = 'js-lock dependency-list' ] \
+    || fail "a pnpm-lock.yaml without package.json was misclassified: $detected"
+
+  out=$(run_provision "$case_dir" "$case_dir/wt" "$fakebin")
+  assert_contains "$out" 'rc=0 summary=js-lock:dependency-list=skipped:no-package-manifest' \
+    "a pnpm-lock.yaml without package.json refused the worktree: $out"
+  assert_no_grep 'pnpm install' "$case_dir/install.log" \
+    "a pnpm-lock.yaml without package.json reached pnpm install"
+  pass "a pnpm lock without its required manifest records a capability gap"
 }
 
 # --- library: install, then cache hit ---------------------------------------
@@ -1947,6 +2175,13 @@ test_spawn_into_an_undeclared_project_is_unchanged() {
 }
 
 test_worktree_declaring_nothing_is_a_clean_noop
+test_a_bare_requirements_list_installs_dependencies_not_a_project
+test_bare_requirements_take_precedence_over_a_standalone_uv_lock
+test_a_standalone_uv_lock_installs_dependencies_not_a_project
+test_an_unresolved_standalone_uv_lock_is_a_gap_not_a_failure
+test_a_path_dependent_standalone_uv_lock_is_a_gap
+test_an_npm_lock_without_a_package_manifest_is_a_gap_not_a_failure
+test_a_pnpm_lock_without_a_package_manifest_is_a_gap_not_a_failure
 test_first_spawn_installs_and_second_reuses_the_cache
 test_a_changed_manifest_invalidates_the_cache
 test_changed_installer_configuration_invalidates_the_cache

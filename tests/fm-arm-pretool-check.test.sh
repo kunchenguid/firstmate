@@ -16,6 +16,10 @@ set -u
 CHECK="$ROOT/bin/fm-arm-pretool-check.sh"
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
 
+# The executable transport resolves approved absolute setup paths against the
+# active firstmate home. Keep that input owned by this fixture, not the caller.
+export FM_HOME="$ROOT"
+
 # --- full cross-harness acceptance matrix ----------------------------------
 
 MATRIX_IDS=()

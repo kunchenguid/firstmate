@@ -560,6 +560,7 @@ shared_allocator_bridge_unit() {
   python3 - "$HOST" <<'PY' || fail "shared allocator runner bridge failed"
 import importlib.util, json, pathlib, subprocess, tempfile, sys
 spec=importlib.util.spec_from_file_location("runner_shared",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+fixture_home=pathlib.Path(tempfile.mkdtemp())
 env={"subscription":"sub","resource_group":"rg","prefix":"prefix","budget_limit":1500,"state_dir":pathlib.Path(tempfile.mkdtemp()),"azure_operation_count":0}
 limits={**m.RESOURCE_CLASSES["behavior-heavy"],"sku":"Standard_D4as_v7","sku_family":"StandardDasv7Family"}
 state={"schema":m.SCHEMA,"invocation":"azr-aaaaaaaaaaaa","resources":{},"request":{"fence":"sha256:"+"a"*64,"resource_class":"behavior-heavy","limits":limits}}
@@ -568,10 +569,12 @@ calls=[]
 def completed(value):
     return subprocess.CompletedProcess(["python"],0,stdout=json.dumps(value),stderr="")
 def allocator_run(command,**kwargs):
-    assert kwargs["env"]["FM_HOME"]==str(m.ROOT)
-    assert kwargs["env"]["FM_AZURE_WORKER_STATE_DIR"]==str(m.ROOT/"state"/"azure-workers")
+    assert kwargs["env"]["FM_HOME"]==str(fixture_home)
+    assert kwargs["env"]["FM_AZURE_WORKER_STATE_DIR"]==str((fixture_home/"state"/"azure-workers").resolve())
     calls.append(command)
     return completed({"reservation_id":"azr-aaaaaaaaaaaa","status":"reserved","reason":"","actual_usd":100.0,"forecast_usd":200.0,"admission_limit_usd":1500.0})
+old_home=m.os.environ.get("FM_HOME")
+m.os.environ["FM_HOME"]=str(fixture_home)
 m.run=allocator_run
 cost={"max_increment":25.0}
 result=m.shared_capacity_reserve(env,state,cost)
@@ -594,6 +597,8 @@ state["shared_capacity_reservation"]={"status":"reserved"}
 m.shared_capacity_release(env,state)
 assert "capacity-release" in calls[-1] and len(calls[-1][calls[-1].index("--cleanup-receipt")+1])==64
 assert state["shared_capacity_reservation"]["status"]=="released"
+if old_home is None:m.os.environ.pop("FM_HOME",None)
+else:m.os.environ["FM_HOME"]=old_home
 PY
   pass "runner queues behind the shared allocator and requires actual/forecast evidence before compute"
 }

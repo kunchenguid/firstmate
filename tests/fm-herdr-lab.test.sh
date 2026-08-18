@@ -258,17 +258,31 @@ test_changed_default_trips_after_teardown() {
   pass "fm-herdr-lab: changed default fleet state is a hard failure"
 }
 
-test_changed_default_fleet_members_trip_after_teardown() {
-  local name="fm-lab-tripwire-members-$$" status=0
+test_external_default_fleet_churn_is_audited() {
+  local name="fm-lab-tripwire-members-$$" output
   : > "$FAKE_LOG"
   run_with_fake fm_herdr_lab_provision "$name" || fail "fleet-member tripwire fixture provision failed"
   printf '%s\n' captain > "$FAKE_STATE/default-agents"
-  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
-  expect_code 1 "$status" "lost default fleet members must fail teardown"
-  assert_present "$TRIPWIRES/$name.fleet-state.json" "fleet-member tripwire failure should retain evidence"
+  output=$(run_with_fake fm_herdr_lab_teardown "$name" 2>&1) \
+    || fail "unrelated default fleet churn blocked guarded teardown"
+  printf '%s\n' "$output" | grep -F "fleet-state audit: unrelated default-session topology changed" >/dev/null \
+    || fail "unrelated default fleet churn was not audited"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "audited external churn retained owned lab state"
   printf '%s\n' captain crewmate-1 crewmate-2 > "$FAKE_STATE/default-agents"
-  rm -f "$TRIPWIRES/$name.fleet-state.json"
-  pass "fm-herdr-lab: default pane and agent deaths trip the fleet-state guard"
+  pass "fm-herdr-lab: unrelated same-operator fleet churn is audited without blocking teardown"
+}
+
+test_lab_attributed_default_fleet_drift_trips() {
+  local name="fm-lab-attributed-drift-$$" status=0
+  : > "$FAKE_LOG"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "attributed-drift fixture provision failed"
+  printf '%s\n' captain crewmate-1 crewmate-2 "$name" > "$FAKE_STATE/default-agents"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "lab-attributed default fleet drift must refuse teardown"
+  assert_present "$TRIPWIRES/$name.fleet-state.json" "attributed fleet drift discarded ownership evidence"
+  printf '%s\n' captain crewmate-1 crewmate-2 > "$FAKE_STATE/default-agents"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "attributed-drift cleanup failed after default fleet repair"
+  pass "fm-herdr-lab: lab-attributed default fleet drift retains teardown refusal"
 }
 
 test_default_runtime_activity_does_not_trip() {
@@ -389,7 +403,8 @@ test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
 test_agent_argv_inserts_session_before_separator
 test_changed_default_trips_after_teardown
-test_changed_default_fleet_members_trip_after_teardown
+test_external_default_fleet_churn_is_audited
+test_lab_attributed_default_fleet_drift_trips
 test_default_runtime_activity_does_not_trip
 test_stopped_default_refuses_provision
 test_malformed_default_running_refuses_provision

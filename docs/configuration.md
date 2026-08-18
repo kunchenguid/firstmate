@@ -324,7 +324,9 @@ A lane launched into that state cannot run the project's own tests, formatters, 
 This section records the operator-facing behavior only.
 
 Detection is driven by what the worktree declares, never by a project name.
-A directory holding `uv.lock` provisions with `uv sync --frozen`; one holding `requirements.txt` gets a `uv venv` virtual environment plus its `requirements.txt` and any conventional `requirements-dev.txt` / `requirements-test.txt` companions; `package-lock.json` runs `npm ci`; `pnpm-lock.yaml` runs `pnpm install --frozen-lockfile`.
+A `requirements.txt` without Python project metadata is treated as a dependency list: provisioning creates a `uv venv` environment and installs the listed requirements without installing the directory as a package.
+A standalone `uv.lock` is handled the same way only when its root dependency set is unambiguous; otherwise it records a capability gap and launches unprovisioned.
+JavaScript lockfiles require a `package.json`; a lockfile-only directory records a capability gap instead of being passed to a package manager.
 Python always goes through uv, never pip or venv directly.
 A directory whose `pyproject.toml` declares a project - a `[project]`, `[build-system]`, or `[tool.poetry]` table - with neither of those two Python manifests is enumerated and reported as a capability gap rather than installed from a guess; a uv workspace member is excused, because its root's `uv sync --all-packages` already installs it, and a `pyproject.toml` holding only tool configuration (`[tool.ruff]`, `[tool.black]`, `[tool.pytest.ini_options]`) declares nothing to provision and is a clean no-op.
 A pip component's fingerprint covers the requirements files it reaches through `-r` / `-c` includes as well as the ones named directly, so editing an included file is a cache miss rather than a false hit.

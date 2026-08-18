@@ -38,6 +38,9 @@ fm_git_identity fmtest fmtest@example.invalid
 . "$ROOT/bin/fm-backend.sh"
 
 fm_test_tmproot_into TMP_ROOT fm-backend-tests
+FM_HOME="$TMP_ROOT/fm-home"
+export FM_HOME
+mkdir -p "$FM_HOME"
 
 # fm_backend_detect's cmux fallback (bundle id + process ancestry,
 # docs/cmux-backend.md "Runtime auto-detection") consults uname, lsappinfo,

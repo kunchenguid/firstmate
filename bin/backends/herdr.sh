@@ -3535,7 +3535,14 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
     fm_backend_herdr_control_exec rm -rf "$fifo_dir" 2>/dev/null || true
     return 2
   fi
-  fm_backend_herdr_scrubbed_exec "${reader[@]}" "$sock" "$timeout" "${pane_ids[@]}" > "$fifo" 2>/dev/null &
+  (
+    export LD_PRELOAD='' LD_LIBRARY_PATH='' LD_AUDIT='' LD_DEBUG=''
+    export DYLD_INSERT_LIBRARIES='' DYLD_LIBRARY_PATH='' DYLD_FRAMEWORK_PATH=''
+    export DYLD_FALLBACK_LIBRARY_PATH='' DYLD_FALLBACK_FRAMEWORK_PATH=''
+    export PERL5OPT='' PERL5LIB='' PERLLIB='' NODE_OPTIONS='' NODE_PATH=''
+    export PYTHONHOME='' PYTHONPATH='' RUBYOPT='' RUBYLIB='' BASH_ENV='' ENV='' GCONV_PATH=''
+    exec "${reader[@]}" "$sock" "$timeout" "${pane_ids[@]}"
+  ) > "$fifo" 2>/dev/null &
   reader_pid=$!
   if ! exec 9< "$fifo"; then
     kill "$reader_pid" 2>/dev/null || true
