@@ -13,6 +13,9 @@
 #     any current shellcheck. bin/fm-lint.sh refuses any version but its pin,
 #     and several tests call it, so the pinned build has to be on PATH in the
 #     behavior jobs too, not only in the lint job.
+#   - actionlint is absent, while bin/fm-lint.sh now includes workflow lint.
+#     Install its pinned build in a separate prefix so it cannot overwrite the
+#     pinned ShellCheck in /usr/local/bin.
 #   - jq 1.5 exits 0 from `jq -e` on empty input instead of 4. cmux.sh's
 #     surface_exists is exactly that predicate, so an absent surface reads as
 #     present and tests/fm-backend-cmux.test.sh fails.
@@ -34,7 +37,7 @@
 #
 # github.com is not reachable from the runner directly, so every pinned tool is
 # fetched through the internal relay. Bump versions in the owning script (
-# bin/fm-install-shellcheck.sh) or here, never in apt.
+# bin/fm-install-shellcheck.sh or bin/fm-install-actionlint.sh, never in apt.
 #
 # Usage: fm-ci-codebase-setup.sh
 set -eu
@@ -69,6 +72,11 @@ jq --version
 echo "--- pinned ShellCheck"
 https_proxy=$RELAY http_proxy=$RELAY "$SCRIPT_DIR/fm-install-shellcheck.sh" /usr/local/bin
 shellcheck --version | awk '/^version:/ {print $2}'
+
+echo "--- pinned actionlint"
+https_proxy=$RELAY http_proxy=$RELAY \
+  "$SCRIPT_DIR/fm-install-actionlint.sh" /opt/firstmate/actionlint/bin
+/opt/firstmate/actionlint/bin/actionlint -version
 
 echo "--- tasks-axi"
 npm install -g tasks-axi
