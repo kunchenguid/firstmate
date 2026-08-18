@@ -2,13 +2,13 @@ Mode: Cursor stop-hook-owned park.
 
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
-   After handling all emitted wakes and reconciling open decisions, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
+   After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
 2. Routine watcher arm and re-arm are owned by the `stop` hook (`bin/fm-turnend-guard-cursor.sh`), never by you.
    Cursor runs that hook synchronously and awaits it, so every turn end while supervision is needed parks the turn boundary open on one home-scoped watcher cycle, with no model command and no model tokens spent while parked.
 3. An actionable close wakes you as a follow-up turn carrying the `watcher` operational kind.
    On that wake, run `bin/fm-wake-drain.sh` first and handle it.
    Do not run `bin/fm-watch-arm.sh` after an ordinary wake; the next turn end parks again automatically when supervision is still needed.
-   Do not invent a wake from an attach-status line alone; drain and act only on real wake records, the drain's `OPEN DECISIONS` entries, or a real watcher reason line.
+   Do not invent a wake from an attach-status line alone; drain and act only on real wake records, the drain's `OPEN DECISIONS` and `UNREAD STATUS` entries, or a real watcher reason line.
 4. The captain keeps control while the hook is parked.
    A message typed into a parked Cursor pane is accepted and runs its turn immediately, but the older park remains the recorded owner until that turn ends and the next `stop` hook claims the baton.
    An actionable watcher close in that window can still be delivered by the older park as one follow-up.
