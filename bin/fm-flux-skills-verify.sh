@@ -22,22 +22,39 @@ die() {
 [ -f "$CHECKSUMS" ] || die "missing CHECKSUMS.sha256 at $CHECKSUMS"
 [ -f "$VENDOR_ROOT/NOTICE.md" ] || die 'missing NOTICE.md'
 
-# shellcheck disable=SC1090
-. <(sed -n 's/^\([A-Za-z0-9_]*\)=\(.*\)$/\1="\2"/p' "$MANIFEST")
+declare -A manifest=()
+while IFS='=' read -r key value; do
+  [ -n "$key" ] || die 'manifest contains an empty key'
+  case "$key" in
+    source_repo|source_url|license|upstream_tag|upstream_commit|adopted_skills|excluded_skills) ;;
+    *) die "unexpected manifest key: $key" ;;
+  esac
+  [ -z "${manifest[$key]+x}" ] || die "duplicate manifest key: $key"
+  manifest[$key]=$value
+done <"$MANIFEST"
 
-: "${source_repo:=}"
-: "${source_url:=}"
-: "${license:=}"
-: "${upstream_tag:=}"
-: "${upstream_commit:=}"
-: "${adopted_skills:=}"
-: "${excluded_skills:=}"
+for key in source_repo source_url license upstream_tag upstream_commit adopted_skills excluded_skills; do
+  [ -n "${manifest[$key]:-}" ] || die "manifest key is empty or missing: $key"
+done
+
+source_repo=${manifest[source_repo]}
+source_url=${manifest[source_url]}
+license=${manifest[license]}
+upstream_tag=${manifest[upstream_tag]}
+upstream_commit=${manifest[upstream_commit]}
+adopted_skills=${manifest[adopted_skills]}
+excluded_skills=${manifest[excluded_skills]}
 
 [ "$source_repo" = fluxcd/agent-skills ] || die "unexpected source_repo: $source_repo"
 [ "$source_url" = https://github.com/fluxcd/agent-skills ] || die "unexpected source_url: $source_url"
 [ "$license" = Apache-2.0 ] || die "unexpected license: $license"
-[ -n "$upstream_tag" ] || die 'upstream_tag is empty'
-[ -n "$upstream_commit" ] || die 'upstream_commit is empty'
+[ "$upstream_tag" = v0.2.0 ] || die "unexpected upstream_tag: $upstream_tag"
+[ "$upstream_commit" = 9b05787530a3e200a9ac031fc8a477566e0b7adc ] \
+  || die "unexpected upstream_commit: $upstream_commit"
+[ "$adopted_skills" = 'gitops-knowledge gitops-repo-audit' ] \
+  || die "unexpected adopted_skills: $adopted_skills"
+[ "$excluded_skills" = gitops-cluster-debug ] \
+  || die "unexpected excluded_skills: $excluded_skills"
 
 read -r -a adopted <<<"$adopted_skills"
 read -r -a excluded <<<"$excluded_skills"
@@ -61,6 +78,20 @@ while IFS= read -r entry; do
   actual_hash=$(sha256sum "$VENDOR_ROOT/$relpath" | awk '{print $1}')
   [ "$actual_hash" = "$expected_hash" ] || die "checksum mismatch for $relpath"
 done <"$CHECKSUMS"
+
+checksum_inventory=$(mktemp)
+vendor_inventory=$(mktemp)
+cleanup() {
+  rm -f "$checksum_inventory" "$vendor_inventory"
+}
+trap cleanup EXIT
+sed -n 's/^[[:xdigit:]]\{64\}  //p' "$CHECKSUMS" | LC_ALL=C sort >"$checksum_inventory"
+(
+  cd "$VENDOR_ROOT"
+  find "${adopted[@]}" -type f -print | LC_ALL=C sort
+) >"$vendor_inventory"
+cmp -s "$checksum_inventory" "$vendor_inventory" \
+  || die 'checksum inventory does not match adopted skill files'
 
 while IFS= read -r top; do
   base=${top##*/}

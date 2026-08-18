@@ -8,7 +8,6 @@ set -u
 ROOT=${ROOT:?}
 VERIFY="$ROOT/bin/fm-flux-skills-verify.sh"
 VENDOR_ROOT="$ROOT/skills/vendor/fluxcd-agent-skills"
-MANIFEST="$VENDOR_ROOT/MANIFEST"
 
 test_verify_passes_on_committed_vendor_tree() {
   local out rc
@@ -19,45 +18,6 @@ test_verify_passes_on_committed_vendor_tree() {
   assert_contains "$out" 'gitops-knowledge' "verify output names adopted skills"
   assert_contains "$out" 'v0.2.0' "verify output names pinned tag"
   pass 'fm-flux-skills-verify accepts the committed vendor tree'
-}
-
-test_manifest_records_upstream_identity() {
-  assert_grep 'source_repo=fluxcd/agent-skills' "$MANIFEST" 'manifest records source repo'
-  assert_grep 'license=Apache-2.0' "$MANIFEST" 'manifest records license'
-  assert_grep 'upstream_tag=v0.2.0' "$MANIFEST" 'manifest records pinned tag'
-  assert_grep 'upstream_commit=9b05787530a3e200a9ac031fc8a477566e0b7adc' "$MANIFEST" 'manifest records pinned commit'
-  assert_grep 'adopted_skills=gitops-knowledge gitops-repo-audit' "$MANIFEST" 'manifest records adopted skills'
-  assert_grep 'excluded_skills=gitops-cluster-debug' "$MANIFEST" 'manifest records excluded skills'
-  pass 'MANIFEST records upstream identity and selection'
-}
-
-test_excluded_skill_is_not_vendored_or_exposed() {
-  [ ! -e "$VENDOR_ROOT/gitops-cluster-debug" ] \
-    || fail 'gitops-cluster-debug must not exist in the vendor tree'
-  [ ! -e "$ROOT/.agents/skills/gitops-cluster-debug" ] \
-    || fail 'gitops-cluster-debug must not be exposed under .agents/skills'
-  pass 'gitops-cluster-debug is absent from vendor and agent skill surfaces'
-}
-
-test_adopted_skills_have_upstream_skill_md() {
-  assert_present "$VENDOR_ROOT/gitops-knowledge/SKILL.md" 'gitops-knowledge SKILL.md'
-  assert_present "$VENDOR_ROOT/gitops-repo-audit/SKILL.md" 'gitops-repo-audit SKILL.md'
-  pass 'adopted skills ship upstream SKILL.md files'
-}
-
-test_internal_stubs_point_at_vendor_and_amendment() {
-  assert_grep 'skills/vendor/fluxcd-agent-skills/gitops-knowledge/SKILL.md' \
-    "$ROOT/.agents/skills/gitops-knowledge/SKILL.md" \
-    'gitops-knowledge stub points at vendor skill'
-  assert_grep 'skills/vendor/fluxcd-agent-skills/gitops-repo-audit/SKILL.md' \
-    "$ROOT/.agents/skills/gitops-repo-audit/SKILL.md" \
-    'gitops-repo-audit stub points at vendor skill'
-  assert_grep 'flux-classic-gitops' \
-    "$ROOT/.agents/skills/gitops-knowledge/SKILL.md" \
-    'gitops-knowledge stub names classic amendment'
-  assert_present "$ROOT/.agents/skills/flux-classic-gitops/SKILL.md" \
-    'flux-classic-gitops amendment exists'
-  pass 'internal stubs route to vendor skills and the classic amendment'
 }
 
 test_checksum_tamper_is_rejected() {
@@ -75,9 +35,35 @@ test_checksum_tamper_is_rejected() {
   pass 'fm-flux-skills-verify rejects checksum tampering'
 }
 
+test_unlisted_file_is_rejected() {
+  local extra="$VENDOR_ROOT/gitops-knowledge/unlisted-file"
+  : >"$extra"
+  if "$VERIFY" >/dev/null 2>&1; then
+    rm -f "$extra"
+    fail 'verify must reject files omitted from the checksum inventory'
+  fi
+  rm -f "$extra"
+  pass 'fm-flux-skills-verify rejects unlisted adopted files'
+}
+
+test_manifest_is_parsed_without_execution() {
+  local manifest="$VENDOR_ROOT/MANIFEST" backup marker
+  backup=$(mktemp)
+  marker=$(mktemp)
+  rm -f "$marker"
+  cp "$manifest" "$backup"
+  sed "s|^source_repo=.*|source_repo=\$(touch '$marker')|" "$backup" >"$manifest"
+  "$VERIFY" >/dev/null 2>&1 && {
+    cp "$backup" "$manifest"
+    fail 'verify must reject a malformed source identity'
+  }
+  cp "$backup" "$manifest"
+  [ ! -e "$marker" ] || fail 'verify executed manifest data'
+  rm -f "$backup"
+  pass 'fm-flux-skills-verify treats manifest values as data'
+}
+
 test_verify_passes_on_committed_vendor_tree
-test_manifest_records_upstream_identity
-test_excluded_skill_is_not_vendored_or_exposed
-test_adopted_skills_have_upstream_skill_md
-test_internal_stubs_point_at_vendor_and_amendment
 test_checksum_tamper_is_rejected
+test_unlisted_file_is_rejected
+test_manifest_is_parsed_without_execution
