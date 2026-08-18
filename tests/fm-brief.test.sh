@@ -235,7 +235,9 @@ test_deliverable_inventory_is_ship_only() {
       "$mode brief did not require implementation locations"
     assert_grep "Explicitly identify every surface you deliberately skipped and why." "$brief" \
       "$mode brief did not require deliberate omissions"
-    assert_grep "If you cannot complete this inventory, say so in your completion report rather than blocking the report." "$brief" \
+    assert_grep "Report the inventory in your final message in your pane, never in the status file - status lines stay one line." "$brief" \
+      "$mode brief did not keep the inventory out of the one-line status protocol"
+    assert_grep "If you cannot complete this inventory, say so there rather than blocking the report." "$brief" \
       "$mode brief turned the inventory prompt into a hard gate"
     inventory_line=$(grep -nFx "# Deliverable inventory" "$brief" | cut -d: -f1)
     dod_line=$(grep -nFx "# Definition of done" "$brief" | cut -d: -f1)

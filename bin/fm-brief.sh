@@ -410,7 +410,8 @@ IFS= read -r -d '' DELIVERABLE_INVENTORY <<'EOF' || true
 Before reporting done, list every distinct surface named by the task - files, components, screens, endpoints, config, and documentation.
 For each surface, state where you implemented it.
 Explicitly identify every surface you deliberately skipped and why.
-If you cannot complete this inventory, say so in your completion report rather than blocking the report.
+Report the inventory in your final message in your pane, never in the status file - status lines stay one line.
+If you cannot complete this inventory, say so there rather than blocking the report.
 EOF
 DELIVERABLE_INVENTORY=${DELIVERABLE_INVENTORY%$'\n'}
 
