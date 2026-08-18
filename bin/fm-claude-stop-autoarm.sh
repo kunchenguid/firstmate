@@ -39,10 +39,16 @@
 #     exit 2 to guarantee the next Stop-owned retry without repeating notice,
 #     until the synchronous guard has consumed its attended fail-open.
 #
-# The epoch ledger state/.claude-autoarm-epoch records the latest claim and
-# outcome so the synchronous Stop guard (bin/fm-turnend-guard.sh --claude) can
+# The epoch ledger state/.claude-autoarm-epoch records the latest claim, outcome,
+# and session-lock owner so the synchronous Stop guard
+# (bin/fm-turnend-guard.sh --claude) can
 # allow a stop whose recovery this hook already owns, instead of forcing a
-# duplicate continuation for the same event epoch. The failure marker
+# duplicate continuation for the same event epoch. The session binding also lets
+# the pull guard recognize a long active rewake turn without extending the
+# beacon's lease for old, foreign, or failed cycles. The companion
+# state/.claude-rewake-turn marker exists only from an actionable close until
+# this session's next Stop, so the prior rewake cannot exempt a later turn. The
+# failure marker
 # state/.claude-autoarm-failure-notified deduplicates the last-resort notice,
 # and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
 # suppresses any later automatic continuation in that unresolved episode.
@@ -64,6 +70,7 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 EPOCH="$STATE/.claude-autoarm-epoch"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+ACTIVE_REWAKE_TURN="$STATE/.claude-rewake-turn"
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
 case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
@@ -113,6 +120,11 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   RECOVER_SESSION_LOCK=1
 fi
 
+# This session reached its next Stop, so any rewake proof from the turn that just
+# ended is no longer active. Clear it before the AFK and need gates: an idle or
+# away Stop still ends that turn. A competing session never reaches this write.
+[ "$RECOVER_SESSION_LOCK" -eq 1 ] || rm -f "$ACTIVE_REWAKE_TURN" 2>/dev/null || true
+
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
 [ -e "$STATE/.afk" ] && exit 0
 
@@ -129,6 +141,7 @@ need_supervision || exit 0
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
   fm_session_lock_owned_by_self "$STATE" || exit 0
+  rm -f "$ACTIVE_REWAKE_TURN" 2>/dev/null || true
 fi
 
 # --- single-flight owner claim ------------------------------------------------
@@ -142,17 +155,41 @@ if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
 fi
 trap 'fm_lock_release "$OWNER_LOCK"' EXIT
 
+EPOCH_SEQUENCE=
+EPOCH_SESSION_PID=
+EPOCH_WRITE_OK=0
 write_epoch() {  # <outcome>
-  local outcome=$1 seq tmp
+  local outcome=$1 seq tmp session_pid
   seq=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$EPOCH" 2>/dev/null || true)
   case "$seq" in
     ''|*[!0-9]*) seq=0 ;;
   esac
   seq=$((seq + 1))
+  session_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$session_pid" in
+    ''|*[!0-9]*) session_pid=unknown ;;
+  esac
   tmp="$EPOCH.tmp.$$"
-  printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
-    "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$EPOCH" 2>/dev/null
+  EPOCH_SEQUENCE=$seq
+  EPOCH_SESSION_PID=$session_pid
+  EPOCH_WRITE_OK=0
+  if printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s session_pid=%s\n' \
+    "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" "$session_pid" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$EPOCH" 2>/dev/null; then
+    EPOCH_WRITE_OK=1
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+publish_active_rewake_turn() {
+  local tmp value
+  [ "$EPOCH_WRITE_OK" -eq 1 ] || return 1
+  for value in "$EPOCH_SEQUENCE" "$EPOCH_SESSION_PID"; do
+    case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  done
+  tmp="$ACTIVE_REWAKE_TURN.tmp.$$"
+  printf 'epoch=%s session_pid=%s\n' "$EPOCH_SEQUENCE" "$EPOCH_SESSION_PID" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$ACTIVE_REWAKE_TURN" 2>/dev/null
   rm -f "$tmp" 2>/dev/null || true
 }
 
@@ -238,6 +275,7 @@ fi
 
 if [ "$ACTIONABLE" -eq 1 ]; then
   write_epoch rewake
+  publish_active_rewake_turn || true
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
     [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
