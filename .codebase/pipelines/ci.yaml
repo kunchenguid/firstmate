@@ -196,12 +196,9 @@ jobs:
     image: hub.byted.org/codebase/ci_nodejs_20:latest
     timeout: 10
     steps:
-      - name: Symlinks must stay intact
+      - name: Compatibility pointers must stay intact
         commands:
-          - |
-            set -eu
-            [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
-            [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo ".claude/skills must be a symlink to ../.agents/skills"; exit 1; }
+          - bin/fm-repo-compatibility-pointers-check.sh
       - name: Personal fleet paths must not be tracked
         commands:
           - |
