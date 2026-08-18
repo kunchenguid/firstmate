@@ -11,3 +11,7 @@ __pycache__/
 *.pyc
 .env
 config/
+
+# Sentinel: credential store symlinks (both forms - trailing slash does not match symlinks)
+.claude/credentials
+.claude/credentials/
