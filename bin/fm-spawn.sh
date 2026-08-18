@@ -144,9 +144,10 @@
 #   local tip instead of refusing. Taking that path is never silent - it prints one
 #   loud NOTICE naming the project and stating that the origin freshen is skipped and
 #   that the named LOCAL default branch is the base authority, so a project that lost a
-#   remote it was meant to have is visible rather than assumed local-only. The notice
-#   reports the skip only; the clean-worktree and reset checks below still apply and
-#   can refuse afterwards.
+#   remote it was meant to have is visible rather than assumed local-only. A LOCAL
+#   default branch that cannot be resolved refuses instead, before any notice prints.
+#   The notice reports the skip only; the clean-worktree and reset checks still apply
+#   and can refuse afterwards.
 #   Only a genuinely absent remote takes that path; a configured origin that cannot
 #   be fetched still refuses exactly as above.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
