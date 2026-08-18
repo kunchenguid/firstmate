@@ -906,7 +906,9 @@ fmx_post_json() (
 # fm-x-followup.sh posts against that link (within the window, up to the cap),
 # then either records the incremented count or clears the link. These helpers
 # own the read/write/clear so fm-x-link.sh and fm-x-followup.sh never hand-edit
-# meta and the rewrite stays atomic and preserves every other meta line.
+# meta and the rewrite stays atomic and preserves every other meta line. Each
+# mutation also republishes pr= and pr_head= after all other fields, because
+# the strict PR identity parser allows only the whitelisted X fields after pr=.
 
 # fmx_meta_get <meta> <key>: print the value of the last "key=value" line in
 # <meta>, or nothing (and succeed) when the file or key is absent. Callers treat

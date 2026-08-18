@@ -187,6 +187,9 @@
 # one W3C traceparent= carrier, the same value injected into the pane as
 # TRACEPARENT; the default-off path writes neither, leaving the generated meta
 # and launch environment unchanged.
+# On relaunch, preserved pr= and pr_head= lines are published after every other
+# durable field; a trace-enabled publication places traceparent= before those
+# PR lines so the strict PR identity record remains parseable.
 #   --traceparent <carrier> delivers a carrier that a REMOTE parent already
 #   resolved and will record, instead of resolving one from this home's frozen
 #   decision. It is accepted only for --secondmate spawns, only as a strictly
