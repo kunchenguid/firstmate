@@ -13,8 +13,8 @@ Credential paths below are shown with the home directory replaced by `<home>`.
 ## Quota granularity the judgment depends on
 
 Verified 2026-07-30 against quota-axi 0.1.16 for the provider and model-scope relationships below.
-That release's captured default output included `quotaSemantics.description`; the current default field placement is verified against 0.1.29 in the next section.
-Current dispatch reads each scope's `boundedBy`, which names the applied bound without relying on the `--full`-only description.
+That release's captured default output included `quotaSemantics.description`; the current default TOON and JSON fallback field placement are verified against 0.1.29 in the next section.
+Current dispatch reads the TOON scope and `limitedBy` fields; the JSON fallback's corresponding `scope` and `boundedBy` fields preserve the same provider/model applicability without relying on the `--full`-only description.
 
 ```json
 {
@@ -43,7 +43,16 @@ Three properties follow and are load-bearing for dispatch:
 ## Completion-runway and selection shape the judgment depends on
 
 Verified 2026-08-18 against quota-axi 0.1.29 schema 5, captured from an isolated `quota-axi@0.1.29` install.
-The command below records the producer shape without persisting account-specific quota values:
+The default TOON exposed these table headers, with row counts normalized to `N`:
+
+```text
+quota[N]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+exhaustion[N]{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:
+attention[N]{provider,scope,kind,detail,remedy}:
+```
+
+`exhaustion[]` and `attention[]` are sparse, so an empty table is rendered with count zero and no row fields.
+The command below records the JSON fallback shape without persisting account-specific quota values:
 
 ```sh
 quota-axi --json | jq '{schemaVersion, effectiveAvailabilityFields: ([.providers[]?.quotaSemantics.effectiveAvailability[]? | keys] | unique), runwayFields: ([.providers[]?.quotaSemantics.effectiveAvailability[]?.runway? | select(type == "object") | keys] | unique), selectionFields: ([.providers[]?.quotaSemantics.effectiveAvailability[]?.selection? | select(type == "object") | keys] | unique), paceFields: ([.providers[]?.quotaSemantics.effectiveAvailability[]?.pace? | select(type == "object") | keys] | unique), windowPaceFields: ([.providers[]?.windows[]?.pace? | select(type == "object") | keys] | unique)}'
