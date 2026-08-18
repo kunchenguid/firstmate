@@ -69,6 +69,7 @@ HELPER="<skill-dir>/scripts/sops-safe.sh"
 `detect-age-identity` prints `age_identity_present=` and `source=` only.
 It never prints `AGE-SECRET-KEY-...` or file contents.
 Exit 0 means an identity is available to the current process; exit 1 means none.
+Treat `source=env` as an inherited unsafe state to clear, not as approval to use the key from the parent environment.
 
 Decrypted output has no generally safe field allowlist and must never be relayed to chat, logs, or saved diagnostics.
 For verification, discard decrypted stdout and use only the command exit status.
@@ -105,7 +106,7 @@ Never paste `AGE-SECRET-KEY-...` into chat, tool arguments, logs, commits, or st
 Never pass a private key as a visible command-line argument to `sops`, `age`, or any wrapper.
 Never write a private key into a tracked file.
 
-Prefer `with-age-key bws` over exporting `SOPS_AGE_KEY` in the parent shell.
+Do not export `SOPS_AGE_KEY` in the parent shell; use `with-age-key bws` so the key exists only in the trusted child process.
 When the operator supplies a key file, reference only the file path and keep permissions tight.
 
 ## Authority for mutating work
@@ -191,7 +192,7 @@ After encrypt, edit, `updatekeys`, or `rotate`:
 ## Cleanup
 
 Remove gitignored plaintext staging files, temp decrypt outputs, and editor swap files before reporting completion.
-Unset any manual `SOPS_AGE_KEY` or `SOPS_AGE_KEY_FILE` exports in the current shell.
+Unset any inherited or pre-existing `SOPS_AGE_KEY` export before continuing, and clear temporary `SOPS_AGE_KEY_FILE` exports after use.
 Do not leave decrypted content in the worktree.
 
 ## Failure handling
