@@ -38,6 +38,23 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   config/crew-autocompact is an optional local scalar that applies an
+#   auto-compaction threshold to firstmate-launched workers without changing a
+#   harness's global configuration. It accepts a positive absolute token count
+#   or an integer percentage from 1% through 100%. Codex percentages resolve
+#   against the selected model's effective context window from
+#   ${CODEX_HOME:-$HOME/.codex}/models_cache.json: context_window multiplied by
+#   effective_context_window_percent (95 when omitted). A missing explicit model,
+#   unreadable catalog, unknown model, or invalid window warns and omits the
+#   override. Codex receives per-launch -c values for
+#   model_auto_compact_token_limit and scope="total", so the threshold counts the
+#   full active context. Claude 2.1.234 has a real --autocompact token flag and
+#   receives supported absolute values from 100000 through 1000000; percentages
+#   warn and are omitted because Claude exposes no per-model context catalog to
+#   resolve them. The verified OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and
+#   Muse launch surfaces expose no equivalent per-launch control, so a configured
+#   value warns and is not applicable to those adapters. Raw launch commands are
+#   unchanged. Absence leaves every launch command unchanged.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -150,6 +167,7 @@
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __AUTOCOMPACTFLAG__ optional supported per-launch auto-compaction control
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -1111,12 +1129,12 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG____AUTOCOMPACTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG____AUTOCOMPACTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG____AUTOCOMPACTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1180,8 +1198,10 @@ launch_template() {
   esac
 }
 
+RAW_LAUNCH=0
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1421,6 +1441,116 @@ effort_flag_for_harness() {
     # task metadata but never reaches the launch command. Cursor encodes effort
     # in model ids such as cursor-grok-4.5-high, so it also receives no separate
     # effort flag.
+  esac
+}
+
+crew_autocompact_value() {
+  local path="$CONFIG/crew-autocompact" value
+  [ -f "$path" ] || return 1
+  value=$(sed -n 's/^[[:space:]]*//;s/[[:space:]]*$//;/^$/d;/^#/d;p;q' "$path")
+  printf '%s\n' "$value"
+}
+
+positive_token_count() {
+  local value=$1 normalized
+  case "$value" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  normalized=$(printf '%s\n' "$value" | sed 's/^0*//')
+  [ -n "$normalized" ] && [ "${#normalized}" -le 18 ]
+}
+
+codex_percent_autocompact_tokens() {
+  local percent=$1 model=$2 codex_home cache catalog_row context_window effective_percent tokens
+  if [ -z "$model" ] || [ "$model" = default ]; then
+    echo "warning: config/crew-autocompact=$percent% needs an explicit Codex model to resolve its context window; launching without an auto-compaction override" >&2
+    return 1
+  fi
+  codex_home=${CODEX_HOME:-${HOME:-}/.codex}
+  cache="$codex_home/models_cache.json"
+  if [ ! -r "$cache" ] || ! command -v jq >/dev/null 2>&1; then
+    echo "warning: config/crew-autocompact=$percent% cannot resolve Codex model '$model' because '$cache' is unreadable or jq is unavailable; launching without an auto-compaction override" >&2
+    return 1
+  fi
+  catalog_row=$(jq -er --arg model "$model" '
+    first(.models[] | select(.slug == $model))
+    | select((.context_window | type) == "number" and .context_window > 0)
+    | [.context_window, (.effective_context_window_percent // 95)]
+    | @tsv
+  ' "$cache" 2>/dev/null) || {
+    echo "warning: config/crew-autocompact=$percent% cannot determine Codex model '$model' context window from '$cache'; launching without an auto-compaction override" >&2
+    return 1
+  }
+  IFS=$'\t' read -r context_window effective_percent <<< "$catalog_row"
+  case "$context_window:$effective_percent" in
+    *[!0-9:]*|:*|*:)
+      echo "warning: config/crew-autocompact=$percent% found invalid Codex context metadata for model '$model' in '$cache'; launching without an auto-compaction override" >&2
+      return 1
+      ;;
+  esac
+  if ! positive_token_count "$context_window" || [ "${#context_window}" -gt 14 ] || \
+    ! positive_token_count "$effective_percent" || [ "$effective_percent" -gt 100 ]; then
+    echo "warning: config/crew-autocompact=$percent% found unsafe Codex context metadata for model '$model' in '$cache'; launching without an auto-compaction override" >&2
+    return 1
+  fi
+  tokens=$((context_window * effective_percent * percent / 10000))
+  [ "$tokens" -gt 0 ] || {
+    echo "warning: config/crew-autocompact=$percent% resolves below one token for Codex model '$model'; launching without an auto-compaction override" >&2
+    return 1
+  }
+  printf '%s\n' "$tokens"
+}
+
+autocompact_flag_for_harness() {
+  local harness=$1 model=$2 value percent tokens
+  if ! value=$(crew_autocompact_value); then
+    return 0
+  fi
+  case "$value" in
+    *%)
+      percent=${value%\%}
+      if ! positive_token_count "$percent" || [ "$percent" -gt 100 ]; then
+        echo "warning: config/crew-autocompact must be a positive token count or an integer percentage from 1% through 100%; launching without an auto-compaction override" >&2
+        return 0
+      fi
+      case "$harness" in
+        codex)
+          tokens=$(codex_percent_autocompact_tokens "$percent" "$model") || return 0
+          ;;
+        claude)
+          echo "warning: config/crew-autocompact=$value cannot be resolved for Claude because its CLI exposes no model context catalog; launching without an auto-compaction override" >&2
+          return 0
+          ;;
+        *)
+          echo "warning: config/crew-autocompact is not applicable to harness '$harness'; it exposes no supported per-launch auto-compaction control" >&2
+          return 0
+          ;;
+      esac
+      ;;
+    *)
+      if ! positive_token_count "$value"; then
+        echo "warning: config/crew-autocompact must be a positive token count or an integer percentage from 1% through 100%; launching without an auto-compaction override" >&2
+        return 0
+      fi
+      tokens=$(printf '%s\n' "$value" | sed 's/^0*//')
+      ;;
+  esac
+  case "$harness" in
+    codex)
+      printf -- '-c %s -c %s ' \
+        "$(shell_quote "model_auto_compact_token_limit=$tokens")" \
+        "$(shell_quote 'model_auto_compact_token_limit_scope="total"')"
+      ;;
+    claude)
+      if [ "$tokens" -lt 100000 ] || [ "$tokens" -gt 1000000 ]; then
+        echo "warning: config/crew-autocompact=$tokens is outside Claude's supported 100000-1000000 token range; launching without an auto-compaction override" >&2
+        return 0
+      fi
+      printf -- '--autocompact %s ' "$(shell_quote "$tokens")"
+      ;;
+    *)
+      echo "warning: config/crew-autocompact is not applicable to harness '$harness'; it exposes no supported per-launch auto-compaction control" >&2
+      ;;
   esac
 }
 
@@ -2714,8 +2844,13 @@ sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
+AUTOCOMPACTFLAG=
+if [ "$RAW_LAUNCH" -eq 0 ]; then
+  AUTOCOMPACTFLAG=$(autocompact_flag_for_harness "$HARNESS" "$MODEL")
+fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__AUTOCOMPACTFLAG__/$AUTOCOMPACTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
