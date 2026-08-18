@@ -460,23 +460,51 @@ fm_backend_herdr_workspace_label_matches_base() {  # <label> <base-identity-labe
   return 0
 }
 
-# The name-only identity title this home last actually put on its own Space,
-# recorded whenever a title is applied. It is what makes a deliberate identity
-# REASSIGNMENT renameable rather than deadlocked: the outgoing title is this
-# home's own history, not a foreign Space. Nothing mechanical reads it.
-fm_backend_herdr_workspace_recorded_identity_base() {
+# This home's own presentation binding, written ONLY after its ownership of an
+# exact Herdr Space has been proven (created here, or renamed through an exact
+# workspace id): "<base-identity-title>\t<session>\t<workspace-id>". The title
+# is what makes a deliberate identity REASSIGNMENT renameable rather than
+# deadlocked; the session and workspace id are what keep that allowance bound to
+# ONE exact Space instead of to a title anyone could be carrying. Nothing
+# mechanical routes on it. A pre-binding single-field marker still reads as a
+# title with no binding.
+fm_backend_herdr_workspace_recorded_line() {
   local marker="$FM_HOME/$FM_BACKEND_HERDR_SPACE_TITLE_MARKER" line
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
   IFS= read -r line < "$marker" 2>/dev/null || return 0
   printf '%s' "$line"
 }
 
-fm_backend_herdr_workspace_record_identity_base() {  # <base-identity-label>
-  local marker="$FM_HOME/$FM_BACKEND_HERDR_SPACE_TITLE_MARKER" base=$1 tmp
+fm_backend_herdr_workspace_recorded_identity_base() {
+  local line
+  line=$(fm_backend_herdr_workspace_recorded_line) || return 0
+  printf '%s' "${line%%$'\t'*}"
+}
+
+# Echoes "<session>\t<workspace-id>" when this home recorded an exact binding.
+fm_backend_herdr_workspace_recorded_binding() {
+  local line rest
+  line=$(fm_backend_herdr_workspace_recorded_line) || return 1
+  rest=${line#*$'\t'}
+  [ "$rest" != "$line" ] || return 1
+  case "$rest" in
+    *$'\t'*) ;;
+    *) return 1 ;;
+  esac
+  [ -n "${rest%%$'\t'*}" ] && [ -n "${rest#*$'\t'}" ] || return 1
+  printf '%s' "$rest"
+}
+
+fm_backend_herdr_workspace_record_identity_base() {  # <base-identity-label> [<session> <workspace-id>]
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SPACE_TITLE_MARKER" base=$1 session=${2-} workspace=${3-} tmp
   [ -n "$base" ] && [ -d "$FM_HOME" ] || return 0
   [ ! -L "$marker" ] || return 0
   tmp=$(mktemp "$FM_HOME/.fm-herdr-space-identity.XXXXXX" 2>/dev/null) || return 0
-  if printf '%s\n' "$base" > "$tmp" && mv -f "$tmp" "$marker"; then
+  if { if [ -n "$session" ] && [ -n "$workspace" ]; then
+         printf '%s\t%s\t%s\n' "$base" "$session" "$workspace"
+       else
+         printf '%s\n' "$base"
+       fi; } > "$tmp" && mv -f "$tmp" "$marker"; then
     return 0
   fi
   rm -f "$tmp"
@@ -504,24 +532,6 @@ fm_backend_herdr_workspace_label_is_own() {  # <label> [<base-identity-label>]
 # deadlocked - an exact canonical title of the configured roster that the live
 # config reserves for nobody. A title the config assigns to another home, or one
 # absent from the roster, is still refused loudly.
-# The recorded prior identity title this home may still RECLAIM by title alone:
-# it exists only because this home itself last wrote it, and the live config
-# reserves it for nobody, so no other home can legitimately be carrying it.
-# Empty otherwise - a reserved or unknown prior title stays undiscoverable.
-fm_backend_herdr_workspace_reclaimable_prior_base() {
-  local prior roster identity
-  local FM_CREW_IDENTITY_CONFIG
-  prior=$(fm_backend_herdr_workspace_recorded_identity_base) || return 0
-  [ -n "$prior" ] || return 0
-  # shellcheck disable=SC2034 # read by the sourced crew-identity library.
-  FM_CREW_IDENTITY_CONFIG=$(fm_backend_herdr_crew_identity_config_path)
-  fm_crew_identity_config_present || return 0
-  roster=$(fm_crew_identity_config_roster) || return 0
-  identity=$(fm_crew_identity_id_for_space_label "$roster" "$prior") || return 0
-  fm_crew_identity_config_assigns "$identity" && return 0
-  printf '%s' "$prior"
-}
-
 fm_backend_herdr_workspace_label_is_own_bound() {  # <label> [<base-identity-label>]
   local candidate=$1 base=${2-} prior stem identity roster
   local FM_CREW_IDENTITY_CONFIG
@@ -567,7 +577,7 @@ fm_backend_herdr_workspace_identity_rename_exact() { # <session> <workspace-id> 
   current=$(printf '%s' "$out" | jq -er --arg workspace "$workspace" \
     'select(.result.workspace.workspace_id == $workspace) | .result.workspace.label' 2>/dev/null) || return 1
   if [ "$current" = "$desired" ]; then
-    fm_backend_herdr_workspace_record_identity_base "$base"
+    fm_backend_herdr_workspace_record_identity_base "$base" "$session" "$workspace"
     return 0
   fi
   fm_backend_herdr_workspace_label_is_own_bound "$current" "$base" || {
@@ -578,7 +588,7 @@ fm_backend_herdr_workspace_identity_rename_exact() { # <session> <workspace-id> 
   verify=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
   printf '%s' "$verify" | jq -e --arg workspace "$workspace" --arg desired "$desired" \
     '.result.workspace.workspace_id == $workspace and .result.workspace.label == $desired' >/dev/null 2>&1 || return 1
-  fm_backend_herdr_workspace_record_identity_base "$base"
+  fm_backend_herdr_workspace_record_identity_base "$base" "$session" "$workspace"
   FM_BACKEND_HERDR_WORKSPACE_TITLE_CHANGED=1
 }
 
@@ -1821,7 +1831,7 @@ fm_backend_herdr_server_ensure() {  # <session>
 # home's own Spaces can legitimately carry different titles now: an earlier
 # identity title survives until it is reconciled.
 fm_backend_herdr_workspace_find_all_labelled() {  # <session>
-  local session=$1 label list base rows id lbl legacy prior
+  local session=$1 label list base rows id lbl legacy
   label=$(fm_backend_herdr_workspace_label)
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
   base=$(fm_backend_herdr_workspace_identity_base_label 2>/dev/null) || base=""
@@ -1836,14 +1846,10 @@ fm_backend_herdr_workspace_find_all_labelled() {  # <session>
     # "firstmate", so a legacy-titled primary Space stays out of this query.
     legacy=$(fm_backend_herdr_workspace_legacy_label)
     [ "$legacy" = firstmate ] || legacy=""
-    prior=$(fm_backend_herdr_workspace_reclaimable_prior_base)
     printf '%s\n' "$rows" | while IFS=$'\t' read -r id lbl; do
       [ -n "$id" ] || continue
       [ -z "$legacy" ] || [ "$lbl" != "$legacy" ] || continue
-      if ! fm_backend_herdr_workspace_label_is_own "$lbl" "$base"; then
-        [ -n "$prior" ] || continue
-        fm_backend_herdr_workspace_label_matches_base "$lbl" "$prior" || continue
-      fi
+      fm_backend_herdr_workspace_label_is_own "$lbl" "$base" || continue
       printf '%s\t%s\n' "$id" "$lbl"
     done
     return 0
@@ -2170,6 +2176,12 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
     printf '%s' "$wsid"
     return 0
   fi
+  fm_backend_herdr_workspace_reclaim_recorded_binding "$session" && status=0 || status=$?
+  case "$status" in
+    0) printf '%s' "$FM_BACKEND_HERDR_WS_ID"; return 0 ;;
+    2) ;;
+    *) return 3 ;;
+  esac
   out=$(fm_backend_herdr_cli "$session" workspace create --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || return 1
   wsid=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
   [ -n "$wsid" ] || return 1
@@ -2183,8 +2195,50 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
   # this exact captured tab_id.
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   fm_backend_herdr_workspace_record_identity_base \
-    "$(fm_backend_herdr_workspace_identity_base_label 2>/dev/null || true)"
+    "$(fm_backend_herdr_workspace_identity_base_label 2>/dev/null || true)" "$session" "$wsid"
   printf '%s' "$wsid"
+}
+
+# fm_backend_herdr_workspace_reclaim_recorded_binding: the ONLY no-ancestry
+# path allowed to retitle a Space that no longer carries this home's current
+# title. It never searches by title: it uses the exact session/workspace-id
+# binding this home recorded once its ownership was proven, and it only engages
+# when the recorded title differs from the currently configured one - i.e. after
+# a deliberate identity reassignment. Returns 0 with FM_BACKEND_HERDR_WS_ID set
+# when the bound Space was reclaimed, 2 when there is nothing to reclaim (the
+# caller may create), and 3 for a loud refusal: a missing, cross-session, stale,
+# or inconsistent binding stops here rather than adopting by title or leaving a
+# duplicate Space behind.
+fm_backend_herdr_workspace_reclaim_recorded_binding() {  # <session>
+  local session=$1 recorded base binding bound_session workspace out current
+  recorded=$(fm_backend_herdr_workspace_recorded_identity_base)
+  [ -n "$recorded" ] || return 2
+  base=$(fm_backend_herdr_workspace_identity_base_label 2>/dev/null) || base=""
+  [ -n "$base" ] || return 2
+  [ "$recorded" != "$base" ] || return 2
+  binding=$(fm_backend_herdr_workspace_recorded_binding) || {
+    echo "error: this home's crew identity changed to '$base', but its Space titled '$recorded' has no exact recorded Herdr binding to retitle and this spawn has no herdr parent pane; run bin/fm-crew-identity-migrate-herdr.sh '$session' from inside that Space, or remove $FM_HOME/$FM_BACKEND_HERDR_SPACE_TITLE_MARKER once it is gone" >&2
+    return 3
+  }
+  bound_session=${binding%%$'\t'*}
+  workspace=${binding#*$'\t'}
+  [ "$bound_session" = "$session" ] || {
+    echo "error: this home's recorded Herdr Space binding names session '$bound_session', not '$session'; refusing to retitle across sessions" >&2
+    return 3
+  }
+  out=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || out=""
+  current=$(printf '%s' "$out" | jq -er --arg workspace "$workspace" \
+    'select(.result.workspace.workspace_id == $workspace) | .result.workspace.label' 2>/dev/null) || {
+    echo "error: this home's recorded Herdr Space '$workspace' in session '$session' no longer resolves, so its title '$recorded' cannot be reconciled with the newly configured '$base'; close the stale Space and remove $FM_HOME/$FM_BACKEND_HERDR_SPACE_TITLE_MARKER, or run bin/fm-crew-identity-migrate-herdr.sh '$session'" >&2
+    return 3
+  }
+  [ "$current" = "$recorded" ] || {
+    echo "error: this home's recorded Herdr Space '$workspace' is labelled '$current', not the recorded '$recorded'; refusing to retitle an inconsistent binding" >&2
+    return 3
+  }
+  fm_backend_herdr_workspace_identity_rename_exact "$session" "$workspace" || return 3
+  FM_BACKEND_HERDR_WS_ID=$workspace
+  return 0
 }
 
 # fm_backend_herdr_container_ensure: the full spawn-time container-ensure

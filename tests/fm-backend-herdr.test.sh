@@ -684,7 +684,7 @@ test_bound_space_reassignment_needs_no_recorded_marker() {
   pass "Herdr reassignment retitles a bound Space with no recorded marker and still refuses unknown titles"
 }
 
-test_reassigned_primary_reclaims_its_own_stale_titled_space() {
+test_reassigned_primary_retitles_only_its_exact_bound_space() {
   local base home dir log resp fb out
   base="$TMP_ROOT/identity-primary-reclaim"
   home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
@@ -692,37 +692,106 @@ test_reassigned_primary_reclaims_its_own_stale_titled_space() {
   fb=$(make_herdr_fakebin "$dir")
   printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{}}' \
     > "$home/config/crew-identities.json"
+  # Ownership proven through the exact workspace id records the binding.
   printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Lt Pullings"}}}' > "$resp/1.out"
   rm -f "$resp/.count"
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
-      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact s w-p' \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact fmses w-p' \
       "$ROOT" >/dev/null 2>&1 || fail "the primary could not confirm its own converged title"
 
-  # Reassigned primary, no launcher ancestry: its own stale-titled Space must
-  # still be found (and later retitled), not left orphaned beside a new one.
-  : > "$log"; rm -f "$resp/.count"
+  # Reassigned primary, no launcher ancestry: unbound discovery must NOT claim
+  # the stale-titled Space by title.
   printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"william-mowett","agents":{}}' \
     > "$home/config/crew-identities.json"
+  : > "$log"; rm -f "$resp/.count"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-p","label":"Lt Pullings"},{"workspace_id":"w-x","label":"firstmate"}]}}' \
     > "$resp/1.out"
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
-      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find_all s' "$ROOT")
-  [ "$out" = w-p ] \
-    || fail "a reassigned primary did not reclaim its own stale-titled Space: '$out'"
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find_all fmses' "$ROOT")
+  [ -z "$out" ] || fail "unbound discovery claimed a Space by a historical title: '$out'"
 
-  # Once the config reserves that same title for another home, it stops being
-  # reclaimable by title alone.
+  # ...but the exact recorded binding retitles that same Space instead of
+  # creating a duplicate.
   : > "$log"; rm -f "$resp/.count"
-  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"william-mowett","agents":{"sd-1":"thomas-pullings"}}' \
-    > "$home/config/crew-identities.json"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-p","label":"Lt Pullings"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Lt Pullings"}}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Lt Pullings"}}}' > "$resp/3.out"
+  : > "$resp/4.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Lt Mowett"}}}' > "$resp/5.out"
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
-      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find_all s' "$ROOT")
-  [ -z "$out" ] || fail "a title now reserved for another home was still claimed by label search: '$out'"
-  pass "Herdr reassigned primary reclaims its own recorded stale title but never a reserved one"
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmses "$1"' "$ROOT" "$home" 2>&1) \
+    || fail "the reassigned primary refused its own exactly bound Space: $out"
+  [ "$out" = w-p ] || fail "the reassigned primary did not reuse its bound Space: '$out'"
+  assert_contains "$(cat "$log")" $'workspace\x1frename\x1fw-p\x1fLt Mowett' \
+    "the bound Space was not retitled to the newly configured identity"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fcreate' "a duplicate Space was created instead of retitling"
+  pass "Herdr reassigned primary retitles its exactly bound Space and never adopts one by title"
+}
+
+test_reassigned_primary_refuses_a_missing_or_stale_binding() {
+  local base home dir log resp fb out
+  base="$TMP_ROOT/identity-binding-refusals"
+  dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$resp"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+
+  # A pre-binding marker (title only, no exact Space recorded) must stop.
+  home="$base/pre-binding"; mkdir -p "$home/config"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"william-mowett","agents":{}}' \
+    > "$home/config/crew-identities.json"
+  printf 'Lt Pullings\n' > "$home/.fm-herdr-space-identity"
+  printf '%s\n' '{"result":{"workspaces":[]}}' > "$resp/1.out"
+  rm -f "$resp/.count"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmses "$1"' "$ROOT" "$home" 2>&1) \
+    && fail "a reassignment with no exact recorded binding silently created a Space"
+  assert_contains "$out" "no exact recorded Herdr binding" "the missing-binding refusal did not explain itself"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fcreate' "a duplicate Space was created despite the refusal"
+
+  # A binding whose Space is gone must stop rather than orphan or duplicate.
+  home="$base/stale"; mkdir -p "$home/config"
+  cp "$base/pre-binding/config/crew-identities.json" "$home/config/crew-identities.json"
+  printf 'Lt Pullings\tfmses\tw-gone\n' > "$home/.fm-herdr-space-identity"
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"result":{"workspaces":[]}}' > "$resp/1.out"
+  printf '%s\n' '{"error":{"code":"workspace_not_found"}}' > "$resp/2.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmses "$1"' "$ROOT" "$home" 2>&1) \
+    && fail "a stale recorded binding silently created a Space"
+  assert_contains "$out" "no longer resolves" "the stale-binding refusal did not explain itself"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fcreate' "a duplicate Space was created despite the stale binding"
+
+  # A binding whose Space now carries a different title is inconsistent.
+  home="$base/inconsistent"; mkdir -p "$home/config"
+  cp "$base/pre-binding/config/crew-identities.json" "$home/config/crew-identities.json"
+  printf 'Lt Pullings\tfmses\tw-p\n' > "$home/.fm-herdr-space-identity"
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"result":{"workspaces":[]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Dr Maturin"}}}' > "$resp/2.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmses "$1"' "$ROOT" "$home" 2>&1) \
+    && fail "an inconsistent recorded binding was retitled anyway"
+  assert_contains "$out" "inconsistent binding" "the inconsistent-binding refusal did not explain itself"
+  assert_not_contains "$(cat "$log")" "rename" "an inconsistent binding renamed a Space"
+
+  # A binding from another herdr session is never followed.
+  home="$base/cross-session"; mkdir -p "$home/config"
+  cp "$base/pre-binding/config/crew-identities.json" "$home/config/crew-identities.json"
+  printf 'Lt Pullings\tother-session\tw-p\n' > "$home/.fm-herdr-space-identity"
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"result":{"workspaces":[]}}' > "$resp/1.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmses "$1"' "$ROOT" "$home" 2>&1) \
+    && fail "a cross-session binding was followed"
+  assert_contains "$out" "not 'fmses'" "the cross-session refusal did not name both sessions"
+  pass "Herdr reassignment refuses missing, stale, inconsistent, and cross-session Space bindings"
 }
 
 test_workspace_find_all_tolerates_registered_project_drift() {
@@ -4971,7 +5040,8 @@ test_workspace_identity_reassignment_retitles_this_homes_own_space
 test_unassigned_projection_titles_keep_their_concise_task_label
 test_identity_exchange_never_lets_one_home_adopt_anothers_space
 test_bound_space_reassignment_needs_no_recorded_marker
-test_reassigned_primary_reclaims_its_own_stale_titled_space
+test_reassigned_primary_retitles_only_its_exact_bound_space
+test_reassigned_primary_refuses_a_missing_or_stale_binding
 test_workspace_find_all_tolerates_registered_project_drift
 test_exact_legacy_workspace_identity_rename_is_id_bound
 test_cli_helper_sets_env_and_appends_trailing_session_flag
