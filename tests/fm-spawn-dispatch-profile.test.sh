@@ -18,7 +18,6 @@ make_spawn_pi_probe() {
   cat > "$fakebin/$tool" <<'SH'
 #!/usr/bin/env bash
 set -u
-. "${FM_FAKE_SPAWN_ACK_LIB:?FM_FAKE_SPAWN_ACK_LIB unset}"
 if [ "${1:-}" = --help ]; then
   if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
     printf '%s\n' 'Pi 0.82.0' 'Options: --help'
@@ -37,6 +36,7 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+. "${FM_FAKE_SPAWN_ACK_LIB:?FM_FAKE_SPAWN_ACK_LIB unset}"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
