@@ -620,4 +620,41 @@ wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
 RECOVERY_WORKER_PID=
 pass "quarantine clears only after recorded execution has stopped"
 
+# A signal landing inside the rename window of worker_publish_lock_owner or
+# worker_publish_quarantine - the supervisor's second TERM, or the KILL phase of
+# fm_remote_job_stop_worker_tree - kills the child by default disposition, so its
+# EXIT trap never runs and one zero-byte mktemp entry stays inside the lock. That
+# is the state pinned here. Reclaim must clear it: clearing only pid/start/command
+# left every later rmdir failing with "Directory not empty", so no worker could
+# ever start again for that state root and ensure reported only "did not report
+# ready after startup" 48 seconds late.
+SCRATCH_HOME="$TMP_ROOT/scratch-account"
+SCRATCH_STATE="$TMP_ROOT/scratch-jobs"
+SCRATCH_ORPHAN="$SCRATCH_STATE/worker.lock/.quarantine.ABC123"
+mkdir -p "$SCRATCH_HOME" "$SCRATCH_STATE/jobs" "$SCRATCH_STATE/logs" "$SCRATCH_STATE/worker.lock"
+chmod 700 "$SCRATCH_HOME" "$SCRATCH_STATE" "$SCRATCH_STATE/jobs" "$SCRATCH_STATE/logs" \
+  "$SCRATCH_STATE/worker.lock"
+: > "$SCRATCH_ORPHAN"
+chmod 600 "$SCRATCH_ORPHAN"
+# Past worker_lock_recent's window, so reclaim is attempted on the first pass
+# rather than after its bounded wait for a live owner.
+touch -t 200001010000 "$SCRATCH_STATE/worker.lock"
+HOME="$SCRATCH_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$SCRATCH_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS=2 \
+  "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
+  > "$TMP_ROOT/scratch-worker.out" 2> "$TMP_ROOT/scratch-worker.err" &
+RECOVERY_WORKER_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$SCRATCH_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$SCRATCH_STATE/worker.ready" \
+  "an orphaned publish scratch entry wedged worker ownership"
+assert_absent "$SCRATCH_ORPHAN" "reclaim retained the orphaned publish scratch entry"
+assert_present "$SCRATCH_STATE/worker.lock/pid" "the recovered worker did not claim ownership"
+kill -TERM "$RECOVERY_WORKER_PID"
+wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
+RECOVERY_WORKER_PID=
+pass "an orphaned publish scratch entry never wedges worker ownership"
+
 echo "ALL TESTS PASSED"

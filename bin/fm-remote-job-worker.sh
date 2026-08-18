@@ -143,6 +143,25 @@ worker_recover_quarantine() { # <account-home>
   rm -f -- "$WORKER_LOCK/quarantine"
 }
 
+# The worker's own atomic-publish scratch inside the ownership lock: the mktemp
+# files worker_publish_lock_owner and worker_publish_quarantine rename into
+# place. A signal landing inside that rename window - the supervisor's second
+# TERM, or the KILL phase of fm_remote_job_stop_worker_tree - kills the child by
+# default disposition, so its EXIT trap never runs and one scratch entry is left
+# behind. Every later reclaim then fails its rmdir with "Directory not empty" and
+# ownership is wedged permanently, which is why this is cleared alongside the
+# canonical pid/start/command names rather than only next to the name it came
+# from. A symlink is refused rather than followed, exactly as those names are.
+worker_clear_lock_scratch() {
+  local entry
+  for entry in "$WORKER_LOCK"/.pid.* "$WORKER_LOCK"/.start.* \
+    "$WORKER_LOCK"/.command.* "$WORKER_LOCK"/.quarantine.*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    [ ! -L "$entry" ] || return 1
+    rm -f -- "$entry" || return 1
+  done
+}
+
 worker_acquire_lock() {
   local account_home=$1 attempt=0
   while [ "$attempt" -lt 150 ]; do
@@ -164,6 +183,7 @@ worker_acquire_lock() {
     fi
     [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] || return 1
     rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" || return 1
+    worker_clear_lock_scratch || return 1
     rmdir "$WORKER_LOCK" || return 1
   done
   return 1
@@ -190,6 +210,7 @@ worker_cleanup() {
   if [ -z "$owner_pid" ]; then
     [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] &&
       rm -f -- "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
+    worker_clear_lock_scratch 2>/dev/null || true
     rmdir "$WORKER_LOCK" 2>/dev/null || true
     WORKER_LOCK_HELD=0
     return 0
@@ -202,6 +223,7 @@ worker_cleanup() {
   [ ! -L "$ready" ] && rm -f -- "$ready" 2>/dev/null || true
   [ ! -L "$identity" ] && rm -f -- "$identity" 2>/dev/null || true
   rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
+  worker_clear_lock_scratch 2>/dev/null || true
   rmdir "$WORKER_LOCK" 2>/dev/null || true
   WORKER_LOCK_HELD=0
 }

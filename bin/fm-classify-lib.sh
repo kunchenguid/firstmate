@@ -61,12 +61,13 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared pause or a dead-agent captain hold.
-# Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
-# avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
-# invisibly - it re-surfaces once for a recheck every window. One hour by default;
-# both consumers read FM_PAUSE_RESURFACE_SECS with this default so the cadence has
-# one owner.
+# Bounded re-surface cadence for a declared pause, a dead-agent captain hold,
+# or a crew parked on a still-open captain decision. Far longer than the wedge
+# threshold (FM_STALE_ESCALATE_SECS, default 240s), it avoids nagging a
+# deliberate wait or a held decision while ensuring a forgotten hold or an
+# abandoned decision cannot rot invisibly - it re-surfaces once for a recheck
+# every window. One hour by default; both consumers read FM_PAUSE_RESURFACE_SECS
+# with this default so the cadence has one owner.
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
@@ -373,6 +374,22 @@ $open
 EOF
   done
   return 0
+}
+
+# Per-task predicate over status_open_decisions: 0 iff <task>'s status log
+# holds at least one still-open keyed decision. The watcher's stale triage uses
+# this to distinguish a PROVABLY-WORKING crew parked on a captain decision
+# (absorbed on the long re-surface cadence, never wedge-escalated) from a
+# genuinely wedged crew (no open decision, escalates exactly as before). The
+# criterion is the open decision itself, not mere inactivity, so a wedged crew
+# and a decision-waiting crew stay distinguishable. Pure read of the status file
+# via the whole-file fold above, so it carries that fold's cost: callers in a
+# poll loop must call it only where a verdict can actually change - the watcher
+# does so once per distinct stale hash, then only when the status file's mtime
+# moves - never on every poll.
+task_has_open_decision() {  # <state> <task>
+  local state=$1 task=$2
+  [ -n "$(status_open_decisions "$state/$task.status")" ]
 }
 
 # --- incremental (cursor-backed) open-decisions fold ------------------------
