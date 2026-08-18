@@ -48,11 +48,12 @@
 #      agree, and are reported as parked.
 #      For harness=claude, a pane parked on Claude Code's account/usage-limit
 #      banner (claude_limit_detail below, over bin/fm-busy-lib.sh's
-#      fm_busy_claude_limit_banner) also reports paused when the run is PARKED
-#      - a parked run makes no progress of its own, so the pane's external wait
-#      is the whole story - while an actively running/fixing/ci step keeps
-#      reporting working and only carries `worker pane limit-blocked` in its
-#      detail, since the pipeline step may progress independently of the pane.
+#      fm_busy_claude_limit_banner) never overrides an attributed run's own
+#      state: a parked or actively running/fixing/ci run keeps its state and
+#      gate detail and only gains an appended `worker pane limit-blocked` note,
+#      and a terminal done/failed run is left alone. The pane's paused verdict
+#      applies only when no run is attributed (case 4 below) or the attributed
+#      run is in none of those states.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
@@ -717,21 +718,25 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
-  # A limit-blocked Claude pane is an external wait on the worker's side even
-  # when a run is attributed to its branch. A parked run is not itself making
-  # progress, so the pane's wait is the whole story: report paused, exactly as
-  # the no-run fallback does. An actively running/fixing/ci step may progress
-  # independently of this pane, so it keeps reporting working and only carries
-  # the pane's block in its detail.
+  # A limit-blocked Claude pane is an external wait on the worker's side, but a
+  # run attributed to this crew stays authoritative: a parked run is waiting on
+  # a CAPTAIN decision the worker's quota block does not prevent, and an active
+  # step may progress independently of the pane, so both keep their own state
+  # and detail and only carry the pane's block as an appended note. A terminal
+  # outcome (done/failed) is more informative than paused and is left alone.
+  # Only a run whose state is neither parked, active, nor terminal falls
+  # through to the pane's paused verdict.
   case "$RUN_STATE" in
-    parked)
-      if LIMIT_DETAIL=$(claude_limit_detail); then
-        emit paused pane "account limit: $LIMIT_DETAIL"
-      fi
-      ;;
-    working)
+    parked|working)
       if LIMIT_DETAIL=$(claude_limit_detail); then
         RUN_DETAIL="$RUN_DETAIL${SEP}worker pane limit-blocked ($LIMIT_DETAIL)"
+      fi
+      ;;
+    done|failed)
+      ;;
+    *)
+      if LIMIT_DETAIL=$(claude_limit_detail); then
+        emit paused pane "account limit: $LIMIT_DETAIL"
       fi
       ;;
   esac

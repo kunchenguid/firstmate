@@ -1108,6 +1108,8 @@ signal_reason_is_actionable() {  # <file> ...
 # that appended paused: but then STARTED a run reports working, never paused.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
+# The pause-liveness path (crew_pause_still_live below) keeps that budget by
+# throttling its own re-probe to the PAUSE_RESURFACE_SECS cadence.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
   local id=$1 line state src
@@ -1133,11 +1135,43 @@ crew_absorb_class() {  # <id>
 # without it the daemon wipes the re-surface throttle every housekeeping cycle
 # and the watcher re-surfaces the same limit-blocked crew once per cycle instead
 # of once per PAUSE_RESURFACE_SECS.
-# Carries crew_absorb_class's cost note: callers gate it on marker presence so
-# the bounded fm-crew-state.sh read happens only for an already-tracked pause.
-crew_pause_still_live() {  # <id>
-  [ -n "${1:-}" ] || return 1
-  [ "$(crew_absorb_class "$1")" = paused ]
+#
+# THROTTLED, to keep crew_absorb_class's "never every wake" cost contract true:
+# a confirmed pause is re-probed at most once per PAUSE_RESURFACE_SECS - the
+# same cadence the pause itself re-surfaces on - recorded in
+# <state>/.paused-livecheck-<key>. Inside that window the pause is taken as
+# still live with no read at all, so a sustained account limit across N
+# crewmates costs N bounded reads per cadence window, not per poll. Callers
+# additionally gate it on marker presence, so an unpaused crew never probes.
+crew_pause_livecheck_mtime() {  # <file>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %m "$1" 2>/dev/null
+  else
+    stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
+crew_pause_still_live() {  # <id> <state-dir> <key>
+  local id=${1:-} state=${2:-} key=${3:-} probe='' mtime age secs
+  [ -n "$id" ] || return 1
+  secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+  if [ -n "$state" ] && [ -n "$key" ]; then
+    probe="$state/.paused-livecheck-$key"
+    mtime=$(crew_pause_livecheck_mtime "$probe")
+    case "$mtime" in
+      ''|*[!0-9]*) ;;
+      *)
+        age=$(( $(date +%s) - mtime ))
+        [ "$age" -lt "$secs" ] && return 0
+        ;;
+    esac
+  fi
+  if [ "$(crew_absorb_class "$id")" = paused ]; then
+    [ -n "$probe" ] && : > "$probe"
+    return 0
+  fi
+  [ -n "$probe" ] && rm -f "$probe"
+  return 1
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class

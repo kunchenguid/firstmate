@@ -895,7 +895,8 @@ test_no_run_claude_session_limit_banner_paused() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
-  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm"
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
   export FM_FAKE_BUSY_TEXT
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limit5h)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limit5h busy --gen "$gen" \
@@ -920,7 +921,8 @@ test_no_run_claude_weekly_limit_banner_paused() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
-  FM_FAKE_BUSY_TEXT="You've hit your weekly limit · resets Tue 2:30pm"
+  FM_FAKE_BUSY_TEXT="You've hit your weekly limit · resets Tue 2:30pm
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
   export FM_FAKE_BUSY_TEXT
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limit7d)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limit7d busy --gen "$gen" \
@@ -968,7 +970,8 @@ test_no_run_non_claude_harness_ignores_limit_banner_text() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
-  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm"
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
   export FM_FAKE_BUSY_TEXT
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-opencode)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-opencode busy --gen "$gen" \
@@ -992,7 +995,8 @@ test_no_run_claude_named_limit_variants_paused() {
     FM_FAKE_AXI_STATUS=""
     FM_FAKE_RUNS_LIST=""
     FM_FAKE_BUSY=1
-    FM_FAKE_BUSY_TEXT="You've hit your $name · resets 2:30pm"
+    FM_FAKE_BUSY_TEXT="You've hit your $name · resets 2:30pm
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
     export FM_FAKE_BUSY_TEXT
     local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limitvar)
     "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limitvar busy --gen "$gen" \
@@ -1061,8 +1065,9 @@ esc to interrupt"
   pass "a busy Claude worker editing limit-banner text is not misread as paused"
 }
 
-# The override also applies when a run IS attributed to the crew: a PARKED run
-# makes no progress of its own, so a limit-blocked pane is the whole story.
+# A PARKED run stays authoritative even when the pane is limit-blocked: the gate
+# is waiting on a CAPTAIN decision the worker's quota block does not prevent, so
+# the parked verdict and its gate detail must survive and only gain a note.
 test_parked_run_claude_limit_banner_paused() {
   reset_fakes
   local d; d=$(new_case claude-limit-parked-run)
@@ -1071,12 +1076,17 @@ test_parked_run_claude_limit_banner_paused() {
   fm_write_meta "$d/state/feat-limitparked.meta" "window=fm:fm-feat-limitparked" "worktree=$d/wt" "kind=ship" "harness=claude"
   FM_FAKE_AXI_STATUS="$(run_parked fm/feat-limitparked)"
   FM_FAKE_BUSY=1
-  FM_FAKE_BUSY_TEXT="You've hit your weekly limit · resets Tue 2:30pm"
+  FM_FAKE_BUSY_TEXT="You've hit your weekly limit · resets Tue 2:30pm
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
   export FM_FAKE_BUSY_TEXT
   local out; out=$(run_crew_state "$d" feat-limitparked)
-  assert_contains "$out" "state: paused" "a parked run plus a limit-blocked pane reads paused"
-  assert_contains "$out" "weekly limit" "the parked-run override names the limit"
-  pass "a parked run whose Claude pane is limit-blocked reads paused"
+  assert_contains "$out" "state: parked" "a parked run keeps its own state over the pane override"
+  assert_not_contains "$out" "state: paused" "a limit-blocked pane must not absorb a pending gate decision"
+  assert_contains "$out" "2 finding(s)" "the parked gate detail survives the limit note"
+  assert_contains "$out" "ask-user" "the parked gate's ask-user marker survives the limit note"
+  assert_contains "$out" "worker pane limit-blocked" "the parked run's detail records the blocked pane"
+  assert_contains "$out" "weekly limit" "the appended note names the limit"
+  pass "a parked run whose Claude pane is limit-blocked stays parked with an appended note"
 }
 
 # An actively running step may progress independently of this crew's pane, so
@@ -1089,12 +1099,41 @@ test_active_run_claude_limit_banner_annotates_working() {
   fm_write_meta "$d/state/feat-limitactive.meta" "window=fm:fm-feat-limitactive" "worktree=$d/wt" "kind=ship" "harness=claude"
   FM_FAKE_AXI_STATUS="$(run_running fm/feat-limitactive)"
   FM_FAKE_BUSY=1
-  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm"
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
   export FM_FAKE_BUSY_TEXT
   local out; out=$(run_crew_state "$d" feat-limitactive)
   assert_contains "$out" "state: working" "an active run step keeps reporting working"
   assert_contains "$out" "worker pane limit-blocked" "the active run's detail records the blocked pane"
   pass "an actively running step with a limit-blocked Claude pane stays working with a note"
+}
+
+# Claude Code's NON-blocking approaching-limit warning ("You've used NN% of your
+# <name> · resets <time>", status allowed_warning at >=70% utilization) renders
+# the same names and reset hint while the account is NOT blocked and the worker
+# is genuinely still working. Only a blocking auto-continue widget phrase means
+# a real block, so the warning alone must never read paused.
+test_no_run_claude_approaching_limit_warning_stays_working() {
+  reset_fakes
+  local d; d=$(new_case claude-approaching-limit)
+  make_repo_on_branch "$d/wt" fm/feat-approaching
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-approaching.meta" "window=fm:fm-feat-approaching" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="Approaching session limit
+You've used 85% of your session limit · resets 3:00pm
+> 
+ ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-approaching)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-approaching busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-approaching)
+  assert_contains "$out" "state: working" "an approaching-limit warning keeps the worker working"
+  assert_not_contains "$out" "state: paused" "a non-blocking warning must never read paused"
+  pass "a Claude worker on the non-blocking approaching-limit warning still reads working"
 }
 
 test_no_run_herdr_unknown_uses_backend_capture() {
@@ -1927,6 +1966,7 @@ test_no_run_claude_widget_only_tail_paused
 test_no_run_claude_scrollback_limit_words_stay_working
 test_parked_run_claude_limit_banner_paused
 test_active_run_claude_limit_banner_annotates_working
+test_no_run_claude_approaching_limit_warning_stays_working
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle

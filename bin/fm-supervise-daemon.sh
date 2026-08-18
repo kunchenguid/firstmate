@@ -471,6 +471,7 @@ clear_pause_tracking() {  # <window> <state>
   watcher_key=$(_stale_key "$win")
   rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-stale-$key" \
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
+    "$state/.paused-livecheck-$watcher_key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key"
 }
 
@@ -488,7 +489,7 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
     # override) writes no paused: line, so the absent verb alone does not make
     # the marker stale - crew_pause_still_live (bin/fm-classify-lib.sh) is the
     # shared owner of that question.
-    if ! crew_pause_still_live "$task"; then
+    if ! crew_pause_still_live "$task" "$state" "$watcher_key"; then
       clear_pause_tracking "$win" "$state"
     fi
   fi

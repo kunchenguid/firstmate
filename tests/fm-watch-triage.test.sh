@@ -948,6 +948,49 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
 }
 
+# A pane-derived pause (fm-crew-state.sh's Claude account-limit-banner override)
+# writes NO paused: status line, so the watcher's own poll-loop guard must not
+# treat its pause marker as stale. Regression: without the crew-state check the
+# guard cleared the marker and the re-surface throttle on every poll, so the same
+# limit-blocked crew re-surfaced once per poll instead of once per
+# PAUSE_RESURFACE_SECS. The daemon-side mirror of this guard is covered in
+# tests/fm-daemon.test.sh.
+test_pane_derived_pause_marker_survives_polls() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case pane-derived-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-limitblocked"
+  printf 'account limit reached, waiting' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/limitblocked.meta"
+  # No paused: line - the pause exists only in the authoritative crew state.
+  printf 'working: started the task\n' > "$state/limitblocked.status"
+  sig=$(seen_sig "$state/limitblocked.status"); printf '%s' "$sig" > "$state/.seen-limitblocked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "account limit reached, waiting")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  : > "$state/.paused-resurfaced-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: pane · account limit: session limit · resets 2:30pm'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "watcher exited for a pane-derived limit pause (should absorb): $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || fail "the watcher cleared a live pane-derived pause marker"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the watcher wiped the pane-derived pause's re-surface throttle"
+  [ ! -s "$out" ] || fail "a live pane-derived pause printed a wake during absorb: $(cat "$out")"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional pane-pause watcher stop"
+  unset FM_FAKE_CREW_STATE
+  pass "a pane-derived limit pause keeps its marker and throttle across watcher polls"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -2172,6 +2215,7 @@ test_secondmate_status_note_surfaced_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
+test_pane_derived_pause_marker_survives_polls
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_absorbed_while_pipeline_advances

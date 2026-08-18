@@ -873,23 +873,28 @@ fm_busy_grok_tail_busy() {
 # FM_BUSY_CLAUDE_LIMIT_REGION_LINES non-empty lines of the captured tail,
 # where Claude Code renders the banner and its composer - so ordinary
 # scrollback that merely mentions a limit name (a crewmate editing this very
-# file, a diff, a doc) can never trigger the override. Within that region:
-#   - a limit NAME plus one of the verified wait/reset hints on the same or an
-#     adjacent line prints that name line as the detail (it carries the reset
-#     hint), or
-#   - one of the verified auto-continue widget phrases ALONE is sufficient
-#     (the named notice scrolls out of the capture window while the widget
-#     persists, and the auto-continue-stopped state is the most wedged wait of
-#     all); the detail then reports the limit type as unspecified rather than
-#     naming a limit that was not on screen.
-# Fails when neither holds.
+# file, a diff, a doc) can never trigger the override.
+#
+# Within that region a BLOCKING auto-continue widget phrase is REQUIRED:
+# "press enter to continue", "continuing automatically", or "Automatic
+# continue stopped after repeated usage-limit hits". A named notice alone is
+# deliberately NOT sufficient, because the same bundle renders a separate
+# NON-blocking approaching-limit warning from the same names -
+# "Approaching <name>" / "You've used NN% of your <name> \xB7 resets <time>"
+# (status allowed_warning at utilization >= 70%) - which every long-running
+# worker crosses while it is genuinely still working. Only the widget marks an
+# account that is actually blocked. The limit NAME is then used solely to
+# enrich the detail: a name on the same or an adjacent line as the widget
+# prints that name line (it carries the reset hint); otherwise the detail
+# reports the limit type as unspecified rather than naming a limit that was
+# not on screen. Fails when no blocking widget phrase is in the region.
 FM_BUSY_CLAUDE_LIMIT_NAMES_DEFAULT='session limit|weekly limit|opus limit|sonnet limit|fable 5 limit|usage credit limit'
-FM_BUSY_CLAUDE_LIMIT_HINTS_DEFAULT='resets|press enter|continuing automatically|esc to cancel'
-FM_BUSY_CLAUDE_LIMIT_WIDGETS_DEFAULT='usage limit reached.*continuing automatically|usage limit has reset.*press enter|automatic continue stopped after repeated usage-limit hits'
+FM_BUSY_CLAUDE_LIMIT_WIDGETS_DEFAULT='press enter to continue|continuing automatically|automatic continue stopped after repeated usage-limit hits'
 FM_BUSY_CLAUDE_LIMIT_REGION_LINES=${FM_BUSY_CLAUDE_LIMIT_REGION_LINES:-12}
 
 fm_busy_claude_limit_banner() {
-  local tail_text region name_line='' widget_line
+  local tail_text region rl idx widget=-1
+  local -a region_lines=() region_lower=()
   # `read -d ''` reads all of stdin into one variable using only a bash
   # builtin (no external `cat`), preserving embedded newlines; it always
   # returns non-zero at EOF with no NUL delimiter, so that status is ignored.
@@ -897,30 +902,22 @@ fm_busy_claude_limit_banner() {
   region=$(printf '%s\n' "$tail_text" | grep -v '^[[:space:]]*$' \
     | tail -n "$FM_BUSY_CLAUDE_LIMIT_REGION_LINES")
   [ -n "$region" ] || return 1
-  local -a region_lines=() region_lower=()
-  local rl idx hit=-1
   while IFS= read -r rl; do
     region_lines+=("$rl")
     region_lower+=("${rl,,}")
   done <<<"$region"
   for ((idx = 0; idx < ${#region_lines[@]}; idx++)); do
-    [[ ${region_lower[idx]} =~ $FM_BUSY_CLAUDE_LIMIT_NAMES_DEFAULT ]] || continue
-    if [[ ${region_lower[idx]} =~ $FM_BUSY_CLAUDE_LIMIT_HINTS_DEFAULT ]] \
-      || { [ "$idx" -gt 0 ] && [[ ${region_lower[idx-1]} =~ $FM_BUSY_CLAUDE_LIMIT_HINTS_DEFAULT ]]; } \
-      || { [ "$((idx + 1))" -lt "${#region_lines[@]}" ] \
-           && [[ ${region_lower[idx+1]} =~ $FM_BUSY_CLAUDE_LIMIT_HINTS_DEFAULT ]]; }; then
-      hit=$idx
+    [[ ${region_lower[idx]} =~ $FM_BUSY_CLAUDE_LIMIT_WIDGETS_DEFAULT ]] && widget=$idx
+  done
+  [ "$widget" -ge 0 ] || return 1
+  for idx in "$widget" "$((widget - 1))" "$((widget + 1))"; do
+    [ "$idx" -ge 0 ] && [ "$idx" -lt "${#region_lines[@]}" ] || continue
+    if [[ ${region_lower[idx]} =~ $FM_BUSY_CLAUDE_LIMIT_NAMES_DEFAULT ]]; then
+      printf '%s' "${region_lines[idx]}"
+      return 0
     fi
   done
-  [ "$hit" -ge 0 ] && name_line=${region_lines[hit]}
-  if [ -n "$name_line" ]; then
-    printf '%s' "$name_line"
-    return 0
-  fi
-  widget_line=$(printf '%s\n' "$region" | LC_ALL=C grep -iE \
-    "$FM_BUSY_CLAUDE_LIMIT_WIDGETS_DEFAULT" | tail -1)
-  [ -n "$widget_line" ] || return 1
-  printf 'limit type unspecified - %s' "$widget_line"
+  printf 'limit type unspecified - %s' "${region_lines[widget]}"
 }
 
 # fm_busy_classify: semantic classification for a task whose endpoint the
