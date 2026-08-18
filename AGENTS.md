@@ -537,6 +537,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 - `bws` - load before any work with Bitwarden Secrets Manager CLI (`bws`, not `bw`): authentication checks, listing projects or secrets, reading secret values, creating, updating, rotating, or deleting secrets.
+- `sops-age` - load before any work with `sops`, `age`, or `age-keygen`: encrypting or decrypting files, editing encrypted manifests, rotating age recipients or data keys, or resolving an age private key from bws.
 
 ## 14. Relay
 
