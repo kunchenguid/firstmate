@@ -171,8 +171,7 @@ fi
 
 block_stop() {
   local afk x_mode reason rule
-  afk=0
-  [ -e "$STATE/.afk" ] && afk=1
+  afk=$(fm_afk_supervision_state "$STATE")
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
   reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
@@ -346,7 +345,7 @@ terminal_fail_open() {
 
 failure_episode_verified() {
   local outcome
-  [ ! -e "$STATE/.afk" ] || return 1
+  ! fm_afk_daemon_owns_supervision "$STATE" || return 1
   [ -e "$FAILURE_NOTICE" ] || return 1
   outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
@@ -386,7 +385,18 @@ if [ "$terminal_status" -eq 0 ]; then
   else
     NEED_DESC="X-mode relay polling active"
   fi
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  DOWN_DESC=$(printf 'FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted.' "$NEED_DESC")
+  # This fail-open is reachable in away mode, where asking for an attended
+  # session contradicts the very flag that says the captain left. Nothing covers
+  # this home at this point, so the shared notice takes an empty cover and the
+  # repair named here is the daemon, not a person at the screen.
+  AFK_NOTICE=$(fm_afk_daemon_down_notice "$STATE" '')
+  if [ -n "$AFK_NOTICE" ]; then
+    printf '{"systemMessage":"%s %s Nobody can be assumed to be at this screen, so restart the away-mode daemon or exit away mode, and diagnose the automatic Stop-hook and watcher startup."}\n' \
+      "$AFK_NOTICE" "$DOWN_DESC"
+  else
+    printf '{"systemMessage":"%s Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$DOWN_DESC"
+  fi
   exit 0
 fi
 [ "$terminal_status" -eq 2 ] && exit 0

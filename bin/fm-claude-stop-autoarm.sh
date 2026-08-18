@@ -15,9 +15,13 @@
 #     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
 #     ownership. A live owner, missing lock, malformed lock, or unresolved
 #     ancestry remains inert, so a competing session never arms or rewakes.
-#   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
-#     this hook exits 0 and NEVER rewakes the primary (checked again at
-#     translation time so a mid-cycle AFK transition is honored).
+#   - AFK: while a LIVE away-mode daemon owns this home, it owns the watcher and
+#     triage; this hook exits 0 and NEVER rewakes the primary (checked again at
+#     translation time so a mid-cycle AFK transition is honored). The flag alone
+#     never stands this hook down: a flag with no daemon behind it would leave
+#     the home with no supervision and no alarm at once, so an armed-but-dead
+#     away mode gets the ordinary arm plus a banner naming it
+#     (docs/watcher-continuity.md "Away-mode stand-down").
 #   - Need: arms only while work is in flight (state/*.meta) or X mode has a
 #     relay poll to run (state/x-watch.check.sh); an idle home exits 0.
 #   - Single-flight: Claude does not dedupe async hooks, so a home-scoped owner
@@ -27,11 +31,12 @@
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
-#   - Translation: while supervision is still needed and AFK remains inactive,
-#     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
-#     rewake banner to stderr and exits 2, which wakes Claude even while idle
-#     ("Stop hook feedback"). A close that reports no actionable reason is
-#     benign when a live identity-matched watcher still has a fresh beacon.
+#   - Translation: while supervision is still needed and no live away daemon has
+#     taken this home over, an actionable arm close (signal:/stale:/check:/
+#     heartbeat) prints one rewake banner to stderr and exits 2, which wakes
+#     Claude even while idle ("Stop hook feedback"). A close that reports no
+#     actionable reason is benign when a live identity-matched watcher still has
+#     a fresh beacon.
 #   - Failure handling: a typed failure is rechecked against the same live,
 #     fresh watcher predicate and retried a bounded number of times in this
 #     hook. Only an exhausted failure with no verified watcher emits one
@@ -100,9 +105,10 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # --- identity: only the lock-owning session's hooks may arm ------------------
 # A prior session may have died after leaving its numeric harness pid in .lock.
 # Use the shared liveness predicate to recognize only that stale-owner case.
-# Defer the mutating claim until after the unchanged AFK and need gates, so an
-# idle or away home remains byte-for-byte inert. Missing or malformed locks are
-# uncertainty rather than stale-owner evidence and remain inert.
+# Defer the mutating claim until after the away-mode and need gates, so an idle
+# home, or one a live away daemon owns, remains byte-for-byte inert. Missing or
+# malformed locks are uncertainty rather than stale-owner evidence and remain
+# inert.
 RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
@@ -113,8 +119,8 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   RECOVER_SESSION_LOCK=1
 fi
 
-# --- AFK: the away daemon owns the watcher and triage; never rewake ----------
-[ -e "$STATE/.afk" ] && exit 0
+# --- AFK: a LIVE away daemon owns the watcher and triage; never rewake -------
+fm_afk_daemon_owns_supervision "$STATE" && exit 0
 
 # --- need: in-flight work or an X-mode relay poll ----------------------------
 need_supervision() {
@@ -156,6 +162,15 @@ write_epoch() {  # <outcome>
   rm -f "$tmp" 2>/dev/null || true
 }
 
+# One line, printed with any banner this hook emits, whenever away mode is
+# flagged with no daemon behind it. Without it the model handles the wake, ends
+# the turn, arms again, and never learns that away mode stopped supervising.
+# The caller names what covers the home, because that differs by banner: the
+# rewake ran a successful arm, the failure banner has none left to offer.
+afk_daemon_down_notice() {  # [what-covers-this-home]
+  fm_afk_daemon_down_notice "$STATE" "${1-}"
+}
+
 write_epoch arming
 
 # X mode cadence: source the generated config so an X instance polls at its
@@ -183,9 +198,9 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
   fi
 
-  # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress
-  # every subsequent classification and handoff.
-  if [ -e "$STATE/.afk" ]; then
+  # A live away daemon may have taken over mid-cycle: it owns triage now, so
+  # suppress every subsequent classification and handoff.
+  if fm_afk_daemon_owns_supervision "$STATE"; then
     write_epoch afk
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
@@ -240,6 +255,7 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   write_epoch rewake
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
+    afk_daemon_down_notice 'this Stop-owned arm'
     [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
     printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
@@ -254,6 +270,7 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
   write_epoch failed
   {
     printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n' "$attempt"
+    afk_daemon_down_notice
     [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
     printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n'
   } >&2

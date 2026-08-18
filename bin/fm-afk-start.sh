@@ -4,7 +4,7 @@
 #
 # Usage: fm-afk-start.sh
 #   Sets state/.afk unless FM_AFK_STATE_PREPARED=1, checks
-#   state/.supervise-daemon.lock, and:
+#   daemon liveness with the shared fm_afk_daemon_alive predicate, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
 #       lock is held by a live daemon (a REFRESH: no stale-artifact clear);
 #     - otherwise clears any prior away session's stale escalation artifacts
@@ -13,7 +13,7 @@
 #       already cleared transactionally by bin/fm-afk-launch.sh.
 #
 # This file is sourceable: its BASH_SOURCE guard keeps main from running, while
-# exposing the daemon-lock helpers and fm_afk_clear_stale_artifacts. Sourcing it
+# exposing fm_afk_clear_stale_artifacts and fm_afk_flag_write. Sourcing it
 # enables nounset and errexit; callers that need different shell options must
 # restore them explicitly.
 #
@@ -66,50 +66,6 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
         "$state/.subsuper-inject-wedged" 2>/dev/null
 }
 
-daemon_lock_owner() {
-  local owner
-  if [ -L "$FM_AFK_LOCK" ]; then
-    owner=$(readlink "$FM_AFK_LOCK" 2>/dev/null) || return 1
-    [ -n "$owner" ] || return 1
-    case "$owner" in
-      /*) printf '%s\n' "$owner" ;;
-      *) printf '%s/%s\n' "$(dirname "$FM_AFK_LOCK")" "$owner" ;;
-    esac
-    return 0
-  fi
-  [ -d "$FM_AFK_LOCK" ] || return 1
-  printf '%s\n' "$FM_AFK_LOCK"
-}
-
-daemon_pid_matches() {
-  local pid=$1 owner=$2 identity current command
-  identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
-  if [ -n "$identity" ]; then
-    current=$(fm_pid_identity "$pid") || return 1
-    [ "$current" = "$identity" ]
-    return
-  fi
-  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-  case "$command" in
-    *"$FM_AFK_DAEMON"*|*"fm-supervise-daemon.sh"*) return 0 ;;
-  esac
-  return 1
-}
-
-daemon_lock_pid() {
-  local owner
-  owner=$(daemon_lock_owner) || return 1
-  cat "$owner/pid" 2>/dev/null || true
-}
-
-daemon_lock_held_by_live_daemon() {
-  local owner pid
-  owner=$(daemon_lock_owner) || return 1
-  pid=$(cat "$owner/pid" 2>/dev/null || true)
-  fm_pid_alive "$pid" || return 1
-  daemon_pid_matches "$pid" "$owner"
-}
-
 fm_afk_flag_write() {  # <state-dir>
   local state=$1 lock="$1/.cursor-park-owner.lock" pending attempt=0 status=1
   mkdir -p "$state" || return 1
@@ -145,8 +101,8 @@ fm_afk_start_main() {
   fi
 
   local pid
-  pid=$(daemon_lock_pid 2>/dev/null || true)
-  if daemon_lock_held_by_live_daemon; then
+  pid=$(fm_afk_daemon_lock_pid "$FM_AFK_STATE" 2>/dev/null || true)
+  if fm_afk_daemon_alive "$FM_AFK_STATE"; then
     echo "afk: daemon already running pid=$pid"
     return 0
   fi
@@ -165,8 +121,8 @@ fm_afk_start_main() {
   exec "$FM_AFK_DAEMON"
 }
 
-# Run only when executed, not when sourced (tests source fm_afk_clear_stale_artifacts
-# and the lock helpers directly).
+# Run only when executed, not when sourced (tests and bin/fm-afk-launch.sh source
+# fm_afk_clear_stale_artifacts and fm_afk_flag_write directly).
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   fm_afk_start_main "$@"
 fi

@@ -44,9 +44,10 @@
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       every state/*.meta, a bounded state/*.status tail, the
+#                       away-mode supervision state (the flag AND whether a
+#                       daemon is actually behind it), and a cheap per-task
+#                       endpoint-liveness read: read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -723,8 +724,7 @@ fi
 
 # --- 4. supervision operating instructions ----------------------------------
 stage supervision-instructions
-AFK_PRESENT=0
-[ -e "$STATE/.afk" ] && AFK_PRESENT=1
+AFK_PRESENT=$(fm_afk_supervision_state "$STATE")
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
 
@@ -831,11 +831,22 @@ done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "AFK"
-if [ -e "$STATE/.afk" ]; then
-  printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
-else
-  printf 'absent\n'
-fi
+# The verdict resolved for the supervision block above, not a second reading: two
+# reads can disagree, and a digest that contradicts the block and the next step
+# printed by the same session start is worse than a slightly older answer.
+case "$AFK_PRESENT" in
+  daemon)
+    printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
+    ;;
+  armed-no-daemon)
+    printf 'present, but NO away-mode daemon is running - away mode owns nothing, so\n'
+    printf 'normal harness supervision stays armed. Load /afk to restart the daemon, or\n'
+    printf 'exit away mode.\n'
+    ;;
+  *)
+    printf 'absent\n'
+    ;;
+esac
 
 # Public commitments made through the myfirstmate relay. A promise to reply in a
 # public thread must survive compaction and restart, so it is surfaced from disk
@@ -896,11 +907,18 @@ drain, spawn, steer, merge, or repair fleet state from here. Only a session
 with verified fleet-lock ownership may perform mutable follow-up.
 
 EOF
-elif [ "$AFK_PRESENT" -eq 1 ]; then
+elif [ "$AFK_PRESENT" = daemon ]; then
   cat <<'EOF'
 Away mode is active. Follow the supervision operating instructions block above:
 load /afk and ensure the daemon is running, because the daemon owns watcher
 supervision.
+
+EOF
+elif [ "$AFK_PRESENT" = armed-no-daemon ]; then
+  cat <<'EOF'
+Away mode is flagged but its daemon is NOT running, so nothing is supervising
+this home. Load /afk to restart the daemon, or exit away mode, and follow the
+supervision operating instructions block above meanwhile.
 
 EOF
 elif [ -f "$CONFIG/x-mode.env" ]; then

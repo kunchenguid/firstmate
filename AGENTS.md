@@ -165,7 +165,7 @@ When that section reports its checks still in progress it names exactly what is 
    When the lock could not be acquired and verified, the queue is left untouched because no session mutation is authorized, and the guard's tangle/watcher-liveness alarms still print in read-only advisory mode without drain, supervision repair, or checkout repair commands.
 4. **Supervision operating instructions** - after the wake queue and before both digests, the digest emits exactly one operating block for the detected primary harness, followed by the read-once contract that governs them.
    The script itself never starts supervision; the emitted harness protocol owns the exact wait or wake mechanism.
-5. **Fleet-state digest** - after that read-once contract and ahead of the context digest, the compact backlog listing owned by `bin/fm-session-start.sh`; every `state/<id>.meta`; a bounded tail of each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for a deeper read); the `state/.afk` flag; and one cheap alive/dead read of each task's recorded backend endpoint.
+5. **Fleet-state digest** - after that read-once contract and ahead of the context digest, the compact backlog listing owned by `bin/fm-session-start.sh`; every `state/<id>.meta`; a bounded tail of each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for a deeper read); the away-mode supervision state (`state/.afk` and whether a daemon is actually behind it); and one cheap alive/dead read of each task's recorded backend endpoint.
    That liveness line is a fast presence check only, not a full state read - when you need a crew's actual current state (a run-step, not just "is the pane there"), read it with `bin/fm-crew-state.sh <id>` as before; the digest deliberately skips that deeper, slower read for every task so it stays fast and bounded.
 6. **Network checks** - after the fleet-state digest, the deferred stage's result, or an explicit statement of what it has not confirmed yet.
    A read-only session runs no network checks at all and says so.
@@ -217,7 +217,7 @@ For an ordinary direct report whose endpoint is dead or metadata has no window, 
 For a dead secondmate direct report, load `secondmate-provisioning` and reconcile only that secondmate, never its whole child tree from the main home.
 Each secondmate reconciles work already in its own home and then idles; recovery never authorizes it to invent work.
 
-If away mode is present, load `/afk` and let its daemon own supervision rather than arming another cycle.
+If away mode is present, load `/afk` and let its daemon own supervision rather than arming another cycle, and repair or exit away mode when no daemon is actually running.
 Surface only captain-relevant decisions, review-ready PRs, failures, and credential needs; otherwise resume the emitted supervision protocol silently.
 A restart must be a non-event because durable state and live backend inventory, not conversation memory, are authoritative.
 
@@ -420,7 +420,7 @@ Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `
 The skill owns the daemon procedure; these safety facts remain inline:
 
 - Every current daemon injection uses the `away-supervisor` kind from `bin/fm-operational-input.sh` after `FM_OPERATIONAL_PREFIX` (U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), while the `/afk` skill owns legacy bare-marker compatibility.
-- While `state/.afk` exists, the daemon owns supervision; do not arm a separate watcher.
+- The daemon owns supervision only while it is actually running; do not arm a separate watcher then, and treat a flag with no live daemon as an unsupervised home to repair or exit.
 - A marked message while away mode is active is internal escalation and does not exit away mode.
 - A message beginning `/afk` refreshes away mode.
 - Any other unmarked message means the captain returned; load `/afk`, run the return owner, and do not process that message as ordinary work until its durable catch-up gate clears.

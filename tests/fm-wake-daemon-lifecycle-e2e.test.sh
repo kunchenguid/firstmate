@@ -33,16 +33,16 @@ fi
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-daemon-e2e)
 
-# Run the daemon-managed watcher once: under the supervise-daemon (away mode) the
-# watcher is one-shot - it exits with a single reason line on EVERY wake and the
-# daemon does the triage. This e2e exercises exactly that path, so it runs with
-# state/.afk present (which the daemon owns) to keep the watcher one-shot; the
-# always-on standalone triage is covered by fm-watch-triage.test.sh. fakebin
-# shadows tmux. Echoes nothing; the caller reads $out.
+# Run the daemon-managed watcher once: under a LIVE supervise-daemon the watcher
+# is one-shot - it exits with a single reason line on EVERY wake and the daemon
+# does the triage. This e2e exercises exactly that path, so it runs behind the
+# shared live-daemon fixture rather than the flag alone, which owns nothing on
+# its own; the always-on standalone triage is covered by fm-watch-triage.test.sh.
+# fakebin shadows tmux. Echoes nothing; the caller reads $out.
 run_watcher_once() {
   local state=$1 fakebin=$2 out=$3
   mkdir -p "$state"
-  date '+%s' > "$state/.afk"
+  [ -d "$state/.supervise-daemon.lock" ] || fm_fake_afk_daemon "$state" >/dev/null
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 50

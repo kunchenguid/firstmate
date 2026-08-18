@@ -129,7 +129,7 @@ unit_fresh_vs_refresh() {
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-inject-wedged"
   # A live "daemon": a real process whose identity the lock records, so
-  # daemon_lock_held_by_live_daemon returns true (a refresh).
+  # fm_afk_daemon_alive returns true (a refresh).
   sleep 600 &
   sleep_pid=$!
   lock="$st/state/.supervise-daemon.lock"
@@ -266,7 +266,8 @@ unit_lock_initialization_grace() {
     sleep 0.15
     if [ -d "$st/state/.afk-launch.lock" ]; then
       printf '%s' "$$" > "$st/state/.afk-launch.lock/pid"
-      ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$$" > "$st/state/.afk-launch.lock/pid-identity" 2>/dev/null ) || true
+      FM_STATE_OVERRIDE="$st/state" bash -c '. "$1"; fm_pid_identity "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$$" > "$st/state/.afk-launch.lock/pid-identity" 2>/dev/null || true
       # shellcheck disable=SC2031 # The subshell writes the path value; it does not reassign the variable.
       : > "$marker"
       sleep 0.15
@@ -480,6 +481,203 @@ unit_tmux_absence_distinguishes_probe_failure() {
   else
     fail "tmux absence: probe failure was treated as confirmed absence"
   fi
+  rm -rf "$st"
+}
+
+unit_afk_supervision_state() {
+  local st lock pid dead state
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-state.XXXXXX")
+  mkdir -p "$st/state"
+
+  state=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" status 2>/dev/null)
+  if [ "$state" = off ]; then
+    pass "away state: no flag reports off"
+  else
+    fail "away state: no flag should report off, got '$state'"
+  fi
+
+  # Flag with a LIVE identity-matched daemon: away mode genuinely owns supervision.
+  date '+%s' > "$st/state/.afk"
+  sleep 600 &
+  pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$pid" > "$lock/pid"
+  FM_STATE_OVERRIDE="$st/state" bash -c '. "$1"; fm_pid_identity "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$pid" > "$lock/pid-identity" 2>/dev/null || true
+  state=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" status 2>/dev/null)
+  if [ "$state" = daemon ]; then
+    pass "away state: flag plus a live identity-matched daemon reports daemon"
+  else
+    fail "away state: a live daemon should report daemon, got '$state'"
+  fi
+
+  # Same flag, same lock, dead pid: the measured defect state. The flag has not
+  # changed at all, so only daemon liveness can tell these two apart.
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  state=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" status 2>/dev/null)
+  if [ "$state" = armed-no-daemon ]; then
+    pass "away state: an unchanged flag over a dead daemon reports armed-no-daemon"
+  else
+    fail "away state: a dead daemon should report armed-no-daemon, got '$state'"
+  fi
+
+  # A recorded pid that a different live process now owns must not pass as the
+  # daemon: identity, not pid liveness, is the proof.
+  sleep 600 &
+  dead=$!
+  printf '%s\n' "$dead" > "$lock/pid"
+  printf 'some other process identity\n' > "$lock/pid-identity"
+  state=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" status 2>/dev/null)
+  kill "$dead" 2>/dev/null || true
+  wait "$dead" 2>/dev/null || true
+  if [ "$state" = armed-no-daemon ]; then
+    pass "away state: a live pid with a mismatched identity is not the daemon"
+  else
+    fail "away state: identity mismatch should report armed-no-daemon, got '$state'"
+  fi
+  rm -rf "$st"
+}
+
+# The down-notice subcommand is the away-mode alarm sentence itself, reached by
+# the two adapters that cannot source bash. It must speak in exactly the state
+# where nothing is supervising, and stay silent in the other two so a covered
+# home is never told its away mode is broken.
+unit_down_notice_speaks_only_for_a_flagged_dead_daemon() {
+  local st lock pid out status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-notice.XXXXXX")
+  mkdir -p "$st/state"
+
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" down-notice 'the test cover' 2>/dev/null)
+  if [ -z "$out" ]; then
+    pass "down-notice: a home that never entered away mode is told nothing"
+  else
+    fail "down-notice: spoke with no away-mode flag: $out"
+  fi
+
+  date '+%s' > "$st/state/.afk"
+  sleep 600 &
+  pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$pid" > "$lock/pid"
+  FM_STATE_OVERRIDE="$st/state" bash -c '. "$1"; fm_pid_identity "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$pid" > "$lock/pid-identity" 2>/dev/null || true
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" down-notice 'the test cover' 2>/dev/null)
+  if [ -z "$out" ]; then
+    pass "down-notice: a live away daemon raises no alarm"
+  else
+    fail "down-notice: alarmed while a live away daemon owned the home: $out"
+  fi
+
+  # Same flag, same lock, dead pid: only liveness separates this from the case above.
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" down-notice 'the test cover' 2>/dev/null)
+  if printf '%s\n' "$out" | grep -F 'AWAY MODE IS FLAGGED BUT ITS DAEMON IS NOT RUNNING' >/dev/null \
+    && printf '%s\n' "$out" | grep -F 'the test cover is the only cover' >/dev/null; then
+    pass "down-notice: an unchanged flag over a dead daemon names the broken away mode and its cover"
+  else
+    fail "down-notice: a dead daemon under a present flag was not named: $out"
+  fi
+  if [ -e "$st/state/.afk" ]; then
+    pass "down-notice: reading the state never clears the captain's away-mode flag"
+  else
+    fail "down-notice: removed the away-mode flag"
+  fi
+
+  # An EMPTY cover is the deliberate "nothing covers this home" case a failure
+  # path must be able to state. It must produce the WHOLE sentence naming that
+  # absence, never a blank answer and never a clause that reads as a cover.
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" down-notice '' 2>/dev/null)
+  status=$?
+  if [ "$status" -eq 0 ] \
+    && printf '%s\n' "$out" | grep -F 'AWAY MODE IS FLAGGED BUT ITS DAEMON IS NOT RUNNING' >/dev/null \
+    && printf '%s\n' "$out" | grep -F 'nothing is covering this home' >/dev/null \
+    && ! printf '%s\n' "$out" | grep -F 'is the only cover' >/dev/null; then
+    pass "down-notice: an empty cover names the absence of any cover, in full"
+  else
+    fail "down-notice: an empty cover exited $status with: $out"
+  fi
+
+  # An ABSENT argument stays a caller error: that guard is what catches a caller
+  # who forgot the clause entirely rather than choosing to state its absence.
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" down-notice >/dev/null 2>&1
+  status=$?
+  if [ "$status" -eq 2 ]; then
+    pass "down-notice: an omitted cover argument fails loudly instead of emitting a half-sentence"
+  else
+    fail "down-notice: an omitted cover argument exited $status"
+  fi
+  rm -rf "$st"
+}
+
+unit_status_needs_no_lock() {
+  local st state
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-status-lock.XXXXXX")
+  mkdir -p "$st/state" "$st/state/.afk-launch.lock"
+  # A concurrent start holds the launcher lock. Learning whether anything is
+  # supervising must never wait behind it, so status takes no lock at all.
+  printf '%s\n' "$$" > "$st/state/.afk-launch.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$$" > "$st/state/.afk-launch.lock/pid-identity" 2>/dev/null ) || true
+  state=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" status 2>/dev/null)
+  if [ "$state" = off ]; then
+    pass "away state: status answers while another launcher holds the lock"
+  else
+    fail "away state: status blocked or misreported under a held launcher lock, got '$state'"
+  fi
+  rm -rf "$st"
+}
+
+# The help text is this script's own emitted interface, and its every subcommand
+# has to survive to the reader: a hard-coded line range silently truncated the
+# `status` entry mid-sentence as soon as the header grew.
+unit_help_documents_every_subcommand_untruncated() {
+  local st out sub status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-help.XXXXXX")
+  mkdir -p "$st/state"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" help 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    fail "help: exited $status instead of printing usage"
+    rm -rf "$st"
+    return
+  fi
+  for sub in start start-native stop reconcile status down-notice; do
+    printf '%s\n' "$out" | grep -F "fm-afk-launch.sh $sub" >/dev/null \
+      || fail "help: the $sub subcommand is missing from the emitted usage"
+  done
+  # The last sentence of the last documented subcommand, and the trailing
+  # paragraphs after it: the truncation cut exactly here.
+  printf '%s\n' "$out" | grep -F "adapters never drift apart." >/dev/null \
+    || fail "help: the last subcommand entry is truncated mid-sentence"
+  printf '%s\n' "$out" | grep -F "Supported backends:" >/dev/null \
+    || fail "help: the supported-backend paragraph was cut off"
+  printf '%s\n' "$out" | grep -F "Test seam:" >/dev/null \
+    || fail "help: the test-seam paragraph was cut off"
+  printf '%s\n' "$out" | grep -q '^set -u$' \
+    && fail "help: printed past the header comment block into the script body"
+  pass "help: prints the whole header block, ending at the first non-comment line"
+  rm -rf "$st"
+}
+
+unit_native_entry_reports_no_supervision_until_the_daemon_lands() {
+  local st state
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-claim.XXXXXX")
+  mkdir -p "$st/state"
+  # start-native writes the flag BEFORE the harness-native background job runs,
+  # and cannot wait for it. That entry must therefore never read as supervision:
+  # if the native job never starts, or the host reaps it, the home stays covered
+  # by normal harness supervision instead of standing it down for nothing.
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1
+  state=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" status 2>/dev/null)
+  if [ -e "$st/state/.afk" ] && [ "$state" = armed-no-daemon ]; then
+    pass "native entry: a prepared away mode with no daemon yet never claims supervision"
+  else
+    fail "native entry: expected flag present and armed-no-daemon, got '$state'"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
   rm -rf "$st"
 }
 
@@ -939,6 +1137,11 @@ unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
+unit_afk_supervision_state
+unit_down_notice_speaks_only_for_a_flagged_dead_daemon
+unit_status_needs_no_lock
+unit_help_documents_every_subcommand_untruncated
+unit_native_entry_reports_no_supervision_until_the_daemon_lands
 unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record

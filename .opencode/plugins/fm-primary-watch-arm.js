@@ -101,8 +101,45 @@ async function isPrimaryRoot(root, home) {
   return gitDir.stdout.trim() === commonDir.stdout.trim();
 }
 
-function shouldArm(paths) {
-  if (existsSync(`${paths.state}/.afk`)) return false;
+// The away-mode flag is a declaration of intent, not proof of supervision: the
+// host can kill the daemon and leave the flag behind. Standing down on the flag
+// alone would leave the home with no watcher AND no alarm at once, so ask
+// bin/fm-afk-launch.sh - the single owner of that predicate - whether a daemon
+// is actually alive (docs/watcher-continuity.md "Away-mode stand-down"). An
+// unreadable answer keeps this plugin armed, which is the safe direction.
+// Launched through bash like every other script this plugin runs: Windows cannot
+// execute a .sh directly, and there the failure is systematic rather than
+// unreadable - it would arm a second cycle on top of every live away daemon.
+async function afkDaemonOwnsSupervision(paths) {
+  if (!existsSync(`${paths.state}/.afk`)) return false;
+  const result = await runProcess("bash", [`${paths.root}/bin/fm-afk-launch.sh`, "status"], {
+    env: { ...process.env, FM_HOME: paths.home, FM_STATE_OVERRIDE: paths.state },
+  });
+  if (result.code !== 0) return false;
+  return result.stdout.trim() === "daemon";
+}
+
+// Naming the broken away mode on the wake surface, because this plugin arming
+// the cycle is exactly what keeps the watcher healthy - so fm-guard.sh and the
+// turn-end guard never print their banners, and nothing else would report it
+// before the next session start. The sentence has one owner in
+// bin/fm-wake-lib.sh, reached here through the same read-only launcher entry
+// point the state query uses; the flag test short-circuits the spawn outside
+// away mode, and an unreadable answer stays silent rather than inventing one.
+// The cover is per-call, not per-adapter: a path that just reported this cycle
+// broken passes an empty one, so the sentence says nothing covers the home
+// instead of naming the mechanism it has just declared dead.
+async function awayModeDownNotice(paths, cover) {
+  if (!existsSync(`${paths.state}/.afk`)) return "";
+  const result = await runProcess("bash", [`${paths.root}/bin/fm-afk-launch.sh`, "down-notice", cover], {
+    env: { ...process.env, FM_HOME: paths.home, FM_STATE_OVERRIDE: paths.state },
+  });
+  if (result.code !== 0) return "";
+  return result.stdout.trim();
+}
+
+async function shouldArm(paths) {
+  if (await afkDaemonOwnsSupervision(paths)) return false;
   if (existsSync(`${paths.config}/x-mode.env`)) return true;
   try {
     return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
@@ -205,13 +242,16 @@ async function sendPrompt(paths, client, sessionID, text, recovery) {
   }
 }
 
-function wakePrompt(reason) {
-  return `WATCHER FIRED - drain queued wakes with bin/fm-wake-drain.sh and handle the reported wake. Watcher continuity is plugin-owned.\n\n${reason}`;
+function wakePrompt(reason, notice = "") {
+  const tail = notice ? `\n\n${notice}` : "";
+  return `WATCHER FIRED - drain queued wakes with bin/fm-wake-drain.sh and handle the reported wake. Watcher continuity is plugin-owned.\n\n${reason}${tail}`;
 }
 
 function surfaceFailure(paths, client, sessionID, reason) {
-  void sendPrompt(paths, client, sessionID, wakePrompt(reason)).catch(() => {
-  });
+  void awayModeDownNotice(paths, "")
+    .then((notice) => sendPrompt(paths, client, sessionID, wakePrompt(reason, notice)))
+    .catch(() => {
+    });
 }
 
 function retryDelay(attempt) {
@@ -360,10 +400,11 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
         ? previousRestoration.catch(() => "").then(() => restoreAfterActionableClose(paths, sessionID, client, predecessor))
         : restoreAfterActionableClose(paths, sessionID, client, predecessor);
       restorationInFlight = restoration;
-      void restoration.then((result) => {
+      void restoration.then(async (result) => {
         if (restorationInFlight === restoration) restorationInFlight = null;
         const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
-        return sendPrompt(paths, client, sessionID, wakePrompt(message), result.recovery);
+        const notice = await awayModeDownNotice(paths, result.failure ? "" : "this plugin-owned watcher cycle");
+        return sendPrompt(paths, client, sessionID, wakePrompt(message, notice), result.recovery);
       }).catch(() => {
       });
       return;
@@ -401,7 +442,7 @@ async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
-  if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
+  if (!(await shouldArm(paths))) return { status: "not-needed", armChild: null };
   return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid) };
 }
 

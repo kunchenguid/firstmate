@@ -10,7 +10,7 @@
 // callbacks from a prior generation are no-ops against the active replacement.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -149,6 +149,30 @@ function markLoaded(): void {
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 
+// Naming the broken away mode on the wake surface, because this extension arming
+// the cycle is exactly what keeps the watcher healthy - so fm-guard.sh and the
+// turn-end guard never print their banners, and nothing else would report it
+// before the next session start. The sentence has one owner in
+// bin/fm-wake-lib.sh, reached here through the read-only launcher entry point;
+// the flag test short-circuits the spawn outside away mode, and an unreadable
+// answer stays silent rather than inventing one.
+// The cover is per-call, not per-adapter: a path that just reported this cycle
+// broken passes an empty one, so the sentence says nothing covers the home
+// instead of naming the mechanism it has just declared dead.
+function awayModeDownNotice(cover: string): string {
+  if (!existsSync(`${state}/.afk`)) return "";
+  const result = spawnSync(
+    "bash",
+    [`${fmRoot}/bin/fm-afk-launch.sh`, "down-notice", cover],
+    {
+      encoding: "utf8",
+      env: { ...process.env, FM_HOME: fmHome, FM_STATE_OVERRIDE: state, FM_ROOT_OVERRIDE: fmRoot },
+    },
+  );
+  if (result.status !== 0) return "";
+  return result.stdout.trim();
+}
+
 function actionableLine(output: string): string {
   const lines = output.split(/\r?\n/);
   return lines.find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line)) || "";
@@ -242,11 +266,13 @@ export default function (pi: ExtensionAPI) {
     owner: SessionGeneration,
     message: string,
     recovery?: { generation: string; watcherPid: string },
+    cover = "this extension-owned watcher cycle",
   ): Promise<void> {
     if (!generationIsLive(owner)) return;
+    const notice = awayModeDownNotice(cover);
     const content = encodeFirstmateOperationalInput(
       "watcher",
-      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
+      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.${notice ? `\n\n${notice}` : ""}`,
     );
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
     if (recovery) {
@@ -263,7 +289,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
-    void sendWake(owner, message).catch(() => {
+    void sendWake(owner, message, undefined, "").catch(() => {
       // Pi owns delivery errors; continuity restoration never waits on prompting.
     });
   }
@@ -455,7 +481,7 @@ export default function (pi: ExtensionAPI) {
           if (generationIsLive(owner)) owner.restoring = false;
           if (!generationIsLive(owner)) return;
           const message = restoration.failure ? `${classification.message}\n\n${restoration.failure}` : classification.message;
-          await sendWake(owner, message, restoration.recovery);
+          await sendWake(owner, message, restoration.recovery, restoration.failure ? "" : "this extension-owned watcher cycle");
         })().catch(() => {
         });
         return;

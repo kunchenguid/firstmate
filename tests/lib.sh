@@ -70,6 +70,13 @@ pass() {
 
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
+# Same `$$`-keyed registry trick for helper-spawned stand-in processes (see
+# fm_fake_afk_daemon): a helper called in `$(...)` cannot register anything in
+# the caller's shell, so the pid goes to a file the EXIT trap below reaps.
+FM_TEST_PID_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-pids.$$.XXXXXX") || {
+  rm -f "$FM_TEST_CLEANUP_REGISTRY"
+  return 1
+}
 
 fm_test_pid_identity() {
   local pid=$1
@@ -83,7 +90,16 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
 }
 
 fm_test_cleanup() {
-  local d
+  local d pid
+  if [ -f "$FM_TEST_PID_REGISTRY" ]; then
+    while IFS= read -r pid; do
+      case "$pid" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      kill "$pid" 2>/dev/null || true
+    done < "$FM_TEST_PID_REGISTRY"
+    rm -f "$FM_TEST_PID_REGISTRY"
+  fi
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
@@ -258,6 +274,51 @@ fm_write_secondmate_meta() {
     "yolo=off" \
     "home=$home" \
     "projects=$projects"
+}
+
+# --- away-mode fixtures -----------------------------------------------------
+#
+# The away-mode flag is a declaration of intent; only a live daemon behind it
+# means anything is supervising (fm_afk_supervision_state in bin/fm-wake-lib.sh).
+# These two helpers build the two states a test needs to tell apart, so no suite
+# has to re-roll the lock/identity shape.
+
+# fm_fake_afk_daemon <state-dir>: away mode WITH a live daemon. Writes the flag,
+# then records a real running process and its identity in the daemon lock -
+# exactly the evidence fm_afk_daemon_alive requires. Echoes the pid so a test can
+# end that daemon mid-run; otherwise the suite's cleanup reaps it.
+fm_fake_afk_daemon() {
+  local state=$1 pid lock
+  mkdir -p "$state" || return 1
+  date '+%s' > "$state/.afk" || return 1
+  # Detach the stand-in daemon's stdio: a caller that runs this helper in
+  # `$(...)` would otherwise wait on the sleep holding that pipe open.
+  sleep 600 >/dev/null 2>&1 &
+  pid=$!
+  lock="$state/.supervise-daemon.lock"
+  mkdir -p "$lock" || return 1
+  printf '%s\n' "$pid" > "$lock/pid" || return 1
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$pid" > "$lock/pid-identity" || return 1
+  printf '%s\n' "$pid" >> "$FM_TEST_PID_REGISTRY"
+  printf '%s\n' "$pid"
+}
+
+# fm_fake_afk_flagged_no_daemon <state-dir>: away mode with NO daemon - the
+# measured defect state, where the flag alone used to stand every supervision
+# mechanism down. Leaves behind the dead pid it recorded, so the fixture also
+# covers a daemon that died rather than one that never started.
+fm_fake_afk_flagged_no_daemon() {
+  local state=$1 lock dead=999999
+  mkdir -p "$state" || return 1
+  date '+%s' > "$state/.afk" || return 1
+  while kill -0 "$dead" 2>/dev/null; do
+    dead=$((dead + 1))
+  done
+  lock="$state/.supervise-daemon.lock"
+  mkdir -p "$lock" || return 1
+  printf '%s\n' "$dead" > "$lock/pid" || return 1
+  printf 'dead away-mode daemon identity\n' > "$lock/pid-identity" || return 1
 }
 
 # --- common assertions ------------------------------------------------------

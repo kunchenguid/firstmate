@@ -285,6 +285,117 @@ fm_watcher_supervision_verdict() {
   return 0
 }
 
+# --- away-mode daemon ownership ---------------------------------------------
+# The away-mode flag state/.afk is a DECLARATION of intent, never proof that
+# anything is supervising: the host can kill bin/fm-supervise-daemon.sh while the
+# flag stays behind. Every mechanism that stands down for away mode must ask
+# whether that daemon is ALIVE, because standing down on the flag alone leaves a
+# home with no supervision AND no alarm at the same time, silently
+# (docs/watcher-continuity.md "Away-mode stand-down").
+#
+# fm_afk_daemon_lock_owner <state>
+# Print the directory actually holding the daemon lock's files, resolving the
+# symlinked-owner form fm_lock_try_acquire can create. Fails when no lock exists.
+fm_afk_daemon_lock_owner() {
+  local state=$1 lock owner
+  lock="$state/.supervise-daemon.lock"
+  if [ -L "$lock" ]; then
+    owner=$(readlink "$lock" 2>/dev/null) || return 1
+    [ -n "$owner" ] || return 1
+    case "$owner" in
+      /*) printf '%s\n' "$owner" ;;
+      *) printf '%s/%s\n' "$(dirname "$lock")" "$owner" ;;
+    esac
+    return 0
+  fi
+  [ -d "$lock" ] || return 1
+  printf '%s\n' "$lock"
+}
+
+# fm_afk_daemon_lock_pid <state>: print the pid that lock records.
+fm_afk_daemon_lock_pid() {
+  local owner
+  owner=$(fm_afk_daemon_lock_owner "$1") || return 1
+  cat "$owner/pid" 2>/dev/null || true
+}
+
+# fm_afk_daemon_pid_matches <pid> <owner-dir>
+# True when <pid> is still the process that took the lock. The recorded identity
+# is authoritative and survives pid reuse; a lock written without one falls back
+# to the process command, which is weaker than an identity but still stronger
+# than "some process holds this pid".
+fm_afk_daemon_pid_matches() {
+  local pid=$1 owner=$2 identity current command
+  identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
+  if [ -n "$identity" ]; then
+    current=$(fm_pid_identity "$pid") || return 1
+    [ "$current" = "$identity" ]
+    return
+  fi
+  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  case "$command" in
+    *fm-supervise-daemon.sh*) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_afk_daemon_alive <state>
+# Exit 0 iff a live, identity-matched away-mode daemon holds this home's lock.
+fm_afk_daemon_alive() {
+  local state=$1 owner pid
+  owner=$(fm_afk_daemon_lock_owner "$state") || return 1
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" || return 1
+  fm_afk_daemon_pid_matches "$pid" "$owner"
+}
+
+# fm_afk_supervision_state <state>
+# THE vocabulary for away-mode ownership; every caller uses these three words:
+#   off              no away-mode flag - normal harness supervision applies
+#   daemon           flag present AND a live daemon owns the watcher and triage
+#   armed-no-daemon  flag present but no daemon is running, so away mode owns
+#                    nothing and normal harness supervision must stay armed
+fm_afk_supervision_state() {
+  local state=$1
+  [ -e "$state/.afk" ] || { printf 'off\n'; return 0; }
+  if fm_afk_daemon_alive "$state"; then
+    printf 'daemon\n'
+  else
+    printf 'armed-no-daemon\n'
+  fi
+}
+
+# fm_afk_daemon_owns_supervision <state>
+# The stand-down predicate. Exit 0 only in the `daemon` state, so a mechanism
+# stands down for a live daemon (unchanged behavior, one supervision cycle) and
+# stays armed when the daemon is gone.
+fm_afk_daemon_owns_supervision() {
+  local state=$1
+  [ -e "$state/.afk" ] || return 1
+  fm_afk_daemon_alive "$state"
+}
+
+# fm_afk_daemon_down_notice <state> <what-covers-this-home>
+# The one sentence every turn-end mechanism prints with its own banner while away
+# mode is flagged with no daemon behind it, so the state is named wherever the
+# session already looks. Silent otherwise. <what-covers-this-home> names the
+# mechanism that took over, because that is the only part that differs per
+# harness and duplicating the sentence per hook is how the wordings drift apart.
+# Pass it EMPTY on a path that just reported its own mechanism broken: claiming a
+# cover in the same breath as its failure is the very "supervision that does not
+# exist" this contract exists to stop, so that case says nothing covers the home.
+fm_afk_daemon_down_notice() {
+  local state=$1 cover=$2 clause
+  [ -e "$state/.afk" ] || return 0
+  fm_afk_daemon_alive "$state" && return 0
+  if [ -n "$cover" ]; then
+    clause="$cover is the only cover"
+  else
+    clause='nothing is covering this home'
+  fi
+  printf 'AWAY MODE IS FLAGGED BUT ITS DAEMON IS NOT RUNNING - state/.afk is set and no away-mode daemon holds this home, so away mode is supervising nothing and %s. Load /afk to restart the daemon, or exit away mode.\n' "$clause"
+}
+
 fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \

@@ -160,6 +160,45 @@ test_grok_command_sources_effective_config() {
   pass "grok rendered command sources the effective x-mode config"
 }
 
+# armed-no-daemon must DIAGNOSE without amputating the procedure: codex and grok
+# have no automatic re-arm, so the harness instruction they need is exactly the
+# one an early return would have dropped.
+test_armed_no_daemon_repair_line_keeps_the_harness_procedure() {
+  local home out
+  home="$TMP_ROOT/armed-no-daemon-home"
+  mkdir -p "$home/state" "$home/config"
+
+  out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --afk armed-no-daemon --repair-line)
+  assert_contains "$out" "Away mode is flagged but its daemon is NOT running" "codex repair line lost the away-mode diagnosis"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "codex repair line lost the only instruction that restores its supervision"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]')" = 1 ] || fail "the repair line must stay a single line for its banner callers: $out"
+
+  out=$(FM_HOME="$home" "$RENDER" --harness grok --afk armed-no-daemon --repair-line)
+  assert_contains "$out" "Away mode is flagged but its daemon is NOT running" "grok repair line lost the away-mode diagnosis"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "grok repair line lost its tracked background arm"
+
+  out=$(FM_HOME="$home" "$RENDER" --harness claude --afk armed-no-daemon --repair-line)
+  assert_contains "$out" "Away mode is flagged but its daemon is NOT running" "claude repair line lost the away-mode diagnosis"
+  assert_contains "$out" "watcher supervision needs Stop-owned automatic recovery" "an auto-arming harness lost its own repair guidance"
+
+  # The conditional prefixes are part of the ordinary path, so taking it must
+  # bring them back rather than drop them with the harness instruction.
+  : > "$home/config/x-mode.env"
+  out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --afk armed-no-daemon \
+    --queue-pending 1 --x-mode 1 --repair-line)
+  assert_contains "$out" "Away mode is flagged but its daemon is NOT running" "the diagnosis was dropped once the prefixes applied"
+  assert_contains "$out" "draining queued wakes" "armed-no-daemon lost the queue-pending prefix"
+  assert_contains "$out" "source '$home/config/x-mode.env' first" "armed-no-daemon lost the x-mode cadence prefix"
+  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "armed-no-daemon lost the harness instruction under the prefixes"
+
+  # A live daemon keeps the unchanged ownership line and never suggests repairing
+  # supervision alongside it.
+  out=$(FM_HOME="$home" "$RENDER" --harness codex --afk daemon --repair-line)
+  assert_contains "$out" "Away mode owns watcher supervision" "the live-daemon repair line changed"
+  assert_not_contains "$out" "bin/fm-watch-checkpoint.sh" "a live daemon must not be told to start a second supervision cycle"
+  pass "armed-no-daemon diagnoses the broken away mode and still renders the harness repair procedure"
+}
+
 test_pi_snippet_uses_effective_extension_path() {
   local home out turnend watch
   home="$TMP_ROOT/pi-home"
@@ -180,6 +219,7 @@ test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
 test_repair_lines
+test_armed_no_daemon_repair_line_keeps_the_harness_procedure
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify

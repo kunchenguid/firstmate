@@ -43,6 +43,13 @@ Without that proof an unheld lock alarms exactly as it did before, so an unloade
 Under every persistent-watcher harness a live identity-matched watcher with a fresh beacon is still required, so the pull guard keeps the same strict semantics there.
 Its banner names the true failing condition, either a missing live watcher process or a genuinely stale beacon with its real age, and keys the once-per-episode dedup on that condition rather than the beacon mtime.
 
+Away mode never exempts a turn end from this predicate, and it changes only WHO is expected to be supervising.
+The guard resolves that with `fm_afk_supervision_state` and renders the matching repair line: `daemon` keeps the unchanged "away mode owns the watcher" guidance, while `armed-no-daemon` states that the flag has no daemon behind it and then gives the harness's ordinary repair instruction unchanged, prefixes included.
+That diagnosis never replaces the instruction, because codex and grok have no automatic re-arm and the instruction is what restores their supervision.
+The attended fail-open is refused only for a live `daemon`, because a flagged-but-dead away mode is the ordinary no-supervision case and must keep the ordinary bounded progression instead of blocking against an ownership that does not exist.
+When it does fire under `armed-no-daemon`, its alarm names the broken away mode and asks for a daemon restart or an away-mode exit instead of asking for an attended session, because the flag itself says the captain left.
+[`watcher-continuity.md`](watcher-continuity.md#away-mode-stand-down) owns that state vocabulary and why liveness, not the flag, is the condition.
+
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repository-root `state/`.
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot safely read loop-guard fields.
@@ -149,7 +156,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 `tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, the cooperative `--claude` claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and stale-beacon alarm, and the extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
-`tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, child-worktree exclusion, and that the adapter never exits 2.
+`tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, live-away-daemon and lock-ownership inertness, staying armed and naming the broken away mode in its wake follow-up when the flag has no daemon behind it, child-worktree exclusion, and that the adapter never exits 2.
 `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` is the opt-in guard that proves the same behavior against the installed cursor-agent and fails naming the harness and version.
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.

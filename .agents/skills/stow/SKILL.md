@@ -25,7 +25,7 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 
 ```markdown
 - Treehouse pool slots share one repo, so workers must create their task branch before editing. <!--a:2026-08-03-->
-- While state/.afk exists, the away-daemon owns triage (until the afk-wake fix lands; tracked: afk-pi-wake-bypass-r1). <!--p:2026-07-20-->
+- While a LIVE away-daemon holds the home, it owns triage; the flag alone does not (until the afk-wake fix lands; tracked: afk-pi-wake-bypass-r1). <!--p:2026-07-20-->
 - Never restart the shared no-mistakes daemon while runs are active. <!--P-->
 ```
 

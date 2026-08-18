@@ -248,6 +248,12 @@ case "$*" in
     [ -n "${FM_FAKE_HARNESS_PID:-}" ] || exit 1
     /bin/ps -o ppid= -p "$pid"
     ;;
+  *"lstart="*)
+    # Process-identity reads (fm_pid_identity) must stay truthful: this stub
+    # only impersonates the primary harness, and a faked identity would make
+    # every liveness proof built on it vacuous.
+    exec /bin/ps -p "$pid" -o lstart= -o command=
+    ;;
 esac
 exit 1
 SH
@@ -2230,7 +2236,7 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  : > "$home/state/.afk"
+  fm_fake_afk_daemon "$home/state" >/dev/null
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
@@ -2240,7 +2246,30 @@ EOF
   assert_contains "$out" "- Away mode: active" "supervision block did not include active AFK state"
   assert_not_contains "$out" "  bin/fm-watch-arm.sh" "AFK next step still told the agent to arm the watcher directly"
 
-  pass "next step delegates watcher ownership to the AFK daemon"
+  pass "next step delegates watcher ownership to a live AFK daemon"
+}
+
+# A restarting session used to read the flag as proof that the daemon owned the
+# watcher, which is exactly how a dead daemon stayed invisible across restarts.
+test_afk_flag_without_daemon_is_reported_as_unsupervised() {
+  local rec root home fakebin out
+  rec=$(new_world next-step-afk-dead)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  fm_fake_afk_flagged_no_daemon "$home/state"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "NO away-mode daemon is running" "the digest did not report the missing away-mode daemon"
+  assert_not_contains "$out" "away-mode supervision is active" "the digest still claimed away-mode supervision was active"
+  assert_contains "$out" "- Away mode: FLAGGED WITH NO DAEMON" "the supervision block did not name the broken away mode"
+  assert_contains "$out" "Away mode is flagged but its daemon is NOT running" "the next step did not tell the session to repair or exit away mode"
+  assert_present "$home/state/.afk" "session start must never clear the captain's away-mode flag"
+
+  pass "session start reports an away-mode flag with no daemon as unsupervised"
 }
 
 test_supervision_block_exactly_one_and_pi_diagnostic() {
@@ -2428,6 +2457,7 @@ test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
+test_afk_flag_without_daemon_is_reported_as_unsupervised
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker

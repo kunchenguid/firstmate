@@ -49,10 +49,17 @@ batched digest rather than per-wake injections.
    The daemon is **presence-gated**: it injects escalations only while
    `state/.afk` exists, and stays quiet otherwise.
 
-3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
+3. **Confirm the daemon actually took the home before reporting away mode as active.**
+   Run `bin/fm-afk-launch.sh status` and require `daemon`.
+   The terminal-backed path already waits for that proof and rolls back without it, but the native path CANNOT: it writes the flag first and cannot wait on a harness-native background job, so an unconfirmed native launch is the one entry that can leave a flag with nothing behind it.
+   `armed-no-daemon` means away mode is supervising nothing.
+   Retry the launch, and if it will not hold, tell the captain away mode is not running rather than reporting it as active.
+   This never ends in a blind home: normal harness supervision stays armed for anything but `daemon`, so an unconfirmed entry degrades to ordinary supervision instead of no supervision (`docs/watcher-continuity.md` "Away-mode stand-down").
+
+4. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.
 
-4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
+5. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
 
 ## How to exit afk
 
@@ -149,8 +156,9 @@ behavior but needs a separate fix; the gap is recorded in
 The daemon wraps `fm-watch.sh`, runs the watcher as a child, presents every durable wake after each actionable watcher close, classifies each presented record in bash, and acknowledges the presented generation only after routing completes.
 It self-handles the routine majority without consuming a firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
-The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
-While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
+The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage whenever no live daemon holds the home, so the two modes apply one identical policy.
+While a LIVE away-mode daemon owns this home the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
+The flag alone never transfers that ownership: with `state/.afk` present and no daemon behind it the watcher keeps its ordinary triage, because nothing would be there to consume the handoffs.
 
 Classify each wake this way:
 
@@ -240,6 +248,9 @@ These properties must hold:
 
 - Nothing is lost after queue publication.
   The daemon leaves every presented wake durable until routing completes and post-handling acknowledgement succeeds, so interruption replays the same work to the daemon or its successor.
+- A dead daemon is never mistaken for a live one.
+  Every native supervision mechanism stands down for a LIVE daemon, never for the flag, so a daemon the host kills gives the home back its ordinary supervision and says so instead of leaving it quietly unsupervised.
+  `docs/watcher-continuity.md` "Away-mode stand-down" owns that contract; nothing here or elsewhere clears `state/.afk` on the captain's behalf.
 - Wedge detection is bounded-latency, not lossy.
 - Declared external waits are rechecked on a separate, bounded cadence rather than being mislabeled as wedges.
 - The catch-all scan backs up the keyword classifier.

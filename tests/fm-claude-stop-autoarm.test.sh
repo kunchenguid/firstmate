@@ -140,7 +140,16 @@ SH
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
+# Away mode takes over mid-cycle exactly as it really does: a live daemon claims
+# the home, and only then does the flag mean anything.
 : > "$FM_HOME/state/.afk"
+sleep 600 &
+echo "$!" > "$FM_HOME/state/afk-daemon-pid"
+mkdir -p "$FM_HOME/state/.supervise-daemon.lock"
+cat "$FM_HOME/state/afk-daemon-pid" > "$FM_HOME/state/.supervise-daemon.lock/pid"
+( . "$FM_HOME/bin/fm-wake-lib.sh"
+  fm_pid_identity "$(cat "$FM_HOME/state/afk-daemon-pid")" \
+    > "$FM_HOME/state/.supervise-daemon.lock/pid-identity" ) 2>/dev/null
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
 exit 0
@@ -245,27 +254,66 @@ test_inert_when_lock_held_by_other_harness() {
   pass "auto-arm: inert without arm, rewake, or lock replacement when another live harness owns the home"
 }
 
-test_inert_when_afk() {
+test_inert_when_afk_daemon_is_alive() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/afk")
   : > "$dir/state/task.meta"
-  : > "$dir/state/.afk"
+  fm_fake_afk_daemon "$dir/state" >/dev/null
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
   write_arm_fixture "$dir" actionable
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  expect_code 0 "$status" "hook must never arm or rewake while away mode owns triage"
-  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed while state/.afk existed"
+  expect_code 0 "$status" "hook must never arm or rewake while a live away daemon owns triage"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed while a live away daemon owned the home"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "AFK without positive recovery reset the failure notice"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "AFK without positive recovery reset the attended alarm"
-  pass "auto-arm: inert while AFK owns supervision"
+  pass "auto-arm: inert while a live away daemon owns supervision"
+}
+
+test_arms_when_afk_flag_has_no_daemon() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/afk-no-daemon")
+  : > "$dir/state/task.meta"
+  fm_fake_afk_flagged_no_daemon "$dir/state"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>&1); status=$?
+  expect_code 2 "$status" "a flag with no daemon behind it must not stand the auto-arm down"
+  [ -e "$dir/state/arm-ran" ] || fail "hook stayed inert with away mode flagged and no daemon running"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  assert_contains "$out" "AWAY MODE IS FLAGGED BUT ITS DAEMON IS NOT RUNNING" \
+    "the rewake banner must name the broken away mode, or the model never learns to repair it"
+  # This banner follows a SUCCESSFUL arm, so the cover it claims is real.
+  assert_contains "$out" "this Stop-owned arm is the only cover" \
+    "the rewake banner must name the arm that took over from the dead daemon"
+  assert_present "$dir/state/.afk" "the hook must never clear the captain's away-mode flag"
+  pass "auto-arm: arms and names the failure when away mode is flagged with no daemon"
+}
+
+test_failed_arm_under_dead_afk_daemon_names_both_failures() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/afk-no-daemon-failed-arm")
+  : > "$dir/state/task.meta"
+  fm_fake_afk_flagged_no_daemon "$dir/state"
+  write_arm_fixture "$dir" failed
+  out=$(run_autoarm "$dir" 2>&1); status=$?
+  expect_code 2 "$status" "a failed arm under a dead away daemon must still force a handling turn"
+  assert_contains "$out" "auto-arm FAILED" "the arm failure must still be reported"
+  assert_contains "$out" "AWAY MODE IS FLAGGED BUT ITS DAEMON IS NOT RUNNING" \
+    "a failed arm must also name the away mode that is supervising nothing"
+  # The banner has just reported this very mechanism broken with no live watcher
+  # verified, so claiming it covers the home would contradict its own alarm.
+  assert_contains "$out" "nothing is covering this home" \
+    "the failure banner must say the home is uncovered"
+  assert_not_contains "$out" "is the only cover" \
+    "the failure banner claimed a cover in the same breath as reporting itself broken"
+  pass "auto-arm: a failed arm under a dead away daemon names both failures"
 }
 
 test_stale_lock_recovery_preserves_afk_and_need_gates() {
   local afk_dir idle_dir out status
   afk_dir=$(make_primary_dir "$TMP_ROOT/stale-afk")
   : > "$afk_dir/state/task.meta"
-  : > "$afk_dir/state/.afk"
+  fm_fake_afk_daemon "$afk_dir/state" >/dev/null
   printf '9999999\n' > "$afk_dir/state/.lock"
   write_arm_fixture "$afk_dir" actionable
   out=$(printf '%s\n' '{"session_id":"stale-afk"}' | FM_HOME="$afk_dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
@@ -547,15 +595,17 @@ test_need_vanished_mid_cycle_closes_quietly() {
 }
 
 test_afk_mid_cycle_suppresses_rewake() {
-  local dir out status
+  local dir out status daemon_pid
   dir=$(make_primary_dir "$TMP_ROOT/afk-mid")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" afk-appears
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  expect_code 0 "$status" "AFK appearing mid-cycle must suppress the primary rewake"
+  daemon_pid=$(cat "$dir/state/afk-daemon-pid" 2>/dev/null || true)
+  [ -z "$daemon_pid" ] || kill "$daemon_pid" 2>/dev/null || true
+  expect_code 0 "$status" "a live away daemon taking over mid-cycle must suppress the primary rewake"
   [ -z "$out" ] || fail "AFK-suppressed close produced output: $out"
   [ "$(epoch_outcome "$dir")" = afk ] || fail "epoch must record outcome=afk, got: $(epoch_outcome "$dir")"
-  pass "auto-arm: mid-cycle AFK hands triage to the daemon with no rewake"
+  pass "auto-arm: a live daemon taking over mid-cycle keeps triage with no rewake"
 }
 
 test_active_in_marked_secondmate_home() {
@@ -581,7 +631,9 @@ test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
-test_inert_when_afk
+test_inert_when_afk_daemon_is_alive
+test_arms_when_afk_flag_has_no_daemon
+test_failed_arm_under_dead_afk_daemon_names_both_failures
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
