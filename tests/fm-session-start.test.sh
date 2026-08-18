@@ -1867,7 +1867,7 @@ SH
   # A caller that closed its own input has none to carry; the bounded command
   # must still run rather than fail on a bad descriptor.
   status=0
-  # shellcheck disable=SC2016 -- $1 belongs to the nested bash -c invocation.
+  # shellcheck disable=SC2016  # $1 belongs to the nested bash -c invocation.
   out=$(env PATH="$fakebin:$BASE_PATH" bash -c \
     '. "$1"; fm_run_timed 10 echo closed-stdin-command-ran 0<&-' _ "$ROOT/bin/fm-timeout-lib.sh") || status=$?
   expect_code 0 "$status" "a bounded call from a caller with closed stdin refused"
