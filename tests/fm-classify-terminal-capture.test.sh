@@ -51,7 +51,7 @@ test_a_terminal_report_is_observed_once() {
 
   status_terminal_capture "$state" alpha || fail "capture failed"
   assert_present "$record" "no terminal observation was recorded"
-  [ "$(record_field "$record" verb)" = done ] \
+  [ "$(record_field "$record" verb)" = "done" ] \
     || fail "the observation did not record the terminal verb"
   [ "$(record_field "$record" source)" = supervision-observation ] \
     || fail "the observation did not name its own provenance"
@@ -109,7 +109,7 @@ test_an_unchanged_size_log_is_not_recounted() {
   status_terminal_capture "$state" alpha || fail "capture after the same-size rewrite failed"
   [ "$(record_field "$record" events)" = 1 ] \
     || fail "a status log of unchanged size was counted again"
-  [ "$(record_field "$record" verb)" = done ] \
+  [ "$(record_field "$record" verb)" = "done" ] \
     || fail "a status log of unchanged size restamped the observation"
   pass "terminal capture: an observed task whose log has not grown is never re-counted"
 }
@@ -129,7 +129,7 @@ test_a_second_terminal_report_is_its_own_observation() {
   status_terminal_capture "$state" alpha || fail "second capture failed"
   second=$(record_field "$record" events)
   [ "$second" = 2 ] || fail "a second terminal report was not observed as its own event"
-  [ "$(record_field "$record" verb)" = done ] \
+  [ "$(record_field "$record" verb)" = "done" ] \
     || fail "the second observation did not record the newer terminal verb"
   pass "terminal capture: a relaunched task's second completion is observed as its own event"
 }

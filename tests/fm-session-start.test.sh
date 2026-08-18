@@ -1827,6 +1827,55 @@ SH
   pass "the portable timeout path force-kills a command that ignores TERM"
 }
 
+# Every bounded mechanism must hand the caller's own standard input to the
+# command it bounds. The two mechanisms that launch the bounded command
+# asynchronously let Bash swap that input for /dev/null, so a bounded program
+# supplied on stdin - the shape bin/fm-task-metrics.sh derives its row with -
+# could silently run as an empty program and still exit 0.
+test_bounded_commands_receive_the_callers_own_stdin() {
+  local fakebin="$TMP_ROOT/bounded-stdin" driver out status=0
+
+  mkdir -p "$fakebin"
+  make_term_escalating_timeout "$fakebin"
+  driver="$TMP_ROOT/bounded-stdin-driver.sh"
+  cat > "$driver" <<'SH'
+#!/usr/bin/env bash
+set -eu
+. "$1"
+mechanism=$(fm_timeout_mechanism)
+[ "$mechanism" = "$2" ] || { echo "selected $mechanism, wanted $2" >&2; exit 64; }
+# The payload is a program, not data: an empty stdin runs nothing and still
+# exits 0, which is exactly how the original defect stayed silent.
+fm_run_timed 10 python3 - <<'PROGRAM'
+print("bounded stdin payload")
+PROGRAM
+SH
+  chmod +x "$driver"
+
+  out=$(env PATH="$fakebin:$BASE_PATH" "$driver" "$ROOT/bin/fm-timeout-lib.sh" timeout) || status=$?
+  expect_code 0 "$status" "the external-timeout mechanism refused a bounded program on stdin"
+  [ "$out" = "bounded stdin payload" ] \
+    || fail "the external-timeout mechanism did not deliver stdin to the bounded command: [$out]"
+
+  status=0
+  out=$(env PATH="$fakebin:$BASE_PATH" FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    "$driver" "$ROOT/bin/fm-timeout-lib.sh" bash) || status=$?
+  expect_code 0 "$status" "the pure-Bash mechanism refused a bounded program on stdin"
+  [ "$out" = "bounded stdin payload" ] \
+    || fail "the pure-Bash mechanism did not deliver stdin to the bounded command: [$out]"
+
+  # A caller that closed its own input has none to carry; the bounded command
+  # must still run rather than fail on a bad descriptor.
+  status=0
+  out=$(env PATH="$fakebin:$BASE_PATH" bash -c \
+    '. "$1"; fm_run_timed 10 echo closed-stdin-command-ran 0<&-' _ "$ROOT/bin/fm-timeout-lib.sh") || status=$?
+  expect_code 0 "$status" "a bounded call from a caller with closed stdin refused"
+  [ "$out" = "closed-stdin-command-ran" ] \
+    || fail "a bounded call from a caller with closed stdin lost its command: [$out]"
+
+  pass "every bounded mechanism runs the command against the caller's own stdin"
+}
+
 test_runtime_bound_leaves_a_healthy_digest_untouched() {
   local rec root home fakebin out
   rec=$(new_world runtime-bound-healthy)
@@ -2436,6 +2485,7 @@ test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
 test_runtime_bound_truncates_loudly_and_exits_zero
 test_portable_timeout_escalates_term_resistant_process
+test_bounded_commands_receive_the_callers_own_stdin
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain

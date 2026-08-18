@@ -430,7 +430,13 @@ trap 'exit 0' TERM INT
 while :; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_PI_ARM_READY_TIMEOUT_MS=250 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+  # Every successor here hangs deliberately, so the readiness budget is spent in
+  # full on each attempt and only bounds how long an attempt is given to prove
+  # itself. It must therefore stay far above the time a spawned arm needs just to
+  # reach its first line - measured in the low tens of milliseconds - or a
+  # scheduling stall makes the wake go out before the arm has recorded the
+  # attempt the extension already made, and the counts below disagree.
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_PI_ARM_READY_TIMEOUT_MS=1500 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -454,9 +460,13 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-hung-successor", {}, undefined, undefined, {});
-for (let i = 0; i < 500 && !prompt; i += 1) {
+// Restoration deliberately spends the full readiness budget on each of its
+// attempts, so this wait has to stay well clear of their sum. It ends as soon
+// as the wake arrives, so the generous bound costs a healthy run nothing.
+for (let i = 0; i < 3000 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
+if (!prompt) throw new Error("no wake was ever delivered");
 const rows = existsSync(process.env.FM_ARM_LOG)
   ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
   : [];
@@ -470,8 +480,8 @@ if (stableRows.length !== 4) throw new Error(`single-flight recovery launched ${
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi must deliver the actionable wake after bounded hung-successor recovery"
   [ -z "$out" ] || fail "Pi hung-successor test printed output: $out"
+  expect_code 0 "$status" "Pi must deliver the actionable wake after bounded hung-successor recovery"
   pass "Pi hung successor falls back to one typed actionable wake"
 }
 

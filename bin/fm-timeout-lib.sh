@@ -13,7 +13,10 @@
 #   fm_run_timed <seconds> <command> [args...]
 #       Runs the command with a hard bound. Exit status is the command's own,
 #       except 124, which means the bound was hit (GNU timeout's convention,
-#       reproduced by the perl and bash fallbacks).
+#       reproduced by the perl and bash fallbacks). The caller's own standard
+#       input reaches the command on every mechanism, so a bounded call reading
+#       a here-document or a pipe behaves the same on every host. Callers that
+#       want a closed input still pass their own `< /dev/null`.
 #
 # A non-positive bound is not a bound: `timeout 0` and the perl fallback's
 # `alarm 0` both disable the deadline, so callers must reject 0 before calling.
@@ -48,14 +51,21 @@ fm_run_bash_timeout() {
   deadline_status="${command_status}.deadline"
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m
-  (
-    set +m
-    "$@"
-    command_rc=$?
-    printf '%s\n' "$command_rc" > "$command_status"
-    exit "$command_rc"
-  ) &
-  child_pid=$!
+  # An asynchronous list is handed /dev/null on standard input before any
+  # explicit redirection, so the caller's own input has to be carried in on a
+  # spare descriptor and restored inside the child. Without this a bounded
+  # command that reads stdin - a here-document program, a piped payload - sees
+  # an empty stream here while the perl mechanism feeds it the real one.
+  {
+    (
+      set +m
+      "$@" <&8 8<&-
+      command_rc=$?
+      printf '%s\n' "$command_rc" > "$command_status"
+      exit "$command_rc"
+    ) &
+    child_pid=$!
+  } 8<&0
   (
     set +m
     sleep "$seconds"
@@ -95,16 +105,21 @@ fm_run_external_timeout() {
   # A shell wrapper can exit promptly on TERM while one of its descendants
   # ignores TERM; timeout then considers the command finished and does not send
   # its configured KILL. Explicitly reap that leftover group on a real timeout.
-  # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
-  "$runner" -k 1 "$seconds" bash -c '
-    status_file=$1
-    shift
-    "$@"
-    command_rc=$?
-    printf "%s\n" "$command_rc" > "$status_file"
-    exit "$command_rc"
-  ' _ "$status_file" "$@" &
-  runner_pid=$!
+  # The runner is asynchronous, so standard input is /dev/null before any
+  # explicit redirection; carry the caller's own input in on a spare descriptor
+  # and restore it for the bounded command (see fm_run_bash_timeout).
+  {
+    # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
+    "$runner" -k 1 "$seconds" bash -c '
+      status_file=$1
+      shift
+      "$@"
+      command_rc=$?
+      printf "%s\n" "$command_rc" > "$status_file"
+      exit "$command_rc"
+    ' _ "$status_file" "$@" <&8 8<&- &
+    runner_pid=$!
+  } 8<&0
   if wait "$runner_pid"; then
     runner_rc=0
   else
@@ -128,6 +143,14 @@ fm_run_external_timeout() {
 fm_run_timed() {  # <seconds> <command...>
   local seconds=$1
   shift
+  # Every mechanism below carries the caller's own standard input through to the
+  # bounded command. A caller that closed its input has none to carry, so hand
+  # the command the empty stream it effectively received before rather than
+  # failing on a bad descriptor.
+  if ! { : 8<&0; } 2>/dev/null; then
+    fm_run_timed "$seconds" "$@" < /dev/null
+    return
+  fi
   case "$(fm_timeout_mechanism)" in
     timeout) fm_run_external_timeout timeout "$seconds" "$@" ;;
     gtimeout) fm_run_external_timeout gtimeout "$seconds" "$@" ;;
