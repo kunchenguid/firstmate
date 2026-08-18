@@ -79,15 +79,19 @@ mkdir -p "$LAB/wt"
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s identity -n control -c "$LAB/wt" \
   || fail "could not start the private tmux server"
 
-# The environment signals the library reads, cleared for every launch so no
-# value inherited from the session running this suite can decide a verdict.
-CLEARED=(-u CLAUDE_PID -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID
-         -u CMUX_WORKSPACE_ID -u CMUX_SURFACE_ID)
+# The environment signals the library reads, cleared for every launch so no value
+# inherited from the session running this suite can decide a verdict. The list is
+# derived from the library's own tables by its single owner, so a signal added
+# there is cleared here without this guard being edited.
+# shellcheck source=tests/session-signals.sh
+. "$ROOT/tests/session-signals.sh"
+fm_test_clear_signals_argv
+CLEARED=("${FM_TEST_CLEAR_SIGNALS_ARGV[@]}")
 
 # Evaluate one library expression from a process that is NOT related to the
 # harness under test, which is the position every competing session speaks from.
 probe() {  # <expression>
-  env "${CLEARED[@]}" bash -c ". \"\$0\"; $1" "$LIB"
+  "${CLEARED[@]}" bash -c ". \"\$0\"; $1" "$LIB"
 }
 
 # Mirror bin/fm-spawn.sh's own resolution order, so this guard covers the same
@@ -167,7 +171,7 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor; do
   # harness into the shell's own pid and making it the session leader.
   # shellcheck disable=SC2086,SC2016  # an empty value must add no argument; the inner shell's $0/$@ are deliberately unexpanded here
   "$REAL_TMUX" -L "$SOCKET" new-window -d -t identity: -n "$harness" -c "$LAB/wt" -- \
-    env "${CLEARED[@]}" bash -c '"$0" "$@"; :' "$bin_path" $launch_args \
+    "${CLEARED[@]}" bash -c '"$0" "$@"; :' "$bin_path" $launch_args \
     || fail "$harness ($version): could not launch a window for the identity probe"
 
   pid=

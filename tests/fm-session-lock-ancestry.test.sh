@@ -163,6 +163,9 @@ case "$pid:$field:${FM_TEST_NODE_SHAPE:-harness}" in
   760:args=:optionpath) printf '%s\n' 'node /work/tools/run.js --config /etc/codex/config.toml' ;;
   760:args=:requirepath) printf '%s\n' 'node --require /opt/hooks/claude/instrument.js /srv/app/server.js' ;;
   760:args=:evalpath) printf '%s\n' 'node -e require("/opt/claude/x")' ;;
+  760:args=:requirejoined) printf '%s\n' 'node --require=/opt/x/claude /srv/app.js' ;;
+  760:args=:loadervalue) printf '%s\n' 'node --loader /opt/tools/pi /srv/app.js' ;;
+  760:args=:shortjoined) printf '%s\n' 'node -r/opt/x/codex /srv/app.js' ;;
   760:args=:bare) printf '%s\n' 'node' ;;
   760:ppid=:*) printf '%s\n' 1 ;;
   *:comm=:*) printf '%s\n' bash ;;
@@ -173,27 +176,34 @@ SH
   chmod +x "$fakebin/ps"
   printf '760\n' > "$dir/state/.lock"
 
-  # A bare interpreter and one whose wrapper inserted an interpreter flag are the
-  # same harness, so the script path has to be found rather than assumed to be
-  # the one token after the interpreter.
-  for shape in harness flagged; do
-    FM_TEST_NODE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 760' \
-      || fail "$shape: an npm-installed harness reporting MainThread was not recognized as a harness at all"
-    FM_TEST_NODE_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
-      || fail "$shape: a MainThread-named harness session could not recognize its own lock"
-  done
+  # The plain shape is the one a real npm-installed codex reports, and the one
+  # this branch exists for.
+  FM_TEST_NODE_SHAPE=harness lib_eval "$fakebin" 'fm_harness_pid_alive 760' \
+    || fail "an npm-installed harness reporting MainThread was not recognized as a harness at all"
+  FM_TEST_NODE_SHAPE=harness lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a MainThread-named harness session could not recognize its own lock"
 
   # Nothing else in an interpreter's argv may be read as a harness: not a script
   # merely living beside a harness-shaped name, not a passing argument that
-  # happens to be one whether bare or the value of an option, and not the
-  # path-shaped value of an interpreter flag that precedes the script, which is
-  # the interpreter's own argument rather than the program being run.
-  for shape in sibling flag optionpath requirepath evalpath bare; do
+  # happens to be one whether bare or the value of an option, and above all not
+  # the path-shaped VALUE of an interpreter flag, which can be named anything at
+  # all - `/opt/x/claude` and `/opt/tools/pi` included - and is the interpreter's
+  # own argument rather than the program being run.
+  #
+  # `flagged` is a DELIBERATE refusal, not an oversight: once any flag precedes
+  # the script this branch stops guessing which token is the script, because the
+  # alternative is an allowlist of value-taking interpreter flags that would rot
+  # silently as vendors add them. Do not restore a scan to make it pass; teach it
+  # a shape only from a real release that reports it.
+  for shape in flagged sibling flag optionpath requirepath evalpath requirejoined loadervalue shortjoined bare; do
     if FM_TEST_NODE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 760'; then
-      fail "$shape: an unrelated node program reporting MainThread was treated as a harness"
+      fail "$shape: a node program reporting MainThread whose script is not the one plain token after the interpreter was treated as a harness"
+    fi
+    if FM_TEST_NODE_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+      fail "$shape: a node program reporting MainThread claimed a home's session lock"
     fi
   done
-  pass "session-lock: a MainThread-named harness is identified from its script path, and only from there"
+  pass "session-lock: a MainThread-named harness is identified from the one plain script token, and only from there"
 }
 
 test_harness_beyond_a_gap_never_owns_the_lock() {
@@ -690,11 +700,14 @@ holder=$(tr -d '[:space:]' < "$FM_FIX/holder-pid")
 printf '%s\n' "$holder" > "$FM_FIX/state/.lock"
 export FM_FIX_HOLDER="$holder"
 bash "$FM_FIX/check.sh"
-printf '%s\n' "$?" > "$FM_FIX/check-finished"
+check_rc=$?
+FM_HOME="$FM_FIX" "$FM_FIX_ROOT/bin/fm-lock.sh" > "$FM_FIX/lock.out" 2>&1
+printf '%s\n' "$?" > "$FM_FIX/lock.rc"
+printf '%s\n' "$check_rc" > "$FM_FIX/check-finished"
 SH
   chmod +x "$dir/window.sh"
   "${COHORT_ENV_ARGV[@]}" FM_FIX="$dir" FM_FIX_LIB="$LIB" FM_FIX_CLAUDE="$NAMED_CLAUDE" \
-    HERDR_ENV=1 HERDR_PANE_ID=fixture-pane \
+    FM_FIX_ROOT="$ROOT" HERDR_ENV=1 HERDR_PANE_ID=fixture-pane \
     bash -c 'FM_FIXTURE_LAUNCHER=$$ "$0" "$1" &' "$NAMED_CLAUDE" "$dir/window.sh"
   window=$(wait_for_file "$dir/window-pid" "the fixture window session pid")
   holder=$(wait_for_file "$dir/holder-pid" "the pid of the session the window session started")
@@ -726,6 +739,16 @@ SH
     "the window session did not recognize a lock naming the session it started as its own home"$'\n'"$(cohort_report "$dir")"
   [ "$(cohort_field "$dir" competes)" = no ] || fail \
     "the session this one started was treated as a competing session"$'\n'"$(cohort_report "$dir")"
+
+  # And the acquisition that follows says what it did. Converging one session's
+  # own lock onto its own pid is not a home changing hands, and the two members of
+  # a launcher/launched pair print this at each other on every session start.
+  [ "$(tr -d '[:space:]' < "$dir/lock.rc")" = 0 ] || fail \
+    "acquiring the home from inside its own cohort failed: $(cat "$dir/lock.out" 2>/dev/null)"
+  assert_contains "$(cat "$dir/lock.out")" "converged onto this session's own holder pid $holder" \
+    "acquisition did not name the holder it converged onto"
+  assert_not_contains "$(cat "$dir/lock.out")" "took over from" \
+    "acquisition told this session it took the home over from itself"
   pass "session-lock: a session still owns its home once the lock names the session it started"
 }
 
@@ -958,6 +981,39 @@ test_suspended_holder_releases_and_resumes() {
   pass "session-lock: a suspended holder stops holding and holds again once it resumes"
 }
 
+# The other half of that sentence, through the acquisition path itself: taking a
+# home from a durably stopped session genuinely does change hands, so this one is
+# reported as a takeover and names the pid it came from.
+test_acquisition_names_a_takeover_from_a_suspended_holder() {
+  local dir holder out acquirer
+  dir="$TMP_ROOT/cohort-suspended-takeover"
+  make_cohort_fixture "$dir"
+  start_cohort_holder "$dir"
+  holder=$COHORT_HOLDER_PID
+  printf '%s\n' "$holder" > "$dir/state/.lock"
+  kill -STOP "$holder" 2>/dev/null || fail "could not suspend the fixture holder"
+  wait_for_state "$holder" T "the fixture holder never reached the stopped state"
+
+  # The acquiring session is a harness-named process of its own, so the ancestry
+  # terminates inside the fixture; the explicit exit keeps bash from exec'ing
+  # fm-lock.sh in its place and sending that walk out to the ambient session.
+  out=$("${COHORT_ENV_ARGV[@]}" FM_HOME="$dir" "$NAMED_CLAUDE" \
+    -c 'printf "acquirer=%s\n" "$$"; "$0"; exit $?' "$ROOT/bin/fm-lock.sh" 2>&1)
+  kill -CONT "$holder" 2>/dev/null || true
+  acquirer=$(printf '%s\n' "$out" | sed -n 's/^acquirer=//p')
+
+  [ -n "$acquirer" ] && [ "$acquirer" != "$holder" ] || fail \
+    "the fixture did not produce a distinct acquiring session: acquirer=$acquirer holder=$holder"$'\n'"$out"
+  assert_contains "$out" "took over from suspended harness pid $holder" \
+    "acquisition did not name the suspended holder it took the home from"$'\n'"$out"
+  assert_not_contains "$out" 'converged onto' \
+    "a takeover from a separate suspended session was reported as this session converging its own lock"$'\n'"$out"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$acquirer" ] || fail \
+    "acquisition did not converge the lock onto the acquiring session: expected $acquirer, got $(cat "$dir/state/.lock")"
+  wait_for_state "$holder" running "the fixture holder never resumed"
+  pass "session-lock: acquisition names a takeover from a suspended holder and converges the lock"
+}
+
 # The suspension verdict is confirmed over several samples on purpose, so a
 # momentary stop - a debugger, a profiler, a job control keystroke immediately
 # undone - is not read as a session that will never let go.
@@ -1048,5 +1104,6 @@ test_liveness_is_decided_before_any_recorded_cohort_signal
 test_container_signal_alone_carries_co_location
 test_terminal_signal_alone_carries_co_location
 test_suspended_holder_releases_and_resumes
+test_acquisition_names_a_takeover_from_a_suspended_holder
 test_momentary_stop_is_not_a_suspended_holder
 test_unusable_stop_sampling_settings_cannot_release_a_live_holder

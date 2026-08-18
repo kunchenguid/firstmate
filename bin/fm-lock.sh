@@ -8,8 +8,9 @@
 # fm_session_lock_holder_competes in bin/fm-session-lock-lib.sh: a recorded
 # holder that is this same session in another process tree, or a durably
 # suspended one, does not block. Every acquisition then converges the lock onto
-# the acquiring session's own pid, so repeated runs are idempotent, and any
-# takeover is named on stdout rather than being silent.
+# the acquiring session's own pid, so repeated runs are idempotent, and any live
+# holder it converged onto or took over from is named on stdout rather than being
+# silent.
 #
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
@@ -69,10 +70,10 @@ release_claim_lock() {
 trap release_claim_lock EXIT
 trap 'exit 1' HUP INT TERM
 
-# Why the takeover reason is captured rather than printed here: the fast path
+# Why the yield reason is captured rather than printed here: the fast path
 # below is only a pre-check, and the authoritative decision is retaken under the
 # claim lock. Printing it once, at the end, keeps one acquisition to one line.
-TAKEOVER=
+YIELDED=
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
   if [ "$old" = "$me" ]; then
@@ -112,8 +113,11 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     # Reclaiming a dead owner has always been silent and stays that way. The two
     # holders that are alive and still yield are the surprising ones, so name
     # them rather than moving the lock out from under a visible process quietly.
+    # The predicate supplies the whole clause, because converging onto this
+    # session's own holder and taking a home from a suspended one are different
+    # events and only the second one changed hands.
     if fm_harness_pid_alive "$old"; then
-      TAKEOVER=$FM_SESSION_HOLDER_YIELD_REASON
+      YIELDED=$FM_SESSION_HOLDER_YIELD_REASON
     fi
   fi
 fi
@@ -130,8 +134,8 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   exit 1
 fi
 release_claim_lock
-if [ -n "$TAKEOVER" ]; then
-  echo "lock acquired: harness pid $me (took over from $TAKEOVER)"
+if [ -n "$YIELDED" ]; then
+  echo "lock acquired: harness pid $me ($YIELDED)"
 else
   echo "lock acquired: harness pid $me"
 fi

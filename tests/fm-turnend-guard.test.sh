@@ -1615,6 +1615,29 @@ test_hook_claude_mode_fail_open_refused_while_autoarm_is_establishing() {
   pass "fm-turnend-guard --claude: a fresh auto-arm entry keeps the fail-open shut"
 }
 
+# The exhausted-episode path waits for the HANDOFF, not just for the outcome: it
+# requires the auto-arm's one failure notice to have been consumed as well as an
+# exhausted-failure ledger. This is the state between those two events - a fresh
+# failed-suppressed epoch with no notice yet - and it must still block, because
+# the auto-arm has not finished reporting. A fresh ledger is what keeps the
+# absent/stale path out of it, so this case can only be decided by the notice
+# precondition, and deleting that precondition flips it to a fail-open one block
+# early.
+test_hook_claude_mode_exhausted_episode_without_a_consumed_notice_blocks() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-no-notice")
+  : > "$dir/state/task1.meta"
+  printf 'epoch=4 owner_pid=%s outcome=failed-suppressed updated_at=%s\n' "$(nonexistent_pid)" "$(date +%s)" \
+    > "$dir/state/.claude-autoarm-epoch"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "fixture must start with no consumed failure notice"
+  seed_claude_budget "$dir" 3
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "an exhausted-failure ledger whose notice is not yet consumed must still block"
+  assert_not_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "the fail-open fired before the auto-arm's failure notice was consumed"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "a fail-open with no consumed notice consumed the attended alarm"
+  pass "fm-turnend-guard --claude: an exhausted episode without its consumed notice keeps blocking"
+}
+
 # A stale auto-arm entry is the same unrepairable condition as no entry at all:
 # the mechanism ran at some point and is not running now. It reaches the valve
 # through the absent path rather than needing a matching consumed notice, which
@@ -1785,6 +1808,7 @@ test_hook_claude_mode_absent_autoarm_reaches_the_bounded_fail_open
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
 test_hook_claude_mode_fail_open_refused_while_autoarm_is_establishing
 test_hook_claude_mode_stale_autoarm_evidence_reaches_the_fail_open
+test_hook_claude_mode_exhausted_episode_without_a_consumed_notice_blocks
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim

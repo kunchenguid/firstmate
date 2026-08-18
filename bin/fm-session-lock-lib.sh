@@ -77,9 +77,16 @@ fm_harness_path_name() {  # <path>
 # interpreter's script path. A harness component ANYWHERE in the path is too
 # loose there, because an interpreter's argv also carries the values of its own
 # flags: `--require /opt/hooks/claude/instrument.js` names no harness, and its
-# basename `instrument.js` is what says so. Exact equality is deliberate, so a
-# version-suffixed or extension-suffixed name cannot match here; those shapes are
-# identified by the command path and argv[0] evidence above instead.
+# basename `instrument.js` is what says so.
+#
+# Exact equality is deliberate, and under `MainThread` it is the ONLY evidence
+# there is: the command path is literally `MainThread` and argv[0] is the
+# interpreter, so neither the command-path nor the argv[0] rule above can see the
+# script at all. A harness whose script basename is not exactly the harness name
+# - a version-suffixed name, or a `.js` bin entry - is therefore deliberately not
+# identified in that branch. Teaching it such a shape is a verification task
+# against a real release, the same as extending FM_SESSION_LAUNCH_MARKERS, and
+# not a reason to loosen this rule.
 fm_harness_basename_name() {  # <path>
   local path=$1 base name
   [ -n "$path" ] || return 1
@@ -104,12 +111,13 @@ fm_harness_basename_name() {  # <path>
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
 #   3. a bare interpreter (node, python) running a harness script path.
-#   4. node's own `MainThread` exec name, resolved from the script path in argv
-#      by exact basename only.
+#   4. node's own `MainThread` exec name, resolved from the one argv token after
+#      the interpreter by exact basename only, and refused outright when that
+#      token is a flag.
 #   5. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name script rest
+  local comm=$1 args=$2 base argv0 name script
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
@@ -136,36 +144,34 @@ fm_harness_process_matches() {  # <comm> <args>
   # `MainThread` with argv `node .../bin/codex`, and without this it is not a
   # harness at all, which leaves a codex primary unable to acquire its own home.
   #
-  # Identity then has to come from the interpreter's SCRIPT PATH - the FIRST
-  # path-shaped token after the interpreter, so a wrapper that inserts an
-  # interpreter flag such as `node --enable-source-maps .../bin/codex` is still
-  # identified - matched by the STRICTEST rule this file has, exact basename,
-  # rather than the loose regex or the whole-path-component rule above. Every
-  # narrowing matters here, because `MainThread` is a name any node program can
-  # present and the rest of its argv is not the script: an unrelated script under
-  # a harness-shaped directory, a passing `--profile codex` argument, and the
-  # path-shaped VALUE of an interpreter flag such as `--require` must none of them
-  # carry a harness verdict. Only that first path is a candidate, so no later
-  # path-valued option argument decides the verdict either.
+  # Identity then has to come from the interpreter's SCRIPT PATH, and the ONLY
+  # candidate is the single token immediately after the interpreter, matched by
+  # the strictest rule this file has, exact basename. `MainThread` is a name any
+  # node program can present, and the rest of an interpreter's argv is not the
+  # script: it also carries the values of the interpreter's own flags, and those
+  # values are paths that can be named anything, `/opt/vendor/claude` included.
+  #
+  # So the branch REFUSES to identify anything as soon as that first token is a
+  # flag, rather than trying to work out where the flags end. That gives up the
+  # inferred `node --enable-source-maps .../bin/codex` shape on purpose: the
+  # alternative is an allowlist of value-taking interpreter flags, which would rot
+  # silently every time a vendor adds one, and silently stale recorded state is
+  # the exact failure this whole mechanism exists to remove. Refusing to guess is
+  # the intended behaviour, and only the plain `node <script>` shape - the one
+  # actually observed from a real codex install - is identified here.
   if [ "$base" = MainThread ]; then
-    rest=${args#* }
-    if [ "$rest" != "$args" ]; then
-      while [ -n "$rest" ]; do
-        script=${rest%% *}
-        case "$script" in
-          */*)
-            if name=$(fm_harness_basename_name "$script"); then
-              case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
-              return 0
-            fi
-            break
-            ;;
-        esac
-        case "$rest" in
-          *' '*) rest=${rest#* } ;;
-          *) rest= ;;
-        esac
-      done
+    script=${args#* }
+    if [ "$script" != "$args" ]; then
+      script=${script%% *}
+      case "$script" in
+        -*) : ;;
+        */*)
+          if name=$(fm_harness_basename_name "$script"); then
+            case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+            return 0
+          fi
+          ;;
+      esac
     fi
   fi
   # Cursor: its own owner decides, from Cursor's name or versioned install tree
@@ -569,22 +575,27 @@ fm_harness_pid_suspended() {  # <pid>
 #
 # Not competing: a dead or non-harness pid, a pid in this process's own session
 # cohort, and a durably suspended harness. Everything else is.
+#
+# FM_SESSION_HOLDER_YIELD_REASON is a whole clause rather than a noun phrase,
+# because the three cases are not the same event and a caller that prefixed one
+# verb onto all of them would report the cohort case - one session converging its
+# own lock onto its own pid - as a home changing hands.
 # shellcheck disable=SC2034 # Read by bin/fm-lock.sh to report why it did not yield.
 FM_SESSION_HOLDER_YIELD_REASON=
 fm_session_lock_holder_competes() {  # <pid>
   local pid=$1
   FM_SESSION_HOLDER_YIELD_REASON=
   if ! fm_harness_pid_alive "$pid"; then
-    FM_SESSION_HOLDER_YIELD_REASON="dead or non-harness holder pid $pid"
+    FM_SESSION_HOLDER_YIELD_REASON="reclaimed a dead or non-harness holder pid $pid"
     return 1
   fi
   if fm_session_same_cohort "$pid" '' 1; then
-    FM_SESSION_HOLDER_YIELD_REASON="this session's own holder pid $pid ($FM_SESSION_COHORT_EVIDENCE)"
+    FM_SESSION_HOLDER_YIELD_REASON="converged onto this session's own holder pid $pid ($FM_SESSION_COHORT_EVIDENCE)"
     return 1
   fi
   if fm_harness_pid_suspended "$pid"; then
     # shellcheck disable=SC2034 # Read by bin/fm-lock.sh to report why it did not yield.
-    FM_SESSION_HOLDER_YIELD_REASON="suspended harness pid $pid"
+    FM_SESSION_HOLDER_YIELD_REASON="took over from suspended harness pid $pid"
     return 1
   fi
   return 0
