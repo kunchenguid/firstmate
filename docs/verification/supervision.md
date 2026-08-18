@@ -409,7 +409,7 @@ FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=161833
 The exact maintainer live-verification sequence is:
 
 1. Launch Claude Code from an isolated firstmate project and isolated `FM_HOME` with `FM_GUARD_GRACE=1`, one in-flight task, the tracked hooks enabled, and no shared fleet state.
-2. Let the Stop-owned watcher produce one actionable close and confirm that the resulting handling turn has no live watcher, a stale `state/.last-watcher-beat`, `state/.claude-autoarm-epoch` with `outcome=rewake` and `session_pid` equal to `state/.lock`, and a matching `state/.claude-rewake-turn` proof.
+2. Let the Stop-owned watcher produce one actionable close and confirm that the resulting handling turn has no live watcher, a stale `state/.last-watcher-beat`, `state/.claude-autoarm-epoch` with `outcome=rewake` and `session_pid` equal to `state/.lock`, a matching `state/.claude-rewake-turn` proof, and the same generation published in `state/.claude-rewake-boundary`.
 3. From that same handling turn after the one-second grace, run `FM_GUARD_READ_ONLY=1 bin/fm-guard.sh` and confirm it is silent.
 4. Copy the isolated state, replace only the epoch's `session_pid` with a dead or foreign pid, run the same read-only guard outside the owning session, and confirm it prints `WATCHER DOWN - SUPERVISION IS OFF`.
 5. End the real handling turn, confirm its synchronous Stop guard retires the prior `state/.claude-rewake-turn` even if the async auto-arm hook does not execute, confirm its durable generation lets a delayed actionable auto-arm publish the session-owned replacement after the former synchronization window, and confirm the PID-strict turn-end guard still requires a live successor or a current auto-arm claim.

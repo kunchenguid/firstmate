@@ -87,7 +87,7 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, session-bound epoch publication, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
 `tests/fm-guard-stale-banner.test.sh` reproduces a stale beacon during a long session-bound Claude rewake turn and keeps non-rewake and unowned stale-beacon cases as alarm-preserving counterfactuals.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
-`tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset.
+`tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including prior-proof retirement, both concurrent and delayed active-turn generation handoffs, monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset.
 
 ## Active limits and verification
 
