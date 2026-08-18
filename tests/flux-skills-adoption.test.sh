@@ -57,6 +57,17 @@ test_symlink_is_rejected() {
   pass 'fm-flux-skills-verify rejects adopted skill symlinks'
 }
 
+test_unexpected_top_level_symlink_is_rejected() {
+  local link="$VENDOR_ROOT/extra-skill"
+  ln -s gitops-knowledge "$link"
+  if "$VERIFY" >/dev/null 2>&1; then
+    rm -f "$link"
+    fail 'verify must reject unexpected top-level symbolic links'
+  fi
+  rm -f "$link"
+  pass 'fm-flux-skills-verify rejects top-level symlinks'
+}
+
 test_manifest_is_parsed_without_execution() {
   local manifest="$VENDOR_ROOT/MANIFEST" backup marker
   backup=$(mktemp)
@@ -78,4 +89,5 @@ test_verify_passes_on_committed_vendor_tree
 test_checksum_tamper_is_rejected
 test_unlisted_file_is_rejected
 test_symlink_is_rejected
+test_unexpected_top_level_symlink_is_rejected
 test_manifest_is_parsed_without_execution

@@ -108,7 +108,7 @@ while IFS= read -r top; do
     fi
   done
   [ "$found" -eq 1 ] || die "unexpected top-level vendor entry: $base"
-done < <(find "$VENDOR_ROOT" -mindepth 1 -maxdepth 1 \( -type d -o -type f \) -printf '%f\n' | LC_ALL=C sort)
+done < <(find "$VENDOR_ROOT" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)
 
 for skill in "${excluded[@]}"; do
   [ ! -d "$ROOT/.agents/skills/$skill" ] || die "excluded skill exposed under .agents/skills: $skill"
