@@ -641,6 +641,7 @@ fm_backend_herdr_projection_identity_rename_exact() { # <session> <journal> <tas
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" \
     && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ] \
     && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$desired" ] || return 1
+  # shellcheck disable=SC2034 # caller-visible status flag (see fm-crew-identity-migrate-herdr.sh)
   FM_BACKEND_HERDR_WORKSPACE_TITLE_CHANGED=1
 }
 
