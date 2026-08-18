@@ -133,6 +133,19 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+#   Fix 4 - reclaim the copy's Next.js build output before it returns to the
+#     pool. `treehouse return` resets tracked content and leaves gitignored
+#     build output where it is, so a finished copy goes back to the pool still
+#     holding it and nothing ever removes it (measured 2026-08-18: 15 GB in one
+#     idle Artemis copy on a volume with 11 GB free; ~25.6 GB across eight
+#     copies on 2026-08-07). This runs after every unlanded-work refusal has
+#     passed and after the worktree's processes are reaped, so nothing is still
+#     writing it. bin/fm-next-cache-lib.sh owns exactly what qualifies and why
+#     it can never reach source, node_modules, or git data. Best effort and
+#     silent when there is nothing to reclaim: the output regenerates from
+#     source, so it is never the work product a refusal is protecting.
+#     bin/fm-next-cache-sweep.sh is the matching entry point for copies already
+#     sitting idle in the pool.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -168,6 +181,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-next-cache-lib.sh
+. "$SCRIPT_DIR/fm-next-cache-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -2436,6 +2451,15 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  # Fix 4 (see script header): reclaim this copy's Next.js build output. Every
+  # unlanded-work refusal has already passed and the worktree's processes are
+  # already reaped, so nothing here is still being written. treehouse return
+  # resets tracked content but leaves gitignored output alone, so without this
+  # the copy goes back to the pool carrying gigabytes nobody will use again.
+  # Never fatal: the build output is not the work product, and failing a
+  # completed teardown over a directory that regenerates would be the wrong
+  # trade. bin/fm-next-cache-lib.sh owns what is removed and why.
+  fm_next_cache_reclaim "$WT" "teardown" || true
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
