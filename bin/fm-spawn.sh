@@ -2274,7 +2274,7 @@ fi
 TASK_TMP="/tmp/fm-$ID"
 mkdir -p "$TASK_TMP/gotmp"
 
-# Per-harness turn-end hook where enabled: a file that touches
+# Per-harness turn-end hook where enabled: a generation-bound publisher creates
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
 # and token pointers stay out of git's view so they never block teardown's dirty
 # check or leak into a commit.
@@ -2349,7 +2349,7 @@ if [ "$KIND" != secondmate ]; then
       # never leave a stale busy record. Claude fires no hook for a manual
       # interrupt: fm-control preserves the adapter-owned state, while the
       # legacy fm-send --key Escape path records idle/fm-interrupt. Stop keeps
-      # the turn-ended NOTIFICATION touch for the watcher. Every
+      # the generation-bound turn-ended NOTIFICATION for the watcher. Every
       # hook command tolerates a refused event (|| true) so a stale-gen writer
       # can never break Claude's own lifecycle.
       mkdir -p "$WT/.claude"
@@ -2375,7 +2375,7 @@ EOF
 // reports activity (the worker's main session - a subagent child session can
 // only start while the main session is already busy) and ignores other
 // sessions' status until the latched session settles, so a child's idle can
-// never clear the worker's busy state. The session.idle touch stays the
+// never clear the worker's busy state. The session.idle publication stays the
 // watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
 const busyEvent = (state, event) =>
@@ -2431,7 +2431,7 @@ EOF
 // loops, and queued continuations all keep the run un-settled, and a settle
 // that raced another extension's fresh run keeps state busy via isIdle().
 // "turn_end" fires at every inner turn boundary (one LLM response plus its
-// tool calls) and stays a wake NOTIFICATION touch for the watcher, never
+// tool calls) and stays a wake NOTIFICATION publication for the watcher, never
 // current-state truth.
 import { execFile } from "node:child_process";
 const busyEvent = (state: string, event: string) =>
