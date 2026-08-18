@@ -1071,8 +1071,9 @@ window_to_task() {
 # captain-relevant last line; 1 otherwise. Pass the space-separated file list that
 # follows the "signal:" prefix. Non-.status arguments (e.g. .turn-ended markers,
 # which never carry a verb) are skipped. A 1 here is NOT "benign" on its own: a
-# no-verb signal (a bare turn-end, a working: note) is only benign when the crew is
-# also provably working (signal_crew_provably_working below); otherwise it surfaces.
+# no-verb signal (a bare turn-end, a working: note, a paused: declaration) is only
+# benign when the crew is also absorbable (signal_crew_absorbable below); otherwise
+# it surfaces.
 signal_reason_is_actionable() {  # <file> ...
   local f last
   for f in "$@"; do
@@ -1133,18 +1134,29 @@ crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
 }
 
-# 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
-# working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
-# same space-separated file list as signal_reason_is_actionable. Files are mapped to
-# task ids by stripping the .status / .turn-ended suffix; a no-verb wake with nothing
-# provably working must surface, so an empty/unresolvable list returns 1.
+# 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is either
+# provably working OR under a declared external-wait pause; 1 (actionable/surface) if
+# any is neither, or no task can be resolved. Pass the same space-separated file list
+# as signal_reason_is_actionable. Files are mapped to task ids by stripping the
+# .status / .turn-ended suffix; a no-verb wake with nothing absorbable must surface,
+# so an empty/unresolvable list returns 1.
+# The paused class is absorbed here for the same reason paused is excluded from the
+# captain-relevant set: a declared pause says "stop nagging this idle lane", so the
+# APPEND that declares or refreshes it must not itself wake the supervisor. Without
+# this, refreshing a pause to keep the wait honest costs a full supervision turn per
+# refresh. A pause never becomes invisible: the stale path still re-surfaces it once
+# every FM_PAUSE_RESURFACE_SECS for a recheck (fm-watch.sh handle_paused_stale), and
+# any later captain-relevant line surfaces through signal_reason_is_actionable.
+# Run-step precedence is unchanged, since crew_absorb_class reads the authoritative
+# current state: a crew that appended paused: but then STARTED a run classes working.
 # A kind=secondmate task's .status signal is never absorbable here regardless of
 # busy evidence: that stream is the mate's routed-reply channel, so every append
 # is parent-directed content the supervisor must read (a routed reply, a newly
 # raised decision, a mirrored remote line), and a busy mate agent makes its note
-# more current, not less deliverable. Scoped to .status files - a mate's bare
-# turn-ended ping still uses the ordinary provably-working absorb.
-signal_crew_provably_working() {  # <file> ...
+# more current, not less deliverable. That includes a mate's paused: line, which is
+# still a routed declaration its parent must read. Scoped to .status files - a mate's
+# bare turn-ended ping still uses the ordinary absorb.
+signal_crew_absorbable() {  # <file> ...
   local f base dir task seen=""
   for f in "$@"; do
     base=${f##*/}
@@ -1165,7 +1177,10 @@ signal_crew_provably_working() {  # <file> ...
     esac
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
-    crew_is_provably_working "$task" || return 1
+    case "$(crew_absorb_class "$task")" in
+      working|paused) ;;
+      *) return 1 ;;
+    esac
   done
   [ -n "$seen" ] || return 1
   return 0

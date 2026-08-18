@@ -325,27 +325,37 @@ test_crew_absorb_class_classifier() {
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
-# signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
-# task it references is provably working; if any crew has stopped, or no task can be
-# resolved, it surfaces. Files map to ids by stripping .status / .turn-ended.
-test_signal_crew_provably_working_classifier() {
+# signal_crew_absorbable: a no-verb "signal:" wake is benign ONLY when EVERY task it
+# references is provably working or under a declared external-wait pause; if any crew
+# has stopped, or no task can be resolved, it surfaces. Files map to ids by stripping
+# .status / .turn-ended.
+test_signal_crew_absorbable_classifier() {
   local dir fakebin state
-  dir=$(make_case signal-provably-working); fakebin="$dir/fakebin"; state="$dir/state"
+  dir=$(make_case signal-absorbable); fakebin="$dir/fakebin"; state="$dir/state"
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
   export FM_FAKE_CREW_STATE_a='state: working · source: run-step · running'
   export FM_FAKE_CREW_STATE_b='state: done · source: run-step · run passed'
-  signal_crew_provably_working "$state/a.status" "$state/a.turn-ended" \
+  export FM_FAKE_CREW_STATE_p='state: paused · source: status-log · awaiting the upstream release'
+  signal_crew_absorbable "$state/a.status" "$state/a.turn-ended" \
     || fail "a single provably-working crew (status+turn-end) was not benign"
-  ! signal_crew_provably_working "$state/a.status" "$state/b.turn-ended" \
+  # The pause-refresh loop this predicate closes: the append that declares or
+  # refreshes a declared pause must not itself be an actionable wake.
+  signal_crew_absorbable "$state/p.status" \
+    || fail "a declared external-wait pause's own status append was treated as actionable"
+  signal_crew_absorbable "$state/a.status" "$state/p.status" \
+    || fail "a coalesced working+paused batch was treated as actionable"
+  ! signal_crew_absorbable "$state/p.status" "$state/b.turn-ended" \
+    || fail "the paused absorb leaked onto a coalesced batch containing a stopped crew"
+  ! signal_crew_absorbable "$state/a.status" "$state/b.turn-ended" \
     || fail "a coalesced batch including a stopped crew was treated as benign"
-  ! signal_crew_provably_working "$state/b.turn-ended" \
+  ! signal_crew_absorbable "$state/b.turn-ended" \
     || fail "a stopped crew's bare turn-end was treated as benign"
-  ! signal_crew_provably_working "$state/a.meta" \
+  ! signal_crew_absorbable "$state/a.meta" \
     || fail "a non-signal file resolved to a benign verdict"
-  ! signal_crew_provably_working \
+  ! signal_crew_absorbable \
     || fail "an empty signal file list was treated as benign"
-  unset FM_FAKE_CREW_STATE_a FM_FAKE_CREW_STATE_b
-  pass "signal_crew_provably_working: benign only when every referenced crew is provably working"
+  unset FM_FAKE_CREW_STATE_a FM_FAKE_CREW_STATE_b FM_FAKE_CREW_STATE_p
+  pass "signal_crew_absorbable: benign only when every referenced crew is provably working or declared paused"
 }
 
 test_secondmate_status_signal_never_absorbed_classifier() {
@@ -357,18 +367,25 @@ test_secondmate_status_signal_never_absorbed_classifier() {
   export FM_FAKE_CREW_STATE_sm='state: working · source: run-step · running'
   printf 'kind=secondmate\n' > "$state/sm.meta"
   printf 'working: routed reply for the parent\n' > "$state/sm.status"
-  ! signal_crew_provably_working "$state/sm.status" \
+  ! signal_crew_absorbable "$state/sm.status" \
     || fail "a working secondmate's status signal was treated as absorbable"
-  signal_crew_provably_working "$state/sm.turn-ended" \
+  signal_crew_absorbable "$state/sm.turn-ended" \
     || fail "a working secondmate's bare turn-end lost its ordinary absorb"
+  # The paused absorb does not open a hole in that routed-reply rule either: a
+  # mate's paused: line is still a declaration its parent must read.
+  export FM_FAKE_CREW_STATE_smp='state: paused · source: status-log · awaiting the parent'
+  printf 'kind=secondmate\n' > "$state/smp.meta"
+  printf 'paused: awaiting the parent\n' > "$state/smp.status"
+  ! signal_crew_absorbable "$state/smp.status" \
+    || fail "a paused secondmate's status signal was treated as absorbable"
   # An ordinary crewmate with the same verdict stays absorbable: the rule is
   # keyed on recorded kind, not on task naming or content guessing.
   export FM_FAKE_CREW_STATE_crew='state: working · source: run-step · running'
   printf 'kind=ship\n' > "$state/crew.meta"
   printf 'working: progress\n' > "$state/crew.status"
-  signal_crew_provably_working "$state/crew.status" \
+  signal_crew_absorbable "$state/crew.status" \
     || fail "the secondmate rule leaked onto an ordinary crewmate status"
-  unset FM_FAKE_CREW_STATE_sm FM_FAKE_CREW_STATE_crew
+  unset FM_FAKE_CREW_STATE_sm FM_FAKE_CREW_STATE_smp FM_FAKE_CREW_STATE_crew
   pass "a secondmate's status signal is never absorbed as provably working; crewmates are unaffected"
 }
 
@@ -412,6 +429,37 @@ test_turn_ended_provably_working_absorbed() {
   [ ! -s "$state/.wake-queue" ] || fail "provably-working turn-end enqueued a durable wake record"
   reap "$pid"
   pass "a bare turn-end whose crew is provably working (busy pane) is absorbed"
+}
+
+# A declared external-wait pause is the second absorb class on the signal path.
+# Regression for the pause-refresh loop: firstmate parks a lane with paused:, then
+# refreshes that declaration to keep the wait honest, and every append was reported
+# back as an actionable signal: wake - so the act of declaring a pause woke the very
+# supervisor that declared it, costing a full handling turn per refresh. Both the
+# first declaration and a later refresh must absorb.
+test_paused_signal_absorbed_including_refresh() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case paused-signal); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'paused: waiting on the upstream tool release\n' > "$status_file"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on the upstream tool release'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a declared pause's own status append (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "declared pause printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "declared pause enqueued a durable wake record"
+  [ -s "$state/.seen-task_status" ] || fail "declared pause did not advance its .seen-* suppressor"
+  # The refresh: a second paused: line on an already-paused task.
+  printf 'paused: still waiting on the upstream tool release\n' >> "$status_file"
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "watcher exited for a REFRESHED pause (the loop this fixes): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "refreshed pause printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "refreshed pause enqueued a durable wake record"
+  reap "$pid"
+  pass "a declared pause's own status append is absorbed, and so is a later refresh of it"
 }
 
 # --- a no-verb signal whose crew is NOT provably working SURFACES -------------
@@ -1442,6 +1490,67 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   pass "the production default busy-turn-age bound is 3600s (5min under does not wedge, 66min over does)"
 }
 
+# The busy-turn-age bound must respect a declared external wait. A crew idling on
+# its own background work declares paused: while its harness pane keeps rendering
+# a busy indicator; before this carve-out that lane crossed the busy bound and was
+# then reported as "possible wedge, escalation N" every FM_STALE_ESCALATE_SECS,
+# with no .paused-* marker ever recorded - a deliberate wait nagged as a wedge.
+# The leash stays on: past FM_PAUSE_RESURFACE_SECS the same lane re-surfaces as a
+# recheck, so claiming a pause is a longer leash, never immunity.
+test_busy_declared_pause_uses_pause_cadence_not_wedge() {
+  local dir state fakebin out capture_file window key sig pid back
+  dir=$(make_case busy-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-paused"
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-paused.meta"
+  record_pi_busy "$state" busy-paused
+  printf 'paused: waiting on the background implementation agent\n' > "$state/busy-paused.status"
+  sig=$(seen_sig "$state/busy-paused.status"); printf '%s' "$sig" > "$state/.seen-busy-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "Working...")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # No completed turn ever recorded: age the spawn record past the busy bound.
+  touch -t 200001010000 "$state/busy-paused.meta"
+  # A wedge timer already past the escalation threshold: without the carve-out
+  # this is exactly the poll that emits "possible wedge, escalation 1".
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on the background implementation agent'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a busy pane under a declared pause wedge-escalated past the turn-age bound: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a busy pane under a declared pause printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a busy pane under a declared pause enqueued a wedge wake"
+  [ -e "$state/.paused-$key" ] || fail "a busy pane under a declared pause recorded no pause marker"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a busy pane under a declared pause kept its wedge timer"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional busy-pause phase-A stop"
+  : > "$out"
+
+  # The leash: age the declaration past the pause cadence and it must re-surface
+  # as a recheck - never as a wedge.
+  back=$(( $(date +%s) - 4000 ))
+  set_mtime "$back" "$state/busy-paused.status"
+  sig=$(seen_sig "$state/busy-paused.status"); printf '%s' "$sig" > "$state/.seen-busy-paused_status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a long-declared pause on a busy pane never re-surfaced for a recheck"
+  grep -F "awaiting external" "$out" >/dev/null \
+    || fail "the busy declared pause re-surfaced as something other than a paused recheck: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "the busy declared pause re-surfaced as a possible wedge: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a busy pane under a declared pause uses the pause cadence instead of the wedge timer, and still re-surfaces for a recheck"
+}
+
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1932,10 +2041,11 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
-test_signal_crew_provably_working_classifier
+test_signal_crew_absorbable_classifier
 test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
+test_paused_signal_absorbed_including_refresh
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
@@ -1952,6 +2062,7 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
+test_busy_declared_pause_uses_pause_cadence_not_wedge
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
