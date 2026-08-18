@@ -3,7 +3,9 @@
 #
 # This drives the public Pi skill-loading interface against a fake quota-axi
 # executable rather than parsing instruction source bytes or recreating the
-# selector in test code.
+# selector in test code. The fake serves default TOON from the schema-5 JSON
+# fixture; --json remains available so a TOON-first skill cannot silently
+# fall back without the call log catching it.
 set -u
 
 if [ "${FM_QUOTA_ARRAY_DISPATCH_LIVE_E2E:-0}" != 1 ]; then
@@ -20,6 +22,7 @@ fail() {
 }
 
 command -v pi >/dev/null 2>&1 || fail "pi not found"
+command -v python3 >/dev/null 2>&1 || fail "python3 not found"
 [ -f "$OWNER" ] || fail "quota-array-dispatch skill not found"
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-quota-array-dispatch-live.XXXXXX")
@@ -38,13 +41,118 @@ cp "$OWNER" "$PROJECT/.agents/skills/quota-array-dispatch/SKILL.md"
 
 cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
+# Fake quota-axi: default TOON from the schema-5 JSON fixture; --json dumps it.
 set -u
-if [ "${1:-}" != --json ] || [ "$#" -ne 1 ]; then
-  printf 'unexpected quota-axi invocation: %s\n' "$*" >&2
-  exit 64
-fi
-printf '%s\n' "$*" >> "${QUOTA_AXI_CALLS:?}"
-cat "${QUOTA_AXI_FIXTURE:?}"
+record() {
+  printf '%s\n' "$1" >> "${QUOTA_AXI_CALLS:?}"
+}
+emit_toon() {
+  python3 - "${QUOTA_AXI_FIXTURE:?}" <<'PY'
+import json
+import sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+generated = data.get("generatedAt", "unknown")
+quota = []
+exhaustion = []
+attention = []
+
+
+def join_ids(ids):
+    if not ids:
+        return "unknown"
+    return " + ".join(str(item) for item in ids)
+
+
+for provider in data.get("providers") or []:
+    name = provider.get("provider", "unknown")
+    windows = {window.get("id"): window for window in (provider.get("windows") or [])}
+    semantics = provider.get("quotaSemantics") or {}
+    for scope in semantics.get("effectiveAvailability") or []:
+        remaining = scope.get("effectivePercentRemaining")
+        selection = scope.get("selection") or {}
+        runway = scope.get("runway") or {}
+        scope_name = scope.get("scope", "unknown")
+        if remaining is None:
+            attention.append(
+                f"  {name},{scope_name},headroom_unknown,{join_ids(runway.get('unmeasurableWindowIds') or scope.get('boundedBy'))},none"
+            )
+            continue
+        if selection.get("status") == "known" and "spendPriority" in selection:
+            spend = selection["spendPriority"]
+        else:
+            spend = "unknown"
+        runway_status = runway.get("status") or "unknown"
+        confidence = runway.get("projectionConfidence") or "unknown"
+        limited = join_ids(scope.get("limitingWindowIds"))
+        binding = None
+        for window_id in scope.get("limitingWindowIds") or []:
+            binding = (windows.get(window_id) or {}).get("resetsAt")
+            if binding:
+                break
+        resets_at = binding or generated
+        quota.append(
+            f"  {name},{scope_name},{remaining},{spend},{runway_status},{confidence},{limited},{resets_at}"
+        )
+        if runway_status in ("projected_exhaustion", "exhausted_now"):
+            seconds = runway.get("usableRunwaySeconds", "unknown")
+            exhausted_at = runway.get("projectedExhaustedAt", "unknown")
+            limiting = runway.get("limitingWindowId", "unknown")
+            exhaustion.append(
+                f"  {name},{scope_name},{seconds},{exhausted_at},{limiting}"
+            )
+        blocked = []
+        if runway.get("unmeasurableWindowIds"):
+            blocked.append(f"{join_ids(runway['unmeasurableWindowIds'])} blocks runway")
+        if selection.get("unmeasurableWindowIds"):
+            blocked.append(
+                f"{join_ids(selection['unmeasurableWindowIds'])} blocks spendPriority"
+            )
+        if blocked:
+            attention.append(
+                f"  {name},{scope_name},unmeasurable,{' · '.join(blocked)},none"
+            )
+
+print('bin: fake-quota-axi')
+print('description: Report local agent-provider quota windows for routing-aware agents')
+print(f'generatedAt: "{generated}"')
+print(
+    f"quota[{len(quota)}]{{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}}:"
+)
+print("\n".join(quota) if quota else "")
+print(
+    f"exhaustion[{len(exhaustion)}]{{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}}:"
+    if exhaustion
+    else "exhaustion[0]:"
+)
+if exhaustion:
+    print("\n".join(exhaustion))
+print(
+    f"attention[{len(attention)}]{{provider,scope,kind,detail,remedy}}:"
+    if attention
+    else "attention[0]:"
+)
+if attention:
+    print("\n".join(attention))
+print("help[1]:")
+print("  Run `quota-axi --full` for windows, pace, reserve, and account evidence")
+PY
+}
+
+case "$*" in
+  ""|quota)
+    record TOON
+    emit_toon
+    ;;
+  --json)
+    record JSON
+    cat "${QUOTA_AXI_FIXTURE:?}"
+    ;;
+  *)
+    printf 'unexpected quota-axi invocation: %s\n' "$*" >&2
+    exit 64
+    ;;
+esac
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
@@ -65,7 +173,7 @@ run_case() {
           "$prompt"
   ) || fail "$label: Pi skill run failed: $out"
   calls=$(cat "$CALLS")
-  [ "$calls" = "--json" ] || fail "$label: skill did not use one quota-axi --json snapshot: $calls"
+  [ "$calls" = "TOON" ] || fail "$label: skill did not use one quota-axi default TOON snapshot: $calls"
   printf '%s\n' "$out" | grep -Fxq "$expected" \
     || fail "$label: expected final line $expected, got: $out"
   for required in "$@"; do
@@ -153,11 +261,11 @@ write_fixture <<'JSON'
 }
 JSON
 run_case \
-  "higher spendPriority beats more headroom and a less-negative reserve" \
+  "higher spendPriority beats more headroom after the three gates" \
   "SELECTED=codex" \
-  "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi --json exactly once. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove Claude/Sonnet and Codex/GPT models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Both candidates have known runway that supports that horizon. Return exact lines FACT=claude|headroom=80|spendPriority=-1.1111|runway_seconds=241920|reserve=-10 and FACT=codex|headroom=20|spendPriority=-0.8333|runway_seconds=90720|reserve=-20 to preserve candidate accounting, then an exact final line SELECTED=<claude|codex>. Do not use other vendor or model commands and do not modify files." \
-  "FACT=claude|headroom=80|spendPriority=-1.1111|runway_seconds=241920|reserve=-10" \
-  "FACT=codex|headroom=20|spendPriority=-0.8333|runway_seconds=90720|reserve=-20"
+  "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove Claude/Sonnet and Codex/GPT models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Both candidates have known runway that supports that horizon. Return exact lines FACT=claude|headroom=80|spendPriority=-1.1111|runway_seconds=241920 and FACT=codex|headroom=20|spendPriority=-0.8333|runway_seconds=90720 to preserve candidate accounting, then an exact final line SELECTED=<claude|codex>. Do not use other vendor or model commands and do not modify files." \
+  "FACT=claude|headroom=80|spendPriority=-1.1111|runway_seconds=241920" \
+  "FACT=codex|headroom=20|spendPriority=-0.8333|runway_seconds=90720"
 
 write_fixture <<'JSON'
 {
@@ -232,7 +340,7 @@ JSON
 run_case \
   "unmeasurable runway stays eligible and is accounted for explicitly" \
   "DECISION=CODEX" \
-  "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi --json exactly once. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove both models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Claude has higher known headroom but explicitly unmeasurable runway and unknown spendPriority, while Codex has lower known headroom, known spendPriority, and established runway that supports completion. Claude remains eligible and its uncertainty must be disclosed. Return exact lines FACT=claude|eligible=yes|headroom=55|runway=unknown|spendPriority=unknown|unmeasurable=weekly and FACT=codex|eligible=yes|headroom=45|spendPriority=-0.404|runway_seconds=222676|supports_horizon=yes, then an exact final line DECISION=CODEX. Do not use other vendor or model commands and do not modify files." \
+  "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json; the TOON already reports Claude spendPriority as the literal unknown. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove both models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Claude has higher known headroom but explicitly unmeasurable runway and unknown spendPriority, while Codex has lower known headroom, known spendPriority, and established runway that supports completion. Claude remains eligible and its uncertainty must be disclosed. Never read unknown spendPriority as 0. Return exact lines FACT=claude|eligible=yes|headroom=55|runway=unknown|spendPriority=unknown|unmeasurable=weekly and FACT=codex|eligible=yes|headroom=45|spendPriority=-0.404|runway_seconds=222676|supports_horizon=yes, then an exact final line DECISION=CODEX. Do not use other vendor or model commands and do not modify files." \
   "FACT=claude|eligible=yes|headroom=55|runway=unknown|spendPriority=unknown|unmeasurable=weekly" \
   "FACT=codex|eligible=yes|headroom=45|spendPriority=-0.404|runway_seconds=222676|supports_horizon=yes"
 
@@ -315,7 +423,7 @@ JSON
 run_case \
   "required strongest reasoning class is not downgraded for quota" \
   "SELECTED=claude" \
-  "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi --json exactly once. The likely task-completion horizon is two hours with established confidence. Claude/Sonnet is catalog-supported with usable authentication and is the only profile that meets the task's required strongest reasoning class. Codex/GPT is catalog-supported with usable authentication but is a weaker reasoning class and cannot meet the requirement. Return exact lines FACT=claude|reasoning=required|headroom=5|spendPriority=-1.8|runway_seconds=15916 and FACT=codex|reasoning=weaker|headroom=80|spendPriority=-0.3921|runway_seconds=362880, then an exact final line SELECTED=<claude|codex>. Do not use other vendor or model commands and do not modify files." \
+  "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json. The likely task-completion horizon is two hours with established confidence. Claude/Sonnet is catalog-supported with usable authentication and is the only profile that meets the task's required strongest reasoning class. Codex/GPT is catalog-supported with usable authentication but is a weaker reasoning class and cannot meet the requirement. Return exact lines FACT=claude|reasoning=required|headroom=5|spendPriority=-1.8|runway_seconds=15916 and FACT=codex|reasoning=weaker|headroom=80|spendPriority=-0.3921|runway_seconds=362880, then an exact final line SELECTED=<claude|codex>. Do not use other vendor or model commands and do not modify files." \
   "FACT=claude|reasoning=required|headroom=5|spendPriority=-1.8|runway_seconds=15916" \
   "FACT=codex|reasoning=weaker|headroom=80|spendPriority=-0.3921|runway_seconds=362880"
 
@@ -398,7 +506,7 @@ JSON
 run_case \
   "runway versus completion horizon remains a hard gate over spendPriority" \
   "SELECTED=codex" \
-  "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi --json exactly once. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove Claude/Sonnet and Codex/GPT models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Claude has known spendPriority of -0.8333 and runway of 2700 seconds. Codex has known spendPriority of -1.8 and runway of 15916 seconds. Return exact lines FACT=claude|spendPriority=-0.8333|runway_seconds=2700|supports_horizon=no and FACT=codex|spendPriority=-1.8|runway_seconds=15916|supports_horizon=yes to preserve candidate accounting, then an exact final line SELECTED=<claude|codex>. Do not use other vendor or model commands and do not modify files." \
+  "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove Claude/Sonnet and Codex/GPT models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Claude has known spendPriority of -0.8333 and runway of 2700 seconds. Codex has known spendPriority of -1.8 and runway of 15916 seconds. Return exact lines FACT=claude|spendPriority=-0.8333|runway_seconds=2700|supports_horizon=no and FACT=codex|spendPriority=-1.8|runway_seconds=15916|supports_horizon=yes to preserve candidate accounting, then an exact final line SELECTED=<claude|codex>. Do not use other vendor or model commands and do not modify files." \
   "FACT=claude|spendPriority=-0.8333|runway_seconds=2700|supports_horizon=no" \
   "FACT=codex|spendPriority=-1.8|runway_seconds=15916|supports_horizon=yes"
 
