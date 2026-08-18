@@ -4,6 +4,9 @@
 # The full canonical GitHub PR URL is parsed by bin/fm-pr-lib.sh and the derived
 # owner/repository and PR number are passed to gh-axi as separate arguments.
 #
+# Refuses to merge if any PR commit carries an agent co-author trailer (see
+# bin/fm-agent-coauthor-lib.sh); fix the branch and retry rather than bypassing.
+#
 # Merge method defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. Extra args
 # must not include --repo or -R because the repository comes only from the URL.
@@ -17,6 +20,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-agent-coauthor-lib.sh
+. "$SCRIPT_DIR/fm-agent-coauthor-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -75,6 +80,12 @@ grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1
 }
+
+if ! gh-axi api "repos/$PR_OWNER/$PR_REPO/pulls/$PR_NUMBER/commits" --jq '.[].commit.message' \
+    | fm_agent_coauthor_scan; then
+  echo "REFUSED: fix the offending commit(s) on the PR branch (e.g. amend/rebase and force-push) and retry." >&2
+  exit 1
+fi
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then
