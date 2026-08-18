@@ -264,11 +264,27 @@ SH
   chmod +x "$fakebin/shellcheck"
 }
 
+# Default fm-lint runs the separate workflow validator after ShellCheck. These
+# changed-mode fixtures exercise ShellCheck root selection, so provide the
+# pinned workflow-linter interface as well instead of depending on a host tool.
+fm_lint_stub_actionlint() {
+  local fakebin=$1
+  cat > "$fakebin/actionlint" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -version ]; then
+  printf '1.7.12\n'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/actionlint"
+}
+
 test_changed_mode_lints_only_the_changed_file() {
   local tmp fakebin log diff_file out target
   tmp=$(fm_test_tmproot fm-lint-changed)
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_git "$fakebin"
+  fm_lint_stub_actionlint "$fakebin"
   log="$tmp/shellcheck.log"
   fm_lint_stub_shellcheck "$fakebin" "$log"
   diff_file="$tmp/diff.nul"
@@ -339,6 +355,7 @@ test_zero_changed_files_exits_clean() {
   tmp=$(fm_test_tmproot fm-lint-zero-changed)
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_git "$fakebin"
+  fm_lint_stub_actionlint "$fakebin"
   diff_file="$tmp/diff.nul"
   : > "$diff_file"
 
