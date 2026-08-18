@@ -779,6 +779,19 @@ clear_write_tracking() {  # <window-key>
   rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
 }
 
+# LOCAL PATCH (2026-08-19): FM_WEDGE_MAX_ESCALATIONS caps wedge escalations for
+# a stale-hash to prevent LLM-supervised unattended loops from hammering paid
+# API quotas when the demand-deep-inspection marker is read but not acted on.
+# Once the count reaches this threshold, wedge_timer_check emits ONE terminal
+# wake ("PERMANENTLY-WEDGED") and writes STATE/.wedge-permanent-<key>, then
+# stops sending further wakes for this hash until the pane's state resets to
+# genuinely active (same rm-on-reset sites below). Default 10 escalations is
+# roughly 10 * STALE_ESCALATE_SECS (default 240s) = ~40 minutes of unattended
+# signaling before the cap kicks in - enough for any human or smart supervisor
+# to act, short enough to bound the burn. Tracked for revert: see
+# PATCHES.md (patch-wedge-cap-2026-08-19).
+FM_WEDGE_MAX_ESCALATIONS=${FM_WEDGE_MAX_ESCALATIONS:-10}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -791,7 +804,15 @@ clear_write_tracking() {  # <window-key>
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason permanent_marker
+  # LOCAL PATCH (2026-08-19): if this hash was already capped as permanently
+  # wedged, stop firing wakes for it. Pane recovery (rm-on-reset sites below)
+  # clears the marker so a wedge that genuinely resolves can re-escalate if it
+  # wedges again.
+  permanent_marker="${escalation_file/.wedge-escalations-/.wedge-permanent-}"
+  if [ -e "$permanent_marker" ]; then
+    return 0
+  fi
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -813,6 +834,19 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
           reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+        fi
+        # LOCAL PATCH (2026-08-19): cap reached - emit ONE terminal wake and
+        # stop. Durable STATE/.wedge-permanent-<key> marker so subsequent polls
+        # for the same hash short-circuit (see return at top of function).
+        if [ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]; then
+          date +%s > "$permanent_marker"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wakes for this hash until pane recovers; local patch 2026-08-19)"
+          fm_wake_append stale "$win" "$reason" || exit 1
+          rm -f "$since_file"
+          clear_write_tracking "$(window_key "$win")"
+          triage_log "wedge permanently capped: $win (escalation $n, max $FM_WEDGE_MAX_ESCALATIONS)"
+          wake "$reason"
+          return 0
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
@@ -857,7 +891,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.wedge-permanent-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
@@ -951,6 +985,8 @@ clear_pause_tracking() {  # <window-key>
   local key=$1
   clear_pause_state "$key"
   clear_stale_hash_tracking "$key"
+  # LOCAL PATCH (2026-08-19): clear permanent-wedge marker on full pause tracking reset.
+  rm -f "$STATE/.wedge-permanent-$key"*
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
