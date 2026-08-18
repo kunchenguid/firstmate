@@ -87,6 +87,10 @@ write_arm_fixture() {
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
+if [ -f "$FM_HOME/state/.claude-rewake-boundary-request" ]; then
+  cp "$FM_HOME/state/.claude-rewake-boundary-request" "$FM_HOME/state/.claude-rewake-boundary"
+  rm -f "$FM_HOME/state/.claude-rewake-boundary-request"
+fi
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
 exit 0
@@ -120,6 +124,10 @@ SH
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
+if [ -f "$FM_HOME/state/.claude-rewake-boundary-request" ]; then
+  cp "$FM_HOME/state/.claude-rewake-boundary-request" "$FM_HOME/state/.claude-rewake-boundary"
+  rm -f "$FM_HOME/state/.claude-rewake-boundary-request"
+fi
 sleep 2
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'signal: task.status done: slow fixture\n'

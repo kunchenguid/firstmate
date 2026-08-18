@@ -1208,6 +1208,34 @@ test_concurrent_stop_boundary_preserves_new_rewake_proof() {
   pass "fm-turnend-guard --claude: concurrent Stop hooks preserve the new rewake proof"
 }
 
+test_guard_first_healthy_boundary_preserves_new_rewake_proof() {
+  local dir auto_pid auto_status guard_pid guard_status marker pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-guard-first-rewake")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_integrated_actionable_arm "$dir"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the healthy watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  marker="$dir/state/.claude-rewake-turn"
+  printf 'epoch=2 session_pid=999\n' > "$marker"
+  run_hook_claude "$dir" false > "$dir/guard.out" 2>&1 &
+  guard_pid=$!
+  while [ -e "$marker" ]; do sleep 0.05; done
+  run_integrated_autoarm "$dir" > "$dir/auto.out" 2>&1 &
+  auto_pid=$!
+  wait "$guard_pid"; guard_status=$?
+  wait "$auto_pid"; auto_status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$guard_status" "the guard-first healthy Stop must remain allowed"
+  expect_code 2 "$auto_status" "the later actionable auto-arm must deliver its rewake"
+  assert_present "$marker" "the guard-first ordering lost the new turn's rewake proof"
+  pass "fm-turnend-guard --claude: guard-first healthy Stop preserves the new rewake proof"
+}
+
 test_hook_claude_mode_reblocks_x_mode_without_tasks() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-x-mode")
@@ -1694,6 +1722,7 @@ test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_retires_prior_rewake_proof
 test_concurrent_stop_boundary_preserves_new_rewake_proof
+test_guard_first_healthy_boundary_preserves_new_rewake_proof
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open
