@@ -2232,7 +2232,7 @@ fm_backend_herdr_workspace_reclaim_recorded_binding() {  # <session>
     echo "error: this home's recorded Herdr Space '$workspace' in session '$session' no longer resolves, so its title '$recorded' cannot be reconciled with the newly configured '$base'; close the stale Space and remove $FM_HOME/$FM_BACKEND_HERDR_SPACE_TITLE_MARKER, or run bin/fm-crew-identity-migrate-herdr.sh '$session'" >&2
     return 3
   }
-  [ "$current" = "$recorded" ] || {
+  fm_backend_herdr_workspace_label_matches_base "$current" "$recorded" || {
     echo "error: this home's recorded Herdr Space '$workspace' is labelled '$current', not the recorded '$recorded'; refusing to retitle an inconsistent binding" >&2
     return 3
   }

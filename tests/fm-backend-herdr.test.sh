@@ -731,6 +731,46 @@ test_reassigned_primary_retitles_only_its_exact_bound_space() {
   pass "Herdr reassigned primary retitles its exactly bound Space and never adopts one by title"
 }
 
+test_reassigned_project_owning_secondmate_retitles_its_bound_space() {
+  local base home dir log resp fb out
+  base="$TMP_ROOT/identity-slug-binding"
+  home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/config" "$home/data" "$resp"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  printf 'sd-1\n' > "$home/.fm-secondmate-home"
+  printf -- '- developer-setup - registered clone (added 2026-01-01)\n' > "$home/data/projects.md"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"sd-1":"john-allen"}}' \
+    > "$home/config/crew-identities.json"
+  # Ownership proven by exact workspace id records the NAME-ONLY base title.
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-a","label":"Mr Allen — developer-setup"}}}' > "$resp/1.out"
+  rm -f "$resp/.count"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact fmses w-a' \
+      "$ROOT" >/dev/null 2>&1 || fail "the project-owning secondmate could not confirm its converged title"
+
+  # Reassigned, no launcher ancestry: the bound project-owning Space must be
+  # retitled, not refused as an inconsistent binding.
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"sd-1":"william-mowett"}}' \
+    > "$home/config/crew-identities.json"
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-a","label":"Mr Allen — developer-setup"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-a","label":"Mr Allen — developer-setup"}}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-a","label":"Mr Allen — developer-setup"}}}' > "$resp/3.out"
+  : > "$resp/4.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-a","label":"Lt Mowett — developer-setup"}}}' > "$resp/5.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmses "$1" other-home' \
+      "$ROOT" "$home" 2>&1) \
+    || fail "a reassigned project-owning secondmate refused its own bound Space: $out"
+  [ "$out" = w-a ] || fail "the reassigned secondmate did not reuse its bound Space: '$out'"
+  assert_contains "$(cat "$log")" $'workspace\x1frename\x1fw-a\x1fLt Mowett — developer-setup' \
+    "the bound project-owning Space was not retitled with its exact registered slug"
+  assert_not_contains "$(cat "$log")" $'workspace\x1fcreate' "a duplicate Space was created instead of retitling"
+  pass "Herdr reassignment retitles a bound project-owning Space, slug and all"
+}
+
 test_reassigned_primary_refuses_a_missing_or_stale_binding() {
   local base home dir log resp fb out
   base="$TMP_ROOT/identity-binding-refusals"
@@ -5042,6 +5082,7 @@ test_identity_exchange_never_lets_one_home_adopt_anothers_space
 test_bound_space_reassignment_needs_no_recorded_marker
 test_reassigned_primary_retitles_only_its_exact_bound_space
 test_reassigned_primary_refuses_a_missing_or_stale_binding
+test_reassigned_project_owning_secondmate_retitles_its_bound_space
 test_workspace_find_all_tolerates_registered_project_drift
 test_exact_legacy_workspace_identity_rename_is_id_bound
 test_cli_helper_sets_env_and_appends_trailing_session_flag
