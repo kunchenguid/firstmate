@@ -32,7 +32,17 @@
 #   4. There are no stashes. A stash is unlanded work that a clean tree does not
 #      show, and nobody is watching an idle copy to notice it disappear.
 # Checks 3 and 4 read git and change nothing. A copy that fails any check keeps
-# its build output; the sweep says which check failed and moves on.
+# its build output; the sweep says which check failed and moves on. Every check
+# treats "could not determine" as "owned": an unreadable pool, an unparseable
+# status, a path that is not an inspectable git worktree, or a git command that
+# fails all skip the copy rather than assume it is free.
+#
+# One race is left open deliberately. A copy can be leased in the moment between
+# the pool reporting it available and the removal running. Closing that would
+# need a lease this tool does not own, and the consequence is bounded: the copy
+# was leased to start fresh work, so it loses build output it was about to
+# regenerate anyway - the same directory `next build` clears at the start of
+# every production build. Losing that race costs a rebuild, not work.
 #
 # It reports every copy it reclaimed, with the space each gave back and a total,
 # and says plainly when it found nothing - a cleanup that prints nothing is
@@ -135,11 +145,19 @@ sweep_pool_entries() {  # <project-dir>
   ( cd "$1" && treehouse status --json 2>/dev/null ) | python3 -c '
 import json, sys
 
+# Anything this cannot read as a list of pool entries exits non-zero, so the
+# caller reports the project as unreadable and sweeps none of its copies. An
+# unparseable pool is not an empty pool, and it is certainly not a pool of
+# unowned copies.
 try:
     pool = json.load(sys.stdin)
 except ValueError:
     sys.exit(1)
+if not isinstance(pool, list):
+    sys.exit(1)
 for entry in pool:
+    if not isinstance(entry, dict):
+        sys.exit(1)
     status = entry.get("status") or ""
     path = entry.get("path") or ""
     if path:
@@ -147,36 +165,49 @@ for entry in pool:
 '
 }
 
-# Why <worktree> may not be swept, printed as a short reason; empty when it may.
+# Why <worktree> may not be swept, printed as "<class><tab><reason>"; empty when
+# it may be. The class separates a copy shown to have an owner (`owned`) from
+# one whose ownership could not be established at all (`undetermined`). Both
+# skip, but they are reported differently: an undetermined copy is always named,
+# because the same broken inspection that hides its owner also hides how much it
+# is holding, and a silent skip there would read as "nothing here".
 sweep_unowned_reason() {  # <status> <worktree>
   local status=$1 wt=$2
+  # Only the pool's own word for "available" clears this check. Any other
+  # value - in-use, a status this version of treehouse does not print, or none
+  # at all - means ownership was not established, which is not the same as
+  # establishing that there is no owner.
+  if [ "$status" = in-use ]; then
+    printf 'owned\tin use by the pool\n'
+    return 0
+  fi
   if [ "$status" != available ]; then
-    printf 'in use by the pool\n'
+    printf 'undetermined\tthe pool did not report it available\n'
     return 0
   fi
   if sweep_task_owns "$wt"; then
-    printf 'still claimed by a task record\n'
+    printf 'owned\tstill claimed by a task record\n'
     return 0
   fi
   if ! git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
-    printf 'not an inspectable git worktree\n'
+    printf 'undetermined\tnot an inspectable git worktree\n'
     return 0
   fi
   local dirty stashes
   if ! dirty=$(git -C "$wt" status --porcelain 2>/dev/null); then
-    printf 'cannot inspect it for uncommitted changes\n'
+    printf 'undetermined\tcannot inspect it for uncommitted changes\n'
     return 0
   fi
   if [ -n "$dirty" ]; then
-    printf 'has uncommitted changes\n'
+    printf 'owned\thas uncommitted changes\n'
     return 0
   fi
   if ! stashes=$(git -C "$wt" stash list 2>/dev/null); then
-    printf 'cannot inspect it for stashes\n'
+    printf 'undetermined\tcannot inspect it for stashes\n'
     return 0
   fi
   if [ -n "$stashes" ]; then
-    printf 'has stashed work\n'
+    printf 'owned\thas stashed work\n'
     return 0
   fi
   printf '\n'
@@ -216,12 +247,19 @@ for project in "${TARGETS[@]}"; do
   while IFS=$'\t' read -r status wt; do
     [ -n "$wt" ] || continue
     [ -d "$wt" ] || continue
-    reason=$(sweep_unowned_reason "$status" "$wt")
-    if [ -n "$reason" ]; then
-      # Only worth a line when there was something to reclaim; an idle copy that
-      # never built anything is not news.
+    verdict=$(sweep_unowned_reason "$status" "$wt")
+    if [ -n "$verdict" ]; then
+      class=${verdict%%	*}
+      reason=${verdict#*	}
       fm_next_cache_total_kb "$wt" >/dev/null
-      if [ "$FM_NEXT_CACHE_TOTAL_KB" -gt 0 ]; then
+      if [ "$class" = undetermined ]; then
+        # Always named: the failed inspection that hid the owner also hid the
+        # size, so "holding 0" here means "could not measure", not "empty".
+        printf 'sweep: skipped %s (%s); its contents could not be assessed\n' "$wt" "$reason"
+        SKIPPED=$(( SKIPPED + 1 ))
+      elif [ "$FM_NEXT_CACHE_TOTAL_KB" -gt 0 ]; then
+        # An owned copy is worth a line only when it is actually holding
+        # something; an idle copy that never built anything is not news.
         printf 'sweep: skipped %s (%s), holding %s\n' \
           "$wt" "$reason" "$(fm_next_cache_human_kb "$FM_NEXT_CACHE_TOTAL_KB")"
         SKIPPED=$(( SKIPPED + 1 ))
@@ -248,7 +286,7 @@ sweep_copies() {  # <count>
 
 if [ "$RECLAIMED" -eq 0 ]; then
   if [ "$SKIPPED" -gt 0 ]; then
-    printf 'sweep: nothing to reclaim; %s still hold build output but are in use or hold unlanded work\n' \
+    printf 'sweep: nothing to reclaim; %s were skipped as owned or unassessable (listed above)\n' \
       "$(sweep_copies "$SKIPPED")"
   else
     printf 'sweep: nothing to reclaim; no idle copy holds Next.js build output\n'

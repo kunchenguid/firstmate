@@ -259,6 +259,162 @@ test_sweep_skips_stashed_copy() {
   pass "sweep never touches a copy holding stashed work"
 }
 
+# --- sweep: ownership that cannot be determined counts as owned --------------
+#
+# The reclaim is a deletion, so the interesting question is not what happens
+# when the proof succeeds - it is what happens when the proof cannot be made.
+# Each case below breaks one input the sweep relies on and asserts the build
+# output SURVIVES, because "could not determine" must read as "owned".
+
+test_sweep_skips_copy_with_unknown_pool_status() {
+  local case_dir wt out
+  case_dir=$(make_case unknown-status)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  # A status this version of the sweep does not know: not `available`, so not
+  # proven free, even though it is not the familiar `in-use` either.
+  printf '1 reserved-by-something-new\n' > "$case_dir/pool-status"
+
+  out=$(run_sweep "$case_dir" 2>&1)
+
+  assert_present "$wt/packages/frontend/.next" \
+    "unknown-status: an unrecognized pool status is not proof the copy is free"
+  assert_contains "$out" "the pool did not report it available" \
+    "unknown-status: the skip reason must name what was not established"
+  pass "an unrecognized pool status keeps the copy out of scope"
+}
+
+test_sweep_skips_whole_project_when_pool_is_unreadable() {
+  local case_dir wt out rc
+  case_dir=$(make_case pool-unreadable)
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  # treehouse answers `status --json` with something that is not pool JSON. An
+  # unparseable pool is not an empty pool and is certainly not a pool of
+  # unowned copies, so no copy in this project may be swept.
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ]; then printf 'panic: pool state corrupt
+'; exit 0; fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  assert_present "$wt/packages/frontend/.next" \
+    "pool-unreadable: an unreadable pool must leave every copy alone"
+  assert_contains "$out" "cannot read the worktree pool" \
+    "pool-unreadable: the sweep must report the project it could not read"
+  [ "$rc" -ne 0 ] || fail "pool-unreadable: an unreadable pool must not report a clean sweep"
+  pass "an unreadable pool sweeps nothing in that project and reports it"
+}
+
+test_sweep_skips_project_when_pool_lookup_fails() {
+  local case_dir wt out rc
+  case_dir=$(make_case pool-failing)
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+echo "treehouse: cannot open pool" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  assert_present "$wt/packages/frontend/.next" \
+    "pool-failing: a failed pool lookup must leave every copy alone"
+  [ "$rc" -ne 0 ] || fail "pool-failing: a failed pool lookup must not report a clean sweep"
+  pass "a failing pool lookup sweeps nothing in that project"
+}
+
+test_sweep_refuses_without_treehouse() {
+  local case_dir wt out rc path_dir cmd resolved
+  case_dir=$(make_case no-treehouse)
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  # A PATH with the ordinary tools but no treehouse at all: without the pool's
+  # lease there is no ownership signal that spans firstmate homes, so the sweep
+  # must refuse rather than fall back to the checks it can still make.
+  path_dir="$case_dir/path-without-treehouse"
+  mkdir -p "$path_dir"
+  for cmd in awk basename bash cat chmod cut dirname du env find git grep head mkdir \
+    printf python3 readlink rm sed sort stat tail tr wc; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+  done
+
+  set +e
+  out=$(FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_PROJECTS_OVERRIDE="$case_dir/projects" \
+    PATH="$path_dir" "$SWEEP" 2>&1); rc=$?
+  set -e
+
+  assert_present "$wt/packages/frontend/.next" \
+    "no-treehouse: without the pool's lease the sweep must remove nothing"
+  expect_code 2 "$rc" "no-treehouse: a missing ownership signal is an environment error"
+  assert_contains "$out" "treehouse is not installed" \
+    "no-treehouse: the refusal must name the missing requirement"
+  pass "the sweep refuses outright when the pool's lease cannot be consulted"
+}
+
+test_sweep_skips_uninspectable_worktree() {
+  local case_dir wt out
+  case_dir=$(make_case uninspectable)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  # The pool still names this path, but it is no longer a git worktree, so the
+  # clean-tree and stash proofs cannot be made at all.
+  rm -f "$wt/.git"
+  rm -rf "$wt/.git"
+  printf '1 available\n' > "$case_dir/pool-status"
+
+  out=$(run_sweep "$case_dir" 2>&1)
+
+  assert_present "$wt/packages/frontend/.next" \
+    "uninspectable: a path git cannot inspect must keep its build output"
+  assert_contains "$out" "not an inspectable git worktree" \
+    "uninspectable: the skip reason must be reported"
+  assert_contains "$out" "could not be assessed" \
+    "uninspectable: a copy that cannot be assessed must be named, not passed over silently"
+  pass "a copy git cannot inspect is never swept"
+}
+
+test_sweep_skips_when_git_inspection_fails() {
+  local case_dir wt out gitdir
+  case_dir=$(make_case git-failing)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  # The worktree still looks like a repo, but its object store is gone, so
+  # `git status` cannot answer whether there is uncommitted work. Unknown is
+  # not clean.
+  gitdir=$(git -C "$wt" rev-parse --git-dir)
+  gitdir=$(cd "$wt" && cd "$gitdir" && pwd -P)
+  mv "$gitdir/index" "$gitdir/index.moved" 2>/dev/null || true
+  printf 'not an index\n' > "$gitdir/index"
+  printf '1 available\n' > "$case_dir/pool-status"
+
+  out=$(run_sweep "$case_dir" 2>&1)
+
+  assert_present "$wt/packages/frontend/.next" \
+    "git-failing: an unanswerable clean-tree check must keep the build output"
+  assert_contains "$out" "cannot inspect it" \
+    "git-failing: the skip reason must say the inspection failed"
+  assert_contains "$out" "could not be assessed" \
+    "git-failing: a copy that cannot be assessed must be named, not passed over silently"
+  pass "a copy whose git state cannot be read is never swept"
+}
+
 # --- discovery rule: only regenerable Next.js build output -------------------
 
 test_sweep_leaves_tracked_next_directory() {
@@ -423,6 +579,58 @@ test_teardown_reclaims_before_returning_the_copy() {
   pass "teardown reclaims Next.js build output before returning the copy to the pool"
 }
 
+test_teardown_reclaims_only_after_the_copy_is_quiet() {
+  local case_dir out rc pid order
+  case_dir=$(make_teardown_case teardown-order)
+  add_next_app "$case_dir/wt" packages/frontend
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  order="$case_dir/order.log"
+
+  # Teardown's answer to "what if the copy is not really finished with" is
+  # ordering: the reclaim runs after every unlanded-work refusal has passed AND
+  # after the worktree's processes are reaped, so nothing can still be writing
+  # the directory it removes. This stub stands where the pool return happens -
+  # the step right after the reclaim - and records what was true by then.
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ -e "$case_dir/wt/packages/frontend/.next" ]; then
+  printf 'build-output-still-present\n' >> "$order"
+else
+  printf 'build-output-already-reclaimed\n' >> "$order"
+fi
+if kill -0 "\$(cat "$case_dir/sleeper.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
+  printf 'worktree-process-still-alive\n' >> "$order"
+else
+  printf 'worktree-process-already-reaped\n' >> "$order"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  # A live process whose working directory is the copy - exactly what teardown's
+  # reap exists to clear, and exactly what would still be writing the build
+  # output if the reclaim ran too early.
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown 2>/dev/null || true
+  printf '%s\n' "$pid" > "$case_dir/sleeper.pid"
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "teardown-order: setup sleeper did not start"
+
+  set +e
+  out=$(run_teardown "$case_dir" 2>&1); rc=$?
+  set -e
+  kill -KILL "$pid" 2>/dev/null || true
+
+  expect_code 0 "$rc" "teardown-order: teardown should succeed"
+  assert_grep "build-output-already-reclaimed" "$order" \
+    "teardown-order: the reclaim must happen before the copy returns to the pool"
+  assert_grep "worktree-process-already-reaped" "$order" \
+    "teardown-order: nothing may still be running in the copy when its output is removed"
+  pass "teardown reclaims only after the copy's processes are reaped and before it returns"
+}
+
 test_teardown_refusal_keeps_the_copy_intact() {
   local case_dir out rc
   case_dir=$(make_teardown_case teardown-refuse)
@@ -466,11 +674,18 @@ test_sweep_skips_copy_claimed_by_task_record
 test_sweep_skips_copy_claimed_by_secondmate_task_record
 test_sweep_skips_dirty_copy
 test_sweep_skips_stashed_copy
+test_sweep_skips_copy_with_unknown_pool_status
+test_sweep_skips_whole_project_when_pool_is_unreadable
+test_sweep_skips_project_when_pool_lookup_fails
+test_sweep_refuses_without_treehouse
+test_sweep_skips_uninspectable_worktree
+test_sweep_skips_when_git_inspection_fails
 test_sweep_leaves_tracked_next_directory
 test_sweep_leaves_ignored_next_outside_a_next_app
 test_sweep_leaves_node_modules_and_source
 test_sweep_reclaims_nested_build_output_once
 test_sweep_never_sweeps_the_project_clone
 test_teardown_reclaims_before_returning_the_copy
+test_teardown_reclaims_only_after_the_copy_is_quiet
 test_teardown_refusal_keeps_the_copy_intact
 test_teardown_stays_quiet_without_build_output
