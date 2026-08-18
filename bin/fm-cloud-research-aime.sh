@@ -39,6 +39,14 @@
 # The current bytedcli contract has no cancellation command, so `cancel` always
 # reports cancellation-unsupported without issuing a provider write.
 #
+# `retire` first asks the AIME adapter to seal the exact provider-stopped,
+# authoritative-terminal, output-unavailable failure class when proven by its
+# preserved observation or one bounded fresh readback.
+# That adapter-owned preparation requires a safe report, stops the canonical
+# result source, quarantines and generation-acknowledges its bounded pending
+# captures, and removes only their exact queued wakes before ordinary terminal,
+# report, and decision-gate retirement checks continue.
+#
 # `sandbox-verify` is intentionally mutating and opt-in.
 # It creates one disposable empty AIME session, reads that same session back, and
 # writes config/aime-cloud-worker with enabled=false and the exact bytedcli
@@ -70,7 +78,7 @@ die() {
 }
 
 usage() {
-  sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -707,9 +715,11 @@ cmd_cancel() {
 }
 
 cmd_retire() {
-  local id=${1-} source lock
+  local id=${1-} source lock report
   [ "$#" -eq 1 ] || usage
   fm_aime_task_id_valid "$id" || die "invalid task id"
+  "$SCRIPT_DIR/fm-procevent-aime.sh" prepare-retire "$id" >/dev/null \
+    || die "AIME task retirement preparation failed"
   lock=$(fm_aime_task_lock_path "$id")
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock AIME task $id"
@@ -719,8 +729,10 @@ cmd_retire() {
       terminal-success|terminal-failure) ;;
       *) die "AIME task is not safely terminal: phase=$AIME_STATE_PHASE" ;;
     esac
-    [ -f "$DATA/$id/report.md" ] && [ ! -L "$DATA/$id/report.md" ] \
-      || die "AIME task has no safe report at data/$id/report.md"
+    report=$(fm_aime_report_path "$id") || die "cannot resolve the AIME report path"
+    if ! fm_aime_report_safe "$id" || [ "$AIME_STATE_REPORT_PATH" != "$report" ]; then
+      die "AIME task has no safe report at data/$id/report.md"
+    fi
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$id" >/dev/null \
       || die "AIME task decision completion gate has not passed"
     source=$(fm_aime_source_id "$id") || die "invalid task id"

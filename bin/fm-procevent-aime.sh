@@ -7,6 +7,7 @@
 #   fm-procevent-aime.sh handle <task-id> <sequence> <result-file>
 #   fm-procevent-aime.sh autohandle <source-id> <sequence> <result-file>
 #   fm-procevent-aime.sh terminal <result-file>
+#   fm-procevent-aime.sh prepare-retire <task-id>
 #   fm-procevent-aime.sh retire <task-id>
 #
 # `source` is the blocking provider-specific readback operation registered by
@@ -25,11 +26,20 @@
 # before acknowledging that older generation through the adapter-owned path.
 # `source` reduces replay history to one bounded summary before transport; raw
 # replay event/tool payloads never enter an observation, status event, or report.
+# `prepare-retire` seals only an identity-bound provider status `stopped` plus
+# authoritative terminal replay plus unavailable bounded output readback, using
+# the preserved observation when sufficient or one bounded fresh readback.
+# It requires or preserves a safe report, stops the canonical source, then
+# quarantines and acknowledges at most FM_AIME_RETIRE_MAX_GENERATIONS exact
+# captured generations and removes only their exact queued wake records.
+# Every checkpoint is idempotent; an unsafe, unrelated, contradictory, or
+# over-bound generation refuses the seal without trusting its payload bytes.
 #
 # Every source invocation exits 0 with one bounded JSON observation, including
 # provider errors.
 # This avoids the generic runner's "nonzero plus empty output" retry ambiguity.
-# A failed readback does not mean the cloud task stopped and is re-armed.
+# A failed readback is re-armed unless the same identity-bound observation also
+# proves provider status `stopped` and authoritative terminal replay.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +63,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 AIME_REPLAY_TIMEOUT_MS=${FM_AIME_REPLAY_TIMEOUT_MS:-5000}
 AIME_REPLAY_MAX_STREAMS=${FM_AIME_REPLAY_MAX_STREAMS:-200}
 AIME_READBACK_TIMEOUT=${FM_AIME_READBACK_TIMEOUT:-20}
+AIME_RETIRE_MAX_GENERATIONS=${FM_AIME_RETIRE_MAX_GENERATIONS:-256}
+AIME_RETIRE_MAX_CAPTURE_BYTES=${FM_AIME_RETIRE_MAX_CAPTURE_BYTES:-1048576}
 
 die() {
   printf 'error: %s\n' "$1" >&2
@@ -60,7 +72,7 @@ die() {
 }
 
 usage() {
-  sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -71,6 +83,8 @@ validate_positive() {
 validate_positive FM_AIME_REPLAY_TIMEOUT_MS "$AIME_REPLAY_TIMEOUT_MS"
 validate_positive FM_AIME_REPLAY_MAX_STREAMS "$AIME_REPLAY_MAX_STREAMS"
 validate_positive FM_AIME_READBACK_TIMEOUT "$AIME_READBACK_TIMEOUT"
+validate_positive FM_AIME_RETIRE_MAX_GENERATIONS "$AIME_RETIRE_MAX_GENERATIONS"
+validate_positive FM_AIME_RETIRE_MAX_CAPTURE_BYTES "$AIME_RETIRE_MAX_CAPTURE_BYTES"
 
 temp_root() {
   local root
@@ -265,24 +279,13 @@ document_json_from_output() { # <content-file>
   '
 }
 
-report_path_safe() { # <report-path>
-  local report=$1 links owner
-  [ ! -L "$report" ] || return 1
-  [ -e "$report" ] || return 0
-  [ -f "$report" ] || return 1
-  links=$(fm_aime_file_links "$report") || return 1
-  [ "$links" = 1 ] || return 1
-  owner=$(fm_aime_file_owner "$report") || return 1
-  [ "$owner" = "$(id -u)" ]
-}
-
 write_report() { # <id> <observation-artifact> <output-artifact> <document-json-or-empty>
   local id=$1 observation=$2 output_file=$3 document_json=$4 report content_file
-  report="$DATA/$id/report.md"
+  report=$(fm_aime_report_path "$id") || return 1
   content_file="${output_file}.content"
   jq -r '.data.content // ""' "$output_file" >"$content_file" || return 1
   [ -s "$content_file" ] || return 2
-  report_path_safe "$report" || return 1
+  fm_aime_report_replaceable "$id" || return 1
   # shellcheck disable=SC2016 # Backticks below are literal Markdown.
   {
     printf '# AIME cloud research report\n\n'
@@ -322,8 +325,8 @@ write_report() { # <id> <observation-artifact> <output-artifact> <document-json-
 # identity authoritative.
 write_terminal_failure_report() { # <id> <error-class> <observation-path>
   local id=$1 class=$2 observation=$3 report
-  report="$DATA/$id/report.md"
-  report_path_safe "$report" || return 1
+  report=$(fm_aime_report_path "$id") || return 1
+  fm_aime_report_replaceable "$id" || return 1
   # shellcheck disable=SC2016 # Backticks below are literal Markdown.
   {
     printf '# AIME cloud research result\n\n'
@@ -337,7 +340,17 @@ write_terminal_failure_report() { # <id> <error-class> <observation-path>
     printf -- '- Outcome: `failed`\n'
     printf -- '- Error class: `%s`\n' "$class"
     printf -- '- Observation: `%s`\n' "$observation"
-    printf '\nThe AIME session reached a terminal provider event, but no valid requested result was recoverable.\n'
+    if [ "$class" = provider-stopped-output-unavailable ]; then
+      printf '\n## Terminal Outcome\n\n'
+      printf '%s\n' '- Provider status: `stopped`'
+      printf '%s\n' '- Authoritative provider terminal: `true`'
+      printf '%s\n' '- Requested output: `unavailable after bounded readback`'
+      printf '%s\n' '- Outcome: `failed`'
+      printf '\nThe provider confirmed that execution stopped, while bounded output readback produced no readable result.\n'
+      printf 'Firstmate recovered no result, computed no replacement outcome, and neither attempted nor claimed provider cancellation.\n'
+    else
+      printf '\nThe AIME session reached a terminal provider event, but no valid requested result was recoverable.\n'
+    fi
     if [ "$class" = document-identity-missing ]; then
       printf 'Firstmate did not create, copy, rewrite, share, or change permissions on any Feishu document.\n'
     fi
@@ -348,10 +361,11 @@ write_terminal_failure_report() { # <id> <error-class> <observation-path>
 }
 
 record_terminal_result_failure() { # <id> <error-class> <observation-path> <cursor>
-  local id=$1 class=$2 observation=$3 cursor=$4 report
+  local id=$1 class=$2 observation=$3 cursor=$4 report checkpoint=terminal-result-invalid
   report=$(write_terminal_failure_report "$id" "$class" "$observation") || return 1
+  [ "$class" != provider-stopped-output-unavailable ] || checkpoint='terminal-output-unavailable'
   fm_aime_state_transition "$id" terminal-failure failed "$class" \
-    "$AIME_STATE_SESSION_ID" "$AIME_STATE_MESSAGE_ID" "$cursor" terminal-result-invalid \
+    "$AIME_STATE_SESSION_ID" "$AIME_STATE_MESSAGE_ID" "$cursor" "$checkpoint" \
     "$observation" "$report" terminal "" || return 1
   ensure_terminal_status "$id" terminal-failure
 }
@@ -378,10 +392,358 @@ record_result_unavailable() { # <id> <error-class> <observation-path>
 }
 
 resolve_result_unavailable() { # <id>
-  local id=$1
+  local id=$1 line status
   [ "$AIME_STATE_PHASE" = result-unavailable ] || return 0
-  fm_aime_status_append "$id" \
-    "resolved [key=aime-result-unavailable]: authoritative AIME readback recovered"
+  line="resolved [key=aime-result-unavailable]: authoritative AIME readback recovered"
+  status="$STATE/$id.status"
+  grep -Fqx "$line" "$status" 2>/dev/null && return 0
+  fm_aime_status_append "$id" "$line"
+}
+
+terminal_unavailable_observation() { # <task-id> <observation>
+  local id=$1 observation=$2 cursor
+  validate_observation "$observation" "$id" || return 1
+  [ "$(jq -r '.session_id' "$observation")" = "$AIME_STATE_SESSION_ID" ] || return 1
+  [ "$(jq -r '.site' "$observation")" = "$AIME_STATE_SITE" ] || return 1
+  jq -e --arg session "$AIME_STATE_SESSION_ID" '
+    .replay_ok == true
+    and .session_ok == true
+    and .terminal_candidate == true
+    and .replay.data.session_id == $session
+    and .replay.data.terminal == true
+    and (.replay.data.event_count | type == "number" and . > 0 and floor == .)
+    and (.replay.data.last_event_offset as $last
+      | .from_offset as $from
+      | ($last | type) == "number" and ($last | floor) == $last and $last >= $from)
+    and .session.data.id == $session
+    and .session.data.status == "stopped"
+    and .output_ok == false
+    and .output.status == "error"
+    and (.output.error_class | type == "string" and length > 0)
+  ' "$observation" >/dev/null 2>&1 || return 1
+  cursor=$(jq -r '.replay.data.last_event_offset' "$observation")
+  case "$cursor" in ''|*[!0-9]*) return 1 ;; esac
+}
+
+terminal_unavailable_state_observation() { # <task-id>
+  local id=$1 task_dir observation observed_from cursor
+  task_dir=$(fm_aime_task_dir "$id") || return 1
+  observation=$AIME_STATE_RESULT_PATH
+  case "$observation" in
+    "$task_dir"/artifacts/*-observation.json) ;;
+    *) return 1 ;;
+  esac
+  fm_aime_private_file_safe "$observation" || return 1
+  terminal_unavailable_observation "$id" "$observation" || return 1
+  observed_from=$(jq -r '.from_offset' "$observation")
+  cursor=$(jq -r '.replay.data.last_event_offset' "$observation")
+  if [ "$AIME_STATE_PHASE" = result-unavailable ]; then
+    [ "$observed_from" = "$AIME_STATE_CURSOR" ] || return 1
+  else
+    [ "$cursor" = "$AIME_STATE_CURSOR" ] || return 1
+  fi
+  AIME_TERMINAL_UNAVAILABLE_OBSERVATION=$observation
+  AIME_TERMINAL_UNAVAILABLE_CURSOR=$cursor
+}
+
+refresh_terminal_unavailable_observation() { # <task-id>
+  local id=$1 root readback summary artifact cursor
+  root=$(temp_root)
+  readback="$root/readback.json"
+  summary="$root/terminal-unavailable.json"
+  cmd_source "$id" >"$readback" || { rm -rf -- "$root"; return 1; }
+  terminal_unavailable_observation "$id" "$readback" || { rm -rf -- "$root"; return 1; }
+  jq -c '
+    {
+      schema,task_id,provider,site,session_id,from_offset,replay_ok,session_ok,output_ok,
+      terminal_candidate,
+      replay:{status:.replay.status,data:{session_id:.replay.data.session_id,terminal:.replay.data.terminal,last_event_offset:.replay.data.last_event_offset,event_count:.replay.data.event_count},error:null},
+      session:{status:.session.status,data:{id:.session.data.id,status:.session.data.status},error:null},
+      output:{status:.output.status,error_class:.output.error_class}
+    }
+  ' "$readback" >"$summary" || { rm -rf -- "$root"; return 1; }
+  artifact=$(fm_aime_artifact_store "$id" observation "$summary") \
+    || { rm -rf -- "$root"; return 1; }
+  cursor=$(jq -r '.replay.data.last_event_offset' "$summary")
+  rm -rf -- "$root"
+  AIME_TERMINAL_UNAVAILABLE_OBSERVATION=$artifact
+  AIME_TERMINAL_UNAVAILABLE_CURSOR=$cursor
+}
+
+append_terminal_unavailable_report() { # <task-id>
+  local id=$1 report marker tmp
+  # shellcheck disable=SC2016 # Backticks below are literal Markdown.
+  marker='- Requested output: `unavailable after bounded readback`'
+  report=$(fm_aime_report_path "$id") || return 1
+  fm_aime_report_safe "$id" || return 1
+  grep -Fqx -- "$marker" "$report" 2>/dev/null && return 0
+  tmp=$(umask 077; mktemp "$DATA/$id/.report-terminal.XXXXXX") || return 1
+  # shellcheck disable=SC2016 # Backticks below are literal Markdown.
+  {
+    cat "$report"
+    printf '\n\n## Terminal Outcome\n\n'
+    printf '%s\n' '- Provider status: `stopped`'
+    printf '%s\n' '- Authoritative provider terminal: `true`'
+    printf '%s\n' "$marker"
+    printf '%s\n' '- Outcome: `failed`'
+    printf '\nThe provider confirmed that execution stopped, while bounded output readback produced no readable result.\n'
+    printf 'Firstmate recovered no result, computed no replacement outcome, and neither attempted nor claimed provider cancellation.\n'
+  } >"$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$report"
+}
+
+aime_quarantine_dir() { # <task-id>
+  printf '%s/%s/aime-quarantine\n' "$DATA" "$1"
+}
+
+ensure_quarantine_dir() { # <task-id>
+  local id=$1 task_data dir mode owner
+  task_data="$DATA/$id"
+  [ -d "$task_data" ] && [ ! -L "$task_data" ] || return 1
+  dir=$(aime_quarantine_dir "$id")
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  else
+    (umask 077; mkdir "$dir") || return 1
+  fi
+  chmod 0700 "$dir" || return 1
+  mode=$(fm_aime_file_mode "$dir") || return 1
+  [ "$mode" = 700 ] || return 1
+  owner=$(fm_aime_file_owner "$dir") || return 1
+  [ "$owner" = "$(id -u)" ]
+}
+
+captured_generation_preflight() { # <task-id> <source-id> <sequence> <result>
+  local id=$1 source=$2 seq=$3 result=$4 expected adapter_file adapter size schema_task schema_site schema_session
+  expected="$(fm_procevent_inbox_dir "$STATE")/$source.$seq.result"
+  [ "$result" = "$expected" ] || { AIME_RETIRE_REFUSAL="generation $seq path is not canonical"; return 1; }
+  [ "$(fm_procevent_result_source_id "$result")" = "$source" ] \
+    || { AIME_RETIRE_REFUSAL="generation $seq source identity does not match"; return 1; }
+  [ "$(fm_procevent_result_sequence "$result")" = "$seq" ] \
+    || { AIME_RETIRE_REFUSAL="generation $seq identity does not match its path"; return 1; }
+  adapter_file=${result%.result}.adapter
+  fm_aime_private_file_safe "$result" \
+    || { AIME_RETIRE_REFUSAL="generation $seq result file is unsafe"; return 1; }
+  fm_aime_private_file_safe "$adapter_file" \
+    || { AIME_RETIRE_REFUSAL="generation $seq adapter identity is unsafe"; return 1; }
+  adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
+  [ "$adapter" = aime ] \
+    || { AIME_RETIRE_REFUSAL="generation $seq is not owned by the AIME adapter"; return 1; }
+  size=$(wc -c <"$result" | tr -d '[:space:]')
+  case "$size" in ''|*[!0-9]*) AIME_RETIRE_REFUSAL="generation $seq size is unreadable"; return 1 ;; esac
+  [ "$size" -le "$AIME_RETIRE_MAX_CAPTURE_BYTES" ] \
+    || { AIME_RETIRE_REFUSAL="generation $seq exceeds the quarantine byte bound"; return 1; }
+  if jq -e --arg schema "$AIME_OBSERVATION_SCHEMA" '.schema == $schema' "$result" >/dev/null 2>&1; then
+    schema_task=$(jq -r '.task_id // ""' "$result")
+    schema_site=$(jq -r '.site // ""' "$result")
+    schema_session=$(jq -r '.session_id // ""' "$result")
+    [ "$schema_task" = "$id" ] && [ "$schema_site" = "$AIME_STATE_SITE" ] \
+      && [ "$schema_session" = "$AIME_STATE_SESSION_ID" ] \
+      || { AIME_RETIRE_REFUSAL="generation $seq observation identity does not match the task"; return 1; }
+    terminal_unavailable_observation "$id" "$result" \
+      || { AIME_RETIRE_REFUSAL="generation $seq contradicts the terminal-unavailable outcome"; return 1; }
+    AIME_CAPTURE_CLASS='terminal-output-unavailable'
+  else
+    AIME_CAPTURE_CLASS=malformed
+  fi
+  AIME_CAPTURE_SIZE=$size
+}
+
+quarantine_generation() { # <task-id> <source-id> <sequence> <result>
+  local id=$1 source=$2 seq=$3 result=$4 dir dest tmp source_sha dest_sha
+  ensure_quarantine_dir "$id" || return 1
+  dir=$(aime_quarantine_dir "$id")
+  dest="$dir/$source.$seq.result"
+  source_sha=$(fm_aime_sha256_file "$result") || return 1
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    fm_aime_private_file_safe "$dest" || return 1
+    dest_sha=$(fm_aime_sha256_file "$dest") || return 1
+    [ "$source_sha" = "$dest_sha" ] || return 1
+  else
+    tmp=$(umask 077; mktemp "$dir/.generation-$seq.XXXXXX") || return 1
+    cat "$result" >"$tmp" || { rm -f -- "$tmp"; return 1; }
+    chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+    dest_sha=$(fm_aime_sha256_file "$tmp") || { rm -f -- "$tmp"; return 1; }
+    [ "$source_sha" = "$dest_sha" ] || { rm -f -- "$tmp"; return 1; }
+    mv -f -- "$tmp" "$dest" || { rm -f -- "$tmp"; return 1; }
+  fi
+  AIME_CAPTURE_SHA=$source_sha
+}
+
+append_quarantined_generation_report() { # <task-id> <source-id> <sequence> <class> <bytes> <sha>
+  local id=$1 source=$2 seq=$3 class=$4 bytes=$5 sha=$6 report header line tmp
+  report=$(fm_aime_report_path "$id") || return 1
+  fm_aime_report_safe "$id" || return 1
+  header='## Retired Captured Observations'
+  line="- \`$source#$seq\`: \`$class\`, $bytes bytes, SHA-256 \`$sha\`; the AIME adapter quarantined the untrusted bytes before acknowledging only this generation."
+  grep -Fqx -- "$line" "$report" 2>/dev/null && return 0
+  tmp=$(umask 077; mktemp "$DATA/$id/.report-generation.XXXXXX") || return 1
+  {
+    cat "$report"
+    if ! grep -Fqx -- "$header" "$report" 2>/dev/null; then
+      printf '\n\n%s\n\n' "$header"
+    else
+      printf '\n'
+    fi
+    printf '%s\n' "$line"
+  } >"$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$report"
+}
+
+remove_queued_generation() { # <source-id> <sequence>
+  local source=$1 seq=$2 key payload tmp status=0
+  key="procevent:$source:$seq"
+  payload="check: procevent aime $source $seq"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if [ ! -e "$FM_WAKE_QUEUE" ] && [ ! -L "$FM_WAKE_QUEUE" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 0
+  fi
+  if [ ! -f "$FM_WAKE_QUEUE" ] || [ -L "$FM_WAKE_QUEUE" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  fi
+  tmp=$(umask 077; mktemp "$STATE/.wake-aime-retire.XXXXXX") || {
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  }
+  awk -F '\t' -v key="$key" -v payload="$payload" \
+    '!(NF >= 5 && $3 == "check" && $4 == key && $5 == payload)' \
+    "$FM_WAKE_QUEUE" >"$tmp" || status=1
+  [ "$status" -ne 0 ] || chmod 0600 "$tmp" || status=1
+  [ "$status" -ne 0 ] || mv -f -- "$tmp" "$FM_WAKE_QUEUE" || status=1
+  [ "$status" -eq 0 ] || rm -f -- "$tmp"
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+source_generation_quarantined() { # <task-id> <source-id> <sequence>
+  local dir
+  dir=$(aime_quarantine_dir "$1")
+  [ -f "$dir/$2.$3.result" ] && [ ! -L "$dir/$2.$3.result" ]
+}
+
+preflight_captured_generations() { # <task-id> <source-id>
+  local id=$1 source=$2 inbox seq result adapter_file handled quarantine=false
+  inbox=$(fm_procevent_inbox_dir "$STATE")
+  seq=1
+  while [ "$seq" -le "$AIME_RETIRE_MAX_GENERATIONS" ]; do
+    result="$inbox/$source.$seq.result"
+    adapter_file=${result%.result}.adapter
+    handled=${result%.result}.handled
+    quarantine=false
+    source_generation_quarantined "$id" "$source" "$seq" && quarantine=true
+    if [ ! -e "$result" ] && [ ! -L "$result" ]; then
+      if [ -e "$adapter_file" ] || [ -L "$adapter_file" ] \
+        || [ -e "$handled" ] || [ -L "$handled" ] || [ "$quarantine" = true ]; then
+        AIME_RETIRE_REFUSAL="generation $seq has incomplete captured state"
+        return 1
+      fi
+      AIME_RETIRE_LAST_SEQUENCE=$((seq - 1))
+      return 0
+    fi
+    if { [ -e "$result" ] || [ -L "$result" ]; } \
+      && { [ "$quarantine" = true ] || ! fm_procevent_is_handled "$STATE" "$source" "$seq"; }; then
+      captured_generation_preflight "$id" "$source" "$seq" "$result" || return 1
+    fi
+    seq=$((seq + 1))
+  done
+  result="$inbox/$source.$((AIME_RETIRE_MAX_GENERATIONS + 1)).result"
+  if [ -e "$result" ] || [ -L "$result" ]; then
+    AIME_RETIRE_REFUSAL="captured generations exceed the bounded retirement scan"
+    return 1
+  fi
+  AIME_RETIRE_LAST_SEQUENCE=$AIME_RETIRE_MAX_GENERATIONS
+}
+
+quarantine_captured_generations() { # <task-id> <source-id>
+  local id=$1 source=$2 inbox seq result quarantine=false
+  preflight_captured_generations "$id" "$source" || return 1
+  inbox=$(fm_procevent_inbox_dir "$STATE")
+  seq=1
+  while [ "$seq" -le "$AIME_RETIRE_LAST_SEQUENCE" ]; do
+    result="$inbox/$source.$seq.result"
+    quarantine=false
+    source_generation_quarantined "$id" "$source" "$seq" && quarantine=true
+    if { [ -e "$result" ] || [ -L "$result" ]; } \
+      && { [ "$quarantine" = true ] || ! fm_procevent_is_handled "$STATE" "$source" "$seq"; }; then
+      captured_generation_preflight "$id" "$source" "$seq" "$result" || return 1
+      quarantine_generation "$id" "$source" "$seq" "$result" \
+        || { AIME_RETIRE_REFUSAL="generation $seq could not be quarantined"; return 1; }
+      append_quarantined_generation_report "$id" "$source" "$seq" "$AIME_CAPTURE_CLASS" \
+        "$AIME_CAPTURE_SIZE" "$AIME_CAPTURE_SHA" \
+        || { AIME_RETIRE_REFUSAL="generation $seq could not be recorded in the report"; return 1; }
+      "$SCRIPT_DIR/fm-procevent.sh" handled "$source" "$seq" >/dev/null \
+        || { AIME_RETIRE_REFUSAL="generation $seq could not be acknowledged"; return 1; }
+      fm_procevent_is_handled "$STATE" "$source" "$seq" \
+        || { AIME_RETIRE_REFUSAL="generation $seq acknowledgement is not durable"; return 1; }
+      remove_queued_generation "$source" "$seq" \
+        || { AIME_RETIRE_REFUSAL="generation $seq queued wake could not be retired"; return 1; }
+    fi
+    seq=$((seq + 1))
+  done
+}
+
+retire_terminal_unavailable_source() { # <source-id>
+  local source=$1 registration claim
+  registration="$(fm_procevent_registry_dir "$STATE")/$source.source"
+  claim=$(fm_procevent_claim_path "$source") || return 1
+  if [ ! -e "$registration" ] && [ ! -L "$registration" ] \
+    && [ ! -e "$claim" ] && [ ! -L "$claim" ]; then
+    return 0
+  fi
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$source" >/dev/null || return 1
+  [ ! -e "$registration" ] && [ ! -L "$registration" ] \
+    && [ ! -e "$claim" ] && [ ! -L "$claim" ]
+}
+
+seal_terminal_unavailable_locked() { # <task-id>
+  local id=$1 source report
+  AIME_RETIRE_REFUSAL=
+  fm_aime_state_load "$id" || { AIME_RETIRE_REFUSAL="task state is missing or invalid"; return 1; }
+  case "$AIME_STATE_PHASE:$AIME_STATE_ERROR_CLASS" in
+    result-unavailable:*)
+      fm_aime_report_safe "$id" \
+        || { AIME_RETIRE_REFUSAL="a safe failure report is required before sealing"; return 1; }
+      if ! terminal_unavailable_state_observation "$id" \
+        && ! refresh_terminal_unavailable_observation "$id"; then
+        AIME_RETIRE_REFUSAL="terminal stopped/output-unavailable evidence is not proven"
+        return 1
+      fi
+      append_terminal_unavailable_report "$id" \
+        || { AIME_RETIRE_REFUSAL="the failure report could not record output unavailability"; return 1; }
+      resolve_result_unavailable "$id" \
+        || { AIME_RETIRE_REFUSAL="the readback blocker could not be resolved"; return 1; }
+      report=$(fm_aime_report_path "$id") || return 1
+      fm_aime_state_transition "$id" terminal-failure failed provider-stopped-output-unavailable \
+        "$AIME_STATE_SESSION_ID" "$AIME_STATE_MESSAGE_ID" "$AIME_TERMINAL_UNAVAILABLE_CURSOR" \
+        terminal-output-unavailable "$AIME_TERMINAL_UNAVAILABLE_OBSERVATION" "$report" terminal "" \
+        || { AIME_RETIRE_REFUSAL="terminal failure state could not be checkpointed"; return 1; }
+      ensure_terminal_status "$id" terminal-failure \
+        || { AIME_RETIRE_REFUSAL="terminal failure status could not be checkpointed"; return 1; }
+      fm_aime_state_load "$id" || return 1
+      ;;
+    terminal-failure:provider-stopped-output-unavailable) ;;
+    *) AIME_RETIRE_REFUSAL="task is not the stopped terminal-unavailable failure class"; return 1 ;;
+  esac
+  terminal_unavailable_state_observation "$id" \
+    || { AIME_RETIRE_REFUSAL="sealed state lost its terminal stopped/output-unavailable proof"; return 1; }
+  report=$(fm_aime_report_path "$id") || return 1
+  if [ "$AIME_STATE_PROVIDER_CHECKPOINT" != terminal-output-unavailable ] \
+    || [ "$AIME_STATE_WAITER" != terminal ] \
+    || [ "$AIME_STATE_REPORT_PATH" != "$report" ] \
+    || ! fm_aime_report_safe "$id"; then
+    AIME_RETIRE_REFUSAL="sealed state or report binding is incomplete"
+    return 1
+  fi
+  append_terminal_unavailable_report "$id" \
+    || { AIME_RETIRE_REFUSAL="the failure report could not preserve the terminal outcome"; return 1; }
+  source=$(fm_aime_source_id "$id") || return 1
+  retire_terminal_unavailable_source "$source" \
+    || { AIME_RETIRE_REFUSAL="canonical result source could not be proven retired"; return 1; }
+  quarantine_captured_generations "$id" "$source" || return 1
 }
 
 newer_observation_was_applied() { # <task-id> <source-id> <older-sequence>
@@ -444,6 +806,15 @@ cmd_handle_locked() {
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer" ;; esac
   if ! validate_observation "$result" "$id"; then
     fm_aime_state_load "$id" || die "AIME task state is missing or invalid"
+    if terminal_unavailable_state_observation "$id" && fm_aime_report_safe "$id"; then
+      seal_terminal_unavailable_locked "$id" \
+        || die "cannot seal terminal-unavailable AIME failure: $AIME_RETIRE_REFUSAL"
+      if fm_procevent_is_handled "$STATE" "$source" "$seq"; then
+        printf 'handled: %s malformed-terminal-unavailable=true cursor=%s\n' \
+          "$id" "$AIME_STATE_CURSOR"
+        return 0
+      fi
+    fi
     recover_superseded_malformed_observation "$id" "$source" "$seq" "$result" \
       || die "AIME observation is malformed"
     return 0
@@ -456,6 +827,11 @@ cmd_handle_locked() {
           || die "cannot restore the terminal AIME status event"
         ;;
     esac
+    if [ "$AIME_STATE_PHASE:$AIME_STATE_ERROR_CLASS" \
+      = terminal-failure:provider-stopped-output-unavailable ]; then
+      seal_terminal_unavailable_locked "$id" \
+        || die "cannot finish terminal-unavailable AIME retirement preparation: $AIME_RETIRE_REFUSAL"
+    fi
     printf 'handled: %s duplicate=true cursor=%s\n' "$id" "$AIME_STATE_CURSOR"
     return 0
   fi
@@ -474,6 +850,11 @@ cmd_handle_locked() {
           || die "cannot restore the terminal AIME status event"
         ;;
     esac
+    if [ "$AIME_STATE_PHASE:$AIME_STATE_ERROR_CLASS" \
+      = terminal-failure:provider-stopped-output-unavailable ]; then
+      seal_terminal_unavailable_locked "$id" \
+        || die "cannot finish terminal-unavailable AIME retirement preparation: $AIME_RETIRE_REFUSAL"
+    fi
     "$SCRIPT_DIR/fm-procevent.sh" handled "$source" "$seq" >/dev/null \
       || die "cannot acknowledge duplicate AIME observation"
     printf 'handled: %s duplicate=true cursor=%s\n' "$id" "$AIME_STATE_CURSOR"
@@ -536,6 +917,18 @@ cmd_handle_locked() {
 
   if ! jq -e '.output_ok == true' "$result" >/dev/null 2>&1; then
     class=$(jq -r '.output.error_class // "result-unavailable"' "$result")
+    if [ "$provider_status" = stopped ]; then
+      resolve_result_unavailable "$id" \
+        || die "cannot resolve recovered AIME readback blocker"
+      record_terminal_result_failure "$id" provider-stopped-output-unavailable "$observation" "$cursor" \
+        || die "cannot record stopped terminal AIME output failure"
+      seal_terminal_unavailable_locked "$id" \
+        || die "cannot finish stopped terminal AIME output failure: $AIME_RETIRE_REFUSAL"
+      "$SCRIPT_DIR/fm-procevent.sh" handled "$source" "$seq" >/dev/null \
+        || die "cannot acknowledge stopped terminal AIME output failure"
+      printf 'handled: %s phase=terminal-failure error=provider-stopped-output-unavailable\n' "$id"
+      return 0
+    fi
     record_result_unavailable "$id" "$class" "$observation" \
       || die "cannot record unavailable terminal AIME output"
     cmd_arm_locked "$id" >/dev/null \
@@ -649,6 +1042,26 @@ cmd_arm() {
   )
 }
 
+cmd_prepare_retire() {
+  local id=${1-} lock
+  [ "$#" -eq 1 ] || usage
+  fm_aime_task_id_valid "$id" || die "invalid task id"
+  lock=$(fm_aime_task_lock_path "$id")
+  (
+    fm_lock_acquire_wait "$lock" || die "cannot lock AIME task $id"
+    trap 'fm_lock_release "$lock"' EXIT
+    fm_aime_state_load "$id" || die "AIME task state is missing or invalid"
+    case "$AIME_STATE_PHASE:$AIME_STATE_ERROR_CLASS" in
+      result-unavailable:*|terminal-failure:provider-stopped-output-unavailable)
+        seal_terminal_unavailable_locked "$id" \
+          || die "cannot prepare terminal-unavailable AIME retirement: $AIME_RETIRE_REFUSAL"
+        printf 'prepared-retirement: %s phase=terminal-failure error=provider-stopped-output-unavailable\n' "$id"
+        ;;
+      *) printf 'prepare-retirement: %s no-terminal-unavailable-transition\n' "$id" ;;
+    esac
+  )
+}
+
 cmd_retire() {
   local id=${1-} source
   [ "$#" -eq 1 ] || usage
@@ -662,6 +1075,7 @@ case "${1-}" in
   handle) shift; cmd_handle "$@" ;;
   autohandle) shift; cmd_autohandle "$@" ;;
   terminal) shift; cmd_terminal "$@" ;;
+  prepare-retire) shift; cmd_prepare_retire "$@" ;;
   retire) shift; cmd_retire "$@" ;;
   -h|--help|'') usage ;;
   *) usage ;;

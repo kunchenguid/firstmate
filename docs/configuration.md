@@ -72,6 +72,10 @@ It never fakes `window`, `worktree`, `harness`, `backend`, or local endpoint fie
 Private state and raw provider artifacts live beneath mode-restricted `state/cloud-tasks/<id>/`.
 `bin/fm-aime-cloud-lib.sh` owns their exact schemas, phases, atomic transition rules, file modes, and allowed error classifications.
 `bin/fm-procevent-aime.sh` owns authoritative event replay, session and output readback, durable cursor advancement, duplicate handling, report generation, and re-arming through the existing process-event runner.
+Replay, session, and output readback failures remain adoptable and re-armed unless one identity-bound observation proves provider status `stopped`, authoritative terminal replay, and unavailable bounded output readback.
+That exact combination becomes the explicit `provider-stopped-output-unavailable` terminal failure without claiming recovered output, successful research, a computed result, or provider cancellation.
+The adapter establishes or preserves the private failure report, stops the canonical source, then uses a bounded task/source generation scan to quarantine each selected captured result before exact acknowledgement and queued-wake removal.
+Identity, adapter, file-safety, size, contradictory-result, and scan-bound mismatches refuse that seal.
 
 Restart adoption uses the recorded session identity and never creates or sends again after submission.
 Create or send acceptance that cannot be proven remains an explicit blocker and is never retried automatically.
@@ -82,7 +86,9 @@ Rollback is therefore two steps.
 First set `enabled=false`, or remove `config/aime-cloud-worker`, to stop new cloud dispatch immediately while leaving local routing unchanged.
 Then reconcile every existing cloud task to a terminal report, or interrupt only its local waiter while recording that the AIME session may still continue.
 Do not delete a nonterminal cloud record, claim cancellation, or create a replacement session.
-Terminal tasks retire through `bin/fm-task-retire.sh` only after the report and ordinary decision-hold completion gate pass.
+Terminal tasks retire through `bin/fm-task-retire.sh` only after task state binds a private single-link report and the ordinary decision-hold completion gate passes.
+A previously recorded `result-unavailable` task can cross that boundary only through the adapter's idempotent stopped terminal-unavailable preparation using its preserved authoritative observation or one bounded fresh readback and an already existing safe report.
+Retirement preserves the report and private quarantined capture evidence while removing volatile cloud state.
 
 Document mode does not activate the local Feishu document integration.
 AIME creates the requested document and returns its canonical URL, identity, and revision.
