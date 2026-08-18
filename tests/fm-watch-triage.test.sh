@@ -901,6 +901,89 @@ test_declared_pause_liveness_decides_trust() {
   pass "a declared pause is absorbed for a live or unmeasurable agent and surfaced only for a confidently dead one"
 }
 
+test_live_declared_pause_surfaces_once_after_agent_dies() {
+  local dir state fakebin out capture_file statusf window key pane pane_hash pid round wakes
+  dir=$(make_case live-declared-pause-agent-dies); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  pane='idle, holding for the upstream tool release'
+  printf '%s\n' "$pane" > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "live declared pause surfaced before its agent died: $(cat "$out")"
+  fi
+  [ "$(queued_stale_wakes "$state" "$window")" -eq 0 ] \
+    || { reap "$pid"; fail "live declared pause queued a stale wake before its agent died"; }
+  [ -e "$state/.paused-$key" ] \
+    || { reap "$pid"; fail "live declared pause did not record its pause marker"; }
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || { reap "$pid"; fail "live declared pause did not record its stale hash"; }
+  [ ! -e "$state/.paused-resurfaced-$key" ] \
+    || { reap "$pid"; fail "live declared pause recorded a surface while it was absorbed"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the live declared-pause absorb"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || { reap "$pid"; fail "unchanged declared-pause pane did not surface after its agent died"; }
+  wakes=$(queued_stale_wakes "$state" "$window")
+  [ "$wakes" -eq 1 ] \
+    || fail "declared pause queued $wakes wakes when its live agent died (want exactly one)"
+  [ -e "$state/.paused-$key" ] || fail "surfaced dead-agent pause lost its pause marker"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || fail "surfaced dead-agent pause lost its stale hash"
+  [ -e "$state/.paused-resurfaced-$key" ] \
+    || fail "surfaced dead-agent pause did not record its surface marker"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the dead-agent transition surface"
+
+  round=1
+  while [ "$round" -le 3 ]; do
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+      FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    if ! wait_live "$pid" 30; then
+      reap "$pid"
+      fail "dead agent re-surfaced on unchanged poll $round after its transition wake"
+    fi
+    wakes=$(queued_stale_wakes "$state" "$window")
+    [ "$wakes" -eq 0 ] \
+      || { reap "$pid"; fail "dead agent queued $wakes repeated wakes on unchanged poll $round"; }
+    [ -e "$state/.paused-$key" ] \
+      || { reap "$pid"; fail "dead agent lost its bounded pause marker on unchanged poll $round"; }
+    [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+      || { reap "$pid"; fail "dead agent lost its stale hash on unchanged poll $round"; }
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "could not acknowledge unchanged dead-agent poll $round"
+    round=$((round + 1))
+  done
+  pass "a live declared pause surfaces once when its agent dies without changing the pane"
+}
+
 # A captain-held or paused crew can leave a stable backend endpoint after its agent
 # exits. fm-crew-state then authoritatively reports stopped rather than paused, and
 # a confidently dead agent means nothing is left to end the declared wait, so the
@@ -2220,6 +2303,7 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_declared_pause_liveness_decides_trust
+test_live_declared_pause_surfaces_once_after_agent_dies
 test_exited_declared_pause_surfaces_once_while_live_pane_holds
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed

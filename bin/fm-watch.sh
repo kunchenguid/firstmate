@@ -425,7 +425,7 @@ pause_declaration_is_trustworthy() {  # <window>
 # only decides whether it still holds, so a confidently dead agent surfaces for
 # reconciliation while every other liveness read keeps the bounded cadence.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class
+  local win=$1 task=$2 key last recheck_file recheck_state class
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -437,11 +437,17 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+    recheck_state=$(cat "$recheck_file" 2>/dev/null || true)
     if ! pause_declaration_is_trustworthy "$win"; then
-      rm -f "$recheck_file"
-      printf 'none'
+      if [ "$recheck_state" = surfaced ]; then
+        printf 'paused'
+      else
+        rm -f "$recheck_file"
+        printf 'none'
+      fi
       return
     fi
+    [ "$recheck_state" = trusted ] || printf 'trusted' > "$recheck_file"
     printf 'paused'
     return
   fi
@@ -451,9 +457,15 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
+  recheck_state=$(cat "$recheck_file" 2>/dev/null || true)
   if ! pause_declaration_is_trustworthy "$win"; then
-    rm -f "$recheck_file"
-    printf 'none'
+    if [ "$recheck_state" = surfaced ]; then
+      printf 'surfaced' > "$recheck_file"
+      printf 'paused'
+    else
+      rm -f "$recheck_file"
+      printf 'none'
+    fi
     return
   fi
   # Only paused and none can reach here (working returned above). A `none` means
@@ -461,7 +473,7 @@ pause_state_class() {  # <window> <task>
   # stopped, finished, or unknown read - and the worker's own still-trustworthy
   # declaration is the better evidence, so both remaining classes take the bounded
   # pause cadence.
-  date +%s > "$recheck_file"
+  printf 'trusted' > "$recheck_file"
   printf 'paused'
 }
 
@@ -475,7 +487,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
-    date +%s > "$STATE/.paused-rechecked-$key"
+    printf 'surfaced' > "$STATE/.paused-rechecked-$key"
     date +%s > "$STATE/.paused-resurfaced-$key"
   else
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
@@ -1174,7 +1186,7 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
-                *)       handle_paused_stale "$w" "$task" "$h" ;;
+                *)       surface_nonterminal_stale "$w" "$h" ;;
               esac
             else
               wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
