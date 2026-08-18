@@ -401,11 +401,11 @@ clear_pause_tracking() {  # <window>
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
-# 0 when a DECLARED pause or captain hold on <window> can still be trusted.
-# Liveness decides whether the declaration still HOLDS; it never replaces the
-# class. A live agent is present to end its own declared wait, so its idle pane is
-# the normal case. Only a CONFIDENTLY dead agent invalidates the declaration,
-# because nothing is left to end that wait.
+# Print alive, dead, or unknown for the agent behind a DECLARED pause or captain
+# hold on <window>. Liveness decides whether the declaration still HOLDS; it never
+# replaces the class. A live agent is present to end its own declared wait, so its
+# idle pane is the normal case. Only a CONFIDENTLY dead agent invalidates the
+# declaration, because nothing is left to end that wait.
 # `unknown` (fm_backend_agent_alive folds an unreadable read, an ambiguous
 # foreground process, and an unverified backend into it - bin/fm-backend.sh) is a
 # measurement gap, not evidence the worker is gone, so the declaration stays
@@ -413,19 +413,20 @@ clear_pause_tracking() {  # <window>
 # dead/missing for exactly that reason, and the bounded PAUSE_RESURFACE_SECS
 # recheck below remains the backstop when a trusted wait has quietly rotted.
 # A secondmate's idle endpoint is healthy by charter, so it is never probed.
-pause_declaration_is_trustworthy() {  # <window>
+pause_declaration_liveness() {  # <window>
   local win=$1 agent_alive
-  [ "$(window_kind "$win")" != secondmate ] || return 0
+  [ "$(window_kind "$win")" != secondmate ] || { printf 'alive'; return; }
   agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-  [ "$agent_alive" != dead ]
+  case "$agent_alive" in alive|dead) ;; *) agent_alive=unknown ;; esac
+  printf '%s' "$agent_alive"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# The declaration itself classifies the pane; pause_declaration_is_trustworthy
-# only decides whether it still holds, so a confidently dead agent surfaces for
+# The declaration itself classifies the pane; pause_declaration_liveness only
+# decides whether it still holds, so a confidently dead agent surfaces for
 # reconciliation while every other liveness read keeps the bounded cadence.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file recheck_state class
+  local win=$1 task=$2 key last recheck_file recheck_state class agent_alive
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -438,7 +439,8 @@ pause_state_class() {  # <window> <task>
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     recheck_state=$(cat "$recheck_file" 2>/dev/null || true)
-    if ! pause_declaration_is_trustworthy "$win"; then
+    agent_alive=$(pause_declaration_liveness "$win")
+    if [ "$agent_alive" = dead ]; then
       if [ "$recheck_state" = surfaced ]; then
         printf 'paused'
       else
@@ -447,7 +449,9 @@ pause_state_class() {  # <window> <task>
       fi
       return
     fi
-    [ "$recheck_state" = trusted ] || printf 'trusted' > "$recheck_file"
+    if [ "$agent_alive" = alive ] && [ "$recheck_state" != trusted ]; then
+      printf 'trusted' > "$recheck_file"
+    fi
     printf 'paused'
     return
   fi
@@ -458,7 +462,8 @@ pause_state_class() {  # <window> <task>
     return
   fi
   recheck_state=$(cat "$recheck_file" 2>/dev/null || true)
-  if ! pause_declaration_is_trustworthy "$win"; then
+  agent_alive=$(pause_declaration_liveness "$win")
+  if [ "$agent_alive" = dead ]; then
     if [ "$recheck_state" = surfaced ]; then
       printf 'surfaced' > "$recheck_file"
       printf 'paused'
@@ -473,7 +478,9 @@ pause_state_class() {  # <window> <task>
   # stopped, finished, or unknown read - and the worker's own still-trustworthy
   # declaration is the better evidence, so both remaining classes take the bounded
   # pause cadence.
-  printf 'trusted' > "$recheck_file"
+  if [ "$agent_alive" = alive ]; then
+    printf 'trusted' > "$recheck_file"
+  fi
   printf 'paused'
 }
 

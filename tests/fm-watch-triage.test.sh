@@ -903,6 +903,7 @@ test_declared_pause_liveness_decides_trust() {
 
 test_live_declared_pause_surfaces_once_after_agent_dies() {
   local dir state fakebin out capture_file statusf window key pane pane_hash pid round wakes
+  local command label total_wakes surface_recheck_mtime
   dir=$(make_case live-declared-pause-agent-dies); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
   window="test:fm-held"
@@ -950,17 +951,27 @@ test_live_declared_pause_surfaces_once_after_agent_dies() {
   wakes=$(queued_stale_wakes "$state" "$window")
   [ "$wakes" -eq 1 ] \
     || fail "declared pause queued $wakes wakes when its live agent died (want exactly one)"
+  total_wakes=$wakes
   [ -e "$state/.paused-$key" ] || fail "surfaced dead-agent pause lost its pause marker"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
     || fail "surfaced dead-agent pause lost its stale hash"
   [ -e "$state/.paused-resurfaced-$key" ] \
     || fail "surfaced dead-agent pause did not record its surface marker"
+  surface_recheck_mtime=$(file_mtime "$state/.paused-rechecked-$key") \
+    || fail "surfaced dead-agent pause lost its recheck marker"
   ack_stopped_cycle "$state" || fail "could not acknowledge the dead-agent transition surface"
 
   round=1
-  while [ "$round" -le 3 ]; do
+  while [ "$round" -le 5 ]; do
+    case "$round" in
+      1) label=unreadable; command= ;;
+      2) label=dead-after-unreadable; command=zsh ;;
+      3) label=ambiguous; command=node ;;
+      4) label=dead-after-ambiguous; command=zsh ;;
+      5) label=unchanged-dead; command=zsh ;;
+    esac
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-      FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+      FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
       FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
       FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -968,20 +979,27 @@ test_live_declared_pause_surfaces_once_after_agent_dies() {
     pid=$!
     if ! wait_live "$pid" 30; then
       reap "$pid"
-      fail "dead agent re-surfaced on unchanged poll $round after its transition wake"
+      fail "$label liveness re-surfaced the unchanged dead-agent pause on round $round"
     fi
     wakes=$(queued_stale_wakes "$state" "$window")
+    total_wakes=$((total_wakes + wakes))
     [ "$wakes" -eq 0 ] \
-      || { reap "$pid"; fail "dead agent queued $wakes repeated wakes on unchanged poll $round"; }
+      || { reap "$pid"; fail "$label liveness queued $wakes repeated wakes on unchanged round $round"; }
     [ -e "$state/.paused-$key" ] \
-      || { reap "$pid"; fail "dead agent lost its bounded pause marker on unchanged poll $round"; }
+      || { reap "$pid"; fail "$label liveness lost the bounded pause marker on unchanged round $round"; }
     [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
-      || { reap "$pid"; fail "dead agent lost its stale hash on unchanged poll $round"; }
+      || { reap "$pid"; fail "$label liveness lost the stale hash on unchanged round $round"; }
+    [ -e "$state/.paused-resurfaced-$key" ] \
+      || { reap "$pid"; fail "$label liveness lost the recorded surface on unchanged round $round"; }
     reap "$pid"
-    ack_stopped_cycle "$state" || fail "could not acknowledge unchanged dead-agent poll $round"
+    ack_stopped_cycle "$state" || fail "could not acknowledge unchanged $label poll $round"
     round=$((round + 1))
   done
-  pass "a live declared pause surfaces once when its agent dies without changing the pane"
+  [ "$total_wakes" -eq 1 ] \
+    || fail "dead-agent liveness flicker queued $total_wakes total wakes (want exactly one)"
+  [ "$(file_mtime "$state/.paused-rechecked-$key")" = "$surface_recheck_mtime" ] \
+    || fail "unknown liveness refreshed the surfaced pause recheck marker"
+  pass "a live declared pause surfaces once when its dead agent later reads unknown"
 }
 
 # A captain-held or paused crew can leave a stable backend endpoint after its agent
