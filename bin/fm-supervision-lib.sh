@@ -4,11 +4,11 @@
 #
 # Reports whether a firstmate home needs supervision because it has active work
 # (a state/<id>.meta exists, except a secondmate already idle on a local done
-# status), an X-mode relay poll (state/x-watch.check.sh), or an active
-# process-event source (remote-reply sources count only while that secondmate
-# has pending-reply or captured-result work), and whether its watcher has a fresh
-# liveness beacon (state/.last-watcher-beat, touched every poll cycle, within
-# the grace window).
+# status), an X-mode relay poll (state/x-watch.check.sh), or active
+# process-event work (remote-reply sources count only while that secondmate has
+# pending-reply work, and unhandled remote-reply captures count even after source
+# retirement), and whether its watcher has a fresh liveness beacon
+# (state/.last-watcher-beat, touched every poll cycle, within the grace window).
 # bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
 # bin/fm-wake-lib.sh for its block decision. bin/fm-guard.sh uses the model-aware
 # fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh), which owns what a
@@ -61,19 +61,28 @@ fm_sup_secondmate_idle() {  # <state-dir> <task-id> <meta-file>
   [ "$verb" = "done" ]
 }
 
-fm_sup_source_has_unhandled_capture() {  # <state-dir> <source-id>
-  local state=$1 source_id=$2 inbox result base seq
+fm_sup_unhandled_remote_reply_capture_sources() {  # <state-dir>
+  local state=$1 inbox result base source_id seq
   inbox="$state/procevent-inbox"
-  [ -d "$inbox" ] || return 1
-  for result in "$inbox/$source_id".*.result; do
+  [ -d "$inbox" ] || return 0
+  for result in "$inbox"/remote-reply-*.result; do
     [ -f "$result" ] && [ ! -L "$result" ] || continue
     base=${result%.result}
-    seq=${base##*.}
+    source_id=${base##*/}
+    seq=${source_id##*.}
+    source_id=${source_id%.*}
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     [ -e "$base.handled" ] && continue
-    return 0
-  done
-  return 1
+    printf '%s\n' "$source_id"
+  done | sort -u
+}
+
+fm_sup_source_counted() {  # <newline-delimited-source-list> <source-id>
+  local list=$1 id=$2
+  case "$list" in
+    *$'\n'"$id"$'\n'*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_sup_source_counts() {  # <state-dir> <source-file>
@@ -83,8 +92,7 @@ fm_sup_source_counts() {  # <state-dir> <source-file>
     remote-reply-*.source)
       id=${base#remote-reply-}
       id=${id%.source}
-      fm_sup_source_has_unhandled_capture "$state" "remote-reply-$id" \
-        || fm_sup_task_needs_pending_reply_supervision "$state" "$id"
+      fm_sup_task_needs_pending_reply_supervision "$state" "$id"
       return
       ;;
   esac
@@ -94,17 +102,18 @@ fm_sup_source_counts() {  # <state-dir> <source-file>
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of active state/*.meta records
-#   FM_SUP_SOURCES        count of active registered process-to-event sources
+#   FM_SUP_SOURCES        count of active process-event supervision items
 #   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, or a
-#                         registered event source (a source is a wait on an
-#                         external process, not a task, so it has no metadata)
+#                         process-event item (a source is a wait on an external
+#                         process, not a task, so it has no metadata)
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source task_id beat m age
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source source_id task_id beat m age
+  local counted_sources=$'\n'
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
@@ -124,8 +133,20 @@ fm_supervision_status() {
   for source in "$state"/procevent/*.source; do
     [ -e "$source" ] || continue
     fm_sup_source_counts "$state" "$source" || continue
+    source_id=${source##*/}
+    source_id=${source_id%.source}
+    fm_sup_source_counted "$counted_sources" "$source_id" && continue
+    counted_sources="${counted_sources}${source_id}"$'\n'
     FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
   done
+  while IFS= read -r source_id; do
+    [ -n "$source_id" ] || continue
+    fm_sup_source_counted "$counted_sources" "$source_id" && continue
+    counted_sources="${counted_sources}${source_id}"$'\n'
+    FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
+  done <<EOF
+$(fm_sup_unhandled_remote_reply_capture_sources "$state")
+EOF
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
     || [ -f "$state/x-watch.check.sh" ] \
     || [ "$FM_SUP_SOURCES" -gt 0 ]; then

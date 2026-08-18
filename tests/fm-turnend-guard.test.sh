@@ -123,19 +123,18 @@ test_predicate_remote_reply_without_pending_is_quiet() {
 
 test_predicate_remote_reply_with_unhandled_capture_needs_supervision() {
   local state="$TMP_ROOT/pred-remote-reply-unhandled/state"
-  mkdir -p "$state/procevent" "$state/procevent-inbox"
-  : > "$state/procevent/remote-reply-studio.source"
+  mkdir -p "$state/procevent-inbox"
   printf 'reply captured before acknowledgement\n' > "$state/procevent-inbox/remote-reply-studio.7.result"
   printf 'remote-reply\n' > "$state/procevent-inbox/remote-reply-studio.7.adapter"
   fm_supervision_needed "$state" 300 \
-    || fail "remote-reply source with an unhandled captured result must require supervision"
-  [ "$FM_SUP_SOURCES" -eq 1 ] || fail "unhandled remote-reply capture must count as an active source"
+    || fail "retired remote-reply source with an unhandled captured result must require supervision"
+  [ "$FM_SUP_SOURCES" -eq 1 ] || fail "unhandled remote-reply capture must count as active process-event work"
   : > "$state/procevent-inbox/remote-reply-studio.7.handled"
   if fm_supervision_needed "$state" 300; then
     fail "handled remote-reply capture without an open pending reply must be quiet"
   fi
-  [ "$FM_SUP_SOURCES" -eq 0 ] || fail "handled remote-reply capture must not count as active"
-  pass "fm_supervision_needed: unhandled remote-reply captures keep supervision armed"
+  [ "$FM_SUP_SOURCES" -eq 0 ] || fail "handled remote-reply capture must not count as active process-event work"
+  pass "fm_supervision_needed: unhandled retired remote-reply captures keep supervision armed"
 }
 
 test_predicate_remote_reply_with_pending_needs_supervision() {
@@ -326,7 +325,7 @@ test_hook_blocks_source_only_home() {
   : > "$dir/state/procevent/source-only.source"
   out=$(run_hook "$dir" false); status=$?
   expect_code 2 "$status" "non-Claude hook must block when a source-only home has no watcher"
-  assert_contains "$out" "1 process-event source(s) registered" "block reason must identify the source-only supervision need"
+  assert_contains "$out" "1 process-event supervision item(s) active" "block reason must identify the source-only supervision need"
   pass "fm-turnend-guard: non-Claude path blocks a source-only home"
 }
 

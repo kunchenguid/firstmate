@@ -13,7 +13,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 
 `bin/fm-guard.sh` is a pull-based warning that runs only when another supervision command invokes it.
 The turn-end guard closes the remaining gap at the primary's own turn boundary.
-When active work, an active process-event source, or Relay polling needs supervision at that boundary and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
+When active work, active process-event work, or Relay polling needs supervision at that boundary and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
 The mid-turn pull warning uses the model-aware supervision verdict described below, while the turn-end guard keeps the PID-strict watcher predicate.
 The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
 
@@ -27,7 +27,8 @@ That check keeps crewmate and scout linked worktrees inert because their git dir
 It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
 For an in-scope primary, the guard counts active work from `state/*.meta`, excluding a `kind=secondmate` record whose latest `state/<id>.status` event is `done` unless it still has pending-reply work, including retryable escalation-close cleanup.
-Registered `state/procevent/*.source` records require supervision even though they have no task metadata, except that a `remote-reply-<id>.source` record is active only while secondmate `<id>` has pending-reply work or unhandled captured reply results.
+Registered `state/procevent/*.source` records require supervision even though they have no task metadata, except that a `remote-reply-<id>.source` record is active only while secondmate `<id>` has pending-reply work.
+Unhandled `state/procevent-inbox/remote-reply-<id>.<seq>.result` captures also require supervision even after the source registration has retired.
 The default cross-harness mode exits silently with no supervision need.
 Every mode treats `state/x-watch.check.sh` as supervision need, so Relay polling remains guarded without an in-flight task.
 Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`, the same PID-strict identity-matched lock and fresh-beacon check used by `bin/fm-watch-arm.sh`: a stale beacon blocks even when a watcher pid is live, and a fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
