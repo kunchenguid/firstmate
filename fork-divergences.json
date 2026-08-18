@@ -169,6 +169,23 @@
         "bin/fm-brief.sh",
         "tests/fm-brief.test.sh"
       ]
+    },
+    {
+      "id": "firstmate-progressive-disclosure-restructure",
+      "summary": "Restructure Firstmate's always-loaded instructions toward progressive disclosure while preserving every operational rule and safety boundary.",
+      "class": "pending",
+      "topic": "fm/divergence/firstmate-progressive-disclosure-restructure",
+      "introduced": "2026-08-18",
+      "upstream_pr": {
+        "url": "https://github.com/kunchenguid/firstmate/pull/2547",
+        "disposition": "open"
+      },
+      "retire_when": "upstream main carries this restructure or an equivalent",
+      "paths": [
+        "AGENTS.md",
+        "bin/fm-session-start.sh",
+        "docs/configuration.md"
+      ]
     }
   ],
   "retired_upstream": []
