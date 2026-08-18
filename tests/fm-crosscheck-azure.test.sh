@@ -697,6 +697,55 @@ assert rules["deny-all-outbound"]["priority"]==4096
 allows=[name for name,rule in rules.items() if rule["access"]=="Allow"]
 assert sorted(allows)==["allow-azure-dns-outbound","allow-provider-endpoint-outbound"]
 PY
+  # The closure the image is built from is tracked, because it previously lived
+  # only in an operator-local parameters file: the image tags preserve each
+  # digest but not the URL or byte count, so a built image could not be
+  # reproduced from anything that survived it.
+  python3 - "$ROOT/docs/azure-crosscheck/model-image.json" \
+    "$ROOT/docs/azure-crosscheck/model-image-closure.json" \
+    "$ROOT/bin/fm-azure-cell-image.sh" <<'PY' || fail "the tracked image closure is not exact"
+import json
+import re
+import sys
+
+template = json.load(open(sys.argv[1]))
+closure = json.load(open(sys.argv[2]))
+cell = open(sys.argv[3]).read()
+
+declared = {name for name in template["parameters"]}
+supplied = {name for name in closure if not name.startswith("$")}
+# Every closure parameter the build declares must be pinned here, and nothing
+# may be pinned that the build does not read.
+closure_names = {
+    name for name in declared
+    if name.startswith(("codexCli", "claudeCli", "piTarball", "nodeTarball", "piVersion"))
+}
+assert supplied == closure_names, (supplied ^ closure_names)
+for name, entry in closure.items():
+    if name.startswith("$"):
+        continue
+    assert set(entry) == {"value"}, name
+    value = entry["value"]
+    if name.endswith("Sha256"):
+        assert re.fullmatch(r"[0-9a-f]{64}", value), name
+    elif name.endswith("Bytes"):
+        assert isinstance(value, int) and value > 0, name
+    elif name.endswith("Url"):
+        assert value.startswith("https://"), name
+
+# A Pi reviewer and a Pi author must run one agent. The doc asserts this; here
+# it is enforced, so the two pins cannot drift apart silently.
+def cell_pin(key):
+    match = re.search(r"^%s=(\S+)$" % key, cell, re.M)
+    assert match, key
+    return match.group(1)
+
+assert closure["piTarballUrl"]["value"] == cell_pin("PI_URL")
+assert closure["piTarballSha256"]["value"] == cell_pin("PI_DIGEST")
+assert closure["piTarballBytes"]["value"] == int(cell_pin("PI_BYTES"))
+assert closure["piVersion"]["value"] in cell, "the cell image does not assert the pinned Pi version"
+PY
+
   params=$(mktemp)
   printf '{"parameters":{}}\n' >"$params"
   if "$ROOT/bin/fm-crosscheck-azure-image.sh" image-build --subscription s --resource-group g --parameters "$params" >/dev/null 2>&1; then

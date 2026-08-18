@@ -161,14 +161,30 @@ That promotion is the one step of this contract the bounded command does not own
 Admission does not check that the configured image actually carries the harness it admits: the build tags the image with its `pi-tarball-sha256`, `codex-cli-sha256`, and `claude-cli-sha256`, and nothing reads those tags. Until it does, pointing `model_image_id` at an image built before a harness was added admits that harness and fails it inside a paid VM.
 One more Pi-lane cost is open: the model guest launches `pi` without `--offline`, and the compartment's egress allowlist is Azure DNS plus one provider endpoint, so Pi's startup update and telemetry calls are dropped rather than refused and each waits out its own timeout on a paid VM before the review begins.
 
-The Pi closure parameters must name the same tarball the crewmate cell image installs, so that a Pi reviewer and a Pi author run one identical agent rather than two versions that can disagree for reasons the review would report as a finding:
+The pinned closure is tracked at [`azure-crosscheck/model-image-closure.json`](azure-crosscheck/model-image-closure.json).
+It exists because the parameters file was previously operator-local and recorded nowhere: a built image's tags preserve each digest but not the URL or byte count the build also needs, so an image could not be reproduced from anything that outlived the shell that made it.
+Compose the `--parameters` file by taking that closure and adding the installation-specific values, which are the only ones that legitimately vary:
 
-| parameter | value |
-|---|---|
-| `piTarballUrl` / `piTarballSha256` / `piTarballBytes` / `piVersion` | exactly `PI_URL` / `PI_DIGEST` / `PI_BYTES` / the asserted version in [`bin/fm-azure-cell-image.sh`](../bin/fm-azure-cell-image.sh) |
-| `nodeTarballUrl` | `https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.xz` |
-| `nodeTarballSha256` | `d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307` |
-| `nodeTarballBytes` | `31058332` |
+```sh
+guest=bin/fm-crosscheck-azure-model-guest.sh
+python3 - <<'EOF' > /tmp/model-image.parameters.json
+import base64, hashlib, json, pathlib
+closure = json.load(open('docs/azure-crosscheck/model-image-closure.json'))
+body = pathlib.Path('bin/fm-crosscheck-azure-model-guest.sh').read_bytes()
+params = {k: v for k, v in closure.items() if not k.startswith('$')}
+params['modelGuestSha256'] = {'value': hashlib.sha256(body).hexdigest()}
+params['modelGuestBase64'] = {'value': base64.b64encode(body).decode()}
+params['namingPrefix'] = {'value': '<prefix>'}
+params['imageVersion'] = {'value': '<version>'}
+params['builderIdentityId'] = {'value': '<image-builder identity resource id>'}
+params['ubuntuExactVersion'] = {'value': '<exact marketplace version>'}
+print(json.dumps({'$schema': 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#',
+                  'contentVersion': '1.0.0.0', 'parameters': params}, indent=1))
+EOF
+```
+
+The Pi entries must equal the crewmate cell image's, so a Pi reviewer and a Pi author run one identical agent rather than two versions that can disagree for reasons the review would report as a finding. `tests/fm-crosscheck-azure.test.sh` enforces that equality; it is not left to care:
+
 
 Pi declares `engines.node >= 22.19.0` and ships a `#!/usr/bin/env node` entrypoint, so the Node pin is a correctness bound and not a preference: an older runtime or an unresolvable `node` on `PATH` fails the reviewer at launch rather than at admission.
 

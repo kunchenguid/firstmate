@@ -1,0 +1,46 @@
+{
+  "$comment": [
+    "Tracked pinned closure for the Crosscheck reviewer model image.",
+    "These are the values that were previously supplied only in an operator-local",
+    "parameters file and recorded nowhere, which made a built image impossible to",
+    "reproduce: the image tags preserve each digest but not the URL or byte count",
+    "the build also requires. Compose the full --parameters file for",
+    "bin/fm-crosscheck-azure-image.sh by adding the installation-specific values",
+    "(namingPrefix, imageVersion, builderIdentityId, ubuntuExactVersion) and the",
+    "modelGuest pair derived from the tracked guest, as docs/azure-crosscheck.md",
+    "describes. Every digest here was computed by downloading the artifact, not",
+    "copied from a release page.",
+    "piTarball must stay equal to PI_URL/PI_BYTES/PI_DIGEST in",
+    "bin/fm-azure-cell-image.sh so a Pi reviewer and a Pi author run one agent;",
+    "tests/fm-crosscheck-azure.test.sh enforces that rather than asking for it."
+  ],
+  "codexCliUrl": {
+    "value": "https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-x86_64-unknown-linux-musl.tar.gz"
+  },
+  "codexCliSha256": {
+    "value": "0246e2e773834e07f0fb5249ed6ebad12e4591e608f8c7bb97dd6a9690544c36"
+  },
+  "codexCliBytes": { "value": 98970270 },
+  "claudeCliUrl": {
+    "value": "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/2.1.227/linux-x64/claude"
+  },
+  "claudeCliSha256": {
+    "value": "6832dc3f1797b890b71116e5f2dbbf9a83fd3d0498c235b4b0f9cd0e6e499ad6"
+  },
+  "claudeCliBytes": { "value": 304282632 },
+  "piTarballUrl": {
+    "value": "https://registry.npmjs.org/@earendil-works/pi-coding-agent/-/pi-coding-agent-0.84.1.tgz"
+  },
+  "piTarballSha256": {
+    "value": "a69a18596017e91955fd0fd677be69fab5b6ea01d5b06207bcee34ee1522bc20"
+  },
+  "piTarballBytes": { "value": 5103866 },
+  "piVersion": { "value": "0.84.1" },
+  "nodeTarballUrl": {
+    "value": "https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.xz"
+  },
+  "nodeTarballSha256": {
+    "value": "d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307"
+  },
+  "nodeTarballBytes": { "value": 31058332 }
+}
