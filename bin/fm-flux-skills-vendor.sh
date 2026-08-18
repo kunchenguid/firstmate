@@ -95,6 +95,8 @@ actual_commit=$(git -C "$clone_dir" rev-parse HEAD)
 
 for skill in "${ADOPTED_SKILLS[@]}"; do
   [ -d "$clone_dir/skills/$skill" ] || die "adopted skill missing upstream: $skill"
+  symlink=$(find "$clone_dir/skills/$skill" -type l -print -quit)
+  [ -z "$symlink" ] || die "adopted skill contains a symbolic link: ${symlink#"$clone_dir/skills/"}"
 done
 
 if [ "$DRY_RUN" -eq 1 ]; then

@@ -46,6 +46,17 @@ test_unlisted_file_is_rejected() {
   pass 'fm-flux-skills-verify rejects unlisted adopted files'
 }
 
+test_symlink_is_rejected() {
+  local link="$VENDOR_ROOT/gitops-knowledge/unlisted-link"
+  ln -s SKILL.md "$link"
+  if "$VERIFY" >/dev/null 2>&1; then
+    rm -f "$link"
+    fail 'verify must reject symbolic links in adopted skills'
+  fi
+  rm -f "$link"
+  pass 'fm-flux-skills-verify rejects adopted skill symlinks'
+}
+
 test_manifest_is_parsed_without_execution() {
   local manifest="$VENDOR_ROOT/MANIFEST" backup marker
   backup=$(mktemp)
@@ -66,4 +77,5 @@ test_manifest_is_parsed_without_execution() {
 test_verify_passes_on_committed_vendor_tree
 test_checksum_tamper_is_rejected
 test_unlisted_file_is_rejected
+test_symlink_is_rejected
 test_manifest_is_parsed_without_execution

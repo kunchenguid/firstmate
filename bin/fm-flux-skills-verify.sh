@@ -66,6 +66,8 @@ done
 
 for skill in "${adopted[@]}"; do
   [ -f "$VENDOR_ROOT/$skill/SKILL.md" ] || die "adopted skill missing SKILL.md: $skill"
+  symlink=$(find "$VENDOR_ROOT/$skill" -type l -print -quit)
+  [ -z "$symlink" ] || die "adopted skill contains a symbolic link: ${symlink#"$VENDOR_ROOT/"}"
 done
 
 while IFS= read -r entry; do
