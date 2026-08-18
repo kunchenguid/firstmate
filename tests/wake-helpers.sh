@@ -53,6 +53,23 @@ append_wake() {
   ' _ "$lib" "$kind" "$key" "$payload"
 }
 
+# Stop a background child without allowing a signal-handling regression in the
+# fixture itself to consume the surrounding job's entire timeout. TERM retains
+# the production cleanup path; KILL is only the bounded test-fixture fallback.
+stop_child_bounded() {  # <pid> [<tenths>]
+  local pid=$1 limit=${2:-50} i=0
+  kill -TERM "$pid" 2>/dev/null || true
+  while is_live_non_zombie "$pid" && [ "$i" -lt "$limit" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$pid"; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  ! is_live_non_zombie "$pid"
+}
+
 make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"

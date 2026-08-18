@@ -12,9 +12,11 @@ When this session owns supervision and away mode is not active:
 4. On the one `Stop hook feedback` automatic-mechanism failure notice (`firstmate watcher auto-arm FAILED ...`), drain, inspect the automatic mechanism failure, and do not turn the notice into a repeating manual-arm loop.
 5. If the Stop hook does not claim the home or reports an exhausted failure, inspect its registration and watcher startup path before ending blind.
    Keep the Stop-owned automatic mechanism as the only Claude arm owner.
+   On the second genuinely identical no-claim observation, the guard itself ends the continuation loop with exactly one captain-facing question; do not synthesize or repeat that question.
+   Every subsequent unchanged Stop passes silently, while changed supervision evidence starts a fresh count as specified in [`turnend-guard.md`](../turnend-guard.md).
 6. Treat `watcher: started ...` and `watcher: attached ...` inside automatic arm output as proof that one live cycle exists.
    On attach, the arm follows verified identity-matched successors instead of exiting when the first cycle ends.
-7. The durable wake queue preserves actionable events between a rewake and the next Stop-launched arm, while the bounded turn-end guard prevents a blind Stop when recovery did not start.
+7. The durable wake queue preserves actionable events between a rewake and the next Stop-launched arm and remains a supervision need until the printed post-handling acknowledgement consumes them, while the bounded turn-end guard prevents a blind Stop when recovery did not start.
    No PreToolUse hook denies fleet commands based on watcher status.
    [`watcher-continuity.md`](../watcher-continuity.md) owns the exact session-lock recovery boundary.
 8. The turn-end guard (`bin/fm-turnend-guard.sh --claude`) remains the final backstop.

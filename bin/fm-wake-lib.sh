@@ -299,7 +299,7 @@ fm_lock_clean_known_files() {
 fm_lock_set_role() {
   local lockdir=$1 role=$2 current pid back
   case "$role" in
-    autoarm|terminal-check) : ;;
+    autoarm|terminal-check|terminal-escalation) : ;;
     *) return 1 ;;
   esac
   current=${BASHPID:-$$}
@@ -735,8 +735,11 @@ fm_lock_try_acquire() {
 
   # Compare against ${BASHPID:-$$} inline, never via a command substitution:
   # $() forks a subshell whose BASHPID is not this frame's pid.
+  # Stock macOS Bash has no BASHPID and keeps $$ unchanged in a subshell, so
+  # BASH_SUBSHELL must also prove this is the original holding frame.
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ] \
+    && [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
     # lock mid-critical-section (e.g. TERM inside a recovery-marker section,
@@ -903,6 +906,7 @@ fm_failure_episode_reset() {
   esac
   for path in \
     "$state/.turnend-claude-blocks" \
+    "$state/.turnend-claude-escalated" \
     "$state/.claude-autoarm-failure-notified" \
     "$state/.claude-autoarm-failure-alarmed"
   do
@@ -913,6 +917,7 @@ fm_failure_episode_reset() {
   done
   if ! rm -f \
     "$state/.turnend-claude-blocks" \
+    "$state/.turnend-claude-escalated" \
     "$state/.claude-autoarm-failure-notified" \
     "$state/.claude-autoarm-failure-alarmed" \
     2>/dev/null; then
@@ -1089,7 +1094,7 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
 # Map one structurally valid signal key to its home-local status filename.
 # Queue payload text is intentionally ignored: it is display data, not a path
 # authority. The caller still verifies the resulting regular file immediately
-# before its bounded read.
+# before reading every still-unread byte.
 FM_WAKE_STATUS_KEY=
 FM_WAKE_STATUS_HISTORICAL=false
 fm_wake_status_key_map() {  # <queue-key>
@@ -1189,7 +1194,7 @@ fm_wake_unread_events() {  # <validated-status-path> <unused-tail-byte-cap> <min
   FM_WAKE_EVENT_LINE=$(printf '%s' "$FM_WAKE_EVENT_LINE" | LC_ALL=C tr '\t\r' '  ')
 }
 
-fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
+fm_wake_latest_event() {  # <validated-status-path> <unused-tail-byte-cap>
   fm_wake_unread_events "$1" "$2" 0
 }
 
