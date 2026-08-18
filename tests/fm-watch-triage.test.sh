@@ -274,25 +274,27 @@ test_declared_work_stall_classifier() {
   status_declares_work '' && fail "an empty line classed as declared work"
 
   # A later event of ANY kind supersedes the declaration, so the stream no longer
-  # declares unresumed work.
+  # declares unresumed work. Resolved the way the poll resolves it - the stream's
+  # last line, read ONCE, then handed to the decision - so these cases cover the
+  # composition production actually runs rather than a separate entry point.
   printf 'working: relaunching the remaining six\n' > "$state/open.status"
-  status_work_declared_unresumed "$state/open.status" \
-    || fail "a stream whose last event declares work was not classed unresumed"
   printf 'working: relaunching the six\ndone: all six landed\n' > "$state/closed.status"
-  status_work_declared_unresumed "$state/closed.status" \
-    && fail "a later terminal event did not supersede the declaration"
   printf 'working: relaunching the six\npaused: awaiting upstream\n' > "$state/held.status"
-  status_work_declared_unresumed "$state/held.status" \
+  open_line=$(last_status_line "$state/open.status")
+  closed_line=$(last_status_line "$state/closed.status")
+  held_line=$(last_status_line "$state/held.status")
+  status_declares_work "$open_line" \
+    || fail "a stream whose last event declares work was not classed unresumed"
+  status_declares_work "$closed_line" \
+    && fail "a later terminal event did not supersede the declaration"
+  status_declares_work "$held_line" \
     && fail "a later declared pause did not supersede the declaration"
-  status_work_declared_unresumed "$state/absent.status" \
+  status_declares_work "$(last_status_line "$state/absent.status")" \
     && fail "a missing status file was classed as declaring unresumed work"
 
   # The stall verdict is taken on the line the caller ALREADY holds, so one read
   # both decides it and supplies the line the wake quotes back. These cases feed
-  # it the same three streams above, resolved once through the file-level helper.
-  open_line=$(last_status_line "$state/open.status")
-  closed_line=$(last_status_line "$state/closed.status")
-  held_line=$(last_status_line "$state/held.status")
+  # it the same three streams above.
   status_declared_work_stalled "$open_line" 500 240 \
     || fail "declared work idle past the threshold was not classed stalled"
   status_declared_work_stalled "$open_line" 239 240 \
@@ -1033,17 +1035,15 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
 # the parent cannot disturb the mate's own primary supervision. Building the case
 # any other way would assert a state production cannot reach. The stall is built
 # purely by backdating the status file, which is exactly what the detector reads.
-# <meta-extra> lets a case add recorded metadata (a remote endpoint, say) without
-# a second builder.
-make_secondmate_work_case() {  # <case-name> <task> <last-status-line> <silence-secs> [meta-extra]
-  local name=$1 task=$2 line=$3 silence=$4 extra=${5-} dir state window back
+# A case needing a different endpoint shape (a remote mate, say) records its own
+# meta over this one, so there is no metadata parameter here to fall out of step
+# with what that case actually writes.
+make_secondmate_work_case() {  # <case-name> <task> <last-status-line> <silence-secs>
+  local name=$1 task=$2 line=$3 silence=$4 dir state window back
   dir=$(make_case "$name"); state="$dir/state"
   window="test:fm-$task"
   printf 'idle prompt, nothing running\n' > "$dir/pane.txt"
-  {
-    printf 'window=%s\nkind=secondmate\n' "$window"
-    [ -z "$extra" ] || printf '%s\n' "$extra"
-  } > "$state/$task.meta"
+  printf 'window=%s\nkind=secondmate\n' "$window" > "$state/$task.meta"
   printf '%s\n' "$line" > "$state/$task.status"
   back=$(( $(date +%s) - silence ))
   set_mtime "$back" "$state/$task.status"
@@ -1229,8 +1229,7 @@ test_secondmate_remote_declared_work_stall_surfaces() {
   local dir state task drain_out pid
   task=secondmate-remoto
   dir=$(make_secondmate_work_case secondmate-remote-declared-work "$task" \
-    'working [key=aterrizaje]: los seis restantes se relanzan uno a uno' 5000 \
-    'remote_host=mate.example.test') \
+    'working [key=aterrizaje]: los seis restantes se relanzan uno a uno' 5000) \
     || fail "could not build the remote declared-work fixture"
   state="$dir/state"; drain_out="$dir/drain.out"
   # Overwrite the endpoint with the shape a remote spawn records: window=remote:<id>,

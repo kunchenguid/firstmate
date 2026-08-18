@@ -172,10 +172,20 @@ status_declares_work() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_DECLARED_WORK_VERB:-$FM_CLASSIFY_DECLARED_WORK_VERB_DEFAULT}" ]
 }
 
-# 0 if a status stream still declares work that nothing has followed: its last
-# non-blank line declares work, so no later event of any kind - a terminal verb,
-# a resolution, a captain-held transfer, a declared pause, an informational note,
-# or a newer declared phase - superseded it.
+# 0 if declared work has gone SILENT: the stream's last event still declares
+# work that nothing has followed AND that stream has been quiet for at least
+# <threshold> seconds.
+# Neither half means anything alone - a declared-work line is the healthy state
+# of any worker mid-task, and a quiet stream is the healthy state of a worker
+# with nothing supervisor-actionable to report - which is exactly why every
+# existing detector let the combination through: the stale path exempts a
+# secondmate's idle endpoint by design, and a working: line is not
+# captain-relevant, so the heartbeat backstop correctly absorbs it.
+# UNRESUMED IS READ OFF THE LAST EVENT. The line handed in is the stream's last
+# non-blank one (last_status_line above), so a declaration still standing there
+# is one no later event of any kind - a terminal verb, a resolution, a
+# captain-held transfer, a declared pause, an informational note, or a newer
+# declared phase - superseded.
 # Deliberately the LAST event rather than the keyed activity fold
 # (status_open_activities): a `working` phase has no contract requiring a keyed
 # terminal event to close it, so an open keyed phase routinely outlives the work
@@ -192,23 +202,9 @@ status_declares_work() {  # <status-line>
 # rule with is the wider false signal, not a narrower one.
 # Any later event, keyed or not, is evidence the worker is still reporting, and
 # that is the honest boundary here.
-status_work_declared_unresumed() {  # <status-file>
-  status_declares_work "$(last_status_line "$1")"
-}
-
-# 0 if declared work has gone SILENT: the stream's last event still declares
-# unresumed work AND that stream has been quiet for at least <threshold> seconds.
-# Neither half means anything alone - a declared-work line is the healthy state
-# of any worker mid-task, and a quiet stream is the healthy state of a worker
-# with nothing supervisor-actionable to report - which is exactly why every
-# existing detector let the combination through: the stale path exempts a
-# secondmate's idle endpoint by design, and a working: line is not
-# captain-relevant, so the heartbeat backstop correctly absorbs it.
 # Takes the caller's ALREADY-READ last line, not the file, so ONE read both
 # decides the verdict and supplies the line the caller quotes back; a second read
-# could disagree with the first if the worker appends between them. A caller that
-# does not already hold the line resolves it through
-# status_work_declared_unresumed above.
+# could disagree with the first if the worker appends between them.
 # The caller measures <silence-age-secs> so this stays a pure decision both
 # supervisors share; status files are append-only (see the cursor contract
 # below), so the file's own age IS the time since its last event. A caller that
