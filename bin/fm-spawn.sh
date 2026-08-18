@@ -2266,8 +2266,10 @@ fi
 
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   TASK_WORKTREE=$WT
-  pin_ack="fm-pin-$ID-${BASHPID:-$$}-$RANDOM"
-  spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$TASK_WORKTREE") && printf '%s\n' $(shell_quote "$pin_ack")"
+  pin_ack_left="fm-pin-$ID-"
+  pin_ack_right="${BASHPID:-$$}-$RANDOM"
+  pin_ack="$pin_ack_left$pin_ack_right"
+  spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$TASK_WORKTREE") && printf '%s%s\n' $(shell_quote "$pin_ack_left") $(shell_quote "$pin_ack_right")"
   pinned=
   pin_seen=0
   for _ in $(seq 1 10); do

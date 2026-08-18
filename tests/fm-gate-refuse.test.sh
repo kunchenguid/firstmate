@@ -141,13 +141,16 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+. "${FM_FAKE_SPAWN_ACK_LIB:?FM_FAKE_SPAWN_ACK_LIB unset}"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  capture-pane) fm_fake_spawn_ack_capture; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys|set-window-option) exit 0 ;;
+  send-keys) fm_fake_spawn_ack_send "$@"; exit 0 ;;
+  has-session|new-session|new-window|set-window-option) exit 0 ;;
 esac
 exit 0
 SH

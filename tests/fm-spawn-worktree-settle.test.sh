@@ -30,6 +30,7 @@ make_settle_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+. "${FM_FAKE_SPAWN_ACK_LIB:?FM_FAKE_SPAWN_ACK_LIB unset}"
 case "$*" in
   *"#{pane_current_path}"*)
     countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
@@ -52,10 +53,11 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   capture-pane)
-    if [ -f "${FM_FAKE_PIN_PENDING_FILE:-}" ]; then
-      cat "${FM_FAKE_PIN_PENDING_FILE}"
+    if [ -f "${FM_STATE_OVERRIDE:-}/.fake-spawn-pin-pending" ]; then
+      ack=$(fm_fake_spawn_ack_capture)
+      printf '%s\n' "$ack"
+      printf '%s\n' "$ack" > "${FM_FAKE_PIN_OUTPUT_FILE:?FM_FAKE_PIN_OUTPUT_FILE unset}"
       touch "${FM_FAKE_PANE_PINNED_FILE:?FM_FAKE_PANE_PINNED_FILE unset}"
-      rm -f "${FM_FAKE_PIN_PENDING_FILE}"
     fi
     exit 0
     ;;
@@ -64,7 +66,8 @@ case "${1:-}" in
   send-keys)
     case "$*" in
       *"cd -- "*)
-        printf '%s\n' "$*" | sed -n "s/.*'\(fm-pin-[^']*\)'.*/\1/p" > "${FM_FAKE_PIN_PENDING_FILE:?FM_FAKE_PIN_PENDING_FILE unset}"
+        printf '%s\n' "$*" > "${FM_FAKE_PIN_COMMAND_FILE:?FM_FAKE_PIN_COMMAND_FILE unset}"
+        fm_fake_spawn_ack_send "$@"
         ;;
       *" -l "*) [ -f "${FM_FAKE_PANE_PINNED_FILE:-}" ] && launch_cwd=${FM_FAKE_PANE_PATH:-} || launch_cwd=${FM_FAKE_PRIMARY_PATH:-}; printf '%s\n' "$launch_cwd" > "${FM_FAKE_LAUNCH_CWD_FILE:?FM_FAKE_LAUNCH_CWD_FILE unset}" ;;
     esac
@@ -84,7 +87,7 @@ SH
 # entirely, distinct from both the project and the worktree - mirroring the
 # live incident where the stale read was another real firstmate home).
 make_settle_case() {
-  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile pinned pinpending launchcwd
+  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile pinned pincommand pinoutput launchcwd
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$home/projects/project"
@@ -92,7 +95,8 @@ make_settle_case() {
   stale="$case_dir/stale-other-checkout"
   countfile="$case_dir/pane-call-count"
   pinned="$case_dir/pane-pinned"
-  pinpending="$case_dir/pin-pending"
+  pincommand="$case_dir/pin-command"
+  pinoutput="$case_dir/pin-output"
   launchcwd="$case_dir/launch-cwd"
   fakebin=$(make_settle_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
@@ -102,11 +106,11 @@ make_settle_case() {
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
-  printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin|$countfile|$stale_reads|$pinned|$pinpending|$launchcwd"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin|$countfile|$stale_reads|$pinned|$pincommand|$pinoutput|$launchcwd"
 }
 
 read_settle_record() {
-  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS PINNED_FILE PIN_PENDING_FILE LAUNCH_CWD_FILE <<EOF
+  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS PINNED_FILE PIN_COMMAND_FILE PIN_OUTPUT_FILE LAUNCH_CWD_FILE <<EOF
 $1
 EOF
 }
@@ -119,7 +123,7 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PRIMARY_PATH="$PROJ_DIR" FM_FAKE_PANE_PINNED_FILE="$PINNED_FILE" \
-    FM_FAKE_PIN_PENDING_FILE="$PIN_PENDING_FILE" \
+    FM_FAKE_PIN_COMMAND_FILE="$PIN_COMMAND_FILE" FM_FAKE_PIN_OUTPUT_FILE="$PIN_OUTPUT_FILE" \
     FM_FAKE_LAUNCH_CWD_FILE="$LAUNCH_CWD_FILE" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" \
@@ -189,6 +193,10 @@ test_relative_project_records_launched_pane_cwd() {
     || fail "relative-project meta collapsed worktree and project to '$meta_worktree'"
   [ "$(cat "$LAUNCH_CWD_FILE")" = "$meta_worktree" ] \
     || fail "relative-project launched pane cwd does not equal meta worktree '$meta_worktree'"
+  [ -s "$PIN_OUTPUT_FILE" ] || fail "relative-project spawn did not observe the executed pin acknowledgement"
+  if grep -Fq "$(cat "$PIN_OUTPUT_FILE")" "$PIN_COMMAND_FILE"; then
+    fail "complete pin acknowledgement appeared in echoed command input"
+  fi
   assert_contains "$out" "worktree=$WT_DIR" \
     "relative-project success output did not report the launched pane cwd"
   pass "a relative projects/<repo> spawn records the launched pane cwd as worktree"
