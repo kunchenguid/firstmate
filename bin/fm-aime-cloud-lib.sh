@@ -407,7 +407,7 @@ fm_aime_state_transition() {
 fm_aime_artifact_store() {
   local id=$1 kind=$2 source=$3 dir revision dest tmp source_sha dest_sha
   case "$kind" in
-    probe|create|send|replay|session|get-output|observation) ;;
+    probe|create|send|replay|session|get-output|observation|malformed-observation) ;;
     *) return 1 ;;
   esac
   fm_aime_state_load "$id" || return 1

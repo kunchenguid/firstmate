@@ -74,7 +74,8 @@ $ BYTEDCLI_NO_AUTO_UPGRADE=1 bytedcli aime session replay-events --help | grep -
 
 `tests/fm-aime-cloud-worker.test.sh` puts a fake `bytedcli` first on `PATH` and drives the real Firstmate scripts.
 It performs no real AIME or Feishu write.
-The suite covers the disabled gate; read-only probe classifications; explicit fake sandbox authorization and disabled config output; durable create and send boundaries; asynchronous process-event completion; duplicate wake replay; restart adoption from submitted and checkpointed-created phases even after config removal; acceptance-unknown states; explicit rate-limited and unavailable rejection; canonical Feishu-host document identity validation with no local Feishu write; malformed, empty, missing, and transient results; cancellation refusal; cloud retirement with report preservation; and unchanged local dispatch, state, and retirement delegation.
+The suite covers the disabled gate; read-only probe classifications; explicit fake sandbox authorization and disabled config output; durable create and send boundaries; asynchronous process-event completion; duplicate wake replay; replay histories larger than the generic capture bound reduced to a valid cursor-bearing summary; adapter-owned preservation and acknowledgement of an older malformed capture only after a later authoritative observation is applied; restart adoption from submitted and checkpointed-created phases even after config removal; acceptance-unknown states; explicit rate-limited and unavailable rejection; canonical Feishu-host document identity validation with no local Feishu write; malformed, empty, missing, and transient results; cancellation refusal; cloud retirement with report preservation; and unchanged local dispatch, state, and retirement delegation.
+Latest fake-provider regression: 2026-08-18 against `origin/main` at `6f41888ae639e1ecf4d3cd6c5d4c27d3bd81fddd`.
 
 ```console
 $ bin/fm-test-run.sh tests/fm-aime-cloud-worker.test.sh
@@ -82,6 +83,7 @@ ok - AIME probe is read-only and production dispatch is disabled by default
 ok - AIME probe distinguishes auth, unsupported capability, malformed output, and unavailable CLI
 ok - sandbox verification requires explicit authority, reads back one disposable session, and stays disabled
 ok - AIME dispatch checkpoints identity, completes asynchronously, wakes once, and replays safely
+ok - oversized replay history stays bounded, handles to terminal success, and safely supersedes the malformed capture
 ok - restart adoption safely resumes not-started and created checkpoints, preserves submissions, and never claims cloud cancellation
 ok - AIME writes preserve acceptance-unknown states and distinguish explicit rejection classes
 ok - AIME document mode records the provider-created artifact and terminal bad results fail explicitly
@@ -89,7 +91,7 @@ ok - transient provider readback is unknown current state, re-arms, and resolves
 ok - terminal AIME retirement passes the decision gate, removes volatile cloud state, and preserves the report
 ok - backend-neutral wrappers preserve local spawn, state, and teardown argument semantics
 # fm-aime-cloud-worker.test.sh: all assertions passed
-FM_TEST_END 2026-08-13T18:24:55Z tests/fm-aime-cloud-worker.test.sh exit=0 duration_ms=97411 gate_skip=false
+FM_TEST_END 2026-08-18T07:47:36Z tests/fm-aime-cloud-worker.test.sh exit=0 duration_ms=104689 gate_skip=false
 ```
 
 The complete 136-test repository run also passed the AIME suite and every touched lifecycle family.
