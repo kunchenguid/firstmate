@@ -460,15 +460,15 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 #
 # These cases run real processes and no harness. The shape they reproduce is a
 # harness rehosting a session's work under its own pty: the resulting tree is
-# orphaned away from its launcher and never reaches the pid that holds the lock, so ancestry
-# alone reports one genuine session as two competing ones.
+# orphaned away from its launcher and never reaches the pid that holds the lock,
+# so ancestry alone reports one genuine session as two competing ones.
 #
 # Every fixture clears every environment signal the library reads before setting
 # the ones its case means to drive, so a value inherited from the developer's
 # own live session can never decide a verdict here. Each case also asserts the
 # signals it drove APART, so a case whose fixture stopped diverging fails
 # instead of passing on an accident.
-COHORT_SIGNAL_VARS='CLAUDE_PID TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID'
+COHORT_SIGNAL_VARS=$FM_TEST_SESSION_SIGNAL_VARS
 
 COHORT_ENV_ARGV=()
 cohort_env_argv() {
@@ -1009,19 +1009,24 @@ test_unusable_stop_sampling_settings_cannot_release_a_live_holder() {
   done
 
   # The fallback is the documented default rather than a blanket refusal, so a
-  # genuinely stopped holder is still recognized under the same setting.
+  # genuinely stopped holder is still recognized under either unusable setting.
+  # A non-numeric gap is the sharper of the two: unvalidated it is handed to
+  # `sleep`, which fails, and the sequence that cannot complete reports a really
+  # stopped holder as live - the permanent lockout this decision removes.
   kill -STOP "$holder" 2>/dev/null || fail "could not suspend the fixture holder"
   wait_for_state "$holder" T "the fixture holder never reached the stopped state"
   lib_probe "FM_SESSION_STOP_SAMPLES=abc; fm_harness_pid_suspended $holder" \
     || fail "an unusable sample count refused every suspension instead of falling back to the default"
+  lib_probe "FM_SESSION_STOP_SAMPLE_SLEEP=abc; fm_harness_pid_suspended $holder" \
+    || fail "an unusable sample gap made a genuinely stopped holder look live, so its home would never be reclaimable"
 
-  # An unusable gap between samples must not collapse the confirmation window
-  # either: the stop below is undone well inside it, and a run that samples
-  # without waiting would report this holder as a suspended session.
+  # A zero gap is the other direction: unvalidated, every sample lands inside the
+  # same instant, so the stop below - undone well inside the real confirmation
+  # window - would be read as a suspended session.
   ( sleep 0.4; kill -CONT "$holder" 2>/dev/null ) &
   COHORT_PIDS+=("$!")
-  if lib_probe "FM_SESSION_STOP_SAMPLES=20 FM_SESSION_STOP_SAMPLE_SLEEP=abc; fm_harness_pid_suspended $holder"; then
-    fail "an unusable sample gap collapsed the confirmation window, so a momentary stop was read as a suspended session"
+  if lib_probe "FM_SESSION_STOP_SAMPLES=20 FM_SESSION_STOP_SAMPLE_SLEEP=0; fm_harness_pid_suspended $holder"; then
+    fail "a zero sample gap collapsed the confirmation window, so a momentary stop was read as a suspended session"
   fi
   wait_for_state "$holder" running "the fixture holder never resumed"
   pass "session-lock: unusable stop-sampling settings fall back to the default and never release a live holder"

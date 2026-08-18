@@ -187,6 +187,31 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# --- session-lock cohort signals --------------------------------------------
+#
+# Every environment variable the session-lock cohort proof reads: the launch
+# markers in FM_SESSION_LAUNCH_MARKERS and the container guards and pane ids in
+# FM_SESSION_CONTAINERS (bin/fm-session-lock-lib.sh).
+#
+# A fixture that starts a harness-named process MUST clear all of them, or that
+# process inherits the captain session's own launch marker and pane id, is
+# genuinely in the cohort of the process asking about it, and a control that
+# reads as "a separate concurrent session" silently becomes "this session's own
+# holder". One owner for the list, because two suites clearing different subsets
+# is the same failure with extra steps.
+FM_TEST_SESSION_SIGNAL_VARS='CLAUDE_PID TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID'
+
+# Populate FM_TEST_CLEAR_SIGNALS_ARGV with an `env -u ...` prefix that clears
+# every one of them. Bash 3.2 has no namerefs, so the array is the return value.
+FM_TEST_CLEAR_SIGNALS_ARGV=()
+fm_test_clear_signals_argv() {
+  local var
+  FM_TEST_CLEAR_SIGNALS_ARGV=(env)
+  for var in $FM_TEST_SESSION_SIGNAL_VARS; do
+    FM_TEST_CLEAR_SIGNALS_ARGV+=(-u "$var")
+  done
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
