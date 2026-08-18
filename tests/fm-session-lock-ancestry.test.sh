@@ -157,8 +157,10 @@ done
 case "$pid:$field:${FM_TEST_NODE_SHAPE:-harness}" in
   760:comm=:*) printf '%s\n' MainThread ;;
   760:args=:harness) printf '%s\n' 'node /home/u/.nvm/versions/node/v24.16.0/bin/codex' ;;
+  760:args=:flagged) printf '%s\n' 'node --enable-source-maps /home/u/.nvm/versions/node/v24.16.0/bin/codex' ;;
   760:args=:sibling) printf '%s\n' 'node /work/codex-notes/build.js' ;;
   760:args=:flag) printf '%s\n' 'node /work/tools/run.js --profile codex' ;;
+  760:args=:optionpath) printf '%s\n' 'node /work/tools/run.js --config /etc/codex/config.toml' ;;
   760:args=:bare) printf '%s\n' 'node' ;;
   760:ppid=:*) printf '%s\n' 1 ;;
   *:comm=:*) printf '%s\n' bash ;;
@@ -169,14 +171,20 @@ SH
   chmod +x "$fakebin/ps"
   printf '760\n' > "$dir/state/.lock"
 
-  FM_TEST_NODE_SHAPE=harness lib_eval "$fakebin" 'fm_harness_pid_alive 760' \
-    || fail "an npm-installed harness reporting MainThread was not recognized as a harness at all"
-  FM_TEST_NODE_SHAPE=harness lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
-    || fail "a MainThread-named harness session could not recognize its own lock"
+  # A bare interpreter and one whose wrapper inserted an interpreter flag are the
+  # same harness, so the script path has to be found rather than assumed to be
+  # the one token after the interpreter.
+  for shape in harness flagged; do
+    FM_TEST_NODE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 760' \
+      || fail "$shape: an npm-installed harness reporting MainThread was not recognized as a harness at all"
+    FM_TEST_NODE_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$shape: a MainThread-named harness session could not recognize its own lock"
+  done
 
   # Neither a script merely living beside a harness-shaped name, nor a passing
-  # argument that happens to be one, may be read as a harness.
-  for shape in sibling flag bare; do
+  # argument that happens to be one - bare, or the value of an option after a
+  # script path that is already not a harness - may be read as a harness.
+  for shape in sibling flag optionpath bare; do
     if FM_TEST_NODE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 760'; then
       fail "$shape: an unrelated node program reporting MainThread was treated as a harness"
     fi
@@ -495,9 +503,14 @@ set -u
   printf 'tty_self=%s\n' "$(fm_session_tty_of_pid "$$" 2>/dev/null || printf NONE)"
   printf 'tty_holder=%s\n' "$(fm_session_tty_of_pid "$FM_FIX_HOLDER" 2>/dev/null || printf NONE)"
   printf 'launcher_self=%s\n' "$(fm_session_launcher_pid "$$" 2>/dev/null || printf NONE)"
+  printf 'launcher_ancestry=%s\n' "$(fm_harness_ancestry_pids 2>/dev/null | while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    printf '%s ' "$(fm_session_launcher_pid "$m" 2>/dev/null || printf NONE)"
+  done)"
+  printf 'launcher_holder=%s\n' "$(fm_session_launcher_pid "$FM_FIX_HOLDER" 2>/dev/null || printf NONE)"
   if fm_session_lock_owned_by_self "$FM_FIX/state"; then printf 'owned=yes\n'; else printf 'owned=no\n'; fi
   if fm_session_lock_holder_competes "$FM_FIX_HOLDER"; then printf 'competes=yes\n'; else printf 'competes=no\n'; fi
-} > "$FM_FIX/check.out" 2> "$FM_FIX/check.err"
+} > "$FM_FIX/${FM_FIX_OUT:-check}.out" 2> "$FM_FIX/${FM_FIX_OUT:-check}.err"
 SH
   chmod +x "$dir/holder.sh" "$dir/session.sh" "$dir/check.sh"
 }
@@ -540,11 +553,21 @@ run_cohort_session() {  # <dir> <holder-pid> <launch-marker-pid> <env-assignment
 }
 
 cohort_field() {  # <dir> <key>
-  sed -n "s/^$2=//p" "$1/check.out" 2>/dev/null
+  cohort_field_of "$1" check "$2"
+}
+
+# The same field from one named report, for a case that checks the same fixture
+# more than once.
+cohort_field_of() {  # <dir> <report> <key>
+  sed -n "s/^$3=//p" "$1/$2.out" 2>/dev/null
 }
 
 cohort_report() {  # <dir>
-  printf '%s' "--- observed signals ---"$'\n'"$(cat "$1/check.out" 2>/dev/null)"
+  cohort_report_of "$1" check
+}
+
+cohort_report_of() {  # <dir> <report>
+  printf '%s' "--- observed signals ($2) ---"$'\n'"$(cat "$1/$2.out" 2>/dev/null)"
 }
 
 # The headline case: the lock names a live harness the process tree cannot
@@ -573,6 +596,76 @@ test_rehosted_session_owns_the_lock_it_cannot_reach() {
   [ "$(cohort_field "$dir" competes)" = no ] || fail \
     "this session's own lock holder was treated as a competing session"$'\n'"$(cohort_report "$dir")"
   pass "session-lock: a session rehosted outside its own process tree still owns its lock"
+}
+
+# The mirror of the case above, and the shape ownership converges into: every
+# acquisition rewrites the lock onto the acquiring session's own pid, so once a
+# background session has claimed the home the lock names the session that was
+# STARTED while the attended window session is the one asking whether it still
+# owns its home. The relationship is then only readable in reverse - the holder's
+# own recorded launch marker names this session - and while only the forward
+# direction existed this shape moved the read-only degradation onto the window
+# session for as long as the session it launched kept running.
+test_launching_session_owns_a_lock_naming_the_session_it_started() {
+  local dir window holder
+  dir="$TMP_ROOT/cohort-reverse"
+  make_cohort_fixture "$dir"
+  # The window session. It exports its own pid as the launch marker for
+  # everything it starts, exactly as a real session does, then starts the second
+  # session detached so that session is orphaned to init and the two are
+  # unreachable from each other's process tree in either direction.
+  cat > "$dir/window.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+export CLAUDE_PID=$$
+printf '%s\n' "$$" > "$FM_FIX/window-pid"
+i=0
+while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+bash -c '"$0" "$1" &' "$FM_FIX_CLAUDE" "$FM_FIX/holder.sh"
+i=0
+while [ "$i" -lt 400 ] && [ ! -s "$FM_FIX/holder-pid" ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+holder=$(tr -d '[:space:]' < "$FM_FIX/holder-pid")
+printf '%s\n' "$holder" > "$FM_FIX/state/.lock"
+export FM_FIX_HOLDER="$holder"
+bash "$FM_FIX/check.sh"
+printf '%s\n' "$?" > "$FM_FIX/check-finished"
+SH
+  chmod +x "$dir/window.sh"
+  "${COHORT_ENV_ARGV[@]}" FM_FIX="$dir" FM_FIX_LIB="$LIB" FM_FIX_CLAUDE="$NAMED_CLAUDE" \
+    HERDR_ENV=1 HERDR_PANE_ID=fixture-pane \
+    bash -c '"$0" "$1" &' "$NAMED_CLAUDE" "$dir/window.sh"
+  window=$(wait_for_file "$dir/window-pid" "the fixture window session pid")
+  holder=$(wait_for_file "$dir/holder-pid" "the pid of the session the window session started")
+  COHORT_PIDS+=("$holder" "$window")
+  wait_for_file "$dir/check-finished" "the fixture check result" >/dev/null
+
+  # Divergence, so the verdict can only be coming from the reverse direction:
+  # the holder is outside the ancestry, and no marker on this side of the pair
+  # names it.
+  assert_contains " $(cohort_field "$dir" ancestry) " " $window " \
+    "the window session was not in its own harness ancestry, so this fixture no longer reproduces the shape"$'\n'"$(cohort_report "$dir")"
+  assert_not_contains " $(cohort_field "$dir" ancestry) " " $holder " \
+    "the launched session was still inside the window session's ancestry, so ancestry alone could have decided this"$'\n'"$(cohort_report "$dir")"
+  [ "$(cohort_field "$dir" launcher_self)" = "$window" ] || fail \
+    "the window session did not publish its own pid as the launch marker its children inherit"$'\n'"$(cohort_report "$dir")"
+  assert_not_contains " $(cohort_field "$dir" launcher_ancestry) " " $holder " \
+    "a marker on this side of the pair named the holder, so the forward direction was not driven out"$'\n'"$(cohort_report "$dir")"
+  [ "$(cohort_field "$dir" launcher_holder)" = "$window" ] || fail \
+    "the launched session did not record the window session as its launcher, so nothing was left to relate them"$'\n'"$(cohort_report "$dir")"
+  [ "$(cohort_field "$dir" container_self)" = "$(cohort_field "$dir" container_holder)" ] || fail \
+    "the fixture lost the co-location the relationship is AND-ed with"$'\n'"$(cohort_report "$dir")"
+
+  [ "$(cohort_field "$dir" owned)" = yes ] || fail \
+    "the window session did not recognize a lock naming the session it started as its own home"$'\n'"$(cohort_report "$dir")"
+  [ "$(cohort_field "$dir" competes)" = no ] || fail \
+    "the session this one started was treated as a competing session"$'\n'"$(cohort_report "$dir")"
+  pass "session-lock: a session still owns its home once the lock names the session it started"
 }
 
 # The property the lock exists for. Same pane, same terminal, same everything a
@@ -640,6 +733,44 @@ cohort_tmux_ready() {
   command -v tmux >/dev/null 2>&1 || return 1
   cohort_tmux has-session -t cohort 2>/dev/null && return 0
   cohort_tmux new-session -d -s cohort -n control -c "$TMP_ROOT" 2>/dev/null
+}
+
+# A dead or recycled holder pid must never be matched through EITHER direction,
+# so liveness is decided before any recorded identity of the holder is read.
+# Driven with a recorded environment that satisfies every cohort signal at once,
+# behind two pids that differ only in whether they are alive.
+test_liveness_is_decided_before_any_recorded_cohort_signal() {
+  local dir holder dead
+  dir="$TMP_ROOT/cohort-liveness-first"
+  make_cohort_fixture "$dir"
+  start_cohort_holder "$dir"
+  holder=$COHORT_HOLDER_PID
+  dead=$(nonexistent_cohort_pid)
+
+  # Positive control: with the same recorded identity behind a LIVE harness pid,
+  # every signal the cohort proof reads is satisfied and the pid is accepted.
+  cohort_probe_recorded_identity "$dir/proc" "$holder" \
+    || fail "the recorded identity this case drives did not relate a live holder at all, so its refusal below would prove nothing"
+  if cohort_probe_recorded_identity "$dir/proc" "$dead"; then
+    fail "a dead pid whose recorded identity named this session was accepted as its own holder, so a recycled pid can be claimed"
+  fi
+  pass "session-lock: a dead holder pid is refused before its recorded identity is consulted"
+}
+
+# Ask the cohort question about <pid> with a fabricated recorded environment for
+# it under proc root <root>: a launch marker naming the asking process, plus the
+# container the asking process is in. Both cohort signals are then satisfiable,
+# so only liveness is left to decide the verdict.
+cohort_probe_recorded_identity() {  # <proc-root> <pid>
+  local root=$1 pid=$2
+  mkdir -p "$root/$pid"
+  lib_probe "
+    HERDR_ENV=1
+    HERDR_PANE_ID=fixture-pane
+    FM_PROC_ROOT_OVERRIDE='$root'
+    printf 'CLAUDE_PID=%s\0HERDR_ENV=1\0HERDR_PANE_ID=fixture-pane\0' \"\$\$\" > '$root/$pid/environ'
+    fm_session_same_cohort $pid
+  "
 }
 
 # Co-location has two providers so that neither is load-bearing alone. These two
@@ -791,6 +922,50 @@ test_momentary_stop_is_not_a_suspended_holder() {
   pass "session-lock: a stop undone during confirmation is not a suspended holder"
 }
 
+# The sampling settings are environment overrides, and an unusable one must not
+# be able to report a live holder as suspended: that is the one verdict that lets
+# an acquisition take over a genuinely separate concurrent session's home.
+test_unusable_stop_sampling_settings_cannot_release_a_live_holder() {
+  local dir holder setting
+  dir="$TMP_ROOT/cohort-unusable-sampling"
+  make_cohort_fixture "$dir"
+  start_cohort_holder "$dir"
+  holder=$COHORT_HOLDER_PID
+
+  for setting in \
+    'FM_SESSION_STOP_SAMPLES=0' \
+    'FM_SESSION_STOP_SAMPLES=abc' \
+    'FM_SESSION_STOP_SAMPLES=-1' \
+    'FM_SESSION_STOP_SAMPLES=' \
+    'FM_SESSION_STOP_SAMPLE_SLEEP=abc' \
+    'FM_SESSION_STOP_SAMPLE_SLEEP=0'
+  do
+    if lib_probe "$setting; fm_harness_pid_suspended $holder"; then
+      fail "$setting: a running holder was classified as suspended, so an ambient setting hands another session's home over"
+    fi
+    lib_probe "$setting; fm_session_lock_holder_competes $holder" \
+      || fail "$setting: a running holder in another session stopped being a competitor"
+  done
+
+  # The fallback is the documented default rather than a blanket refusal, so a
+  # genuinely stopped holder is still recognized under the same setting.
+  kill -STOP "$holder" 2>/dev/null || fail "could not suspend the fixture holder"
+  wait_for_state "$holder" T "the fixture holder never reached the stopped state"
+  lib_probe "FM_SESSION_STOP_SAMPLES=abc; fm_harness_pid_suspended $holder" \
+    || fail "an unusable sample count refused every suspension instead of falling back to the default"
+
+  # An unusable gap between samples must not collapse the confirmation window
+  # either: the stop below is undone well inside it, and a run that samples
+  # without waiting would report this holder as a suspended session.
+  ( sleep 0.4; kill -CONT "$holder" 2>/dev/null ) &
+  COHORT_PIDS+=("$!")
+  if lib_probe "FM_SESSION_STOP_SAMPLES=20 FM_SESSION_STOP_SAMPLE_SLEEP=abc; fm_harness_pid_suspended $holder"; then
+    fail "an unusable sample gap collapsed the confirmation window, so a momentary stop was read as a suspended session"
+  fi
+  wait_for_state "$holder" running "the fixture holder never resumed"
+  pass "session-lock: unusable stop-sampling settings fall back to the default and never release a live holder"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_node_main_thread_identity_comes_only_from_the_script_path
@@ -800,9 +975,12 @@ test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
 test_rehosted_session_owns_the_lock_it_cannot_reach
+test_launching_session_owns_a_lock_naming_the_session_it_started
 test_colocated_session_without_a_launch_relationship_is_refused
 test_related_session_in_another_container_is_refused
+test_liveness_is_decided_before_any_recorded_cohort_signal
 test_container_signal_alone_carries_co_location
 test_terminal_signal_alone_carries_co_location
 test_suspended_holder_releases_and_resumes
 test_momentary_stop_is_not_a_suspended_holder
+test_unusable_stop_sampling_settings_cannot_release_a_live_holder

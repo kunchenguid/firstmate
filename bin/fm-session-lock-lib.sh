@@ -16,11 +16,12 @@
 #   verified-harness ancestry. This is the original evidence and still the
 #   primary one.
 #
-#   Session cohort (further below): the lock names a live harness process that
-#   provably STARTED this session and is co-located with it. A harness can put a
-#   session's work in a process tree that never reaches the pid holding the lock
-#   - a background session rehosted under its own pty reparents to init - and
-#   ancestry then reports one genuine session as two competing ones.
+#   Session cohort (further below): the lock names a live harness process tied to
+#   this one by a launch relationship in EITHER direction - it started this
+#   session, or this session started it - and co-located with it. A harness can
+#   put a session's work in a process tree that never reaches the pid holding the
+#   lock - a background session rehosted under its own pty reparents to init -
+#   and ancestry then reports one genuine session as two competing ones.
 #
 # Neither kind vetoes the other: each is a positive proof on its own, and the
 # absence of cohort evidence leaves the ancestry verdict exactly as it was.
@@ -85,7 +86,7 @@ fm_harness_path_name() {  # <path>
 #   5. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name script
+  local comm=$1 args=$2 base argv0 name script rest
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
@@ -112,18 +113,34 @@ fm_harness_process_matches() {  # <comm> <args>
   # `MainThread` with argv `node .../bin/codex`, and without this it is not a
   # harness at all, which leaves a codex primary unable to acquire its own home.
   #
-  # Identity then has to come from the interpreter's SCRIPT PATH - argv[1], the
-  # one token after the interpreter - matched by the STRICT whole-path-component
-  # rule rather than the loose regex above. Both narrowings matter: `MainThread`
-  # is a name any node program can present, so neither an unrelated script under
-  # a harness-shaped directory nor a passing `--profile codex` argument may
-  # carry a harness verdict.
+  # Identity then has to come from the interpreter's SCRIPT PATH - the FIRST
+  # path-shaped token after the interpreter, so a wrapper that inserts an
+  # interpreter flag such as `node --enable-source-maps .../bin/codex` is still
+  # identified - matched by the STRICT whole-path-component rule rather than the
+  # loose regex above. Both narrowings matter: `MainThread` is a name any node
+  # program can present, so neither an unrelated script under a harness-shaped
+  # directory nor a passing `--profile codex` argument may carry a harness
+  # verdict. Only that first path is a candidate: scanning on past it would let
+  # any later path-valued option argument decide the verdict instead.
   if [ "$base" = MainThread ]; then
-    script=${args#* }
-    script=${script%% *}
-    if [ "$script" != "$args" ] && name=$(fm_harness_path_name "$script"); then
-      case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
-      return 0
+    rest=${args#* }
+    if [ "$rest" != "$args" ]; then
+      while [ -n "$rest" ]; do
+        script=${rest%% *}
+        case "$script" in
+          */*)
+            if name=$(fm_harness_path_name "$script"); then
+              case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+              return 0
+            fi
+            break
+            ;;
+        esac
+        case "$rest" in
+          *' '*) rest=${rest#* } ;;
+          *) rest= ;;
+        esac
+      done
     fi
   fi
   # Cursor: its own owner decides, from Cursor's name or versioned install tree
@@ -353,12 +370,19 @@ fm_session_launcher_pid() {  # <pid>
 # is load-bearing on its own and the absence of either falls back to the
 # ancestry verdict rather than opening ownership up:
 #
-#   1. Relationship. Some process in this session - this one, or a member of its
-#      harness ancestry - carries a launch marker naming the holder as the
-#      harness session that started it. This is what makes the holder OUR
-#      session rather than merely a neighbour, and it is the signal the process
-#      tree destroys when a harness rehosts a session under its own pty and the
-#      tree reparents to init.
+#   1. Relationship, satisfied by EITHER direction of one launch pair. Forward:
+#      some process in this session - this one, or a member of its harness
+#      ancestry - carries a launch marker naming the holder as the harness
+#      session that started it. Reverse: the holder's own exec-time launch marker
+#      names this process or a member of this session's harness ancestry. Both
+#      directions are required because acquisition converges the lock onto the
+#      acquiring session's own pid, so either member of a launcher/launched pair
+#      can end up recorded as the holder while the other one asks; testing only
+#      the forward direction would move the read-only degradation onto the
+#      launching session instead of removing it. Either way this is what makes
+#      the holder OUR session rather than merely a neighbour, and it is the
+#      signal the process tree destroys when a harness rehosts a session under
+#      its own pty and the tree reparents to init.
 #   2. Co-location. Both processes are in the same innermost runtime container,
 #      or on the same controlling terminal. Two providers, either sufficient,
 #      because a rehosted session keeps its pane and loses its terminal.
@@ -369,30 +393,67 @@ fm_session_launcher_pid() {  # <pid>
 # exactly that, and it must still be refused. Co-location alone would also be
 # the only thing standing between an unrelated harness and this home if the
 # holder's pid were recycled, which is why it corroborates rather than decides.
+# $2 and $3 are internal fast paths for callers that have already done the same
+# work, and change no verdict: $2 is this session's harness ancestry when the
+# caller has already resolved it, and $3 is 1 only when the caller has already
+# proven the holder is a live harness. Every other caller passes one argument and
+# gets both checks here, so the liveness precondition still runs before any
+# recorded identity of the holder is consulted in either direction.
 FM_SESSION_COHORT_EVIDENCE=
-fm_session_same_cohort() {  # <pid>
-  local pid=$1 mine theirs pids member launcher related=0 located=
+fm_session_same_cohort() {  # <pid> [<ancestry-pids>] [<holder-alive-verified>]
+  local pid=$1 pids=${2-} verified=${3:-0} mine theirs member launcher
+  local related=0 relation='' located=''
   FM_SESSION_COHORT_EVIDENCE=
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
   # A dead or recycled pid must never be matched, so the holder has to be a live
   # harness before any of its recorded identity is consulted.
-  fm_harness_pid_alive "$pid" || return 1
+  if [ "$verified" != 1 ]; then
+    fm_harness_pid_alive "$pid" || return 1
+  fi
 
   launcher=$(fm_session_launcher_pid "$$" 2>/dev/null || true)
-  [ "$launcher" = "$pid" ] && related=1
-  if [ "$related" -eq 0 ] && pids=$(fm_harness_ancestry_pids 2>/dev/null); then
+  if [ "$launcher" = "$pid" ]; then
+    related=1
+    relation="launched this session"
+  fi
+  if [ "$related" -eq 0 ] && [ -z "$pids" ]; then
+    pids=$(fm_harness_ancestry_pids 2>/dev/null || true)
+  fi
+  if [ "$related" -eq 0 ]; then
     while IFS= read -r member; do
       [ -n "$member" ] || continue
       launcher=$(fm_session_launcher_pid "$member" 2>/dev/null || true)
       if [ "$launcher" = "$pid" ]; then
         related=1
+        relation="launched this session"
         break
       fi
     done <<EOF
 $pids
 EOF
+  fi
+  if [ "$related" -eq 0 ]; then
+    launcher=$(fm_session_launcher_pid "$pid" 2>/dev/null || true)
+    if [ -n "$launcher" ]; then
+      if [ "$launcher" = "$$" ]; then
+        related=1
+      else
+        while IFS= read -r member; do
+          [ -n "$member" ] || continue
+          if [ "$launcher" = "$member" ]; then
+            related=1
+            break
+          fi
+        done <<EOF
+$pids
+EOF
+      fi
+      if [ "$related" -eq 1 ]; then
+        relation="was launched by this session"
+      fi
+    fi
   fi
   [ "$related" -eq 1 ] || return 1
 
@@ -408,7 +469,7 @@ EOF
     return 1
   fi
 
-  FM_SESSION_COHORT_EVIDENCE="launched this session; $located"
+  FM_SESSION_COHORT_EVIDENCE="$relation; $located"
   return 0
 }
 
@@ -429,25 +490,52 @@ EOF
 # Only `T` counts. Linux also reports `t` for a tracing stop, which is routinely
 # transient inside a debugger or strace, and reclaiming a home from it would be
 # a reflex rather than a decision.
-FM_SESSION_STOP_SAMPLES=${FM_SESSION_STOP_SAMPLES:-3}
-FM_SESSION_STOP_SAMPLE_SLEEP=${FM_SESSION_STOP_SAMPLE_SLEEP:-0.2}
+#
+# The verdict fails CLOSED - NOT suspended - on every state it cannot confirm,
+# because reporting a live holder as suspended is what lets an acquisition take
+# over a genuinely separate concurrent session's home. So the sample count and
+# the gap between samples reject empty, non-numeric and zero values back to their
+# defaults instead of being trusted from the environment, an unreadable process
+# state is not a stop, and a sample sequence that cannot be completed is not a
+# confirmation.
+FM_SESSION_STOP_SAMPLES_DEFAULT=3
+FM_SESSION_STOP_SAMPLE_SLEEP_DEFAULT=0.2
+FM_SESSION_STOP_SAMPLES=${FM_SESSION_STOP_SAMPLES:-$FM_SESSION_STOP_SAMPLES_DEFAULT}
+FM_SESSION_STOP_SAMPLE_SLEEP=${FM_SESSION_STOP_SAMPLE_SLEEP:-$FM_SESSION_STOP_SAMPLE_SLEEP_DEFAULT}
 fm_harness_pid_suspended() {  # <pid>
-  local pid=$1 i=0 state
+  local pid=$1 samples nap i=0 confirmed=0 state
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  while [ "$i" -lt "$FM_SESSION_STOP_SAMPLES" ]; do
-    state=$(ps -o state= -p "$pid" 2>/dev/null | tr -d '[:space:]') || return 1
+  samples=${FM_SESSION_STOP_SAMPLES:-$FM_SESSION_STOP_SAMPLES_DEFAULT}
+  case "$samples" in
+    ''|*[!0-9]*|0) samples=$FM_SESSION_STOP_SAMPLES_DEFAULT ;;
+  esac
+  # The gap is a fractional number of seconds, so it also has to admit one
+  # decimal point while still rejecting any zero-valued gap, which would collapse
+  # the confirmation window a momentary stop is separated by.
+  nap=${FM_SESSION_STOP_SAMPLE_SLEEP:-$FM_SESSION_STOP_SAMPLE_SLEEP_DEFAULT}
+  case "$nap" in
+    ''|.|*[!0-9.]*|*.*.*) nap=$FM_SESSION_STOP_SAMPLE_SLEEP_DEFAULT ;;
+    *)
+      case "${nap//./}" in
+        *[!0]*) : ;;
+        *) nap=$FM_SESSION_STOP_SAMPLE_SLEEP_DEFAULT ;;
+      esac
+      ;;
+  esac
+  while [ "$i" -lt "$samples" ]; do
+    state=$(ps -o state= -p "$pid" 2>/dev/null | tr -d '[:space:]')
     case "$state" in
-      T*) : ;;
+      T*) confirmed=$((confirmed + 1)) ;;
       *) return 1 ;;
     esac
     i=$((i + 1))
-    if [ "$i" -lt "$FM_SESSION_STOP_SAMPLES" ]; then
-      sleep "$FM_SESSION_STOP_SAMPLE_SLEEP"
+    if [ "$i" -lt "$samples" ]; then
+      sleep "$nap" || return 1
     fi
   done
-  return 0
+  [ "$confirmed" -gt 0 ] && [ "$confirmed" -eq "$samples" ]
 }
 
 # True when session-lock holder $1 is a COMPETING session the caller must yield
@@ -465,7 +553,7 @@ fm_session_lock_holder_competes() {  # <pid>
     FM_SESSION_HOLDER_YIELD_REASON="dead or non-harness holder pid $pid"
     return 1
   fi
-  if fm_session_same_cohort "$pid"; then
+  if fm_session_same_cohort "$pid" '' 1; then
     FM_SESSION_HOLDER_YIELD_REASON="this session's own holder pid $pid ($FM_SESSION_COHORT_EVIDENCE)"
     return 1
   fi
@@ -504,5 +592,5 @@ fm_session_lock_owned_by_self() {
   done <<EOF
 $pids
 EOF
-  fm_session_same_cohort "$lock_pid"
+  fm_session_same_cohort "$lock_pid" "$pids"
 }

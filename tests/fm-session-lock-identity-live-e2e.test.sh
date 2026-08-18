@@ -48,8 +48,17 @@ LIB="$ROOT/bin/fm-session-lock-lib.sh"
 SOCKET="fm-session-lock-identity-$$"
 LAB=
 REAL_TMUX=
+# Every harness this guard launched, so no exit path can leave one behind. A
+# SIGSTOPped process does not act on the SIGHUP that killing the tmux server
+# delivers, so it has to be continued before it can be terminated at all.
+LAUNCHED_PIDS=
 
 cleanup_all() {
+  local p
+  for p in $LAUNCHED_PIDS; do
+    kill -CONT "$p" 2>/dev/null || true
+    kill -TERM "$p" 2>/dev/null || true
+  done
   [ -n "$REAL_TMUX" ] && "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1
   [ -n "${LAB:-}" ] && rm -rf "$LAB"
   return 0
@@ -162,6 +171,7 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor; do
     || fail "$harness ($version): could not launch a window for the identity probe"
 
   pid=
+  tracked=
   identified=0
   for _ in $(seq 1 300); do
     pane_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "identity:$harness" '#{pane_pid}' 2>/dev/null | tr -d '[:space:]')
@@ -172,6 +182,10 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor; do
     case "$pid" in
       ''|*[!0-9]*) sleep 0.2; continue ;;
     esac
+    if [ "$pid" != "$tracked" ]; then
+      LAUNCHED_PIDS="$LAUNCHED_PIDS $pid"
+      tracked=$pid
+    fi
     if probe "fm_harness_pid_alive $pid"; then
       identified=1
       break

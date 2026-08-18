@@ -203,10 +203,10 @@ ok - session-lock identity: codex codex-cli 0.139.0 is identified, refuses an un
 
 Codex is the harness whose reported name depends on its install method.
 The macOS table above records `codex` for a native 0.146.0 install, while an npm install under nvm runs it as a node script and node renames its own main thread, so `ps -o comm=` reports `MainThread` and no interpreter name at all.
-Identity for that shape comes from the interpreter's script path in argv, matched by whole path component only, so an unrelated node program presenting the same name is not a harness.
+Identity for that shape comes from the interpreter's script path in argv, taken as the first path-shaped token after the interpreter so an inserted node flag does not hide it, and matched by whole path component only, so an unrelated node program presenting the same name is not a harness.
 
 The launch marker is the environment variable a harness exports into every process it starts, naming its own session pid.
-It is what lets a session the harness rehosted under its own pty still recognize the lock its process tree can no longer reach.
+It is what lets a session the harness rehosted under its own pty still recognize the lock its process tree can no longer reach, in whichever direction of the launch pair recorded it.
 A bare launch with no prompt starts no child, so the live guard reports it as unobserved rather than asserting it; the marker itself is confirmed from inside a real session.
 
 ```sh
