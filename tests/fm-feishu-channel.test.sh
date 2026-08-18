@@ -46,6 +46,7 @@ APP_FINGERPRINT="$APP_FINGERPRINT" \
 node --input-type=module <<'JS'
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -60,8 +61,11 @@ import {
   offerFeishuIngress,
   pathsForHome,
   pendingFeishuIngress,
+  persistAssistantOutboundIntent,
   publishFeishuInbound,
   receiptOutbound,
+  registerAssistantOutbound,
+  repairOutboundState,
   statusSummary,
   writeTransportHealth,
 } from "./bin/fm-feishu-state.mjs";
@@ -76,6 +80,7 @@ const home = process.env.FM_HOME;
 const sessionId = process.env.SID;
 const sessionFile = process.env.SESSION_FILE;
 const sessionCwd = process.env.SESSION_DIR;
+const sha = (value) => createHash("sha256").update(String(value)).digest("hex");
 const pairing = createPairing(home, {
   appIdFingerprint: process.env.APP_FINGERPRINT,
   allowedUser: "ou_captain1234",
@@ -284,6 +289,8 @@ await emit(pi, "message_start", { message: session.entries.at(-1).message }, ses
 await finalizeAssistant("00000005", [{ type: "text", text: "Local TUI answer is mirrored too" }], "2026-08-12T00:00:04.000Z");
 session.entries.push({ type: "message", id: "00000006", parentId: "00000005", timestamp: "2026-08-12T00:00:05.000Z", message: { role: "user", content: "\u2063FIRSTMATE_OP: v1 routine" } });
 await finalizeAssistant("00000007", [{ type: "text", text: "Captain, shipshape." }], "2026-08-12T00:00:06.000Z");
+await finalizeAssistant("0000000c", [{ type: "text", text: "Captain，shipshape." }], "2026-08-12T00:00:06.500Z");
+await finalizeAssistant("0000000d", [{ type: "text", text: "Captain， shipshape." }], "2026-08-12T00:00:06.750Z");
 await finalizeAssistant("00000008", [{ type: "thinking", thinking: "private" }, { type: "toolCall", id: "call-1", name: "read", arguments: {} }], "2026-08-12T00:00:07.000Z");
 session.entries.push({ type: "custom", id: "00000009", parentId: "00000008", timestamp: "2026-08-12T00:00:08.000Z", customType: "tui-only", data: { message: "local alert" } });
 await finalizeAssistant("0000000a", [{ type: "text", text: "Watcher answer is mirrored too" }], "2026-08-12T00:00:09.000Z");
@@ -299,9 +306,53 @@ for (let claim = claimNextOutbound(home); claim; claim = claimNextOutbound(home)
 assert.deepEqual(mirrored, [
   { id: "00000003", text: "Direct Feishu answer https://example.test/full" },
   { id: "00000005", text: "Local TUI answer is mirrored too" },
+  { id: "0000000d", text: "Captain， shipshape." },
   { id: "0000000a", text: "Watcher answer is mirrored too" },
 ]);
 assert.equal(statusSummary(home).outbound_pending, 0);
+
+assert.equal(persistAssistantOutboundIntent(home, {
+  text: "Captain，shipshape.",
+  assistantEntryId: "0000000e",
+  sessionOrder: session.entries.length,
+  sessionEntryTimestamp: "2026-08-12T00:00:11.000Z",
+  sessionId,
+  bindingGeneration: binding.generation,
+}).status, "skipped", "durable intent path accepted the fullwidth-comma routine response");
+assert.equal(registerAssistantOutbound(home, {
+  text: "Captain，shipshape.",
+  assistantEntryId: "0000000e",
+  sessionOrder: session.entries.length,
+  sessionEntryTimestamp: "2026-08-12T00:00:11.000Z",
+  sessionId,
+  bindingGeneration: binding.generation,
+}).status, "skipped", "direct outbox path accepted the fullwidth-comma routine response");
+assert.equal(claimNextOutbound(home), undefined, "routine-response sibling paths introduced outbound work");
+
+const historicalReg = registerAssistantOutbound(home, {
+  text: "Historical mirror persisted before the fullwidth routine fix",
+  assistantEntryId: "0000000f",
+  sessionOrder: session.entries.length + 1,
+  sessionEntryTimestamp: "2026-08-12T00:00:12.000Z",
+  sessionId,
+  bindingGeneration: binding.generation,
+});
+assert.equal(historicalReg.status, "registered", "historical mirror registered before routine rewrite");
+const historicalClaim = claimNextOutbound(home);
+assert.ok(historicalClaim, "historical mirror was claimed for delivery");
+receiptOutbound(home, historicalClaim, { messageId: "om_historicalposted", chatId: "oc_chat1234" });
+assert.equal(statusSummary(home).outbound_pending, 0, "historical mirror delivered with no pending work");
+const historicalPaths = pathsForHome(home);
+const historicalOutboxPath = join(historicalPaths.outbox, `${sha(historicalClaim.outbox.event_id)}.json`);
+const historicalOutbox = JSON.parse(readFileSync(historicalOutboxPath, "utf8"));
+const historicalRoutineText = "Captain，shipshape.";
+historicalOutbox.text = historicalRoutineText;
+historicalOutbox.text_hash = `sha256:${sha(historicalRoutineText)}`;
+historicalOutbox.chunks = [{ index: 0, count: 1, chunk: historicalRoutineText, chunk_hash: `sha256:${sha(historicalRoutineText)}`, idempotency_key: historicalOutbox.chunks[0].idempotency_key }];
+writeFileSync(historicalOutboxPath, `${JSON.stringify(historicalOutbox)}\n`);
+repairOutboundState(home);
+assert.equal(statusSummary(home).outbound_pending, 0, "restart validation kept a terminal-delivered fullwidth routine record local without corrupting state");
+assert.equal(JSON.parse(readFileSync(historicalOutboxPath, "utf8")).text, historicalRoutineText, "terminal-delivered historical routine record survived restart validation");
 
 const pairingPath = pathsForHome(home).pairing;
 const validPairingBytes = readFileSync(pairingPath, "utf8");
@@ -409,7 +460,6 @@ writeFileSync(secretFile, `${JSON.stringify({ type: "session", version: 3, id: s
 const secretBinding = bindSession(secretHome, { sessionId, sessionFile: secretFile, sessionCwd: secretSession, headerId: sessionId, headerCwd: secretSession });
 const paths = pathsForHome(secretHome);
 const beforeIntents = readdirSync(paths.outboundRegistrationIntents).length;
-const { persistAssistantOutboundIntent } = await import("./bin/fm-feishu-state.mjs");
 const refused = persistAssistantOutboundIntent(secretHome, { text: "Authorization: Bearer fixed-secret-value-123456", assistantEntryId: "abcdef01", sessionOrder: 1, sessionEntryTimestamp: "2026-08-12T00:00:00.000Z", sessionId, bindingGeneration: secretBinding.generation });
 assert.equal(refused.status, "secret-refused");
 assert.equal(readdirSync(paths.outboundRegistrationIntents).length, beforeIntents, "secret text was persisted before deterministic refusal");
