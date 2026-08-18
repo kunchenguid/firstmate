@@ -38,6 +38,8 @@ The controller rejects duplicate active account or writable-worktree bindings.
 A general request has role `author`, is explicitly eligible, and is owned by either the primary or a secondmate.
 The same task generation and exact identity is idempotent, while a changed identity under the same task generation refuses.
 An assigned request stays in the queue until its ordinary release proof is accepted and every exact cloud resource is safely reset.
+A request that never reached assignment leaves the queue by `withdraw`, which is the only other queue mutation: it accepts an entry still in `queued`, refuses anything a worker owns or a pending provider action names, requires `--confirm-withdraw` and `--confirm-subscription`, touches no capacity, and removes the per-task cloud state including the staged provider credential.
+Release remains the only exit for work that ever held capacity.
 Therefore a truly empty queue also means there is no active task worker and desired worker compute is zero.
 
 ```sh
