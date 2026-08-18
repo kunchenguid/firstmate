@@ -776,10 +776,11 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
 # bounded pause handling.
-# A still-live agent at an external-decision gate is the disconfirming case: it
-# must surface once, while the unchanged hash must not append the same wake on
-# every watcher re-arm.
-test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
+# A still-live agent with a declared pause is no longer the disconfirming case: a
+# declared external-wait pause is legitimate whether the agent is alive on a
+# healthy idle pane or has exited, so it absorbs on the long pause cadence exactly
+# like an exited agent, never re-escalating on the wedge timer.
+test_exited_declared_pause_is_bounded_but_live_gate_absorbed() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -848,21 +849,29 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
 
-  # First sight must surface promptly so a live external-decision gate is not
-  # hidden behind the pause cadence.
+  # A live agent with a declared pause is absorbed on the long pause cadence, not
+  # surfaced as a possible wedge, because the declared external wait is legitimate
+  # even while the worker process is still alive on a healthy idle pane.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "live external-decision gate did not surface immediately"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the immediate external-decision surface"
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "live agent with a declared pause surfaced instead of absorbing: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "live declared pause printed a wake reason during absorb: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "live declared pause enqueued a wake during absorb"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live declared pause did not record its pause cadence marker"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "live declared pause started the wedge timer"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the live declared-pause absorb"
 
-  # Re-arm with the stale timer already beyond the wedge threshold. This is the
-  # exact unchanged-hash fallback after the immediate surface: it must retain
-  # the pause cadence and discard any residual wedge timer instead of emitting
-  # a second possible-wedge wake.
+  # Re-arm with the stale timer already beyond the wedge threshold. The live
+  # declared pause must retain its pause cadence and discard any residual wedge
+  # timer instead of emitting a possible-wedge wake.
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -870,16 +879,71 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pid=$!
   if ! wait_live "$pid" 30; then
     reap "$pid"
-    fail "live external-decision gate escalated on the wedge timer after its immediate surface: $(cat "$out")"
+    fail "live declared pause escalated on the wedge timer on re-arm: $(cat "$out")"
   fi
-  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live external-decision gate lost its pause cadence marker"; }
-  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "live external-decision gate retained the wedge timer"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live declared pause lost its pause cadence marker on re-arm"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "live declared pause retained the wedge timer on re-arm"; }
   reap "$pid"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
   bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
-  [ "$wakes" -eq 0 ] || fail "acknowledged external-decision surface replayed $wakes wakes"
-  [ "$bare" -eq 0 ] || fail "acknowledged external-decision bare stale remained queued"
-  pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
+  [ "$wakes" -eq 0 ] || fail "live declared pause replayed $wakes wakes on re-arm"
+  [ "$bare" -eq 0 ] || fail "live declared pause surfaced as $bare bare stopped-crew wakes on re-arm"
+  pass "exited and live declared-pause panes and dead captain-held panes all use the bounded pause cadence"
+}
+
+# A live agent that declared a pause is absorbed on the long cadence, but a
+# declared pause must never mask an agent that subsequently dies: endpoint-death
+# detection keeps priority over the long cadence. So when the same pane goes
+# dead after being absorbed as a live pause, it must still re-surface on the
+# bounded pause cadence (the death is detected for a recheck), never stay hidden
+# behind the pause cadence and never be mislabeled a wedge.
+test_live_paused_agent_death_still_rechecks() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back
+  dir=$(make_case live-paused-then-dead); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/gate.status"
+  window="test:fm-gate"
+  printf 'idle external-decision gate\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/gate.meta"
+  printf 'paused: waiting at an active external-decision gate\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle external-decision gate")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # Phase A: the live agent's declared pause is absorbed on the long cadence.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "live paused agent was not absorbed before death: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live paused absorb did not record its pause marker"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the live-pause absorb"
+
+  # Phase B: the agent dies (stopped, bare shell) while the pause status remains.
+  # The death must still be detected: age the status past the re-surface
+  # threshold and confirm the pane re-surfaces as a paused recheck, not a wedge
+  # and not hidden behind the pause cadence.
+  printf 'idle bare shell after agent death\n' > "$capture_file"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "dead-after-pause agent did not re-surface on the bounded cadence: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "dead-after-pause agent did not re-surface with a stale wake"
+  grep -F "awaiting external" "$out" >/dev/null || fail "dead-after-pause re-surface was not labeled a paused recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "dead-after-pause agent was mislabeled a possible wedge"
+  pass "a live paused agent that subsequently dies still re-surfaces on the bounded pause cadence (death not masked)"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -1954,7 +2018,8 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
-test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_exited_declared_pause_is_bounded_but_live_gate_absorbed
+test_live_paused_agent_death_still_rechecks
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking

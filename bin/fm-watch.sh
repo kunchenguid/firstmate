@@ -161,9 +161,10 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
-# pane is absorbed rather than wedge-escalated.
-# A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once.
+# pane is absorbed rather than wedge-escalated, whether the agent is still alive
+# on a healthy idle pane or has exited. A captain-held crew whose agent has
+# confidently exited uses the same bounded cadence, while a live agent at a
+# captain-held (non-pause) gate still surfaces once.
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -372,8 +373,12 @@ clear_pause_tracking() {  # <window>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# A declared pause (paused:) is absorbed on the long bounded cadence whether the
+# agent is still alive on a healthy idle pane or has exited, so a legitimate long
+# external wait is not re-escalated every STALE_ESCALATE_SECS just because the
+# worker process is still alive. Only a confidently dead ordinary crew may recover
+# paused classification after fm-crew-state has fallen back to stopped or unknown;
+# a live agent at a captain-held (non-pause) gate still surfaces once.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -389,7 +394,7 @@ pause_state_class() {  # <window> <task>
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$(window_kind "$win")" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
+      if [ "$agent_alive" != dead ] && ! status_is_paused "$last"; then
         rm -f "$recheck_file"
         printf 'none'
         return
@@ -406,7 +411,7 @@ pause_state_class() {  # <window> <task>
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
+    if [ "$agent_alive" != dead ] && ! status_is_paused "$last"; then
       rm -f "$recheck_file"
       printf 'none'
       return
