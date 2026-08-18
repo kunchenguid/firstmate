@@ -393,6 +393,19 @@ def inspect_pi_credential(account_home: Path) -> tuple[str, str]:
         )
     except CrosscheckError as exc:
         tool_fail(str(exc))
+    # Pi pools every signed-in profile in one auth.json keyed by provider slot,
+    # and only this slot is ever read. An account home carrying more than one
+    # slot therefore cannot mean what its caller thinks: the roster's selected
+    # profile is unreachable, and the Azure reviewer archive - which stages this
+    # whole file - would carry every other signed-in account's live tokens into
+    # a compartment that needs exactly one. Project a single-profile home with
+    # bin/fm-pi-account-home.py rather than pointing a reviewer at the pool.
+    if isinstance(credentials, dict) and len(credentials) > 1:
+        tool_fail(
+            f"Pi executing-account credential at {credential_file} carries "
+            f"{len(credentials)} provider slots; an account home holds exactly "
+            "one (project one with bin/fm-pi-account-home.py)"
+        )
     credential = (
         credentials.get("openai-codex")
         if isinstance(credentials, dict)

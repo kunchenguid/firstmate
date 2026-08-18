@@ -172,6 +172,22 @@ The Pi closure parameters must name the same tarball the crewmate cell image ins
 
 Pi declares `engines.node >= 22.19.0` and ships a `#!/usr/bin/env node` entrypoint, so the Node pin is a correctness bound and not a preference: an older runtime or an unresolvable `node` on `PATH` fails the reviewer at launch rather than at admission.
 
+### Pi reviewer account homes
+
+Pi keeps every signed-in profile in one `auth.json` keyed by provider slot (`openai-codex`, `openai-codex-2`, ...), while every Firstmate consumer reads an account home holding exactly one credential under the fixed key `openai-codex`.
+Pointing a reviewer at the pooled file therefore fails twice: only the first slot is ever read, so the selected profile is unreachable, and the reviewer credential archive would carry every signed-in account's tokens into a compartment that needs one.
+
+`bin/fm-pi-account-home.py` writes the single-profile homes those consumers expect:
+
+```sh
+bin/fm-pi-account-home.py report
+bin/fm-pi-account-home.py project --destination-root <root> --profile openai-codex-2
+```
+
+It validates credential shape, refuses a blanked or non-oauth profile, and reports expiry instants and account digests, never token material.
+It does not decide whether a credential is still good enough to use: that question has one owner, `bin/fm-credential-expiry.py`, which the reviewer preflight runs.
+Distinct profiles are distinct upstream accounts, so a Pi-versus-Pi review still satisfies account separation; `config/crosscheck-same-model` relaxes only the model screen.
+
 The home-local configuration is optional and gitignored:
 
 ```json

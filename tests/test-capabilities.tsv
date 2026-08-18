@@ -11,6 +11,7 @@ fm-arm-pretool-check.test.sh	hermetic
 fm-auto-reap-herdr-e2e.test.sh	herdr-lab
 fm-auto-reap.test.sh	hermetic
 fm-autocompact.test.sh	hermetic
+fm-azure-cell-image.test.sh	hermetic
 fm-azure-pilot.test.sh	hermetic
 fm-azure-runner.test.sh	hermetic
 fm-azure-validation.test.sh	hermetic
@@ -63,6 +64,7 @@ fm-lock.test.sh	hermetic
 fm-macos-permissions.test.sh	hermetic
 fm-nm-step-liveness.test.sh	hermetic
 fm-no-mistakes-reattach.test.sh	hermetic
+fm-pi-account-home.test.sh	hermetic
 fm-pi-primary-live-e2e.test.sh	hermetic
 fm-pi-primary-types.test.sh	hermetic
 fm-pi-watch-extension.test.sh	hermetic
@@ -103,12 +105,11 @@ fm-watch-pause-absorb.test.sh	hermetic
 fm-watch-triage.test.sh	hermetic
 fm-watcher-lock.test.sh	hermetic
 fm-worker-lifecycle.test.sh	hermetic
-fm-worker-supervisor.test.sh	hermetic
 fm-worker-outcome-transport.test.sh	hermetic
+fm-worker-supervisor.test.sh	hermetic
 fm-x-mode.test.sh	hermetic
 lavish-repair.test.sh	hermetic
 lavish.test.sh	hermetic
 operating-fundamentals.test.sh	hermetic
 runner-entry-probe.test.sh	hermetic
 test-suite-seal.test.sh	hermetic
-fm-azure-cell-image.test.sh	hermetic
