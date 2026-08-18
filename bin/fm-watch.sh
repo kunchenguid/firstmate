@@ -399,8 +399,15 @@ busy_turn_over_age() {  # <task>
 # than asserting a stall.
 # SINGLE-FIRE. The .stalled-* marker is a LATCH, not a throttle: a declared-work
 # episode surfaces exactly once and stays silent until a later status event ends
-# the episode (which resets the silence age, so the gate fails and the latch
-# clears). One wake suffices because the wake queue is durable and is
+# the episode. The marker holds the status log's SIGNATURE at wake time - the
+# same size:mtime episode boundary scan_signals persists in .seen-* - so what
+# ends an episode is the mate's own event, never watcher uptime: an append the
+# poll sees inside the sub-threshold window clears the marker outright, and one
+# that lands while no watcher is running still reads as a new episode on the
+# next poll. A bare existence check cannot tell those apart, and would stay
+# latched forever against a mate that declared again and went quiet across a
+# restart or a slept host - permanently blinding the detector for exactly the
+# mate it exists to catch. One wake suffices because the wake queue is durable and is
 # acknowledged only after the handling turn, so a single wake cannot be lost.
 # That bound is also what makes the accepted false readings cheap: whichever of
 # the four it turns out to be, the mate is worth one look, and suppressing the
@@ -409,7 +416,7 @@ busy_turn_over_age() {  # <task>
 # <key> is the caller's already-computed marker key (pure parameter expansion in
 # the poll loop), passed in rather than rebuilt here so this costs no subshell.
 secondmate_declared_work_check() {  # <task> <last-status-line> <marker-key>
-  local task=$1 last=$2 key=$3 age reason
+  local task=$1 last=$2 key=$3 age reason sig marker
   if ! status_declares_work "$last"; then
     rm -f "$STATE/.stalled-$key"
     return 0
@@ -419,10 +426,15 @@ secondmate_declared_work_check() {  # <task> <last-status-line> <marker-key>
     rm -f "$STATE/.stalled-$key"
     return 0
   fi
-  [ ! -e "$STATE/.stalled-$key" ] || return 0
+  marker="$STATE/.stalled-$key"
+  sig=$(fm_wake_signal_sig "$STATE/$task.status") || sig=''
+  if [ -e "$marker" ]; then
+    [ -n "$sig" ] || return 0
+    [ "$sig" != "$(cat "$marker" 2>/dev/null)" ] || return 0
+  fi
   reason="check: secondmate-stalled $task: declared work, then no status event for ${age}s - may be long legitimate work with nothing to report, a phase it finished without closing its record, work nothing resumed, or, for a remote mate, a relay that stopped delivering its events here; check cheaply before acting (last report: $last)"
   fm_wake_append check "secondmate-stalled:$task" "$reason" || exit 1
-  : > "$STATE/.stalled-$key"
+  printf '%s\n' "$sig" > "$marker"
   wake "$reason"
 }
 

@@ -397,7 +397,7 @@ Handle actionable wakes as follows:
 
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
-3. For `check:`, act on the named poll result, including merges, Relay events, process-to-event source results, and a `secondmate-stalled` result, which reports a secondmate whose own last event still declares work while its status stream then went silent - long legitimate work, a phase it finished without closing its record, or work nothing resumed - so check cheaply which it is, then push the declared work forward or close the record.
+3. For `check:`, act on the named poll result, including merges, Relay events, process-to-event source results, and a `secondmate-stalled` result, which reports a secondmate whose own last event still declares work while its status stream then went silent - long legitimate work, a phase it finished without closing its record, work nothing resumed, or, for a remote mate, a relay that stopped delivering its events to this home - so check cheaply which it is, then push the declared work forward, close the record, or re-read the remote home and restore its delivery.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.

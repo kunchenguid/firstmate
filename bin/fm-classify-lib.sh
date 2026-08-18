@@ -61,18 +61,6 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# The non-terminal verb that DECLARES work. A worker (or a secondmate reporting
-# to its parent) appends
-#   working: <the phase it has started or is about to start>
-# to state what it is doing. Unlike `paused:` - a KNOWN external wait that is
-# expected to idle and owns its own bounded re-surface cadence - and unlike the
-# terminal verbs, this line is an INTENTION: it proves what the worker said it
-# would do, never that the work is running. When it is the last event in a stream
-# and the endpoint has gone idle, the declared work was never resumed. This
-# constant is the ONE definition of the verb, read by both consumers rather than
-# hardcoded; FM_CLASSIFY_DECLARED_WORK_VERB overrides it.
-FM_CLASSIFY_DECLARED_WORK_VERB_DEFAULT='working'
-
 # Seconds a status stream may stay SILENT after declaring work before that
 # silence is worth reconciling. The measured quantity is the status log's own
 # quiet, not an endpoint reading: a live worker writes status events, and one
@@ -139,7 +127,7 @@ status_is_captain_relevant() {
   status_is_paused "$line" && return 1
   verb=$(status_line_verb "$line")
   case "$verb" in
-    "${FM_CLASSIFY_DECLARED_WORK_VERB:-$FM_CLASSIFY_DECLARED_WORK_VERB_DEFAULT}"|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
       return 1
       ;;
   esac
@@ -165,11 +153,18 @@ status_is_paused() {  # <status-line>
 # 0 if a status line's leading verb declares work (working: <what>). A pure read
 # of the line, matching only the verb before the first colon, so a blocker or
 # note that merely mentions "working" does not false-match.
+# A worker (or a secondmate reporting to its parent) appends
+#   working: <the phase it has started or is about to start>
+# to state what it is doing. Unlike `paused:` - a KNOWN external wait that is
+# expected to idle and owns its own bounded re-surface cadence - and unlike the
+# terminal verbs, this line is an INTENTION: it proves what the worker said it
+# would do, never that the work is running. When it is the last event in a stream
+# and the endpoint has gone idle, the declared work was never resumed.
 status_declares_work() {  # <status-line>
   local line=$1 verb
   [ -n "$line" ] || return 1
   verb=$(status_line_verb "$line")
-  [ "$verb" = "${FM_CLASSIFY_DECLARED_WORK_VERB:-$FM_CLASSIFY_DECLARED_WORK_VERB_DEFAULT}" ]
+  [ "$verb" = working ]
 }
 
 # 0 if declared work has gone SILENT: the stream's last event still declares
@@ -1091,9 +1086,7 @@ EOF
 }
 
 # Fold material routed-work phases in the same keyed event stream.
-# A declared-work or declared-pause event - both read from the configured verbs
-# above, so an override moves this fold with the rest of the library - opens or
-# replaces one phase for its key.
+# A working or declared-pause event opens or replaces one phase for its key.
 # A later done, failed, needs-decision, blocked, or resolved event carrying that
 # key closes the phase, because it has moved to a terminal or separately tracked
 # state.
@@ -1102,18 +1095,17 @@ EOF
 # It is never authoritative current crew state, and consumers must not let an open
 # phase outrank a structured home snapshot or fm-crew-state result.
 _fm_status_open_activities_stream() {
-  local line verb key note resolve held open='' stripped pause work
+  local line verb key note resolve held open='' stripped pause
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
-  work=${FM_CLASSIFY_DECLARED_WORK_VERB:-$FM_CLASSIFY_DECLARED_WORK_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
     verb=$(status_line_verb "$line")
     key=$(_fm_decision_key "$line") || continue
     case "$verb" in
-      "$work"|"$pause")
+      working|"$pause")
         note=$(status_line_note "$line")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'

@@ -255,7 +255,7 @@ EOF
 # verb or the threshold. A declared-work line states an intention; only pairing it
 # with a measured idle age turns it into a stall.
 test_declared_work_stall_classifier() {
-  local dir state open_line closed_line held_line override_open
+  local dir state open_line closed_line held_line
   dir=$(make_case classify-declared-work); state="$dir/state"
   status_declares_work 'working: relaunching the remaining six one by one' \
     || fail "the declared-work verb was not recognized"
@@ -318,27 +318,6 @@ test_declared_work_stall_classifier() {
   [ "$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT" -lt "$FM_PAUSE_RESURFACE_SECS_DEFAULT" ] \
     || fail "unresumed declared work waits as long as a legitimately declared pause"
 
-  # The constant is the library's ONE definition of the verb, so an override has
-  # to move EVERY reading of it together. The stall decision and the keyed
-  # activity fold are two such readings of the same line: the fold is what the
-  # fleet view renders as the mate's open phase, so a verb the stall wake fires
-  # on while the fold drops it would surface a mate whose declared phase the
-  # snapshot has already lost.
-  printf 'wip [key=aterrizaje]: relanzando los seis\n' > "$state/override.status"
-  FM_CLASSIFY_DECLARED_WORK_VERB=wip \
-    status_declares_work "$(last_status_line "$state/override.status")" \
-    || fail "the overridden declared-work verb was not recognized as a declaration"
-  override_open=$(FM_CLASSIFY_DECLARED_WORK_VERB=wip \
-    status_open_activities "$state/override.status")
-  printf '%s' "$override_open" | grep -F $'aterrizaje\twip\trelanzando los seis' >/dev/null \
-    || fail "the overridden declared-work verb opened no keyed activity phase"
-  printf 'wip [key=aterrizaje]: relanzando los seis\ndone [key=aterrizaje]: los seis aterrizaron\n' \
-    > "$state/override-closed.status"
-  [ -z "$(FM_CLASSIFY_DECLARED_WORK_VERB=wip status_open_activities "$state/override-closed.status")" ] \
-    || fail "a terminal event did not close the overridden declared-work phase"
-  [ -z "$(FM_CLASSIFY_DECLARED_WORK_VERB=wip status_open_activities "$state/open.status")" ] \
-    || fail "the replaced default verb still opened an activity phase under the override"
-  unset FM_CLASSIFY_DECLARED_WORK_VERB
   pass "status_declares_work and status_declared_work_stalled: a declaration plus measured silence, never either alone"
 }
 
@@ -1331,6 +1310,52 @@ test_secondmate_declared_work_stall_fires_once_per_episode() {
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "a declared-work stall fires exactly once per episode: latched past its window, rearmed only when the mate reports again"
+}
+
+# The latch is bounded by the mate's own EVENT, not by watcher uptime. A poll
+# only clears it by observing the stream inside its sub-threshold window, so if
+# the mate declares again and goes quiet while no watcher is running - a restart,
+# a slept host, the downtime .watcher-down already models - nothing observes that
+# window. A latch keyed on mere existence would then suppress forever: both of
+# its clearing paths need an append, and a genuinely stalled mate never appends
+# again, so the detector would be permanently dead for exactly the mate it exists
+# to catch. Keying it on the status log's signature makes the new declaration
+# itself the episode boundary, which is the same rule scan_signals uses so that
+# signals landing with no watcher running are caught by the next one.
+test_secondmate_declared_work_stall_rearms_after_watcher_downtime() {
+  local dir state task key pid queued
+  task=secondmate-downtime
+  dir=$(make_secondmate_work_case secondmate-declared-work-downtime "$task" \
+    'working: relaunching the remaining six one by one' 500) \
+    || fail "could not build the downtime fixture"
+  state="$dir/state"; key=$(printf '%s' "test:fm-$task" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle secondmate endpoint'
+  watch_secondmate_case "$dir" "$task" 240
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "the first declared-work stall never surfaced"
+  [ -e "$state/.stalled-$key" ] || fail "the stall did not latch after surfacing"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first stall wake"
+  queued=$(queue_lines "$state")
+
+  # The mate declared a NEW phase and went silent past the threshold again, all
+  # while no watcher was running: no poll ever saw the stream inside its window,
+  # so nothing cleared the latch by observation.
+  printf 'working: relaunched two of the six, four to go\n' >> "$state/$task.status"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/$task.status"
+  prime_status_seen "$state" "$state/$task.status" \
+    || fail "could not prime the report that landed during the downtime"
+  : > "$dir/watch.out"
+  watch_secondmate_case "$dir" "$task" 240
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || fail "a declaration that went silent across watcher downtime stayed latched forever"
+  grep -F "check: secondmate-stalled $task" "$dir/watch.out" >/dev/null \
+    || fail "the rearmed stall lost its reason: $(cat "$dir/watch.out")"
+  [ "$(queue_lines "$state")" -gt "$queued" ] \
+    || fail "the rearmed stall was not queued"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the rearmed stall wake"
+  unset FM_FAKE_CREW_STATE
+  pass "a new declaration that goes silent while no watcher runs ends the old episode and surfaces on its own"
 }
 
 test_secondmate_declared_work_stall_surfaces_in_afk() {
@@ -2387,6 +2412,7 @@ test_secondmate_declared_pause_never_stalls
 test_secondmate_terminal_status_never_stalls
 test_secondmate_remote_declared_work_stall_surfaces
 test_secondmate_declared_work_stall_fires_once_per_episode
+test_secondmate_declared_work_stall_rearms_after_watcher_downtime
 test_secondmate_declared_work_stall_surfaces_in_afk
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
