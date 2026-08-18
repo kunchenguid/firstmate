@@ -820,25 +820,33 @@ test_terminated_batched_collection_stops_instead_of_resuming() {
   tmpdir="$TMP_ROOT/termbatch-tmp"
   mkdir -p "$tmpdir"
   : > "$home/termbatch-nm.log"
-  # Cap below the child count, so the collector is inside an intermediate wait
-  # with probes still queued when the signal lands.
+  # Probe CONCURRENCY - not the reported-row cap, which is deliberately left
+  # wide here - is what decides the wave width. Two probes per wave against six
+  # children in six repositories (twelve probes) leaves the collector parked in
+  # an intermediate wait with probes still queued when the signal lands.
   PATH="$fakebin:$PATH" FM_HOME="$mate" TMPDIR="$tmpdir" \
     FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
-    FM_SNAPSHOT_SECONDMATE_CHILDREN=2 \
+    FM_SNAPSHOT_SECONDMATE_CHILDREN=6 \
+    FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY=2 \
     FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=20 \
     FAKE_NM_SLEEP=1 FAKE_NM_LOG="$home/termbatch-nm.log" \
     "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary >/dev/null 2>&1 &
   pid=$!
   i=0
-  while [ "$i" -lt 100 ]; do
+  # Wait for the FULL first wave, so the pre-signal count is the batch boundary
+  # rather than a partially forked wave: any later line can then only come from
+  # a wave the signal handler wrongly resumed.
+  while [ "$i" -lt 200 ]; do
     set -- "$tmpdir"/fm-child-state.*
-    [ -d "$1" ] && [ -s "$home/termbatch-nm.log" ] && break
+    [ -d "$1" ] && [ "$(wc -l < "$home/termbatch-nm.log" | tr -d ' ')" -ge 2 ] && break
     i=$((i + 1))
     sleep 0.1
   done
   set -- "$tmpdir"/fm-child-state.*
   [ -d "$1" ] || fail "batched collection never staged a directory under TMPDIR"
   calls_at_kill=$(wc -l < "$home/termbatch-nm.log" | tr -d ' ')
+  [ "$calls_at_kill" -eq 2 ] \
+    || fail "probe concurrency did not bound the first wave to 2 probes (saw $calls_at_kill)"
   kill -TERM "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null
   rc=$?
