@@ -27,7 +27,7 @@
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha on GitLab because the head comes only from the live read.
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--expected-head <oid>] [-- <extra forge merge args>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,6 +57,15 @@ PR_NUMBER=$FM_PR_NUMBER
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
+EXPECTED_HEAD=
+if [ "${1:-}" = --expected-head ]; then
+  [ "$#" -ge 2 ] && fm_pr_head_valid "$2" || {
+    echo "error: invalid expected PR head" >&2
+    exit 2
+  }
+  EXPECTED_HEAD=$2
+  shift 2
+fi
 [ "${1:-}" = "--" ] && shift
 
 caller_has_merge_method() {
@@ -137,6 +146,13 @@ grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1
 }
+if [ -n "$EXPECTED_HEAD" ]; then
+  RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  if [ "$RECORDED_HEAD" != "$EXPECTED_HEAD" ]; then
+    echo "error: PR head changed; rerun delivery scan" >&2
+    exit 1
+  fi
+fi
 
 # Pre-merge conditions for a GitLab merge request, read from one live view of
 # the merge request. Sets FM_PR_MERGE_HEAD to the verified head on success and

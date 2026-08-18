@@ -238,6 +238,7 @@ test_records_pr_and_head_before_merging() {
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    --expected-head deadbeefcafefeed0000000000000000deadbeef \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -250,6 +251,28 @@ test_records_pr_and_head_before_merging() {
   grep -qxF 'pr merge 9 --repo example/repo --squash' "$case_dir/gh-axi.log" \
     || fail "records-before-merge: gh-axi pr merge was not invoked with number, --repo, and default --squash"
   pass "fm-pr-merge records pr= and pr_head= before invoking gh-axi pr merge"
+}
+
+test_expected_head_refuses_stale_pr() {
+  local case_dir rc
+  case_dir=$(make_case stale-expected-head)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/10 \
+    --expected-head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-expected-head: fm-pr-merge should refuse"
+  assert_grep 'error: PR head changed; rerun delivery scan' "$case_dir/stderr" \
+    "stale-expected-head: refusal did not explain the changed head"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "stale-expected-head: stale delivery wake merged a new head"
+  pass "fm-pr-merge refuses a stale delivery head"
 }
 
 test_merge_failure_propagates_after_recording() {
@@ -811,6 +834,7 @@ test_github_still_forwards_sha_arg() {
 }
 
 test_records_pr_and_head_before_merging
+test_expected_head_refuses_stale_pr
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge

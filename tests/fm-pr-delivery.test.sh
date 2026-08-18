@@ -245,6 +245,32 @@ test_post_merge_routing() {
   pass "post-merge monitoring routes merged PR"
 }
 
+test_closed_pr_state_retires_and_reopens() {
+  local home fixture out
+  home=$(make_world closed)
+  fixture="$TMP_ROOT/fix-closed"
+  setup_project "$home" "$fixture"
+  write_open "$fixture" acme/alpha '[{"number":13,"url":"https://github.com/acme/alpha/pull/13","headRefName":"fm/closed13","headRefOid":"lll","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/alpha 13 '{"number":13,"url":"https://github.com/acme/alpha/pull/13","headRefName":"fm/closed13","headRefOid":"lll","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  fm_write_meta "$home/state/closed13.meta" \
+    'window=fm-closed13' "worktree=$home/projects/closed13" 'project=alpha' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+  run_delivery "$home" "$fixture" _scan-locked 1 >/dev/null
+  write_open "$fixture" acme/alpha '[]'
+  write_view "$fixture" acme/alpha 13 '{"state":"CLOSED","mergedAt":null}'
+  run_delivery "$home" "$fixture" _scan-locked 1 >/dev/null
+  [ -z "$(find "$home/state/pr-delivery/fingerprints" -type f -name '*.fp' -print -quit)" ] \
+    || fail "closed PR retained its observation fingerprint"
+  [ -z "$(find "$home/state/pr-delivery/delivered" -type f -name '*.delivered' -print -quit)" ] \
+    || fail "closed PR retained its delivered marker"
+  write_open "$fixture" acme/alpha '[{"number":13,"url":"https://github.com/acme/alpha/pull/13","headRefName":"fm/closed13","headRefOid":"lll","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/alpha 13 '{"number":13,"url":"https://github.com/acme/alpha/pull/13","headRefName":"fm/closed13","headRefOid":"lll","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
+    || fail "unchanged reopened PR remained suppressed"
+  pass "closed PR state retires and unchanged reopen re-evaluates"
+}
+
 test_accelerate_marker() {
   local home fixture out
   home=$(make_world accel)
@@ -363,6 +389,7 @@ test_base_branch_race
 test_head_change_during_review_fetch
 test_optional_review_silence
 test_post_merge_routing
+test_closed_pr_state_retires_and_reopens
 test_accelerate_marker
 test_show_blocked_queue
 test_secondmate_refuses_scan

@@ -506,16 +506,35 @@ process_pr_record() { # <repo> <project> <pr-json> <deadline> -> sets ACTIONABLE
   return 0
 }
 
+retire_pr_state() { # <repo> <number> <url>
+  rm -f -- \
+    "$(fingerprint_path "$1" "$2")" \
+    "$(delivered_path "$1" "$2")" \
+    "$(accelerate_path "$3")"
+}
+
 check_post_merge() { # <repo> <project> <number> <url> <task>
   local repo=$1 project=$2 number=$3 url=$4 task=$5
   local notice state_json state notice_path
   notice_path=$(merged_notice_path "$repo" "$number")
-  [ -f "$notice_path" ] && return 0
+  if [ -f "$notice_path" ]; then
+    retire_pr_state "$repo" "$number" "$url"
+    return $?
+  fi
   state_json=$(gh_fetch_merged_state "$repo" "$number") || return 0
   state=$(printf '%s' "$state_json" | jq -r '.state // empty' 2>/dev/null)
-  [ "$state" = MERGED ] || return 0
-  ACTIONABLE="post-merge: project=$project repo=$repo pr=$number task=${task:-} url=$url"
-  PENDING_NOTICE_PATH=$notice_path
+  case "$state" in
+    MERGED)
+      ACTIONABLE="post-merge: project=$project repo=$repo pr=$number task=${task:-} url=$url"
+      PENDING_NOTICE_PATH=$notice_path
+      PENDING_RETIRE_REPO=$repo
+      PENDING_RETIRE_NUMBER=$number
+      PENDING_RETIRE_URL=$url
+      ;;
+    CLOSED)
+      retire_pr_state "$repo" "$number" "$url"
+      ;;
+  esac
 }
 
 write_merged_notice() { # <path>
@@ -532,6 +551,7 @@ commit_actionable_state() {
   fi
   if [ -n "${PENDING_NOTICE_PATH:-}" ]; then
     write_merged_notice "$PENDING_NOTICE_PATH" || return 1
+    retire_pr_state "$PENDING_RETIRE_REPO" "$PENDING_RETIRE_NUMBER" "$PENDING_RETIRE_URL" || return 1
   fi
 }
 
@@ -556,13 +576,14 @@ scan_repo() { # <project> <repo> <deadline>
   safe=$(printf '%s' "$repo" | tr '/:' '__')
   for fp in "$FINGERPRINT_DIR"/"$safe"-*.fp; do
     [ -e "$fp" ] || continue
+    [ "$(date +%s)" -lt "$deadline" ] || return 3
     num=${fp##*/}; num=${num#"$safe"-}; num=${num%.fp}
     case " ${OPEN_PR_NUMS:-} " in
       *" $num "*) continue ;;
     esac
     url="https://github.com/$repo/pull/$num"
     task=$(task_for_pr_url "$url" 2>/dev/null || true)
-    check_post_merge "$repo" "$project" "$num" "$url" "$task" || true
+    check_post_merge "$repo" "$project" "$num" "$url" "$task" || return 1
     [ -z "${ACTIONABLE:-}" ] || return 0
   done
   return 0
@@ -614,6 +635,9 @@ scan() {
   PENDING_DELIVERED_VALUE=
   PENDING_ACCEL_PATH=
   PENDING_NOTICE_PATH=
+  PENDING_RETIRE_REPO=
+  PENDING_RETIRE_NUMBER=
+  PENDING_RETIRE_URL=
   QUEUE_ROWS=
   command -v jq >/dev/null 2>&1 || { printf 'fm-pr-delivery: jq not found\n' >&2; return 1; }
   command -v "$GH_BIN" >/dev/null 2>&1 || return 0

@@ -21,17 +21,18 @@ Do not invent a parallel PR poll or merge path.
 ## On wake
 
 1. Read the wake payload from the drain.
-   It is either `merge-eligible: ...` or `post-merge: ...` with `project=`, `repo=`, `pr=`, `task=`, and `url=` fields.
+   It is either `merge-eligible: ...` with `project=`, `repo=`, `pr=`, `task=`, `url=`, and `head=` fields, or `post-merge: ...` without `head=`.
 2. Run `bin/fm-pr-delivery.sh show` when you need the current reason-coded blocked queue for operator context.
 
 ## merge-eligible
 
 1. Reconcile the named task with `bin/fm-crew-state.sh` when current state matters.
-2. Confirm the PR URL, task id, and project still match the payload and the blocked queue does not show a stronger hold.
+2. Confirm the PR URL, task id, project, and expected head still match the payload and the blocked queue does not show a stronger hold.
 3. Decide merge authority:
    - With standing or task `yolo=on`, merge when the scan classified the PR as eligible.
    - Otherwise escalate to the captain for explicit merge approval before calling `bin/fm-pr-merge.sh`.
-4. Merge only through `bin/fm-pr-merge.sh <task-id> <full-pr-url>`.
+4. Merge only through `bin/fm-pr-merge.sh <task-id> <full-pr-url> --expected-head <payload-head>`.
+   If the expected-head guard refuses, leave the PR unmerged and let the delivery scan classify the new head.
    Never call `gh` or `gh-axi pr merge` directly around that helper.
 5. After a successful merge, refresh the project clone through the guarded fleet-sync path (`bin/fm-fleet-sync.sh`).
 6. Continue normal ship supervision: validation state, PR ready reporting, teardown only after landing is confirmed.
