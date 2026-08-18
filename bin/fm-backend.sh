@@ -588,6 +588,33 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
   return 0
 }
 
+# Source one adapter file, at most once per shell, failing rather than exiting
+# when it is missing.
+#
+# Stock macOS Bash 3.2 - what /usr/bin/env bash resolves to on the machines this
+# fleet runs on - terminates the whole shell when `.` cannot find its file, and
+# does so with status 0. It ignores both the `|| return 1` written beside the
+# source and the `if !` the caller wrapped the call in. A missing adapter would
+# therefore end fm-teardown.sh mid-run while reporting success, so the caller
+# records a task as cleaned up when nothing was cleaned up and the safety
+# refusal it was about to print never appears. Bash 5 returns 1 as written,
+# which is why CI's Linux lanes never saw it. Testing the file first makes the
+# missing adapter a refusable error on every supported Bash.
+# The guard is read and written through eval because this file is also sourced
+# from zsh, where bash's ${!var} indirection and printf -v mean something else
+# or nothing at all. Guard names are literals from this file's own call sites.
+# Verified 2026-08-18 against GNU bash 3.2.57(1)-release (arm64-apple-darwin25)
+# and pinned by tests/fm-backend.test.sh.
+fm_backend_source_adapter_once() {  # <guard-var> <adapter-file>
+  local guard=$1 file=$2 loaded
+  eval "loaded=\${$guard:-}"
+  [ -z "$loaded" ] || return 0
+  [ -r "$file" ] || return 1
+  # shellcheck source=/dev/null
+  . "$file" || return 1
+  eval "$guard=1"
+}
+
 # fm_backend_source: source the named backend's adapter file, once per shell.
 # Each adapter is an independently linted canonical root. The /dev/null source
 # boundaries keep runtime dispatch from importing all five adapter ASTs into
@@ -597,39 +624,19 @@ fm_backend_source() {  # <name>
   fm_backend_validate "$name" || return 1
   case "$name" in
     tmux)
-      if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
-        # shellcheck source=/dev/null
-        . "$FM_BACKEND_LIB_DIR/backends/tmux.sh" || return 1
-        _FM_BACKEND_TMUX_SOURCED=1
-      fi
+      fm_backend_source_adapter_once _FM_BACKEND_TMUX_SOURCED "$FM_BACKEND_LIB_DIR/backends/tmux.sh" || return 1
       ;;
     herdr)
-      if [ -z "${_FM_BACKEND_HERDR_SOURCED:-}" ]; then
-        # shellcheck source=/dev/null
-        . "$FM_BACKEND_LIB_DIR/backends/herdr.sh" || return 1
-        _FM_BACKEND_HERDR_SOURCED=1
-      fi
+      fm_backend_source_adapter_once _FM_BACKEND_HERDR_SOURCED "$FM_BACKEND_LIB_DIR/backends/herdr.sh" || return 1
       ;;
     zellij)
-      if [ -z "${_FM_BACKEND_ZELLIJ_SOURCED:-}" ]; then
-        # shellcheck source=/dev/null
-        . "$FM_BACKEND_LIB_DIR/backends/zellij.sh" || return 1
-        _FM_BACKEND_ZELLIJ_SOURCED=1
-      fi
+      fm_backend_source_adapter_once _FM_BACKEND_ZELLIJ_SOURCED "$FM_BACKEND_LIB_DIR/backends/zellij.sh" || return 1
       ;;
     orca)
-      if [ -z "${_FM_BACKEND_ORCA_SOURCED:-}" ]; then
-        # shellcheck source=/dev/null
-        . "$FM_BACKEND_LIB_DIR/backends/orca.sh" || return 1
-        _FM_BACKEND_ORCA_SOURCED=1
-      fi
+      fm_backend_source_adapter_once _FM_BACKEND_ORCA_SOURCED "$FM_BACKEND_LIB_DIR/backends/orca.sh" || return 1
       ;;
     cmux)
-      if [ -z "${_FM_BACKEND_CMUX_SOURCED:-}" ]; then
-        # shellcheck source=/dev/null
-        . "$FM_BACKEND_LIB_DIR/backends/cmux.sh" || return 1
-        _FM_BACKEND_CMUX_SOURCED=1
-      fi
+      fm_backend_source_adapter_once _FM_BACKEND_CMUX_SOURCED "$FM_BACKEND_LIB_DIR/backends/cmux.sh" || return 1
       ;;
   esac
 }

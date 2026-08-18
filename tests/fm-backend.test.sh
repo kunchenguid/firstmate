@@ -503,6 +503,39 @@ test_backend_source_shell_portable() {
   pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
 }
 
+test_backend_source_missing_adapter_is_refusable() {
+  local root out rc backend
+  # A missing adapter file must reach the caller as a failed call it can refuse
+  # on - not as the death of the calling shell. Stock macOS Bash 3.2 terminates
+  # the whole shell (with status 0) when `.` cannot find its file, ignoring both
+  # the `|| return 1` and the `if !` around it, which silently turned
+  # fm-teardown.sh's herdr preflight refusal into a reported success. Bash 5
+  # returns 1 as written, so this case only ever fails on the stock macOS Bash
+  # the fleet actually runs on.
+  root="$TMP_ROOT/missing-adapter"
+  rm -rf "$root"
+  mkdir -p "$root"
+  cp -R "$ROOT/bin" "$root/bin"
+  for backend in tmux herdr zellij orca cmux; do
+    rm -f "$root/bin/backends/$backend.sh"
+  done
+  for backend in tmux herdr zellij orca cmux; do
+    rc=0
+    out=$(bash -c "
+      set -eu
+      . '$root/bin/fm-backend.sh'
+      if fm_backend_source $backend; then echo LOADED; else echo REFUSED; fi
+      echo CALLER-SURVIVED
+    " 2>/dev/null) || rc=$?
+    expect_code 0 "$rc" "fm_backend_source $backend: the caller should keep control"
+    assert_contains "$out" "REFUSED" \
+      "fm_backend_source $backend: a missing adapter must be a failed call, not a load"
+    assert_contains "$out" "CALLER-SURVIVED" \
+      "fm_backend_source $backend: a missing adapter must not terminate the calling shell"
+  done
+  pass "fm_backend_source: a missing adapter fails the call instead of killing the caller"
+}
+
 test_backend_validate_spawn_accepts_orca() {
   local out
   fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
@@ -1126,6 +1159,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_backend_source_missing_adapter_is_refusable
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
