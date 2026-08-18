@@ -55,19 +55,42 @@ fm_nm_field() {  # <toon-output> <key>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
 }
 
-# 0 if run head $2 matches worktree $1's code identity, per the same rule
-# everywhere this attribution is needed:
+# Relationship between run head $2 and worktree $1's code identity.
+# The result distinguishes an ordinary mismatch from a relationship that Git
+# cannot compute because an object is unavailable:
 #   - missing/empty head: cannot bind; reject
 #   - equal commits (short or full SHA): match
 #   - worktree HEAD is an ancestor of run head: match (pipeline fix commits on
 #     the same history advanced the run tip past local HEAD)
 #   - run head is a strict ancestor of worktree HEAD, or diverged: no match
 #     (local work advanced outside the run, or the branch tip was rewritten)
-fm_nm_head_matches_worktree() {  # <worktree> <run_head>
-  local wt=$1 run_head=$2 local_full run_full
-  [ -n "$run_head" ] || return 1
-  local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 1
-  run_full=$(git -C "$wt" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
-  [ "$run_full" = "$local_full" ] && return 0
+#   - an unavailable head or an ancestry error: unresolvable, not a mismatch
+fm_nm_head_relationship() {  # <worktree> <run_head>
+  local wt=$1 run_head=$2 local_full run_full rc
+  [ -n "$run_head" ] || { printf 'missing-run-head'; return 0; }
+  local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) \
+    || { printf 'unresolvable-worktree-head'; return 0; }
+  run_full=$(git -C "$wt" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) \
+    || { printf 'unresolvable-run-head'; return 0; }
+  if [ "$run_full" = "$local_full" ]; then
+    printf 'equal'
+    return 0
+  fi
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+  rc=$?
+  case "$rc" in
+    0) printf 'worktree-ancestor-of-run' ;;
+    1) printf 'mismatch' ;;
+    *) printf 'unresolvable-ancestry' ;;
+  esac
+}
+
+# 0 only when fm_nm_head_relationship reports one of the two matching
+# relations. Callers that need to distinguish mismatch from an unavailable
+# object read fm_nm_head_relationship directly.
+fm_nm_head_matches_worktree() {  # <worktree> <run_head>
+  case "$(fm_nm_head_relationship "$1" "$2")" in
+    equal|worktree-ancestor-of-run) return 0 ;;
+    *) return 1 ;;
+  esac
 }
