@@ -49,15 +49,34 @@ fm_sup_task_needs_pending_reply_supervision() {  # <state-dir> <task-id>
   return 1
 }
 
+fm_sup_status_lifecycle_verb() {  # <status-file>
+  local file=$1 line stripped verb lifecycle=''
+  [ -f "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped=${line//[[:space:]]/}
+    [ -n "$stripped" ] || continue
+    verb=${line%%:*}
+    verb=${verb%%\[*}
+    verb=${verb#"${verb%%[![:space:]]*}"}
+    verb=${verb%"${verb##*[![:space:]]}"}
+    case "$verb" in
+      working|needs-decision|blocked|done|failed|"${FM_CLASSIFY_PAUSED_VERB:-paused}")
+        lifecycle=$verb
+        ;;
+    esac
+  done < "$file"
+  [ -n "$lifecycle" ] || return 1
+  printf '%s\n' "$lifecycle"
+}
+
 fm_sup_secondmate_idle() {  # <state-dir> <task-id> <meta-file>
-  local state=$1 task_id=$2 meta=$3 kind status_file last verb
+  local state=$1 task_id=$2 meta=$3 kind status_file verb
   kind=$(fm_sup_record_value "$meta" kind)
   [ "$kind" = secondmate ] || return 1
   fm_sup_task_needs_pending_reply_supervision "$state" "$task_id" && return 1
   status_file="$state/$task_id.status"
   [ -f "$status_file" ] || return 1
-  last=$(awk 'NF { line=$0 } END { print line }' "$status_file")
-  verb=${last%%[[:space:]:]*}
+  verb=$(fm_sup_status_lifecycle_verb "$status_file") || return 1
   [ "$verb" = "done" ]
 }
 

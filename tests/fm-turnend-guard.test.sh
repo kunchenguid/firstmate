@@ -169,11 +169,12 @@ test_predicate_resolved_pending_reply_close_needs_supervision() {
   fm_supervision_needed "$state" 300 \
     || fail "resolved pending reply with an unclosed escalation must require supervision"
   [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "unclosed escalation cleanup must keep the secondmate active"
+  printf 'resolved [key=pending-reply-abcdef0123456789]: pending-reply-resolved: task=studio pending-reply-id=abcdef0123456789 via=status\n' >> "$state/studio.status"
   printf 'escalation_closed_epoch=4300\n' >> "$state/pending-replies/abcdef0123456789"
   if fm_supervision_needed "$state" 300; then
-    fail "resolved pending reply with closed escalation cleanup must be quiet"
+    fail "closed escalation cleanup after a decision-resolution event must be quiet"
   fi
-  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "closed escalation cleanup must let the secondmate idle"
+  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "closed escalation cleanup must let the completed secondmate idle"
   pass "fm_supervision_needed: resolved pending-reply cleanup keeps supervision armed"
 }
 

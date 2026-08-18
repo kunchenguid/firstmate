@@ -26,7 +26,7 @@ An unmarked checkout or invalid marker falls through to the git-dir check.
 That check keeps crewmate and scout linked worktrees inert because their git dir differs from their git common dir.
 It also requires `AGENTS.md`, `bin/`, and the effective state directory.
 
-For an in-scope primary, the guard counts active work from `state/*.meta`, excluding a `kind=secondmate` record whose latest `state/<id>.status` event is `done` unless it still has pending-reply work, including retryable escalation-close cleanup.
+For an in-scope primary, the guard counts active work from `state/*.meta`, excluding a `kind=secondmate` record whose latest recognized `state/<id>.status` lifecycle state is `done` unless it still has pending-reply work, including retryable escalation-close cleanup.
 Registered `state/procevent/*.source` records require supervision even though they have no task metadata, except that a `remote-reply-<id>.source` record is active only while secondmate `<id>` has pending-reply work.
 Unhandled `state/procevent-inbox/remote-reply-<id>.<seq>.result` captures also require supervision even after the source registration has retired.
 The default cross-harness mode exits silently with no supervision need.
