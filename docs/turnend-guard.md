@@ -68,7 +68,8 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.
-Codex registers the guard with `--codex`.
+Codex registers the guard with `--codex` when the current worktree's guard supports that mode.
+The hook probes with empty input first and falls back to the legacy no-argument invocation for an older linked worktree, so an active primary does not emit an unsupported-option error during a mixed-version checkout transition.
 Its bounded foreground checkpoint has released the watcher's singleton lock before the next turn boundary, so a true value cannot prove supervision.
 The Codex mode therefore rechecks the PID-strict watcher lock and beacon predicate on every stop and returns exit 2 until a real identity-matched watcher owns the home lock.
 The generic default retains its one-follow-up loop guard for adapters that provide their own continuity mechanism.

@@ -935,6 +935,34 @@ EOF
   pass ".codex/hooks.json: Stop hook ignores nested git root guard scripts"
 }
 
+test_codex_hook_falls_back_for_an_older_linked_worktree_guard() {
+  local settings command dir payload out status
+  settings="$ROOT/.codex/hooks.json"
+  [ -f "$settings" ] || fail "tracked .codex/hooks.json is missing"
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$settings")
+  [ -n "$command" ] || fail "Stop hook command is missing from .codex/hooks.json"
+  dir=$(make_primary_dir "$TMP_ROOT/codex-hook-older-guard")
+  mark_codex_hook_root "$dir"
+cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = --codex ]; then
+  echo 'usage: fm-turnend-guard.sh [--claude|--cursor]' >&2
+  exit 2
+fi
+printf 'guard=%s\n' "$0"
+printf 'args=%s\n' "$*"
+cat
+EOF
+  chmod +x "$dir/bin/fm-turnend-guard.sh"
+  payload='{"stop_hook_active":false}'
+  out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
+  expect_code 0 "$status" "codex hook must fall back when a linked worktree has an older guard"
+  assert_contains "$out" "args=" "codex hook must invoke the older guard without --codex"
+  assert_contains "$out" "$payload" "codex hook must preserve the original payload for an older guard"
+  assert_not_contains "$out" "usage:" "codex hook must not expose an unsupported --codex usage error"
+  pass ".codex/hooks.json: Stop hook falls back for an older linked-worktree guard"
+}
+
 test_opencode_plugin_anchors_guard_to_worktree() {
   local plugin parent worktree_dir wrong_dir out status
   plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
@@ -1748,6 +1776,7 @@ test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
+test_codex_hook_falls_back_for_an_older_linked_worktree_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
