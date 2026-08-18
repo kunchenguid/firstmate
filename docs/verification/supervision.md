@@ -561,6 +561,7 @@ fm-lint-workflows.sh: 3 workflow files valid
 An earlier run of the same gate on 2026-08-18 exited 127 because actionlint was absent from that host, which was a missing tool rather than a result.
 `tests/fm-test-run.test.sh` still cannot complete on this host because its CI YAML assertion requires ruby, which is absent.
 
+
 ### What the cooperative wait budget does and does not bound, 2026-08-22
 
 The first version of the elapsed-time regression asserted the hook's TOTAL wall clock, which made it assert fixed cost rather than the defect and fail under load.
