@@ -265,7 +265,7 @@ FM_WATCHER_VERDICT_REASON=stale-beacon
 # alarm. Cursor shares the autoarm model but owns a different park ledger, so a
 # leftover Claude epoch must never satisfy it.
 fm_claude_rewake_turn_active() {
-  local state=$1 record marker outcome epoch epoch_session_pid marker_epoch marker_session_pid lock_pid harness value
+  local state=$1 record marker boundary outcome epoch epoch_session_pid marker_epoch marker_session_pid marker_generation boundary_generation boundary_status boundary_session_pid lock_pid harness value
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   [ "$harness" = claude ] || return 1
   if ! type fm_session_lock_owned_by_self >/dev/null 2>&1; then
@@ -277,18 +277,26 @@ fm_claude_rewake_turn_active() {
   [ -f "$state/.claude-rewake-turn" ] && [ ! -L "$state/.claude-rewake-turn" ] || return 1
   record=$(sed -n '1p' "$state/.claude-autoarm-epoch" 2>/dev/null || true)
   marker=$(sed -n '1p' "$state/.claude-rewake-turn" 2>/dev/null || true)
+  boundary=$(sed -n '1p' "$state/.claude-rewake-boundary" 2>/dev/null || true)
   epoch=$(printf '%s\n' "$record" | sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p')
   outcome=$(printf '%s\n' "$record" | sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p')
   [ "$outcome" = rewake ] || return 1
   epoch_session_pid=$(printf '%s\n' "$record" | sed -n 's/^.*session_pid=\([0-9][0-9]*\).*$/\1/p')
   marker_epoch=$(printf '%s\n' "$marker" | sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p')
   marker_session_pid=$(printf '%s\n' "$marker" | sed -n 's/^.*session_pid=\([0-9][0-9]*\).*$/\1/p')
+  marker_generation=$(printf '%s\n' "$marker" | sed -n 's/^.*generation=\([0-9][0-9]*\).*$/\1/p')
+  boundary_generation=$(printf '%s\n' "$boundary" | sed -n 's/^generation=\([0-9][0-9]*\) .*$/\1/p')
+  boundary_status=$(printf '%s\n' "$boundary" | sed -n 's/^generation=[0-9][0-9]* status=\([a-z][a-z]*\) .*$/\1/p')
+  boundary_session_pid=$(printf '%s\n' "$boundary" | sed -n 's/^.*session_pid=\([0-9][0-9]*\).*$/\1/p')
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
-  for value in "$epoch" "$epoch_session_pid" "$marker_epoch" "$marker_session_pid" "$lock_pid"; do
+  for value in "$epoch" "$epoch_session_pid" "$marker_epoch" "$marker_session_pid" "$marker_generation" "$boundary_generation" "$boundary_session_pid" "$lock_pid"; do
     case "$value" in ''|*[!0-9]*) return 1 ;; esac
   done
   [ "$marker_epoch" = "$epoch" ] || return 1
   [ "$marker_session_pid" = "$epoch_session_pid" ] || return 1
+  [ "$marker_generation" = "$boundary_generation" ] || return 1
+  [ "$boundary_status" = published ] || return 1
+  [ "$boundary_session_pid" = "$epoch_session_pid" ] || return 1
   [ "$epoch_session_pid" = "$lock_pid" ] || return 1
   fm_harness_pid_alive "$lock_pid" || return 1
   fm_session_lock_owned_by_self "$state"

@@ -92,7 +92,8 @@ run_guard_case_claude_rewake_turn() {
       printf "epoch=3 owner_pid=999 outcome=%s updated_at=1 session_pid=%s\n" \
         "$FM_CASE_OUTCOME" "$$" > "$FM_CASE_HOME/state/.claude-autoarm-epoch"
       if [ "$FM_CASE_PUBLISH_MARKER" = 1 ]; then
-        printf "epoch=3 session_pid=%s\n" "$$" > "$FM_CASE_HOME/state/.claude-rewake-turn"
+        printf "epoch=3 session_pid=%s generation=7\n" "$$" > "$FM_CASE_HOME/state/.claude-rewake-turn"
+        printf "generation=7 status=published session_pid=%s owner_pid=999\n" "$$" > "$FM_CASE_HOME/state/.claude-rewake-boundary"
       fi
       touch -t 202001010000 "$FM_CASE_HOME/state/.claude-autoarm-epoch"
       FM_ROOT_OVERRIDE="$FM_CASE_ROOT" FM_HOME="$FM_CASE_HOME" \

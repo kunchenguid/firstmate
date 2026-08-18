@@ -87,9 +87,10 @@ write_arm_fixture() {
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
-if [ -f "$FM_HOME/state/.claude-rewake-boundary-request" ]; then
-  cp "$FM_HOME/state/.claude-rewake-boundary-request" "$FM_HOME/state/.claude-rewake-boundary"
-  rm -f "$FM_HOME/state/.claude-rewake-boundary-request"
+if grep -q ' status=pending ' "$FM_HOME/state/.claude-rewake-boundary" 2>/dev/null; then
+  sed 's/ status=pending / status=acked /' "$FM_HOME/state/.claude-rewake-boundary" \
+    > "$FM_HOME/state/.claude-rewake-boundary.tmp"
+  mv "$FM_HOME/state/.claude-rewake-boundary.tmp" "$FM_HOME/state/.claude-rewake-boundary"
 fi
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 printf 'stale: fixture-win actionable\n'
@@ -124,9 +125,10 @@ SH
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
-if [ -f "$FM_HOME/state/.claude-rewake-boundary-request" ]; then
-  cp "$FM_HOME/state/.claude-rewake-boundary-request" "$FM_HOME/state/.claude-rewake-boundary"
-  rm -f "$FM_HOME/state/.claude-rewake-boundary-request"
+if grep -q ' status=pending ' "$FM_HOME/state/.claude-rewake-boundary" 2>/dev/null; then
+  sed 's/ status=pending / status=acked /' "$FM_HOME/state/.claude-rewake-boundary" \
+    > "$FM_HOME/state/.claude-rewake-boundary.tmp"
+  mv "$FM_HOME/state/.claude-rewake-boundary.tmp" "$FM_HOME/state/.claude-rewake-boundary"
 fi
 sleep 2
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"

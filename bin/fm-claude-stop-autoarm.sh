@@ -72,7 +72,6 @@ FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 ACTIVE_REWAKE_TURN="$STATE/.claude-rewake-turn"
 REWAKE_BOUNDARY_LOCK="$STATE/.claude-rewake-boundary.lock"
-REWAKE_BOUNDARY_REQUEST="$STATE/.claude-rewake-boundary-request"
 REWAKE_BOUNDARY="$STATE/.claude-rewake-boundary"
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
 case "$AUTOARM_ATTEMPTS" in
@@ -155,8 +154,9 @@ trap 'fm_lock_release "$OWNER_LOCK"' EXIT
 EPOCH_SEQUENCE=
 EPOCH_SESSION_PID=
 EPOCH_WRITE_OK=0
-BOUNDARY_EPOCH=
+BOUNDARY_GENERATION=
 VERIFIED_SESSION_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+AUTOARM_PID=${BASHPID:-$$}
 case "$VERIFIED_SESSION_PID" in
   ''|*[!0-9]*) exit 0 ;;
 esac
@@ -191,24 +191,33 @@ publish_active_rewake_turn() {
   i=0
   while [ "$i" -lt 20 ]; do
     boundary=$(cat "$REWAKE_BOUNDARY" 2>/dev/null || true)
-    [ "$boundary" = "epoch=$BOUNDARY_EPOCH session_pid=$EPOCH_SESSION_PID" ] && break
+    [ "$boundary" = "generation=$BOUNDARY_GENERATION status=acked session_pid=$EPOCH_SESSION_PID owner_pid=$AUTOARM_PID" ] && break
     sleep 0.1
     i=$((i + 1))
   done
-  [ "$boundary" = "epoch=$BOUNDARY_EPOCH session_pid=$EPOCH_SESSION_PID" ] || return 1
+  [ "$boundary" = "generation=$BOUNDARY_GENERATION status=acked session_pid=$EPOCH_SESSION_PID owner_pid=$AUTOARM_PID" ] || return 1
   fm_lock_try_acquire "$REWAKE_BOUNDARY_LOCK" || return 1
   boundary=$(cat "$REWAKE_BOUNDARY" 2>/dev/null || true)
   current_session_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
-  if [ "$boundary" != "epoch=$BOUNDARY_EPOCH session_pid=$EPOCH_SESSION_PID" ] \
+  if [ "$boundary" != "generation=$BOUNDARY_GENERATION status=acked session_pid=$EPOCH_SESSION_PID owner_pid=$AUTOARM_PID" ] \
     || [ "$current_session_pid" != "$VERIFIED_SESSION_PID" ] \
     || ! fm_session_lock_owned_by_self "$STATE"; then
     fm_lock_release "$REWAKE_BOUNDARY_LOCK"
     return 1
   fi
   tmp="$ACTIVE_REWAKE_TURN.tmp.$$"
-  if ! printf 'epoch=%s session_pid=%s\n' "$EPOCH_SEQUENCE" "$EPOCH_SESSION_PID" > "$tmp" 2>/dev/null \
+  if ! printf 'epoch=%s session_pid=%s generation=%s\n' \
+    "$EPOCH_SEQUENCE" "$EPOCH_SESSION_PID" "$BOUNDARY_GENERATION" > "$tmp" 2>/dev/null \
     || ! mv -f "$tmp" "$ACTIVE_REWAKE_TURN" 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null || true
+    fm_lock_release "$REWAKE_BOUNDARY_LOCK"
+    return 1
+  fi
+  tmp="$REWAKE_BOUNDARY.tmp.$$"
+  if ! printf 'generation=%s status=published session_pid=%s owner_pid=%s\n' \
+    "$BOUNDARY_GENERATION" "$EPOCH_SESSION_PID" "$AUTOARM_PID" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$REWAKE_BOUNDARY" 2>/dev/null; then
+    rm -f "$ACTIVE_REWAKE_TURN" "$tmp" 2>/dev/null || true
     fm_lock_release "$REWAKE_BOUNDARY_LOCK"
     return 1
   fi
@@ -217,12 +226,24 @@ publish_active_rewake_turn() {
 }
 
 write_epoch arming
-BOUNDARY_EPOCH=$EPOCH_SEQUENCE
 if fm_lock_try_acquire "$REWAKE_BOUNDARY_LOCK"; then
-  printf 'epoch=%s session_pid=%s\n' "$BOUNDARY_EPOCH" "$EPOCH_SESSION_PID" \
-    > "$REWAKE_BOUNDARY_REQUEST.tmp.$$" 2>/dev/null \
-    && mv -f "$REWAKE_BOUNDARY_REQUEST.tmp.$$" "$REWAKE_BOUNDARY_REQUEST" 2>/dev/null
-  rm -f "$REWAKE_BOUNDARY_REQUEST.tmp.$$" 2>/dev/null || true
+  boundary=$(cat "$REWAKE_BOUNDARY" 2>/dev/null || true)
+  generation=$(printf '%s\n' "$boundary" | sed -n 's/^generation=\([0-9][0-9]*\) status=.*$/\1/p')
+  status=$(printf '%s\n' "$boundary" | sed -n 's/^generation=[0-9][0-9]* status=\([a-z][a-z]*\) .*$/\1/p')
+  boundary_session=$(printf '%s\n' "$boundary" | sed -n 's/^.* session_pid=\([0-9][0-9]*\) .*$/\1/p')
+  case "$generation" in ''|*[!0-9]*) generation=0 ;; esac
+  if [ "$status" = ready ] && [ "$boundary_session" = "$EPOCH_SESSION_PID" ]; then
+    BOUNDARY_GENERATION=$generation
+    status=acked
+  else
+    BOUNDARY_GENERATION=$((generation + 1))
+    status=pending
+  fi
+  printf 'generation=%s status=%s session_pid=%s owner_pid=%s\n' \
+    "$BOUNDARY_GENERATION" "$status" "$EPOCH_SESSION_PID" "$AUTOARM_PID" \
+    > "$REWAKE_BOUNDARY.tmp.$$" 2>/dev/null \
+    && mv -f "$REWAKE_BOUNDARY.tmp.$$" "$REWAKE_BOUNDARY" 2>/dev/null
+  rm -f "$REWAKE_BOUNDARY.tmp.$$" 2>/dev/null || true
   fm_lock_release "$REWAKE_BOUNDARY_LOCK"
 fi
 

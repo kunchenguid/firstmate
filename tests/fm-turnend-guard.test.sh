@@ -1196,7 +1196,7 @@ test_concurrent_stop_boundary_preserves_new_rewake_proof() {
   printf 'epoch=2 session_pid=999\n' > "$marker"
   run_integrated_autoarm "$dir" > "$dir/auto.out" 2>&1 &
   auto_pid=$!
-  while [ ! -e "$dir/state/.claude-rewake-boundary-request" ]; do sleep 0.05; done
+  while ! grep -q ' status=pending ' "$dir/state/.claude-rewake-boundary" 2>/dev/null; do sleep 0.05; done
   [ "$(cat "$marker")" = 'epoch=2 session_pid=999' ] \
     || fail "the async hook replaced the ending turn's proof before the synchronous Stop boundary"
   guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=500 run_hook_claude "$dir" false); guard_status=$?
@@ -1204,36 +1204,37 @@ test_concurrent_stop_boundary_preserves_new_rewake_proof() {
   expect_code 0 "$guard_status" "the synchronous guard must accept the claimed auto-arm cycle"
   [ -z "$guard_out" ] || fail "the concurrent Stop guard produced output: $guard_out"
   expect_code 2 "$auto_status" "the actionable auto-arm must deliver its rewake"
+  assert_contains "$(cat "$dir/auto.out")" "firstmate watcher wake" \
+    "the concurrent auto-arm fell back without publishing proof"
   assert_present "$marker" "the synchronous guard deleted the new turn's rewake proof"
   pass "fm-turnend-guard --claude: concurrent Stop hooks preserve the new rewake proof"
 }
 
-test_guard_first_healthy_boundary_preserves_new_rewake_proof() {
-  local dir auto_pid auto_status guard_pid guard_status marker pid identity
+test_guard_first_delayed_boundary_preserves_new_rewake_proof() {
+  local dir auto_status guard_status marker
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-guard-first-rewake")
   : > "$dir/state/task1.meta"
   install_integrated_autoarm "$dir"
   write_integrated_actionable_arm "$dir"
-  sleep 60 &
-  pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify the healthy watcher"
-  record_watcher_lock "$dir" "$pid" "$identity"
-  touch "$dir/state/.last-watcher-beat"
   marker="$dir/state/.claude-rewake-turn"
   printf 'epoch=2 session_pid=999\n' > "$marker"
-  run_hook_claude "$dir" false > "$dir/guard.out" 2>&1 &
-  guard_pid=$!
-  while [ -e "$marker" ]; do sleep 0.05; done
-  run_integrated_autoarm "$dir" > "$dir/auto.out" 2>&1 &
-  auto_pid=$!
-  wait "$guard_pid"; guard_status=$?
-  wait "$auto_pid"; auto_status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  expect_code 0 "$guard_status" "the guard-first healthy Stop must remain allowed"
+  FM_HOME="$dir" "$dir/fake-claude" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    printf "%s\n" "{\"stop_hook_active\":false,\"session_id\":\"sess-claude-mode\"}" \
+      | CLAUDECODE=1 "$FM_HOME/bin/fm-turnend-guard.sh" --claude \
+        > "$FM_HOME/guard.out" 2>&1
+    printf "%s\n" "$?" > "$FM_HOME/guard.status"
+    sleep 1.2
+    printf "%s\n" "{\"session_id\":\"sess-claude-mode\",\"stop_hook_active\":false}" \
+      | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/auto.out" 2>&1
+    printf "%s\n" "$?" > "$FM_HOME/auto.status"
+  '
+  guard_status=$(cat "$dir/guard.status")
+  auto_status=$(cat "$dir/auto.status")
+  expect_code 2 "$guard_status" "the guard-first Stop must finish before the delayed auto-arm"
   expect_code 2 "$auto_status" "the later actionable auto-arm must deliver its rewake"
   assert_present "$marker" "the guard-first ordering lost the new turn's rewake proof"
-  pass "fm-turnend-guard --claude: guard-first healthy Stop preserves the new rewake proof"
+  pass "fm-turnend-guard --claude: delayed auto-arm consumes the durable guard-first generation"
 }
 
 test_hook_claude_mode_reblocks_x_mode_without_tasks() {
@@ -1722,7 +1723,7 @@ test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_retires_prior_rewake_proof
 test_concurrent_stop_boundary_preserves_new_rewake_proof
-test_guard_first_healthy_boundary_preserves_new_rewake_proof
+test_guard_first_delayed_boundary_preserves_new_rewake_proof
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open
