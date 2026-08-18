@@ -59,9 +59,14 @@ fm_backend_herdr_version_check || fail "version_check failed against the real in
 # deterministically. Herdr's unlabeled workspace-label derivation is not a
 # stable test contract, while the adopted-workspace state is the behavior
 # this regression must exercise. The seeded tab remains labeled "1".
+#
+# The home's own label is now fm_backend_herdr_workspace_label = the FM_HOME
+# basename, so FM_HOME is pinned to a "firstmate"-named dir to make the label
+# deterministically collide, rather than depending on the repo checkout dir name.
 
 LIVE_CWD="$SCRATCH/firstmate"
 mkdir -p "$LIVE_CWD"
+export FM_HOME="$LIVE_CWD"
 
 fm_backend_herdr_server_ensure "$SESSION" || fail "could not start the isolated session's server"
 
