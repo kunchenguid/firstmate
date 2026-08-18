@@ -647,6 +647,74 @@ test_multi_child_home_summary_stays_bounded() {
   pass "multi-child home summary collects child state in one bounded wave"
 }
 
+# A fatal signal must END the summary, not unwind into the middle of a live
+# collection wave. The handler clears the staging path, so a resumed wave would
+# redirect its next probe to an absolute path under the filesystem root - on a
+# root-running remote job worker that means stray files at /. The capped-batch
+# shape is where this bites: more children than the concurrency cap means the
+# collector is parked in an INTERMEDIATE wait with probes still queued behind it.
+test_terminated_batched_collection_stops_instead_of_resuming() {
+  local home mate fakebin tmpdir pid i rc wt calls_at_kill calls_after
+  home=$(make_home termbatch-home-state)
+  mate="$TMP_ROOT/termbatch-home-state-mate"
+  make_valid_secondmate_home termbatch-state "$mate"
+  append_secondmate_registry "$home" termbatch-state "$mate"
+  {
+    printf '## In flight\n'
+    for i in 1 2 3 4 5 6; do
+      printf -- '- [ ] b%s - Batched child %s (repo: sample) (kind: ship) (since 2026-08-17)\n' "$i" "$i"
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$mate/data/backlog.md"
+  for i in 1 2 3 4 5 6; do
+    wt="$mate/projects/b$i"
+    fm_git_init_commit "$wt"
+    git -C "$wt" checkout -q -b "fm/b$i"
+    fm_write_meta "$mate/state/b$i.meta" \
+      "window=firstmate:fm-b$i" "worktree=$wt" "project=sample" \
+      "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$mate/state" "b$i" busy
+    printf 'working: batched child %s\n' "$i" > "$mate/state/b$i.status"
+  done
+  fakebin=$(make_fakebin "$home")
+  tmpdir="$TMP_ROOT/termbatch-tmp"
+  mkdir -p "$tmpdir"
+  : > "$home/termbatch-nm.log"
+  # Cap below the child count, so the collector is inside an intermediate wait
+  # with probes still queued when the signal lands.
+  PATH="$fakebin:$PATH" FM_HOME="$mate" TMPDIR="$tmpdir" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_CHILDREN=2 \
+    FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=20 \
+    FAKE_NM_SLEEP=1 FAKE_NM_LOG="$home/termbatch-nm.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary >/dev/null 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    set -- "$tmpdir"/fm-child-state.*
+    [ -d "$1" ] && [ -s "$home/termbatch-nm.log" ] && break
+    i=$((i + 1))
+    sleep 0.1
+  done
+  set -- "$tmpdir"/fm-child-state.*
+  [ -d "$1" ] || fail "batched collection never staged a directory under TMPDIR"
+  calls_at_kill=$(wc -l < "$home/termbatch-nm.log" | tr -d ' ')
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null
+  rc=$?
+  # 128+SIGTERM. A handler that cleans up and RETURNS lets the script run to
+  # completion and exit 0, which is exactly the resumed-wave defect.
+  [ "$rc" -eq 143 ] \
+    || fail "terminated home summary resumed instead of stopping (exit $rc, expected 143)"
+  sleep 1
+  calls_after=$(wc -l < "$home/termbatch-nm.log" | tr -d ' ')
+  [ "$calls_after" -eq "$calls_at_kill" ] \
+    || fail "terminated collection launched $((calls_after - calls_at_kill)) more probes after its signal"
+  [ "$(find "$tmpdir" -maxdepth 1 -name 'fm-child-state.*' 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ] \
+    || fail "terminated batched collection left staged child state under TMPDIR"
+  pass "a terminated batched collection stops instead of resuming through a cleared path"
+}
+
 # The child-state collection stages its probe results under TMPDIR. The timed-out
 # home is exactly the case this feature exists for, and that path terminates the
 # summary's process group with SIGTERM, so cleanup registered only for a normal
@@ -2386,6 +2454,7 @@ test_gate_parked_child_without_logged_decision_is_held
 test_ci_phase_children_keep_the_summary_bounded
 test_collected_ci_log_still_reports_checks_green
 test_child_state_tempdir_is_cleaned_on_termination
+test_terminated_batched_collection_stops_instead_of_resuming
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only

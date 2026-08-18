@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Shared no-mistakes axi run attribution primitives.
 #
-# ONE owner for the branch+code-identity matching rule that decides whether a
-# no-mistakes run belongs to a given worktree, used by fm-crew-state.sh
+# ONE owner for the branch+code-identity and repository-scope rules that decide
+# whether a no-mistakes run belongs to a given worktree, used by fm-crew-state.sh
 # (read-only current-state reporting) and fm-teardown.sh (pre-teardown run
 # abort, see its "Fix 1" header comment). Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
@@ -53,6 +53,33 @@ fm_nm_strip_quotes() {
 # Scalar value of a TOON key in captured `axi status` output $1.
 fm_nm_field() {  # <toon-output> <key>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
+}
+
+# The no-mistakes REPOSITORY SCOPE for worktree $1: the main worktree behind
+# git-common-dir. Non-zero when $1 is not inside a git repository.
+#
+# One owner, because two callers must agree exactly. `no-mistakes runs` lists
+# runs for the CURRENT REPOSITORY, and the CLI resolves a linked worktree to the
+# clone it was registered under (verified against the installed CLI, v1.51.1:
+# `runs` inside a treehouse worktree lists the registered clone's runs). Every
+# ship task gets its OWN isolated worktree leased from that clone
+# (bin/fm-spawn.sh's validate_spawn_worktree refuses anything else), so the
+# worktree root is a private key that shares nothing while the main worktree is
+# the scope the CLI itself answers for. bin/fm-fleet-snapshot.sh stamps a
+# collected inventory with this scope and bin/fm-crew-state.sh reuses that
+# inventory only when its own computation is string-equal, so a divergence
+# between two copies of this rule would silently disable reuse everywhere with
+# no test failure - the fallback is a legal bounded query.
+fm_nm_repo_scope() {  # <worktree>
+  local common
+  common=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  case "$common" in
+    /*) ;;
+    *) common=$(cd "$1" 2>/dev/null && cd "$common" 2>/dev/null && pwd -P) || return 1 ;;
+  esac
+  [ -n "$common" ] || return 1
+  ( cd "$(dirname "$common")" 2>/dev/null && pwd -P ) || return 1
 }
 
 # 0 if run head $2 matches worktree $1's code identity, per the same rule

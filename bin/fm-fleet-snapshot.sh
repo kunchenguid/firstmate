@@ -165,13 +165,15 @@ no-mistakes evidence up front in two CONCURRENT waves - `axi status` per ship
 child plus one coarse run inventory per distinct child repository, then the ci
 step log for each ci-phase child - each query bounded by
 FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT (default 3 seconds) and at most
-FM_SNAPSHOT_SECONDMATE_CHILDREN queries in flight, so child-state cost is two
-bounds for the home rather than one 10-second query per child. Children a wave
-could not answer for fall back to pane/status evidence, an unanswered ci log
-stays fail-closed as unknown readiness, and a coarse row never clears a child's
-open captain decision. A remote home summary runs under the remote job worker's
-fixed environment, so these bounds are read from the remote home's own
-environment, not the caller's.
+FM_SNAPSHOT_SECONDMATE_CHILDREN queries in flight, so each wave costs
+ceil(queries / that cap) of those bounds - one bound per wave for a home within
+the cap - instead of one 10-second query per child. The whole summary still sits
+under FM_SNAPSHOT_SECONDMATE_TIMEOUT, and a home that exceeds it stays a
+fail-closed unknown. Children a wave could not answer for fall back to
+pane/status evidence, an unanswered ci log stays fail-closed as unknown
+readiness, and a coarse row never clears a child's open captain decision. A
+remote home summary runs under the remote job worker's fixed environment, so
+these bounds are read from the remote home's own environment, not the caller's.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
@@ -670,20 +672,6 @@ secondmate_child_state_cleanup() {
   SECONDMATE_CHILD_STATE_DIR=
 }
 
-# The repository scope no-mistakes resolves for <worktree>: the main worktree
-# behind git-common-dir. Non-zero when the path is not in a git repository.
-secondmate_nm_repo_scope() {  # <worktree>
-  local common
-  common=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 1
-  [ -n "$common" ] || return 1
-  case "$common" in
-    /*) ;;
-    *) common=$(cd "$1" 2>/dev/null && cd "$common" 2>/dev/null && pwd -P) || return 1 ;;
-  esac
-  [ -n "$common" ] || return 1
-  ( cd "$(dirname "$common")" 2>/dev/null && pwd -P ) || return 1
-}
-
 # Filesystem-safe key for a repository scope path. The mapping is an explicit
 # registration table rather than a hash of the path, so two distinct clones can
 # never alias onto one inventory file: a scope gets a key only by being recorded
@@ -708,6 +696,7 @@ secondmate_child_state_probes() {  # <spec-file>
   case "$cap" in ''|*[!0-9]*|0) cap=20 ;; esac
   case "$limit" in ''|*[!0-9]*|0) limit=200 ;; esac
   while IFS=$'\t' read -r probe target arg; do
+    [ -n "$SECONDMATE_CHILD_STATE_DIR" ] || return 1
     case "$probe" in
       status)
         fm_nm_run_bounded "$target" "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
@@ -739,7 +728,15 @@ secondmate_collect_child_state() {
   local meta id worktree scope key spec scopes=''
   command -v no-mistakes >/dev/null 2>&1 || return 1
   SECONDMATE_CHILD_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-child-state.XXXXXX") || return 1
-  trap secondmate_child_state_cleanup EXIT HUP INT TERM
+  trap secondmate_child_state_cleanup EXIT
+  # A fatal signal must END this summary, not return into live collection code:
+  # the handler clears SECONDMATE_CHILD_STATE_DIR, so a resumed wave would
+  # redirect its next probe to an absolute path under the filesystem root. The
+  # caller already treats a summary that produced no output as unavailable, which
+  # is the correct fail-closed answer for a home we were killed while reading.
+  trap 'secondmate_child_state_cleanup; exit 129' HUP
+  trap 'secondmate_child_state_cleanup; exit 130' INT
+  trap 'secondmate_child_state_cleanup; exit 143' TERM
   spec="$SECONDMATE_CHILD_STATE_DIR/.probes"
   : > "$spec"
   for meta in "$STATE"/*.meta; do
@@ -750,7 +747,7 @@ secondmate_collect_child_state() {
     worktree=$(meta_value "$meta" worktree)
     [ -n "$worktree" ] && [ -d "$worktree" ] || continue
     git -C "$worktree" symbolic-ref --quiet --short HEAD >/dev/null 2>&1 || continue
-    scope=$(secondmate_nm_repo_scope "$worktree") || continue
+    scope=$(fm_nm_repo_scope "$worktree") || continue
     [ -n "$scope" ] || continue
     key=$(secondmate_scope_key "$scope")
     printf '%s\n' "$scope" > "$SECONDMATE_CHILD_STATE_DIR/$id.scope"
@@ -778,9 +775,10 @@ secondmate_collect_child_state() {
 # fm-crew-state.sh reads it for any child whose run is in the ci phase. That read
 # needs the run id the first wave just collected, so it forms a SECOND bounded
 # wave rather than a per-child call escaping into the sequential summary loop.
-# Cost stays two bounds for the whole home instead of one query per child.
+# Each wave costs ceil(probes / concurrency cap) bounds, not one query per child.
 secondmate_collect_child_ci_logs() {
   local status id run_id spec
+  [ -n "$SECONDMATE_CHILD_STATE_DIR" ] || return 1
   spec="$SECONDMATE_CHILD_STATE_DIR/.probes.ci"
   : > "$spec"
   for status in "$SECONDMATE_CHILD_STATE_DIR"/*.status; do

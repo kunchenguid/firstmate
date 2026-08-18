@@ -390,22 +390,11 @@ nm_ci_checks_state() {
 # was registered under (verified against the installed CLI, v1.51.1). The main
 # worktree behind git-common-dir is that clone, so all crews leased from one
 # clone share one inventory instead of each holding a private, unshareable key.
-crew_nm_repo_scope() {
-  local common
-  common=$(git -C "$WT" rev-parse --git-common-dir 2>/dev/null) || return 1
-  [ -n "$common" ] || return 1
-  case "$common" in
-    /*) ;;
-    *) common=$(cd "$WT" 2>/dev/null && cd "$common" 2>/dev/null && pwd -P) || return 1 ;;
-  esac
-  [ -n "$common" ] || return 1
-  ( cd "$(dirname "$common")" 2>/dev/null && pwd -P ) || return 1
-}
 crew_runs_snapshot_applies() {
   local scope
   [ "${FM_CREW_STATE_RUNS_SNAPSHOT+x}" = x ] || return 1
   [ -n "${FM_CREW_STATE_RUNS_SNAPSHOT_REPO:-}" ] || return 1
-  scope=$(crew_nm_repo_scope) || return 1
+  scope=$(fm_nm_repo_scope "$WT") || return 1
   [ "$scope" = "$FM_CREW_STATE_RUNS_SNAPSHOT_REPO" ]
 }
 nm_runs_status_for_branch() {  # <branch>
