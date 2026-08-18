@@ -354,7 +354,7 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
-test_ship_project_memory_wording() {
+test_ship_project_memory_wording_is_trimmed() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
   mkdir -p "$home/data"
@@ -362,13 +362,64 @@ test_ship_project_memory_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
-    "project-memory contract lost the durable-knowledge bar"
-  assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
-    "project-memory contract lost pointer-over-copy guidance"
+  assert_grep "If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge" "$brief" \
+    "project-memory trim lost the trigger sentence"
+  assert_no_grep "Record only project knowledge useful to almost every future session." "$brief" \
+    "project-memory trim retained the removed durable-knowledge sentence"
+  assert_no_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
+    "project-memory trim retained the removed pointer-over-copy sentence"
   assert_grep "lacks \`## Maintaining this file\`, add that short self-governance section" "$brief" \
     "project-memory contract lost the self-governance add-in-same-pass rule"
-  pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
+  assert_grep "Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks" "$brief" \
+    "project-memory trim lost the proportionality sentence"
+  pass "fm-brief.sh: ship project-memory wording keeps the trigger and proportionality only"
+}
+
+test_no_mistakes_daemon_rule_is_mode_scoped() {
+  local home id brief shape
+  home="$TMP_ROOT/daemon-rule-home"
+  mkdir -p "$home/data"
+
+  for shape in direct local scout; do
+    id="brief-daemon-$shape"
+    case "$shape" in
+      direct)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+        ;;
+      local)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_no_grep "Never stop, restart, or update the shared \`no-mistakes\` daemon" "$brief" \
+      "$shape brief retained the no-mistakes-only daemon rule"
+  done
+
+  id="brief-daemon-no-mistakes"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving" "$brief" \
+    "no-mistakes brief lost the daemon rule"
+  assert_grep "daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon." "$brief" \
+    "no-mistakes brief changed the daemon rule"
+  pass "fm-brief.sh: daemon rule appears only in no-mistakes mode"
+}
+
+test_ship_status_protocol_tracks_wait_and_pushed_head() {
+  local home id brief
+  home="$TMP_ROOT/status-protocol-home"
+  mkdir -p "$home/data"
+  id="brief-status-protocol-c2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "When you enter a deliberate wait, declare it in one \`paused:\` line naming your current head, exactly what you await, and what voids the wait." "$brief" \
+    "ship status protocol omitted the deliberate-wait declaration"
+  assert_grep "The moment you push, your next status line names the new head before anything else - never advertise a head you have moved past." "$brief" \
+    "ship status protocol omitted the pushed-head declaration"
+  pass "fm-brief.sh: ship status protocol declares deliberate waits and pushed heads"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
@@ -419,7 +470,7 @@ test_herdr_lab_contract_quotes_foreign_firstmate_path() {
   pass "fm-brief.sh: --herdr-lab uses its quoted Firstmate-owned helper path"
 }
 
-test_herdr_lab_omission_is_loud_for_ship_and_scout() {
+test_unguarded_briefs_omit_herdr_gate() {
   local home id brief
   home="$TMP_ROOT/herdr-gate-home"
   mkdir -p "$home/data"
@@ -431,12 +482,12 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
-    assert_grep "# Herdr lifecycle declaration - NOT ENABLED" "$brief" \
-      "$kind brief silently omitted the Herdr declaration"
-    assert_grep "regenerate the brief with \`--herdr-lab\` before dispatch" "$brief" \
-      "$kind brief missing the fail-visible regeneration instruction"
+    assert_no_grep "Herdr lifecycle declaration - NOT ENABLED" "$brief" \
+      "$kind brief retained the removed Herdr declaration"
+    assert_no_grep "regenerate the brief with \`--herdr-lab\` before dispatch" "$brief" \
+      "$kind brief retained the removed Herdr gate"
   done
-  pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
+  pass "fm-brief.sh: unguarded ship and scout scaffolds omit the Herdr gate"
 }
 
 test_secondmate_no_projects_charter() {
@@ -719,10 +770,12 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
-test_ship_project_memory_wording
+test_ship_project_memory_wording_is_trimmed
+test_no_mistakes_daemon_rule_is_mode_scoped
+test_ship_status_protocol_tracks_wait_and_pushed_head
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
-test_herdr_lab_omission_is_loud_for_ship_and_scout
+test_unguarded_briefs_omit_herdr_gate
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
