@@ -86,8 +86,9 @@ When every remaining candidate is tight, dispatch inside the strongest-reasoning
 ### 3. Runway feasibility floor
 
 Known runway that will not last until the inspectable likely-completion horizon fails this gate, even when that candidate has the highest `spendPriority`.
-Read `runway` from the `quota[]` row: `through_reset` lasts until reset, `exhausted_now` is zero, and `projected_exhaustion` uses the matching `exhaustion[]` row's `usableRunwaySeconds`.
-A high `spendPriority` on a nearly empty window that resets soon must not route into a mid-task stall.
+Read `runway` from the `quota[]` row: `through_reset` passes this generic feasibility floor because the window reaches its refill without exhausting; never compare its `resetsAt` with the completion horizon as though reset were an exhaustion deadline.
+`exhausted_now` is zero, and `projected_exhaustion` uses the matching `exhaustion[]` row's `usableRunwaySeconds`.
+A high `spendPriority` on a nearly empty window that will exhaust soon must not route into a mid-task stall.
 Unknown or unmeasurable runway stays eligible with disclosed uncertainty and is never assumed to pass.
 Do not invent a generic percentage floor, and honor an explicit captain floor for a candidate when one exists.
 
@@ -99,6 +100,8 @@ Rank only from comparable known scalars.
 Never treat absent, `unknown`, or unmeasurable `spendPriority` as zero or as healthy; `0` means exact utilization, a different claim from unknown.
 An unknown `spendPriority` keeps the candidate eligible with disclosed uncertainty.
 Prefer known viable evidence when otherwise comparable.
+After the permitted TOON-to-JSON fallback, escalate to Firstmate instead of routing if no candidate can be ranked or runway uncertainty prevents proving the feasibility floor for any candidate that could be selected.
+Never resolve that terminal uncertainty by treating unknown as healthy or by choosing arbitrarily.
 Show the scalar or the literal `unknown` in the rationale; do not hide it in a score.
 
 Do not compare headroom against runway by hand.
