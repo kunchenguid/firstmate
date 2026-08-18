@@ -690,6 +690,53 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# A fresh worktree carries no gitignored files, so a crewmate that must run the
+# app to verify its work has to copy in the runtime config (e.g. .env) first. Both
+# ship and scout briefs (both run apps in worktrees) must carry that conditional
+# rule with its never-commit / never-print / bounded / fail-closed-to-firstmate
+# constraints, while the secondmate charter (which routes to its own crews rather
+# than running apps in a fresh worktree) must not.
+test_ship_and_scout_carry_runtime_config_rule() {
+  local home id brief
+  home="$TMP_ROOT/runtime-config-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-runtime-config-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    assert_grep "# Local runtime config" "$brief" \
+      "$kind brief missing the local runtime-config section"
+    assert_grep "If verifying your work requires running the app or site locally" "$brief" \
+      "$kind brief missing the conditional trigger for the runtime-config rule"
+    # shellcheck disable=SC2016 # Literal backticks must stay unexpanded in the assertion.
+    assert_grep 'gitignored runtime config the app needs to start (such as `.env` or `.env.local`)' "$brief" \
+      "$kind brief did not name the gitignored runtime config it must copy"
+    assert_grep "copy those required config files from the project's canonical local checkout into your worktree at the same relative path" "$brief" \
+      "$kind brief did not instruct copying required config to the same relative path"
+    assert_grep "a sibling local checkout of the same repo already on this machine" "$brief" \
+      "$kind brief lost the source-discovery guidance"
+    assert_grep "ask firstmate rather than guessing or fabricating config values" "$brief" \
+      "$kind brief did not fail closed to firstmate when the source cannot be found"
+    # shellcheck disable=SC2016 # Literal backticks must stay unexpanded in the assertion.
+    assert_grep 'never `node_modules`, build output, caches, or unrelated secrets' "$brief" \
+      "$kind brief did not bound the copy against a blind gitignored-file sweep"
+    assert_grep "never commit it, never let it enter your PR or diff, and never print its secret values" "$brief" \
+      "$kind brief lost the never-commit / never-print constraint"
+  done
+
+  # The secondmate charter routes work to its own crews; it must not carry the rule.
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='ops' \
+    "$ROOT/bin/fm-brief.sh" brief-runtime-config-sm --secondmate --no-projects >/dev/null 2>&1
+  assert_no_grep "# Local runtime config" "$home/data/brief-runtime-config-sm/brief.md" \
+    "secondmate charter should not carry the worktree runtime-config rule"
+  pass "fm-brief.sh: ship and scout briefs carry the conditional runtime-config copy rule; the charter does not"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -731,4 +778,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_ship_and_scout_carry_runtime_config_rule
 test_scout_and_secondmate_scaffold
