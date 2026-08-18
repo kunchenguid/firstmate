@@ -48,6 +48,14 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# PR-bearing ship briefs (no-mistakes, direct-PR) carry a "# Screenshots and PR
+# media" section: visual evidence is committed into the branch under
+# .github/pr-media/<task-id>/ and referenced by the branch's GitHub blob URL with
+# ?raw=true, which renders inline in a PR body even on a private repository;
+# local filesystem paths are forbidden because no reviewer can open them.
+# no-mistakes mode carries those image lines in --intent, the only worker text
+# the pipeline keeps verbatim when it regenerates the PR body; direct-PR mode
+# writes them into the PR body. local-only has no PR, so the section is omitted.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
@@ -426,19 +434,35 @@ fi
 case "$MODE" in
   direct-PR)
     SETUP2=""
+    MEDIA_CARRY="Put those image lines in the PR body you open."
     RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
     ;;
   local-only)
     SETUP2=""
+    MEDIA_CARRY=""
     RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into local \`main\`."
     ;;
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+    MEDIA_CARRY="Put those image lines in your \`--intent\`: the pipeline keeps the intent verbatim in the PR body and rewrites every other section on each run."
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+
+# PR-bearing modes get the media contract; local-only has no PR body to render into.
+MEDIA_SECTION=""
+if [ -n "$MEDIA_CARRY" ]; then
+  IFS= read -r -d '' MEDIA_SECTION <<EOF || true
+# Screenshots and PR media
+When a screenshot, GIF, or recording is part of the deliverable, commit it into your branch under \`.github/pr-media/$ID/\` and reference it as \`![what it shows](https://github.com/<owner>/<repo>/blob/fm/$ID/.github/pr-media/$ID/<file>?raw=true)\`, using the owner/repo your branch is pushed to.
+That URL renders inline in the PR body, private repository included, for as long as the branch exists; the files merge with the change and stay at the same path.
+Never paste a local filesystem path into a PR body - nobody else can open it.
+$MEDIA_CARRY
+
+EOF
+fi
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -504,6 +528,6 @@ For anything the codebase already shows, prefer a pointer to the authoritative f
 If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
-$DOD
+$MEDIA_SECTION$DOD
 EOF
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"

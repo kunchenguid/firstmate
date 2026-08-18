@@ -869,6 +869,44 @@ test_worker_role_scope() {
 }
 
 test_worker_role_scope
+# Visual evidence must reach the PR as an inline image, never as a local
+# filesystem path, and the carrying channel differs by mode: no-mistakes keeps
+# only the worker's --intent verbatim when it regenerates the PR body, while a
+# direct-PR worker writes the body itself. local-only has no PR body at all.
+test_ship_pr_media_contract_by_mode() {
+  local home brief
+  home="$TMP_ROOT/pr-media-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" media-nm-c1 some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/media-nm-c1/brief.md"
+  assert_grep "# Screenshots and PR media" "$brief" "no-mistakes brief lost the PR media section"
+  assert_grep "commit it into your branch under \`.github/pr-media/media-nm-c1/\`" "$brief" \
+    "no-mistakes brief must name the task-scoped media directory"
+  assert_grep 'blob/fm/media-nm-c1/.github/pr-media/media-nm-c1/<file>?raw=true' "$brief" \
+    "no-mistakes brief must give the branch blob URL with ?raw=true"
+  assert_grep "Never paste a local filesystem path into a PR body" "$brief" \
+    "no-mistakes brief must forbid local filesystem paths"
+  assert_grep "Put those image lines in your \`--intent\`" "$brief" \
+    "no-mistakes brief must carry the image lines through --intent"
+  assert_no_grep "Put those image lines in the PR body you open" "$brief" \
+    "no-mistakes brief must not tell the worker to write the pipeline-owned PR body"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" media-direct-c2 some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/media-direct-c2/brief.md"
+  assert_grep "# Screenshots and PR media" "$brief" "direct-PR brief lost the PR media section"
+  assert_grep 'blob/fm/media-direct-c2/.github/pr-media/media-direct-c2/<file>?raw=true' "$brief" \
+    "direct-PR brief must give the branch blob URL with ?raw=true"
+  assert_grep "Put those image lines in the PR body you open" "$brief" \
+    "direct-PR brief must carry the image lines in the PR body"
+  assert_no_grep "--intent" "$brief" "direct-PR brief must not mention --intent"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" media-local-c3 some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/media-local-c3/brief.md"
+  assert_no_grep "# Screenshots and PR media" "$brief" \
+    "local-only brief has no PR body and must not carry the PR media section"
+  pass "fm-brief.sh: PR media contract is inline-image only and carried per delivery mode"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -877,6 +915,7 @@ test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
+test_ship_pr_media_contract_by_mode
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
