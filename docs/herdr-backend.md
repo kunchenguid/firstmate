@@ -33,6 +33,61 @@ The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and
 Those script headers own release assets, checksums, download bounds, and post-install gates.
 Real harness credential tests remain opt-in rather than part of default CI.
 
+## Home layout
+
+Each home appears in Herdr as its own workspace, so you can tell your homes apart at a glance instead of one flat `firstmate`.
+
+This is a captain-facing "what you see and how to use it" guide for the Herdr backend only.
+The other backends do not group by home.
+
+### What you see
+
+Each home is its own Herdr workspace, labeled with the home's name (for this fleet: `distro`, `aimica`, `infina-inside`).
+The firstmate for that home is a pane titled `<home> · firstmate`, so you always know which home you are talking to.
+Every worker firstmate starts for that home is a tab inside the same workspace, titled `<home> · <task>`.
+In Herdr's `spaces` and `agents` sidebars, a home's firstmate and its workers group together under the home's name.
+
+```
+Herdr session
+├── distro                       workspace, labeled with the home name
+│   ├── distro · firstmate       the firstmate you talk to
+│   ├── distro · hlay-04         a worker (one tab per task)
+│   └── distro · gflow-02        another worker
+├── aimica
+│   ├── aimica · firstmate
+│   └── aimica · pricing-fix
+└── 2ndmate-web                  a secondmate home
+    ├── 2ndmate-web · firstmate
+    └── 2ndmate-web · api-tidy
+```
+
+### How to navigate
+
+Click a home's workspace in the sidebar to see that home's firstmate and all of its workers nested under it.
+The workers you see under a workspace are exactly the tasks running in that home, and nothing from another home mixes in.
+
+### In the dashboard Terminal
+
+The dashboard's pane picker is a tree grouped `home -> firstmate -> workers`.
+Click any node - a home's firstmate or any worker - and the dashboard streams that pane directly, which is fast.
+There is no longer a nested full-Herdr client to load first.
+
+### The rules that matter
+
+The labels are for display only.
+Firstmate always routes a worker by its pane identity, never by the label, so two homes or tasks sharing a label is safe and never sends work to the wrong place.
+A secondmate home shows up as `2ndmate-<id>` instead of a plain home name, so it is obviously distinct from the primary home and from every other secondmate.
+A home's label is simply the `FM_HOME` directory's basename - its home name.
+This layout is Herdr-only; the other runtime backends have no per-home grouping.
+
+### When it takes effect
+
+The workspace label and the `<home> · firstmate` pane title are set at session start.
+New workers are placed into the home's workspace as they are spawned.
+A session that was already running before this landed picks up the labeling the next time it starts.
+
+<!-- Maintainer note: the firstmate-side pieces of this layout (bin/fm-herdr-home-label.sh session-start labeling, and fm-spawn.sh worker placement) touch shared/tracked code and are a strong upstream-PR candidate - see fleet-ops #14 (fork drift budget). Flag them upstream so the fork stays thin. -->
+
 ## Watching and task containers
 
 The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.
