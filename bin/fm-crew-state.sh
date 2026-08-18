@@ -23,8 +23,12 @@
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? A caller may supply one already-bounded coarse runs inventory
-#      through FM_CREW_STATE_RUNS_SNAPSHOT so a fleet summary can reuse one query
-#      across every child. Branch name alone is not enough: a historical run on a reused
+#      through FM_CREW_STATE_RUNS_SNAPSHOT, plus the repository root it was
+#      captured in through FM_CREW_STATE_RUNS_SNAPSHOT_REPO, so a fleet summary
+#      can reuse one query across every child of that repository; a child of any
+#      other repository still issues its own bounded query. A coarse row carries
+#      no gate detail, so it never overrides a still-open keyed decision.
+#      Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
@@ -139,6 +143,23 @@ map_log_state() {  # <line>
 
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
+
+# Still-open keyed decisions for this crew, as a canonical state, or empty when
+# none are open. Derived from the ONE owner of the open/resolved semantics
+# (fm-classify-lib.sh's whole-stream fold), never from a log tail, so a decision
+# the crew already resolved does not count and a decision buried under later
+# unrelated events still does. Used only where a state read cannot itself see
+# gate detail; a needs-decision outranks a blocked when both are open, matching
+# map_log_state's parked-over-blocked precedence for the captain surface.
+coarse_open_decision_state() {
+  local verbs
+  verbs=$(status_open_decisions "$LOG" 2>/dev/null | cut -f2)
+  if printf '%s\n' "$verbs" | grep -qx 'needs-decision'; then
+    printf 'parked'
+  elif printf '%s\n' "$verbs" | grep -qx 'blocked'; then
+    printf 'blocked'
+  fi
+}
 
 # pane_readable is consulted ONLY in the no-run fallback below. The run-step path
 # stays authoritative regardless of pane liveness - judge by the run-step, not the
@@ -336,9 +357,24 @@ nm_ci_checks_state() {
 # is a run for THIS branch active right now. Echoes the first (most recent)
 # matching row's status word (running/completed/cancelled/failed), or empty
 # when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
+#
+# A caller that already holds a bounded inventory may hand it over through
+# FM_CREW_STATE_RUNS_SNAPSHOT, but `no-mistakes runs` lists runs for the CURRENT
+# REPOSITORY only (verified against the installed CLI: outside an initialized
+# repo it prints nothing on stdout and exits 1). A snapshot is therefore only
+# usable here when FM_CREW_STATE_RUNS_SNAPSHOT_REPO names this worktree's own
+# repository root; a snapshot captured in some other project clone answers about
+# other code entirely and is ignored in favour of this crew's own bounded query.
+crew_runs_snapshot_applies() {
+  local root
+  [ "${FM_CREW_STATE_RUNS_SNAPSHOT+x}" = x ] || return 1
+  [ -n "${FM_CREW_STATE_RUNS_SNAPSHOT_REPO:-}" ] || return 1
+  root=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ "$root" = "$FM_CREW_STATE_RUNS_SNAPSHOT_REPO" ]
+}
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
-  if [ "${FM_CREW_STATE_RUNS_SNAPSHOT+x}" = x ]; then
+  if crew_runs_snapshot_applies; then
     out=$FM_CREW_STATE_RUNS_SNAPSHOT
   else
     out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
@@ -397,7 +433,7 @@ COARSE_STATUS=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  if [ "${FM_CREW_STATE_RUNS_SNAPSHOT+x}" = x ]; then
+  if crew_runs_snapshot_applies; then
     COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
     if [ -n "$COARSE_STATUS" ]; then
       HAVE_RUN=1
@@ -436,15 +472,25 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_LOG_STATE=""
   RUN_STATUS=""
   if [ "$RUN_SOURCE" = coarse ]; then
-    # No step/gate detail is available from the plain runs list - only ever
-    # true/working, done, or failed. A crew genuinely parked at a gate still
-    # gets full detail once `axi status` reports its own branch again (e.g.
-    # once its own step is the most-recently-touched one), and its own
-    # needs-decision/blocked status-log append (a captain-relevant VERB) is
-    # surfaced through signal_reason_is_actionable regardless of this
-    # coarse-vs-full distinction, so a real gate is never silently missed.
+    # No step/gate detail is available from the plain runs list: a run parked at
+    # a captain gate is still just `running` there. So a coarse `running` alone
+    # is NOT evidence that this crew moved past a gate, and must never override a
+    # still-open keyed decision (the same whole-stream fold consumers use). While
+    # one is open the crew reports parked/blocked - the fail-closed direction, so
+    # a genuine captain decision is never cleared by a coarse read. Once the
+    # decision is resolved in the log, or `axi status` attributes this crew's own
+    # run again, full gate detail resumes.
     case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
+      running)
+        COARSE_OPEN_STATE=$(coarse_open_decision_state)
+        if [ -n "$COARSE_OPEN_STATE" ]; then
+          RUN_STATE=$COARSE_OPEN_STATE
+          RUN_DETAIL="open decision in status log; runs list reports the run active without gate detail"
+        else
+          RUN_STATE=working
+          RUN_DETAIL="validating (background run)"
+        fi
+        ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)    RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
@@ -532,7 +578,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   # stale: the gate resolved and the run resumed or finished.
   case "$LOG_VERB" in
     needs-decision|blocked)
-      if [ "$RUN_STATE" != parked ]; then
+      if [ "$RUN_STATE" != parked ] && [ "$RUN_STATE" != blocked ]; then
         if [ "$RUN_STATE" = working ]; then
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by active run"
         else

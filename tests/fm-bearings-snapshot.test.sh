@@ -28,8 +28,13 @@ make_fakebin() {  # <dir>
   fb=$(fm_fakebin "$1")
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-[ -z "${FAKE_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FAKE_NM_LOG"
+# The real CLI lists runs for the repository of its CWD, so the cwd is recorded
+# beside the argv: a test can assert WHICH repository was actually queried.
+[ -z "${FAKE_NM_LOG:-}" ] || printf '%s\t%s\n' "$PWD" "$*" >> "$FAKE_NM_LOG"
 [ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 30
+if [ "${1:-}" = runs ] && [ -n "${FAKE_NM_RUNS:-}" ] && [ -f "$FAKE_NM_RUNS" ]; then
+  cat "$FAKE_NM_RUNS"
+fi
 exit 0
 SH
   cat > "$fb/tmux" <<'SH'
@@ -497,8 +502,23 @@ test_bad_secondmate_homes_never_revive_parent_work() {
   pass "missing, invalid, unreadable, malformed, and timed-out homes stay explicit unknowns"
 }
 
+# Did any recorded no-mistakes invocation run with <repo-root> as its working
+# directory? The CLI answers for the repository of its CWD, so this is the
+# observable "which repository was actually asked" signal. Paths are compared
+# physically: the snapshot resolves a repository root while a per-child query
+# uses the recorded worktree path, and on macOS those differ only by /private.
+nm_log_queried_repo() {  # <log> <repo-root>
+  local dir resolved
+  while IFS=$'\t' read -r dir _; do
+    [ -n "$dir" ] || continue
+    resolved=$(cd "$dir" 2>/dev/null && pwd -P) || continue
+    [ "$resolved" = "$2" ] && return 0
+  done < "$1"
+  return 1
+}
+
 test_home_summary_reuses_one_bounded_run_inventory() {
-  local home mate wt fakebin canonical started elapsed calls
+  local home mate wt fakebin canonical started elapsed calls repo_root
   home=$(make_home bounded-home-state)
   mate="$TMP_ROOT/bounded-home-state-mate"
   make_valid_secondmate_home bounded-state "$mate"
@@ -542,7 +562,119 @@ EOF
   [ "$calls" -eq 1 ] || fail "home summary issued $calls no-mistakes queries instead of one bounded inventory"
   assert_grep 'runs --limit 200' "$home/nm.log" \
     "home summary did not use the public coarse run inventory"
+  # `no-mistakes runs` answers for the repository of its CWD, and a ship child
+  # validates its project clone, never the Firstmate home. Querying the home
+  # would list some unrelated repository's runs (or nothing at all).
+  repo_root=$(git -C "$wt" rev-parse --show-toplevel)
+  grep -q "^$repo_root"$'\t'"runs --limit 200$" "$home/nm.log" \
+    || fail "shared inventory was not captured in the child's own repository: $(cat "$home/nm.log")"
   pass "home summary reuses one bounded run inventory and stays within its outer deadline"
+}
+
+# The coarse runs list reports a run parked at a captain gate as plain `running`,
+# so treating it as authoritative would report a gate-parked child as working and
+# silently drop its open decision from the captain surface. Exercised through the
+# public fleet-snapshot interface with a REAL matching run row.
+test_home_summary_keeps_gate_parked_child_decision() {
+  local home mate wt fakebin canonical sha
+  home=$(make_home parked-home-state)
+  mate="$TMP_ROOT/parked-home-state-mate"
+  make_valid_secondmate_home parked-state "$mate"
+  append_secondmate_registry "$home" parked-state "$mate"
+  fm_write_secondmate_meta "$home/state/parked-state.meta" "$mate" \
+    "firstmate:fm-parked-state" sample
+  wt="$mate/projects/parked"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b fm/parked
+  sha=$(git -C "$wt" rev-parse --short HEAD)
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] parked - Parked child (repo: sample) (kind: ship) (since 2026-08-17)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/parked.meta" \
+    "window=firstmate:fm-parked" "worktree=$wt" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" parked busy
+  printf 'needs-decision [key=gate]: review gate wants an authority call\n' \
+    > "$mate/state/parked.status"
+  printf 'running fm/parked %s 2026-08-17\n' "$sha" > "$TMP_ROOT/parked-runs.txt"
+  fakebin=$(make_fakebin "$home")
+  : > "$home/parked-nm.log"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FAKE_NM_RUNS="$TMP_ROOT/parked-runs.txt" FAKE_NM_LOG="$home/parked-nm.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "parked-state")
+    | .provenance.selected == "structured-home"
+      and .current.state == "captain_decision"
+      and ([.decisions_open[].id] | index("parked") != null)
+      and ([.holds[].id] | index("parked") != null)
+  ' >/dev/null || fail "coarse run row cleared a gate-parked child's captain decision: $canonical"
+  pass "home summary keeps a gate-parked child's decision and hold under the coarse inventory"
+}
+
+# A home with children in two different project clones must never answer one
+# clone's children with the other clone's run inventory: `no-mistakes runs` is
+# per-repository, so the shared inventory covers exactly one repository and the
+# other child falls back to its own bounded query in its own repository.
+test_home_summary_never_shares_inventory_across_repositories() {
+  local home mate first second fakebin canonical first_root second_root
+  home=$(make_home multirepo-home-state)
+  mate="$TMP_ROOT/multirepo-home-state-mate"
+  make_valid_secondmate_home multirepo-state "$mate"
+  append_secondmate_registry "$home" multirepo-state "$mate"
+  fm_write_secondmate_meta "$home/state/multirepo-state.meta" "$mate" \
+    "firstmate:fm-multirepo-state" sample
+  first="$mate/projects/alpha"
+  second="$mate/projects/beta"
+  fm_git_init_commit "$first"
+  fm_git_init_commit "$second"
+  git -C "$first" checkout -q -b fm/alpha
+  git -C "$second" checkout -q -b fm/beta
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] alpha-child - Alpha child (repo: alpha) (kind: ship) (since 2026-08-17)
+- [ ] beta-child - Beta child (repo: beta) (kind: ship) (since 2026-08-17)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/alpha-child.meta" \
+    "window=firstmate:fm-alpha-child" "worktree=$first" "project=alpha" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$mate/state/beta-child.meta" \
+    "window=firstmate:fm-beta-child" "worktree=$second" "project=beta" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" alpha-child busy
+  record_claude_state "$mate/state" beta-child busy
+  printf 'working: alpha child\n' > "$mate/state/alpha-child.status"
+  printf 'working: beta child\n' > "$mate/state/beta-child.status"
+  fakebin=$(make_fakebin "$home")
+  : > "$home/multirepo-nm.log"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FAKE_NM_LOG="$home/multirepo-nm.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "multirepo-state")
+    | .provenance.selected == "structured-home"
+      and ([.active_children[].id] | sort) == ["alpha-child","beta-child"]
+  ' >/dev/null || fail "multi-repository home summary lost a child: $canonical"
+  first_root=$(cd "$first" && pwd -P)
+  second_root=$(cd "$second" && pwd -P)
+  nm_log_queried_repo "$home/multirepo-nm.log" "$first_root" \
+    || fail "no no-mistakes query ran in the first child's repository: $(cat "$home/multirepo-nm.log")"
+  nm_log_queried_repo "$home/multirepo-nm.log" "$second_root" \
+    || fail "second repository's child was answered from another repository's inventory: $(cat "$home/multirepo-nm.log")"
+  ! nm_log_queried_repo "$home/multirepo-nm.log" "$(cd "$mate" && pwd -P)" \
+    || fail "a run inventory was captured from the Firstmate home instead of a project clone"
+  pass "home summary never answers one repository's children from another's run inventory"
 }
 
 test_oversized_secondmate_summary_stays_strict_unknown() {
@@ -1950,6 +2082,8 @@ test_active_child_overrides_old_parent_event
 test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
 test_home_summary_reuses_one_bounded_run_inventory
+test_home_summary_keeps_gate_parked_child_decision
+test_home_summary_never_shares_inventory_across_repositories
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only

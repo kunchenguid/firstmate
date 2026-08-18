@@ -1041,7 +1041,7 @@ FM_STATE_OVERRIDE="$REMOTE_HOME/state" \
 printf 'working: bounded remote summary fixture\n' > "$REMOTE_HOME/state/bounded-summary.status"
 cat > "$REMOTE_ROOT/bin/no-mistakes" <<SH
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> '$TMP_ROOT/remote-summary-nm.log'
+printf '%s\t%s\n' "\$PWD" "\$*" >> '$TMP_ROOT/remote-summary-nm.log'
 sleep 30
 SH
 chmod +x "$REMOTE_ROOT/bin/no-mistakes"
@@ -1059,6 +1059,15 @@ printf '%s' "$BOUNDED_SNAPSHOT" | jq -e '
 ' >/dev/null || fail "bounded remote summary did not retain healthy structured state"
 [ "$(wc -l < "$TMP_ROOT/remote-summary-nm.log" | tr -d ' ')" -eq 1 ] \
   || fail "remote home summary issued more than one no-mistakes inventory query"
+# `no-mistakes runs` answers for the repository of its working directory, so the
+# shared inventory has to be captured in the ship child's project clone - never
+# in the remote Firstmate home, which is a different repository entirely.
+BOUNDED_QUERY_DIR=$(cut -f1 "$TMP_ROOT/remote-summary-nm.log" | head -1)
+BOUNDED_QUERY_DIR=$(cd "$BOUNDED_QUERY_DIR" && pwd -P)
+[ "$BOUNDED_QUERY_DIR" = "$(cd "$REMOTE_HOME/projects/alpha" && pwd -P)" ] \
+  || fail "remote shared inventory was captured outside the child's repository: $BOUNDED_QUERY_DIR"
+grep -q $'\t''runs --limit' "$TMP_ROOT/remote-summary-nm.log" \
+  || fail "remote home summary did not use the public coarse run inventory: $(cat "$TMP_ROOT/remote-summary-nm.log")"
 rm -f "$REMOTE_ROOT/bin/no-mistakes" \
   "$REMOTE_HOME/state/bounded-summary.meta" "$REMOTE_HOME/state/bounded-summary.status" \
   "$REMOTE_HOME/state/bounded-summary.busy-state" "$REMOTE_HOME/state/bounded-summary.busy-gen"
