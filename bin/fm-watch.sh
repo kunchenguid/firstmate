@@ -403,6 +403,19 @@ clear_pause_tracking() {  # <window>
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
 }
 
+# Drop <window>'s pause tracking ONLY when its pause has actually settled. A
+# pane-derived pause (fm-crew-state.sh's Claude account-limit override) carries
+# no paused: status line, so every poll-loop site that would otherwise treat a
+# marker without such a line as stale asks the one owner of that question
+# (crew_pause_still_live) first. Returns non-zero when the tracking was kept.
+clear_pause_tracking_if_settled() {  # <window> <task>
+  local win=$1 task=$2 key
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  [ -e "$STATE/.paused-$key" ] || return 1
+  crew_pause_still_live "$task" "$STATE" "$key" && return 1
+  clear_pause_tracking "$win"
+}
+
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # Only a confidently dead ordinary crew may recover paused classification after
 # fm-crew-state has fallen back to stopped or unknown.
@@ -465,7 +478,8 @@ surface_nonterminal_stale() {  # <window> <hash>
     date +%s > "$STATE/.paused-rechecked-$key"
     date +%s > "$STATE/.paused-resurfaced-$key"
   else
-    rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+    rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" \
+      "$STATE/.paused-livecheck-$key"
   fi
   wake "stale: $win"
 }
@@ -1043,9 +1057,8 @@ EOF
     key=${key//\//_}
     key=${key//./_}
     last=$(last_status_line "$STATE/$task.status")
-    if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ] \
-      && ! crew_pause_still_live "$task" "$STATE" "$key"; then
-      clear_pause_tracking "$w"
+    if ! status_is_paused_or_captain_held "$last"; then
+      clear_pause_tracking_if_settled "$w" "$task" || true
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
@@ -1178,7 +1191,7 @@ EOF
           rm -f "$ssf" "$ewf"
         fi
         if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
-          clear_pause_tracking "$w"
+          clear_pause_tracking_if_settled "$w" "$(window_to_task "$w" "$STATE")" || true
         fi
       fi
     else
@@ -1196,7 +1209,7 @@ EOF
           *)      clear_pause_tracking "$w" ;;
         esac
       else
-        [ -e "$pf" ] && clear_pause_tracking "$w"
+        clear_pause_tracking_if_settled "$w" "$task" || true
       fi
     fi
   done < <(recorded_windows)

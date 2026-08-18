@@ -991,6 +991,110 @@ test_pane_derived_pause_marker_survives_polls() {
   pass "a pane-derived limit pause keeps its marker and throttle across watcher polls"
 }
 
+# Same live pane-derived pause, but its pane CONTENT changes between polls (the
+# auto-continue widget's countdown, a token counter, the composer footer). The
+# changed-hash branch resets the stale bookkeeping and must not take the pause
+# marker with it, or the re-surface throttle is wiped on every redraw.
+test_pane_derived_pause_marker_survives_changed_pane() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case pane-derived-pause-changed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-limitredraw"
+  printf 'Usage limit reached - continuing automatically at 3:00pm' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/limitredraw.meta"
+  printf 'working: started the task\n' > "$state/limitredraw.status"
+  printf '%s' "$(seen_sig "$state/limitredraw.status")" > "$state/.seen-limitredraw_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "Usage limit reached - continuing automatically at 3:05pm")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  : > "$state/.paused-resurfaced-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: pane · account limit: session limit · resets 2:30pm'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "watcher exited for a redrawing pane-derived limit pause: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || fail "a redrawing pane cleared the live pane-derived pause marker"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "a redrawing pane wiped the pane-derived pause's re-surface throttle"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional redraw-pause watcher stop"
+  unset FM_FAKE_CREW_STATE
+  pass "a pane-derived limit pause keeps its marker when the pane redraws"
+}
+
+# Same live pane-derived pause seen on a pane that is not yet STABLY stale (one
+# identical hash so far). That branch also resets pending bookkeeping and must
+# leave a still-live pause alone.
+test_pane_derived_pause_marker_survives_unstable_stale() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(make_case pane-derived-pause-unstable); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-limitfresh"
+  printf 'Usage limit reached - continuing automatically at 3:00pm' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/limitfresh.meta"
+  printf 'working: started the task\n' > "$state/limitfresh.status"
+  printf '%s' "$(seen_sig "$state/limitfresh.status")" > "$state/.seen-limitfresh_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "Usage limit reached - continuing automatically at 3:00pm")" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  : > "$state/.paused-resurfaced-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: pane · account limit: session limit · resets 2:30pm'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "watcher exited for a not-yet-stable pane-derived limit pause: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || fail "the not-yet-stable stale branch cleared the live pane-derived pause marker"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the not-yet-stable stale branch wiped the re-surface throttle"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional unstable-pause watcher stop"
+  unset FM_FAKE_CREW_STATE
+  pass "a pane-derived limit pause keeps its marker before the pane is stably stale"
+}
+
+# The pause-liveness probe is throttled through .paused-livecheck-<key>, so a
+# stamp left behind after the pause markers are dropped would answer "still
+# live" with no probe for a whole re-surface window and pin a resumed crew's
+# marker in place. Surfacing an ordinary non-terminal stale drops it too.
+test_nonterminal_stale_clears_livecheck_stamp() {
+  local dir state fakebin out capture_file window key pane_hash pid
+  dir=$(make_case livecheck-stamp); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-resumed"
+  printf 'quiet pane after the limit lifted' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/resumed.meta"
+  printf 'working: started the task\n' > "$state/resumed.status"
+  printf '%s' "$(seen_sig "$state/resumed.status")" > "$state/.seen-resumed_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "quiet pane after the limit lifted")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-livecheck-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface an ordinary non-terminal stale"
+  [ ! -e "$state/.paused-livecheck-$key" ] || fail "the pause-liveness stamp outlived the pause markers"
+  unset FM_FAKE_CREW_STATE
+  pass "surfacing a non-terminal stale clears the pause-liveness throttle stamp"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -2216,6 +2320,9 @@ test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_pane_derived_pause_marker_survives_polls
+test_pane_derived_pause_marker_survives_changed_pane
+test_pane_derived_pause_marker_survives_unstable_stale
+test_nonterminal_stale_clears_livecheck_stamp
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_absorbed_while_pipeline_advances
