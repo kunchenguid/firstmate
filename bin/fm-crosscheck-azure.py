@@ -60,6 +60,7 @@ MODEL_GUEST = ROOT / "bin" / "fm-crosscheck-azure-model-guest.sh"
 RUNNER_CONTROLLER = ROOT / "bin" / "fm-azure-runner.py"
 RUNNER_GUEST = ROOT / "bin" / "fm-azure-runner-guest.sh"
 RUNNER_EXECUTOR = ROOT / "bin" / "fm-azure-runner-exec.py"
+CREDENTIAL_EXPIRY = ROOT / "bin" / "fm-credential-expiry.py"
 
 
 class AzureCrosscheckError(RuntimeError):
@@ -154,6 +155,63 @@ def load_tool_bridge() -> Any:
         "firstmate_azure_crosscheck_tool_bridge",
         "Azure Crosscheck host tool bridge",
     )
+
+
+def load_credential_expiry() -> Any:
+    return load_module(
+        CREDENTIAL_EXPIRY,
+        "firstmate_credential_expiry",
+        "provider credential expiry preflight",
+    )
+
+
+# The interval between a granted lane and the reviewer's first token: scope
+# verification, VM create, boot, and bundle upload. `poll_model_run` budgets
+# it on the run deadline and the credential margin budgets it on the token,
+# so both read the same number.
+PROVISIONING_ALLOWANCE_SECONDS = 900
+
+
+def preflight_reviewer_credential(core: Any, config: dict[str, str]) -> dict[str, Any]:
+    """Refuse a dead reviewer credential before any billable compartment.
+
+    The model compartment's egress allowlist is Azure DNS plus exactly one
+    provider API host (docs/azure-crosscheck/network-policy.json), and a
+    provider auth host is not on it. A CLI inside the compartment therefore
+    cannot refresh an expired token, so `refreshable` is not recoverable
+    there: the credential must already authenticate and must still do so
+    after the review deadline. Raising the core tool failure lets the
+    reviewer roster skip this account and try the next one, which is the
+    same treatment any other environment fault gets.
+
+    The margin covers the review, not the wait in front of it, so this is
+    called twice: once to fail fast, and once after the lane is held, which
+    is the call that actually stands between a dead token and a paid VM.
+
+    It also covers the gap between the check and the reviewer's first token:
+    scope verification, VM create, boot, and bundle upload all happen after
+    the lane is granted. `poll_model_run` already budgets that gap, so the
+    margin reuses its constant rather than inventing a second estimate of the
+    same interval.
+    """
+
+    expiry = load_credential_expiry()
+    record = expiry.inspect_profile(
+        config["account_home"],
+        harness=config["harness"],
+        margin_seconds=bounded_environment_integer(
+            "FM_CROSSCHECK_REVIEWER_TIMEOUT_SECONDS", 1800, 30, MAX_REVIEW_SECONDS
+        )
+        + PROVISIONING_ALLOWANCE_SECONDS,
+    )
+    try:
+        expiry.require_state(record, "usable", "Azure Crosscheck reviewer")
+    except expiry.CredentialExpiryError as exc:
+        raise core.CrosscheckToolError(
+            f"{exc}; re-authenticate that account before another review "
+            "(no model compartment, lane, or staged object was created)"
+        ) from exc
+    return record
 
 
 def azure_review_enabled(home: Path) -> bool:
@@ -949,7 +1007,7 @@ def submit_model_run(
 def poll_model_run(
     config: dict[str, Any], command_id: str, timeout_seconds: int
 ) -> tuple[str, str]:
-    deadline = time.monotonic() + timeout_seconds + 900
+    deadline = time.monotonic() + timeout_seconds + PROVISIONING_ALLOWANCE_SECONDS
     url = "https://management.azure.com" + command_id + "?api-version=2024-03-01&$expand=instanceView"
     while time.monotonic() < deadline:
         value, rc, detail = az(config, ["rest", "--method", "get", "--url", url], check=False)
@@ -1459,11 +1517,25 @@ def run_azure_review(
     until a lane frees, in exact submission order. The lane index selects the
     reviewer SKU deterministically so concurrent reviewers spread families.
     """
+    # Expiry first: a dead credential must cost nothing. This runs before any
+    # Azure call and before any staged object, so an already-expired reviewer
+    # is skipped instead of provisioning a VM that dies with an unrefreshable
+    # session.
+    preflight_reviewer_credential(core, config)
     probe = runtime_config(home)
     lane, lane_handle = acquire_review_lane(
         home, probe["lanes"], probe["queue_wait_seconds"]
     )
     try:
+        # The check above bounded nothing but its own instant. acquire_review_lane
+        # blocks in FIFO order for up to queue_wait_seconds - 7200 by default and
+        # 86400 at the maximum - which is far longer than the review margin, so a
+        # credential admitted as usable can be long dead by the time a lane frees.
+        # Under load, which is exactly when spend is highest, the first check is
+        # the one that proves nothing. This second check is the one that gates
+        # spend: every billable action happens after it, and it costs one local
+        # file read.
+        preflight_reviewer_credential(core, config)
         return _run_azure_review_in_lane(
             core=core, root=root, home=home, task_id=task_id, pr_url=pr_url,
             review_dir=review_dir, proof_root=proof_root,

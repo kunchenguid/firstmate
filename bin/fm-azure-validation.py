@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "docs" / "azure-validation" / "cell.json"
 GUEST = ROOT / "bin" / "fm-azure-validation-guest.sh"
 SHARD_BRIDGE = ROOT / "bin" / "fm-azure-validation-shard-bridge.py"
+CREDENTIAL_EXPIRY = ROOT / "bin" / "fm-credential-expiry.py"
 CONTAINER = "validation-shards"
 SCHEMA = "fm.azure-validation/v1"
 RESULT_SCHEMA = "fm.azure-validation-result/v1"
@@ -973,6 +974,170 @@ def runner_module():
         spec.loader.exec_module(module)
         _RUNNER_MODULE = module
     return _RUNNER_MODULE
+
+
+_CREDENTIAL_EXPIRY_MODULE = None
+
+
+def credential_expiry_module():
+    global _CREDENTIAL_EXPIRY_MODULE
+    if _CREDENTIAL_EXPIRY_MODULE is None:
+        spec = importlib.util.spec_from_file_location(
+            "credential_expiry_module", str(CREDENTIAL_EXPIRY)
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _CREDENTIAL_EXPIRY_MODULE = module
+    return _CREDENTIAL_EXPIRY_MODULE
+
+
+# What the fm-auth-home share actually is, verified against both consumers:
+# the guest's auth_home_pull copies the WHOLE share into one cell home and the
+# guest exports CODEX_HOME=$HOME/.codex or CLAUDE_CONFIG_DIR=$HOME/.claude, so
+# the share is exactly one home-shaped tree holding at most one codex profile
+# and one claude profile. Crosscheck reviewers never read the share at all;
+# they receive a per-review credential archive. There is therefore no consumer
+# for a multi-profile layout, and inventing one would write bytes nothing
+# reads. Seeding keeps the layout the consumers already expect.
+#
+# Only the credential file itself is uploaded. Sessions, history, caches, and
+# project state are cell-local by design and have no reason to sit on a shared
+# Azure Files share.
+AUTH_HOME_LAYOUT = {
+    "codex": (".codex", "auth.json"),
+    "claude": (".claude", ".credentials.json"),
+}
+
+
+def auth_seed_targets(args):
+    """Resolve the requested harness/profile pairs for one seeding run."""
+
+    selected = []
+    for harness in PROVIDERS:
+        value = getattr(args, harness, None)
+        if not value:
+            continue
+        profile = Path(value).expanduser()
+        if not profile.is_dir() or profile.is_symlink():
+            raise ValidationError(
+                "{} profile must be an existing non-symlink directory: {}".format(
+                    harness, profile
+                )
+            )
+        directory, credential = AUTH_HOME_LAYOUT[harness]
+        source = profile.resolve() / credential
+        if not source.is_file() or source.is_symlink():
+            raise ValidationError(
+                "{} profile holds no regular {} to seed: {}".format(
+                    harness, credential, source
+                )
+            )
+        selected.append({
+            "harness": harness,
+            "profile": profile.resolve(),
+            "source": source,
+            "share_directory": directory,
+            "share_path": "{}/{}".format(directory, credential),
+        })
+    if not selected:
+        raise ValidationError(
+            "auth-seed requires at least one of --codex or --claude"
+        )
+    return selected
+
+
+def auth_seed_preflight(targets):
+    """Refuse to publish a credential the cells cannot authenticate with.
+
+    Seeding exists to carry a freshly re-authenticated profile onto the share.
+    A profile whose access token is already dead would be uploaded, pulled by
+    every later boot, and fail there instead of here, so it is refused with
+    its own expiry named.
+    """
+
+    expiry = credential_expiry_module()
+    for target in targets:
+        record = expiry.inspect_profile(
+            target["profile"], harness=target["harness"]
+        )
+        try:
+            expiry.require_state(record, "usable", "fm-auth-home seed")
+        except expiry.CredentialExpiryError as exc:
+            raise ValidationError(
+                "{}; re-authenticate that profile and seed again".format(exc)
+            )
+        target["expiry"] = record
+    return targets
+
+
+def auth_seed(env, args):
+    """Publish selected local credentials onto the persistent auth share.
+
+    Plan is local and touches no Azure. Apply requires the exact subscription
+    plus an explicit seed confirmation, uploads each credential to the exact
+    path its consumer reads, and then re-reads the share to prove the upload.
+    """
+
+    targets = auth_seed_preflight(auth_seed_targets(args))
+    share = auth_share_name()
+    if not share:
+        raise ValidationError("FM_AZURE_AUTH_SHARE is empty; the auth-home sync is disabled")
+    if not args.apply:
+        print("auth-seed plan (no Azure call made)")
+        print("  share: {}".format(share))
+        for target in targets:
+            print("  {} {} -> {}".format(
+                target["harness"], target["source"], target["share_path"]
+            ))
+            print("    state {} expires {}".format(
+                target["expiry"]["state"], target["expiry"]["expires_at"]
+            ))
+        print("  apply with: --apply --confirm-seed --confirm-subscription <exact-id>")
+        return
+    if not args.confirm_seed:
+        raise ValidationError("auth-seed --apply requires --confirm-seed")
+    if args.confirm_subscription != env["subscription"]:
+        raise ValidationError("auth-seed --apply requires the exact --confirm-subscription")
+    scope_gate(env)
+    backup = ["--auth-mode", "login", "--enable-file-backup-request-intent"]
+    for target in targets:
+        az_command(env, [
+            "storage", "directory", "create",
+            "--account-name", env["storage"],
+            "--share-name", share,
+            "--name", target["share_directory"],
+        ] + backup)
+        _, code, detail = az_command(env, [
+            "storage", "file", "upload",
+            "--account-name", env["storage"],
+            "--share-name", share,
+            "--source", str(target["source"]),
+            "--path", target["share_path"],
+        ] + backup, check=False)
+        if code != 0:
+            raise ValidationError("auth-seed upload failed for {}: {}".format(
+                target["share_path"], detail
+            ))
+        # An accepted upload is not proof: re-read the share and require the
+        # exact byte count, so a truncated or replaced object is caught here
+        # instead of at the next cell boot.
+        published, code, detail = az_command(env, [
+            "storage", "file", "show",
+            "--account-name", env["storage"],
+            "--share-name", share,
+            "--path", target["share_path"],
+        ] + backup, check=False)
+        expected = target["source"].stat().st_size
+        published_size = ((published or {}).get("properties") or {}).get("contentLength")
+        if code != 0 or published_size != expected:
+            raise ValidationError(
+                "auth-seed could not prove {} landed at its expected {} bytes: {}".format(
+                    target["share_path"], expected, detail or published_size
+                )
+            )
+        print("auth-seed published {} ({} bytes, expires {})".format(
+            target["share_path"], expected, target["expiry"]["expires_at"]
+        ))
 
 
 def lifecycle_command(env, arguments):
@@ -2862,6 +3027,12 @@ def parser():
     retain_parser.add_argument("--confirm-retain", action="store_true")
     retain_parser.add_argument("--confirm-subscription")
     commands.add_parser("queue")
+    seed_parser = commands.add_parser("auth-seed")
+    seed_parser.add_argument("--codex")
+    seed_parser.add_argument("--claude")
+    seed_parser.add_argument("--apply", action="store_true")
+    seed_parser.add_argument("--confirm-seed", action="store_true")
+    seed_parser.add_argument("--confirm-subscription")
     pure = commands.add_parser("pure-check", help=argparse.SUPPRESS)
     pure.add_argument("--fixture", required=True)
     return root
@@ -2874,6 +3045,10 @@ def main():
             pure_check(args)
             return 0
         cloud = args.command in ("dispatch", "drive", "observe", "collect", "respond", "replace", "close", "retain-failure")
+        # Planning a seed is a purely local credential read; only the upload
+        # needs a cloud scope, so a plan works without Azure environment.
+        if args.command == "auth-seed" and args.apply:
+            cloud = True
         env = environment(require_cloud=cloud)
         if args.command == "submit":
             submit(env, args)
@@ -2897,6 +3072,8 @@ def main():
             queue(env)
         elif args.command == "status":
             status(env, args)
+        elif args.command == "auth-seed":
+            auth_seed(env, args)
         return 0
     except ValidationError as exc:
         print("AZURE VALIDATION FAILED: {}".format(exc), file=sys.stderr)

@@ -42,19 +42,28 @@
 #   fm-azure-validation.sh retain-failure --cell <azv-id> --confirm-retain \
 #     --confirm-subscription <exact-id>
 #   fm-azure-validation.sh queue
+#   fm-azure-validation.sh auth-seed [--codex <profile>] [--claude <profile>]
+#     [--apply --confirm-seed --confirm-subscription <exact-id>]
+#
+# auth-seed publishes a locally re-authenticated credential onto the
+# fm-auth-home share so cells stop booting with a dead token. Without --apply
+# it plans locally and makes no Azure call. It refuses any profile whose
+# credential is not usable now (bin/fm-credential-expiry.py owns that
+# judgement) and uploads only the credential file, into the one home-shaped
+# layout the guest actually reads.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
 usage() {
-  sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
   help|-h|--help|"")
     usage
     ;;
-  submit|dispatch|drive|observe|collect|status|respond|replace|close|retain-failure|queue)
+  submit|dispatch|drive|observe|collect|status|respond|replace|close|retain-failure|queue|auth-seed)
     exec python3 "$SCRIPT_DIR/fm-azure-validation.py" "$@"
     ;;
   *)

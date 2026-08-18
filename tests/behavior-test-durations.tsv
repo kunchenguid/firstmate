@@ -52,6 +52,7 @@
 1000	tests/fm-cloud-state.test.sh
 263	tests/fm-composer-ghost.test.sh
 30	tests/fm-composer-lib.test.sh
+4000	tests/fm-credential-expiry.test.sh
 10055	tests/fm-crew-state.test.sh
 5000	tests/fm-crosscheck-azure.test.sh
 94232	tests/fm-crosscheck.test.sh

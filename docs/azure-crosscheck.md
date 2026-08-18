@@ -56,6 +56,17 @@ A force-push changes the live head and invalidates the ordinary exact-head ledge
 A stale claims document invalidates the claims match.
 A wrong account, model, generation, VM, boot, request, transport, or cleanup identity cannot become a clear run.
 
+## Reviewer credential preflight
+
+The model compartment's egress allowlist is Azure-provided DNS plus the exact provider API endpoint, and a provider auth host is not on it.
+A reviewer CLI inside the compartment therefore cannot refresh an expired session, so a dead credential buys a real VM and returns a tool failure instead of a verdict.
+
+Every review runs `bin/fm-credential-expiry.py` against the selected reviewer's account home twice: once before the FIFO lane wait, before any Azure call and before any staged object, and again once the lane is held.
+The second check is the one that gates spend. The margin covers the review, not the queue in front of it, and `FM_AZURE_CROSSCHECK_QUEUE_WAIT_SECONDS` bounds that queue at 7200 seconds by default and 86400 at its maximum, so a credential admitted before the wait can be long dead by the time a lane frees - under load, which is when spend is highest.
+The credential must be `usable` and must still be usable after the review deadline (`FM_CROSSCHECK_REVIEWER_TIMEOUT_SECONDS`); `refreshable` is refused because it is not recoverable inside the compartment.
+A refusal is an ordinary tool failure, so the roster records the account and rotates to the next policy-screened reviewer rather than ending the review.
+The preflight reads expiry instants and account paths only, and never emits token material.
+
 ## Model compartment
 
 The model VM uses a separately built and reviewed exact Azure image resource ID supplied through `FM_CROSSCHECK_AZURE_MODEL_IMAGE_ID`.

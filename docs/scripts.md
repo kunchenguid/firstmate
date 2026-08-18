@@ -71,6 +71,7 @@ The shared no-mistakes gate refusal used by every directly invocable mutating co
 | `fm-azure-pilot.sh`      | Validate, preview, apply, inspect, recover, or explicitly remove the private Azure foundation |
 | `fm-azure-runner.sh`     | Run one credential-free exact repository command on one private disposable Azure VM |
 | `fm-azure-validation.sh` | Queue and control exact-head no-mistakes runs in isolated elastic Azure cells        |
+| `fm-credential-expiry.py`  | Classify one account profile's provider credential by expiry without emitting token material |
 | `fm-azure-validation-shard-bridge.py` | Exchange exact behavior/lint requests and independent Azure runner receipts inside one cell |
 | `fm-nm-step-liveness.sh` | Read a no-mistakes step's processes as alive, dead, or graded unknown                |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
