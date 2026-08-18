@@ -844,6 +844,141 @@ operator_documentation_contract() {
   pass "operator documentation records queue, cost, failure, recovery, eight-shard, scale-zero, and real acceptance contracts"
 }
 
+shard_receipt_demotion_contract() {
+  local work block full
+  work=$(fm_test_tmproot fm-azure-validation-shard-demotion)
+
+  # Drive the guest's real text from the demotion through the result assembly,
+  # so the assertions land on the artifact the controller reads rather than on
+  # shell variables. A unit that only checks $OUTCOME cannot see a demotion that
+  # runs after the result was already written, which is the ordering this whole
+  # change depends on.
+  block=$work/emit.sh
+  awk '/^SHARD_RECEIPTS=\$SHARD_EXCHANGE/,/^RESULT_ARCHIVE=/' "$GUEST" \
+    | grep -v '^install -d\|^cp \|^RESULT_ARCHIVE=' >"$block"
+  [ -s "$block" ] || fail "the guest result-emission region was not found"
+  grep -q 'OUTCOME=failed' "$block" || fail "the extracted region does not demote the outcome"
+  grep -q 'behavior_shards' "$block" || fail "the extracted region does not assemble the result"
+  grep -q 'Behavior shards:' "$block" || fail "the extracted region does not write the operator report"
+  # The guest reads its boot id from procfs, which the extracted region cannot.
+  # shellcheck disable=SC2016  # The pattern is literal guest text, not an expansion.
+  sed -i.bak 's#\$(cat /proc/sys/kernel/random/boot_id)#boot-id#' "$block" && rm -f "$block.bak"
+
+  mkdir -p "$work/exchange" "$work/state" "$work/evidence/attempt-1"
+  # Only the shard count varies; pass it as a value so the JSON braces are
+  # not shell literals. "none" omits the field entirely.
+  write_request() {
+    local limits=""
+    [ "$1" = none ] || limits="\"behavior_shards\":$1"
+    {
+      printf '{"limits":{%s},"protocol":{"result_schema":"fm.test/v1"},' "$limits"
+      printf '"request_digest":"d","cell":"c","home_binding":"h","task":"t",'
+      printf '"task_generation":"g","validation_generation":"v","fence":"f",'
+      printf '"repository":{"branch":"b","head":"hh"}}\n'
+    } >"$work/request.json"
+  }
+  write_request 8
+  printf '{"worktree_disk_id":"wd","run_id":"nm-run"}\n' >"$work/identity.json"
+
+  cat >"$work/drive.sh" <<'DRIVER'
+set -euo pipefail
+SHARD_EXCHANGE=$FM_TEST_WORK/exchange
+REQUEST=$FM_TEST_WORK/request.json
+IDENTITY=$FM_TEST_WORK/identity.json
+STATE=$FM_TEST_WORK/state
+EVIDENCE=$FM_TEST_WORK/evidence
+ATTEMPT=1
+CELL=c
+OUTCOME=$FM_TEST_OUTCOME
+CURRENT_HEAD=hh
+CURRENT_TREE=tt
+REMOTE_HEAD=hh
+RUN_ID=nm-run
+VM_RESOURCE_ID=/vm
+VM_INSTANCE_ID=vmi
+START_EPOCH=1 END_EPOCH=2 START_LOAD=0 END_LOAD=0
+START_MEM_AVAILABLE_KIB=1 END_MEM_AVAILABLE_KIB=1
+PR=https://github.com/o/r/pull/1
+CHECKS_GREEN=false
+case "$OUTCOME" in passed|checks-passed) CHECKS_GREEN=true ;; esac
+. "$FM_TEST_BLOCK"
+DRIVER
+
+  emit() {
+    rm -f "$work/state/result-a1.json" "$work/state/report.md" "$work/exchange/receipts.json"
+    [ "$2" = ABSENT ] || printf '%s\n' "$2" >"$work/exchange/receipts.json"
+    env FM_TEST_BLOCK="$block" FM_TEST_WORK="$work" FM_TEST_OUTCOME="$1" bash "$work/drive.sh"
+  }
+  assert_result() {
+    grep -q "$1" "$work/state/result-a1.json" || fail "$2"
+  }
+
+  full=$(python3 -c 'import json;print(json.dumps([{"shard":i} for i in range(1,9)]))')
+
+  emit passed "$full" >/dev/null 2>&1 || fail "emitting a complete result failed"
+  assert_result '"outcome":"passed"' "a complete receipt set did not keep its passed outcome"
+  assert_result '"checks_green":true' "a complete receipt set lost its CI-green marker"
+
+  # The stranding case, asserted on the emitted result rather than a shell
+  # variable: if the demotion runs after the result is assembled, this file
+  # still says passed and the cell strands exactly as before.
+  emit passed '[]' >/dev/null 2>&1 || fail "emitting a shortfall result failed"
+  assert_result '"outcome":"failed"' "a passed result with no shard receipts was emitted undemoted"
+  assert_result '"checks_green":false' "a demoted result kept its CI-green marker"
+  assert_grep "Behavior shards:" "$work/state/report.md" "the report omitted the shard shortfall"
+  assert_grep "found 0" "$work/state/report.md" "the report omitted the observed receipt count"
+
+  emit checks-passed "$(python3 -c 'import json;print(json.dumps([{"shard":i} for i in range(1,4)]))')" >/dev/null 2>&1
+  assert_result '"outcome":"failed"' "a partial receipt set was emitted undemoted"
+
+  # An unreadable count must fail closed. The obvious numeric default, zero, is
+  # exactly the observed value here, so a plain count comparison would wave this
+  # through at the moment the check matters most.
+  write_request none
+  emit passed '[]' >/dev/null 2>&1
+  assert_result '"outcome":"failed"' "an unreadable shard count was treated as zero expected"
+  assert_grep "unreadable" "$work/state/report.md" "the report did not name the unreadable shard count"
+
+  write_request 8
+  emit passed '{"not":"an array"}' >/dev/null 2>&1
+  assert_result '"outcome":"failed"' "a malformed receipt file was treated as a count"
+  emit passed ABSENT >/dev/null 2>&1
+  assert_result '"outcome":"failed"' "an absent receipt file was treated as a count"
+
+  # Receipts that jq itself cannot parse take the shell fallback rather than the
+  # jq else-branch, so a fallback that reuses the expected count would match it.
+  emit passed 'this is not json at all {' >/dev/null 2>&1
+  assert_result '"outcome":"failed"' "an unparseable receipt file was treated as a matching count"
+
+  # A count that is a number but not an integer cannot be compared numerically;
+  # without an explicit guard the arithmetic test errors, and an errored test in
+  # an if-condition reads as false, so the shortfall passes silently.
+  write_request 8.0
+  emit passed "$full" >/dev/null 2>&1
+  assert_result '"outcome":"failed"' "a non-integer shard count was compared instead of refused"
+  write_request 8
+
+  # An already-failed run is untouched, so the check cannot invent a second
+  # reason for a failure that already has one.
+  emit failed '[]' >/dev/null 2>&1
+  assert_result '"outcome":"failed"' "an already-failed outcome was rewritten"
+  if grep -q "Behavior shards:" "$work/state/report.md"; then
+    fail "an already-failed outcome gained a spurious shard shortfall"
+  fi
+
+  # A request that asks for no shards is satisfied by no receipts.
+  write_request 0
+  emit passed '[]' >/dev/null 2>&1
+  assert_result '"outcome":"passed"' "a zero-shard request was demoted"
+
+  # Every attempt starts from no receipts, so a reattach cannot inherit the
+  # previous attempt's proof about a tree it did not test.
+  grep -q 'rm -f ..SHARD_EXCHANGE/receipts.json' "$GUEST" \
+    || fail "the guest does not clear a stale receipt set before an attempt"
+
+  pass "a passed cell result without its complete shard receipt set is demoted in the emitted result, not refused after the spend"
+}
+
 static_contract
 submit_contract
 security_negative_contract
@@ -858,3 +993,4 @@ shard_runner_integration_contract
 cleanup_recovery_contract
 multi_lane_queue_contract
 operator_documentation_contract
+shard_receipt_demotion_contract

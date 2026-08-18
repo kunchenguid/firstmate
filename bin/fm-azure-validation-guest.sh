@@ -551,6 +551,12 @@ for executable in "$NM_BIN" "$PROVIDER_BIN" "$GH_BIN" "$GH_AXI_BIN"; do
   [ -x "$executable" ] || { echo "validation guest: exact runtime executable is absent" >&2; exit 125; }
 done
 PROVIDER=$(jq -r '.credentials.provider' "$REQUEST")
+# A receipt set proves something about the attempt that produced it. The shard
+# exchange is on the durable worktree mount and survives a reattach, so a stale
+# receipts.json would let this attempt inherit the previous one's proof - which
+# the controller accepts, because it allows a receipt head that is merely an
+# ancestor of the published head. Every attempt starts from no receipts.
+rm -f "$SHARD_EXCHANGE/receipts.json" || :
 ENV_FILE=$STATE/cell.env
 {
   printf 'HOME=%s\n' "$HOME_DIR"
@@ -931,6 +937,38 @@ CHECKS_GREEN=false
 case "$OUTCOME" in passed|checks-passed) CHECKS_GREEN=true ;; esac
 SHARD_RECEIPTS=$SHARD_EXCHANGE/receipts.json
 [ -f "$SHARD_RECEIPTS" ] || printf '[]\n' >"$SHARD_RECEIPTS"
+# A passed outcome asserts the complete independent behavior-shard receipt set
+# (docs/azure-validation.md: "A missing ... shard fails the no-mistakes test
+# step"). When the bridge never ran, the substituted empty set above turns
+# "sharding did not happen" into "passed with no receipts", and the controller
+# then refuses the entire result as malformed. That refusal is correct but it
+# lands too late to be useful: the cell never reaches `collected`, so it can
+# neither close nor be retained on its own outcome, and its worktree disk stays
+# allocated with nothing in the result saying why. Demote here instead, where
+# the reason is still known.
+# Both sentinels are out of band. A numeric default would sit inside the value
+# space of real counts, and the obvious choice - zero - is exactly the observed
+# value in the failure being guarded, so an unreadable request would compare
+# equal to an empty receipt set and wave it through.
+SHARD_EXPECTED=$(jq -r 'if (.limits.behavior_shards | type) == "number" then .limits.behavior_shards else "unreadable" end' "$REQUEST" 2>/dev/null || echo unreadable)
+SHARD_OBSERVED=$(jq -r 'if type == "array" then length else "unreadable" end' "$SHARD_RECEIPTS" 2>/dev/null || echo unreadable)
+SHARD_SHORTFALL=""
+case "$OUTCOME" in
+  passed|checks-passed)
+    # Anything that is not a plain integer is a shortfall, not a comparison to
+    # attempt: this fails closed on a truncated request, a malformed receipt
+    # file, or a schema that stops emitting an integer count.
+    case "$SHARD_EXPECTED" in ''|*[!0-9]*) SHARD_EXPECTED=unreadable ;; esac
+    case "$SHARD_OBSERVED" in ''|*[!0-9]*) SHARD_OBSERVED=unreadable ;; esac
+    if [ "$SHARD_EXPECTED" = unreadable ] || [ "$SHARD_OBSERVED" = unreadable ] \
+      || [ "$SHARD_OBSERVED" -ne "$SHARD_EXPECTED" ]; then
+      SHARD_SHORTFALL="expected $SHARD_EXPECTED behavior-shard receipts, found $SHARD_OBSERVED"
+      echo "validation guest: $SHARD_SHORTFALL; demoting outcome $OUTCOME to failed" >&2
+      OUTCOME=failed
+      CHECKS_GREEN=false
+    fi
+    ;;
+esac
 install -d -m 0700 -o fmvalidate -g fmvalidate "$EVIDENCE/attempt-$ATTEMPT"
 cp "$SHARD_RECEIPTS" "$EVIDENCE/attempt-$ATTEMPT/behavior-shards.json"
 # The outcome derivation reads the status log; archive it with the evidence
@@ -1003,6 +1041,9 @@ REPORT=$STATE/report.md
   printf -- "- Submitted head: \`%s\`\n" "$(jq -r '.repository.head' "$REQUEST")"
   printf -- "- Current head: \`%s\`\n" "$CURRENT_HEAD"
   printf -- "- Run id: \`%s\`\n" "${RUN_ID:-unavailable}"
+  if [ -n "$SHARD_SHORTFALL" ]; then
+    printf -- "- Behavior shards: \`%s; outcome demoted to failed\`\n" "$SHARD_SHORTFALL"
+  fi
   if [ -f "$STATE/auth-needed" ]; then
     printf -- "- Auth: \`interactive provider auth needed once (auth share empty)\`\n"
   fi
