@@ -70,7 +70,7 @@ The preflight reads expiry instants and account paths only, and never emits toke
 ## Model compartment
 
 The model VM uses a separately built and reviewed exact Azure image resource ID supplied through `FM_CROSSCHECK_AZURE_MODEL_IMAGE_ID`.
-The image pins the supported Codex, Claude, or Pi reviewer CLI and the model guest, with no ambient credential, Azure CLI, repository helper, tool bridge, or generic command service.
+The image pins the Codex, Claude, and Pi reviewer CLIs and the model guest, with no ambient credential, Azure CLI, repository helper, tool bridge, or generic command service.
 No package or executable is downloaded after the VM begins review.
 
 The reviewer credential is staged as a short-lived exact-object capability.
@@ -153,9 +153,24 @@ No resource group, subnet, shared storage account, foundation resource, sibling 
 
 The complete retained 29-resource private foundation, its controller-identity inventory correction, and the shared whole-fleet allocator are released on `main` with zero VMs; live Azure Crosscheck acceptance remains unperformed and happens later from released public main under separate explicit billable and security-sensitive authorization.
 The pinned model image and the role-specific network policy are tracked declarations at [`docs/azure-crosscheck/model-image.json`](azure-crosscheck/model-image.json) and [`docs/azure-crosscheck/network-policy.json`](azure-crosscheck/network-policy.json), owned by the bounded command [`bin/fm-crosscheck-azure-image.sh`](../bin/fm-crosscheck-azure-image.sh).
-The image pins the exact marketplace base version, the single supported reviewer CLI by URL/size/SHA-256, and the tracked model guest by SHA-256, and disables every command, MCP, extension, skill, and session surface; the policy allows model egress only to Azure-provided DNS and the exact provider endpoint, denies instance metadata and the virtual network, and keeps tool/verifier repository execution networkless.
+The image pins the exact marketplace base version, the Codex and Claude reviewer CLIs by URL/size/SHA-256, and the tracked model guest by SHA-256, and disables every command, MCP, extension, skill, and session surface; Pi is pinned less tightly and deliberately so: its Node runtime and its published tarball are pinned by the same URL/size/SHA-256 contract, and its installed version is asserted after the build, but `npm install` then resolves roughly 127 dependency packages over the network. Pi's own six sibling packages carry a `resolved` URL and no `integrity` hash in the shipped shrinkwrap, so a republished `@earendil-works/pi-*@0.84.1` would enter this credentialed image with every digest check still passing. That is the same exposure the crewmate cell image already accepts for the same package; it is recorded here rather than described as a digest-pinned closure; the policy allows model egress only to Azure-provided DNS and the exact provider endpoint, denies instance metadata and the virtual network, and keeps tool/verifier repository execution networkless.
 Plan legs are read-only; `image-build` and `policy-apply` are billable/security-sensitive, refuse without their exact confirmation flags and subscription, and run only from a clean checkout landed on public main.
 Record the exact built image resource ID before any live review.
+`image-build` distributes a managed image; the reviewer SKUs in [`azure-crosscheck/compartment.json`](azure-crosscheck/compartment.json) need the `DiskControllerTypes` feature a managed image cannot carry, so an operator promotes that managed image into a Compute Gallery image version and it is the gallery version's resource ID that `model_image_id` names.
+That promotion is the one step of this contract the bounded command does not own, so a rebuilt image reaches reviews only after it is promoted and `model_image_id` is repointed.
+Admission does not check that the configured image actually carries the harness it admits: the build tags the image with its `pi-tarball-sha256`, `codex-cli-sha256`, and `claude-cli-sha256`, and nothing reads those tags. Until it does, pointing `model_image_id` at an image built before a harness was added admits that harness and fails it inside a paid VM.
+One more Pi-lane cost is open: the model guest launches `pi` without `--offline`, and the compartment's egress allowlist is Azure DNS plus one provider endpoint, so Pi's startup update and telemetry calls are dropped rather than refused and each waits out its own timeout on a paid VM before the review begins.
+
+The Pi closure parameters must name the same tarball the crewmate cell image installs, so that a Pi reviewer and a Pi author run one identical agent rather than two versions that can disagree for reasons the review would report as a finding:
+
+| parameter | value |
+|---|---|
+| `piTarballUrl` / `piTarballSha256` / `piTarballBytes` / `piVersion` | exactly `PI_URL` / `PI_DIGEST` / `PI_BYTES` / the asserted version in [`bin/fm-azure-cell-image.sh`](../bin/fm-azure-cell-image.sh) |
+| `nodeTarballUrl` | `https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.xz` |
+| `nodeTarballSha256` | `d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307` |
+| `nodeTarballBytes` | `31058332` |
+
+Pi declares `engines.node >= 22.19.0` and ships a `#!/usr/bin/env node` entrypoint, so the Node pin is a correctness bound and not a preference: an older runtime or an unresolvable `node` on `PATH` fails the reviewer at launch rather than at admission.
 
 The home-local configuration is optional and gitignored:
 
@@ -165,7 +180,7 @@ The home-local configuration is optional and gitignored:
   "provider_host": "exact-provider-host.example",
   "provider_port": 443,
   "reviewer_sku": "Standard_D4as_v6",
-  "model_image_id": "/subscriptions/.../resourceGroups/.../providers/Microsoft.Compute/images/..."
+  "model_image_id": "/subscriptions/.../resourceGroups/.../providers/Microsoft.Compute/galleries/.../images/.../versions/1.0.0"
 }
 ```
 

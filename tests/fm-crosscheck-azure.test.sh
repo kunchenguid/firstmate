@@ -624,18 +624,67 @@ image=json.load(open(sys.argv[1]))
 policy=json.load(open(sys.argv[2]))
 parameters=image["parameters"]
 assert "ubuntuExactVersion" in parameters and "defaultValue" not in parameters["ubuntuExactVersion"]
-for name in (
+closure_parameters = (
     "codexCliUrl","codexCliSha256","codexCliBytes",
     "claudeCliUrl","claudeCliSha256","claudeCliBytes",
-    "modelGuestSha256","modelGuestBase64",
-):
+    "piTarballUrl","piTarballSha256","piTarballBytes","piVersion",
+    "nodeTarballUrl","nodeTarballSha256","nodeTarballBytes",
+)
+for name in closure_parameters + ("modelGuestSha256","modelGuestBase64"):
     assert name in parameters, name
 inline="\n".join(image["resources"][0]["properties"]["customize"][0]["inline"])
 for marker in (
     "mcp=disabled","skills=disabled","extensions=disabled","sessions=disabled","sha256sum -c",
-    "/usr/local/bin/codex","/usr/local/bin/claude",
+    "/usr/local/bin/codex","/usr/local/bin/claude","/usr/local/bin/pi","/usr/local/bin/node",
 ):
     assert marker in inline, marker
+steps = image["resources"][0]["properties"]["customize"][0]["inline"]
+# A declared parameter that no build step reads is a closure the image does not
+# actually carry. But "the parameter is mentioned somewhere" is a proxy, and a
+# proxy is satisfied by an `echo` that names it: the assertions below pin the
+# step that must consume each parameter, not the fact that it appears.
+for name in closure_parameters:
+    assert "parameters('%s')" % name in inline, "unwired closure parameter: " + name
+# Every pinned digest must be consumed by a verification step. An `echo` naming
+# the parameter is not a verification step.
+for name in ("codexCliSha256", "claudeCliSha256", "piTarballSha256", "nodeTarballSha256"):
+    verifying = [
+        step for step in steps
+        if "parameters('%s')" % name in step and "sha256sum -c" in step
+    ]
+    assert len(verifying) == 1, "digest not consumed by a sha256sum -c step: " + name
+# Running a CLI proves it starts, not which version started. The version must be
+# consumed by a comparison against the tracked parameter.
+comparing = [
+    step for step in steps
+    if "parameters('piVersion')" in step
+    and "pi --version" in step and step.lstrip().startswith("[format('[ ")
+]
+assert len(comparing) == 2, "the Pi version is not compared against its tracked parameter twice"
+# The ambient-credential purge is a broad `find / -exec rm -rf` and is therefore
+# the one step that can take a CLI back out. Every closure check that runs only
+# before it proves nothing about the image that ships, so the closure must be
+# re-verified at an index AFTER the purge.
+purge = max(i for i, step in enumerate(steps) if "-exec rm -rf" in step)
+for marker in ("/usr/local/bin/codex", "/usr/local/bin/claude", "/usr/local/bin/pi", "model-guest.sh"):
+    assert any(marker in step for step in steps[purge + 1:]), (
+        "closure not re-verified after the credential purge: " + marker
+    )
+# An unpacker the build does not install is a guaranteed billable bake failure.
+if any("tar -xJ" in step for step in steps):
+    assert any(
+        "apt-get install" in step and "xz-utils" in step for step in steps
+    ), "the build unpacks an xz archive without installing xz-utils"
+# Pi's entrypoint is `#!/usr/bin/env node`, so it resolves its interpreter
+# through PATH while every other closure check uses an absolute path.
+assert any(step.startswith("export PATH=") for step in steps), (
+    "the build never fixes a PATH, so `env node` resolution is incidental"
+)
+# The Pi CLI's interpreter belongs to the same pinned closure; a
+# distribution-repository install would not be digest-bound.
+assert "deb.nodesource.com" not in inline and "add-apt-repository" not in inline
+# Ambient reviewer credential state, Pi's included, never survives the build.
+assert "'.pi'" in inline
 assert image["resources"][0]["properties"]["distribute"][0]["type"]=="ManagedImage"
 rules={rule["name"]:rule["properties"] for rule in policy["resources"][0]["properties"]["securityRules"]}
 assert rules["deny-all-inbound"]["access"]=="Deny" and rules["deny-all-inbound"]["direction"]=="Inbound"

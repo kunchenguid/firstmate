@@ -2,7 +2,7 @@
  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
  "contentVersion": "1.0.0.0",
  "metadata": {
-  "description": "Tracked pinned model-image build contract for the credentialed Crosscheck reviewer compartment. The image carries exactly the pinned Codex and Claude reviewer CLI closures (cross-review: each harness reviews the other's work) and the tracked model guest; it has no ambient credential, Azure CLI, repository helper, generic shell service, MCP server, extension, skill, or session surface. Building it is a billable mutation owned by bin/fm-crosscheck-azure-image.sh and requires explicit operator confirmation from released main."
+  "description": "Tracked pinned model-image build contract for the credentialed Crosscheck reviewer compartment. The image carries the pinned Codex and Claude reviewer CLI closures, the Pi CLI published tarball and the pinned Node runtime it executes on, and the tracked model guest (cross-review: a reviewer runs a different executing account than the author, and may also run a different harness). Pi's dependency packages resolve over the network at build time through npm's own metadata and are not digest-pinned here; it has no ambient credential, Azure CLI, repository helper, generic shell service, MCP server, extension, skill, or session surface. Building it is a billable mutation owned by bin/fm-crosscheck-azure-image.sh and requires explicit operator confirmation from released main."
  },
  "parameters": {
   "namingPrefix": {
@@ -82,6 +82,46 @@
   "claudeCliBytes": {
    "type": "int",
    "minValue": 1
+  },
+  "nodeTarballUrl": {
+   "type": "string",
+   "minLength": 1,
+   "metadata": {
+    "description": "Exact Node runtime tarball the Pi reviewer CLI executes on. Pi is an npm package rather than a single static binary, so its interpreter is pinned by digest here instead of being pulled from a distribution repository during the build."
+   }
+  },
+  "nodeTarballSha256": {
+   "type": "string",
+   "minLength": 64,
+   "maxLength": 64
+  },
+  "nodeTarballBytes": {
+   "type": "int",
+   "minValue": 1
+  },
+  "piTarballUrl": {
+   "type": "string",
+   "minLength": 1,
+   "metadata": {
+    "description": "Exact @earendil-works/pi-coding-agent registry tarball. Pin the same version the crewmate cell image installs so a Pi reviewer and a Pi author run one identical closure."
+   }
+  },
+  "piTarballSha256": {
+   "type": "string",
+   "minLength": 64,
+   "maxLength": 64
+  },
+  "piTarballBytes": {
+   "type": "int",
+   "minValue": 1
+  },
+  "piVersion": {
+   "type": "string",
+   "minLength": 1,
+   "maxLength": 32,
+   "metadata": {
+    "description": "Exact version the pinned Pi tarball must report after install. Running the CLI proves it starts; only comparing the version proves the digest-pinned tarball is what ended up on PATH."
+   }
   }
  },
  "variables": {
@@ -117,9 +157,10 @@
       "inline": [
        "set -eu",
        "umask 077",
+       "export PATH=/usr/local/bin:$PATH",
        "export DEBIAN_FRONTEND=noninteractive",
        "apt-get update -qq",
-       "apt-get install -y -qq jq >/dev/null",
+       "apt-get install -y -qq jq xz-utils >/dev/null",
        "install -d -m 0755 /usr/local/libexec/fm-crosscheck-model",
        "[format('printf %s ''{0}'' | base64 -d > /usr/local/libexec/fm-crosscheck-model/model-guest.sh', parameters('modelGuestBase64'))]",
        "[format('printf ''%s  %s\\n'' ''{0}'' /usr/local/libexec/fm-crosscheck-model/model-guest.sh | sha256sum -c -', parameters('modelGuestSha256'))]",
@@ -135,14 +176,34 @@
        "[format('printf ''%s  %s\\n'' ''{0}'' /tmp/claude-cli | sha256sum -c -', parameters('claudeCliSha256'))]",
        "install -m 0755 /tmp/claude-cli /usr/local/bin/claude",
        "rm -f /tmp/claude-cli",
+       "[format('curl --fail --silent --show-error --location --connect-timeout 30 --max-time 900 --max-filesize {0} --output /tmp/node.tar.xz ''{1}''', parameters('nodeTarballBytes'), parameters('nodeTarballUrl'))]",
+       "[format('[ \"$(stat -c %s /tmp/node.tar.xz)\" = ''{0}'' ]', parameters('nodeTarballBytes'))]",
+       "[format('printf ''%s  %s\\n'' ''{0}'' /tmp/node.tar.xz | sha256sum -c -', parameters('nodeTarballSha256'))]",
+       "install -d -m 0755 /usr/local/lib/nodejs",
+       "tar -xJf /tmp/node.tar.xz -C /usr/local/lib/nodejs --strip-components=1",
+       "rm -f /tmp/node.tar.xz",
+       "ln -sf /usr/local/lib/nodejs/bin/node /usr/local/bin/node",
+       "ln -sf /usr/local/lib/nodejs/bin/npm /usr/local/bin/npm",
+       "[format('curl --fail --silent --show-error --location --connect-timeout 30 --max-time 600 --max-filesize {0} --output /tmp/pi-coding-agent.tgz ''{1}''', parameters('piTarballBytes'), parameters('piTarballUrl'))]",
+       "[format('[ \"$(stat -c %s /tmp/pi-coding-agent.tgz)\" = ''{0}'' ]', parameters('piTarballBytes'))]",
+       "[format('printf ''%s  %s\\n'' ''{0}'' /tmp/pi-coding-agent.tgz | sha256sum -c -', parameters('piTarballSha256'))]",
+       "timeout 900 /usr/local/bin/npm install -g --prefix /usr/local --ignore-scripts /tmp/pi-coding-agent.tgz",
+       "rm -f /tmp/pi-coding-agent.tgz",
        "/usr/local/bin/codex --version",
        "/usr/local/bin/claude --version",
+       "/usr/local/bin/node --version",
+       "[format('[ \"$(/usr/local/bin/pi --version </dev/null)\" = ''{0}'' ]', parameters('piVersion'))]",
        "apt-get -y purge azure-cli 2>/dev/null || true",
        "rm -rf /root/.azure /home/*/.azure 2>/dev/null || true",
-       "find / -xdev -maxdepth 6 \\( -name '.codex' -o -name '.claude*' -o -name 'mcp*.json' \\) -exec rm -rf {} + 2>/dev/null || true",
+       "rm -rf /root/.npm /root/.npmrc /usr/local/etc/npmrc 2>/dev/null || true",
+       "find / -xdev -maxdepth 6 \\( -name '.codex' -o -name '.claude*' -o -name '.pi' -o -name 'mcp*.json' \\) -exec rm -rf {} + 2>/dev/null || true",
        "install -d -m 0555 /etc/fm-crosscheck-model",
        "printf 'surface=none\\nmcp=disabled\\nextensions=disabled\\nskills=disabled\\nsessions=disabled\\n' > /etc/fm-crosscheck-model/surfaces.conf",
-       "chmod 0444 /etc/fm-crosscheck-model/surfaces.conf"
+       "chmod 0444 /etc/fm-crosscheck-model/surfaces.conf",
+       "/usr/local/bin/codex --version",
+       "/usr/local/bin/claude --version",
+       "[format('[ \"$(/usr/local/bin/pi --version </dev/null)\" = ''{0}'' ]', parameters('piVersion'))]",
+       "test -x /usr/local/libexec/fm-crosscheck-model/model-guest.sh"
       ]
      }
     ],
@@ -152,7 +213,7 @@
       "imageId": "[resourceId('Microsoft.Compute/images', variables('imageName'))]",
       "location": "[parameters('location')]",
       "runOutputName": "[variables('imageName')]",
-      "artifactTags": "[union(parameters('commonTags'), createObject('firstmate-role', 'crosscheck-model-image', 'model-guest-sha256', parameters('modelGuestSha256'), 'codex-cli-sha256', parameters('codexCliSha256'), 'claude-cli-sha256', parameters('claudeCliSha256')))]"
+      "artifactTags": "[union(parameters('commonTags'), createObject('firstmate-role', 'crosscheck-model-image', 'model-guest-sha256', parameters('modelGuestSha256'), 'codex-cli-sha256', parameters('codexCliSha256'), 'claude-cli-sha256', parameters('claudeCliSha256'), 'pi-tarball-sha256', parameters('piTarballSha256'), 'node-tarball-sha256', parameters('nodeTarballSha256')))]"
      }
     ]
    }
