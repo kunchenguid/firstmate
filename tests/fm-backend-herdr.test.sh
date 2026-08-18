@@ -345,6 +345,56 @@ test_workspace_identity_label_uses_the_exact_registered_repository_slug() {
   pass "Herdr Space labels suffix the exact registered repository slug for project-owning secondmates"
 }
 
+test_workspace_identity_title_prefers_character_and_slug_over_a_generic_role() {
+  local base home dir log resp fb out
+  base="$TMP_ROOT/identity-character-first"
+  home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/config" "$home/data" "$resp"; : > "$log"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"sd-1":"barrett-bonden"}}' \
+    > "$home/config/crew-identities.json"
+  printf 'sd-1\n' > "$home/.fm-secondmate-home"
+  printf -- '- stream-deck-configuration - registered clone (added 2026-01-01)\n' > "$home/data/projects.md"
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT")
+  [ "$out" = "Mr Bonden — stream-deck-configuration" ] \
+    || fail "character identity plus registered slug did not render exactly: $out"
+
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sd","label":"2ndmate-sd-1"}}}' > "$resp/1.out"
+  : > "$resp/2.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sd","label":"Mr Bonden — stream-deck-configuration"}}}' > "$resp/3.out"
+  rm -f "$resp/.count"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact s w-sd' \
+      "$ROOT" 2>&1) || fail "legacy-to-character rename refused: $out"
+  assert_contains "$(cat "$log")" $'workspace\x1frename\x1fw-sd\x1fMr Bonden — stream-deck-configuration' \
+    "did not adopt the character identity plus its exact registered repository slug"
+  assert_not_contains "$(cat "$log")" "Second Mate" "a generic role title was used as a Space title"
+  assert_not_contains "$(cat "$log")" $'rename\x1fw-sd\x1f2ndmate' "a mechanical home label was used as a Space title"
+  pass "Herdr Space titles prefer the character identity and exact repository slug over any generic role"
+}
+
+test_workspace_identity_rename_preserves_a_recorded_title_without_config() {
+  local base home dir log resp fb
+  base="$TMP_ROOT/identity-config-lost"
+  home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/data" "$resp"; : > "$log"
+  printf 'gentech\n' > "$home/.fm-secondmate-home"
+  printf -- '- developer-setup - registered clone (added 2026-01-01)\n' > "$home/data/projects.md"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sm","label":"Mr Allen — developer-setup"}}}' > "$resp/1.out"
+  rm -f "$resp/.count"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact s w-sm' \
+      "$ROOT" >/dev/null 2>&1 \
+    || fail "a relaunch with no inherited crew identity config must not fail on an already-titled Space"
+  assert_not_contains "$(cat "$log")" "rename" "an absent identity config renamed an already-recorded Space title"
+  pass "Herdr identity rename preserves an already recorded Space title when no identity config applies"
+}
+
 test_projection_journal_v2_stays_valid_once_identity_config_appears() {
   local dir state home config out
   dir="$TMP_ROOT/projection-journal-v2-identity-later"; state="$dir/state"; home="$dir/home"
@@ -4675,6 +4725,8 @@ test_workspace_identity_labels_are_exact_and_never_expose_mechanical_ids
 test_workspace_identity_label_uses_the_exact_registered_repository_slug
 test_projection_journal_v2_stays_valid_once_identity_config_appears
 test_workspace_identity_rename_follows_registered_project_transitions
+test_workspace_identity_title_prefers_character_and_slug_over_a_generic_role
+test_workspace_identity_rename_preserves_a_recorded_title_without_config
 test_workspace_find_all_tolerates_registered_project_drift
 test_exact_legacy_workspace_identity_rename_is_id_bound
 test_cli_helper_sets_env_and_appends_trailing_session_flag

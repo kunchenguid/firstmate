@@ -462,6 +462,7 @@ fm_backend_herdr_workspace_label_is_own() {  # <label> [<base-identity-label>]
 # unreadable binding refuses without touching another Space.
 fm_backend_herdr_workspace_identity_rename_exact() { # <session> <workspace-id>
   local session=$1 workspace=$2 desired base out current verify
+  fm_backend_herdr_crew_identity_config_present || return 0
   desired=$(fm_backend_herdr_workspace_label) || return 1
   [ "$desired" != "Unassigned crew" ] || {
     echo "error: crew identity config is active but this persistent home is unassigned; refusing an ambiguous Herdr Space title" >&2

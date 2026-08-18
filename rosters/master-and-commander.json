@@ -132,7 +132,7 @@
     {
       "id": "barrett-bonden",
       "full_name": "Barrett Bonden",
-      "space_label": "Bonden",
+      "space_label": "Mr Bonden",
       "shipboard_role": "Captain's coxswain and captain of the maintop",
       "affinities": ["implementation", "operations", "reliability"],
       "source_refs": ["film-cast", "recurring-characters"]
@@ -196,7 +196,7 @@
     {
       "id": "william-babbington",
       "full_name": "Captain William Babbington",
-      "space_label": "Capt Babbington",
+      "space_label": "Lt Babbington",
       "shipboard_role": "Midshipman, lieutenant, and later post-captain",
       "affinities": ["leadership", "learning", "operations"],
       "source_refs": ["recurring-characters", "ionian-mission"]
