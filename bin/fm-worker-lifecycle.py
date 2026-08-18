@@ -2197,15 +2197,24 @@ def command_execute(env, args):
         if existing is not None:
             print(json.dumps(existing, sort_keys=True, separators=(",", ":")))
             return
+        # Every field the provider will see has to be present BEFORE the key is
+        # minted: make_action hashes the whole action as its last step, and the
+        # provider recomputes that hash over what it actually receives. Adding
+        # these afterwards made the two disagree, so any execute carrying a
+        # payload or an outcome sink was refused outright with "provider
+        # mutation idempotency key is not exact". A bare digest-bound argv had
+        # none of these fields, which is why the earlier smoke passed and the
+        # first crewmate could never run.
+        staged = {}
+        if payload_manifest is not None:
+            staged["payload_dir"] = str(Path(args.payload_dir).resolve())
+            staged["account_dir"] = str(Path(args.account_dir).resolve())
+        if args.outcome_dir is not None:
+            staged["outcome_dir"] = str(Path(args.outcome_dir).resolve())
         action = make_action(
             env, "execute", worker=worker, request=request,
-            request_digest=request["request_digest"],
+            request_digest=request["request_digest"], **staged,
         )
-        if payload_manifest is not None:
-            action["payload_dir"] = str(Path(args.payload_dir).resolve())
-            action["account_dir"] = str(Path(args.account_dir).resolve())
-        if args.outcome_dir is not None:
-            action["outcome_dir"] = str(Path(args.outcome_dir).resolve())
         execute_action(env, state, action)
         result = state["executions"][request["request_digest"]]
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))

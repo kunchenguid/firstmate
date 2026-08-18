@@ -829,6 +829,22 @@ def save():
 if request["operation"] == "mutate":
     action = request["action"]
     key = action["idempotency_key"]
+    # The REAL provider recomputes this hash over the whole action it received
+    # and refuses a mismatch. A fixture that skips the check is more permissive
+    # than the callee it stands in for, so it happily accepted an action whose
+    # key was minted before its payload and outcome fields were added, while
+    # bin/fm-azure-worker-provider.py refused every one of them.
+    expected_key = hashlib.sha256(canonical(
+        {name: value for name, value in action.items() if name != "idempotency_key"}
+    )).hexdigest()
+    if key != expected_key:
+        sys.stderr.write(
+            "FIXTURE PROVIDER REFUSED: idempotency key is not exact for a {} carrying {}\n".format(
+                action.get("type"),
+                sorted(n for n in action if n in ("payload_dir", "account_dir", "outcome_dir")),
+            )
+        )
+        raise SystemExit(1)
     state["calls"].append({
         "type": action["type"], "slot": action["slot"], "key": key,
         "outcome_expected": bool((action.get("request") or {}).get("outcome_expected")),
