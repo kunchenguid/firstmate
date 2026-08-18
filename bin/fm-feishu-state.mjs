@@ -66,10 +66,14 @@ const SESSION_ENTRY_ID = /^[a-f0-9]{8}$/;
 const OUTBOUND_EVENT_ID = /^out_[a-f0-9]{40}$/;
 const MESSAGE_ID = /^om_[A-Za-z0-9_-]{4,128}$/;
 const CHAT_ID = /^oc_[A-Za-z0-9_-]{4,128}$/;
-const LOCAL_ROUTINE_ASSISTANT_TEXTS = new Set(["Captain, shipshape.", "Captain，shipshape."]);
+const LOCAL_ROUTINE_ASSISTANT_TEXTS = new Set(["Captain, shipshape.", "Captain，shipshape.", "船长，处理中。"]);
 
+// A finalized Assistant response equal to a fixed routine acknowledgement stays
+// local even when its persisted representation carries surrounding whitespace,
+// such as a trailing newline. Only outer whitespace is normalized, so a longer
+// response that merely contains the phrase as a substring is still delivered.
 function isLocalRoutineAssistantText(text) {
-  return LOCAL_ROUTINE_ASSISTANT_TEXTS.has(text);
+  return typeof text === "string" && LOCAL_ROUTINE_ASSISTANT_TEXTS.has(text.trim());
 }
 
 function nowIso() {
@@ -1720,9 +1724,19 @@ function maxPendingOutbound(input = {}) {
 function assertOutboundPair(name, outbox, ledger, binding) {
   validateOutbound(outbox);
   validateOutboundLedger(ledger);
-  if (["pending", "retryable", "sending"].includes(ledger.state) && isLocalRoutineAssistantText(outbox.text)) throw new Error("invalid Feishu outbound text");
   if (name !== `${sha(outbox.event_id)}.json` || ledger.event_id !== outbox.event_id || ledger.binding_generation !== outbox.binding_generation || ledger.next_chunk > outbox.chunks.length) throw new Error("Feishu outbox and ledger identity do not match");
   if (binding && outbox.binding_generation === binding.generation && (outbox.binding_id !== binding.binding_id || outbox.session_id !== binding.session_id || outbox.destination_chat_id !== binding.chat_id)) throw new Error("Feishu outbox destination does not match the active binding");
+}
+
+// A finalized Assistant response equal to a fixed routine acknowledgement is
+// never created as a new outbox, but a record persisted by an earlier build
+// whose exact filter missed surrounding whitespace can still sit active in the
+// outbox. Reconciliation neutralizes such a record locally by driving its
+// ledger to the terminal superseded state, so no chunk is ever sent, rather
+// than crashing ingress. Event id, binding generation, and the chunk cursor are
+// preserved, so persisted-entry identity and delivery cursors are unchanged.
+function supersedeRoutineOutboundLedger(ledger) {
+  return { ...ledger, state: "superseded", superseded_at: nowIso(), last_error: "finalized Assistant response is a fixed routine acknowledgement kept local" };
 }
 
 function reconcileOutboundReceiptLocked(paths, name, outbox, ledger) {
@@ -1772,6 +1786,11 @@ function repairOutboundStateLocked(paths, binding) {
     const reconciliation = reconcileOutboundReceiptLocked(paths, name, outbox, ledger);
     ledger = reconciliation.ledger;
     repaired += reconciliation.repaired;
+    if (["pending", "retryable", "sending"].includes(ledger.state) && isLocalRoutineAssistantText(outbox.text)) {
+      ledger = supersedeRoutineOutboundLedger(ledger);
+      atomicJson(ledgerPath, ledger);
+      repaired += 1;
+    }
     if (["pending", "retryable", "sending"].includes(ledger.state)) writeOutboundPendingIndex(paths, name, outbox);
     else if (removeOutboundPendingIndex(paths, name)) repaired += 1;
   }
@@ -1998,6 +2017,11 @@ export function claimNextOutbound(home, options = {}) {
       assertOutboundPair(name, outbox, ledger, binding);
       ledger = reconcileOutboundReceiptLocked(paths, name, outbox, ledger).ledger;
       if (!["pending", "retryable", "sending"].includes(ledger.state)) {
+        removeOutboundPendingIndex(paths, name);
+        continue;
+      }
+      if (isLocalRoutineAssistantText(outbox.text)) {
+        atomicJson(path, supersedeRoutineOutboundLedger(ledger));
         removeOutboundPendingIndex(paths, name);
         continue;
       }

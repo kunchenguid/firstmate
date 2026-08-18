@@ -291,6 +291,11 @@ session.entries.push({ type: "message", id: "00000006", parentId: "00000005", ti
 await finalizeAssistant("00000007", [{ type: "text", text: "Captain, shipshape." }], "2026-08-12T00:00:06.000Z");
 await finalizeAssistant("0000000c", [{ type: "text", text: "Captain，shipshape." }], "2026-08-12T00:00:06.500Z");
 await finalizeAssistant("0000000d", [{ type: "text", text: "Captain， shipshape." }], "2026-08-12T00:00:06.750Z");
+await finalizeAssistant("00000014", [{ type: "text", text: "Captain, shipshape.\n" }], "2026-08-12T00:00:06.760Z");
+await finalizeAssistant("00000015", [{ type: "text", text: " Captain，shipshape. " }], "2026-08-12T00:00:06.770Z");
+await finalizeAssistant("00000016", [{ type: "text", text: "船长，处理中。" }], "2026-08-12T00:00:06.780Z");
+await finalizeAssistant("00000017", [{ type: "text", text: "船长，处理中。\n" }], "2026-08-12T00:00:06.790Z");
+await finalizeAssistant("00000018", [{ type: "text", text: "船长，处理中。 队列任务已全部完成。" }], "2026-08-12T00:00:06.800Z");
 await finalizeAssistant("00000008", [{ type: "thinking", thinking: "private" }, { type: "toolCall", id: "call-1", name: "read", arguments: {} }], "2026-08-12T00:00:07.000Z");
 session.entries.push({ type: "custom", id: "00000009", parentId: "00000008", timestamp: "2026-08-12T00:00:08.000Z", customType: "tui-only", data: { message: "local alert" } });
 await finalizeAssistant("0000000a", [{ type: "text", text: "Watcher answer is mirrored too" }], "2026-08-12T00:00:09.000Z");
@@ -307,6 +312,7 @@ assert.deepEqual(mirrored, [
   { id: "00000003", text: "Direct Feishu answer https://example.test/full" },
   { id: "00000005", text: "Local TUI answer is mirrored too" },
   { id: "0000000d", text: "Captain， shipshape." },
+  { id: "00000018", text: "船长，处理中。 队列任务已全部完成。" },
   { id: "0000000a", text: "Watcher answer is mirrored too" },
 ]);
 assert.equal(statusSummary(home).outbound_pending, 0);
@@ -353,6 +359,50 @@ writeFileSync(historicalOutboxPath, `${JSON.stringify(historicalOutbox)}\n`);
 repairOutboundState(home);
 assert.equal(statusSummary(home).outbound_pending, 0, "restart validation kept a terminal-delivered fullwidth routine record local without corrupting state");
 assert.equal(JSON.parse(readFileSync(historicalOutboxPath, "utf8")).text, historicalRoutineText, "terminal-delivered historical routine record survived restart validation");
+
+// A record persisted by an earlier build whose exact match missed surrounding
+// whitespace can still be an active pending outbox. Both the claim path and the
+// repair path must neutralize it locally with no remote send while preserving
+// the outbox identity and delivery cursor.
+function seedPendingRoutineRecord(entryId, order, timestamp, ordinaryText, routineText) {
+  const reg = registerAssistantOutbound(home, {
+    text: ordinaryText,
+    assistantEntryId: entryId,
+    sessionOrder: order,
+    sessionEntryTimestamp: timestamp,
+    sessionId,
+    bindingGeneration: binding.generation,
+  });
+  assert.equal(reg.status, "registered", "seed pending routine record registered as an ordinary mirror");
+  const paths = pathsForHome(home);
+  const filename = `${sha(reg.eventId)}.json`;
+  const outboxPath = join(paths.outbox, filename);
+  const outbox = JSON.parse(readFileSync(outboxPath, "utf8"));
+  outbox.text = routineText;
+  outbox.text_hash = `sha256:${sha(routineText)}`;
+  outbox.chunks = [{ index: 0, count: 1, chunk: routineText, chunk_hash: `sha256:${sha(routineText)}`, idempotency_key: outbox.chunks[0].idempotency_key }];
+  writeFileSync(outboxPath, `${JSON.stringify(outbox)}\n`);
+  return { filename, eventId: reg.eventId, ledgerPath: join(paths.outboundLedger, filename), pendingPath: join(paths.outboundPending, filename), outboxPath, outbox };
+}
+
+const claimPathRecord = seedPendingRoutineRecord("00000019", session.entries.length + 2, "2026-08-12T00:00:13.000Z", "Ordinary claim-path mirror pending before the routine rewrite", "Captain, shipshape.\n");
+assert.equal(claimNextOutbound(home), undefined, "claim path sent a historical whitespace-carrying routine record");
+const claimPathLedger = JSON.parse(readFileSync(claimPathRecord.ledgerPath, "utf8"));
+assert.equal(claimPathLedger.state, "superseded", "claim path did not neutralize a historical routine record");
+assert.equal(claimPathLedger.event_id, claimPathRecord.eventId, "claim-path neutralization changed the outbound event identity");
+assert.equal(claimPathLedger.next_chunk, 0, "claim-path neutralization advanced the delivery cursor");
+assert.equal(existsSync(claimPathRecord.pendingPath), false, "claim-path neutralization left the record in the pending index");
+assert.equal(JSON.parse(readFileSync(claimPathRecord.outboxPath, "utf8")).text, "Captain, shipshape.\n", "claim-path neutralization mutated the immutable outbox text");
+
+const repairPathRecord = seedPendingRoutineRecord("0000001a", session.entries.length + 3, "2026-08-12T00:00:14.000Z", "Ordinary repair-path mirror pending before the routine rewrite", "船长，处理中。\n");
+repairOutboundState(home);
+const repairPathLedger = JSON.parse(readFileSync(repairPathRecord.ledgerPath, "utf8"));
+assert.equal(repairPathLedger.state, "superseded", "repair path did not neutralize a historical fullwidth routine record");
+assert.equal(repairPathLedger.event_id, repairPathRecord.eventId, "repair-path neutralization changed the outbound event identity");
+assert.equal(repairPathLedger.next_chunk, 0, "repair-path neutralization advanced the delivery cursor");
+assert.equal(existsSync(repairPathRecord.pendingPath), false, "repair-path neutralization left the record in the pending index");
+assert.equal(statusSummary(home).outbound_pending, 0, "historical routine records left outbound work after neutralization");
+assert.equal(claimNextOutbound(home), undefined, "a neutralized historical routine record was later re-sent");
 
 const pairingPath = pathsForHome(home).pairing;
 const validPairingBytes = readFileSync(pairingPath, "utf8");
