@@ -92,7 +92,8 @@ The second condition exists because the first cannot cover its own precondition.
 An auto-arm that never ran records no failure to verify, so every reason it could not start - it stood down at its own identity gate, its hook is not registered, its host stripped it - previously left this guard re-blocking with no way out but Claude's hard 8-block override.
 Supervision being unstartable for a reason this guard cannot repair has to reach the same bounded valve however it arose, so that condition is about the absence of the mechanism rather than any particular cause of it.
 Both conditions stay narrow the same way: away mode still owns supervision when present, and a fresh ledger entry still means the auto-arm is mid-flight and is still given the block.
-The notice names which condition fired, so an absent auto-arm is not reported as an exhausted retry that never happened.
+The notice names the state it actually verified, as one of three distinct causes: an exhausted failure episode, an auto-arm that never claimed this home and left no attempt on record, or an auto-arm whose last recorded attempt is older than one event epoch and has not run since.
+That is why the absent condition is reported as two causes rather than one, so an auto-arm that stopped running is not described as one that never ran, and neither is described as an exhausted retry that never happened.
 Each epoch identity is accounted at most once under the budget lock.
 Whenever both coordination locks are needed, positive auto-arm recovery and the terminal check acquire the auto-arm owner lock before the budget lock.
 After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.

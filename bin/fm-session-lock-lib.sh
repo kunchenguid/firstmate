@@ -70,6 +70,29 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+# Print the exact harness name when path $1's BASENAME is exactly a verified
+# harness name, or return 1.
+#
+# The strictest of this file's path rules, and the only one used for a bare
+# interpreter's script path. A harness component ANYWHERE in the path is too
+# loose there, because an interpreter's argv also carries the values of its own
+# flags: `--require /opt/hooks/claude/instrument.js` names no harness, and its
+# basename `instrument.js` is what says so. Exact equality is deliberate, so a
+# version-suffixed or extension-suffixed name cannot match here; those shapes are
+# identified by the command path and argv[0] evidence above instead.
+fm_harness_basename_name() {  # <path>
+  local path=$1 base name
+  [ -n "$path" ] || return 1
+  base=${path##*/}
+  for name in "${FM_HARNESS_NAMES[@]}"; do
+    if [ "$base" = "$name" ]; then
+      printf '%s' "$name"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -81,8 +104,8 @@ fm_harness_path_name() {  # <path>
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
 #   3. a bare interpreter (node, python) running a harness script path.
-#   4. node's own `MainThread` exec name, resolved from argv by whole path
-#      component only.
+#   4. node's own `MainThread` exec name, resolved from the script path in argv
+#      by exact basename only.
 #   5. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
@@ -116,12 +139,14 @@ fm_harness_process_matches() {  # <comm> <args>
   # Identity then has to come from the interpreter's SCRIPT PATH - the FIRST
   # path-shaped token after the interpreter, so a wrapper that inserts an
   # interpreter flag such as `node --enable-source-maps .../bin/codex` is still
-  # identified - matched by the STRICT whole-path-component rule rather than the
-  # loose regex above. Both narrowings matter: `MainThread` is a name any node
-  # program can present, so neither an unrelated script under a harness-shaped
-  # directory nor a passing `--profile codex` argument may carry a harness
-  # verdict. Only that first path is a candidate: scanning on past it would let
-  # any later path-valued option argument decide the verdict instead.
+  # identified - matched by the STRICTEST rule this file has, exact basename,
+  # rather than the loose regex or the whole-path-component rule above. Every
+  # narrowing matters here, because `MainThread` is a name any node program can
+  # present and the rest of its argv is not the script: an unrelated script under
+  # a harness-shaped directory, a passing `--profile codex` argument, and the
+  # path-shaped VALUE of an interpreter flag such as `--require` must none of them
+  # carry a harness verdict. Only that first path is a candidate, so no later
+  # path-valued option argument decides the verdict either.
   if [ "$base" = MainThread ]; then
     rest=${args#* }
     if [ "$rest" != "$args" ]; then
@@ -129,7 +154,7 @@ fm_harness_process_matches() {  # <comm> <args>
         script=${rest%% *}
         case "$script" in
           */*)
-            if name=$(fm_harness_path_name "$script"); then
+            if name=$(fm_harness_basename_name "$script"); then
               case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
               return 0
             fi

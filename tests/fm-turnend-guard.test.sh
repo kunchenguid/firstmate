@@ -1566,6 +1566,7 @@ test_hook_claude_mode_absent_autoarm_reaches_the_bounded_fail_open() {
   expect_code 0 "$status" "an absent auto-arm with an exhausted budget must reach the bounded attended fail-open"
   assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "absent-auto-arm fail-open was not unmistakable"
   assert_contains "$out" 'never claimed this home at all' "absent-auto-arm fail-open did not name the real condition"
+  assert_not_contains "$out" 'last recorded an attempt' "a home with no ledger at all was reported as having recorded an attempt"
   assert_contains "$out" 'Keep this session attended' "absent-auto-arm fail-open omitted the attended-session action"
   assert_not_contains "$out" 'fm-watch-arm.sh' "absent-auto-arm fail-open assigned a manual watcher launch"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "absent-auto-arm fail-open did not consume the episode alarm"
@@ -1617,7 +1618,10 @@ test_hook_claude_mode_fail_open_refused_while_autoarm_is_establishing() {
 # A stale auto-arm entry is the same unrepairable condition as no entry at all:
 # the mechanism ran at some point and is not running now. It reaches the valve
 # through the absent path rather than needing a matching consumed notice, which
-# is precisely what an auto-arm that stopped running cannot produce.
+# is precisely what an auto-arm that stopped running cannot produce. It is a
+# different FACT though, and the notice has to say which one it verified: an
+# attempt IS on record here, so reporting none would send a captain to the hook
+# wiring instead of to the outcome sitting in the ledger.
 test_hook_claude_mode_stale_autoarm_evidence_reaches_the_fail_open() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-stale")
@@ -1627,7 +1631,8 @@ test_hook_claude_mode_stale_autoarm_evidence_reaches_the_fail_open() {
   seed_claude_budget "$dir" 3
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
   expect_code 0 "$status" "a stale auto-arm entry with an exhausted budget must reach the bounded attended fail-open"
-  assert_contains "$out" 'never claimed this home at all' "a stale auto-arm entry did not report the absent condition"
+  assert_contains "$out" 'last recorded an attempt more than one event epoch ago' "a stale auto-arm entry did not report the stale condition it actually is"
+  assert_not_contains "$out" 'never claimed this home at all' "a stale auto-arm entry with a recorded attempt was reported as having left no attempt on record"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "the stale-evidence fail-open did not consume the episode alarm"
   pass "fm-turnend-guard --claude: stale auto-arm evidence reaches the same bounded fail-open"
 }

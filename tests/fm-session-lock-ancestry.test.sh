@@ -136,8 +136,8 @@ SH
 
 # node renames its own main thread, so an npm-installed harness reports
 # `MainThread` and no interpreter name at all. Identity then has to come from
-# the script path in argv - and only from there, by whole path component, so a
-# name any node program can present cannot carry a harness verdict on its own.
+# the script path in argv - and only from there, by exact basename, so a name any
+# node program can present cannot carry a harness verdict on its own.
 test_node_main_thread_identity_comes_only_from_the_script_path() {
   local dir fakebin shape
   dir="$TMP_ROOT/main-thread"
@@ -161,6 +161,8 @@ case "$pid:$field:${FM_TEST_NODE_SHAPE:-harness}" in
   760:args=:sibling) printf '%s\n' 'node /work/codex-notes/build.js' ;;
   760:args=:flag) printf '%s\n' 'node /work/tools/run.js --profile codex' ;;
   760:args=:optionpath) printf '%s\n' 'node /work/tools/run.js --config /etc/codex/config.toml' ;;
+  760:args=:requirepath) printf '%s\n' 'node --require /opt/hooks/claude/instrument.js /srv/app/server.js' ;;
+  760:args=:evalpath) printf '%s\n' 'node -e require("/opt/claude/x")' ;;
   760:args=:bare) printf '%s\n' 'node' ;;
   760:ppid=:*) printf '%s\n' 1 ;;
   *:comm=:*) printf '%s\n' bash ;;
@@ -181,10 +183,12 @@ SH
       || fail "$shape: a MainThread-named harness session could not recognize its own lock"
   done
 
-  # Neither a script merely living beside a harness-shaped name, nor a passing
-  # argument that happens to be one - bare, or the value of an option after a
-  # script path that is already not a harness - may be read as a harness.
-  for shape in sibling flag optionpath bare; do
+  # Nothing else in an interpreter's argv may be read as a harness: not a script
+  # merely living beside a harness-shaped name, not a passing argument that
+  # happens to be one whether bare or the value of an option, and not the
+  # path-shaped value of an interpreter flag that precedes the script, which is
+  # the interpreter's own argument rather than the program being run.
+  for shape in sibling flag optionpath requirepath evalpath bare; do
     if FM_TEST_NODE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 760'; then
       fail "$shape: an unrelated node program reporting MainThread was treated as a harness"
     fi
@@ -317,11 +321,18 @@ make_primary_home() {  # <dir>
   cat > "$dir/session.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${FM_FIXTURE_ORPHAN_HERE:-0}" = 1 ]; then
+  launcher=${FM_FIXTURE_LAUNCHER:-$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')}
+  parent=$launcher
   i=0
-  while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  while [ "$i" -lt 200 ]; do
+    parent=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')
+    if [ -n "$parent" ] && [ "$parent" != "$launcher" ]; then
+      break
+    fi
     sleep 0.05
     i=$((i + 1))
   done
+  printf 'launcher=%s parent=%s\n' "$launcher" "$parent" > "$FM_HOME/state/reparented"
 fi
 printf '%s\n' "$$" > "$FM_HOME/state/session-pid"
 printf '%s\n' "$$" > "$FM_HOME/state/.lock"
@@ -330,11 +341,18 @@ printf '%s\n' "$?" > "$FM_HOME/state/hook.rc"
 SH
   cat > "$dir/daemon.sh" <<'SH'
 #!/usr/bin/env bash
+launcher=${FM_FIXTURE_LAUNCHER:-$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')}
+parent=$launcher
 i=0
-while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+while [ "$i" -lt 200 ]; do
+  parent=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')
+  if [ -n "$parent" ] && [ "$parent" != "$launcher" ]; then
+    break
+  fi
   sleep 0.05
   i=$((i + 1))
 done
+printf 'launcher=%s parent=%s\n' "$launcher" "$parent" > "$FM_HOME/state/daemon-reparented"
 printf '%s\n' "$$" > "$FM_HOME/state/daemon-pid"
 "$FM_SESSION_BIN" "$FM_HOME/session.sh"
 exit 0
@@ -342,18 +360,36 @@ SH
   chmod +x "$dir/session.sh" "$dir/daemon.sh"
 }
 
+# Assert that a fixture really was reparented away from the launcher that started
+# it, and print the pid it was reparented TO.
+#
+# Comparing against pid 1 is not enough to detect that: on a host with a process
+# subreaper - systemd --user on modern Linux - an orphan is reparented to the
+# subreaper rather than to init, so a fixture that waited for pid 1 waited out its
+# whole timeout and then ran anyway. Each fixture records both pids so the
+# detached shape every case below depends on is asserted rather than assumed.
+assert_reparented() {  # <report> <what>
+  local report=$1 what=$2 text launcher parent
+  text=$(cat "$report" 2>/dev/null || true)
+  launcher=$(printf '%s\n' "$text" | sed -n 's/^launcher=\([0-9]*\) .*$/\1/p')
+  parent=$(printf '%s\n' "$text" | sed -n 's/^.* parent=\([0-9]*\)$/\1/p')
+  [ -n "$launcher" ] && [ -n "$parent" ] && [ "$launcher" != "$parent" ] \
+    || fail "$what was never reparented away from its launcher, so this fixture no longer reproduces a detached session (recorded: ${text:-nothing})"
+  printf '%s\n' "$parent"
+}
+
 # Start the fixture tree detached from this suite's own process tree: the
-# launcher exits immediately, so the tree is reparented to init and the ancestry
+# launcher exits immediately, so the tree is reparented away from it and the ancestry
 # walk terminates inside the fixture. Returns once the hook has recorded its exit
 # code.
 run_fixture_tree() {  # <dir> <session-bin> [<daemon-bin>]
   local dir=$1 session_bin=$2 daemon_bin=${3:-} i
   if [ -n "$daemon_bin" ]; then
     FM_HOME="$dir" FM_SESSION_BIN="$session_bin" FM_FIXTURE_ORPHAN_HERE=0 \
-      bash -c '"$0" "$1" &' "$daemon_bin" "$dir/daemon.sh"
+      bash -c 'FM_FIXTURE_LAUNCHER=$$ "$0" "$1" &' "$daemon_bin" "$dir/daemon.sh"
   else
     FM_HOME="$dir" FM_FIXTURE_ORPHAN_HERE=1 \
-      bash -c '"$0" "$1" &' "$session_bin" "$dir/session.sh"
+      bash -c 'FM_FIXTURE_LAUNCHER=$$ "$0" "$1" &' "$session_bin" "$dir/session.sh"
   fi
   i=0
   while [ "$i" -lt 400 ] && [ ! -s "$dir/state/hook.rc" ]; do
@@ -361,6 +397,11 @@ run_fixture_tree() {  # <dir> <session-bin> [<daemon-bin>]
     i=$((i + 1))
   done
   [ -s "$dir/state/hook.rc" ] || fail "the fixture hook never finished"
+  if [ -n "$daemon_bin" ]; then
+    assert_reparented "$dir/state/daemon-reparented" "the fixture daemon" >/dev/null
+  else
+    assert_reparented "$dir/state/reparented" "the fixture session" >/dev/null
+  fi
 }
 
 hook_rc() {
@@ -419,7 +460,7 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 #
 # These cases run real processes and no harness. The shape they reproduce is a
 # harness rehosting a session's work under its own pty: the resulting tree is
-# orphaned to init and never reaches the pid that holds the lock, so ancestry
+# orphaned away from its launcher and never reaches the pid that holds the lock, so ancestry
 # alone reports one genuine session as two competing ones.
 #
 # Every fixture clears every environment signal the library reads before setting
@@ -480,11 +521,18 @@ SH
 export CLAUDE_PID=$$
 printf '%s\n' "$$" > "$FM_FIX/session-pid"
 if [ "${FM_FIX_ORPHAN:-0}" = 1 ]; then
+  launcher=${FM_FIXTURE_LAUNCHER:-$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')}
+  parent=$launcher
   i=0
-  while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  while [ "$i" -lt 200 ]; do
+    parent=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')
+    if [ -n "$parent" ] && [ "$parent" != "$launcher" ]; then
+      break
+    fi
     sleep 0.05
     i=$((i + 1))
   done
+  printf 'launcher=%s parent=%s\n' "$launcher" "$parent" > "$FM_FIX/reparented"
 fi
 bash "$FM_FIX/check.sh"
 printf '%s\n' "$?" > "$FM_FIX/check-finished"
@@ -540,16 +588,17 @@ start_cohort_holder() {  # <dir> <container-var-assignments...>
 }
 
 # Start the session detached, so the launcher exits immediately and the tree is
-# reparented to init: the ancestry walk then terminates inside the fixture and
-# can never reach the live session running this suite.
+# reparented onto whatever adopts orphans here: the ancestry walk then terminates
+# inside the fixture and can never reach the live session running this suite.
 run_cohort_session() {  # <dir> <holder-pid> <launch-marker-pid> <env-assignments...>
   local dir=$1 holder=$2 marker=$3
   shift 3
   printf '%s\n' "$holder" > "$dir/state/.lock"
   "${COHORT_ENV_ARGV[@]}" FM_FIX="$dir" FM_FIX_LIB="$LIB" FM_FIX_HOLDER="$holder" \
     FM_FIX_ORPHAN=1 CLAUDE_PID="$marker" "$@" \
-    bash -c '"$0" "$1" &' "$NAMED_CLAUDE" "$dir/session.sh"
+    bash -c 'FM_FIXTURE_LAUNCHER=$$ "$0" "$1" &' "$NAMED_CLAUDE" "$dir/session.sh"
   wait_for_file "$dir/check-finished" "the fixture check result" >/dev/null
+  assert_reparented "$dir/reparented" "the fixture session" >/dev/null
 }
 
 cohort_field() {  # <dir> <key>
@@ -607,23 +656,30 @@ test_rehosted_session_owns_the_lock_it_cannot_reach() {
 # direction existed this shape moved the read-only degradation onto the window
 # session for as long as the session it launched kept running.
 test_launching_session_owns_a_lock_naming_the_session_it_started() {
-  local dir window holder
+  local dir window holder reparent
   dir="$TMP_ROOT/cohort-reverse"
   make_cohort_fixture "$dir"
   # The window session. It exports its own pid as the launch marker for
   # everything it starts, exactly as a real session does, then starts the second
-  # session detached so that session is orphaned to init and the two are
+  # session detached so that session is orphaned away from it and the two are
   # unreachable from each other's process tree in either direction.
   cat > "$dir/window.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
 export CLAUDE_PID=$$
 printf '%s\n' "$$" > "$FM_FIX/window-pid"
+launcher=${FM_FIXTURE_LAUNCHER:-$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')}
+parent=$launcher
 i=0
-while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+while [ "$i" -lt 200 ]; do
+  parent=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')
+  if [ -n "$parent" ] && [ "$parent" != "$launcher" ]; then
+    break
+  fi
   sleep 0.05
   i=$((i + 1))
 done
+printf 'launcher=%s parent=%s\n' "$launcher" "$parent" > "$FM_FIX/window-reparented"
 bash -c '"$0" "$1" &' "$FM_FIX_CLAUDE" "$FM_FIX/holder.sh"
 i=0
 while [ "$i" -lt 400 ] && [ ! -s "$FM_FIX/holder-pid" ]; do
@@ -639,11 +695,16 @@ SH
   chmod +x "$dir/window.sh"
   "${COHORT_ENV_ARGV[@]}" FM_FIX="$dir" FM_FIX_LIB="$LIB" FM_FIX_CLAUDE="$NAMED_CLAUDE" \
     HERDR_ENV=1 HERDR_PANE_ID=fixture-pane \
-    bash -c '"$0" "$1" &' "$NAMED_CLAUDE" "$dir/window.sh"
+    bash -c 'FM_FIXTURE_LAUNCHER=$$ "$0" "$1" &' "$NAMED_CLAUDE" "$dir/window.sh"
   window=$(wait_for_file "$dir/window-pid" "the fixture window session pid")
   holder=$(wait_for_file "$dir/holder-pid" "the pid of the session the window session started")
   COHORT_PIDS+=("$holder" "$window")
   wait_for_file "$dir/check-finished" "the fixture check result" >/dev/null
+  reparent=$(assert_reparented "$dir/window-reparented" "the fixture window session")
+  # Whatever adopted the orphan - init, or a subreaper such as systemd --user - is
+  # not a verified harness, so the walk still terminates inside the fixture.
+  assert_not_contains " $(cohort_field "$dir" ancestry) " " $reparent " \
+    "the ancestry walk crossed into the process that adopted the fixture, so it no longer terminates inside the fixture"$'\n'"$(cohort_report "$dir")"
 
   # Divergence, so the verdict can only be coming from the reverse direction:
   # the holder is outside the ancestry, and no marker on this side of the pair

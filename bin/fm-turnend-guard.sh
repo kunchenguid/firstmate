@@ -393,16 +393,29 @@ failure_episode_verified() {
 # present, a fresh ledger entry still means the auto-arm is mid-flight and is
 # still given the block, and the caller's exhausted block budget and one-shot
 # alarm bound this path exactly as they bound the other.
+#
+# The two absences are one condition but not one fact, so which of them held is
+# recorded in FM_TURNEND_AUTOARM_ABSENCE: `absent` when there is no ledger at all
+# and nothing ever recorded an attempt, `stale` when an attempt is on record and
+# nothing has run since. Only the second is a statement the notice below could
+# get wrong by claiming the first.
+FM_TURNEND_AUTOARM_ABSENCE=
 autoarm_never_established() {
+  FM_TURNEND_AUTOARM_ABSENCE=
   [ ! -e "$STATE/.afk" ] || return 1
-  [ -e "$STATE/.claude-autoarm-epoch" ] || return 0
-  [ "$(fm_path_age "$STATE/.claude-autoarm-epoch")" -ge "$EPOCH_FRESH" ]
+  if [ ! -e "$STATE/.claude-autoarm-epoch" ]; then
+    FM_TURNEND_AUTOARM_ABSENCE=absent
+    return 0
+  fi
+  [ "$(fm_path_age "$STATE/.claude-autoarm-epoch")" -ge "$EPOCH_FRESH" ] || return 1
+  FM_TURNEND_AUTOARM_ABSENCE=stale
+  return 0
 }
 
 # Either proof of an unrepairable supervision failure opens the one bounded
-# attended fail-open. FM_TURNEND_FAILOPEN_KIND records which, so the notice can
-# name the real condition rather than describing an exhausted retry that may
-# never have happened.
+# attended fail-open. FM_TURNEND_FAILOPEN_KIND records which of the three states
+# was verified, so the notice states what actually holds rather than describing an
+# exhausted retry that may never have happened or an attempt that is on record.
 FM_TURNEND_FAILOPEN_KIND=
 failopen_condition_verified() {
   FM_TURNEND_FAILOPEN_KIND=
@@ -411,7 +424,7 @@ failopen_condition_verified() {
     return 0
   fi
   if autoarm_never_established; then
-    FM_TURNEND_FAILOPEN_KIND=absent
+    FM_TURNEND_FAILOPEN_KIND=$FM_TURNEND_AUTOARM_ABSENCE
     return 0
   fi
   return 1
@@ -448,11 +461,17 @@ if [ "$terminal_status" -eq 0 ]; then
   else
     NEED_DESC="X-mode relay polling active"
   fi
-  if [ "$FM_TURNEND_FAILOPEN_KIND" = absent ]; then
-    FAILOPEN_CAUSE="the Stop-owned auto-arm never claimed this home at all and left no attempt on record"
-  else
-    FAILOPEN_CAUSE="the Stop-owned auto-arm exhausted its bounded retries and one failure notice"
-  fi
+  case "$FM_TURNEND_FAILOPEN_KIND" in
+    absent)
+      FAILOPEN_CAUSE="the Stop-owned auto-arm never claimed this home at all and left no attempt on record"
+      ;;
+    stale)
+      FAILOPEN_CAUSE="the Stop-owned auto-arm last recorded an attempt more than one event epoch ago and has not run since, so it is no longer establishing supervision"
+      ;;
+    *)
+      FAILOPEN_CAUSE="the Stop-owned auto-arm exhausted its bounded retries and one failure notice"
+      ;;
+  esac
   printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, %s, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC" "$FAILOPEN_CAUSE"
   exit 0
 fi
