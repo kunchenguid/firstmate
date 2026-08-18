@@ -24,13 +24,13 @@
 # Explicit paths always bypass this file-set selection and lint exactly the
 # given paths, matching the same config, without the workflow YAML check.
 #
-# Canonical lint defaults to two bounded workers over two stable logical shards.
-# Each worker further divides its manifest into fixed-size ShellCheck batches, so
-# one long-lived ShellCheck process never accumulates the complete shard's source
-# graph. Each shard writes separate diagnostics, and the parent replays those
-# outputs in deterministic shard and root order after every worker finishes.
-# FM_LINT_JOBS=1 runs the same shards and batches serially with byte-identical
-# diagnostics and exit selection.
+# Canonical lint defaults to one bounded ShellCheck worker over two stable
+# logical shards. Each worker further divides its manifest into fixed-size
+# ShellCheck batches, so one long-lived ShellCheck process never accumulates the
+# complete shard's source graph. Each shard writes separate diagnostics, and the
+# parent replays those outputs in deterministic shard and root order after every
+# worker finishes. FM_LINT_JOBS=2 runs the same shards concurrently with
+# byte-identical diagnostics and exit selection.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, per-ShellCheck-batch wall/CPU/RSS, shard load, and competing
@@ -139,7 +139,7 @@ fm_lint_run_workflows() {
   "$SELF_DIR/fm-lint-workflows.sh"
 }
 
-JOBS=${FM_LINT_JOBS:-2}
+JOBS=${FM_LINT_JOBS:-1}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
 LIST_FILES=0
 while [ "$#" -gt 0 ]; do

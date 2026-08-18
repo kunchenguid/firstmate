@@ -244,6 +244,35 @@ SH
   chmod +x "$fakebin/shellcheck"
 }
 
+# fm_lint_stub_shellcheck_concurrency <fakebin-dir>: records overlapping
+# ShellCheck invocations in FM_TEST_SHELLCHECK_STATE/concurrent. Each invocation
+# waits briefly so two shard workers have time to overlap when enabled.
+fm_lint_stub_shellcheck_concurrency() {
+  local fakebin=$1
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+state=${FM_TEST_SHELLCHECK_STATE:?}
+marker="$state/running.$$"
+: > "$marker"
+i=0
+while [ "$i" -lt 100 ]; do
+  active=$(find "$state" -maxdepth 1 -type f -name 'running.*' | wc -l | tr -d '[:space:]')
+  if [ "$active" -ge 2 ]; then
+    : > "$state/concurrent"
+    break
+  fi
+  sleep 0.01
+  i=$((i + 1))
+done
+rm -f "$marker"
+SH
+  chmod +x "$fakebin/shellcheck"
+}
+
 # fm_lint_stub_shellcheck_batches <fakebin-dir> <log-file>: records one line
 # per ShellCheck invocation, with its roots tab-separated. It proves that the
 # lint owner bounds an individual ShellCheck process even when there is only one
@@ -671,6 +700,52 @@ SH
   pass "fm-lint.sh passes a clean fixture"
 }
 
+test_default_job_is_one_and_explicit_two_overrides() {
+  local tmp fakebin fixture_a fixture_b default_state env_state flag_state
+  local default_telemetry env_telemetry flag_telemetry out
+  tmp=$(fm_test_tmproot fm-lint-default-jobs)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture_a="$tmp/good-a.sh"
+  fixture_b="$tmp/good-b.sh"
+  default_state="$tmp/default-state"
+  env_state="$tmp/env-state"
+  flag_state="$tmp/flag-state"
+  default_telemetry="$tmp/default.tsv"
+  env_telemetry="$tmp/env.tsv"
+  flag_telemetry="$tmp/flag.tsv"
+  fm_lint_stub_shellcheck_concurrency "$fakebin"
+  cat > "$fixture_a" <<'SH'
+#!/usr/bin/env bash
+printf 'ok\n'
+SH
+  cp "$fixture_a" "$fixture_b"
+
+  mkdir -p "$default_state"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_SHELLCHECK_STATE="$default_state" \
+    "$LINT" --telemetry "$default_telemetry" "$fixture_a" "$fixture_b" 2>&1) \
+    || fail "unset job default lint failed"$'\n'"$out"
+  assert_grep $'jobs\t1' "$default_telemetry" "unset FM_LINT_JOBS did not use one worker"
+  [ ! -e "$default_state/concurrent" ] \
+    || fail "unset FM_LINT_JOBS ran concurrent ShellCheck work"
+
+  mkdir -p "$env_state"
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=2 FM_TEST_SHELLCHECK_STATE="$env_state" \
+    "$LINT" --telemetry "$env_telemetry" "$fixture_a" "$fixture_b" 2>&1) \
+    || fail "FM_LINT_JOBS=2 lint failed"$'\n'"$out"
+  assert_grep $'jobs\t2' "$env_telemetry" "FM_LINT_JOBS=2 did not use two workers"
+  [ -e "$env_state/concurrent" ] \
+    || fail "FM_LINT_JOBS=2 did not run concurrent ShellCheck work"
+
+  mkdir -p "$flag_state"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_SHELLCHECK_STATE="$flag_state" \
+    "$LINT" --jobs 2 --telemetry "$flag_telemetry" "$fixture_a" "$fixture_b" 2>&1) \
+    || fail "--jobs 2 lint failed"$'\n'"$out"
+  assert_grep $'jobs\t2' "$flag_telemetry" "--jobs 2 did not use two workers"
+  [ -e "$flag_state/concurrent" ] \
+    || fail "--jobs 2 did not run concurrent ShellCheck work"
+  pass "unset jobs use one worker and explicit two-worker overrides work"
+}
+
 test_jobs_are_deterministic_and_complete() {
   if ! pinned_ready; then
     pass "SKIP (ShellCheck $REQUIRED not resolved): deterministic bounded jobs check"
@@ -938,6 +1013,7 @@ test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
+test_default_job_is_one_and_explicit_two_overrides
 test_jobs_are_deterministic_and_complete
 test_single_worker_uses_bounded_shellcheck_batches
 test_worker_trees_stop_on_signal
