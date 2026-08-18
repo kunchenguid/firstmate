@@ -890,9 +890,22 @@ def specialized_capacity_inventory(controller, vms, identities):
             "amount_usd": amount_microusd / 1_000_000,
             "active": invocation in active,
         })
-    missing = sorted(set(active) - seen)
-    if missing:
-        raise ProviderError("active specialized VM has no exact durable reservation")
+    # There is deliberately NO "every active specialized VM must have a
+    # reservation" refusal here. Nothing in this repo mints a
+    # runner-cost-reservation identity: the role tag appears only in the loop
+    # above, so the requirement could never be satisfied by any shard any lane
+    # launches. Being global and fail-closed, its only real effect was to refuse
+    # every WORKER operation for as long as ANOTHER lane had compute up, behind
+    # an error naming reservations rather than the actual cause. Three
+    # consecutive worker reconciles were refused this way during the first real
+    # crewmate drive.
+    #
+    # What still guards this inventory, all above and all still fail-closed:
+    # foreign owner or deployment generation, malformed SKU/family identity,
+    # duplicate invocation bindings, and a cleaned reservation that still owns
+    # active compute. What bounds SPEND is family and regional quota read from
+    # `az vm list-usage`, not this ledger; active_by_family feeds status
+    # telemetry only.
     return reservations, active_by_family
 
 
