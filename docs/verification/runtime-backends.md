@@ -173,6 +173,71 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+### Session-lock identity and the suspended holder
+
+`bin/fm-session-lock-lib.sh` decides which harness process holds a home's session lock and whether the current process is that same session.
+Its verdict comes from vendor-emitted process names, argv, kernel process state, and the environment a harness hands to the processes it starts, so the per-harness result below is refreshed by a real-harness run rather than transcribed from a previous release.
+
+The installed adapters were exercised on 2026-08-18 with tmux 3.6 on Linux 6.18.33.2-microsoft-standard-WSL2 x86_64.
+Each harness ran as a child of a pane shell, which is the shape a captain's own session has and the shape the suspended-holder incident was observed in.
+
+```sh
+FM_SESSION_LOCK_IDENTITY_LIVE=1 bin/fm-test-run.sh tests/fm-session-lock-identity-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+# claude 2.1.234 (Claude Code): comm='claude', no descendant of a bare launch carried a launch marker
+ok - session-lock identity: claude 2.1.234 (Claude Code) is identified, refuses an unrelated session, and releases while suspended
+# codex codex-cli 0.139.0: comm='MainThread', no descendant of a bare launch carried a launch marker
+ok - session-lock identity: codex codex-cli 0.139.0 is identified, refuses an unrelated session, and releases while suspended
+# unverified on this machine (not installed): opencode pi pi-signed grok kimi cursor
+# checked 2 installed harness(es)
+```
+
+| Harness | Version | `ps -o comm=` | Identified | Refuses an unrelated session | Releases while suspended |
+| --- | --- | --- | --- | --- | --- |
+| claude | 2.1.234 (Claude Code) | `claude` | yes | yes | yes |
+| codex | codex-cli 0.139.0 | `MainThread` | yes | yes | yes |
+
+Codex is the harness whose reported name depends on its install method.
+The macOS table above records `codex` for a native 0.146.0 install, while an npm install under nvm runs it as a node script and node renames its own main thread, so `ps -o comm=` reports `MainThread` and no interpreter name at all.
+Identity for that shape comes from the interpreter's script path in argv, matched by whole path component only, so an unrelated node program presenting the same name is not a harness.
+
+The launch marker is the environment variable a harness exports into every process it starts, naming its own session pid.
+It is what lets a session the harness rehosted under its own pty still recognize the lock its process tree can no longer reach.
+A bare launch with no prompt starts no child, so the live guard reports it as unobserved rather than asserting it; the marker itself is confirmed from inside a real session.
+
+```sh
+echo "$CLAUDE_PID"
+sleep 5 & tr '\0' '\n' < /proc/$!/environ | sed -n 's/^CLAUDE_PID=/child inherits CLAUDE_PID=/p'
+bash -c '. bin/fm-session-lock-lib.sh; fm_harness_ancestry_pid'
+```
+
+Observed output inside Claude Code 2.1.234 on the same machine and date:
+
+```text
+179487
+child inherits CLAUDE_PID=179487
+179487
+```
+
+The marker names the session pid, every child inherits it, and it matches the pid the ancestry walk resolves.
+A later `export` does not rewrite `/proc/<pid>/environ`, so the value a process was started with survives its own reassignment, which is what carries the relationship across a reparented tree.
+Claude is the only adapter with a verified marker at this date; the others keep the ancestry-only verdict, which is the behavior they had before this record existed.
+
+Suspension is confirmed over several samples, and this run also recorded a kernel behavior worth keeping: on this WSL2 build `SIGSTOP` does not stop a pty **session leader** at all, while it stops an ordinary child normally.
+
+```text
+A(session leader): state=S progressed=10
+B(child of pane shell): state=T progressed=0
+```
+
+A process the kernel leaves running is correctly reported as running, so this is a fixture constraint rather than a classifier gap: any check that suspends a harness must start it as a child of a pane shell, not as the pane process itself.
+
+`tests/fm-session-lock-ancestry.test.sh` pins the same logic in CI with real processes and no harness.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.

@@ -195,6 +195,7 @@ family_for_basename() {
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|\
+    fm-session-lock-identity-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|\
@@ -465,6 +466,7 @@ tests/fm-send-resolve-key.test.sh 13450
 tests/fm-send-secondmate-marker-herdr-e2e.test.sh 45
 tests/fm-send-secondmate-marker.test.sh 4439
 tests/fm-session-lock-ancestry.test.sh 1205
+tests/fm-session-lock-identity-live-e2e.test.sh 19
 tests/fm-session-start.test.sh 144836
 tests/fm-sessionstart-hook-live-e2e.test.sh 21
 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 21

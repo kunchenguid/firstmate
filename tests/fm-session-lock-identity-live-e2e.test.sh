@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+# tests/fm-session-lock-identity-live-e2e.test.sh - opt-in guard proving every
+# INSTALLED harness is still identified correctly by the session-lock predicates
+# in bin/fm-session-lock-lib.sh.
+#
+# Why this file exists: the whole session-lock verdict is read off things the
+# harness vendor emits - the process name it runs under, the argv it presents,
+# and the process state the kernel reports for it. A stub agent can only confirm
+# the assumption already written into the stub, so the identity of a real
+# release has to be checked against a real release. Claude Code already changed
+# its own process name to a bare version string once, and every session-lock
+# verdict for it was wrong until the classifier was taught the new shape.
+#
+# What it checks per harness, all against a bare launch with no prompt, so it
+# consumes no model tokens:
+#   1. the running harness is recognized as a harness at all;
+#   2. an unrelated process does NOT get to call that harness its own session,
+#      and a running one is treated as a competing holder - the property the
+#      session lock exists for;
+#   3. a stopped harness is recognized as suspended and stops blocking
+#      acquisition, then blocks again once continued.
+#
+# Each harness runs in its own real pty, because several of them exit
+# immediately without a terminal and would be reported as unidentifiable for a
+# reason that has nothing to do with identity.
+#
+# The launch marker that lets a rehosted session recognize its own lock is
+# deliberately NOT a pass/fail here: a harness publishes it to the processes it
+# starts, and a bare launch with no prompt starts none. This guard reports
+# whatever a descendant scan actually finds, with the ambient markers cleared so
+# an inherited value from the session running this suite cannot be mistaken for
+# the harness's own. docs/verification/runtime-backends.md records the
+# per-harness marker evidence and how it was obtained.
+#
+# Standard CI has no harness binaries or credentials, so this real-harness guard
+# is opt-in and on-demand. tests/fm-session-lock-ancestry.test.sh pins the same
+# logic in CI with real processes and no harness. Run this guard after any
+# harness upgrade and before trusting refreshed per-harness evidence.
+set -u
+
+if [ "${FM_SESSION_LOCK_IDENTITY_LIVE:-0}" != 1 ]; then
+  echo "skip: set FM_SESSION_LOCK_IDENTITY_LIVE=1 to run the installed-harness session-lock identity guard"
+  exit 0
+fi
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIB="$ROOT/bin/fm-session-lock-lib.sh"
+SOCKET="fm-session-lock-identity-$$"
+LAB=
+REAL_TMUX=
+
+cleanup_all() {
+  [ -n "$REAL_TMUX" ] && "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1
+  [ -n "${LAB:-}" ] && rm -rf "$LAB"
+  return 0
+}
+fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+pass() { printf 'ok - %s\n' "$1"; }
+note() { printf '# %s\n' "$1"; }
+trap cleanup_all EXIT
+
+command -v tmux >/dev/null 2>&1 || fail "tmux not found; this guard needs a real pty because several harnesses exit immediately without one"
+REAL_TMUX=$(command -v tmux)
+LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-session-lock-identity.XXXXXX")
+mkdir -p "$LAB/wt"
+
+# shellcheck source=bin/fm-cursor-lib.sh
+. "$ROOT/bin/fm-cursor-lib.sh"
+
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s identity -n control -c "$LAB/wt" \
+  || fail "could not start the private tmux server"
+
+# The environment signals the library reads, cleared for every launch so no
+# value inherited from the session running this suite can decide a verdict.
+CLEARED=(-u CLAUDE_PID -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID
+         -u CMUX_WORKSPACE_ID -u CMUX_SURFACE_ID)
+
+# Evaluate one library expression from a process that is NOT related to the
+# harness under test, which is the position every competing session speaks from.
+probe() {  # <expression>
+  env "${CLEARED[@]}" bash -c ". \"\$0\"; $1" "$LIB"
+}
+
+# Mirror bin/fm-spawn.sh's own resolution order, so this guard covers the same
+# binary firstmate would actually launch rather than only what is on PATH.
+resolve_harness_binary() {  # <harness>
+  local harness=$1 candidate
+  candidate=$(command -v "$harness" 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  if [ "$harness" = kimi ] && [ -n "${HOME:-}" ] && [ -x "$HOME/.kimi-code/bin/kimi" ]; then
+    printf '%s\n' "$HOME/.kimi-code/bin/kimi"
+    return 0
+  fi
+  if [ "$harness" = cursor ]; then
+    fm_cursor_resolve_binary 2>/dev/null && return 0
+    return 1
+  fi
+  return 1
+}
+
+wait_for_state() {  # <pid> <T|running>
+  local pid=$1 want=$2 i=0 state
+  while [ "$i" -lt 200 ]; do
+    state=$(ps -o state= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    case "$want:$state" in
+      T:T*) return 0 ;;
+      running:T*) : ;;
+      running:?*) return 0 ;;
+    esac
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Report any launch marker a descendant of <pid> carries that names a process in
+# the harness's own run. Informational only.
+descendant_marker() {  # <pid>
+  local root=$1 d m
+  for d in $(ps -eo pid= -o ppid= 2>/dev/null | awk -v r="$root" '$2 == r { print $1 }'); do
+    m=$(probe "fm_session_launcher_pid $d" 2>/dev/null) || continue
+    printf '%s\n' "$m"
+    return 0
+  done
+  return 1
+}
+
+CHECKED=0
+SKIPPED=
+UNEXERCISED=
+MARKERS=
+
+# Every primary-capable adapter this repo has verified. muse is crewmate-only and
+# never holds a home's session lock, so it is deliberately out of scope here.
+for harness in claude codex opencode pi pi-signed grok kimi cursor; do
+  pane_pid=
+  if ! bin_path=$(resolve_harness_binary "$harness"); then
+    SKIPPED="$SKIPPED $harness"
+    note "skip: $harness is not installed on this machine, so its session-lock identity is unverified here"
+    continue
+  fi
+
+  version=$("$bin_path" --version 2>/dev/null | head -1 | tr -d '\r') || version=
+  [ -n "$version" ] || version="unknown"
+
+  # cursor blocks on a workspace-trust prompt in a directory it has never seen,
+  # which would hang this probe rather than identify anything; --trust is the
+  # same flag fm-spawn passes for the same reason.
+  launch_args=""
+  [ "$harness" = cursor ] && launch_args="--trust"
+  # The harness runs as a CHILD of the pane's shell, not as the pane process
+  # itself. That is the shape a captain's own session has - a harness started
+  # from a shell in a pane - and it is the shape the suspended-holder incident
+  # was observed in. The trailing no-op is what stops bash from exec'ing the
+  # harness into the shell's own pid and making it the session leader.
+  # shellcheck disable=SC2086,SC2016  # an empty value must add no argument; the inner shell's $0/$@ are deliberately unexpanded here
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -t identity: -n "$harness" -c "$LAB/wt" -- \
+    env "${CLEARED[@]}" bash -c '"$0" "$@"; :' "$bin_path" $launch_args \
+    || fail "$harness ($version): could not launch a window for the identity probe"
+
+  pid=
+  identified=0
+  for _ in $(seq 1 300); do
+    pane_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "identity:$harness" '#{pane_pid}' 2>/dev/null | tr -d '[:space:]')
+    case "$pane_pid" in
+      ''|*[!0-9]*) sleep 0.2; continue ;;
+    esac
+    pid=$(ps -eo pid= -o ppid= 2>/dev/null | awk -v r="$pane_pid" '$2 == r { print $1; exit }')
+    case "$pid" in
+      ''|*[!0-9]*) sleep 0.2; continue ;;
+    esac
+    if probe "fm_harness_pid_alive $pid"; then
+      identified=1
+      break
+    fi
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.2
+  done
+
+  # A harness that never stayed running was not exercised. That is a fact about
+  # this machine, not evidence about identity, so report it instead of turning
+  # it into a drift verdict or a silent pass.
+  if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    UNEXERCISED="$UNEXERCISED $harness"
+    note "unexercised: $harness $version did not stay running in a bare pty launch here, so its session-lock identity is unverified"
+    "$REAL_TMUX" -L "$SOCKET" kill-window -t "identity:$harness" >/dev/null 2>&1 || true
+    continue
+  fi
+
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '\n')
+  args=$(ps -o args= -p "$pid" 2>/dev/null | cut -c1-120 | tr -d '\n')
+
+  [ "$identified" -eq 1 ] || fail \
+    "SESSION-LOCK IDENTITY DRIFT: $harness $version is running but bin/fm-session-lock-lib.sh does not identify it as a harness. Every session-lock verdict for this harness is therefore wrong: its own session start cannot recognize its lock, and a dead holder of its own kind is never reclaimed. Observed process name '$comm'; observed argv '$args'. Teach fm_harness_process_matches the identity this release actually reports."
+
+  if probe "fm_session_same_cohort $pid"; then
+    fail "SESSION-LOCK SAFETY FAILURE: $harness $version was accepted as an unrelated process's own session, so a separate concurrent session could take over that home. Observed process name '$comm'; observed argv '$args'."
+  fi
+  probe "fm_session_lock_holder_competes $pid" || fail \
+    "SESSION-LOCK SAFETY FAILURE: a running $harness $version holding a home's lock was not treated as a competing session, so another session would acquire that home. Observed process name '$comm'; observed argv '$args'."
+
+  kill -STOP "$pid" 2>/dev/null || fail "$harness $version: could not suspend the launched harness"
+  wait_for_state "$pid" T || fail "$harness $version: the launched harness never reached the stopped state"
+  probe "fm_harness_pid_suspended $pid" || fail \
+    "SESSION-LOCK IDENTITY DRIFT: a stopped $harness $version was not recognized as suspended, so a suspended session of this harness would hold its home forever. Observed process state '$(ps -o state= -p "$pid" 2>/dev/null | tr -d '[:space:]')'."
+  if probe "fm_session_lock_holder_competes $pid"; then
+    kill -CONT "$pid" 2>/dev/null || true
+    fail "SESSION-LOCK IDENTITY DRIFT: a stopped $harness $version still blocked acquisition, which is the permanent lockout the suspended-holder decision removes."
+  fi
+  kill -CONT "$pid" 2>/dev/null || fail "$harness $version: could not resume the launched harness"
+  wait_for_state "$pid" running || fail "$harness $version: the launched harness never resumed"
+  probe "fm_session_lock_holder_competes $pid" || fail \
+    "SESSION-LOCK IDENTITY DRIFT: a resumed $harness $version did not go back to blocking acquisition, so a live session of this harness would lose its own home."
+
+  if marker=$(descendant_marker "$pid"); then
+    MARKERS="$MARKERS $harness=$marker"
+    note "$harness $version: comm='$comm', a descendant carries a launch marker naming pid $marker"
+  else
+    note "$harness $version: comm='$comm', no descendant of a bare launch carried a launch marker"
+  fi
+
+  "$REAL_TMUX" -L "$SOCKET" kill-window -t "identity:$harness" >/dev/null 2>&1 || true
+  pass "session-lock identity: $harness $version is identified, refuses an unrelated session, and releases while suspended"
+  CHECKED=$((CHECKED + 1))
+done
+
+[ "$CHECKED" -gt 0 ] || fail \
+  "no verified harness was exercised here, so this run proved nothing; install at least one harness that stays running in a bare pty launch before trusting a pass"
+
+[ -z "$SKIPPED" ] || note "unverified on this machine (not installed):$SKIPPED"
+[ -z "$UNEXERCISED" ] || note "unverified on this machine (did not stay running):$UNEXERCISED"
+[ -z "$MARKERS" ] || note "observed launch markers:$MARKERS"
+note "checked $CHECKED installed harness(es)"
+
+cleanup_all
+trap - EXIT
