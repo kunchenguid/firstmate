@@ -869,55 +869,96 @@ fm_busy_grok_tail_busy() {
 # (data/learnings.md, 2026-08-17), corroborating the session-limit wording
 # above from a real stuck pane.
 #
-# Matching is anchored to the widget/composer region - the bottom-most
-# FM_BUSY_CLAUDE_LIMIT_REGION_LINES non-empty lines of the captured tail,
-# where Claude Code renders the banner and its composer - so ordinary
-# scrollback that merely mentions a limit name (a crewmate editing this very
-# file, a diff, a doc) can never trigger the override.
+# Matching is anchored to the COMPOSER REGION of the captured tail: Claude
+# Code's composer box (its rounded top border down to the trailing hint line)
+# plus at most FM_BUSY_CLAUDE_LIMIT_REGION_LINES lines directly above that
+# border, where the limit widget renders. Nothing outside that region is ever
+# consulted, so scrollback, a diff, a transcript, or this very file's comments
+# can never trigger the override no matter what they contain. A tail with no
+# composer box in it has no region at all and simply does not match.
 #
-# Within that region a BLOCKING auto-continue widget phrase is REQUIRED:
-# "press enter to continue", "continuing automatically", or "Automatic
-# continue stopped after repeated usage-limit hits". A named notice alone is
-# deliberately NOT sufficient, because the same bundle renders a separate
-# NON-blocking approaching-limit warning from the same names -
-# "Approaching <name>" / "You've used NN% of your <name> \xB7 resets <time>"
-# (status allowed_warning at utilization >= 70%) - which every long-running
-# worker crosses while it is genuinely still working. Only the widget marks an
-# account that is actually blocked. The limit NAME is then used solely to
-# enrich the detail: a name on the same or an adjacent line as the widget
-# prints that name line (it carries the reset hint); otherwise the detail
-# reports the limit type as unspecified rather than naming a limit that was
-# not on screen. Fails when no blocking widget phrase is in the region.
-FM_BUSY_CLAUDE_LIMIT_NAMES_DEFAULT='session limit|weekly limit|opus limit|sonnet limit|fable 5 limit|usage credit limit'
-FM_BUSY_CLAUDE_LIMIT_WIDGETS_DEFAULT='press enter to continue|continuing automatically|automatic continue stopped after repeated usage-limit hits'
-FM_BUSY_CLAUDE_LIMIT_REGION_LINES=${FM_BUSY_CLAUDE_LIMIT_REGION_LINES:-12}
+# Inside the region a BLOCKING auto-continue widget phrase is REQUIRED for the
+# paused verdict: "press enter to continue", "continuing automatically", or
+# "Automatic continue stopped after repeated usage-limit hits". The limit NAME
+# is used only to enrich the detail - a name on the same or an adjacent line
+# as the widget prints that name line (it carries the reset hint), otherwise
+# the detail reports the limit type as unspecified.
+#
+# DELIBERATE, CAPTAIN-ACCEPTED LIMITATION (one owner: this header): a named
+# limit notice ALONE never reports paused. Claude Code renders the same
+# "<name> limit ... resets <time>" wording both when the account is merely
+# APPROACHING a limit ("Approaching <name>", "You've used NN% of your <name>",
+# status allowed_warning at utilization >= 70%) and when it is blocked, so the
+# wording cannot separate the two and a worker that is genuinely still working
+# must not be reported as an external wait. fm_busy_claude_limit_notice below
+# reports that weaker "a limit notice is on screen" signal instead, which
+# bin/fm-crew-state.sh appends to its working detail. A truly blocked worker
+# whose pane shows no widget is therefore not reported paused immediately - it
+# is still caught by the existing stale/idle pane detection in bin/fm-watch.sh,
+# just on that path's cadence rather than at once.
+FM_BUSY_CLAUDE_LIMIT_REGION_LINES=${FM_BUSY_CLAUDE_LIMIT_REGION_LINES:-6}
+
+# Print the composer region of the tail on stdin (see the header above), or
+# fail when the tail carries no composer box. Lowercasing goes through tr, not
+# bash 4's ${var,,}, because this repo still runs on macOS bash 3.2.
+fm_busy_claude_composer_region() {
+  local line border=-1 idx=0 start
+  local -a lines=()
+  while IFS= read -r line; do
+    lines+=("$line")
+    case "$line" in *'╭'*|*'┌'*) border=$idx ;; esac
+    idx=$((idx + 1))
+  done
+  [ "$border" -ge 0 ] || return 1
+  start=$((border - FM_BUSY_CLAUDE_LIMIT_REGION_LINES))
+  [ "$start" -lt 0 ] && start=0
+  for ((idx = start; idx < ${#lines[@]}; idx++)); do
+    printf '%s\n' "${lines[idx]}"
+  done
+}
 
 fm_busy_claude_limit_banner() {
-  local tail_text region rl idx widget=-1
+  local rl low idx widget=-1
   local -a region_lines=() region_lower=()
-  # `read -d ''` reads all of stdin into one variable using only a bash
-  # builtin (no external `cat`), preserving embedded newlines; it always
-  # returns non-zero at EOF with no NUL delimiter, so that status is ignored.
-  IFS= read -r -d '' tail_text || true
-  region=$(printf '%s\n' "$tail_text" | grep -v '^[[:space:]]*$' \
-    | tail -n "$FM_BUSY_CLAUDE_LIMIT_REGION_LINES")
-  [ -n "$region" ] || return 1
   while IFS= read -r rl; do
+    low=$(printf '%s' "$rl" | tr '[:upper:]' '[:lower:]')
     region_lines+=("$rl")
-    region_lower+=("${rl,,}")
-  done <<<"$region"
+    region_lower+=("$low")
+  done < <(fm_busy_claude_composer_region)
+  [ "${#region_lines[@]}" -gt 0 ] || return 1
   for ((idx = 0; idx < ${#region_lines[@]}; idx++)); do
-    [[ ${region_lower[idx]} =~ $FM_BUSY_CLAUDE_LIMIT_WIDGETS_DEFAULT ]] && widget=$idx
+    case "${region_lower[idx]}" in
+      *'press enter to continue'*|*'continuing automatically'*|*'automatic continue stopped after repeated usage-limit hits'*)
+        widget=$idx ;;
+    esac
   done
   [ "$widget" -ge 0 ] || return 1
   for idx in "$widget" "$((widget - 1))" "$((widget + 1))"; do
     [ "$idx" -ge 0 ] && [ "$idx" -lt "${#region_lines[@]}" ] || continue
-    if [[ ${region_lower[idx]} =~ $FM_BUSY_CLAUDE_LIMIT_NAMES_DEFAULT ]]; then
-      printf '%s' "${region_lines[idx]}"
-      return 0
-    fi
+    case "${region_lower[idx]}" in
+      *'session limit'*|*'weekly limit'*|*'opus limit'*|*'sonnet limit'*|*'fable 5 limit'*|*'usage credit limit'*)
+        printf '%s' "${region_lines[idx]}"
+        return 0 ;;
+    esac
   done
   printf 'limit type unspecified - %s' "${region_lines[widget]}"
+}
+
+# fm_busy_claude_limit_notice: the WEAKER companion signal - 0 when a limit
+# name is merely visible in the same composer region, with no blocking widget.
+# It says only "a limit notice is on screen", never that the worker is blocked
+# (see the limitation note in the header above), and bin/fm-crew-state.sh uses
+# it to annotate a working verdict, never to change it.
+fm_busy_claude_limit_notice() {
+  local rl low
+  while IFS= read -r rl; do
+    low=$(printf '%s' "$rl" | tr '[:upper:]' '[:lower:]')
+    case "$low" in
+      *'session limit'*|*'weekly limit'*|*'opus limit'*|*'sonnet limit'*|*'fable 5 limit'*|*'usage credit limit'*)
+        return 0 ;;
+    esac
+  done < <(fm_busy_claude_composer_region)
+  return 1
 }
 
 # fm_busy_classify: semantic classification for a task whose endpoint the

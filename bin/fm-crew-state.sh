@@ -47,7 +47,7 @@
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
 #      For harness=claude, a pane parked on Claude Code's account/usage-limit
-#      banner (claude_limit_detail below, over bin/fm-busy-lib.sh's
+#      banner (claude_limit_scan below, over bin/fm-busy-lib.sh's
 #      fm_busy_claude_limit_banner) never overrides an attributed run's own
 #      state: a parked or actively running/fixing/ci run keeps its state and
 #      gate detail and only gains an appended `worker pane limit-blocked` note,
@@ -58,11 +58,13 @@
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail. For harness=claude, a
-#      busy pane verdict is overridden to paused when the pane's own rendered
-#      tail shows Claude Code's account/usage-limit banner (see bin/fm-busy-
-#      lib.sh's fm_busy_claude_limit_banner for the verified wordings): the
+#      busy pane verdict is overridden to paused when the pane's composer region
+#      shows Claude Code's blocking account/usage-limit widget (see bin/fm-busy-
+#      lib.sh's fm_busy_claude_limit_banner for the verified wordings, the
+#      anchoring, and why a bare limit notice is deliberately NOT a pause): the
 #      worker is stalled on an external wait, not a working turn, even though
-#      its UserPromptSubmit hook already opened a turn.
+#      its UserPromptSubmit hook already opened a turn. A bare notice instead
+#      annotates the working detail with `limit notice visible in pane`.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -178,23 +180,34 @@ pane_readable() {  # <target>
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }
-# claude_limit_detail: the pane-derived Claude account/usage-limit override's
-# one reader. Prints the banner detail and returns 0 when this crew is a
-# harness=claude worker whose recorded pane is parked on Claude Code's own
-# account/usage-limit banner; returns non-zero otherwise (wrong harness, no
-# readable pane, no banner). fm_busy_claude_limit_banner (bin/fm-busy-lib.sh)
-# owns the verified wordings and the matching contract; both the run-step path
-# and the no-run pane fallback below consult this one helper so the override
-# cannot drift between them.
-claude_limit_detail() {
-  local tail_text detail
+# claude_limit_scan: the pane-derived Claude account/usage-limit override's one
+# reader, captured once per resolution. For a harness=claude crew with a
+# readable pane it sets, from that single capture:
+#   LIMIT_DETAIL - the BLOCKING banner detail (a blocking widget in the pane's
+#                  composer region); the only signal that reports paused.
+#   LIMIT_NOTICE - a limit name merely visible in that region with no blocking
+#                  widget; annotates a working verdict, never changes it.
+# Both empty (and non-zero) for any other harness, an unreadable pane, or a
+# pane with neither signal. bin/fm-busy-lib.sh's fm_busy_claude_limit_banner
+# header owns the verified wordings, the composer-region anchoring, and the
+# deliberate limitation that a bare notice is not a pause; every path below
+# consults this one helper so the override cannot drift between them.
+claude_limit_scan() {
+  local tail_text
+  LIMIT_DETAIL=''
+  LIMIT_NOTICE=''
   case "$HARNESS" in claude*) ;; *) return 1 ;; esac
   [ -n "$BACKEND_TARGET" ] || return 1
   pane_readable "$BACKEND_TARGET" || return 1
   tail_text=$(fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
-  detail=$(printf '%s' "$tail_text" | fm_busy_claude_limit_banner) || return 1
-  [ -n "$detail" ] || return 1
-  printf '%s' "$detail"
+  LIMIT_DETAIL=$(printf '%s' "$tail_text" | fm_busy_claude_limit_banner) || LIMIT_DETAIL=''
+  if [ -n "$LIMIT_DETAIL" ]; then
+    return 0
+  fi
+  if printf '%s' "$tail_text" | fm_busy_claude_limit_notice; then
+    LIMIT_NOTICE='limit notice visible in pane'
+  fi
+  [ -n "$LIMIT_NOTICE" ]
 }
 
 # crew_busy_verdict: the crew's semantic busy state from the one contract
@@ -728,14 +741,18 @@ if [ "$HAVE_RUN" = 1 ]; then
   # through to the pane's paused verdict.
   case "$RUN_STATE" in
     parked|working)
-      if LIMIT_DETAIL=$(claude_limit_detail); then
-        RUN_DETAIL="$RUN_DETAIL${SEP}worker pane limit-blocked ($LIMIT_DETAIL)"
+      if claude_limit_scan; then
+        if [ -n "$LIMIT_DETAIL" ]; then
+          RUN_DETAIL="$RUN_DETAIL${SEP}worker pane limit-blocked ($LIMIT_DETAIL)"
+        else
+          RUN_DETAIL="$RUN_DETAIL${SEP}$LIMIT_NOTICE"
+        fi
       fi
       ;;
     done|failed)
       ;;
     *)
-      if LIMIT_DETAIL=$(claude_limit_detail); then
+      if claude_limit_scan && [ -n "$LIMIT_DETAIL" ]; then
         emit paused pane "account limit: $LIMIT_DETAIL"
       fi
       ;;
@@ -766,8 +783,11 @@ if [ "$KIND" != secondmate ]; then
       # generic hook-derived busy, per fm_busy_claude_limit_banner's contract
       # (bin/fm-busy-lib.sh). Scoped to harness=claude only; every other
       # harness keeps the plain busy -> working mapping below.
-      if LIMIT_DETAIL=$(claude_limit_detail); then
-        emit paused pane "account limit: $LIMIT_DETAIL"
+      if claude_limit_scan; then
+        if [ -n "$LIMIT_DETAIL" ]; then
+          emit paused pane "account limit: $LIMIT_DETAIL"
+        fi
+        emit working pane "harness busy (${BUSY_VERDICT#* })${SEP}$LIMIT_NOTICE"
       fi
       emit working pane "harness busy (${BUSY_VERDICT#* })"
       ;;

@@ -896,7 +896,11 @@ test_no_run_claude_session_limit_banner_paused() {
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
   FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
-Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
   export FM_FAKE_BUSY_TEXT
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limit5h)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limit5h busy --gen "$gen" \
@@ -922,7 +926,11 @@ test_no_run_claude_weekly_limit_banner_paused() {
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
   FM_FAKE_BUSY_TEXT="You've hit your weekly limit · resets Tue 2:30pm
-Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
   export FM_FAKE_BUSY_TEXT
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limit7d)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limit7d busy --gen "$gen" \
@@ -971,7 +979,11 @@ test_no_run_non_claude_harness_ignores_limit_banner_text() {
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
   FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
-Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
   export FM_FAKE_BUSY_TEXT
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-opencode)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-opencode busy --gen "$gen" \
@@ -996,7 +1008,11 @@ test_no_run_claude_named_limit_variants_paused() {
     FM_FAKE_RUNS_LIST=""
     FM_FAKE_BUSY=1
     FM_FAKE_BUSY_TEXT="You've hit your $name · resets 2:30pm
-Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
     export FM_FAKE_BUSY_TEXT
     local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limitvar)
     "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limitvar busy --gen "$gen" \
@@ -1013,7 +1029,11 @@ Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
 # wait, and the auto-continue-stopped state is the most wedged wait of all.
 test_no_run_claude_widget_only_tail_paused() {
   local widget
-  for widget in "Usage limit reached · continuing automatically at 3:00pm · esc to cancel" \
+  for widget in "Usage limit reached · continuing automatically at 3:00pm · esc to cancel
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts" \
                 "Your usage limit has reset · press enter to continue" \
                 "Automatic continue stopped after repeated usage-limit hits"; do
     reset_fakes
@@ -1024,7 +1044,11 @@ test_no_run_claude_widget_only_tail_paused() {
     FM_FAKE_AXI_STATUS=""
     FM_FAKE_RUNS_LIST=""
     FM_FAKE_BUSY=1
-    FM_FAKE_BUSY_TEXT="$widget"
+    FM_FAKE_BUSY_TEXT="$widget
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
     export FM_FAKE_BUSY_TEXT
     local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-widget)
     "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-widget busy --gen "$gen" \
@@ -1054,7 +1078,10 @@ test_no_run_claude_scrollback_limit_words_stay_working() {
 + # says press enter to continue once stale
 $(for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do printf '  editing bin/fm-busy-lib.sh line %s\n' "$i"; done)
 · Thinking…
-esc to interrupt"
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
   export FM_FAKE_BUSY_TEXT
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-scrollback)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-scrollback busy --gen "$gen" \
@@ -1077,7 +1104,11 @@ test_parked_run_claude_limit_banner_paused() {
   FM_FAKE_AXI_STATUS="$(run_parked fm/feat-limitparked)"
   FM_FAKE_BUSY=1
   FM_FAKE_BUSY_TEXT="You've hit your weekly limit · resets Tue 2:30pm
-Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
   export FM_FAKE_BUSY_TEXT
   local out; out=$(run_crew_state "$d" feat-limitparked)
   assert_contains "$out" "state: parked" "a parked run keeps its own state over the pane override"
@@ -1100,7 +1131,11 @@ test_active_run_claude_limit_banner_annotates_working() {
   FM_FAKE_AXI_STATUS="$(run_running fm/feat-limitactive)"
   FM_FAKE_BUSY=1
   FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
-Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
   export FM_FAKE_BUSY_TEXT
   local out; out=$(run_crew_state "$d" feat-limitactive)
   assert_contains "$out" "state: working" "an active run step keeps reporting working"
@@ -1124,8 +1159,10 @@ test_no_run_claude_approaching_limit_warning_stays_working() {
   FM_FAKE_BUSY=1
   FM_FAKE_BUSY_TEXT="Approaching session limit
 You've used 85% of your session limit · resets 3:00pm
-> 
- ? for shortcuts"
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
   export FM_FAKE_BUSY_TEXT
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-approaching)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-approaching busy --gen "$gen" \
@@ -1134,6 +1171,62 @@ You've used 85% of your session limit · resets 3:00pm
   assert_contains "$out" "state: working" "an approaching-limit warning keeps the worker working"
   assert_not_contains "$out" "state: paused" "a non-blocking warning must never read paused"
   pass "a Claude worker on the non-blocking approaching-limit warning still reads working"
+}
+
+# A bare named limit notice with no blocking widget is deliberately NOT a pause:
+# Claude Code renders the same "<name> limit ... resets <time>" wording while
+# merely approaching a limit and while blocked, so the worker keeps reading
+# working - but the notice is surfaced in the detail so the supervisor sees it.
+# fm_busy_claude_limit_banner's header owns this accepted limitation.
+test_no_run_claude_bare_limit_notice_annotates_working() {
+  reset_fakes
+  local d; d=$(new_case claude-bare-notice)
+  make_repo_on_branch "$d/wt" fm/feat-barenotice
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-barenotice.meta" "window=fm:fm-feat-barenotice" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your weekly limit · resets Tue 2:30pm
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-barenotice)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-barenotice busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-barenotice)
+  assert_contains "$out" "state: working" "a bare limit notice keeps the worker working"
+  assert_not_contains "$out" "state: paused" "only a blocking widget may report paused"
+  assert_contains "$out" "limit notice visible in pane" "the working detail surfaces the visible notice"
+  pass "a bare Claude limit notice annotates the working detail instead of pausing"
+}
+
+# The blocking widget phrases are matched ONLY inside the composer region. A
+# crewmate grepping this repo (whose sources carry the literal phrase) while
+# genuinely mid-turn has the hit in scrollback with an ordinary busy footer at
+# the bottom, and must keep reading working.
+test_no_run_claude_widget_phrase_in_scrollback_stays_working() {
+  reset_fakes
+  local d; d=$(new_case claude-widget-scrollback)
+  make_repo_on_branch "$d/wt" fm/feat-widgetscroll
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-widgetscroll.meta" "window=fm:fm-feat-widgetscroll" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="bin/fm-busy-lib.sh: says press enter to continue once stale
+· Thinking…
+esc to interrupt"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-widgetscroll)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-widgetscroll busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-widgetscroll)
+  assert_contains "$out" "state: working" "a widget phrase in scrollback keeps the worker working"
+  assert_not_contains "$out" "state: paused" "a widget phrase outside the composer region never pauses"
+  pass "a busy Claude worker with a widget phrase in scrollback is not misread as paused"
 }
 
 test_no_run_herdr_unknown_uses_backend_capture() {
@@ -1967,6 +2060,8 @@ test_no_run_claude_scrollback_limit_words_stay_working
 test_parked_run_claude_limit_banner_paused
 test_active_run_claude_limit_banner_annotates_working
 test_no_run_claude_approaching_limit_warning_stays_working
+test_no_run_claude_bare_limit_notice_annotates_working
+test_no_run_claude_widget_phrase_in_scrollback_stays_working
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
