@@ -25,7 +25,11 @@
 #       A rolled-back lease also gives up the identity this run wrote onto it,
 #       through the same transaction retirement uses (bin/fm-home-return-lib.sh),
 #       so the pool never hands the next task a slot still carrying a seeded
-#       home's markers.
+#       home's markers. When that identity cannot be cleared the lease is KEPT
+#       rather than released, because a slot returned still wearing this run's
+#       markers is one the spawn-time isolation guard then refuses for every task
+#       dispatched into it; only proven foreign ownership, the one refusal that
+#       touched nothing this run wrote, hands the lease back unchanged.
 #       Set FM_SECONDMATE_CHARTER='<charter>' to seed from inline charter text
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
@@ -133,17 +137,6 @@ canonical_path_for_check() {
     prefix=/
   fi
   normalize_joined_path "$prefix" "$tail"
-}
-
-path_is_ancestor_of() {
-  local ancestor=$1 path=$2
-  [ -n "$ancestor" ] || return 1
-  [ -n "$path" ] || return 1
-  [ "$ancestor" != "$path" ] || return 1
-  case "$path" in
-    "$ancestor"/*) return 0 ;;
-  esac
-  return 1
 }
 
 registry_home_conflict_for_assignment() {
@@ -606,17 +599,27 @@ seed_return_treehouse_home() {
   fm_home_return_with_clean_identity "$abs_home" "treehouse-acquired home" "$id" seed_pool_return || rc=$?
   case "$rc" in
     0) return 0 ;;
-    "$FM_HOME_RETURN_REFUSED")
-      echo "warning: could not clear the seeded identity of $abs_home during seed rollback; returning its lease unchanged" >&2
+    "$FM_HOME_RETURN_NOT_OWNED")
+      # The one refusal that proves this rollback wrote nothing on the slot: the
+      # marker names a different secondmate. Nothing was touched, so the lease
+      # goes back exactly as it was handed over.
+      echo "warning: $abs_home carries another secondmate's identity, so this seed rollback had nothing of its own to clear on it; returning its lease unchanged" >&2
       seed_pool_return "$abs_home" "treehouse-acquired home" || {
         echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2
       }
       ;;
+    "$FM_HOME_RETURN_REFUSED")
+      # Every other refusal leaves this run's own markers on the slot, and the
+      # reason it fired was already named above. Returning it here would hand the
+      # pool a checkout the spawn-time isolation guard refuses, so the lease is
+      # kept instead and the slot stays this rollback's to finish.
+      echo "warning: could not clear the seeded identity of $abs_home during seed rollback; the reason is named above, this run's identity is still on the home, and its lease is kept rather than returning a marked slot to the pool" >&2
+      ;;
     "$FM_HOME_RETURN_STAGE_FAILED")
-      echo "warning: the seeded identity of $abs_home could not be cleared during seed rollback; the home is intact and its lease may still be held" >&2
+      echo "warning: the seeded identity of $abs_home could not be cleared during seed rollback; the home is intact, its identity is still on it, and its lease is kept" >&2
       ;;
     "$FM_HOME_RETURN_RESTORE_FAILED")
-      echo "warning: the seeded identity staged out of $abs_home during seed rollback could not be put back; its lease may still be held and the staging directory named above holds what is missing" >&2
+      echo "warning: the seeded identity staged out of $abs_home during seed rollback could not be put back; its lease is not released, and the staging directory named above holds what is missing" >&2
       ;;
     *)
       echo "warning: failed to return treehouse-acquired home $abs_home during seed rollback; lease may still be held" >&2

@@ -26,11 +26,14 @@
 # project's git common directory and must be refused on its own terms. One case
 # per signal that identifies such a home - the active home, the firstmate repo,
 # the seeded-home marker, and the fleet's operational directories - so no
-# recognition path is claimed without being driven. A project
-# directory nested inside another repository is refused for the mirror-image
-# reason - it inherits an identity it does not own. Two cases assert that
-# legitimate worktrees still spawn, including in the self-hosted shape, so the
-# assertion cannot pass by refusing everything.
+# recognition path is claimed without being driven. A project directory that is
+# not its repository's top level is refused for the mirror-image reason - it
+# inherits an identity it does not anchor - and both shapes that reach it are
+# driven: a directory swallowed by a repository that is not the project's, and a
+# genuine subdirectory of the project's own, where the refusal must state the
+# top-level requirement without accusing a foreign repository. Two cases assert
+# that legitimate worktrees still spawn, including in the self-hosted shape, so
+# the assertion cannot pass by refusing everything.
 #
 # The marker decides on its own: a checkout a secondmate identity was written
 # into is not a task worktree, whatever else of that home survives, so a marked
@@ -202,6 +205,25 @@ make_nested_project_case() {
   CASE_FAKEBIN=$(make_identity_fakebin "$CASE_DIR/fake")
   fm_git_worktree "$CASE_ENCLOSING" "$CASE_ENCLOSING_WT" "enclosing-wt-$name"
   CASE_PROJ="$CASE_ENCLOSING/nested/project"
+  mkdir -p "$CASE_PROJ"
+  seed_case_home "$id"
+}
+
+# make_own_subdirectory_project_case <name> <id>: the configured project is a
+# genuine SUBDIRECTORY of the repository it really belongs to, not a directory
+# swallowed by a foreign one. `git rev-parse --git-common-dir` walks up to the
+# same answer in both shapes, so both are refused, but here the repository above
+# the project IS the project's own and a refusal must not tell the operator
+# otherwise.
+make_own_subdirectory_project_case() {
+  local name=$1 id=$2
+  CASE_DIR="$TMP_ROOT/$name"
+  CASE_HOME="$CASE_DIR/home"
+  CASE_OWN_REPO="$CASE_DIR/own-repo"
+  CASE_OWN_WT="$CASE_DIR/own-wt"
+  CASE_FAKEBIN=$(make_identity_fakebin "$CASE_DIR/fake")
+  fm_git_worktree "$CASE_OWN_REPO" "$CASE_OWN_WT" "own-wt-$name"
+  CASE_PROJ="$CASE_OWN_REPO/services/api"
   mkdir -p "$CASE_PROJ"
   seed_case_home "$id"
 }
@@ -581,20 +603,56 @@ test_nested_project_directory_is_refused() {
   out=$(run_identity_spawn "$id" "$CASE_ENCLOSING_WT")
   status=$?
   [ "$status" -ne 0 ] || fail "spawn accepted a worktree of the repository merely enclosing the project directory"$'\n'"--- output ---"$'\n'"$out"
-  assert_contains "$out" "is nested inside another git repository" \
+  assert_contains "$out" "is not the top level of the repository it resolves to" \
     "refusal did not name the project's inherited repository identity"
   # The refusal has no migration path behind it, so it has to leave an operator
-  # holding the one they need: which repository swallowed the project, and where
-  # to register it instead.
-  assert_contains "$out" "The enclosing repository's top level is '$enclosing_real'" \
-    "refusal did not name the enclosing repository's top level"
+  # holding the one they need: which repository the project resolves up into, and
+  # where to register it instead.
+  assert_contains "$out" "The repository top level resolved from it is '$enclosing_real'" \
+    "refusal did not name the repository top level the project resolves to"
   assert_contains "$out" "re-register this project at '$enclosing_real'" \
     "refusal did not say where the project must be re-registered"
   assert_not_contains "$out" "spawned $id" \
-    "spawn launched a worker using an enclosing repository's identity"
+    "spawn launched a worker using a repository identity the project does not anchor"
   assert_absent "$CASE_HOME/state/$id.meta" \
     "spawn recorded task metadata for a project nested inside another repository"
   pass "a project nested inside another repository refuses the launch instead of borrowing its identity"
+}
+
+# The same refusal reached from the OTHER shape that walks up: a project
+# registered at a genuine subdirectory of its own repository. The launch is
+# refused exactly the same way, because that directory anchors no repository
+# identity of its own either - but the diagnostic must describe the requirement
+# it broke (register at the repository's top level) and must not tell the
+# operator the identity belongs to some other, enclosing repository, because
+# here it belongs to the project's own.
+test_own_repository_subdirectory_project_is_refused() {
+  local id out status top_real
+  id=identity-own-subdir-ic
+  make_own_subdirectory_project_case identity-own-subdir "$id"
+  top_real=$(cd "$CASE_OWN_REPO" && pwd -P)
+
+  out=$(run_identity_spawn "$id" "$CASE_OWN_WT")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a project registered below its own repository's top level"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "is not the top level of the repository it resolves to" \
+    "refusal did not state the top-level requirement the registration broke"
+  assert_contains "$out" "The repository top level resolved from it is '$top_real'" \
+    "refusal did not name the resolved repository top level"
+  assert_contains "$out" "re-register this project at '$top_real'" \
+    "refusal did not say where the project must be re-registered"
+  # The repository above this project is the project's OWN, so a diagnostic that
+  # calls it another or enclosing repository sends the operator after a tangle
+  # that does not exist.
+  assert_not_contains "$out" "nested inside another git repository" \
+    "refusal accused the project's own repository of being another repository"
+  assert_not_contains "$out" "enclosing repository" \
+    "refusal described the project's own repository as an enclosing one"
+  assert_not_contains "$out" "spawned $id" \
+    "spawn launched a worker for a project registered below its repository's top level"
+  assert_absent "$CASE_HOME/state/$id.meta" \
+    "spawn recorded task metadata for a project registered below its repository's top level"
+  pass "a project below its own repository's top level is refused without accusing a foreign repository"
 }
 
 # Orca never runs treehouse get: it hands fm-spawn its own worktree path, so its
@@ -647,6 +705,7 @@ test_selfhosted_operational_home_is_refused
 test_selfhosted_symlinked_operational_home_is_refused
 test_selfhosted_project_worktree_still_spawns
 test_nested_project_directory_is_refused
+test_own_repository_subdirectory_project_is_refused
 if command -v node >/dev/null 2>&1; then
   test_orca_worktree_of_another_repository_is_refused
   test_orca_project_worktree_still_spawns

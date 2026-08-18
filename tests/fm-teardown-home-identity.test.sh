@@ -33,6 +33,12 @@
 # through bin/fm-home-seed.sh, each with a successful return and with a return
 # that fails.
 #
+# Which refusals may release a lease is its own boundary, and the seed path
+# drives both sides of it: a refusal that stops with this run's identity still on
+# the slot keeps the lease, because returning it there hands the pool a worktree
+# the spawn-time guard refuses; proven foreign ownership, the one refusal that
+# wrote nothing on the slot, hands the lease back untouched.
+#
 # What makes a home retirable is one boundary, so the parity cases drive each
 # layout through the pooled path AND through the standalone path where the home
 # is a plain directory removed outright. Supported layouts retire on both;
@@ -262,6 +268,63 @@ done
 exec $(printf '%q' "$real") "\$@"
 SH
   chmod +x "$fakebin/date"
+}
+
+# An mktemp that fails for the identity staging alone, leaving every other
+# temporary directory the seeder makes untouched. That is the shape of a staging
+# that cannot be created at all - a read-only or full pool root - reached at the
+# one moment the rollback holds a lease whose slot already carries the identity
+# this run wrote and has moved nothing aside.
+install_failing_identity_mktemp() {
+  local fakebin=$1 real
+  real=$(command -v mktemp)
+  cat > "$fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+set -u
+for arg in "\$@"; do
+  case "\$arg" in
+    *.fm-home-identity.*)
+      echo "mktemp: injected identity staging failure" >&2
+      exit 1
+      ;;
+  esac
+done
+exec $(printf '%q' "$real") "\$@"
+SH
+  chmod +x "$fakebin/mktemp"
+}
+
+# A date that stamps ANOTHER secondmate's id onto the leased slot's marker before
+# failing the seed, so the rollback meets proven foreign ownership: the slot
+# carries an identity this run did not write. Injected at the same command as
+# install_failing_date, i.e. only once both markers are already on disk.
+install_marker_stealing_date() {
+  local fakebin=$1 thief=$2 real
+  real=$(command -v date)
+  cat > "$fakebin/date" <<SH
+#!/usr/bin/env bash
+set -u
+for marker in "\${FM_FAKE_SEED_POOL:?}"/.treehouse/*/*/repo/$MARKER; do
+  if [ -f "\$marker" ]; then
+    printf '%s\n' $(printf '%q' "$thief") > "\$marker"
+    echo "date: injected seed failure after the identity was written" >&2
+    exit 1
+  fi
+done
+exec $(printf '%q' "$real") "\$@"
+SH
+  chmod +x "$fakebin/date"
+}
+
+# Whether the pool still refuses to hand out its one worktree, which is how a
+# lease that was never released is observed from outside: a max_trees=1 pool with
+# a released slot answers the next get with that same slot.
+pool_lease_is_still_held() {
+  local next
+  next=$( ( cd "$CASE_REPO" && treehouse get --lease --lease-holder next-holder ) 2>/dev/null ) || return 0
+  [ -n "$next" ] || return 0
+  return_pool_worktree "$next"
+  return 1
 }
 
 # A project-less seed of a pooled home. The charter brief is provided already
@@ -736,6 +799,74 @@ test_seed_rollback_failed_return_keeps_identity() {
   pass "a seed rollback whose return fails restores the identity it staged"
 }
 
+# 10. Releasing a lease is not the conservative answer on the seed path, it is
+# the destructive one. Every refusal except proven foreign ownership stops with
+# THIS run's markers still on the slot, so returning it there hands the pool a
+# worktree the spawn-time isolation guard refuses for every task dispatched into
+# it, until a human deletes a gitignored file. The lease is kept instead. Driven
+# through the real seeder with the identity staging made impossible to create,
+# which is the mktemp failure a read-only or full pool root produces.
+test_seed_rollback_unstageable_identity_keeps_the_lease() {
+  local id out status leased
+  id=identity-seedroll-keep-ta
+  make_pool_case teardown-identity-seedroll-keep 1
+  install_failing_date "$CASE_FAKEBIN"
+  install_failing_identity_mktemp "$CASE_FAKEBIN"
+
+  out=$(run_home_seed "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "the seed reported success although its registry step was made to fail"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "injected seed failure after the identity was written" \
+    "the seed failed before it wrote the identity, so the rollback had nothing to keep"$'\n'"--- output ---"$'\n'"$out"
+  # Without this the case could pass on a rollback that cleared the identity
+  # successfully and released the lease for the right reason.
+  assert_contains "$out" "injected identity staging failure" \
+    "the identity staging was never attempted, so no refusal cause fired"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "its lease is kept" \
+    "the rollback did not report that it kept the lease it could not clear"$'\n'"--- output ---"$'\n'"$out"
+  leased=$(sole_pool_worktree)
+  [ -n "$leased" ] || fail "the throwaway pool holds no worktree after the rolled-back seed"
+  assert_grep "$id" "$leased/$MARKER" \
+    "the rollback removed the marker it had just reported it could not clear"
+  assert_no_identity_staging "a refused staging left something behind in the pool"
+  pool_lease_is_still_held \
+    || fail "the pool handed its one slot out again, so a rollback that could not clear this run's identity released the lease anyway"
+  pass "a seed rollback that cannot clear its own identity keeps the lease instead of poisoning the slot"
+}
+
+# 11. The one refusal that does release it, and the reason the distinction is
+# worth having: a slot marked for a DIFFERENT secondmate carries nothing this
+# rollback wrote, so holding its lease hostage would strand a slot this run has
+# no claim on. It goes back untouched, marker and all.
+test_seed_rollback_foreign_identity_returns_the_lease() {
+  local id out status leased next
+  id=identity-seedroll-foreign-tb
+  make_pool_case teardown-identity-seedroll-foreign 1
+  install_marker_stealing_date "$CASE_FAKEBIN" someone-else
+
+  out=$(run_home_seed "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "the seed reported success although its registry step was made to fail"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "marked for secondmate someone-else" \
+    "the rollback did not explain the ownership mismatch"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "returning its lease unchanged" \
+    "the rollback did not report handing the lease back untouched"$'\n'"--- output ---"$'\n'"$out"
+  leased=$(sole_pool_worktree)
+  [ -n "$leased" ] || fail "the throwaway pool holds no worktree after the rolled-back seed"
+  assert_grep "someone-else" "$leased/$MARKER" \
+    "the rollback cleared an identity it could not prove it owned"
+  assert_no_identity_staging "an unproven target was staged anyway"
+  # The pool is capped at one tree, so a lease granted at all is that slot having
+  # been released rather than a fresh worktree being handed out.
+  next=$(lease_pool_worktree next-holder) \
+    || fail "the pool refused a lease, so a rollback that owned nothing on the slot never released it"
+  [ -n "$next" ] || fail "the pool reported no path for the lease after the rollback released the slot"
+  assert_grep "someone-else" "$next/$MARKER" \
+    "the released slot no longer carries the identity the rollback said it left untouched"
+  return_pool_worktree "$next"
+  pass "a seed rollback that owns nothing on the slot hands its lease back untouched"
+}
+
 # The recovery path's own safety: what the staging holds is not decided by its
 # manifest alone. If the staging still carries content the manifest never named,
 # deleting the staging would destroy the only copy of it, so retirement keeps the
@@ -806,5 +937,7 @@ test_ownership_check_precedes_cleanup
 test_next_lease_is_reusable
 test_seed_rollback_returns_a_clean_checkout
 test_seed_rollback_failed_return_keeps_identity
+test_seed_rollback_unstageable_identity_keeps_the_lease
+test_seed_rollback_foreign_identity_returns_the_lease
 
 echo "# all fm-teardown-home-identity tests passed"

@@ -21,13 +21,16 @@
 # staging is, and a rerun converges on it rather than compounding.
 #
 # Ownership, never resemblance: the identity marker must be present and must
-# name the secondmate the caller expects, or nothing is touched. What counts as
-# a safe home layout is not redefined here - it is
-# validate_firstmate_operational_dirs_for_removal below, the one validator both
-# the pooled and the non-pooled retirement paths use, including its supported
-# shape of an operational directory symlinked to a target inside the home. Such
-# a link is staged together with the target it owns, so the returned checkout
-# carries neither.
+# name the secondmate the caller expects, or nothing is touched. Proven foreign
+# ownership answers with an outcome of its own, FM_HOME_RETURN_NOT_OWNED, kept
+# distinct from every other refusal because it is the only one that leaves none
+# of the caller's own identity on the home, and so the only one on which a
+# pooled lease may be handed back. What counts as a safe home layout is not
+# redefined here - it is validate_firstmate_operational_dirs_for_removal below,
+# the one validator both the pooled and the non-pooled retirement paths use,
+# including its supported shape of an operational directory symlinked to a
+# target inside the home. Such a link is staged together with the target it
+# owns, so the returned checkout carries neither.
 #
 # Callers keep their own route and lifecycle bookkeeping: retirement keeps its
 # registry and teardown records, seed rollback keeps its own restore-and-report
@@ -36,8 +39,10 @@
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 SUB_HOME_PARENT_MARKER="${SUB_HOME_PARENT_MARKER:-.fm-secondmate-parent}"
 
-# Refused before anything moved; nothing on disk changed and the lease is still
-# exactly as the caller handed it over.
+# Refused before anything moved; nothing on disk changed. The home may still be
+# wearing the identity THIS caller wrote, so a pooled lease must not be released
+# on this outcome: handing that slot back marked is what the spawn-time isolation
+# guard then refuses every task dispatched into it.
 FM_HOME_RETURN_REFUSED=1
 # The return itself failed; the home was put back exactly as it was.
 FM_HOME_RETURN_FAILED=2
@@ -48,6 +53,12 @@ FM_HOME_RETURN_RESTORE_FAILED=3
 # is intact but its identity was never cleared, so the lease must not be
 # released as though it had been.
 FM_HOME_RETURN_STAGE_FAILED=4
+# Proven foreign ownership, and only that: the identity marker is present and
+# names a DIFFERENT secondmate, so nothing on this home was written by the caller
+# and nothing was touched. This is the one outcome that carries no identity of
+# the caller's own, and therefore the only refusal on which a pooled lease may be
+# released - every other one leaves this run's marker on the slot.
+FM_HOME_RETURN_NOT_OWNED=5
 # Where fm_home_return_with_clean_identity staged this home's identity, so a
 # caller reporting a failure can name it alongside its own staging.
 # shellcheck disable=SC2034 # Output global read by sourcing callers (bin/fm-teardown.sh).
@@ -359,7 +370,7 @@ fm_home_return_with_clean_identity() {  # <home> <label> <expected-id> <return_f
     marker_id=$(cat "$marker" 2>/dev/null || true)
     if [ "$marker_id" != "$expected_id" ]; then
       echo "REFUSED: $label $abs_home is marked for secondmate ${marker_id:-unknown}, expected $expected_id; its identity is not this retirement's to clear" >&2
-      return "$FM_HOME_RETURN_REFUSED"
+      return "$FM_HOME_RETURN_NOT_OWNED"
     fi
   fi
   validate_firstmate_operational_dirs_for_removal "$abs_home" "$label" || return "$FM_HOME_RETURN_REFUSED"

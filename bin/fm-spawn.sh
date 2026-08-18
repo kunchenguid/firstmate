@@ -138,7 +138,7 @@
 #   repository is refused by name, and so is either side whose repository
 #   identity cannot be established; the project directory must also be its own
 #   repository's top level, since --git-common-dir otherwise walks up and hands
-#   back an enclosing repository's identity.
+#   back the identity of whichever repository sits above it.
 #   Repository membership is not isolation, so the worker root is refused
 #   separately when it is a firstmate home - the active home, the firstmate
 #   repo, a directory carrying the seeded-home marker, or the holder of this
@@ -1489,17 +1489,6 @@ resolve_project_dir_arg() {
   esac
 }
 
-path_is_ancestor_of() {
-  local ancestor=$1 path=$2
-  [ -n "$ancestor" ] || return 1
-  [ -n "$path" ] || return 1
-  [ "$ancestor" != "$path" ] || return 1
-  case "$path" in
-    "$ancestor"/*) return 0 ;;
-  esac
-  return 1
-}
-
 validate_firstmate_home_for_spawn() {
   local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
   abs_home=$(resolved_existing_dir "$home") || return 1
@@ -1809,11 +1798,14 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
   # That identity is only the project's own if the project directory IS its
   # repository's top level: --git-common-dir walks UP, so a project path that is
-  # merely nested inside some enclosing repository silently answers with the
-  # ENCLOSING repository's identity, and any worktree of that enclosing
-  # repository would then be accepted as the project's own. The worktree side is
-  # already anchored by the --show-toplevel equality above; anchor this side the
-  # same way rather than trusting a walked-up answer.
+  # any subdirectory silently answers with the identity of whichever repository
+  # is above it, and every worktree of that repository would then be accepted as
+  # the project's own. The refusal covers both shapes it walks up into - a
+  # directory swallowed by a repository that is not the project's, and a genuine
+  # subdirectory of the project's own repository - because neither anchors an
+  # identity of its own. The worktree side is already anchored by the
+  # --show-toplevel equality above; anchor this side the same way rather than
+  # trusting a walked-up answer.
   proj_top=$(git -C "$PROJ_ABS" rev-parse --show-toplevel 2>/dev/null || true)
   proj_top_real=
   if [ -n "$proj_top" ]; then
@@ -1824,7 +1816,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     exit 1
   fi
   if [ "$proj_top_real" != "$proj_real" ]; then
-    echo "error: project '$PROJ_ABS' is nested inside another git repository instead of being its own repository's top level, so the repository identity '$proj_repo' it answers with belongs to that enclosing repository, not to the project. The enclosing repository's top level is '$proj_top_real'; re-register this project at '$proj_top_real', or give the nested directory its own repository, and dispatch again. Refusing to launch $source's worktree '$WT' against an identity the project does not own. Inspect target $inspect_target" >&2
+    echo "error: project '$PROJ_ABS' is not the top level of the repository it resolves to, and a project has to be registered at its repository's top level for the repository identity '$proj_repo' to be the project's own rather than one walked up to from a subdirectory. The repository top level resolved from it is '$proj_top_real'; re-register this project at '$proj_top_real', or give this directory a repository of its own, and dispatch again. Refusing to launch $source's worktree '$WT' against an identity the project itself does not anchor. Inspect target $inspect_target" >&2
     exit 1
   fi
   wt_repo=$(git_common_dir_real "$wt_real") || wt_repo=
