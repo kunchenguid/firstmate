@@ -886,6 +886,10 @@ test_ship_pr_media_contract_by_mode() {
     "no-mistakes brief must give the branch blob URL with ?raw=true"
   assert_grep "Never paste a local filesystem path into a PR body" "$brief" \
     "no-mistakes brief must forbid local filesystem paths"
+  assert_grep "it stops resolving once the PR merges and the branch is deleted" "$brief" \
+    "no-mistakes brief must disclose that the blob URL dies with the merged branch"
+  assert_no_grep "for as long as the branch exists" "$brief" \
+    "no-mistakes brief must not claim the blob URL outlives its branch"
   assert_grep "Put those image lines in your \`--intent\`" "$brief" \
     "no-mistakes brief must carry the image lines through --intent"
   assert_no_grep "Put those image lines in the PR body you open" "$brief" \

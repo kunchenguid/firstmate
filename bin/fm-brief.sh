@@ -457,7 +457,7 @@ if [ -n "$MEDIA_CARRY" ]; then
   IFS= read -r -d '' MEDIA_SECTION <<EOF || true
 # Screenshots and PR media
 When a screenshot, GIF, or recording is part of the deliverable, commit it into your branch under \`.github/pr-media/$ID/\` and reference it as \`![what it shows](https://github.com/<owner>/<repo>/blob/fm/$ID/.github/pr-media/$ID/<file>?raw=true)\`, using the owner/repo your branch is pushed to.
-That URL renders inline in the PR body, private repository included, for as long as the branch exists; the files merge with the change and stay at the same path.
+That URL renders inline in the PR body, private repository included; it stops resolving once the PR merges and the branch is deleted, though the image file itself lands on the default branch with the change.
 Never paste a local filesystem path into a PR body - nobody else can open it.
 $MEDIA_CARRY
 
