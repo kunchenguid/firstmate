@@ -244,6 +244,26 @@ SH
   chmod +x "$fakebin/shellcheck"
 }
 
+# fm_lint_stub_shellcheck_batches <fakebin-dir> <log-file>: records one line
+# per ShellCheck invocation, with its roots tab-separated. It proves that the
+# lint owner bounds an individual ShellCheck process even when there is only one
+# worker, rather than merely splitting work across concurrent workers.
+fm_lint_stub_shellcheck_batches() {
+  local fakebin=$1 log=$2
+  : > "$log"
+  cat > "$fakebin/shellcheck" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\\nversion: 0.11.0\\n'
+  exit 0
+fi
+shift 3
+(IFS=$'\\t'; printf '%s\\n' "\$*") >> "$log"
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+}
+
 test_changed_mode_lints_only_the_changed_file() {
   local tmp fakebin log diff_file out target
   tmp=$(fm_test_tmproot fm-lint-changed)
@@ -691,13 +711,13 @@ SH
   telemetry_out=$(FM_LINT_JOBS=2 FM_LINT_TELEMETRY="$telemetry" "$LINT" "$good" 2>&1) \
     || fail "telemetry-enabled clean lint failed"
   [ "$telemetry_out" = "$out_clean_2" ] || fail "quiet telemetry changed routine lint output"
-  assert_grep $'format\tfm-lint-telemetry-v1' "$telemetry" "telemetry format marker is missing"
+  assert_grep $'format\tfm-lint-telemetry-v2' "$telemetry" "telemetry format marker is missing"
   assert_grep $'jobs\t2' "$telemetry" "telemetry did not record bounded jobs"
   assert_grep $'root_count\t1' "$telemetry" "telemetry did not record root count"
   assert_grep $'wall_seconds\t' "$telemetry" "telemetry did not record wall time"
   assert_grep $'user_seconds\t' "$telemetry" "telemetry did not record user CPU"
   assert_grep $'system_seconds\t' "$telemetry" "telemetry did not record system CPU"
-  assert_grep $'max_worker_rss_kib\t' "$telemetry" "telemetry did not record maximum RSS"
+  assert_grep $'max_shellcheck_batch_rss_kib\t' "$telemetry" "telemetry did not record one-batch maximum RSS"
   assert_grep $'source_boundary_directives\t' "$telemetry" "telemetry did not record source-graph boundaries"
   assert_grep $'shellcheck_processes_start\t' "$telemetry" "telemetry did not record competing ShellCheck conditions"
 
@@ -709,6 +729,37 @@ SH
   [ -z "$(find "$cleanup_tmp" -mindepth 1 -maxdepth 1 -name 'fm-lint.*' -print -quit)" ] \
     || fail "bounded lint left temporary worker state behind"
   pass "jobs=1 and jobs=2 preserve deterministic diagnostics, failures, cleanup bounds, and quiet telemetry"
+}
+
+test_single_worker_uses_bounded_shellcheck_batches() {
+  local tmp fakebin log out i roots=() line root_count
+  tmp=$(fm_test_tmproot fm-lint-batches)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck-batches.log"
+  fm_lint_stub_shellcheck_batches "$fakebin" "$log"
+
+  # More than two batches verifies the limit is enforced inside a serial worker,
+  # not only by the two-shard parent dispatcher.
+  i=1
+  while [ "$i" -le 17 ]; do
+    printf '#!/usr/bin/env bash\nprintf "ok\\n"\n' > "$tmp/root-$i.sh"
+    roots+=("$tmp/root-$i.sh")
+    i=$((i + 1))
+  done
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 "$LINT" "${roots[@]}" 2>&1) \
+    || fail "single-worker batch fixture failed"$'\n'"$out"
+
+  [ "$(wc -l < "$log" | tr -d '[:space:]')" -eq 17 ] \
+    || fail "17 roots must run in seventeen bounded ShellCheck batches"$'\n'"$(cat "$log")"
+  while IFS= read -r line; do
+    root_count=0
+    [ -z "$line" ] || root_count=$(awk -F '\t' '{print NF}' <<<"$line")
+    [ "$root_count" -le 1 ] \
+      || fail "a serial ShellCheck batch exceeded the one-root safety limit: $root_count"
+  done < "$log"
+  [ "$(tr '\t' '\n' < "$log" | sed '/^$/d' | sort)" = "$(printf '%s\n' "${roots[@]}" | sort)" ] \
+    || fail "bounded batches did not cover every requested root exactly once"
+  pass "jobs=1 splits each ShellCheck process into bounded one-root batches"
 }
 
 test_worker_trees_stop_on_signal() {
@@ -871,6 +922,7 @@ test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
+test_single_worker_uses_bounded_shellcheck_batches
 test_worker_trees_stop_on_signal
 test_seeded_module_boundary_parity
 test_changed_mode_lints_only_the_changed_file

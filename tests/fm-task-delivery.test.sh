@@ -13,6 +13,7 @@
 # ahead of backend creation, and a fake `tmux` that exits non-zero backstops the
 # cases that are meant to get past them, so no window or worktree is ever created.
 set -u
+umask 022
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -20,6 +21,7 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
+BRIDGE="$ROOT/bin/fm-agent-bridge-ship-preflight.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
 # A home with one registered project, one project directory, and a fake tmux that
@@ -32,6 +34,7 @@ make_home() {  # <name> [<registry-line>...]
   projects="$TMP_ROOT/$name/projects"
   fakebin="$TMP_ROOT/$name/bin"
   mkdir -p "$home/data" "$home/state" "$home/config" "$projects/proj" "$fakebin"
+  chmod 755 "$home/data"
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
   if [ "$#" -gt 0 ]; then
@@ -43,6 +46,7 @@ make_home() {  # <name> [<registry-line>...]
 write_brief() {  # <home> <id> [<recorded-mode>]
   local home=$1 id=$2 mode=${3:-}
   mkdir -p "$home/data/$id"
+  chmod 700 "$home/data/$id"
   {
     printf 'You are a crewmate.\n\n# Definition of done\n'
     [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"
@@ -57,6 +61,56 @@ run_spawn() {  # <home> <fakebin> <spawn-args...>
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
+}
+
+approve_preflight() {  # <home> <task-id>
+  local home=$1 id=$2 contract contract_json bound fingerprint handoff tmp now
+  contract="$home/$id-contract.json"
+  printf '%s\n' '{"recommendation":"promote","outcome":"ship work","scope":"task","non_goals":"","delivery_boundary":"pr-only","external_boundaries":"none","questions":[]}' > "$contract"
+  contract_json=$(jq -cS . "$contract") || return 1
+  bound=$(jq -cn --arg id "$id" --argjson contract "$contract_json" '{task_id:$id,contract:$contract}' | jq -cS .) || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    fingerprint=$(printf '%s' "$bound" | sha256sum | awk '{print $1}')
+  else
+    fingerprint=$(printf '%s' "$bound" | shasum -a 256 | awk '{print $1}')
+  fi
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+  mkdir -p "${handoff%/*}"
+  chmod 700 "$home/state/agent-bridge" "${handoff%/*}"
+  tmp=$(umask 077; mktemp "${handoff%/*}/.ship-preflight.XXXXXX") || return 1
+  now=$(date +%s)
+  jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract_json" --argjson now "$now" \
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,producer_revision:1,approval:{authority:"direct-captain",evidence:"direct-captain",approved_at:$now,complete_plan_bypass:false}}' > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$handoff"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$BRIDGE" publish "$id" >/dev/null || return 1
+  printf '%s\n' "$fingerprint"
+}
+
+stage_awaiting_preflight() {  # <home> <task-id>
+  local home=$1 id=$2 contract contract_json bound fingerprint handoff tmp now
+  contract='{"recommendation":"corrected promotion","outcome":"ship work","scope":"task","non_goals":"","delivery_boundary":"pr-only","external_boundaries":"none","questions":[]}'
+  contract_json=$(printf '%s\n' "$contract" | jq -cS .) || return 1
+  bound=$(jq -cn --arg id "$id" --argjson contract "$contract_json" '{task_id:$id,contract:$contract}' | jq -cS .) || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    fingerprint=$(printf '%s' "$bound" | sha256sum | awk '{print $1}')
+  else
+    fingerprint=$(printf '%s' "$bound" | shasum -a 256 | awk '{print $1}')
+  fi
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+  tmp=$(umask 077; mktemp "${handoff%/*}/.ship-preflight.XXXXXX") || return 1
+  now=$(date +%s)
+  jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract_json" --argjson now "$now" \
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"awaiting_approval",contract:$contract,producer_revision:2,created_at:$now}' \
+    > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$handoff"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  printf '%s\n' "$fingerprint"
 }
 
 # A ship spawn must stop when its delivery contract was never decided or cannot be
@@ -135,11 +189,13 @@ EOF
 
   # The agreeing case clears the check and only fails later, at the refusing tmux.
   write_brief "$home" delivery-agree-b2 direct-PR
+  approve_preflight "$home" delivery-agree-b2 >/dev/null || fail "approved agreement preflight could not be created"
   out=$(run_spawn "$home" "$fakebin" delivery-agree-b2 "$proj" claude --mode direct-PR --yolo off)
   assert_not_contains "$out" "delivery mismatch" "an agreeing mode was reported as a mismatch"
 
   # A brief scaffolded before the contract line existed warns once and continues.
   write_brief "$home" delivery-legacy-b3
+  approve_preflight "$home" delivery-legacy-b3 >/dev/null || fail "approved legacy preflight could not be created"
   out=$(run_spawn "$home" "$fakebin" delivery-legacy-b3 "$proj" claude --mode local-only --yolo off)
   assert_contains "$out" "records no delivery contract line" "a legacy brief did not warn about its missing contract"
   assert_not_contains "$out" "delivery mismatch" "a legacy brief was treated as a mismatch"
@@ -161,6 +217,7 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry() {
 $rec
 EOF
     write_brief "$home" "delivery-dev-$n" "$mode"
+    approve_preflight "$home" "delivery-dev-$n" >/dev/null || fail "$label: approved preflight could not be created"
     out=$(run_spawn "$home" "$fakebin" "delivery-dev-$n" "$proj" claude --mode "$mode" --yolo off)
     case "$expect" in
       notice)
@@ -201,9 +258,9 @@ EOF
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta out status
+  local home meta out status fingerprint
   home="$TMP_ROOT/promote/home"
-  mkdir -p "$home/state"
+  mkdir -p "$home/data" "$home/state"
   meta="$home/state/promote-d1.meta"
 
   write_scout_meta() {
@@ -229,13 +286,87 @@ test_promote_requires_and_records_the_delivery_contract() {
 
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
   status=$?
+  [ "$status" -ne 0 ] || fail "promotion without an approved preflight should exit non-zero"
+  assert_contains "$out" "no valid private preflight record" "promotion without preflight did not fail closed"
+  assert_grep 'kind=scout' "$meta" "preflight refusal changed the task record"
+
+  fingerprint=$(approve_preflight "$home" promote-d1) || fail "approved promotion preflight could not be created"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
+  status=$?
   expect_code 0 "$status" "a promotion carrying both flags should succeed"
   assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
   assert_grep 'mode=direct-PR' "$meta" "promotion did not record the decided delivery mode"
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided approval posture"
+  assert_grep "preflight_fingerprint=$fingerprint" "$meta" "promotion did not retain its approved preflight fingerprint"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
+}
+
+test_promote_serializes_preflight_before_metadata_publication() {
+  local home meta id initial_fp corrected_fp holder promotion bridge holder_ready release lock attempts promote_status bridge_status
+  home="$TMP_ROOT/promote-preflight-lock/home"
+  id=promote-lock-d2
+  meta="$home/state/$id.meta"
+  mkdir -p "$home/data" "$home/state"
+  printf 'window=fm-promote-lock-d2\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+  initial_fp=$(approve_preflight "$home" "$id") || fail "initial promotion preflight could not be created"
+  corrected_fp=$(stage_awaiting_preflight "$home" "$id") || fail "corrected promotion preflight could not be staged"
+  holder_ready="$home/holder-ready"
+  release="$home/release-holder"
+  lock="$home/data/$id/.ship-preflight.lock"
+  (
+    FM_STATE_OVERRIDE="$home/state" bash -c '
+      . "$1"
+      lock=$(fm_meta_lock_path "$2") || exit 1
+      fm_lock_acquire_wait "$lock" || exit 1
+      : > "$3"
+      while [ ! -e "$4" ]; do sleep 0.05; done
+      fm_lock_release "$lock"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$meta" "$holder_ready" "$release"
+  ) &
+  holder=$!
+  attempts=0
+  while [ ! -e "$holder_ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  [ -e "$holder_ready" ] || { kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true; fail "could not hold promotion metadata"; }
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$PROMOTE" "$id" --mode direct-PR --yolo on > "$home/promotion.out" 2>&1 &
+  promotion=$!
+  attempts=0
+  while [ ! -e "$lock" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$lock" ]; then
+    : > "$release"
+    wait "$holder" 2>/dev/null || true
+    wait "$promotion" 2>/dev/null || true
+    fail "promotion did not lock preflight before waiting to publish metadata"
+  fi
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$BRIDGE" publish "$id" > "$home/bridge.out" 2>&1 &
+  bridge=$!
+  sleep 0.2
+  if ! kill -0 "$bridge" 2>/dev/null; then
+    : > "$release"
+    wait "$holder" 2>/dev/null || true
+    wait "$promotion" 2>/dev/null || true
+    wait "$bridge" 2>/dev/null || true
+    fail "a corrected preflight published before promotion metadata"
+  fi
+  : > "$release"
+  wait "$holder" || fail "could not release promotion metadata"
+  wait "$promotion"; promote_status=$?
+  wait "$bridge"; bridge_status=$?
+  expect_code 0 "$promote_status" "promotion should retain the approved preflight through metadata publication"
+  expect_code 0 "$bridge_status" "corrected preflight should publish after promotion"
+  assert_grep "preflight_fingerprint=$initial_fp" "$meta" "promotion recorded the corrected or missing preflight fingerprint"
+  jq -e --arg fp "$corrected_fp" '.state == "awaiting_approval" and .fingerprint == $fp' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "corrected preflight did not publish after promotion"
+  pass "fm-promote: preflight approval stays locked through metadata publication"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the
@@ -278,5 +409,6 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_serializes_preflight_before_metadata_publication
 test_project_mode_maps_the_conditional_policy
 echo "# all fm-task-delivery tests passed"

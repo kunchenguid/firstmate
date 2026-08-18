@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only|fast-repair> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -15,8 +15,11 @@
 #   the explicit mode carries less rigor than the project's standing posture, a
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
-#   refused as a flag value.
+#   refused as a flag value. fast-repair is a strict per-task exception, never
+#   a project mode: it requires an eligible typed record from fm-fast-repair.sh,
+#   yolo=off, and its built-in Codex profile.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --recover-missing
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -32,6 +35,12 @@
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
 #   worktree, and clears the previous harness's per-task wiring before arming
 #   the new incarnation.
+#   --recover-missing is the narrow automatic-recovery path for a ship or scout
+#   whose validated tmux endpoint is positively missing. It recreates only that
+#   endpoint in the recorded worktree from the recorded task identity; it is not
+#   a normal control-plane relaunch and is called by fm-dashboard-recovery.sh.
+#   A ship recovery must validate its recorded preflight fingerprint; a missing
+#   or invalid approval record stops recovery before it creates an endpoint.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -173,9 +182,7 @@
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
 # already existed for that workspace). It is launched through the verified binary
-# resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
-# the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
-# park owns that home's supervision (docs/supervision-protocols/cursor.md).
+# resolver because `cursor` is not the CLI name.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -283,6 +290,8 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+RECOVER_MISSING=0
+DASHBOARD_RECOVERY=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -307,6 +316,8 @@ for a in "$@"; do
     --scout) KIND=scout; KIND_SET=1 ;;
     --secondmate) KIND=secondmate; KIND_SET=1 ;;
     --relaunch) RELAUNCH=1 ;;
+    --recover-missing) RECOVER_MISSING=1 ;;
+    --dashboard-recovery) DASHBOARD_RECOVERY=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -332,6 +343,10 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$RELAUNCH" -eq 0 ] || [ "$RECOVER_MISSING" -eq 0 ] || { echo "error: --relaunch and --recover-missing cannot be combined" >&2; exit 1; }
+if [ "$RECOVER_MISSING" -eq 1 ]; then
+  RELAUNCH=1
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -366,7 +381,7 @@ else
   # and record no delivery posture; secondmate spawns hardcode theirs.
   if [ "$KIND" = ship ]; then
     [ "$MODE_SET" -eq 1 ] || {
-      echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+      echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only|fast-repair>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
       exit 1
     }
     [ "$YOLO_SET" -eq 1 ] || {
@@ -374,16 +389,20 @@ else
       exit 1
     }
     case "$MODE" in
-      no-mistakes|direct-PR|local-only) ;;
+      no-mistakes|direct-PR|local-only|fast-repair) ;;
       no-mistakes-prod-only)
         echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
         exit 1 ;;
-      *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
+      *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only, fast-repair (got '$MODE')" >&2; exit 1 ;;
     esac
     case "$YOLO" in
       on|off) ;;
       *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
     esac
+    if [ "$MODE" = fast-repair ] && [ "$YOLO" != off ]; then
+      echo "error: Fast Repair always requires --yolo off; captain approval remains the only merge authority" >&2
+      exit 1
+    fi
   else
     [ "$MODE_SET" -eq 0 ] || {
       echo "error: --mode applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
@@ -663,6 +682,10 @@ SPAWN_META_TMP=
 SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
+RECOVERY_ENDPOINT_PENDING=0
+SPAWN_PREFLIGHT_LOCK=
+SPAWN_PREFLIGHT_LOCK_HELD=0
+SPAWN_PREFLIGHT_LOCK_EXTERNAL=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -670,8 +693,101 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+RECOVERY_CLAIM_LOCK=
+RECOVERY_CLAIM_LOCK_HELD=0
+RECOVERY_CLAIM_VALUE=
+REPLACEMENT_START_AT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SPAWN_RECOVERY_HANDOFF_LOCK=
+SPAWN_RECOVERY_HANDOFF_LOCK_HELD=0
+SPAWN_RECOVERY_HANDOFF_GUARD=
+
+spawn_busy_event() {
+  if [ "$DASHBOARD_RECOVERY" -eq 1 ] && [ -n "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ]; then
+    FM_DASHBOARD_TRANSITION_DEFER=1 "$FM_ROOT/bin/fm-busy-event.sh" "$@"
+  else
+    "$FM_ROOT/bin/fm-busy-event.sh" "$@"
+  fi
+}
+
+spawn_recovery_cancelled() {
+  local guard
+  spawn_recovery_guard_path || return 1
+  guard=$SPAWN_RECOVERY_CANCEL_GUARD
+  [ -e "$guard" ] || [ -L "$guard" ] || return 1
+  rm -f -- "$guard" 2>/dev/null || true
+  rmdir "${guard%/cancelled}" 2>/dev/null || true
+  return 0
+}
+
+spawn_recovery_guard_path() {
+  SPAWN_RECOVERY_CANCEL_GUARD=
+  [ "$DASHBOARD_RECOVERY" -eq 1 ] || return 1
+  case "${FM_DASHBOARD_RECOVERY_CANCEL_GUARD:-}" in
+    "$STATE/dashboard-recovery/.${ID}.cancel."*/cancelled)
+      SPAWN_RECOVERY_CANCEL_GUARD=$FM_DASHBOARD_RECOVERY_CANCEL_GUARD
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+spawn_recovery_submit() {
+  local guard lock status=0
+  if ! spawn_recovery_guard_path; then
+    spawn_send_literal "$@"
+    return
+  fi
+  guard=$SPAWN_RECOVERY_CANCEL_GUARD
+  lock="${guard%/cancelled}/handoff.lock"
+  if [ "${FM_SPAWN_TESTING:-0}" = 1 ] && [ -n "${FM_SPAWN_TEST_RECOVERY_REGISTRATION_READY:-}" ] && [ -n "${FM_SPAWN_TEST_RECOVERY_REGISTRATION_CONTINUE:-}" ]; then
+    : > "$FM_SPAWN_TEST_RECOVERY_REGISTRATION_READY" || return 1
+    while [ ! -e "$FM_SPAWN_TEST_RECOVERY_REGISTRATION_CONTINUE" ]; do sleep 0.01; done
+  fi
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ -e "$guard" ] || [ -L "$guard" ]; then
+    fm_lock_release "$lock" || return 1
+    rm -f -- "$guard" 2>/dev/null || true
+    rmdir "${guard%/cancelled}" 2>/dev/null || true
+    return 4
+  fi
+  fm_lock_release "$lock" || return 1
+  if [ "${FM_SPAWN_TESTING:-0}" = 1 ] && [ -n "${FM_SPAWN_TEST_RECOVERY_HANDOFF_READY:-}" ] && [ -n "${FM_SPAWN_TEST_RECOVERY_HANDOFF_CONTINUE:-}" ]; then
+    : > "$FM_SPAWN_TEST_RECOVERY_HANDOFF_READY" || return 1
+    while [ ! -e "$FM_SPAWN_TEST_RECOVERY_HANDOFF_CONTINUE" ]; do sleep 0.01; done
+  fi
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ -e "$guard" ] || [ -L "$guard" ]; then
+    fm_lock_release "$lock" || return 1
+    rm -f -- "$guard" 2>/dev/null || true
+    rmdir "${guard%/cancelled}" 2>/dev/null || true
+    return 4
+  fi
+  spawn_send_literal "$@" || status=$?
+  if [ "$status" -ne 0 ]; then
+    fm_lock_release "$lock" || return 1
+    return "$status"
+  fi
+  SPAWN_RECOVERY_HANDOFF_LOCK=$lock
+  SPAWN_RECOVERY_HANDOFF_LOCK_HELD=1
+  SPAWN_RECOVERY_HANDOFF_GUARD=$guard
+  if [ "${FM_SPAWN_TESTING:-0}" = 1 ] && [ -n "${FM_SPAWN_TEST_RECOVERY_LITERAL_READY:-}" ] && [ -n "${FM_SPAWN_TEST_RECOVERY_LITERAL_CONTINUE:-}" ]; then
+    : > "$FM_SPAWN_TEST_RECOVERY_LITERAL_READY" || return 1
+    while [ ! -e "$FM_SPAWN_TEST_RECOVERY_LITERAL_CONTINUE" ]; do sleep 0.01; done
+  fi
+  return "$status"
+}
+
+spawn_recovery_handoff_cancelled() {
+  [ "$SPAWN_RECOVERY_HANDOFF_LOCK_HELD" = 1 ] || return 1
+  [ -e "$SPAWN_RECOVERY_HANDOFF_GUARD" ] || [ -L "$SPAWN_RECOVERY_HANDOFF_GUARD" ] || return 1
+  SPAWN_RECOVERY_HANDOFF_LOCK_HELD=0
+  fm_lock_release "$SPAWN_RECOVERY_HANDOFF_LOCK" || return 1
+  rm -f -- "$SPAWN_RECOVERY_HANDOFF_GUARD" 2>/dev/null || true
+  rmdir "${SPAWN_RECOVERY_HANDOFF_GUARD%/cancelled}" 2>/dev/null || true
+  return 0
+}
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -692,6 +808,17 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$SPAWN_RECOVERY_HANDOFF_LOCK_HELD" = 1 ]; then
+    SPAWN_RECOVERY_HANDOFF_LOCK_HELD=0
+    fm_lock_release "$SPAWN_RECOVERY_HANDOFF_LOCK" || true
+  fi
+  if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
+    RECOVERY_CLAIM_LOCK_HELD=0
+    fm_lock_release "$RECOVERY_CLAIM_LOCK" || true
+  fi
+  if [ "$RECOVERY_ENDPOINT_PENDING" = 1 ] && [ "${BACKEND:-}" = tmux ] && [ -n "${T:-}" ]; then
+    fm_backend_kill tmux "$T" 2>/dev/null || true
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -769,6 +896,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
+  fi
+  if [ "$SPAWN_PREFLIGHT_LOCK_HELD" = 1 ] && [ "$SPAWN_PREFLIGHT_LOCK_EXTERNAL" = 0 ]; then
+    SPAWN_PREFLIGHT_LOCK_HELD=0
+    fm_lock_release "$SPAWN_PREFLIGHT_LOCK" || true
   fi
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
@@ -887,6 +1018,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+if spawn_recovery_cancelled; then
+  echo "error: dashboard recovery was cancelled for $ID" >&2
+  exit 4
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -896,6 +1031,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
     SPAWN_CONTROL_LOCK_HELD=1
   else
     echo "error: another lifecycle action is already running for task $ID" >&2
+    if [ "$RECOVER_MISSING" -eq 1 ] || [ "$DASHBOARD_RECOVERY" -eq 1 ]; then
+      exit 4
+    fi
     exit 1
   fi
 fi
@@ -1003,15 +1141,45 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
+  if [ "$RECOVER_MISSING" -eq 1 ]; then
+    [ "$BACKEND" = tmux ] || {
+      echo "error: task $ID's missing endpoint is on $BACKEND; no durable replacement path is available" >&2
+      exit 3
+    }
+    [ "$RELAUNCH_STATE" = missing ] || {
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; replacement recovery requires a confirmed missing endpoint" >&2
+      exit 3
+    }
+  else
+    [ "$RELAUNCH_STATE" = dead ] || {
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 1
+    }
+  fi
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  if [ "$MODE" = fast-repair ]; then
+    RELAUNCH_PRIOR_MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+    RELAUNCH_PRIOR_EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+    if [ "$MODEL_SET" -eq 0 ] && [ -n "$RELAUNCH_PRIOR_MODEL" ] && [ "$RELAUNCH_PRIOR_MODEL" != default ]; then
+      MODEL=$RELAUNCH_PRIOR_MODEL
+    fi
+    if [ "$EFFORT_SET" -eq 0 ] && [ -n "$RELAUNCH_PRIOR_EFFORT" ] && [ "$RELAUNCH_PRIOR_EFFORT" != default ]; then
+      EFFORT=$RELAUNCH_PRIOR_EFFORT
+    fi
+  fi
+  if [ "$KIND" = ship ]; then
+    case "$MODE" in
+      no-mistakes|direct-PR|local-only|fast-repair) ;;
+      *)
+        echo "error: task $ID has unsupported recorded ship mode '${MODE:-none}'; refusing to relaunch" >&2
+        exit 1
+        ;;
+    esac
+  fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -1182,6 +1350,7 @@ launch_template() {
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1189,6 +1358,7 @@ case "$ARG3" in
     done
     ;;
   '')
+    RAW_LAUNCH=0
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
     # secondmate harness (config/secondmate-harness -> config/crew-harness -> own);
     # every other kind uses the crew harness only when no dispatch profile file is
@@ -1211,6 +1381,7 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
   *)
+    RAW_LAUNCH=0
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
@@ -1646,7 +1817,7 @@ fi
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
     no-mistakes) echo 3 ;;
-    direct-PR) echo 2 ;;
+    direct-PR|fast-repair) echo 2 ;;
     local-only) echo 1 ;;
     *) echo 0 ;;
   esac
@@ -1664,6 +1835,49 @@ if [ "$KIND" = ship ]; then
   elif [ "$BRIEF_MODE" != "$MODE" ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
     exit 1
+  fi
+  if [ "$MODE" = fast-repair ]; then
+    "$SCRIPT_DIR/fm-fast-repair.sh" eligible "$ID" >/dev/null || {
+      echo "error: Fast Repair spawn refused because its typed eligibility evidence is absent or incomplete; use the normal delivery path" >&2
+      exit 1
+    }
+    if [ "${RAW_LAUNCH:-0}" = 1 ] || [ "$HARNESS" != codex ] || [ "$MODEL" != gpt-5.6-luna ] || [ "$EFFORT" != medium ]; then
+      echo "error: Fast Repair requires the built-in profile --harness codex --model gpt-5.6-luna --effort medium; an explicit conflicting per-task profile is not overridden" >&2
+      exit 1
+    fi
+  fi
+  if [ "$RELAUNCH" -eq 1 ]; then
+    PREFLIGHT_FINGERPRINT=$(fm_meta_get "$RELAUNCH_META" preflight_fingerprint)
+    case "$PREFLIGHT_FINGERPRINT" in
+      ????????*) [ "${#PREFLIGHT_FINGERPRINT}" -eq 64 ] && ! printf '%s' "$PREFLIGHT_FINGERPRINT" | grep -q '[^0-9a-f]' ;;
+      *) false ;;
+    esac || {
+      echo "error: task $ID has no valid recorded preflight fingerprint" >&2
+      exit 1
+    }
+    PREFLIGHT_RECORD="$DATA/$ID/ship-preflight.json"
+    [ -f "$PREFLIGHT_RECORD" ] && [ ! -L "$PREFLIGHT_RECORD" ] || {
+      echo "error: ship preflight record for $ID is missing or unsafe" >&2
+      exit 1
+    }
+    PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-dispatched "$ID" --fingerprint "$PREFLIGHT_FINGERPRINT") || exit 1
+  else
+    PREFLIGHT_RECORD="$DATA/$ID/ship-preflight.json"
+    [ -f "$PREFLIGHT_RECORD" ] && [ ! -L "$PREFLIGHT_RECORD" ] || {
+      echo "error: ship preflight record for $ID is missing or unsafe" >&2
+      exit 1
+    }
+    PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-current "$ID") || exit 1
+  fi
+  if [ -n "${PREFLIGHT_RESULT:-}" ]; then
+    PREFLIGHT_FINGERPRINT=${PREFLIGHT_RESULT#fingerprint=}
+    case "$PREFLIGHT_FINGERPRINT" in
+      ????????*) [ "${#PREFLIGHT_FINGERPRINT}" -eq 64 ] && ! printf '%s' "$PREFLIGHT_FINGERPRINT" | grep -q '[^0-9a-f]' ;;
+      *) false ;;
+    esac || {
+      echo "error: ship preflight verification returned an invalid fingerprint" >&2
+      exit 1
+    }
   fi
   # The registry holds the captain's standing posture, so dropping below it is
   # allowed (a current explicit captain instruction wins) but never silent. An
@@ -1846,17 +2060,48 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
+if [ "$KIND" = ship ] && [ -n "${PREFLIGHT_FINGERPRINT:-}" ]; then
+  SPAWN_PREFLIGHT_LOCK="$DATA/$ID/.ship-preflight.lock"
+  if [ "$DASHBOARD_RECOVERY" = 1 ] \
+     && [ "${FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK:-}" = "$SPAWN_PREFLIGHT_LOCK" ] \
+     && [ "${FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER:-}" = "${PPID:-}" ] \
+     && [ "${FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER:-}" = "$(cat "$SPAWN_PREFLIGHT_LOCK/pid" 2>/dev/null || true)" ]; then
+    SPAWN_PREFLIGHT_LOCK_EXTERNAL=1
+  else
+    fm_lock_acquire_wait "$SPAWN_PREFLIGHT_LOCK" || {
+      echo "error: could not lock ship preflight record for $ID" >&2
+      exit 1
+    }
+  fi
+  SPAWN_PREFLIGHT_LOCK_HELD=1
+  if [ "$RELAUNCH" -eq 1 ]; then
+    FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-dispatched "$ID" --fingerprint "$PREFLIGHT_FINGERPRINT" >/dev/null || exit 1
+  else
+    FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify "$ID" --fingerprint "$PREFLIGHT_FINGERPRINT" >/dev/null || exit 1
+  fi
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
-  # Adopt the recorded endpoint instead of creating one. This is what keeps a
-  # relaunch a REPLACEMENT rather than a second copy of the task: no new
-  # terminal, no second worktree, and every uncommitted change left exactly
-  # where the previous agent left it.
-  T=$RELAUNCH_TARGET
-  # A secondmate's home already resolved WT above through the same validation a
-  # fresh secondmate spawn uses; every other kind takes the recorded worktree.
-  [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
-  WT_TARGET=$T
-  SES=${T%%:*}
+  if [ "$RECOVER_MISSING" -eq 1 ]; then
+    SES=$(fm_backend_tmux_container_ensure)
+    T="$SES:$W"
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$RELAUNCH_WT") || exit 1
+    WT=$RELAUNCH_WT
+    WT_TARGET=$WID
+    RECOVERY_ENDPOINT_PENDING=1
+  else
+    # Adopt the recorded endpoint instead of creating one. This is what keeps a
+    # relaunch a REPLACEMENT rather than a second copy of the task: no new
+    # terminal, no second worktree, and every uncommitted change left exactly
+    # where the previous agent left it.
+    T=$RELAUNCH_TARGET
+    # A secondmate's home already resolved WT above through the same validation a
+    # fresh secondmate spawn uses; every other kind takes the recorded worktree.
+    [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
+    WT_TARGET=$T
+    SES=${T%%:*}
+  fi
 else
 case "$BACKEND" in
   tmux)
@@ -2190,7 +2435,7 @@ kimi_wait_for_delivery() {
 }
 
 kimi_spawn_fail() {  # <detail>
-  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  "$SCRIPT_DIR/fm-status-event.sh" append "$STATE" "$ID" "failed: $1"
   echo "error: $1; inspect window $T" >&2
 }
 
@@ -2264,6 +2509,13 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
+if [ "$KIND" = ship ] && [ "$MODE" = fast-repair ] && [ "$RELAUNCH" -eq 0 ]; then
+  "$SCRIPT_DIR/fm-fast-repair.sh" eligible "$ID" --worktree "$WT" >/dev/null || {
+    echo "error: Fast Repair spawn refused because its reproduction revision is not proven for the task worktree; use the normal delivery path" >&2
+    exit 1
+  }
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -2320,7 +2572,18 @@ if [ "$KIND" != secondmate ]; then
   esac
   case "$HARNESS" in
     claude*|opencode*|pi|pi-signed)
-      BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+      if [ "$RELAUNCH" -eq 1 ]; then
+        BUSY_GEN=$(spawn_busy_event arm "$STATE_REAL" "$ID" --state unknown --source fm-recovery --event replacement-pending) || {
+          echo "error: failed to arm the busy-state contract for $ID" >&2
+          exit 1
+        }
+      else
+        BUSY_GEN=$(spawn_busy_event arm "$STATE_REAL" "$ID") || {
+          echo "error: failed to arm the busy-state contract for $ID" >&2
+          exit 1
+        }
+      fi
+      [ -n "$BUSY_GEN" ] || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
       }
@@ -2621,6 +2884,13 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+DASHBOARD_INCARNATION=
+if [ "$RELAUNCH" -eq 1 ]; then
+  DASHBOARD_INCARNATION=$(fm_meta_get "$RELAUNCH_META" dashboard_incarnation)
+fi
+case "$DASHBOARD_INCARNATION" in
+  ''|*[!A-Za-z0-9._-]*) DASHBOARD_INCARNATION="i$(date +%s).${BASHPID:-$$}.$RANDOM" ;;
+esac
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -2632,7 +2902,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx preflight_fingerprint dashboard_incarnation", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2645,8 +2915,11 @@ preserve_relaunch_meta() {
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
+  echo "dashboard_incarnation=$DASHBOARD_INCARNATION"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  [ "$MODE" != fast-repair ] || echo "fast_repair=eligible"
+  [ -z "${PREFLIGHT_FINGERPRINT:-}" ] || echo "preflight_fingerprint=$PREFLIGHT_FINGERPRINT"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
@@ -2695,6 +2968,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
+fi
+if [ "$DASHBOARD_RECOVERY" -eq 0 ] || [ -z "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ]; then
+  "$SCRIPT_DIR/fm-dashboard-transition.sh" replay-busy "$STATE" "$ID" || {
+    echo "error: could not publish dashboard timing for $ID" >&2
+    exit 1
+  }
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown
@@ -2746,10 +3025,10 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
   # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): Claude's
-  # Stop auto-arm and Cursor's stop-hook park both run the watcher only BETWEEN
-  # turns, so a fresh beacon with no live watcher is their healthy mid-turn state.
+  # Stop auto-arm runs the watcher only BETWEEN turns, so a fresh beacon with no
+  # live watcher is its healthy mid-turn state.
   case "$HARNESS" in
-    claude|cursor) supervision_model=autoarm ;;
+    claude) supervision_model=autoarm ;;
     *) supervision_model=persistent ;;
   esac
   # Deliver the primary's EFFECTIVE trace-context decision as a normalized on/off
@@ -2763,6 +3042,23 @@ if [ "$KIND" = secondmate ]; then
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
+fi
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  NM_REAL_BIN=$(command -v no-mistakes 2>/dev/null || true)
+  if [ -n "$NM_REAL_BIN" ]; then
+    NM_EVENT_BIN="$TASK_TMP/nm-bin"
+    mkdir -p "$NM_EVENT_BIN"
+    cat > "$NM_EVENT_BIN/no-mistakes" <<EOF
+#!/usr/bin/env bash
+PATH=$(shell_quote "$PATH")
+$(shell_quote "$NM_REAL_BIN") "\$@"
+status=\$?
+FM_HOME=$(shell_quote "$FM_HOME") FM_STATE_OVERRIDE=$(shell_quote "$STATE") $(shell_quote "$FM_ROOT/bin/fm-dashboard-run-state.sh") reconcile $(shell_quote "$ID") >/dev/null 2>&1 || true
+exit "\$status"
+EOF
+    chmod 700 "$NM_EVENT_BIN/no-mistakes"
+    LAUNCH="PATH=$(shell_quote "$NM_EVENT_BIN"):\$PATH $LAUNCH"
+  fi
 fi
 
 spawn_record_traceparent() {
@@ -2806,13 +3102,128 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
+if [ "$RELAUNCH" -eq 1 ] && [ -n "${BUSY_GEN:-}" ]; then
+  spawn_busy_event apply "$STATE_REAL" "$ID" busy --gen "$BUSY_GEN" --source fm-recovery --event replacement-start || {
+    echo "error: failed to record replacement start for $ID" >&2
+    exit 1
+  }
+  if [ "$DASHBOARD_RECOVERY" -eq 1 ] && [ -n "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ]; then
+    replacement_start_record=$(fm_busy_record_read "$STATE_REAL" "$ID") || {
+      echo "error: failed to read replacement start timing for $ID" >&2
+      exit 1
+    }
+    read -r replacement_busy_state replacement_busy_source replacement_busy_event replacement_busy_seq REPLACEMENT_START_AT <<< "$replacement_start_record"
+    if [ "$replacement_busy_state" != busy ] \
+       || [ "$replacement_busy_source" != fm-recovery ] \
+       || [ "$replacement_busy_event" != replacement-start ]; then
+      echo "error: replacement start timing is no longer current for $ID" >&2
+      exit 1
+    fi
+    case "$REPLACEMENT_START_AT" in
+      ''|*[!0-9]*)
+        echo "error: replacement start timing is invalid for $ID" >&2
+        exit 1
+        ;;
+    esac
+  fi
+fi
+literal_status=0
+spawn_recovery_submit "$T" "$LAUNCH" || literal_status=$?
+if [ "$literal_status" -ne 0 ]; then
+  if [ "$RELAUNCH" -eq 1 ] && [ -n "${BUSY_GEN:-}" ]; then
+    spawn_busy_event apply "$STATE_REAL" "$ID" unknown --gen "$BUSY_GEN" --source fm-recovery --event replacement-send-failed || true
+  fi
+  if [ "$literal_status" -eq 4 ]; then
+    echo "error: dashboard recovery was cancelled for $ID" >&2
+  fi
+  exit "$literal_status"
+fi
+if [ "$KIND" != secondmate ] \
+   && { [ "$DASHBOARD_RECOVERY" -eq 0 ] || [ -z "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ]; }; then
+  "$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" working "$(date +%s)" || {
+    echo "error: could not publish dashboard launch timing for $ID" >&2
+    exit 1
+  }
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
+if [ "$DASHBOARD_RECOVERY" -eq 1 ] && [ -n "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ]; then
+  RECOVERY_CLAIM_LOCK="$STATE/dashboard-transitions/$ID.lock"
+  fm_lock_acquire_wait "$RECOVERY_CLAIM_LOCK" || {
+    echo "error: could not acquire dashboard recovery claim for $ID" >&2
+    exit 1
+  }
+  RECOVERY_CLAIM_LOCK_HELD=1
+  claim_path="$STATE/dashboard-transitions/$ID.recovery-claim"
+  claim_incarnation=$(sed -n 's/^incarnation=//p' "$claim_path" 2>/dev/null | tail -1)
+  claim_value=$(sed -n 's/^claim=//p' "$claim_path" 2>/dev/null | tail -1)
+  current_incarnation=$(fm_meta_get "$STATE/$ID.meta" dashboard_incarnation)
+  case "$current_incarnation" in ''|*[!A-Za-z0-9._-]*) current_incarnation="legacy-$ID" ;; esac
+  terminal_state=$(jq -r '.state // ""' "$STATE/dashboard-transitions/$ID.json" 2>/dev/null || true)
+  terminal_incarnation=$(jq -r '.incarnation // ""' "$STATE/dashboard-transitions/$ID.json" 2>/dev/null || true)
+  terminal_line=$(grep -v '^[[:space:]]*$' "$STATE/$ID.status" 2>/dev/null | tail -n 1 || true)
+  terminal_verb=${terminal_line%%:*}
+  terminal_verb=${terminal_verb%%\[*}
+  terminal_verb=${terminal_verb#"${terminal_verb%%[![:space:]]*}"}
+  terminal_verb=${terminal_verb%"${terminal_verb##*[![:space:]]}"}
+  if [ "$claim_value" != "$FM_DASHBOARD_RECOVERY_CLAIM" ] \
+     || [ "$claim_incarnation" != "$current_incarnation" ] \
+     || { [ "$terminal_incarnation" = "$current_incarnation" ] && { [ "$terminal_state" = done ] || [ "$terminal_state" = failed ]; }; } \
+     || [ "$terminal_verb" = done ] || [ "$terminal_verb" = failed ]; then
+    echo "error: dashboard recovery claim for $ID is no longer valid" >&2
+    exit 4
+  fi
+  RECOVERY_CLAIM_VALUE=$claim_value
+fi
+if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
+  recovery_working_status=0
+  if [ -n "$REPLACEMENT_START_AT" ]; then
+    FM_DASHBOARD_RECOVERY_TRANSITION_LOCK=1 \
+      "$SCRIPT_DIR/fm-dashboard-transition.sh" recovery-working "$STATE" "$ID" "$REPLACEMENT_START_AT" "$RECOVERY_CLAIM_VALUE" || recovery_working_status=$?
+  else
+    FM_DASHBOARD_RECOVERY_TRANSITION_LOCK=1 \
+      "$SCRIPT_DIR/fm-dashboard-transition.sh" recovery-working "$STATE" "$ID" "$(date +%s)" "$RECOVERY_CLAIM_VALUE" || recovery_working_status=$?
+  fi
+  case "$recovery_working_status" in
+    0) ;;
+    3) exit 4 ;;
+    *) echo "error: could not publish dashboard recovery launch for $ID" >&2; exit 1 ;;
+  esac
+fi
+if spawn_recovery_handoff_cancelled; then
+  echo "error: dashboard recovery was cancelled for $ID" >&2
+  exit 4
+fi
+if [ "${FM_SPAWN_TESTING:-0}" = 1 ] && [ -n "${FM_SPAWN_TEST_RECOVERY_FINAL_READY:-}" ] && [ -n "${FM_SPAWN_TEST_RECOVERY_FINAL_CONTINUE:-}" ]; then
+  : > "$FM_SPAWN_TEST_RECOVERY_FINAL_READY" || exit 1
+  while [ ! -e "$FM_SPAWN_TEST_RECOVERY_FINAL_CONTINUE" ]; do sleep 0.01; done
+fi
 spawn_send_key "$T" Enter
+if [ "$SPAWN_RECOVERY_HANDOFF_LOCK_HELD" = 1 ]; then
+  SPAWN_RECOVERY_HANDOFF_LOCK_HELD=0
+  fm_lock_release "$SPAWN_RECOVERY_HANDOFF_LOCK" || {
+    echo "error: could not release dashboard recovery handoff for $ID" >&2
+    exit 1
+  }
+fi
+RECOVERY_ENDPOINT_PENDING=0
+if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
+  RECOVERY_CLAIM_LOCK_HELD=0
+  fm_lock_release "$RECOVERY_CLAIM_LOCK" || {
+    echo "error: could not release dashboard recovery claim for $ID" >&2
+    exit 1
+  }
+fi
+if [ "$SPAWN_PREFLIGHT_LOCK_HELD" = 1 ] && [ "$SPAWN_PREFLIGHT_LOCK_EXTERNAL" = 0 ]; then
+  SPAWN_PREFLIGHT_LOCK_HELD=0
+  fm_lock_release "$SPAWN_PREFLIGHT_LOCK" || {
+    echo "error: could not release ship preflight lock for $ID" >&2
+    exit 1
+  }
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

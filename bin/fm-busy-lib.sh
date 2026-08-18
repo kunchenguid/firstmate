@@ -211,7 +211,7 @@ fm_busy_source_trusted() {  # <harness> <source>
 }
 
 # fm_busy_record_read: parse and validate state/<id>.busy-state against the
-# armed gen. Prints "<state> <source> <event> <seq>" for a valid record.
+# armed gen. Prints "<state> <source> <event> <seq> <timestamp>" for a valid record.
 # Non-zero returns name the reason on stdout instead:
 #   missing      no record file (or no armed gen and no record)
 #   malformed    unparseable line, bad tokens, or a missing armed gen for an
@@ -262,7 +262,7 @@ fm_busy_record_read() {  # <state-dir> <id>
     printf 'gen-mismatch'
     return 1
   fi
-  printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
+  printf '%s %s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq" "$r_ts"
 }
 
 # ---------------------------------------------------------------------------
@@ -687,7 +687,28 @@ fm_busy_cursor_transcript() {  # <state-dir> <id>
 # Lifecycle records are matched on top-level fields of structurally valid JSON,
 # so a turn whose own text mentions turn_ended cannot close it.
 fm_busy_cursor_turn_state() {  # <transcript>
-  [ -f "$1" ] || return 1
+  local transcript=$1 size start rc
+  [ -f "$transcript" ] || return 1
+  size=$(LC_ALL=C command -p wc -c < "$transcript" 2>/dev/null) || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  start=0
+  if [ "$size" -gt 262144 ]; then start=$((size - 262144)); fi
+  exec 3< <(command -p perl -MFcntl=:DEFAULT -e '
+      my ($path, $start, $end) = @ARGV;
+      sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+      my @stat = stat $file or exit 1;
+      exit 1 unless -f _ && $stat[7] == $end && $start <= $end;
+      sysseek($file, $start, 0) == $start or exit 1;
+      my $remaining = $end - $start;
+      while ($remaining > 0) {
+        my $want = $remaining > 65536 ? 65536 : $remaining;
+        my $read = sysread($file, my $chunk, $want);
+        defined($read) && $read > 0 or exit 1;
+        print $chunk or exit 1;
+        $remaining -= $read;
+      }
+    ' "$transcript" "$start" "$size")
   if command -v jq >/dev/null 2>&1; then
     LC_ALL=C jq -Rr '
       try (
@@ -697,7 +718,7 @@ fm_busy_cursor_turn_state() {  # <transcript>
           else "other"
           end
       ) catch "malformed"
-    ' "$1"
+    ' <&3
   else
     LC_ALL=C awk '
       function ws(    c) {
@@ -810,7 +831,7 @@ fm_busy_cursor_turn_state() {  # <transcript>
         valid = json(0); ws()
         print (valid && p > n ? event : "malformed")
       }
-    ' "$1"
+    ' <&3
   fi | LC_ALL=C awk '
     $0 == "close" { open = 0; seen = 1; malformed = 0; next }
     $0 == "open" { open = 1; seen = 1; next }
@@ -820,6 +841,9 @@ fm_busy_cursor_turn_state() {  # <transcript>
       print (open ? "busy" : "settled")
     }
   '
+  rc=${PIPESTATUS[0]}
+  exec 3<&-
+  return "$rc"
 }
 
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.

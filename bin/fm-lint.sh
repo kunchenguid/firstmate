@@ -25,12 +25,16 @@
 # given paths, matching the same config, without the workflow YAML check.
 #
 # Canonical lint defaults to two bounded workers over two stable logical shards.
-# Each shard writes separate diagnostics, and the parent replays those outputs in
-# deterministic shard and root order after every worker finishes. FM_LINT_JOBS=1
-# runs the same shards serially with byte-identical diagnostics and exit selection.
+# Each worker further divides its manifest into fixed-size ShellCheck batches, so
+# one long-lived ShellCheck process never accumulates the complete shard's source
+# graph. Each shard writes separate diagnostics, and the parent replays those
+# outputs in deterministic shard and root order after every worker finishes.
+# FM_LINT_JOBS=1 runs the same shards and batches serially with byte-identical
+# diagnostics and exit selection.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
-# graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
+# graph identity, per-ShellCheck-batch wall/CPU/RSS, shard load, and competing
+# ShellCheck processes.
 #
 # Usage:
 #   fm-lint.sh                         lint the context-selected file set (see above)
@@ -43,6 +47,10 @@
 set -u
 
 REQUIRED_SHELLCHECK=0.11.0
+# ShellCheck retains analysis state for every root passed to one invocation. Keep
+# each process small enough for a single-worker lint to remain safe on the shared
+# fleet host; this bound applies independently of FM_LINT_JOBS.
+SHELLCHECK_BATCH_ROOT_LIMIT=1
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/fm-lint.sh"
 ROOT="$(cd "$SELF_DIR/.." && pwd)"
@@ -58,8 +66,8 @@ fm_lint_worker_stop() {
 }
 
 fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
-  local manifest=$1 output_dir=$2 shard_index=$3 tab index path output rc=0
-  local -a roots
+  local manifest=$1 output_dir=$2 shard_index=$3 tab index path output rc=0 batch_rc root_index timing
+  local -a roots batch
   roots=()
   tab=$(printf '\t')
   while IFS="$tab" read -r index path || [ -n "${index:-}${path:-}" ]; do
@@ -71,10 +79,31 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
     trap 'fm_lint_worker_stop; exit 129' HUP
     trap 'fm_lint_worker_stop; exit 130' INT
     trap 'fm_lint_worker_stop; exit 143' TERM
-    "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${roots[@]}" > "$output.out" 2>&1 &
-    FM_LINT_WORKER_SHELLCHECK_PID=$!
-    wait "$FM_LINT_WORKER_SHELLCHECK_PID" || rc=$?
-    FM_LINT_WORKER_SHELLCHECK_PID=
+    : > "$output.out"
+    root_index=0
+    while [ "$root_index" -lt "${#roots[@]}" ]; do
+      batch=("${roots[@]:root_index:SHELLCHECK_BATCH_ROOT_LIMIT}")
+      timing=
+      if [ -n "${FM_LINT_BATCH_TIMING_DIR:-}" ]; then
+        timing="$FM_LINT_BATCH_TIMING_DIR/batch.$shard_index.$root_index"
+        if [ "$(uname)" = Darwin ]; then
+          "$FM_LINT_TIME" -lp -o "$timing" "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${batch[@]}" >> "$output.out" 2>&1 &
+        else
+          "$FM_LINT_TIME" -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
+            "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${batch[@]}" >> "$output.out" 2>&1 &
+        fi
+      else
+        "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${batch[@]}" >> "$output.out" 2>&1 &
+      fi
+      FM_LINT_WORKER_SHELLCHECK_PID=$!
+      batch_rc=0
+      wait "$FM_LINT_WORKER_SHELLCHECK_PID" || batch_rc=$?
+      FM_LINT_WORKER_SHELLCHECK_PID=
+      if [ "$rc" -eq 0 ] && [ "$batch_rc" -ne 0 ]; then
+        rc=$batch_rc
+      fi
+      root_index=$((root_index + SHELLCHECK_BATCH_ROOT_LIMIT))
+    done
     trap - HUP INT TERM
   else
     : > "$output.out"
@@ -292,6 +321,9 @@ TAB=$(printf '\t')
 WEIGHTS="$TMP_ROOT/weights"
 OUTPUT_DIR="$TMP_ROOT/output"
 mkdir -p "$OUTPUT_DIR"
+if [ -n "$TELEMETRY" ]; then
+  mkdir -p "$TMP_ROOT/batch-timing"
+fi
 SHARD_COUNT=2
 worker=0
 while [ "$worker" -lt "$SHARD_COUNT" ]; do
@@ -372,27 +404,17 @@ if [ -n "$TELEMETRY" ]; then
 fi
 
 fm_lint_run_worker() {  # <worker-index>
-  local worker_index=$1 manifest timing
+  local worker_index=$1 manifest
   manifest="$TMP_ROOT/manifest.$worker_index"
-  timing="$TMP_ROOT/timing.$worker_index"
   if [ -n "$TELEMETRY" ] && [ -x /usr/bin/time ]; then
-    if [ "$(uname)" = Darwin ]; then
-      exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
-        /usr/bin/time -lp -o "$timing" \
-        env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
-        "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
-    else
-      exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
-        /usr/bin/time -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
-        env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
-        "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
-    fi
-  else
-    [ -z "$TELEMETRY" ] || printf 'timing_unavailable=1\n' > "$timing"
     exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
       env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+      FM_LINT_TIME=/usr/bin/time FM_LINT_BATCH_TIMING_DIR="$TMP_ROOT/batch-timing" \
       "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
   fi
+  exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
+    env FM_LINT_INTERNAL=1 FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+    "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
 }
 
 fm_lint_start_worker() {
@@ -493,7 +515,7 @@ if [ -n "$TELEMETRY" ]; then
           if (rss > max_rss) max_rss=rss
         }
         END {printf "%.2f %.2f %.2f %.0f %.0f %.2f", user, sys_cpu, wall, max_rss, rss_sum, max_wall}
-      ' "$TMP_ROOT"/timing.*)
+      ' "$TMP_ROOT"/batch-timing/batch.*)
     else
       timing_summary=$(awk -F= '
         $1 == "wall_seconds" {wall += $2; if ($2 > max_wall) max_wall=$2}
@@ -501,23 +523,23 @@ if [ -n "$TELEMETRY" ]; then
         $1 == "system_seconds" {sys_cpu += $2}
         $1 == "max_rss_kib" {rss_sum += $2; if ($2 > max_rss) max_rss=$2}
         END {printf "%.2f %.2f %.2f %.0f %.0f %.2f", user, sys_cpu, wall, max_rss, rss_sum, max_wall}
-      ' "$TMP_ROOT"/timing.*)
+      ' "$TMP_ROOT"/batch-timing/batch.*)
     fi
-    read -r timing_user timing_system timing_worker_wall max_worker_rss worker_rss_sum max_worker_wall <<EOF
+    read -r timing_user timing_system timing_batch_wall max_batch_rss batch_rss_sum max_batch_wall <<EOF
 $timing_summary
 EOF
   else
     timing_user=unavailable
     timing_system=unavailable
-    timing_worker_wall=unavailable
-    max_worker_rss=unavailable
-    worker_rss_sum=unavailable
-    max_worker_wall=unavailable
+    timing_batch_wall=unavailable
+    max_batch_rss=unavailable
+    batch_rss_sum=unavailable
+    max_batch_wall=unavailable
   fi
 
   telemetry_tmp="$TMP_ROOT/telemetry.tsv"
   {
-    printf 'format\tfm-lint-telemetry-v1\n'
+    printf 'format\tfm-lint-telemetry-v2\n'
     printf 'git_head\t%s\n' "$git_head"
     printf 'content_cksum\t%s\n' "$content_cksum"
     printf 'shellcheck_version\t%s\n' "$resolved"
@@ -532,12 +554,12 @@ EOF
     printf 'shard_1_weight_bytes\t%s\n' "${WORKER_LOADS[0]}"
     printf 'shard_2_weight_bytes\t%s\n' "${WORKER_LOADS[1]:-0}"
     printf 'wall_seconds\t%s\n' "$((TELEMETRY_END_EPOCH - TELEMETRY_START_EPOCH))"
-    printf 'worker_wall_sum_seconds\t%s\n' "$timing_worker_wall"
-    printf 'max_worker_wall_seconds\t%s\n' "$max_worker_wall"
+    printf 'shellcheck_batch_wall_sum_seconds\t%s\n' "$timing_batch_wall"
+    printf 'max_shellcheck_batch_wall_seconds\t%s\n' "$max_batch_wall"
     printf 'user_seconds\t%s\n' "$timing_user"
     printf 'system_seconds\t%s\n' "$timing_system"
-    printf 'max_worker_rss_kib\t%s\n' "$max_worker_rss"
-    printf 'worker_rss_sum_kib\t%s\n' "$worker_rss_sum"
+    printf 'max_shellcheck_batch_rss_kib\t%s\n' "$max_batch_rss"
+    printf 'shellcheck_batch_rss_sum_kib\t%s\n' "$batch_rss_sum"
     printf 'shellcheck_processes_start\t%s\n' "$TELEMETRY_SHELLCHECK_START"
     printf 'shellcheck_processes_end\t%s\n' "$TELEMETRY_SHELLCHECK_END"
     printf 'load_average_start\t%s\n' "$TELEMETRY_LOAD_START"

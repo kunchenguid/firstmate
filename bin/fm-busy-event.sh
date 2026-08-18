@@ -93,6 +93,7 @@ fi
 
 REC=$(fm_busy_record_path "$STATE" "$ID")
 GEN_FILE=$(fm_busy_gen_path "$STATE" "$ID")
+JOURNAL="$REC.transition"
 LOCK="$REC.lock"
 
 # Serialize writers. The lock protects seq advancement and the sidecar/record
@@ -118,23 +119,95 @@ lock_acquire() {
 }
 lock_release() { rmdir "$LOCK" 2>/dev/null || true; }
 
-write_record() {  # <gen> <seq>
+write_busy_record() {  # <gen> <seq> <state> <source> <event> <timestamp>
   local tmp
   tmp="$REC.tmp.$$"
   printf 'v1 gen=%s seq=%s state=%s source=%s event=%s ts=%s\n' \
-    "$1" "$2" "$NEW_STATE" "$SOURCE" "$EVENT" "$(date +%s)" > "$tmp" || return 1
+    "$1" "$2" "$3" "$4" "$5" "$6" > "$tmp" || return 1
   mv -f "$tmp" "$REC"
+}
+
+dashboard_state_for() {  # <busy-state>
+  case "$1" in
+    busy) dashboard_state=working ;;
+    idle) dashboard_state=parked ;;
+    unknown) dashboard_state=unknown ;;
+  esac
+}
+
+write_pending() {  # <gen> <seq> <state> <source> <event> <timestamp>
+  local tmp
+  tmp="$JOURNAL.tmp.$$"
+  printf 'v1 gen=%s seq=%s state=%s source=%s event=%s ts=%s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" > "$tmp" || return 1
+  mv -f "$tmp" "$JOURNAL"
+}
+
+read_pending() {
+  local line extra field
+  local -a fields
+  PENDING_GEN=
+  PENDING_SEQ=
+  PENDING_STATE=
+  PENDING_SOURCE=
+  PENDING_EVENT=
+  PENDING_AT=
+  [ -f "$JOURNAL" ] && [ ! -L "$JOURNAL" ] || return 1
+  # shellcheck disable=SC2034 # extra exists only to prove the record is one line
+  { IFS= read -r line && ! IFS= read -r extra; } < "$JOURNAL" 2>/dev/null || return 1
+  IFS=' ' read -r -a fields <<< "$line"
+  [ "${#fields[@]}" -eq 7 ] && [ "${fields[0]}" = "$FM_BUSY_LIB_VERSION" ] || return 1
+  for field in "${fields[@]:1}"; do
+    case "$field" in
+      gen=*) PENDING_GEN=${field#gen=} ;;
+      seq=*) PENDING_SEQ=${field#seq=} ;;
+      state=*) PENDING_STATE=${field#state=} ;;
+      source=*) PENDING_SOURCE=${field#source=} ;;
+      event=*) PENDING_EVENT=${field#event=} ;;
+      ts=*) PENDING_AT=${field#ts=} ;;
+      *) return 1 ;;
+    esac
+  done
+  fm_busy_token_valid "$PENDING_GEN" && fm_busy_token_valid "$PENDING_SOURCE" \
+    && fm_busy_token_valid "$PENDING_EVENT" || return 1
+  case "$PENDING_SEQ" in ''|*[!0-9]*) return 1 ;; esac
+  case "$PENDING_AT" in ''|*[!0-9]*) return 1 ;; esac
+  case "$PENDING_STATE" in busy|idle|unknown) ;; *) return 1 ;; esac
+}
+
+replay_pending() {  # <current-gen>
+  [ -e "$JOURNAL" ] || return 0
+  read_pending || return 1
+  if [ "$PENDING_GEN" != "$1" ]; then
+    rm -f -- "$JOURNAL"
+    return 0
+  fi
+  dashboard_state_for "$PENDING_STATE"
+  if [ "${FM_DASHBOARD_TRANSITION_DEFER:-0}" != 1 ]; then
+    "$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" "$dashboard_state" "$PENDING_AT" || return 1
+  fi
+  if [ "${FM_BUSY_EVENT_TESTING:-0}" = 1 ] && [ "${FM_BUSY_EVENT_TEST_INTERRUPT_AFTER_TRANSITION:-0}" = 1 ]; then
+    return 1
+  fi
+  write_busy_record "$PENDING_GEN" "$PENDING_SEQ" "$PENDING_STATE" "$PENDING_SOURCE" "$PENDING_EVENT" "$PENDING_AT" || return 1
+  rm -f -- "$JOURNAL"
+}
+
+commit_event() {  # <gen> <seq> <state> <source> <event> <timestamp>
+  write_pending "$@" && replay_pending "$1"
 }
 
 old_umask=$(umask)
 umask 077
 
 if [ "$CMD" = arm ]; then
-  GEN="g$(date +%s).$$.$RANDOM"
+  timestamp=$(date +%s)
+  GEN="g${timestamp}.$$.${RANDOM}"
   lock_acquire || exit 1
   {
-    printf '%s\n' "$GEN" > "$GEN_FILE.tmp.$$" && mv -f "$GEN_FILE.tmp.$$" "$GEN_FILE" \
-      && write_record "$GEN" 1
+    rm -f -- "$JOURNAL" \
+      && printf '%s\n' "$GEN" > "$GEN_FILE.tmp.$$" && mv -f "$GEN_FILE.tmp.$$" "$GEN_FILE" \
+      && commit_event "$GEN" 1 "$NEW_STATE" "$SOURCE" "$EVENT" "$timestamp"
   } || { lock_release; umask "$old_umask"; echo "error: arm failed for $ID" >&2; exit 1; }
   lock_release
   umask "$old_umask"
@@ -157,7 +230,7 @@ fi
 lock_acquire || { umask "$old_umask"; exit 1; }
 CURRENT=$(fm_busy_current_gen "$STATE" "$ID") || {
   if [ "$CMD" = retire ] && [ ! -e "$GEN_FILE" ] && [ ! -L "$GEN_FILE" ]; then
-    rm -f "$REC" || {
+    rm -f "$REC" "$JOURNAL" || {
       lock_release
       umask "$old_umask"
       echo "error: busy-state retirement failed for $ID" >&2
@@ -182,7 +255,7 @@ if [ "$GEN" != "$CURRENT" ]; then
   exit 1
 fi
 if [ "$CMD" = retire ]; then
-  rm -f "$GEN_FILE" "$REC" || {
+  rm -f "$GEN_FILE" "$REC" "$JOURNAL" || {
     lock_release
     umask "$old_umask"
     echo "error: busy-state retirement failed for $ID" >&2
@@ -192,6 +265,12 @@ if [ "$CMD" = retire ]; then
   umask "$old_umask"
   exit 0
 fi
+replay_pending "$CURRENT" || {
+  lock_release
+  umask "$old_umask"
+  echo "error: pending busy-state transition could not be replayed for $ID" >&2
+  exit 1
+}
 OLD_SEQ=0
 if [ -f "$REC" ]; then
   old_line=$(head -n 1 "$REC" 2>/dev/null || true)
@@ -206,7 +285,8 @@ if [ -f "$REC" ]; then
       ;;
   esac
 fi
-write_record "$GEN" $((OLD_SEQ + 1)) || {
+timestamp=$(date +%s)
+commit_event "$GEN" $((OLD_SEQ + 1)) "$NEW_STATE" "$SOURCE" "$EVENT" "$timestamp" || {
   lock_release
   umask "$old_umask"
   echo "error: record write failed for $ID" >&2

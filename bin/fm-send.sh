@@ -15,12 +15,6 @@
 # submit or reports an inconclusive send. If a swallowed Enter is positively
 # confirmed, fm-send exits NON-ZERO so the caller knows the steer did not land
 # instead of silently leaving an unsubmitted instruction.
-# Exit status contract: 0 = submit confirmed (or, for a remote secondmate
-# target, delivered with confirmation pending - see the remote paragraph);
-# 3 = the text was typed into the live endpoint and Enter was sent, but the
-# submit read-back stayed unconfirmed (verify the pane before any resend, and
-# never re-type blindly); any other nonzero = the send failed and nothing may
-# be assumed delivered.
 # Submission dispatches through the target's recorded backend; the tmux adapter
 # shares its composer/submit core with the away-mode daemon via bin/fm-tmux-lib.sh.
 # Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4).
@@ -43,20 +37,6 @@
 # re-sending a recovery request for an already-open expectation so a second
 # record is not created. Direct unmarked captain input never creates one.
 #
-# Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
-# (bin/fm-remote-secondmate-control.sh cmd_send) that runs this same verified
-# submit against the recorded remote Herdr pane and relays its exit status
-# unchanged. A leg that delivered the text into the live verified pane but
-# could not synchronously confirm the submit (exit 3 - typically a busy mate
-# whose harness queues the steer and keeps rendering it) is reported here as
-# DELIVERED with confirmation pending: fm-send prints a non-error notice,
-# exits 0, marks the pending-reply expectation delivered, and closes any
-# --resolve-key decisions. Empirically that pattern is a delivered steer, a
-# resend duplicates the instruction, and the parent's pending-reply
-# recovery/escalation still surfaces the rare genuinely lost request. Transport
-# loss (ssh exit 255, completion unknown) and every real remote failure keep
-# failing loudly with the remote leg's own stderr attached.
-#
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
 # blocked: record in the target task's state/<id>.status. After the submit is
@@ -68,24 +48,10 @@
 # remote secondmate alike - because the open-decision ledger fm-wake-drain
 # folds lives in this home's own state dir (a remote mate's escalations reach
 # it through the parent-replies ingest); only the answer message crosses the
-# backend or remote transport.
-#
-# Chat is also a channel that carries keyed captain answers, so the same flag
-# feeds bin/fm-decision-hold.sh's one keyed-answer intake for any key that names
-# a durable decision hold on the target task. fm-send maps nothing to a hold and
-# closes nothing itself; it hands the intake `<key>\t<answer>\t<label>` exactly
-# as every other channel does, and the intake owns what that means. This is what
-# lets an answer reach a decision that has already been transferred from the live
-# status log to its durable hold, which the status ledger alone can no longer
-# close.
-#
-# Each named key must therefore currently be open in ONE of the two ledgers: open
-# in this home's status log per status_open_decisions (bin/fm-classify-lib.sh), or
-# an active captain hold for the target task. A key in neither is refused before
-# sending, so a mistyped key cannot deliver an answer while silently orphaning the
-# decision. A failed or unconfirmed send never closes a key (a remote
-# delivered-with-pending-confirmation outcome counts as delivered - see the
-# remote paragraph above); a
+# backend or remote transport. Each named key must currently be open in that
+# ledger per status_open_decisions (bin/fm-classify-lib.sh) or fm-send refuses
+# before sending, so a mistyped key cannot deliver an answer while silently
+# orphaning the decision. A failed or unconfirmed send never closes a key; a
 # delivered answer whose closing append fails exits nonzero with the exact
 # manual close command, leaving the decision open to re-surface (the safe
 # direction). A send without the flag never closes anything: a routine steer,
@@ -384,25 +350,6 @@ fi
 # send, is what keeps a mistyped key loud instead of delivering an answer that
 # silently leaves its decision open.
 RESOLVE_STATUS_FILE=
-# Which ledger each answered key belongs to. A key still open in the status log
-# is owned by the status log: fm-decision-hold's `complete` closes that live copy
-# at the moment it transfers a decision to its durable hold, so "still open in
-# status" and "already a hold" are the two sides of one transfer, never both at
-# once. Checking the hold only for keys the status log no longer owns also keeps
-# the common path free of any backlog read.
-RESOLVE_STATUS_KEYS=
-RESOLVE_HOLD_KEYS=
-
-fm_send_hold_is_active() {  # <task-id> <decision-key>
-  local show
-  command -v tasks-axi >/dev/null 2>&1 || return 1
-  show=$( (cd "$FM_HOME" && tasks-axi show "$1-decision-$2" --full) 2>/dev/null ) || return 1
-  case "$show" in *"held: yes"*) : ;; *) return 1 ;; esac
-  case "$show" in *"hold_kind: captain"*) : ;; *) return 1 ;; esac
-  case "$show" in *"state: queued"*) return 0 ;; esac
-  return 1
-}
-
 if [ -n "$RESOLVE_KEYS" ]; then
   if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
     echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
@@ -421,20 +368,12 @@ if [ -n "$RESOLVE_KEYS" ]; then
   resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
   for k in $RESOLVE_KEYS; do
     case "$resolve_open_set" in
-      "$k"$'\t'*|*$'\n'"$k"$'\t'*)
-        RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
-        continue
+      "$k"$'\t'*|*$'\n'"$k"$'\t'*) ;;
+      *)
+        echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE (already closed, mistyped, or transferred). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+        exit 1
         ;;
     esac
-    # Not open in the status log. A decision already transferred to its durable
-    # hold is exactly this case, and it is answerable - just through the other
-    # ledger - so check there before refusing.
-    if fm_send_hold_is_active "$RESOLVE_TASK_ID" "$k"; then
-      RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$k"
-      continue
-    fi
-    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no active captain decision $RESOLVE_TASK_ID-decision-$k (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
-    exit 1
   done
 fi
 
@@ -446,35 +385,16 @@ fi
 # (bin/fm-wake-lib.sh) and does not wake this same session again; any
 # concurrent foreign status bytes leave the watcher's wake path untouched.
 fm_send_close_resolved_keys() {  # <answer-text>
-  local note=$1 k line append_rc
+  local note=$1 k line
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
-  for k in $RESOLVE_STATUS_KEYS; do
+  for k in $RESOLVE_KEYS; do
     line="resolved [key=$k]: answered: $note"
     fm_cap_line_var "$line"
-    append_rc=0
-    fm_wake_status_append_self_announced "$STATE" "$RESOLVE_STATUS_FILE" "$FM_LINE_CAP_LINE" || append_rc=$?
-    if [ "$append_rc" -eq 2 ]; then
-      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
+    if ! "$SCRIPT_DIR/fm-status-event.sh" self-resolve "$STATE" "$RESOLVE_TASK_ID" "$FM_LINE_CAP_LINE"; then
+      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it with fm-status-event.sh resolve - do not resend the answer." >&2
       return 1
     fi
   done
-}
-
-# Feed the answered hold keys to the ONE keyed-answer intake, as keyed lines,
-# exactly the way every other channel does. fm-send decides nothing here: it does
-# not map a key to a hold, build a decision record, or choose a close path.
-fm_send_feed_resolved_holds() {  # <answer-text>
-  local note=$1 k lines=''
-  [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
-  note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
-  for k in $RESOLVE_HOLD_KEYS; do
-    lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
-  done
-  if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-decision-hold.sh" answers "$RESOLVE_TASK_ID" \
-    --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
-    echo "error: the answer was delivered to $T, but this captain decision could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-decision-hold.sh (answer, or resolve when it routes work) - do not resend the answer." >&2
-    return 1
-  fi
 }
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
@@ -559,27 +479,12 @@ else
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary.
   send_rc=0
-  REMOTE_DELIVERY_NOTICE=0
   if [ "$TARGET_BACKEND" = remote ]; then
-    # The remote leg is this same script running host-locally against the
-    # recorded Herdr pane (cmd_send in fm-remote-secondmate-control.sh), so its
-    # submit verification IS the local one, and fm-on/the remote worker relay
-    # its exit status unchanged. Exit 3 is the delivered-unconfirmed contract
-    # (see this script's header) crossing the ssh boundary: the text reached
-    # the live verified pane and Enter was sent; only the synchronous read-back
-    # stayed unconfirmed. The remote stderr is held back and replayed only for
-    # a real failure, so a delivered outcome does not surface the inner leg's
-    # diagnostics as alarm.
-    remote_err=$("$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null 2>&1 >/dev/null) || send_rc=$?
-    if [ "$send_rc" -eq 0 ]; then
+    if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then
       verdict=empty
-    elif [ "$send_rc" -eq 3 ]; then
-      verdict=empty
-      send_rc=0
-      REMOTE_DELIVERY_NOTICE=1
     else
+      send_rc=$?
       verdict=send-failed
-      [ -z "$remote_err" ] || printf '%s\n' "$remote_err" >&2
     fi
   elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     :
@@ -608,19 +513,6 @@ else
       echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;
-    pending)
-      # The text was typed into the live target and Enter was sent; only the
-      # submit read-back stayed unconfirmed (e.g. a busy harness queues the
-      # steer and keeps rendering it). That is not a proven failure, so never
-      # re-type the message: verify the pane instead. Exit 3 is the documented
-      # delivered-unconfirmed status, and the remote send leg above depends on
-      # it crossing the ssh boundary intact.
-      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
-      echo "fm-send: text delivered to $T but submission is unconfirmed (verdict=pending; tried $RESOLUTION_TRIED); do not retype or blindly resend - verify with fm-peek.sh, then re-send '--key Enter' only if the composer still holds the text" >&2
-      exit 3
-      ;;
     *)
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
@@ -648,13 +540,6 @@ else
   # ledger (answerer-closes; see the header contract).
   if [ -n "$RESOLVE_KEYS" ]; then
     fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
-    fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
-  fi
-  # Remote delivered-with-pending-confirmation: the outcome above is treated as
-  # delivered (expectation marked, keys closed), and this one non-error notice
-  # carries the remaining nuance so nobody re-sends the steer.
-  if [ "$REMOTE_DELIVERY_NOTICE" = 1 ]; then
-    echo "fm-send: delivered to remote secondmate $TARGET_REMOTE_ID; the remote pane accepted the text and Enter, and only the synchronous submit confirmation is still pending. This is not a failure - do not resend; the pending-reply expectation stays armed." >&2
   fi
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the
