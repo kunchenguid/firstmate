@@ -98,6 +98,8 @@ for skill in "${ADOPTED_SKILLS[@]}"; do
   symlink=$(find "$clone_dir/skills/$skill" -type l -print -quit)
   [ -z "$symlink" ] || die "adopted skill contains a symbolic link: ${symlink#"$clone_dir/skills/"}"
 done
+[ -f "$clone_dir/LICENSE" ] || die 'upstream LICENSE is missing'
+[ ! -L "$clone_dir/LICENSE" ] || die 'upstream LICENSE is a symbolic link'
 
 if [ "$DRY_RUN" -eq 1 ]; then
   printf 'dry-run: would vendor %s at %s (%s)\n' "$SOURCE_REPO" "$TAG" "$commit"
@@ -106,6 +108,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 mkdir -p "$VENDOR_ROOT"
+cp "$clone_dir/LICENSE" "$VENDOR_ROOT/LICENSE"
 for skill in "${ADOPTED_SKILLS[@]}"; do
   rm -rf "$VENDOR_ROOT/$skill"
   cp -a "$clone_dir/skills/$skill" "$VENDOR_ROOT/$skill"
@@ -129,7 +132,7 @@ EOF
   printf '# SHA-256 checksums for skills/vendor/fluxcd-agent-skills\n'
   (
     cd "$VENDOR_ROOT"
-    find "${ADOPTED_SKILLS[@]}" -type f | LC_ALL=C sort | while IFS= read -r relpath; do
+    find LICENSE "${ADOPTED_SKILLS[@]}" -type f | LC_ALL=C sort | while IFS= read -r relpath; do
       sha256sum "$relpath"
     done
   ) | awk '{print $1 "  " $2}'

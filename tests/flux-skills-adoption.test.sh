@@ -46,6 +46,18 @@ test_unlisted_file_is_rejected() {
   pass 'fm-flux-skills-verify rejects unlisted adopted files'
 }
 
+test_missing_upstream_license_is_rejected() {
+  local license="$VENDOR_ROOT/LICENSE" backup
+  backup=$(mktemp)
+  mv "$license" "$backup"
+  if "$VERIFY" >/dev/null 2>&1; then
+    mv "$backup" "$license"
+    fail 'verify must reject a missing upstream license'
+  fi
+  mv "$backup" "$license"
+  pass 'fm-flux-skills-verify requires the upstream license'
+}
+
 test_symlink_is_rejected() {
   local link="$VENDOR_ROOT/gitops-knowledge/unlisted-link"
   ln -s SKILL.md "$link"
@@ -88,6 +100,7 @@ test_manifest_is_parsed_without_execution() {
 test_verify_passes_on_committed_vendor_tree
 test_checksum_tamper_is_rejected
 test_unlisted_file_is_rejected
+test_missing_upstream_license_is_rejected
 test_symlink_is_rejected
 test_unexpected_top_level_symlink_is_rejected
 test_manifest_is_parsed_without_execution

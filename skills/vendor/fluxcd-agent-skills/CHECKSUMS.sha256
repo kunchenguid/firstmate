@@ -1,4 +1,5 @@
 # SHA-256 checksums for skills/vendor/fluxcd-agent-skills
+c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4  LICENSE
 3043c5327d39a6de0ee2ea76c2501afb2414794216fad077b073782a88e270ef  gitops-knowledge/SKILL.md
 ba3cb27ea9de6f8698e23b4ccc56abcc34827e4a5f1c136a9196acaf1119a0f3  gitops-knowledge/assets/schemas/alert-notification-v1beta3.fields.txt
 74aafe081ddf41851f19c37897f5bd23561857ff61fab04ad83af6a450e3e39b  gitops-knowledge/assets/schemas/artifactgenerator-source-v1beta1.fields.txt

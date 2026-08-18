@@ -21,6 +21,8 @@ die() {
 [ -f "$MANIFEST" ] || die "missing MANIFEST at $MANIFEST"
 [ -f "$CHECKSUMS" ] || die "missing CHECKSUMS.sha256 at $CHECKSUMS"
 [ -f "$VENDOR_ROOT/NOTICE.md" ] || die 'missing NOTICE.md'
+[ -f "$VENDOR_ROOT/LICENSE" ] || die 'missing upstream LICENSE'
+[ ! -L "$VENDOR_ROOT/LICENSE" ] || die 'upstream LICENSE is a symbolic link'
 
 declare -A manifest=()
 while IFS='=' read -r key value; do
@@ -90,7 +92,7 @@ trap cleanup EXIT
 sed -n 's/^[[:xdigit:]]\{64\}  //p' "$CHECKSUMS" | LC_ALL=C sort >"$checksum_inventory"
 (
   cd "$VENDOR_ROOT"
-  find "${adopted[@]}" -type f -print | LC_ALL=C sort
+  find LICENSE "${adopted[@]}" -type f -print | LC_ALL=C sort
 ) >"$vendor_inventory"
 cmp -s "$checksum_inventory" "$vendor_inventory" \
   || die 'checksum inventory does not match adopted skill files'
@@ -98,7 +100,7 @@ cmp -s "$checksum_inventory" "$vendor_inventory" \
 while IFS= read -r top; do
   base=${top##*/}
   case "$base" in
-    MANIFEST|CHECKSUMS.sha256|NOTICE.md) continue ;;
+    MANIFEST|CHECKSUMS.sha256|LICENSE|NOTICE.md) continue ;;
   esac
   found=0
   for skill in "${adopted[@]}"; do
