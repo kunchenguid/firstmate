@@ -52,7 +52,16 @@ fi
 if [ "${1:-}" = api ] && [ "${2:-}" = graphql ]; then
   f="$FIX/view/${owner}__${name}-${num}.json"
   [ -f "$f" ] || exit 99
-  jq -c '{data:{repository:{pullRequest:{reviewThreads:(.reviewThreads // {nodes:[]})}}}}' "$f"
+  jq -c '{data:{repository:{pullRequest:{headRefOid,reviewThreads:(.reviewThreads // {nodes:[]})}}}}' "$f"
+  after="$FIX/after-graphql/${owner}__${name}-${num}.json"
+  if [ -f "$after" ]; then
+    cp "$after" "$f"
+    rm -f "$after"
+  fi
+  if [ -f "$FIX/fail-delivered-write" ]; then
+    rm -rf "$FM_STATE_OVERRIDE/pr-delivery/delivered"
+    : > "$FM_STATE_OVERRIDE/pr-delivery/delivered"
+  fi
   exit 0
 fi
 exit 97
@@ -180,6 +189,26 @@ test_base_branch_race() {
   pass "base-branch race triggers re-evaluation"
 }
 
+test_head_change_during_review_fetch() {
+  local home fixture out
+  home=$(make_world headrace)
+  fixture="$TMP_ROOT/fix-headrace"
+  setup_project "$home" "$fixture"
+  write_open "$fixture" acme/alpha '[{"number":11,"url":"https://github.com/acme/alpha/pull/11","headRefName":"fm/head11","headRefOid":"old","baseRefName":"main","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/alpha 11 '{"number":11,"url":"https://github.com/acme/alpha/pull/11","headRefName":"fm/head11","headRefOid":"old","baseRefName":"main","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  mkdir -p "$fixture/after-graphql"
+  printf '%s' '{"number":11,"url":"https://github.com/acme/alpha/pull/11","headRefName":"fm/head11","headRefOid":"new","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":null,"status":"IN_PROGRESS"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}' \
+    > "$fixture/after-graphql/acme__alpha-11.json"
+  fm_write_meta "$home/state/head11.meta" \
+    'window=fm-head11' "worktree=$home/projects/head11" 'project=alpha' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  [ -z "$out" ] || fail "head race mixed passing evidence from the previous head"
+  run_delivery "$home" "$fixture" show | grep -Fq 'checks-pending' \
+    || fail "head race did not classify the revalidated current head"
+  pass "head change retries review evidence for the current head"
+}
+
 test_optional_review_silence() {
   local home fixture out
   home=$(make_world optional)
@@ -268,8 +297,36 @@ test_secondmate_refuses_scan() {
   pass "secondmate home refuses scan"
 }
 
-test_wake_failure_preserves_delivery_state() {
-  local home fixture fp marker rc
+test_wake_failure_remains_retryable() {
+  local home fixture delivered marker rc out
+  home=$(make_world wakepublish)
+  fixture="$TMP_ROOT/fix-wakepublish"
+  setup_project "$home" "$fixture"
+  write_open "$fixture" acme/alpha '[{"number":12,"url":"https://github.com/acme/alpha/pull/12","headRefName":"fm/wake12","headRefOid":"kkk","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/alpha 12 '{"number":12,"url":"https://github.com/acme/alpha/pull/12","headRefName":"fm/wake12","headRefOid":"kkk","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  fm_write_meta "$home/state/wake12.meta" \
+    'window=fm-wake12' "worktree=$home/projects/wake12" 'project=alpha' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+  run_delivery "$home" "$fixture" accelerate 'https://github.com/acme/alpha/pull/12'
+  marker=$(find "$home/state/pr-delivery/accelerate" -type f -name '*.marker' -print -quit)
+  mkdir "$home/state/wake-target"
+  set +e
+  FM_WAKE_QUEUE="$home/state/wake-target" run_delivery "$home" "$fixture" _scan-locked 1 \
+    >"$TMP_ROOT/wakepublish.out" 2>"$TMP_ROOT/wakepublish.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "wake publication failure should fail the scan"
+  delivered=$(find "$home/state/pr-delivery/delivered" -type f -name '*.delivered' -print -quit)
+  [ -z "$delivered" ] || fail "failed wake publication committed delivered marker"
+  [ -f "$marker" ] || fail "failed wake publication removed acceleration marker"
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
+    || fail "failed wake publication was not retried"
+  pass "wake publication failure remains retryable"
+}
+
+test_post_wake_commit_failure_preserves_tracking() {
+  local home fixture fp rc out
   home=$(make_world wakefail)
   fixture="$TMP_ROOT/fix-wakefail"
   setup_project "$home" "$fixture"
@@ -278,30 +335,38 @@ test_wake_failure_preserves_delivery_state() {
   fm_write_meta "$home/state/wake10.meta" \
     'window=fm-wake10' "worktree=$home/projects/wake10" 'project=alpha' \
     'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
-  run_delivery "$home" "$fixture" accelerate 'https://github.com/acme/alpha/pull/10'
-  marker=$(find "$home/state/pr-delivery/accelerate" -type f -name '*.marker' -print -quit)
-  mkdir "$home/state/wake-target"
+  : > "$fixture/fail-delivered-write"
   set +e
-  FM_WAKE_QUEUE="$home/state/wake-target" run_delivery "$home" "$fixture" _scan-locked 1 \
+  run_delivery "$home" "$fixture" _scan-locked 1 \
     >"$TMP_ROOT/wakefail.out" 2>"$TMP_ROOT/wakefail.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "wake publication failure should fail the scan"
+  [ "$rc" -ne 0 ] || fail "delivered-marker failure should fail the scan"
+  grep -Fq $'\tcheck\tpr-delivery\tmerge-eligible:' "$home/state/.wake-queue" \
+    || fail "merge wake was not durable before delivered-marker failure"
   fp=$(find "$home/state/pr-delivery/fingerprints" -type f -name '*.fp' -print -quit)
-  [ -z "$fp" ] || fail "failed wake publication committed eligible fingerprint"
-  [ -f "$marker" ] || fail "failed wake publication removed acceleration marker"
-  pass "wake failure preserves eligible delivery state"
+  [ -n "$fp" ] || fail "published wake lacked independent observation fingerprint"
+  rm -f "$fixture/fail-delivered-write" "$home/state/pr-delivery/delivered"
+  mkdir "$home/state/pr-delivery/delivered"
+  write_open "$fixture" acme/alpha '[]'
+  write_view "$fixture" acme/alpha 10 '{"state":"MERGED","mergedAt":"2026-08-18T00:00:00Z"}'
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  printf '%s\n' "$out" | grep -Fq 'post-merge:' \
+    || fail "observation fingerprint did not preserve post-merge routing"
+  pass "post-wake commit failure preserves post-merge tracking"
 }
 
 test_discovery_without_secondmate
 test_review_issue_then_clearance
 test_migration_hold_clears
 test_base_branch_race
+test_head_change_during_review_fetch
 test_optional_review_silence
 test_post_merge_routing
 test_accelerate_marker
 test_show_blocked_queue
 test_secondmate_refuses_scan
-test_wake_failure_preserves_delivery_state
+test_wake_failure_remains_retryable
+test_post_wake_commit_failure_preserves_tracking
 
 echo "all pr-delivery tests passed"

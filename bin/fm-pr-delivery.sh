@@ -33,6 +33,7 @@ QUEUE_FILE="$DELIVERY_DIR/blocked-queue.tsv"
 SCAN_MARKER="$DELIVERY_DIR/.scan-marker"
 SCAN_LOCK="$STATE/.pr-delivery-scan.lock"
 FINGERPRINT_DIR="$DELIVERY_DIR/fingerprints"
+DELIVERED_DIR="$DELIVERY_DIR/delivered"
 ACCELERATE_DIR="$DELIVERY_DIR/accelerate"
 MERGED_DIR="$DELIVERY_DIR/merged"
 GH_BIN="${GH_BIN:-gh}"
@@ -134,7 +135,7 @@ refuse_secondmate() {
 }
 
 ensure_dirs() {
-  mkdir -p "$DELIVERY_DIR" "$FINGERPRINT_DIR" "$ACCELERATE_DIR" "$MERGED_DIR" || return 1
+  mkdir -p "$DELIVERY_DIR" "$FINGERPRINT_DIR" "$DELIVERED_DIR" "$ACCELERATE_DIR" "$MERGED_DIR" || return 1
   [ ! -L "$DELIVERY_DIR" ] || return 1
 }
 
@@ -371,6 +372,12 @@ fingerprint_path() { # <repo> <number>
   printf '%s/%s-%s.fp\n' "$FINGERPRINT_DIR" "$safe" "$number"
 }
 
+delivered_path() { # <repo> <number>
+  local repo=$1 number=$2 safe
+  safe=$(printf '%s' "$repo" | tr '/:' '__')
+  printf '%s/%s-%s.delivered\n' "$DELIVERED_DIR" "$safe" "$number"
+}
+
 accelerate_path() { # <url>
   local url=$1
   printf '%s/%s.marker\n' "$ACCELERATE_DIR" "$(sha256_text "$url")"
@@ -390,7 +397,7 @@ read_fingerprint() { # <path>
 
 write_fingerprint() { # <path> <value>
   local path=$1 value=$2 tmp
-  tmp=$(mktemp "$FINGERPRINT_DIR/.fp.XXXXXX") || return 1
+  tmp=$(mktemp "${path%/*}/.state.XXXXXX") || return 1
   printf '%s\n' "$value" > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$path"
@@ -404,13 +411,22 @@ gh_fetch_open_prs() { # <repo>
 }
 
 gh_fetch_pr_view() { # <repo> <number>
-  local repo=$1 number=$2 view_json threads_json
-  view_json=$(fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    "$GH_BIN" pr view "$number" --repo "$repo" \
-    --json number,url,headRefName,headRefOid,baseRefName,reviewDecision,mergeable,statusCheckRollup,state 2>/dev/null) || return 1
-  threads_json=$(gh_fetch_review_threads "$repo" "$number") || return 1
-  printf '%s' "$view_json" | jq -c --argjson reviewThreads "$threads_json" \
-    '. + {reviewThreads: $reviewThreads}'
+  local repo=$1 number=$2 view_json thread_snapshot view_head thread_head attempt=0
+  while [ "$attempt" -lt 2 ]; do
+    thread_snapshot=$(gh_fetch_review_threads "$repo" "$number") || return 1
+    view_json=$(fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+      "$GH_BIN" pr view "$number" --repo "$repo" \
+      --json number,url,headRefName,headRefOid,baseRefName,reviewDecision,mergeable,statusCheckRollup,state 2>/dev/null) || return 1
+    thread_head=$(printf '%s' "$thread_snapshot" | jq -r '.head // empty')
+    view_head=$(printf '%s' "$view_json" | jq -r '.headRefOid // empty')
+    if [ -n "$thread_head" ] && [ "$thread_head" = "$view_head" ]; then
+      printf '%s' "$view_json" | jq -c --argjson reviewThreads "$thread_snapshot" \
+        '. + {reviewThreads: {nodes: $reviewThreads.nodes}}'
+      return 0
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 
 gh_fetch_review_threads() { # <repo> <number>
@@ -421,10 +437,12 @@ gh_fetch_review_threads() { # <repo> <number>
   pages=$(fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     "$GH_BIN" api graphql --paginate \
     -f owner="$owner" -f name="$name" -F number="$number" \
-    -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $endCursor) { nodes { isResolved } pageInfo { hasNextPage endCursor } } } } }' \
+    -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid reviewThreads(first: 100, after: $endCursor) { nodes { isResolved } pageInfo { hasNextPage endCursor } } } } }' \
     2>/dev/null) || return 1
-  printf '%s\n' "$pages" | jq -sc \
-    '{nodes: [.[].data.repository.pullRequest.reviewThreads.nodes[]?]}'
+  printf '%s\n' "$pages" | jq -sec '
+    ([.[].data.repository.pullRequest.headRefOid] | unique) as $heads
+    | select(($heads | length) == 1 and ($heads[0] | length) > 0)
+    | {head: $heads[0], nodes: [.[].data.repository.pullRequest.reviewThreads.nodes[]?]}'
 }
 
 gh_fetch_merged_state() { # <repo> <number>
@@ -459,7 +477,7 @@ write_blocked_queue() {
 
 process_pr_record() { # <repo> <project> <pr-json> <deadline> -> sets ACTIONABLE
   local repo=$1 project=$2 pr_json=$3 deadline=$4
-  local classified num url head task fp_path old_fp new_fp accel_path
+  local classified num url head task fp_path delivered marker_fp new_fp accel_path
   [ "$(date +%s)" -lt "$deadline" ] || return 3
   classified=$(classify_pr_json "$repo" "$pr_json") || return 0
   num=$(printf '%s' "$classified" | jq -r '.number')
@@ -470,17 +488,19 @@ process_pr_record() { # <repo> <project> <pr-json> <deadline> -> sets ACTIONABLE
   queue_add_row "$repo" "$num" "$url" "${task:--}" "$REASON_CODE" "$REASON_DETAIL"
   new_fp=$(fingerprint_for "$classified" "$task" "$REASON_CODE")
   fp_path=$(fingerprint_path "$repo" "$num")
-  old_fp=$(read_fingerprint "$fp_path" 2>/dev/null || true)
+  write_fingerprint "$fp_path" "$new_fp" || return 1
+  delivered=$(delivered_path "$repo" "$num")
+  marker_fp=$(read_fingerprint "$delivered" 2>/dev/null || true)
   accel_path=$(accelerate_path "$url")
   if [ "$REASON_CODE" = eligible ]; then
-    if [ "$new_fp" != "$old_fp" ] || [ -f "$accel_path" ]; then
+    if [ "$new_fp" != "$marker_fp" ] || [ -f "$accel_path" ]; then
       ACTIONABLE="merge-eligible: project=$project repo=$repo pr=$num task=${task:-} url=$url head=$head"
-      PENDING_FP_PATH=$fp_path
-      PENDING_FP_VALUE=$new_fp
+      PENDING_DELIVERED_PATH=$delivered
+      PENDING_DELIVERED_VALUE=$new_fp
       PENDING_ACCEL_PATH=$accel_path
     fi
   else
-    write_fingerprint "$fp_path" "$new_fp" || return 1
+    rm -f "$delivered" || return 1
   fi
   OPEN_PR_NUMS="${OPEN_PR_NUMS} ${num}"
   return 0
@@ -506,8 +526,8 @@ write_merged_notice() { # <path>
 }
 
 commit_actionable_state() {
-  if [ -n "${PENDING_FP_PATH:-}" ]; then
-    write_fingerprint "$PENDING_FP_PATH" "$PENDING_FP_VALUE" || return 1
+  if [ -n "${PENDING_DELIVERED_PATH:-}" ]; then
+    write_fingerprint "$PENDING_DELIVERED_PATH" "$PENDING_DELIVERED_VALUE" || return 1
     rm -f "$PENDING_ACCEL_PATH" || return 1
   fi
   if [ -n "${PENDING_NOTICE_PATH:-}" ]; then
@@ -590,8 +610,8 @@ EOF
 scan() {
   local startup=${1:-0} cursor rc=0
   ACTIONABLE=
-  PENDING_FP_PATH=
-  PENDING_FP_VALUE=
+  PENDING_DELIVERED_PATH=
+  PENDING_DELIVERED_VALUE=
   PENDING_ACCEL_PATH=
   PENDING_NOTICE_PATH=
   QUEUE_ROWS=
