@@ -185,13 +185,24 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Fact | Value |
 |---|---|
 | Busy state | Owned lifecycle hooks: `UserPromptSubmit` opens a turn, while `Stop`, `StopFailure`, and `SessionEnd` close it; because Claude fires no hook for a manual interrupt, `bin/fm-control.sh interrupt` reports only delivered keys and the verified endpoint or live agent, publishes no idle event, makes no cancellation claim, and leaves adapter-observed state unchanged, so a mid-turn worker typically remains busy via `claude-hook`. |
+| Autonomy | `--permission-mode auto` (footer shows `⏵⏵ auto mode on`): Claude Code's classifier reviews every action that is not a read or an in-worktree edit instead of prompting, so a crewmate, scout, or secondmate runs unattended. It replaced `--dangerously-skip-permissions`, which Claude Code refuses outright under root (`cannot be used with root/sudo privileges`), so a root-operated fleet could not spawn on claude at all; verified 2026-08-18 on Claude Code 2.1.234, evidence in [`docs/verification/claude.md`](../../../docs/verification/claude.md). |
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
 
-First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
+First launch in a fresh worktree, or first ever on a machine, may show a trust confirmation; the bypass acceptance dialog no longer applies, and auto mode showed no acceptance dialog of its own on 2.1.234 (Claude Code documents only a one-time non-blocking notice for it).
 After every spawn, peek the pane within about 20 seconds.
 If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
+The same peek should show `⏵⏵ auto mode on` in the footer.
+Auto mode exists only for the models Claude Code lists for it (Opus 4.6 or later, Sonnet 4.6 or later, and Fable 5 at the time of writing), and a launch that names any other model, such as Haiku 4.5, starts silently in Manual mode with `⏸ manual mode on · auto mode unavailable for this model` in the footer and parks on its first permission prompt; a claude dispatch profile or `config/secondmate-harness` model token must therefore name an auto-capable model, and a `manual mode on` footer after a spawn is a launch failure to relaunch on a supported model, not a prompt to answer by hand (both footers verified 2026-08-18).
+
+Auto mode is not a full bypass, and what a worker loses is bounded and observable.
+A blocked call does not stall the worker: the model receives `Blocked by classifier` and tries an alternative, and Claude Code lists the call under `/permissions` in its Recently denied tab.
+The documented default blocks that intersect fleet work are discard-style git commands (`git reset --hard`, `git checkout -- .`, `git restore .`, `git clean -fd`, `git stash drop`), `git commit --amend` of a commit the session did not create or already pushed, force pushes, wildcard deletes under `/tmp`, merging a pull request no human approved, and launching another autonomous agent loop; the classifier is contextual rather than a fixed denylist (a session-created scratch repo's `git reset --hard` and a wildcard delete of session-created scratch were both allowed in verification), so treat these as may-be-refused, use-an-alternative, not as never-works.
+After 3 consecutive or 20 total blocks, auto mode pauses and the pane shows an ordinary permission prompt for the blocked call, where an unattended worker waits exactly as it would on a trust dialog; a claude worker that stops responding on such a prompt needs firstmate to answer it (`bin/fm-send.sh <window> --key ...`) or steer it to an allowed alternative, and repeated blocks are the signal that the task itself is asking for a blocked category (documented thresholds, not yet reproduced in a crewmate pane).
+The classifier reads user messages, tool calls, and CLAUDE.md content, never tool results, and explicit `permissions.ask` rules still prompt; firstmate's per-task settings install only hooks, never permission rules, so no fleet-owned rule forces a prompt.
+Claude Code's [permission-modes reference](https://code.claude.com/docs/en/permission-modes) owns the current block and allow lists, and `claude auto-mode defaults` prints them for the installed version.
+A claude secondmate's own spawns, PR merges, and steers all pass through the same classifier and are not yet verified under it; [`docs/verification/claude.md`](../../../docs/verification/claude.md) tracks that gap.
 
 Claude renders a predicted-next-prompt suggestion as dim/faint text inside an otherwise-empty composer after a turn completes.
 A plain `tmux capture-pane` cannot tell that ghost text apart from typed text.
