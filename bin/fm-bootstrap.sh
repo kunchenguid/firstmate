@@ -9,6 +9,7 @@
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
+#                 "STARTUP_MEMORY_BUDGET: startup memory over budget - <total> estimated tokens against an allowance of <budget>; curate it with /stow",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "PR_CHECK_MIGRATION: <private remediation>",
@@ -1097,6 +1098,25 @@ startup_memory_budget_setup() {
   fi
 }
 
+# Detect-only meter reading against the same estimate the /stow curation pass
+# uses, so a home that has drifted past its allowance says so on its own instead
+# of waiting for someone to remember to run that pass. It reports and nothing
+# more: curation is judgement work owned by /stow, and a startup check that
+# blocked or pruned would be the wrong instrument.
+# An unreadable budget stays silent here because startup_memory_budget_setup
+# already owns that diagnostic, and a home whose memory files are absent simply
+# measures zero.
+startup_memory_budget_meter() {
+  local total=0 file
+  fm_startup_memory_budget_read "$CONFIG" >/dev/null 2>&1 || return 0
+  for file in captain.md captain-shared.md learnings.md; do
+    fm_startup_memory_measure_file "$DATA/$file" >/dev/null 2>&1 || return 0
+    total=$((total + FM_STARTUP_MEMORY_MEASURE_TOKENS))
+  done
+  fm_startup_memory_decimal_le "$total" "$FM_STARTUP_MEMORY_BUDGET_VALUE" && return 0
+  echo "STARTUP_MEMORY_BUDGET: startup memory over budget - $total estimated tokens against an allowance of $FM_STARTUP_MEMORY_BUDGET_VALUE; curate it with /stow"
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -1187,6 +1207,7 @@ detect_local_config() {
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
   fi
   crew_dispatch_validate
+  startup_memory_budget_meter
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"

@@ -881,6 +881,96 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
   pass "bootstrap routine contract runs under system /bin/bash"
 }
 
+# The startup-memory allowance had a meter that only the /stow curation pass ever
+# read, so a home could drift far past its budget and inject that cost at every
+# session start with no signal anywhere. Bootstrap now reads the same meter as a
+# detect-only diagnostic. The properties pinned here are that it stays silent for
+# an absent or within-budget home, that it reports the measured total and the
+# allowance when over, and that it works in a secondmate home off the inherited
+# value the primary never materializes locally.
+run_memory_meter_case() {
+  local home=$1 fakebin=$2
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh"
+}
+
+# Writes a file of exactly <bytes> bytes, which the estimator costs at
+# ceil(bytes / 3) tokens.
+write_memory_file() {
+  local path=$1 bytes=$2
+  mkdir -p "$(dirname "$path")"
+  head -c "$bytes" < /dev/zero | tr '\0' 'x' > "$path"
+}
+
+make_memory_meter_home() {
+  local case_dir=$1 budget=$2
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' "$budget" > "$case_dir/home/config/startup-memory-budget"
+  make_fake_toolchain "$case_dir"
+}
+
+test_startup_memory_budget_meter_is_silent_within_budget() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/memory-meter-silent"
+  fakebin=$(make_memory_meter_home "$case_dir" 100)
+
+  out=$(run_memory_meter_case "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "absent memory files must not report over budget, got: $out"
+
+  # 150 bytes across the three files is 50 estimated tokens against 100.
+  write_memory_file "$case_dir/home/data/captain.md" 60
+  write_memory_file "$case_dir/home/data/captain-shared.md" 60
+  write_memory_file "$case_dir/home/data/learnings.md" 30
+  out=$(run_memory_meter_case "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "a within-budget home must stay silent, got: $out"
+
+  pass "bootstrap startup-memory meter is silent when files are absent or within budget"
+}
+
+test_startup_memory_budget_meter_reports_over_budget() {
+  local case_dir fakebin out expected
+  case_dir="$TMP_ROOT/memory-meter-over"
+  fakebin=$(make_memory_meter_home "$case_dir" 100)
+
+  # 303 bytes is 101 estimated tokens: one token past the allowance, so the
+  # comparison boundary itself is pinned rather than a comfortable excess.
+  write_memory_file "$case_dir/home/data/captain.md" 300
+  write_memory_file "$case_dir/home/data/learnings.md" 3
+  expected='STARTUP_MEMORY_BUDGET: startup memory over budget - 101 estimated tokens against an allowance of 100; curate it with /stow'
+  out=$(run_memory_meter_case "$case_dir/home" "$fakebin")
+  [ "$out" = "$expected" ] || fail "expected '$expected', got: $out"
+
+  # One token less is within budget and silent, so the line tracks the measured
+  # total rather than the mere presence of memory files. Each file is costed at
+  # its own ceiling, so dropping the one-token file is what removes that token.
+  rm -f "$case_dir/home/data/learnings.md"
+  out=$(run_memory_meter_case "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "exactly at the allowance must stay silent, got: $out"
+
+  pass "bootstrap startup-memory meter reports the measured total and allowance when over budget"
+}
+
+test_startup_memory_budget_meter_reads_inherited_secondmate_allowance() {
+  local case_dir fakebin out expected
+  case_dir="$TMP_ROOT/memory-meter-secondmate"
+  fakebin=$(make_memory_meter_home "$case_dir" 20)
+  # A secondmate home never materializes its own allowance; it converges the
+  # primary-authoritative value, and the meter must read that inherited file.
+  : > "$case_dir/home/.fm-secondmate-home"
+  write_memory_file "$case_dir/home/data/captain-shared.md" 90
+
+  expected='STARTUP_MEMORY_BUDGET: startup memory over budget - 30 estimated tokens against an allowance of 20; curate it with /stow'
+  out=$(run_memory_meter_case "$case_dir/home" "$fakebin")
+  [ "$out" = "$expected" ] || fail "expected '$expected', got: $out"
+
+  rm -f "$case_dir/home/config/startup-memory-budget"
+  out=$(run_memory_meter_case "$case_dir/home" "$fakebin")
+  [ -z "$out" ] || fail "an unreadable allowance is owned by its own diagnostic, got: $out"
+
+  pass "bootstrap startup-memory meter judges a secondmate home by its inherited allowance"
+}
+
 # FM_BOOTSTRAP_NETWORK splits one bootstrap run into its local and network
 # halves so a session start can compose its digest from the local half alone and
 # run the network half concurrently. The property that has to hold is that the
@@ -1176,3 +1266,6 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_startup_memory_budget_meter_is_silent_within_budget
+test_startup_memory_budget_meter_reports_over_budget
+test_startup_memory_budget_meter_reads_inherited_secondmate_allowance
