@@ -161,14 +161,16 @@ projections. A captain hold is actionable only when every blocker is Done.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
 bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT (default 15 seconds), and
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES. A home summary collects its children's
-no-mistakes evidence up front in one CONCURRENT wave - one `axi status` per ship
-child plus one coarse run inventory per distinct child repository - each query
-bounded by FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT (default 3 seconds) and at most
-FM_SNAPSHOT_SECONDMATE_CHILDREN queries in flight, so child-state cost is that
-one bound rather than one 10-second query per child. Children the wave could not
-answer for fall back to pane/status evidence, and a coarse row never clears a
-child's open captain decision. A remote home summary runs under the remote job
-worker's fixed environment, so these bounds are read from the remote home's own
+no-mistakes evidence up front in two CONCURRENT waves - `axi status` per ship
+child plus one coarse run inventory per distinct child repository, then the ci
+step log for each ci-phase child - each query bounded by
+FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT (default 3 seconds) and at most
+FM_SNAPSHOT_SECONDMATE_CHILDREN queries in flight, so child-state cost is two
+bounds for the home rather than one 10-second query per child. Children a wave
+could not answer for fall back to pane/status evidence, an unanswered ci log
+stays fail-closed as unknown readiness, and a coarse row never clears a child's
+open captain decision. A remote home summary runs under the remote job worker's
+fixed environment, so these bounds are read from the remote home's own
 environment, not the caller's.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
@@ -626,16 +628,22 @@ task_json_lines() {
 # as soon as a home has more than a couple of children - the false "structured
 # home snapshot timed out" result this collection exists to remove.
 #
-# So the home collects child run state ONCE, up front, for the whole home:
-#   - one coarse `no-mistakes runs` inventory per distinct child REPOSITORY, and
-#   - one `no-mistakes axi status` per ship child, for authoritative gate detail,
-# every query bounded by FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT and launched
-# CONCURRENTLY, so the wall-clock cost of the whole wave is that one bound rather
-# than the sum over children. fm-crew-state.sh is then handed each child's own
-# result and issues no query of its own, so a home summary's child-state cost no
-# longer scales with child count. Concurrency is capped at
+# So the home collects child run state ONCE, up front, for the whole home, in two
+# concurrent waves:
+#   1. one coarse `no-mistakes runs` inventory per distinct child REPOSITORY plus
+#      one `no-mistakes axi status` per ship child, for authoritative gate detail;
+#   2. one `axi logs --step ci` per child whose collected status shows a ci-phase
+#      run, keyed by the run id wave 1 just returned - the one read `axi status`
+#      cannot answer (green-but-unmerged vs still-waiting), and the only reason a
+#      second wave exists at all.
+# Every query is bounded by FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT and launched
+# CONCURRENTLY, so wall-clock cost is two bounds for the whole home rather than
+# the sum over children. fm-crew-state.sh is then handed each child's own results
+# and issues no query of its own, so a home summary's child-state cost does not
+# scale with child count; as a backstop its own per-query bound is clamped to the
+# wave bound for the duration of this summary. Concurrency is capped at
 # FM_SNAPSHOT_SECONDMATE_CHILDREN probes per wave, so a home with more children
-# than that cap costs ceil(children / cap) bounds instead of one.
+# than that cap costs ceil(children / cap) bounds per wave instead of one.
 #
 # Repository identity is the scope no-mistakes itself resolves, NOT the task
 # worktree: every ship task runs in its own isolated git worktree leased from the
@@ -656,7 +664,8 @@ SECONDMATE_CHILD_STATE_DIR=
 
 secondmate_child_state_cleanup() {
   [ -n "$SECONDMATE_CHILD_STATE_DIR" ] || return 0
-  rm -f -- "$SECONDMATE_CHILD_STATE_DIR"/* "$SECONDMATE_CHILD_STATE_DIR"/.probes 2>/dev/null || true
+  find "$SECONDMATE_CHILD_STATE_DIR" -mindepth 1 -maxdepth 1 \
+    -exec rm -f -- {} + 2>/dev/null || true
   rmdir -- "$SECONDMATE_CHILD_STATE_DIR" 2>/dev/null || true
   SECONDMATE_CHILD_STATE_DIR=
 }
@@ -675,9 +684,21 @@ secondmate_nm_repo_scope() {  # <worktree>
   ( cd "$(dirname "$common")" 2>/dev/null && pwd -P ) || return 1
 }
 
-# Filesystem-safe, collision-resistant key for a repository scope path.
+# Filesystem-safe key for a repository scope path. The mapping is an explicit
+# registration table rather than a hash of the path, so two distinct clones can
+# never alias onto one inventory file: a scope gets a key only by being recorded
+# in .scopes, and the lookup is an exact whole-line match on that record.
 secondmate_scope_key() {  # <scope>
-  printf '%s' "$1" | cksum | tr -cd '0-9 ' | tr ' ' '-'
+  local table="$SECONDMATE_CHILD_STATE_DIR/.scopes" line n=0
+  [ -f "$table" ] || : > "$table"
+  while IFS= read -r line; do
+    n=$((n + 1))
+    [ "$line" = "$1" ] || continue
+    printf '%s' "$n"
+    return 0
+  done < "$table"
+  printf '%s\n' "$1" >> "$table"
+  printf '%s' "$((n + 1))"
 }
 
 # Run every queued probe, at most $FM_SNAPSHOT_SECONDMATE_CHILDREN at a time.
@@ -697,6 +718,11 @@ secondmate_child_state_probes() {  # <spec-file>
           runs --limit "$limit" \
           > "$SECONDMATE_CHILD_STATE_DIR/inv.$arg" 2>/dev/null &
         ;;
+      cilog)
+        fm_nm_run_bounded "$target" "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
+          axi logs --step ci --run "${arg#*:}" \
+          > "$SECONDMATE_CHILD_STATE_DIR/${arg%%:*}.cilog" 2>/dev/null &
+        ;;
       *) continue ;;
     esac
     running=$((running + 1))
@@ -713,7 +739,7 @@ secondmate_collect_child_state() {
   local meta id worktree scope key spec scopes=''
   command -v no-mistakes >/dev/null 2>&1 || return 1
   SECONDMATE_CHILD_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-child-state.XXXXXX") || return 1
-  trap secondmate_child_state_cleanup EXIT
+  trap secondmate_child_state_cleanup EXIT HUP INT TERM
   spec="$SECONDMATE_CHILD_STATE_DIR/.probes"
   : > "$spec"
   for meta in "$STATE"/*.meta; do
@@ -728,6 +754,7 @@ secondmate_collect_child_state() {
     [ -n "$scope" ] || continue
     key=$(secondmate_scope_key "$scope")
     printf '%s\n' "$scope" > "$SECONDMATE_CHILD_STATE_DIR/$id.scope"
+    printf '%s\n' "$worktree" > "$SECONDMATE_CHILD_STATE_DIR/$id.wt"
     printf 'status\t%s\t%s\n' "$worktree" "$id" >> "$spec"
     case $'\n'"$scopes" in
       *$'\n'"$key"$'\n'*) ;;
@@ -742,7 +769,32 @@ secondmate_collect_child_state() {
     return 1
   fi
   secondmate_child_state_probes "$spec"
+  secondmate_collect_child_ci_logs
   return 0
+}
+
+# `axi status` cannot tell "still waiting on checks" from "checks green, waiting
+# on merge" - only the ci step's own log records that transition, and
+# fm-crew-state.sh reads it for any child whose run is in the ci phase. That read
+# needs the run id the first wave just collected, so it forms a SECOND bounded
+# wave rather than a per-child call escaping into the sequential summary loop.
+# Cost stays two bounds for the whole home instead of one query per child.
+secondmate_collect_child_ci_logs() {
+  local status id run_id spec
+  spec="$SECONDMATE_CHILD_STATE_DIR/.probes.ci"
+  : > "$spec"
+  for status in "$SECONDMATE_CHILD_STATE_DIR"/*.status; do
+    [ -e "$status" ] || continue
+    [ -s "$status" ] || continue
+    id=$(basename "$status"); id=${id%.status}
+    grep -qE '^[[:space:]]*(status:[[:space:]]*"?ci"?|ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,)' \
+      "$status" || continue
+    run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$(cat "$status")" id)")
+    case "$run_id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    printf 'cilog\t%s\t%s:%s\n' "$(cat "$SECONDMATE_CHILD_STATE_DIR/$id.wt")" "$id" "$run_id" >> "$spec"
+  done
+  [ -s "$spec" ] || return 0
+  secondmate_child_state_probes "$spec"
 }
 
 # Hand one child its own pre-collected evidence. The variables are exported when
@@ -752,6 +804,7 @@ secondmate_collect_child_state() {
 secondmate_child_state_env() {  # <id>
   local id=$1 scope key
   unset FM_CREW_STATE_RUN_STATUS FM_CREW_STATE_RUNS_SNAPSHOT FM_CREW_STATE_RUNS_SNAPSHOT_REPO
+  unset FM_CREW_STATE_CI_LOG
   [ -n "$SECONDMATE_CHILD_STATE_DIR" ] || return 0
   [ -f "$SECONDMATE_CHILD_STATE_DIR/$id.scope" ] || return 0
   scope=$(cat "$SECONDMATE_CHILD_STATE_DIR/$id.scope")
@@ -760,7 +813,9 @@ secondmate_child_state_env() {  # <id>
   FM_CREW_STATE_RUN_STATUS=$(cat "$SECONDMATE_CHILD_STATE_DIR/$id.status" 2>/dev/null || true)
   FM_CREW_STATE_RUNS_SNAPSHOT=$(cat "$SECONDMATE_CHILD_STATE_DIR/inv.$key" 2>/dev/null || true)
   FM_CREW_STATE_RUNS_SNAPSHOT_REPO=$scope
+  FM_CREW_STATE_CI_LOG=$(cat "$SECONDMATE_CHILD_STATE_DIR/$id.cilog" 2>/dev/null || true)
   export FM_CREW_STATE_RUN_STATUS FM_CREW_STATE_RUNS_SNAPSHOT FM_CREW_STATE_RUNS_SNAPSHOT_REPO
+  export FM_CREW_STATE_CI_LOG
 }
 
 # Main-home current-inventory validity: same orphan / unstructured-current checks
@@ -1506,7 +1561,15 @@ scout_report_lines() {
 }
 
 unset FM_CREW_STATE_RUN_STATUS FM_CREW_STATE_RUNS_SNAPSHOT FM_CREW_STATE_RUNS_SNAPSHOT_REPO
+unset FM_CREW_STATE_CI_LOG
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
+  # Backstop for the collection below: the per-child reader's own bound is
+  # clamped to this home's wave bound, so any residual or future per-child CLI
+  # read the waves do not pre-collect still cannot cost more than one wave bound
+  # inside this sequential summary. The waves remain the reason child-state cost
+  # does not scale with child count; this only removes the escape hatch.
+  FM_CREW_STATE_NM_TIMEOUT=$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT
+  export FM_CREW_STATE_NM_TIMEOUT
   secondmate_collect_child_state || true
 fi
 

@@ -28,12 +28,15 @@
 #      step detail below is reached with no query at all), and
 #      FM_CREW_STATE_RUNS_SNAPSHOT plus FM_CREW_STATE_RUNS_SNAPSHOT_REPO carry a
 #      bounded coarse inventory and the repository scope it was captured in. A
-#      fleet home summary collects both for every child in one bounded parallel
-#      wave, so its child-state cost does not grow with child count. Either
-#      variable set but EMPTY means the collection already tried and got no
-#      answer, so no query is issued here either and the crew falls through to
-#      its pane/status evidence. A coarse row carries no gate detail, so it never
-#      overrides a still-open keyed decision.
+#      fleet home summary collects these for every child in bounded parallel
+#      waves, so its child-state cost does not grow with child count.
+#      FM_CREW_STATE_CI_LOG carries the ci step log the same way, for the one
+#      distinction `axi status` cannot make (see nm_ci_checks_state). Any of
+#      these variables set but EMPTY means the collection already tried and got
+#      no answer, so no query is issued here either and the crew falls through to
+#      its pane/status evidence (or, for the ci log, to unknown readiness). A
+#      coarse row carries no gate detail, so it never overrides a still-open
+#      keyed decision.
 #      Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
@@ -318,11 +321,20 @@ nm_effective_ci_step_status() {
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
 # green right now, still only waiting on merge/close.
+#
+# A caller that already collected this crew's ci log hands it over through
+# FM_CREW_STATE_CI_LOG. Set but EMPTY means that collection already tried and got
+# no answer, so no query is issued here either and the state stays `unknown`,
+# which is the same fail-closed answer an unanswered query gives.
 nm_ci_checks_state() {
   local run_id log_tail marker
-  run_id=$(strip_quotes "$(nm_field id)")
-  [ -n "$run_id" ] || { printf 'unknown'; return; }
-  log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
+  if [ "${FM_CREW_STATE_CI_LOG+x}" = x ]; then
+    log_tail=$FM_CREW_STATE_CI_LOG
+  else
+    run_id=$(strip_quotes "$(nm_field id)")
+    [ -n "$run_id" ] || { printf 'unknown'; return; }
+    log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
+  fi
   [ -n "$log_tail" ] || { printf 'unknown'; return; }
   marker=$(printf '%s\n' "$log_tail" \
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \

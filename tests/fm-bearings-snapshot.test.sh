@@ -35,7 +35,19 @@ make_fakebin() {  # <dir>
 if [ "${1:-}" = runs ]; then
   [ -z "${FAKE_NM_RUNS:-}" ] || { [ ! -f "$FAKE_NM_RUNS" ] || cat "$FAKE_NM_RUNS"; }
 elif [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
+  if [ "${FAKE_NM_STATUS_CI:-0}" = 1 ]; then
+    # The real CLI answers for the run attributed to the querying worktree, so
+    # the fixture derives branch and head from that worktree's own git state.
+    fake_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || fake_branch=
+    fake_head=$(git rev-parse HEAD 2>/dev/null) || fake_head=
+    printf 'id: run-%s\nbranch: %s\nhead: %s\nstatus: ci\n' \
+      "${fake_branch##*/}" "$fake_branch" "$fake_head"
+    printf 'steps[1]{step,status,detail}:\n  ci, running, monitoring checks\n'
+  fi
   [ -z "${FAKE_NM_STATUS:-}" ] || { [ ! -f "$FAKE_NM_STATUS" ] || cat "$FAKE_NM_STATUS"; }
+elif [ "${1:-}" = axi ] && [ "${2:-}" = logs ]; then
+  [ "${FAKE_NM_LOGS_SLEEP:-0}" != 1 ] || sleep 30
+  [ -z "${FAKE_NM_CILOG:-}" ] || { [ ! -f "$FAKE_NM_CILOG" ] || cat "$FAKE_NM_CILOG"; }
 fi
 exit 0
 SH
@@ -633,6 +645,172 @@ test_multi_child_home_summary_stays_bounded() {
     | .provenance.selected == "structured-home" and .current.reason == null
   ' >/dev/null || fail "multi-child home summary lost its structured state: $canonical"
   pass "multi-child home summary collects child state in one bounded wave"
+}
+
+# The child-state collection stages its probe results under TMPDIR. The timed-out
+# home is exactly the case this feature exists for, and that path terminates the
+# summary's process group with SIGTERM, so cleanup registered only for a normal
+# exit would leak a directory per failing home, forever.
+test_child_state_tempdir_is_cleaned_on_termination() {
+  local home mate wt fakebin tmpdir pid i leaked
+  home=$(make_home termclean-home-state)
+  mate="$TMP_ROOT/termclean-home-state-mate"
+  make_valid_secondmate_home termclean-state "$mate"
+  append_secondmate_registry "$home" termclean-state "$mate"
+  wt="$mate/projects/slow"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b fm/slow
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] slow - Slow child (repo: sample) (kind: ship) (since 2026-08-17)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/slow.meta" \
+    "window=firstmate:fm-slow" "worktree=$wt" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" slow busy
+  printf 'working: slow child\n' > "$mate/state/slow.status"
+  fakebin=$(make_fakebin "$home")
+  tmpdir="$TMP_ROOT/termclean-tmp"
+  mkdir -p "$tmpdir"
+  PATH="$fakebin:$PATH" FM_HOME="$mate" TMPDIR="$tmpdir" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=20 FAKE_NM_SLEEP=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary >/dev/null 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    set -- "$tmpdir"/fm-child-state.*
+    [ -d "$1" ] && break
+    i=$((i + 1))
+    sleep 0.1
+  done
+  set -- "$tmpdir"/fm-child-state.*
+  [ -d "$1" ] || fail "child-state collection never staged a directory under TMPDIR"
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 50 ]; do
+    set -- "$tmpdir"/fm-child-state.*
+    [ -d "$1" ] || break
+    i=$((i + 1))
+    sleep 0.1
+  done
+  leaked=$(find "$tmpdir" -maxdepth 1 -name 'fm-child-state.*' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$leaked" -eq 0 ] \
+    || fail "a terminated home summary leaked $leaked child-state directories under TMPDIR"
+  pass "a terminated home summary cleans up its staged child state"
+}
+
+# `axi status` cannot tell "checks green, waiting on merge" from "still waiting
+# on checks", so a ci-phase child needs the ci step log too. Read per child that
+# is another full-bound no-mistakes call per child, sequentially, on exactly the
+# HEALTHY homes this snapshot is supposed to answer quickly - the same false
+# "structured home snapshot timed out" result by another route. It has to be
+# collected inside the bounded wave, once per child, like every other read.
+test_ci_phase_children_keep_the_summary_bounded() {
+  local home mate fakebin canonical started elapsed i wt logs_calls status_calls
+  home=$(make_home ciphase-home-state)
+  mate="$TMP_ROOT/ciphase-home-state-mate"
+  make_valid_secondmate_home ciphase-state "$mate"
+  append_secondmate_registry "$home" ciphase-state "$mate"
+  fm_write_secondmate_meta "$home/state/ciphase-state.meta" "$mate" \
+    "firstmate:fm-ciphase-state" sample
+  {
+    printf '## In flight\n'
+    for i in 1 2 3; do
+      printf -- '- [ ] ci%s - CI child %s (repo: sample) (kind: ship) (since 2026-08-17)\n' "$i" "$i"
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$mate/data/backlog.md"
+  for i in 1 2 3; do
+    wt="$mate/projects/ci$i"
+    fm_git_init_commit "$wt"
+    git -C "$wt" checkout -q -b "fm/ci$i"
+    fm_write_meta "$mate/state/ci$i.meta" \
+      "window=firstmate:fm-ci$i" "worktree=$wt" "project=sample" \
+      "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$mate/state" "ci$i" busy
+    printf 'working: ci child %s\n' "$i" > "$mate/state/ci$i.status"
+  done
+  fakebin=$(make_fakebin "$home")
+  : > "$home/ci-nm.log"
+  started=$(date +%s)
+  # Healthy, responsive `axi status` reporting a running ci step; only the ci log
+  # read is slow, which is precisely the read that used to escape the wave.
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_TIMEOUT=15 \
+    FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=2 \
+    FAKE_NM_STATUS_CI=1 FAKE_NM_LOGS_SLEEP=1 FAKE_NM_LOG="$home/ci-nm.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 12 ] \
+    || fail "ci-phase child state escaped the bounded wave (${elapsed}s for 3 children)"
+  status_calls=$(grep -c $'\t''axi status$' "$home/ci-nm.log" || true)
+  logs_calls=$(grep -c $'\t''axi logs --step ci' "$home/ci-nm.log" || true)
+  [ "$status_calls" -eq 3 ] \
+    || fail "expected one collected axi status per child, got $status_calls: $(cat "$home/ci-nm.log")"
+  # One ci log read per child, all from the wave. A read escaping into the
+  # sequential summary loop would double this.
+  [ "$logs_calls" -eq 3 ] \
+    || fail "expected one collected ci log per child, got $logs_calls: $(cat "$home/ci-nm.log")"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "ciphase-state")
+    | .provenance.selected == "structured-home"
+      and .current.reason == null
+      and ([.active_children[].id] | sort) == ["ci1","ci2","ci3"]
+  ' >/dev/null || fail "ci-phase home summary lost its structured child state: $canonical"
+  pass "ci-phase children keep their whole child-state collection bounded"
+}
+
+# The ci log is a real product signal, not just a latency problem: a green log
+# means the PR is ready for review rather than still validating. The collected
+# log has to actually drive that verdict.
+test_collected_ci_log_still_reports_checks_green() {
+  local home mate wt fakebin canonical
+  home=$(make_home cigreen-home-state)
+  mate="$TMP_ROOT/cigreen-home-state-mate"
+  make_valid_secondmate_home cigreen-state "$mate"
+  append_secondmate_registry "$home" cigreen-state "$mate"
+  fm_write_secondmate_meta "$home/state/cigreen-state.meta" "$mate" \
+    "firstmate:fm-cigreen-state" sample
+  wt="$mate/projects/green"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b fm/green
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] green - Green CI child (repo: sample) (kind: ship) (since 2026-08-17)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/green.meta" \
+    "window=firstmate:fm-green" "worktree=$wt" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" green busy
+  printf 'working: validating\n' > "$mate/state/green.status"
+  printf 'all CI checks passed - still monitoring until merged or closed\n' \
+    > "$TMP_ROOT/cigreen.log"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FAKE_NM_STATUS_CI=1 FAKE_NM_CILOG="$TMP_ROOT/cigreen.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  # A green ci log turns a still-"ci running" run into a terminal done, which the
+  # home summary reports as an in-flight item contradicting its own inventory -
+  # the deterministic fail-closed shape for a task whose deliverable landed.
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "cigreen-state")
+    | .current.state == "unknown"
+      and (.current.reason | test("terminal child state"))
+      and (.current.reason | test("green=done"))
+  ' >/dev/null || fail "collected ci log did not drive the checks-green verdict: $canonical"
+  pass "a collected green ci log still drives the checks-green verdict"
 }
 
 # A run parked at a captain gate is plain `running` in the coarse inventory, and
@@ -2205,6 +2383,9 @@ test_home_summary_keeps_gate_parked_child_decision
 test_home_summary_never_shares_inventory_across_repositories
 test_multi_child_home_summary_stays_bounded
 test_gate_parked_child_without_logged_decision_is_held
+test_ci_phase_children_keep_the_summary_bounded
+test_collected_ci_log_still_reports_checks_green
+test_child_state_tempdir_is_cleaned_on_termination
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only
