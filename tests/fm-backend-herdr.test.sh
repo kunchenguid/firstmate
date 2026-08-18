@@ -684,6 +684,47 @@ test_bound_space_reassignment_needs_no_recorded_marker() {
   pass "Herdr reassignment retitles a bound Space with no recorded marker and still refuses unknown titles"
 }
 
+test_reassigned_primary_reclaims_its_own_stale_titled_space() {
+  local base home dir log resp fb out
+  base="$TMP_ROOT/identity-primary-reclaim"
+  home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/config" "$resp"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{}}' \
+    > "$home/config/crew-identities.json"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Lt Pullings"}}}' > "$resp/1.out"
+  rm -f "$resp/.count"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact s w-p' \
+      "$ROOT" >/dev/null 2>&1 || fail "the primary could not confirm its own converged title"
+
+  # Reassigned primary, no launcher ancestry: its own stale-titled Space must
+  # still be found (and later retitled), not left orphaned beside a new one.
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"william-mowett","agents":{}}' \
+    > "$home/config/crew-identities.json"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-p","label":"Lt Pullings"},{"workspace_id":"w-x","label":"firstmate"}]}}' \
+    > "$resp/1.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find_all s' "$ROOT")
+  [ "$out" = w-p ] \
+    || fail "a reassigned primary did not reclaim its own stale-titled Space: '$out'"
+
+  # Once the config reserves that same title for another home, it stops being
+  # reclaimable by title alone.
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"william-mowett","agents":{"sd-1":"thomas-pullings"}}' \
+    > "$home/config/crew-identities.json"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-p","label":"Lt Pullings"}]}}' > "$resp/1.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find_all s' "$ROOT")
+  [ -z "$out" ] || fail "a title now reserved for another home was still claimed by label search: '$out'"
+  pass "Herdr reassigned primary reclaims its own recorded stale title but never a reserved one"
+}
+
 test_workspace_find_all_tolerates_registered_project_drift() {
   local base home dir log resp fb out
   base="$TMP_ROOT/identity-find-drift"
@@ -4930,6 +4971,7 @@ test_workspace_identity_reassignment_retitles_this_homes_own_space
 test_unassigned_projection_titles_keep_their_concise_task_label
 test_identity_exchange_never_lets_one_home_adopt_anothers_space
 test_bound_space_reassignment_needs_no_recorded_marker
+test_reassigned_primary_reclaims_its_own_stale_titled_space
 test_workspace_find_all_tolerates_registered_project_drift
 test_exact_legacy_workspace_identity_rename_is_id_bound
 test_cli_helper_sets_env_and_appends_trailing_session_flag

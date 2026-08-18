@@ -504,6 +504,24 @@ fm_backend_herdr_workspace_label_is_own() {  # <label> [<base-identity-label>]
 # deadlocked - an exact canonical title of the configured roster that the live
 # config reserves for nobody. A title the config assigns to another home, or one
 # absent from the roster, is still refused loudly.
+# The recorded prior identity title this home may still RECLAIM by title alone:
+# it exists only because this home itself last wrote it, and the live config
+# reserves it for nobody, so no other home can legitimately be carrying it.
+# Empty otherwise - a reserved or unknown prior title stays undiscoverable.
+fm_backend_herdr_workspace_reclaimable_prior_base() {
+  local prior roster identity
+  local FM_CREW_IDENTITY_CONFIG
+  prior=$(fm_backend_herdr_workspace_recorded_identity_base) || return 0
+  [ -n "$prior" ] || return 0
+  # shellcheck disable=SC2034 # read by the sourced crew-identity library.
+  FM_CREW_IDENTITY_CONFIG=$(fm_backend_herdr_crew_identity_config_path)
+  fm_crew_identity_config_present || return 0
+  roster=$(fm_crew_identity_config_roster) || return 0
+  identity=$(fm_crew_identity_id_for_space_label "$roster" "$prior") || return 0
+  fm_crew_identity_config_assigns "$identity" && return 0
+  printf '%s' "$prior"
+}
+
 fm_backend_herdr_workspace_label_is_own_bound() {  # <label> [<base-identity-label>]
   local candidate=$1 base=${2-} prior stem identity roster
   local FM_CREW_IDENTITY_CONFIG
@@ -1803,7 +1821,7 @@ fm_backend_herdr_server_ensure() {  # <session>
 # home's own Spaces can legitimately carry different titles now: an earlier
 # identity title survives until it is reconciled.
 fm_backend_herdr_workspace_find_all_labelled() {  # <session>
-  local session=$1 label list base rows id lbl legacy
+  local session=$1 label list base rows id lbl legacy prior
   label=$(fm_backend_herdr_workspace_label)
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
   base=$(fm_backend_herdr_workspace_identity_base_label 2>/dev/null) || base=""
@@ -1818,10 +1836,14 @@ fm_backend_herdr_workspace_find_all_labelled() {  # <session>
     # "firstmate", so a legacy-titled primary Space stays out of this query.
     legacy=$(fm_backend_herdr_workspace_legacy_label)
     [ "$legacy" = firstmate ] || legacy=""
+    prior=$(fm_backend_herdr_workspace_reclaimable_prior_base)
     printf '%s\n' "$rows" | while IFS=$'\t' read -r id lbl; do
       [ -n "$id" ] || continue
       [ -z "$legacy" ] || [ "$lbl" != "$legacy" ] || continue
-      fm_backend_herdr_workspace_label_is_own "$lbl" "$base" || continue
+      if ! fm_backend_herdr_workspace_label_is_own "$lbl" "$base"; then
+        [ -n "$prior" ] || continue
+        fm_backend_herdr_workspace_label_matches_base "$lbl" "$prior" || continue
+      fi
       printf '%s\t%s\n' "$id" "$lbl"
     done
     return 0
