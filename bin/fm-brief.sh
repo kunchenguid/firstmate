@@ -54,11 +54,6 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
-# Ship briefs also carry a deliverable-inventory section before the definition
-# of done, worded identically in all three modes: before reporting done the
-# crewmate accounts for every task-named surface it implemented or deliberately
-# skipped, in its pane rather than the one-line status file. Scout and secondmate
-# scaffolds omit it.
 # Refuses to overwrite an existing brief.
 set -eu
 
