@@ -20,12 +20,17 @@ set -u
 FIX="${FM_PR_DELIVERY_FIXTURE:?}"
 repo=''
 num=''
+owner=''
+name=''
 args=("$@")
 i=0
 while [ "$i" -lt "$#" ]; do
   case "${args[$i]}" in
     --repo) repo="${args[$((i+1))]}"; i=$((i+2)); continue ;;
     view) num="${args[$((i+1))]}"; i=$((i+2)); continue ;;
+    owner=*) owner=${args[$i]#owner=}; i=$((i+1)); continue ;;
+    name=*) name=${args[$i]#name=}; i=$((i+1)); continue ;;
+    number=*) num=${args[$i]#number=}; i=$((i+1)); continue ;;
   esac
   i=$((i+1))
 done
@@ -36,9 +41,18 @@ if [ "${1:-}" = pr ] && [ "${2:-}" = list ]; then
   exit 0
 fi
 if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
+  case " $* " in
+    *reviewThreads*) exit 98 ;;
+  esac
   f="$FIX/view/${repo//\//__}-${num}.json"
-  if [ -f "$f" ]; then cat "$f"; exit 0; fi
+  if [ -f "$f" ]; then jq -c 'del(.reviewThreads)' "$f"; exit 0; fi
   printf '{"state":"OPEN"}\n'
+  exit 0
+fi
+if [ "${1:-}" = api ] && [ "${2:-}" = graphql ]; then
+  f="$FIX/view/${owner}__${name}-${num}.json"
+  [ -f "$f" ] || exit 99
+  jq -c '{data:{repository:{pullRequest:{reviewThreads:(.reviewThreads // {nodes:[]})}}}}' "$f"
   exit 0
 fi
 exit 97
@@ -254,6 +268,31 @@ test_secondmate_refuses_scan() {
   pass "secondmate home refuses scan"
 }
 
+test_wake_failure_preserves_delivery_state() {
+  local home fixture fp marker rc
+  home=$(make_world wakefail)
+  fixture="$TMP_ROOT/fix-wakefail"
+  setup_project "$home" "$fixture"
+  write_open "$fixture" acme/alpha '[{"number":10,"url":"https://github.com/acme/alpha/pull/10","headRefName":"fm/wake10","headRefOid":"jjj","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/alpha 10 '{"number":10,"url":"https://github.com/acme/alpha/pull/10","headRefName":"fm/wake10","headRefOid":"jjj","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  fm_write_meta "$home/state/wake10.meta" \
+    'window=fm-wake10' "worktree=$home/projects/wake10" 'project=alpha' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+  run_delivery "$home" "$fixture" accelerate 'https://github.com/acme/alpha/pull/10'
+  marker=$(find "$home/state/pr-delivery/accelerate" -type f -name '*.marker' -print -quit)
+  mkdir "$home/state/wake-target"
+  set +e
+  FM_WAKE_QUEUE="$home/state/wake-target" run_delivery "$home" "$fixture" _scan-locked 1 \
+    >"$TMP_ROOT/wakefail.out" 2>"$TMP_ROOT/wakefail.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "wake publication failure should fail the scan"
+  fp=$(find "$home/state/pr-delivery/fingerprints" -type f -name '*.fp' -print -quit)
+  [ -z "$fp" ] || fail "failed wake publication committed eligible fingerprint"
+  [ -f "$marker" ] || fail "failed wake publication removed acceleration marker"
+  pass "wake failure preserves eligible delivery state"
+}
+
 test_discovery_without_secondmate
 test_review_issue_then_clearance
 test_migration_hold_clears
@@ -263,5 +302,6 @@ test_post_merge_routing
 test_accelerate_marker
 test_show_blocked_queue
 test_secondmate_refuses_scan
+test_wake_failure_preserves_delivery_state
 
 echo "all pr-delivery tests passed"

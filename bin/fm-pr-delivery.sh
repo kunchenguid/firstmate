@@ -404,10 +404,27 @@ gh_fetch_open_prs() { # <repo>
 }
 
 gh_fetch_pr_view() { # <repo> <number>
-  local repo=$1 number=$2
-  fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+  local repo=$1 number=$2 view_json threads_json
+  view_json=$(fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     "$GH_BIN" pr view "$number" --repo "$repo" \
-    --json number,url,headRefName,headRefOid,baseRefName,reviewDecision,mergeable,statusCheckRollup,reviewThreads,state 2>/dev/null
+    --json number,url,headRefName,headRefOid,baseRefName,reviewDecision,mergeable,statusCheckRollup,state 2>/dev/null) || return 1
+  threads_json=$(gh_fetch_review_threads "$repo" "$number") || return 1
+  printf '%s' "$view_json" | jq -c --argjson reviewThreads "$threads_json" \
+    '. + {reviewThreads: $reviewThreads}'
+}
+
+gh_fetch_review_threads() { # <repo> <number>
+  local repo=$1 number=$2 owner name pages
+  owner=${repo%%/*}
+  name=${repo#*/}
+  [ -n "$owner" ] && [ -n "$name" ] && [ "$owner" != "$name" ] || return 1
+  pages=$(fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+    "$GH_BIN" api graphql --paginate \
+    -f owner="$owner" -f name="$name" -F number="$number" \
+    -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $endCursor) { nodes { isResolved } pageInfo { hasNextPage endCursor } } } } }' \
+    2>/dev/null) || return 1
+  printf '%s\n' "$pages" | jq -sc \
+    '{nodes: [.[].data.repository.pullRequest.reviewThreads.nodes[]?]}'
 }
 
 gh_fetch_merged_state() { # <repo> <number>
@@ -454,13 +471,16 @@ process_pr_record() { # <repo> <project> <pr-json> <deadline> -> sets ACTIONABLE
   new_fp=$(fingerprint_for "$classified" "$task" "$REASON_CODE")
   fp_path=$(fingerprint_path "$repo" "$num")
   old_fp=$(read_fingerprint "$fp_path" 2>/dev/null || true)
-  write_fingerprint "$fp_path" "$new_fp" || return 1
   accel_path=$(accelerate_path "$url")
   if [ "$REASON_CODE" = eligible ]; then
     if [ "$new_fp" != "$old_fp" ] || [ -f "$accel_path" ]; then
-      rm -f "$accel_path" 2>/dev/null || true
       ACTIONABLE="merge-eligible: project=$project repo=$repo pr=$num task=${task:-} url=$url head=$head"
+      PENDING_FP_PATH=$fp_path
+      PENDING_FP_VALUE=$new_fp
+      PENDING_ACCEL_PATH=$accel_path
     fi
+  else
+    write_fingerprint "$fp_path" "$new_fp" || return 1
   fi
   OPEN_PR_NUMS="${OPEN_PR_NUMS} ${num}"
   return 0
@@ -474,8 +494,25 @@ check_post_merge() { # <repo> <project> <number> <url> <task>
   state_json=$(gh_fetch_merged_state "$repo" "$number") || return 0
   state=$(printf '%s' "$state_json" | jq -r '.state // empty' 2>/dev/null)
   [ "$state" = MERGED ] || return 0
-  : > "$notice_path"
   ACTIONABLE="post-merge: project=$project repo=$repo pr=$number task=${task:-} url=$url"
+  PENDING_NOTICE_PATH=$notice_path
+}
+
+write_merged_notice() { # <path>
+  local path=$1 tmp
+  tmp=$(mktemp "$MERGED_DIR/.noticed.XXXXXX") || return 1
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$path"
+}
+
+commit_actionable_state() {
+  if [ -n "${PENDING_FP_PATH:-}" ]; then
+    write_fingerprint "$PENDING_FP_PATH" "$PENDING_FP_VALUE" || return 1
+    rm -f "$PENDING_ACCEL_PATH" || return 1
+  fi
+  if [ -n "${PENDING_NOTICE_PATH:-}" ]; then
+    write_merged_notice "$PENDING_NOTICE_PATH" || return 1
+  fi
 }
 
 scan_repo() { # <project> <repo> <deadline>
@@ -553,6 +590,10 @@ EOF
 scan() {
   local startup=${1:-0} cursor rc=0
   ACTIONABLE=
+  PENDING_FP_PATH=
+  PENDING_FP_VALUE=
+  PENDING_ACCEL_PATH=
+  PENDING_NOTICE_PATH=
   QUEUE_ROWS=
   command -v jq >/dev/null 2>&1 || { printf 'fm-pr-delivery: jq not found\n' >&2; return 1; }
   command -v "$GH_BIN" >/dev/null 2>&1 || return 0
@@ -583,6 +624,7 @@ scan() {
   fi
   if [ -n "${ACTIONABLE:-}" ]; then
     fm_wake_append check pr-delivery "$ACTIONABLE" || return 1
+    commit_actionable_state || return 1
     printf '%s\n' "$ACTIONABLE"
   fi
 }
