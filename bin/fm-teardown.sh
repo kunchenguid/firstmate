@@ -2376,9 +2376,30 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
+# Worktree collision guard: when another task's metadata claims the same
+# worktree, skip the CWD-based process reaper to avoid killing a sibling
+# task's agent. Multiple tasks sharing a project directory is a supported
+# pattern (e.g. an anchor task alongside projected workers), so teardown
+# itself must proceed - only the CWD reap is unsafe.
+_td_wt_collision=0
+if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -d "$WT" ]; then
+  for _td_other_meta in "$STATE"/*.meta; do
+    [ -f "$_td_other_meta" ] || continue
+    _td_other_id=$(basename "$_td_other_meta" .meta)
+    [ "$_td_other_id" != "$ID" ] || continue
+    _td_other_wt=$(fm_meta_get "$_td_other_meta" worktree)
+    if [ -n "$_td_other_wt" ] && [ "$_td_other_wt" = "$WT" ]; then
+      echo "warning: task $_td_other_id also claims worktree $WT; skipping CWD-based process reap to protect sibling" >&2
+      _td_wt_collision=1
+      break
+    fi
+  done
+fi
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  if [ "$_td_wt_collision" -eq 0 ]; then
+    reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  fi
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already

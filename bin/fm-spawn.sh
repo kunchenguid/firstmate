@@ -678,6 +678,7 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
+RELAUNCH_ENDPOINT_MISSING=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1016,10 +1017,25 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
+  RELAUNCH_ENDPOINT_MISSING=0
+  case "$RELAUNCH_STATE" in
+    dead)
+      # The endpoint exists but no agent is running - the normal relaunch case.
+      ;;
+    missing)
+      # The endpoint is authoritatively absent from the backend's inventory.
+      # This happens when a pane is destroyed outside teardown (e.g. by a
+      # sibling task's teardown reclaiming a shared worktree, or by an operator
+      # manually closing it). The backend has PROVEN the pane is gone - this is
+      # not a failed read or a timeout. A replacement endpoint will be created
+      # in the same session/workspace, bound to the same task and worktree.
+      RELAUNCH_ENDPOINT_MISSING=1
+      ;;
+    *)
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires either an agent-free endpoint (dead) or a provably absent one (missing); stop the agent first with bin/fm-control.sh $ID exit" >&2
+      exit 1
+      ;;
+  esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -1948,7 +1964,7 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_ENDPOINT_MISSING" -eq 0 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
   # relaunch a REPLACEMENT rather than a second copy of the task: no new
   # terminal, no second worktree, and every uncommitted change left exactly
@@ -1960,6 +1976,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   WT_TARGET=$T
   SES=${T%%:*}
 else
+if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_ENDPOINT_MISSING" -eq 1 ]; then
+  # The recorded endpoint is authoritatively gone. Create a REPLACEMENT
+  # endpoint in the same session/workspace, bound to the same task and
+  # worktree. The worktree is preserved - only the runtime endpoint changes.
+  [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
+  echo "relaunch: endpoint $RELAUNCH_TARGET is provably absent (backend: $BACKEND); creating a replacement" >&2
+fi
 case "$BACKEND" in
   tmux)
     SES=$(fm_backend_tmux_container_ensure)

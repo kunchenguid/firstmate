@@ -1268,7 +1268,7 @@ test_spawn_relaunch_refuses_a_live_agent() {
   add_ship_task "$dir" rl15 claude
   out=$(run_spawn "$dir" rl15 --relaunch --harness claude); rc=$?
   expect_code 1 "$rc" "relaunching into a live endpoint should refuse"
-  assert_contains "$out" "positively agent-free endpoint" "the refusal should demand an agent-free endpoint"
+  assert_contains "$out" "agent-free endpoint" "the refusal should demand an agent-free endpoint"
   assert_contains "$out" "fm-control.sh rl15 exit" "the refusal should point at the way to stop it"
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }

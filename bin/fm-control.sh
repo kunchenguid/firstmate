@@ -442,7 +442,13 @@ do_exit() {
       return 0
       ;;
     alive) ;;
-    missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
+    missing)
+      # The endpoint is authoritatively gone. When called as part of a relaunch,
+      # this is a valid outcome: the agent is definitely not running. When
+      # called standalone (exit verb), die - there is nothing to stop.
+      printf 'already-stopped-missing'
+      return 0
+      ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
@@ -854,6 +860,11 @@ case "$VERB" in
     ;;
   exit)
     result=$(do_exit)
+    case "$result" in
+      already-stopped-missing)
+        die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action"
+        ;;
+    esac
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
   relaunch)
