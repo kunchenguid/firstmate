@@ -309,6 +309,8 @@ test_spawn_tmux_window_construction() {
     "treehouse get must be sent to the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"
+  assert_grep "capture-pane -p -t @spawnwid -S -20" "$rec" \
+    "the pin acknowledgement must be captured from the stable window id"
 
   pass "fm-spawn: appends windows by session-colon, pins the name, and targets the window id"
 }

@@ -2273,7 +2273,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
   pinned=
   pin_seen=0
   for _ in $(seq 1 10); do
-    if fm_backend_capture "$BACKEND" "$T" 20 "$W" 2>/dev/null | grep -Fxq "$pin_ack"; then
+    if fm_backend_capture "$BACKEND" "$WT_TARGET" 20 "$W" 2>/dev/null | grep -Fxq "$pin_ack"; then
       pin_seen=1
     fi
     pinned=$(spawn_current_path "$WT_TARGET" || true)
