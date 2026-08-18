@@ -19,7 +19,8 @@
 # detect-age-identity never prints key material; exit 0 when present, 1 when absent.
 #
 # with-age-key runs the child with SOPS age identity available only inside the
-# child process, then unsets SOPS_AGE_KEY and SOPS_AGE_KEY_FILE before exit.
+# child process, suppresses direct SOPS decrypt stdout, then unsets
+# SOPS_AGE_KEY and SOPS_AGE_KEY_FILE before exit.
 set -u
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -128,6 +129,23 @@ assert_no_key_in_args() {
   done
 }
 
+is_sops_decrypt() {
+  local executable=${1:-} arg
+  shift || true
+  [ "${executable##*/}" = sops ] || return 1
+  for arg in "$@"; do
+    case "$arg" in
+      -d|--decrypt|decrypt)
+        return 0
+        ;;
+      --)
+        return 1
+        ;;
+    esac
+  done
+  return 1
+}
+
 cmd_with_age_key() {
   local mode=${1:-}
   shift || true
@@ -142,7 +160,11 @@ cmd_with_age_key() {
       assert_no_key_in_args "$project_id" "$@"
       command -v bws >/dev/null 2>&1 || die_usage "bws is required for with-age-key bws"
       unset_age_identity
-      bws run --project-id "$project_id" -- "$@"
+      if is_sops_decrypt "$@"; then
+        bws run --project-id "$project_id" -- "$@" >/dev/null
+      else
+        bws run --project-id "$project_id" -- "$@"
+      fi
       local rc=$?
       unset_age_identity
       return "$rc"
@@ -157,7 +179,11 @@ cmd_with_age_key() {
       assert_no_key_in_args "$key_file" "$@"
       [ -r "$key_file" ] || die_usage "KEY_FILE is not readable"
       unset_age_identity
-      SOPS_AGE_KEY_FILE=$key_file "$@"
+      if is_sops_decrypt "$@"; then
+        SOPS_AGE_KEY_FILE=$key_file "$@" >/dev/null
+      else
+        SOPS_AGE_KEY_FILE=$key_file "$@"
+      fi
       local rc=$?
       unset_age_identity
       return "$rc"

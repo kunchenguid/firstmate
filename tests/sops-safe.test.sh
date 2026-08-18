@@ -25,7 +25,7 @@ case "${1:-}" in
       *) printf 'sops 3.9.0\n'; exit 0 ;;
     esac
     ;;
-  --decrypt)
+  -d|--decrypt|decrypt)
     if [ -n "${SOPS_AGE_KEY:-}${SOPS_AGE_KEY_FILE:-}" ] || [ -n "${FM_FAKE_BWS_INJECTED:-}" ]; then
       if [ -n "${FM_FAKE_DECRYPT_MARKER:-}" ]; then
         : > "$FM_FAKE_DECRYPT_MARKER"
@@ -184,30 +184,32 @@ test_with_age_key_refuses_key_in_args() {
 }
 
 test_with_age_key_file_mode() {
-  local key_file marker case_dir fakebin
+  local key_file marker case_dir fakebin out
   key_file="$TMP_ROOT/with-key-file.txt"
   printf 'AGE-SECRET-KEY-TESTKEYTESTKEYTESTKEYTESTKEYTESTKEYTEST\n' > "$key_file"
   chmod 600 "$key_file"
   case_dir="$TMP_ROOT/with-file-mode"
   marker="$case_dir/decrypted"
   fakebin=$(make_fake_sops_age "$case_dir" ready ready)
-  env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE SOPS_AGE_KEY_FILE=should-be-cleared \
+  out=$(env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE SOPS_AGE_KEY_FILE=should-be-cleared \
     FM_FAKE_DECRYPT_MARKER="$marker" PATH="$fakebin:/usr/bin:/bin" \
-    "$HELPER" with-age-key file "$key_file" -- sops --decrypt secret.enc.yaml >/dev/null
+    "$HELPER" with-age-key file "$key_file" -- sops --decrypt secret.enc.yaml)
   [ -f "$marker" ] || fail 'with-age-key file should run child with identity'
+  [ -z "$out" ] || fail 'with-age-key file must suppress decrypted stdout'
   pass 'with-age-key file mode injects identity for child command'
 }
 
 test_with_age_key_bws_mode() {
-  local marker case_dir fakebin bwsbin
+  local marker case_dir fakebin bwsbin out
   case_dir="$TMP_ROOT/with-bws-mode"
   marker="$case_dir/decrypted"
   fakebin=$(make_fake_sops_age "$case_dir" ready ready)
   bwsbin=$(make_fake_bws_run "$case_dir")
-  env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE FM_FAKE_DECRYPT_MARKER="$marker" \
+  out=$(env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE FM_FAKE_DECRYPT_MARKER="$marker" \
     PATH="$bwsbin:$case_dir/fakebin:/usr/bin:/bin" \
-    "$HELPER" with-age-key bws proj-1 -- sops --decrypt secret.enc.yaml >/dev/null
+    "$HELPER" with-age-key bws proj-1 -- sops -d secret.enc.yaml)
   [ -f "$marker" ] || fail 'with-age-key bws should run child through bws run'
+  [ -z "$out" ] || fail 'with-age-key bws must suppress decrypted stdout'
   pass 'with-age-key bws mode delegates to bws run'
 }
 

@@ -58,8 +58,8 @@ Use `scripts/sops-safe.sh` for probes, age-identity detection without printing k
 HELPER="<skill-dir>/scripts/sops-safe.sh"
 "$HELPER" probe
 "$HELPER" detect-age-identity
-"$HELPER" with-age-key bws <PROJECT_ID> -- sops --decrypt file.enc.yaml >/dev/null
-"$HELPER" with-age-key file /path/to/key.txt -- sops --decrypt file.enc.yaml >/dev/null
+"$HELPER" with-age-key bws <PROJECT_ID> -- sops --decrypt file.enc.yaml
+"$HELPER" with-age-key file /path/to/key.txt -- sops --decrypt file.enc.yaml
 ```
 
 `probe` prints `status=`, `sops_version=`, and `age_version=` only.
@@ -79,7 +79,7 @@ Modes:
 - `bws <PROJECT_ID> -- <command...>` runs `bws run --project-id <PROJECT_ID> -- <command...>` so the age key stays in the trusted child environment.
 - `file <KEY_FILE> -- <command...>` sets `SOPS_AGE_KEY_FILE` for the child only when the operator provides a readable key file outside chat.
 
-The wrapper refuses commands whose arguments contain `AGE-SECRET-KEY-...` and unsets `SOPS_AGE_KEY` and `SOPS_AGE_KEY_FILE` after the child exits.
+The wrapper refuses commands whose arguments contain `AGE-SECRET-KEY-...`, suppresses stdout from direct `sops -d`, `sops --decrypt`, and `sops decrypt` commands, and unsets `SOPS_AGE_KEY` and `SOPS_AGE_KEY_FILE` after the child exits.
 
 ## Environment separation
 
