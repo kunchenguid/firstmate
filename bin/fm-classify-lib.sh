@@ -282,14 +282,24 @@ EOF
 # The rule is deliberately generic, so this fold needs no knowledge of any
 # particular owner: a reserved key may only be opened or closed by a line whose
 # note speaks that namespace's own vocabulary, which its owner states by
-# beginning the note with a `<namespace>...:` token. A line failing that is not a
-# decision transition at all here and is folded as ordinary status. This is a
-# consumer-side rule on purpose - it protects local and remote writers
-# identically, and it can never fail a whole delta or wedge a stream the way a
-# writer-side rejection would.
+# beginning the note with a `<namespace>...:` token.  The system's own trusted
+# resolution mechanisms - fm-send.sh --resolve-key ("answered:") and
+# fm-decision-hold.sh ("tracked by") - are recognized as universal resolution
+# vocabulary alongside each namespace's own.  A line failing all vocabulary
+# checks is not a decision transition at all here and is folded as ordinary
+# status.  This is a consumer-side rule on purpose - it protects local and
+# remote writers identically, and it can never fail a whole delta or wedge a
+# stream the way a writer-side rejection would.
 FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT='pending-reply-'
 
-# 0 when <key> is not reserved, or is reserved and <note> speaks its vocabulary.
+# Trusted note prefixes that fm-send.sh --resolve-key and fm-decision-hold.sh
+# write for resolution/transfer lines.  These are accepted as valid vocabulary
+# for closing ANY reserved-key decision, alongside the namespace's own prefix.
+# They are matched as case patterns rather than a list because "tracked by"
+# contains a space, which would break IFS-delimited iteration.
+
+# 0 when <key> is not reserved, or is reserved and <note> speaks its vocabulary
+# (either the namespace's own prefix or a trusted resolution prefix).
 _fm_decision_key_transition_allowed() {  # <key> <note>
   local key=$1 note=$2 prefix
   for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}; do
@@ -297,8 +307,10 @@ _fm_decision_key_transition_allowed() {  # <key> <note>
       "$prefix"*)
         case "$note" in
           "$prefix"*:*) return 0 ;;
-          *) return 1 ;;
+          "answered: "*|"answered:"*) return 0 ;;
+          "tracked by "*) return 0 ;;
         esac
+        return 1
         ;;
     esac
   done
