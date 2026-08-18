@@ -52,15 +52,14 @@ Add this exact line to the project's always-loaded agent instructions (for examp
 
 ## Bundled helper
 
-Use `scripts/sops-safe.sh` for probes, age-identity detection without printing keys, transcript-safe redaction, and trusted age-key injection.
+Use `scripts/sops-safe.sh` for probes, age-identity detection without printing keys, and trusted age-key injection.
 
 ```sh
 HELPER="<skill-dir>/scripts/sops-safe.sh"
 "$HELPER" probe
 "$HELPER" detect-age-identity
-sops --decrypt file.enc.yaml 2>/dev/null | "$HELPER" redact-output
-"$HELPER" with-age-key bws <PROJECT_ID> -- sops --decrypt file.enc.yaml
-"$HELPER" with-age-key file /path/to/key.txt -- sops --decrypt file.enc.yaml
+"$HELPER" with-age-key bws <PROJECT_ID> -- sops --decrypt file.enc.yaml >/dev/null
+"$HELPER" with-age-key file /path/to/key.txt -- sops --decrypt file.enc.yaml >/dev/null
 ```
 
 `probe` prints `status=`, `sops_version=`, and `age_version=` only.
@@ -71,8 +70,8 @@ sops --decrypt file.enc.yaml 2>/dev/null | "$HELPER" redact-output
 It never prints `AGE-SECRET-KEY-...` or file contents.
 Exit 0 means an identity is available to the current process; exit 1 means none.
 
-`redact-output` reads stdin and replaces age private keys and common secret field values with `[REDACTED]` markers.
-Pipe decrypted or edited output through it before chat, logs, or saved diagnostics.
+Decrypted output has no generally safe field allowlist and must never be relayed to chat, logs, or saved diagnostics.
+For verification, discard decrypted stdout and use only the command exit status.
 
 `with-age-key` runs a child command with age identity available only inside that child.
 Modes:
@@ -109,7 +108,7 @@ When the operator supplies a key file, reference only the file path and keep per
 
 ## Authority for mutating work
 
-Read-only operations (probe, metadata inspection, decrypt-for-verification with redacted output) need no extra authority beyond the task itself.
+Read-only operations that do not create files (probe, encrypted metadata inspection, and decrypt-for-verification with stdout discarded) need no extra authority beyond the task itself.
 
 Require current explicit authority naming the target file and environment before:
 
@@ -119,6 +118,7 @@ Require current explicit authority naming the target file and environment before
 - `sops rotate` (data-key rotation)
 - creating or changing `.sops.yaml` creation rules
 - creating, rotating, or deleting age keys or Secrets Manager secrets that hold private keys
+- creating or deleting files containing decrypted values, including temporary files
 
 Refuse mutating requests that name only a directory, only a key alias without environment context, or only a recipient fingerprint without the file set.
 
@@ -137,18 +137,18 @@ Encrypt only with explicit authority naming the plaintext path, output path if d
 2. Never place plaintext secret values in chat or command arguments visible to tools.
 3. Prefer encrypting from a gitignored staging copy when the plaintext must not remain on disk.
 4. Run `sops --encrypt --in-place <file>` or the equivalent your `sops --help` documents for the installed version.
-5. Verify by decrypting inside `with-age-key` and piping through `redact-output`; confirm structure and keys without printing values.
+5. Verify by decrypting inside `with-age-key` with stdout discarded; use the exit status to confirm integrity without printing values.
 6. Remove plaintext staging copies after verification when the workflow created them.
 
 ## Decrypting and inspecting
 
 Decrypt only when the task requires reading content.
-Prefer metadata inspection (`sops --extract`, `sops -d` into a gitignored temp file) over pasting output into chat.
+Prefer encrypted metadata inspection over decrypting values.
 
 1. Run decrypt inside `with-age-key bws` or `with-age-key file`, never with a key in parent arguments.
-2. Pipe stdout through `"$HELPER" redact-output` before logging or relaying.
-3. Write decrypted output only to gitignored temp files with restrictive permissions when a file is required.
-4. Delete temp files in a `trap` or explicit cleanup step before finishing.
+2. Discard stdout when only the decryption result is needed for verification.
+3. Require explicit authority naming the file and environment before writing decrypted output to a restrictive, gitignored temporary file.
+4. Require the same authority to delete that temporary file, and clean it up in a `trap` or explicit cleanup step before finishing.
 
 ## Editing encrypted files
 
@@ -156,7 +156,7 @@ Prefer metadata inspection (`sops --extract`, `sops -d` into a gitignored temp f
 
 1. Confirm the age identity for that environment is available through an approved path.
 2. Run edit inside `with-age-key`.
-3. After edit, verify MAC and decrypt with `redact-output` without printing values.
+3. After edit, verify MAC and decrypt with stdout discarded.
 4. Commit only the encrypted file, never editor backups that might hold plaintext.
 
 ## Recipient update and data-key rotation
@@ -182,7 +182,7 @@ Data-key rotation (`rotate`):
 After encrypt, edit, `updatekeys`, or `rotate`:
 
 1. Confirm `sops` exits 0.
-2. Decrypt inside `with-age-key` and pipe through `redact-output`; check field names and structure only.
+2. Decrypt inside `with-age-key` with stdout discarded and confirm the exit status only.
 3. For GitOps repos, confirm only encrypted blobs changed in the diff.
 4. Never attach decrypted content to PR descriptions, status lines, or chat.
 
@@ -208,5 +208,5 @@ Never retry mutating commands with guessed recipient lists, guessed key files, o
 ## Never commit secrets
 
 Never commit age private keys, plaintext secret files, decrypted output, or command transcripts that contain values.
-Redact before saving diagnostics.
+Do not save diagnostics containing decrypted output.
 Encrypted SOPS files belong in Git; plaintext secrets do not.

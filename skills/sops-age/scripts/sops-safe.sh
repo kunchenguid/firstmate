@@ -3,12 +3,11 @@
 #
 # Owned by skills/sops-age/SKILL.md. Never prints age private keys or decrypted
 # secret values. Consult `sops --help` and `age --help` for flags; this script
-# does not memorize CLI syntax beyond probes, redaction, and key injection.
+# does not memorize CLI syntax beyond probes and key injection.
 #
 # Usage:
 #   sops-safe.sh probe
 #   sops-safe.sh detect-age-identity
-#   sops-safe.sh redact-output
 #   sops-safe.sh with-age-key bws <PROJECT_ID> -- <command...>
 #   sops-safe.sh with-age-key file <KEY_FILE> -- <command...>
 #
@@ -34,7 +33,6 @@ sops-safe.sh - safe helper for Mozilla SOPS and age
 Usage:
   sops-safe.sh probe
   sops-safe.sh detect-age-identity
-  sops-safe.sh redact-output
   sops-safe.sh with-age-key bws <PROJECT_ID> -- <command...>
   sops-safe.sh with-age-key file <KEY_FILE> -- <command...>
 
@@ -117,31 +115,6 @@ cmd_detect_age_identity() {
   exit 1
 }
 
-redact_line() {
-  local line=$1
-  if [[ "$line" =~ $AGE_KEY_PATTERN ]]; then
-    printf '%s\n' "${line//$BASH_REMATCH/[REDACTED_AGE_KEY]}"
-    return 0
-  fi
-  if [[ "$line" =~ ^[[:space:]]*([A-Za-z0-9_.-]+):[[:space:]]*(.+)$ ]]; then
-    local key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]}
-    case "$key" in
-      value|stringData|password|token|secret|apiKey|api_key|private_key|client_secret)
-        printf '%s: [REDACTED]\n' "$key"
-        return 0
-        ;;
-    esac
-  fi
-  printf '%s\n' "$line"
-}
-
-cmd_redact_output() {
-  local line
-  while IFS= read -r line || [ -n "$line" ]; do
-    redact_line "$line"
-  done
-}
-
 unset_age_identity() {
   unset SOPS_AGE_KEY SOPS_AGE_KEY_FILE
 }
@@ -211,10 +184,6 @@ case "$CMD" in
   detect-age-identity)
     [ $# -eq 0 ] || die_usage "detect-age-identity takes no arguments"
     cmd_detect_age_identity
-    ;;
-  redact-output)
-    [ $# -eq 0 ] || die_usage "redact-output reads stdin and takes no arguments"
-    cmd_redact_output
     ;;
   with-age-key)
     cmd_with_age_key "$@"

@@ -387,6 +387,14 @@
     {
       "path": ".agents/skills/bws/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/sops-age/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": ".agents/skills/sops-age/SKILL.md",
+      "audience": "agent-runtime"
     }
   ]
 }

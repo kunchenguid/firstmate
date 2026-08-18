@@ -27,6 +27,9 @@ case "${1:-}" in
     ;;
   --decrypt)
     if [ -n "${SOPS_AGE_KEY:-}${SOPS_AGE_KEY_FILE:-}" ] || [ -n "${FM_FAKE_BWS_INJECTED:-}" ]; then
+      if [ -n "${FM_FAKE_DECRYPT_MARKER:-}" ]; then
+        : > "$FM_FAKE_DECRYPT_MARKER"
+      fi
       printf 'password: super-secret-value\n'
       exit 0
     fi
@@ -164,20 +167,6 @@ test_detect_age_identity_file() {
   pass 'detect-age-identity detects SOPS_AGE_KEY_FILE without echoing it'
 }
 
-test_redact_output_scrubs_keys_and_values() {
-  local out
-  out=$(printf '%s\n' \
-    'AGE-SECRET-KEY-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890AB' \
-    'password: plain-text-secret' \
-    'username: admin' | "$HELPER" redact-output)
-  assert_contains "$out" '[REDACTED_AGE_KEY]' 'redact should scrub age private keys'
-  assert_not_contains "$out" 'AGE-SECRET-KEY-' 'redact must not leave key prefix'
-  assert_contains "$out" 'password: [REDACTED]' 'redact should scrub password values'
-  assert_contains "$out" 'username: admin' 'redact should keep non-secret fields'
-  assert_not_contains "$out" 'plain-text-secret' 'redact must not leak secret values'
-  pass 'redact-output scrubs keys and sensitive field values'
-}
-
 test_with_age_key_refuses_key_in_args() {
   local key_file rc=0
   key_file="$TMP_ROOT/refuse-key-args.txt"
@@ -195,29 +184,30 @@ test_with_age_key_refuses_key_in_args() {
 }
 
 test_with_age_key_file_mode() {
-  local key_file out redacted case_dir fakebin
+  local key_file marker case_dir fakebin
   key_file="$TMP_ROOT/with-key-file.txt"
   printf 'AGE-SECRET-KEY-TESTKEYTESTKEYTESTKEYTESTKEYTESTKEYTEST\n' > "$key_file"
   chmod 600 "$key_file"
   case_dir="$TMP_ROOT/with-file-mode"
+  marker="$case_dir/decrypted"
   fakebin=$(make_fake_sops_age "$case_dir" ready ready)
-  out=$(env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE SOPS_AGE_KEY_FILE=should-be-cleared \
-    PATH="$fakebin:/usr/bin:/bin" "$HELPER" with-age-key file "$key_file" -- sops --decrypt secret.enc.yaml)
-  assert_contains "$out" 'password:' 'with-age-key file should run child with identity'
-  redacted=$(printf '%s\n' "$out" | "$HELPER" redact-output)
-  assert_not_contains "$redacted" 'super-secret-value' 'redact-output should scrub decrypted values'
+  env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE SOPS_AGE_KEY_FILE=should-be-cleared \
+    FM_FAKE_DECRYPT_MARKER="$marker" PATH="$fakebin:/usr/bin:/bin" \
+    "$HELPER" with-age-key file "$key_file" -- sops --decrypt secret.enc.yaml >/dev/null
+  [ -f "$marker" ] || fail 'with-age-key file should run child with identity'
   pass 'with-age-key file mode injects identity for child command'
 }
 
 test_with_age_key_bws_mode() {
-  local out case_dir fakebin bwsbin
+  local marker case_dir fakebin bwsbin
   case_dir="$TMP_ROOT/with-bws-mode"
+  marker="$case_dir/decrypted"
   fakebin=$(make_fake_sops_age "$case_dir" ready ready)
   bwsbin=$(make_fake_bws_run "$case_dir")
-  out=$(env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE \
+  env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE FM_FAKE_DECRYPT_MARKER="$marker" \
     PATH="$bwsbin:$case_dir/fakebin:/usr/bin:/bin" \
-    "$HELPER" with-age-key bws proj-1 -- sops --decrypt secret.enc.yaml)
-  assert_contains "$out" 'password:' 'with-age-key bws should run child through bws run'
+    "$HELPER" with-age-key bws proj-1 -- sops --decrypt secret.enc.yaml >/dev/null
+  [ -f "$marker" ] || fail 'with-age-key bws should run child through bws run'
   pass 'with-age-key bws mode delegates to bws run'
 }
 
@@ -244,7 +234,6 @@ test_probe_age_absent
 test_detect_age_identity_absent
 test_detect_age_identity_env
 test_detect_age_identity_file
-test_redact_output_scrubs_keys_and_values
 test_with_age_key_refuses_key_in_args
 test_with_age_key_file_mode
 test_with_age_key_bws_mode
