@@ -713,6 +713,11 @@ else
   if [ -n "$INACTIVE_OUT" ]; then
     printf 'inactive outcome reconciliation: %s\n' "$INACTIVE_OUT"
   fi
+  PR_DELIVERY_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-pr-delivery.sh" scan --startup 2>&1) || PR_DELIVERY_OUT=
+  if [ -n "$PR_DELIVERY_OUT" ]; then
+    printf 'pr delivery scan: %s\n' "$PR_DELIVERY_OUT"
+  fi
   DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
   if [ -n "$DRAIN_OUT" ]; then
     printf '%s\n' "$DRAIN_OUT"

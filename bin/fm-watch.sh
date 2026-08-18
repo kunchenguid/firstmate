@@ -68,6 +68,9 @@
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
+#   check: pr-delivery     bounded main-home PR delivery scan found a merge-
+#                          eligible PR or a newly merged PR needing post-merge
+#                          routing
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -997,6 +1000,16 @@ while :; do
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
+  fi
+
+  # Bounded main-home PR delivery discovery. Mechanical and silent unless a
+  # merge-eligible or post-merge obligation exists.
+  pr_delivery_out=
+  if pr_delivery_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-pr-delivery.sh" scan 2>/dev/null); then
+    if [ -n "$pr_delivery_out" ]; then
+      wake "check: pr-delivery"
+    fi
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
