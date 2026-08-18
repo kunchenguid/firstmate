@@ -1778,6 +1778,7 @@ fm_backend_herdr_project_workspace_ensure() {  # <session> <project-dir> <state-
     case "$status" in
       0)
         FM_BACKEND_HERDR_PROJECT_WS_ID=$FM_BACKEND_HERDR_PROJECT_BOUND_WORKSPACE_ID
+        [ -n "$FM_BACKEND_HERDR_PROJECT_WS_ID" ] || return 1
         return 0
         ;;
       2) ;;
@@ -1807,6 +1808,8 @@ fm_backend_herdr_project_workspace_ensure() {  # <session> <project-dir> <state-
   }
   FM_BACKEND_HERDR_PROJECT_WS_ID=$wsid
   FM_BACKEND_HERDR_PROJECT_WS_SEEDED_TAB_ID=$seeded
+  [ -n "$FM_BACKEND_HERDR_PROJECT_WS_ID" ] \
+    && [ -n "$FM_BACKEND_HERDR_PROJECT_WS_SEEDED_TAB_ID" ] || return 1
   return 0
 }
 
