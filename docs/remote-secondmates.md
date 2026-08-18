@@ -168,6 +168,11 @@ Send routed requests normally:
 FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
 ```
 
+The [`fm-send.sh` header](../bin/fm-send.sh) owns the exact delivery-status contract.
+When the verified remote endpoint accepts the text and Enter but synchronous submit confirmation remains pending, the primary reports the request as delivered rather than failed; do not resend it, because its pending-reply expectation remains armed.
+`fm-peek.sh` and `fm-crew-state.sh` route remote-secondmate reads to the endpoint's host instead of consulting local worktree or backend state.
+An unreachable or unreadable remote read is unknown, not evidence that the endpoint is dead.
+
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
 A process-event source performs a non-destructive, cursor-anchored delta read, fetches only referenced `data/*.md` documents through the confined reader, mirrors every content-bearing line at most once into the primary status channel, and does not carry blank separators.
@@ -231,6 +236,9 @@ The lifecycle test covers seeding a registered project that this machine has nev
 
 ```sh
 bin/fm-test-run.sh tests/fm-on.test.sh
+bin/fm-test-run.sh tests/fm-send-remote-delivery.test.sh
+bin/fm-test-run.sh tests/fm-peek-remote.test.sh
+bin/fm-test-run.sh tests/fm-crew-state.test.sh
 bin/fm-test-run.sh tests/fm-remote-job.test.sh
 bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
 bin/fm-test-run.sh tests/fm-project-origin.test.sh
