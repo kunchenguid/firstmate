@@ -259,6 +259,30 @@ test_incremental_agrees_with_full_fold_across_appends() {
   pass "the incremental fold matches the full fold across appends in both key positions"
 }
 
+test_paused_key_mention_never_closes_a_decision() {
+  local dir f expected full incr
+  dir=$(case_dir paused-mention)
+  f="$dir/t.status"
+  printf 'needs-decision [key=review-gate-m3-recv-core]: choose the review path\n' > "$f"
+  printf 'paused: awaiting captain decision on [key=review-gate-m3-recv-core] before continuing\n' >> "$f"
+  expected=$(printf 'review-gate-m3-recv-core\tneeds-decision\tchoose the review path\n')
+  assert_fold "$f" "$expected" "a pause that mentions the key in prose"
+
+  # The closing-verb names are overridable for compatibility. Even if one
+  # consumer inherits a conflicting override, the configured pause verb must
+  # remain a no-op so its full fold cannot disagree with a normal drain fold.
+  full=$(FM_CLASSIFY_RESOLVE_VERB=paused status_open_decisions "$f")
+  [ "$full" = "$expected" ] \
+    || fail "a resolve-verb collision let the pause close the full fold: '$full'"
+  incr=$(FM_CLASSIFY_CAPTAIN_HELD_VERB=paused status_open_decisions_incremental "$f")
+  [ "$incr" = "$expected" ] \
+    || fail "a held-verb collision let the pause close the incremental fold: '$incr'"
+
+  printf 'resolved [key=review-gate-m3-recv-core]: answered: use the core path\n' >> "$f"
+  assert_fold "$f" "" "an explicit resolution after a pause"
+  pass "a paused key mention never closes a decision; an explicit resolution does"
+}
+
 test_stated_key_is_honored_in_both_positions
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
@@ -272,3 +296,4 @@ test_corr_only_tag_opens_as_default_like_a_bare_line
 test_key_only_before_colon_still_opens_no_regression
 test_blocked_and_resolved_are_tag_order_independent
 test_incremental_agrees_with_full_fold_across_appends
+test_paused_key_mention_never_closes_a_decision
