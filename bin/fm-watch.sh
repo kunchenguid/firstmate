@@ -161,11 +161,13 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
-# pane is absorbed rather than wedge-escalated.
-# A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once.
-# These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
-# longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
+# pane is absorbed rather than wedge-escalated - whether the underlying agent
+# process is alive (the ordinary case: the crew is genuinely idling) or has
+# confidently exited (a captain-held or paused crew whose agent is gone). An
+# ambiguously read agent with no authoritative paused verdict of its own still
+# surfaces. Both paused cases re-surface once for a recheck every
+# PAUSE_RESURFACE_SECS - far longer than the wedge threshold, but finite so a
+# forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
@@ -372,8 +374,12 @@ clear_pause_tracking() {  # <window>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+# A live agent is the NORMAL case for a declared pause (AGENTS.md's paused:
+# contract is a live crew deliberately idling on a known external wait), so
+# liveness never demotes an already-paused verdict. It only PROMOTES a "none"
+# verdict (fm-crew-state has fallen back to stopped/unknown, e.g. a
+# captain-held transfer with no authoritative paused state of its own) to
+# paused, and only when the agent is confidently dead.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -387,14 +393,6 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
     printf 'paused'
     return
   fi
@@ -404,15 +402,10 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
-  if [ "$(window_kind "$win")" != secondmate ]; then
+  if [ "$class" != paused ] && [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
-      return
-    fi
+    [ "$agent_alive" = dead ] && class=paused
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
     *) rm -f "$recheck_file" ;;
