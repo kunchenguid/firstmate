@@ -283,10 +283,6 @@ log_reports_ci_ready() {
   esac
 }
 
-nm_ci_step_status() {
-  fm_nm_ci_step_row_status "$RUN_OUT"
-}
-
 nm_effective_ci_step_status() {
   fm_nm_effective_ci_step_status "$RUN_OUT" "${RUN_STATUS:-}"
 }
