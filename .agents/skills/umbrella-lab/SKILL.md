@@ -46,6 +46,15 @@ Ship that contract as its own ordinary task and let it merge before any dependen
 Never delegate a per-repo task whose contract is still prose; if it has not landed as code, the work belongs back in the lab.
 Teardown keeps `DESIGN.md` and discards the scratch worktrees, and follows the same unresolved-decision completion gate scouts use (`decision-hold-lifecycle`).
 
+## Epic-design output standard
+
+The lab's design is the start of an epic, so its durable output conforms to your fleet's epic template and epic-convention, not to whatever harness produced it.
+`DESIGN.md`, and any `epic.md` scaffolded from it, must match that shared template; the template is the standard, not the harness.
+Point at your fleet's own epic template and convention rather than copying its shape here, because that template is its single owner.
+Running umbrellas in parallel on different harnesses or models is fine and expected, one independent workspace per lab (`fm-umbrella.sh create`); consistency comes from the shared template, not from all labs sharing one harness or model.
+The template exists to carry two rules every epic inherits: its stories land as PRs into `epic/<slug>` with evidence and firstmate review, and the full epic is validated by no-mistakes before it ships.
+Parallel-on-different-harness never means autonomous design crews: architecture stays captain-direct tech-lead work, never delegated to a spawned scout, exactly as this skill already requires.
+
 ## Not yet built
 
 Only the lab itself (`create`/`teardown`/`list`) is implemented.
