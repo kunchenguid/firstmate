@@ -278,6 +278,7 @@ Polling runs every cycle and remains the permanent fallback when protocol 16, th
 There is still one watcher process; the event reader is a bounded child of that watcher.
 
 `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
+The capability probe matches the large `herdr api schema` in-process rather than through a pipe, so a watcher that inherited an ignored SIGPIPE cannot spam broken-pipe write errors; `tests/fm-backend-herdr.test.sh` pins this.
 
 ## Away-mode supervisor support
 
