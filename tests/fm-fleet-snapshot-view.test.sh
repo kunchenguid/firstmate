@@ -672,7 +672,20 @@ test_identity_records_stay_correct_when_rosters_repeat_and_fail() {
     and $t["unassigned"] == {s:"unassigned",l:"Unassigned crew"}
     and $t["plain"] == {s:"absent",l:null}
   ' >/dev/null || fail "reused roster lookups changed captain-facing identity records: $out"
-  pass "fleet snapshot reuses roster lookups without changing identity records"
+
+  fm_write_meta "$home/state/.symlinked-source.meta" \
+    "window=firstmate:fm-symlinked" "project=theta" "harness=codex" "kind=ship" \
+    "crew_roster=master-and-commander" "crew_identity=john-allen"
+  ln -sf "$home/state/.symlinked-source.meta" "$home/state/symlinked.meta"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "one unreadable crew identity record aborted the whole fleet snapshot"
+  printf '%s' "$out" | jq -e '
+    ([.tasks[] | {key:.id,value:.crew_identity.status}] | from_entries) as $t
+    | $t["symlinked"] == "invalid"
+    and $t["dup-a"] == "assigned"
+    and $t["plain"] == "absent"
+  ' >/dev/null || fail "an unreadable identity record did not degrade to a single invalid task: $out"
+  pass "fleet snapshot reuses roster lookups and degrades unreadable identity metadata per task"
 }
 
 # A still-open decision must survive a LATER, UNRELATED terminal event on the same

@@ -71,9 +71,11 @@ The configuration is primary-authoritative and inherited into secondmate homes t
 After a mid-session edit, run `bin/fm-config-push.sh` to converge live secondmate homes.
 For Herdr homes upgraded while Spaces are already open, run `bin/fm-crew-identity-migrate-herdr.sh [<session>]`, which falls back to `HERDR_SESSION`, from the lock-owning primary session inside its exact primary Space.
 The migration captures missing active metadata, then renames only exact workspace ids whose current titles match their expected legacy titles; a changed, ambiguous, foreign, duplicate, or incomplete binding is refused.
+It reports how many Space titles it actually renamed, so a converged rerun reports zero.
 It never stops or restarts an agent.
 The Aubrey/Pullings example renders the primary Space as `Lt Pullings`; configured agents use the roster's short canonical labels, such as `Mr Allen`, `Dr Maturin`, and `Lt Mowett`.
 A project-owning persistent secondmate Space appends its exact registered repository slug, for example `Mr Allen — developer-setup` and `Lt Mowett — pco-projects-mda`; project-less agents stay name-only.
+Reassigning an identity retitles that home's own Space on the next spawn or relaunch, because each home records the identity title it last applied to itself; another home's title is still refused loudly.
 Full names and expanded ranks remain in charters and detailed fleet JSON.
 
 ## Pi Calm preference (config/calm)

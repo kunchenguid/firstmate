@@ -450,6 +450,74 @@ test_workspace_identity_rename_uses_recorded_metadata_over_live_config() {
   pass "Herdr identity renames follow recorded task metadata, not later live config edits"
 }
 
+test_workspace_identity_reassignment_retitles_this_homes_own_space() {
+  local base home dir log resp fb out
+  base="$TMP_ROOT/identity-reassignment"
+  home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/config" "$resp"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{}}' \
+    > "$home/config/crew-identities.json"
+
+  # A converged Space is not renamed, and reports no title change.
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Lt Pullings"}}}' > "$resp/1.out"
+  rm -f "$resp/.count"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"
+       fm_backend_herdr_workspace_identity_rename_exact s w-p || exit 1
+       printf "%s" "$FM_BACKEND_HERDR_WORKSPACE_TITLE_CHANGED"' "$ROOT" 2>&1) \
+    || fail "a converged primary Space title was refused: $out"
+  [ "$out" = 0 ] || fail "a converged Space reported a title change: $out"
+  assert_not_contains "$(cat "$log")" "rename" "a converged Space title was renamed anyway"
+
+  # The captain deliberately reassigns the primary identity: the home's own
+  # previous title must be retitled, not deadlocked.
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"william-mowett","agents":{}}' \
+    > "$home/config/crew-identities.json"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Lt Pullings"}}}' > "$resp/1.out"
+  : > "$resp/2.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Lt Mowett"}}}' > "$resp/3.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"
+       fm_backend_herdr_workspace_identity_rename_exact s w-p || exit 1
+       printf "%s" "$FM_BACKEND_HERDR_WORKSPACE_TITLE_CHANGED"' "$ROOT" 2>&1) \
+    || fail "a deliberate identity reassignment deadlocked this home's own Space: $out"
+  [ "$out" = 1 ] || fail "an applied rename did not report a title change: $out"
+  assert_contains "$(cat "$log")" $'workspace\x1frename\x1fw-p\x1fLt Mowett' \
+    "the reassigned identity title was not applied"
+
+  # Another crew member's title is still refused untouched.
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Dr Maturin"}}}' > "$resp/1.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact s w-p' \
+      "$ROOT" 2>&1) && fail "a foreign identity title was accepted as this home's own"
+  assert_contains "$out" "refusing identity rename" "the foreign-title refusal did not explain itself"
+  assert_not_contains "$(cat "$log")" "rename" "a foreign Space title was renamed"
+  pass "Herdr identity reassignment retitles this home's own prior Space and still refuses foreign titles"
+}
+
+test_unassigned_projection_titles_keep_their_concise_task_label() {
+  local token assigned unassigned other
+  token='AbCdEfGhIjKlMnOpQrStUv'
+  assigned=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_workspace_label fm-task-one "$1" "Mr Allen"' "$ROOT" "$token")
+  [ "$assigned" = "└ Mr Allen · p:$token" ] || fail "an assigned projection title changed: $assigned"
+  unassigned=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_workspace_label fm-task-one "$1" "Unassigned crew"' "$ROOT" "$token")
+  other=$(bash -c '. "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_workspace_label fm-task-two "$1" "Unassigned crew"' "$ROOT" "$token")
+  [ "$unassigned" = "└ Unassigned crew · task-one · p:$token" ] \
+    || fail "an unassigned projection title lost its concise task label: $unassigned"
+  [ "$unassigned" != "$other" ] \
+    || fail "two concurrent unassigned projections rendered identical titles"
+  pass "Herdr unassigned projection titles keep the concise task label beside the projection token"
+}
+
 test_projection_journal_v2_stays_valid_once_identity_config_appears() {
   local dir state home config out
   dir="$TMP_ROOT/projection-journal-v2-identity-later"; state="$dir/state"; home="$dir/home"
@@ -4783,6 +4851,8 @@ test_workspace_identity_rename_follows_registered_project_transitions
 test_workspace_identity_title_prefers_character_and_slug_over_a_generic_role
 test_workspace_identity_rename_preserves_a_recorded_title_without_config
 test_workspace_identity_rename_uses_recorded_metadata_over_live_config
+test_workspace_identity_reassignment_retitles_this_homes_own_space
+test_unassigned_projection_titles_keep_their_concise_task_label
 test_workspace_find_all_tolerates_registered_project_drift
 test_exact_legacy_workspace_identity_rename_is_id_bound
 test_cli_helper_sets_env_and_appends_trailing_session_flag

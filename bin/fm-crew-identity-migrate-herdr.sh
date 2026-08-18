@@ -76,12 +76,14 @@ fm_backend_herdr_launcher_identity "$SESSION" || {
   echo "error: current Herdr launcher ancestry does not identify one exact primary Space in session '$SESSION'" >&2
   exit 1
 }
+MIGRATED=0
 FM_CREW_IDENTITY_CONFIG_OVERRIDE="$CONFIG/crew-identities.json" \
   FM_HOME="$FM_HOME" fm_backend_herdr_workspace_identity_rename_exact \
     "$SESSION" "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID" || {
       echo "error: could not safely migrate the primary Herdr Space title" >&2
       exit 1
     }
+MIGRATED=$((MIGRATED + FM_BACKEND_HERDR_WORKSPACE_TITLE_CHANGED))
 
 capture_identity_metadata() { # <meta> <task-id> <identity>
   local meta=$1 id=$2 identity=$3 lock tmp
@@ -124,7 +126,6 @@ capture_identity_metadata() { # <meta> <task-id> <identity>
   fm_lock_release "$lock" || return 1
 }
 
-MIGRATED=1
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] && [ ! -L "$meta" ] || continue
   id=$(basename "$meta" .meta)
@@ -153,7 +154,7 @@ for meta in "$STATE"/*.meta; do
           echo "error: could not safely migrate secondmate '$id' Herdr Space title" >&2
           exit 1
         }
-    MIGRATED=$((MIGRATED + 1))
+    MIGRATED=$((MIGRATED + FM_BACKEND_HERDR_WORKSPACE_TITLE_CHANGED))
   else
     journal="$STATE/$id$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"
     [ -e "$journal" ] || continue
@@ -162,8 +163,8 @@ for meta in "$STATE"/*.meta; do
         echo "error: could not safely migrate projected Herdr Space for '$id'" >&2
         exit 1
       }
-    MIGRATED=$((MIGRATED + 1))
+    MIGRATED=$((MIGRATED + FM_BACKEND_HERDR_WORKSPACE_TITLE_CHANGED))
   fi
 done
 
-printf 'migrated %s exact Herdr Space title(s) to configured crew identities\n' "$MIGRATED"
+printf 'renamed %s exact Herdr Space title(s) to configured crew identities\n' "$MIGRATED"

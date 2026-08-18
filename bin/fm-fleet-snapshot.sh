@@ -246,8 +246,11 @@ crew_identity_record_for_meta_json() {  # <meta-file>
     CREW_IDENTITY_META_JSON=$(jq -n '{status:"invalid",assigned:false,roster:null,id:null,space_label:null,full_name:null,shipboard_role:null,affinities:[],error:"crew_roster and crew_identity must each appear exactly once"}')
     return 0
   fi
-  roster=$(fm_crew_identity_meta_value "$meta" crew_roster) || return 1
-  identity=$(fm_crew_identity_meta_value "$meta" crew_identity) || return 1
+  if ! roster=$(fm_crew_identity_meta_value "$meta" crew_roster) \
+     || ! identity=$(fm_crew_identity_meta_value "$meta" crew_identity); then
+    CREW_IDENTITY_META_JSON=$(jq -n '{status:"invalid",assigned:false,roster:null,id:null,space_label:null,full_name:null,shipboard_role:null,affinities:[],error:"crew identity metadata is unreadable"}')
+    return 0
+  fi
   if ! crew_roster_valid_cached "$roster"; then
     CREW_IDENTITY_META_JSON=$(jq -n --arg roster "$roster" --arg identity "$identity" '{status:"invalid",assigned:false,roster:$roster,id:$identity,space_label:null,full_name:null,shipboard_role:null,affinities:[],error:"recorded crew roster is invalid or unavailable"}')
     return 0

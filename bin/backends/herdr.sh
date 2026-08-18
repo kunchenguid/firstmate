@@ -134,6 +134,8 @@ FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
 # The primary firstmate home never carries this marker.
 FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
+FM_BACKEND_HERDR_SPACE_TITLE_MARKER=".fm-herdr-space-identity"
+FM_BACKEND_HERDR_WORKSPACE_TITLE_CHANGED=0
 # The presentation projection is intentionally separate from the authoritative
 # task endpoint record.
 # A per-task journal lives under state/ as <id>.herdr-presentation.
@@ -442,16 +444,10 @@ fm_backend_herdr_workspace_legacy_label() {
   printf 'firstmate'
 }
 
-# fm_backend_herdr_workspace_label_is_own: does <label> belong to THIS home?
-# The owned set is this home's legacy title plus every title its own assigned
-# identity can currently or previously have carried - name-only, and name plus
-# any syntactically valid registered repository slug. A home's registered
-# project set is mutable, so its durable Space title is not; identity ownership
-# is what stays exact here. Refuses every other label.
-fm_backend_herdr_workspace_label_is_own() {  # <label> [<base-identity-label>]
-  local candidate=$1 base=${2-} remainder
-  [ -n "${2+set}" ] || base=$(fm_backend_herdr_workspace_identity_base_label) || return 1
-  [ "$candidate" = "$(fm_backend_herdr_workspace_legacy_label)" ] && return 0
+# fm_backend_herdr_workspace_label_matches_base: <label> is <base> name-only,
+# or <base> plus one syntactically valid registered repository slug.
+fm_backend_herdr_workspace_label_matches_base() {  # <label> <base-identity-label>
+  local candidate=$1 base=$2 remainder
   [ -n "$base" ] || return 1
   [ "$candidate" != "$base" ] || return 0
   case "$candidate" in
@@ -464,6 +460,47 @@ fm_backend_herdr_workspace_label_is_own() {  # <label> [<base-identity-label>]
   return 0
 }
 
+# The name-only identity title this home last actually put on its own Space,
+# recorded whenever a title is applied. It is what makes a deliberate identity
+# REASSIGNMENT renameable rather than deadlocked: the outgoing title is this
+# home's own history, not a foreign Space. Nothing mechanical reads it.
+fm_backend_herdr_workspace_recorded_identity_base() {
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SPACE_TITLE_MARKER" line
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  IFS= read -r line < "$marker" 2>/dev/null || return 0
+  printf '%s' "$line"
+}
+
+fm_backend_herdr_workspace_record_identity_base() {  # <base-identity-label>
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SPACE_TITLE_MARKER" base=$1 tmp
+  [ -n "$base" ] && [ -d "$FM_HOME" ] || return 0
+  [ ! -L "$marker" ] || return 0
+  tmp=$(mktemp "$FM_HOME/.fm-herdr-space-identity.XXXXXX" 2>/dev/null) || return 0
+  if printf '%s\n' "$base" > "$tmp" && mv -f "$tmp" "$marker"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 0
+}
+
+# fm_backend_herdr_workspace_label_is_own: does <label> belong to THIS home?
+# The owned set is this home's legacy title, every title its own assigned
+# identity can currently or previously have carried - name-only, and name plus
+# any syntactically valid registered repository slug - and the same forms of the
+# identity title this home last recorded for itself, so a supported reassignment
+# retitles instead of refusing. A home's registered project set is mutable, so
+# its durable Space title is not; identity ownership is what stays exact here.
+# Refuses every other label, including another home's identity title.
+fm_backend_herdr_workspace_label_is_own() {  # <label> [<base-identity-label>]
+  local candidate=$1 base=${2-} prior
+  [ -n "${2+set}" ] || base=$(fm_backend_herdr_workspace_identity_base_label) || return 1
+  [ "$candidate" = "$(fm_backend_herdr_workspace_legacy_label)" ] && return 0
+  fm_backend_herdr_workspace_label_matches_base "$candidate" "$base" && return 0
+  prior=$(fm_backend_herdr_workspace_recorded_identity_base) || return 1
+  [ -n "$prior" ] || return 1
+  fm_backend_herdr_workspace_label_matches_base "$candidate" "$prior"
+}
+
 # Rename only one exact workspace id that this same home already owns - its
 # legacy title or any of its own identity titles, including one left behind by
 # an earlier registered-project set. The workspace id comes from launcher
@@ -471,6 +508,7 @@ fm_backend_herdr_workspace_label_is_own() {  # <label> [<base-identity-label>]
 # unreadable binding refuses without touching another Space.
 fm_backend_herdr_workspace_identity_rename_exact() { # <session> <workspace-id> [<recorded-roster> <recorded-identity>]
   local session=$1 workspace=$2 roster=${3-} identity=${4-} desired base out current verify
+  FM_BACKEND_HERDR_WORKSPACE_TITLE_CHANGED=0
   if [ -n "$roster" ] && [ -n "$identity" ]; then
     [ "$identity" != unassigned ] || return 0
     base=$(fm_crew_identity_space_label "$roster" "$identity") || return 1
@@ -487,15 +525,20 @@ fm_backend_herdr_workspace_identity_rename_exact() { # <session> <workspace-id> 
   out=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
   current=$(printf '%s' "$out" | jq -er --arg workspace "$workspace" \
     'select(.result.workspace.workspace_id == $workspace) | .result.workspace.label' 2>/dev/null) || return 1
-  [ "$current" != "$desired" ] || return 0
+  if [ "$current" = "$desired" ]; then
+    fm_backend_herdr_workspace_record_identity_base "$base"
+    return 0
+  fi
   fm_backend_herdr_workspace_label_is_own "$current" "$base" || {
-    echo "error: Herdr workspace '$workspace' is labelled '$current', which is not one of this home's own titles (legacy '$(fm_backend_herdr_workspace_legacy_label)' or identity '$base'); refusing identity rename" >&2
+    echo "error: Herdr workspace '$workspace' is labelled '$current', which is not one of this home's own titles (legacy '$(fm_backend_herdr_workspace_legacy_label)', identity '$base', or recorded prior identity '$(fm_backend_herdr_workspace_recorded_identity_base)'); refusing identity rename" >&2
     return 1
   }
   fm_backend_herdr_cli "$session" workspace rename "$workspace" "$desired" >/dev/null 2>&1 || return 1
   verify=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
   printf '%s' "$verify" | jq -e --arg workspace "$workspace" --arg desired "$desired" \
-    '.result.workspace.workspace_id == $workspace and .result.workspace.label == $desired' >/dev/null 2>&1
+    '.result.workspace.workspace_id == $workspace and .result.workspace.label == $desired' >/dev/null 2>&1 || return 1
+  fm_backend_herdr_workspace_record_identity_base "$base"
+  FM_BACKEND_HERDR_WORKSPACE_TITLE_CHANGED=1
 }
 
 # Rename one exact legacy projected workspace to its assigned presentation
@@ -507,6 +550,7 @@ fm_backend_herdr_workspace_identity_rename_exact() { # <session> <workspace-id> 
 fm_backend_herdr_projection_identity_rename_exact() { # <session> <journal> <task-id> <roster> <identity>
   local session=$1 journal=$2 id=$3 roster=$4 identity=$5 identity_label desired
   local workspace current out verify old_label
+  FM_BACKEND_HERDR_WORKSPACE_TITLE_CHANGED=0
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
   [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
     || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ] || return 1
@@ -545,7 +589,8 @@ fm_backend_herdr_projection_identity_rename_exact() { # <session> <journal> <tas
   fi
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" \
     && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ] \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$desired" ]
+    && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$desired" ] || return 1
+  FM_BACKEND_HERDR_WORKSPACE_TITLE_CHANGED=1
 }
 
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
@@ -894,7 +939,10 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
 # non-authoritative correlators only.
 fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id> [<identity-label>]
   local task=$1 token=$2 identity_label=${3:-}
-  if [ -n "$identity_label" ]; then
+  if [ "$identity_label" = "Unassigned crew" ]; then
+    printf '└ %s · %s · p:%s' "$identity_label" \
+      "$(fm_backend_herdr_projection_concise_task_label "$task")" "$token"
+  elif [ -n "$identity_label" ]; then
     printf '└ %s · p:%s' "$identity_label" "$token"
   else
     printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$task")" "$token"
@@ -2089,6 +2137,8 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
   # once the first real task tab exists alongside it, and only ever targets
   # this exact captured tab_id.
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  fm_backend_herdr_workspace_record_identity_base \
+    "$(fm_backend_herdr_workspace_identity_base_label 2>/dev/null || true)"
   printf '%s' "$wsid"
 }
 

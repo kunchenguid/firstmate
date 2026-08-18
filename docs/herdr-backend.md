@@ -98,7 +98,7 @@ Presentation is a best-effort visual projection, never task ownership or lifecyc
 Only a fresh task with neither metadata nor an existing presentation journal is eligible for projected creation.
 Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token before asking Herdr to create anything.
 After the new workspace converges to one exact task endpoint beneath one exact parent workspace id, the journal advances to a version 2 legacy binding or a version 3 identity-labelled binding that records the physical home, named session, endpoint, parent, and immutable expected labels.
-An assigned projection title uses the short identity label plus its non-authoritative token instead of the mechanical task or project id; a configured task without an assignment says `Unassigned crew`.
+An assigned projection title uses the short identity label plus its non-authoritative token instead of the mechanical task or project id; a configured task without an assignment says `Unassigned crew` and keeps the concise task label after it, so simultaneous unassigned Spaces stay distinguishable.
 Another parent with the same presentation label does not prevent publication or participate in restart reclaim.
 The token is visible in the workspace title because Herdr exposes no verified hidden persistent field, but neither token, title, nor journal authorizes send, capture, task ownership, Treehouse return, or general recovery.
 
