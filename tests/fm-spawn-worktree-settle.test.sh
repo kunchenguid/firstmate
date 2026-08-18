@@ -116,18 +116,20 @@ EOF
 }
 
 run_settle_spawn() {
-  local id=$1 project=${2:-$PROJ_DIR}
+  local id=$1 project=${2:-$PROJ_DIR} kind_flag=${3:-}
+  local -a delivery_args=(--mode no-mistakes --yolo off)
+  [ "$kind_flag" != --scout ] || delivery_args=(--scout)
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
-    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
-    FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
-    FM_FAKE_PRIMARY_PATH="$PROJ_DIR" FM_FAKE_PANE_PINNED_FILE="$PINNED_FILE" \
-    FM_FAKE_PIN_COMMAND_FILE="$PIN_COMMAND_FILE" FM_FAKE_PIN_OUTPUT_FILE="$PIN_OUTPUT_FILE" \
-    FM_FAKE_LAUNCH_CWD_FILE="$LAUNCH_CWD_FILE" \
-    FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
-    PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$project" --mode no-mistakes --yolo off 2>&1
+      FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+      FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+      FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
+      FM_FAKE_PRIMARY_PATH="$PROJ_DIR" FM_FAKE_PANE_PINNED_FILE="$PINNED_FILE" \
+      FM_FAKE_PIN_COMMAND_FILE="$PIN_COMMAND_FILE" FM_FAKE_PIN_OUTPUT_FILE="$PIN_OUTPUT_FILE" \
+      FM_FAKE_LAUNCH_CWD_FILE="$LAUNCH_CWD_FILE" \
+      FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+      PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$project" "${delivery_args[@]}" 2>&1
 }
 
 # A single stale first read (the exact incident) must not be accepted: the
@@ -202,8 +204,35 @@ test_relative_project_records_launched_pane_cwd() {
   pass "a relative projects/<repo> spawn records the launched pane cwd as worktree"
 }
 
+test_relative_project_scout_records_launched_pane_cwd() {
+  local rec id out status meta_project meta_worktree
+  id=settle-relative-scout-z4
+  rec=$(make_settle_case settle-relative-scout "$id" 0)
+  read_settle_record "$rec"
+
+  out=$(run_settle_spawn "$id" projects/project --scout)
+  status=$?
+  expect_code 0 "$status" "relative-project scout spawn should succeed"$'\n'"$out"
+  meta_worktree=$(sed -n 's/^worktree=//p' "$HOME_DIR/state/$id.meta")
+  meta_project=$(sed -n 's/^project=//p' "$HOME_DIR/state/$id.meta")
+  [ "$meta_worktree" = "$WT_DIR" ] \
+    || fail "relative-project scout meta worktree '$meta_worktree' does not equal launched pane cwd '$WT_DIR'"
+  [ "$(cd "$meta_project" && pwd -P)" = "$(cd "$PROJ_DIR" && pwd -P)" ] \
+    || fail "relative-project scout meta project '$meta_project' does not equal primary project '$PROJ_DIR'"
+  [ "$meta_worktree" != "$meta_project" ] \
+    || fail "relative-project scout meta collapsed worktree and project to '$meta_worktree'"
+  [ "$(cat "$LAUNCH_CWD_FILE")" = "$meta_worktree" ] \
+    || fail "relative-project scout launched pane cwd does not equal meta worktree '$meta_worktree'"
+  assert_contains "$out" "kind=scout" \
+    "relative-project scout success output did not identify the scout kind"
+  assert_contains "$out" "worktree=$WT_DIR" \
+    "relative-project scout success output did not report the launched pane cwd"
+  pass "a relative projects/<repo> scout spawn records the launched pane cwd as worktree"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_sleep
 test_relative_project_records_launched_pane_cwd
+test_relative_project_scout_records_launched_pane_cwd
 
 echo "# all fm-spawn-worktree-settle tests passed"

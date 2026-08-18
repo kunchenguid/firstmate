@@ -134,6 +134,9 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   Treehouse-backed spawns then pin the endpoint shell in that acquired path
+#   before publishing metadata; worktree= and the launch placeholder both use
+#   that verified endpoint cwd, never the primary project path.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
