@@ -21,7 +21,7 @@ Deterministic shell owns only schema, configuration, and version validation plus
 
 ## Read the default TOON
 
-Run `quota-axi` once per intake, with no `--json`, and reuse that snapshot for every candidate.
+Start each intake by running `quota-axi` once with no `--json`, and reuse that TOON for every candidate.
 Post-consolidation quota-axi (the floor owned by `bin/fm-quota-axi-lib.sh`) puts `spendPriority` in the default `quota[]` block beside `effectivePercentRemaining`, `runway`, `confidence`, `limitedBy`, and `resetsAt`.
 Sparse `exhaustion[]` carries finite-runway seconds only for `projected_exhaustion` and `exhausted_now`.
 Sparse `attention[]` names auth, stale, and unmeasurable facts.
@@ -29,8 +29,9 @@ Sparse `attention[]` names auth, stale, and unmeasurable facts.
 It already computes the economics that older instructions reconstructed by hand from headroom, pace, reserve, and window-id lists; do not recompute those.
 Do not read `--json` on the normal path, and do not reach for `--full` to rebuild that economics.
 
-Fall back to one `quota-axi --json` snapshot only when the TOON is genuinely ambiguous for the decision, or when the installed quota-axi is somehow below the floor so its TOON lacks `spendPriority`.
+After reading the TOON, fall back to one `quota-axi --json` call only when that TOON is genuinely ambiguous for the decision, or when the installed quota-axi is somehow below the floor so its TOON lacks `spendPriority`.
 Ambiguous means a candidate's `spendPriority` is the literal `unknown` or unmeasurable, a real tie still needs extra evidence, or a candidate's eligibility is unclear from `quota[]` plus `attention[]`.
+The fallback therefore has an explicit TOON-then-JSON call sequence; reuse its JSON result and do not take any further quota snapshots.
 Below-floor is rare: bootstrap enforces `FM_QUOTA_AXI_MIN`, and a below-floor build reports `MISSING` and blocks dispatch.
 `--json` is a defensive belt, not a habit; never reach for it because it feels more complete.
 Read `quota-axi auth --json` only when a candidate's credential surface is in question.

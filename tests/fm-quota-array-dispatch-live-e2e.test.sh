@@ -90,7 +90,7 @@ for provider in data.get("providers") or []:
             binding = (windows.get(window_id) or {}).get("resetsAt")
             if binding:
                 break
-        resets_at = binding or generated
+        resets_at = binding or "unknown"
         quota.append(
             f"  {name},{scope_name},{remaining},{spend},{runway_status},{confidence},{limited},{resets_at}"
         )
@@ -161,8 +161,8 @@ write_fixture() {
 }
 
 run_case() {
-  local label=$1 expected=$2 prompt=$3 out calls required
-  shift 3
+  local label=$1 expected=$2 expected_calls=$3 prompt=$4 out calls required
+  shift 4
   : > "$CALLS"
   out=$(
     cd "$PROJECT" &&
@@ -173,7 +173,7 @@ run_case() {
           "$prompt"
   ) || fail "$label: Pi skill run failed: $out"
   calls=$(cat "$CALLS")
-  [ "$calls" = "TOON" ] || fail "$label: skill did not use one quota-axi default TOON snapshot: $calls"
+  [ "$calls" = "$expected_calls" ] || fail "$label: unexpected quota-axi call sequence: $calls"
   printf '%s\n' "$out" | grep -Fxq "$expected" \
     || fail "$label: expected final line $expected, got: $out"
   for required in "$@"; do
@@ -198,6 +198,7 @@ write_fixture <<'JSON'
           "label": "week",
           "kind": "weekly",
           "percentRemaining": 80,
+          "resetsAt": "2030-01-07T07:12:00Z",
           "pace": { "status": "ahead", "reservePercentPoints": -10, "burnMultiple": 2 }
         }
       ],
@@ -232,6 +233,7 @@ write_fixture <<'JSON'
           "label": "week",
           "kind": "weekly",
           "percentRemaining": 20,
+          "resetsAt": "2030-01-03T19:12:00Z",
           "pace": { "status": "ahead", "reservePercentPoints": -20, "burnMultiple": 1.3333 }
         }
       ],
@@ -263,6 +265,7 @@ JSON
 run_case \
   "higher spendPriority beats more headroom after the three gates" \
   "SELECTED=codex" \
+  "TOON" \
   "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove Claude/Sonnet and Codex/GPT models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Both candidates have known runway that supports that horizon. Return exact lines FACT=claude|headroom=80|spendPriority=-1.1111|runway_seconds=241920 and FACT=codex|headroom=20|spendPriority=-0.8333|runway_seconds=90720 to preserve candidate accounting, then an exact final line SELECTED=<claude|codex>. Do not use other vendor or model commands and do not modify files." \
   "FACT=claude|headroom=80|spendPriority=-1.1111|runway_seconds=241920" \
   "FACT=codex|headroom=20|spendPriority=-0.8333|runway_seconds=90720"
@@ -281,6 +284,7 @@ write_fixture <<'JSON'
           "label": "week",
           "kind": "weekly",
           "percentRemaining": 55,
+          "resetsAt": "2030-01-08T00:00:00Z",
           "pace": { "status": "unknown", "reason": "missing_cycle" }
         }
       ],
@@ -309,6 +313,7 @@ write_fixture <<'JSON'
           "label": "week",
           "kind": "weekly",
           "percentRemaining": 45,
+          "resetsAt": "2030-01-04T20:24:00Z",
           "pace": { "status": "ahead", "reservePercentPoints": -10, "burnMultiple": 1.2222 }
         }
       ],
@@ -340,7 +345,9 @@ JSON
 run_case \
   "unmeasurable runway stays eligible and is accounted for explicitly" \
   "DECISION=CODEX" \
-  "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json; the TOON already reports Claude spendPriority as the literal unknown. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove both models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Claude has higher known headroom but explicitly unmeasurable runway and unknown spendPriority, while Codex has lower known headroom, known spendPriority, and established runway that supports completion. Claude remains eligible and its uncertainty must be disclosed. Never read unknown spendPriority as 0. Return exact lines FACT=claude|eligible=yes|headroom=55|runway=unknown|spendPriority=unknown|unmeasurable=weekly and FACT=codex|eligible=yes|headroom=45|spendPriority=-0.404|runway_seconds=222676|supports_horizon=yes, then an exact final line DECISION=CODEX. Do not use other vendor or model commands and do not modify files." \
+  "TOON
+JSON" \
+  "Resolve this matched dispatch profile array now. Load quota-array-dispatch and consult quota-axi's default TOON first. Because Claude spendPriority is the literal unknown, use the permitted quota-axi --json fallback once before deciding. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove both models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Claude has higher known headroom but explicitly unmeasurable runway and unknown spendPriority, while Codex has lower known headroom, known spendPriority, and established runway that supports completion. Claude remains eligible and its uncertainty must be disclosed. Never read unknown spendPriority as 0. Return exact lines FACT=claude|eligible=yes|headroom=55|runway=unknown|spendPriority=unknown|unmeasurable=weekly and FACT=codex|eligible=yes|headroom=45|spendPriority=-0.404|runway_seconds=222676|supports_horizon=yes, then an exact final line DECISION=CODEX. Do not use other vendor or model commands and do not modify files." \
   "FACT=claude|eligible=yes|headroom=55|runway=unknown|spendPriority=unknown|unmeasurable=weekly" \
   "FACT=codex|eligible=yes|headroom=45|spendPriority=-0.404|runway_seconds=222676|supports_horizon=yes"
 
@@ -358,6 +365,7 @@ write_fixture <<'JSON'
           "label": "week",
           "kind": "weekly",
           "percentRemaining": 5,
+          "resetsAt": "2030-01-04T12:00:00Z",
           "pace": { "status": "ahead", "reservePercentPoints": -45, "burnMultiple": 1.9 }
         }
       ],
@@ -392,6 +400,7 @@ write_fixture <<'JSON'
           "label": "week",
           "kind": "weekly",
           "percentRemaining": 80,
+          "resetsAt": "2030-01-06T22:48:00Z",
           "pace": { "status": "ahead", "reservePercentPoints": -5, "burnMultiple": 1.3333 }
         }
       ],
@@ -423,6 +432,7 @@ JSON
 run_case \
   "required strongest reasoning class is not downgraded for quota" \
   "SELECTED=claude" \
+  "TOON" \
   "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json. The likely task-completion horizon is two hours with established confidence. Claude/Sonnet is catalog-supported with usable authentication and is the only profile that meets the task's required strongest reasoning class. Codex/GPT is catalog-supported with usable authentication but is a weaker reasoning class and cannot meet the requirement. Return exact lines FACT=claude|reasoning=required|headroom=5|spendPriority=-1.8|runway_seconds=15916 and FACT=codex|reasoning=weaker|headroom=80|spendPriority=-0.3921|runway_seconds=362880, then an exact final line SELECTED=<claude|codex>. Do not use other vendor or model commands and do not modify files." \
   "FACT=claude|reasoning=required|headroom=5|spendPriority=-1.8|runway_seconds=15916" \
   "FACT=codex|reasoning=weaker|headroom=80|spendPriority=-0.3921|runway_seconds=362880"
@@ -441,6 +451,7 @@ write_fixture <<'JSON'
           "label": "5-hour",
           "kind": "five_hour",
           "percentRemaining": 20,
+          "resetsAt": "2030-01-01T02:00:00Z",
           "pace": { "status": "ahead", "reservePercentPoints": -20, "burnMultiple": 1.3333 }
         }
       ],
@@ -475,6 +486,7 @@ write_fixture <<'JSON'
           "label": "week",
           "kind": "weekly",
           "percentRemaining": 5,
+          "resetsAt": "2030-01-04T12:00:00Z",
           "pace": { "status": "ahead", "reservePercentPoints": -45, "burnMultiple": 1.9 }
         }
       ],
@@ -506,6 +518,7 @@ JSON
 run_case \
   "runway versus completion horizon remains a hard gate over spendPriority" \
   "SELECTED=codex" \
+  "TOON" \
   "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove Claude/Sonnet and Codex/GPT models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Claude has known spendPriority of -0.8333 and runway of 2700 seconds. Codex has known spendPriority of -1.8 and runway of 15916 seconds. Return exact lines FACT=claude|spendPriority=-0.8333|runway_seconds=2700|supports_horizon=no and FACT=codex|spendPriority=-1.8|runway_seconds=15916|supports_horizon=yes to preserve candidate accounting, then an exact final line SELECTED=<claude|codex>. Do not use other vendor or model commands and do not modify files." \
   "FACT=claude|spendPriority=-0.8333|runway_seconds=2700|supports_horizon=no" \
   "FACT=codex|spendPriority=-1.8|runway_seconds=15916|supports_horizon=yes"
