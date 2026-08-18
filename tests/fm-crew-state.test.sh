@@ -1155,8 +1155,8 @@ test_no_run_claude_scrollback_limit_words_stay_working() {
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
-  FM_FAKE_BUSY_TEXT="+ # the 5-hour window is named \"session limit\" and the 7-day one
-+ # \"weekly limit\"; a rejected turn renders resets <time>, and the widget
+  FM_FAKE_BUSY_TEXT="+ # the 5-hour window is named session limit and the 7-day one
++ # weekly limit; a rejected turn renders resets <time>, and the widget
 + # says press enter to continue once stale
 $(for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do printf '  editing bin/fm-busy-lib.sh line %s\n' "$i"; done)
 · Thinking…
