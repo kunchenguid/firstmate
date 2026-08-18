@@ -77,6 +77,11 @@
 #   outside herdr has no workspace to inherit and uses this home's own labeled
 #   workspace, which must then match exactly one. --secondmate is the deliberate
 #   exception: it stands up that secondmate home's own workspace.
+#   The worker's own pane is then titled "<home> · <task-id>" (the same home
+#   label hlay-01 gives the entrypoint pane, epic hlay Q2), so herdr's UI shows
+#   each worker nested under its home by name. This is display-only - routing
+#   stays by pane id, the tab label stays fm-<id> - so a rename refusal warns
+#   and leaves the default label rather than aborting a working spawn.
 #   Herdr additionally uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
@@ -2167,6 +2172,19 @@ EOF
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
+    fi
+    # hlay-02: title the task pane "<home> · <task-id>" so herdr's UI shows this
+    # worker nested under its home by name, mirroring hlay-01's "<home> · firstmate"
+    # entrypoint pane. The tab label stays $W (fm-<id>) - create_task/recovery
+    # dedup resolve tabs by that exact label. HERDR_LABEL_HOME already names the
+    # right home (the secondmate's own for a --secondmate launch, this process's
+    # own otherwise), matching the workspace the tab lives in. Display-only:
+    # routing is by pane id in $T, and the home label is NOT unique across homes,
+    # so a rename refusal must never abort a working spawn.
+    HERDR_PANE_TITLE_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
+    if [ -n "$HERDR_PANE_TITLE_LABEL" ]; then
+      fm_backend_herdr_cli "$HERDR_SES" pane rename "$HERDR_PANE_ID" "$HERDR_PANE_TITLE_LABEL · $ID" >/dev/null 2>&1 \
+        || echo "warning: herdr pane '$HERDR_PANE_ID' rename to '$HERDR_PANE_TITLE_LABEL · $ID' was refused; leaving the default label" >&2
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     ;;
