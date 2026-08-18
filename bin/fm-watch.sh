@@ -65,6 +65,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 
 # The native event fast-path and only its true dependencies have one narrow
@@ -163,7 +164,9 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
-# bounded cadence, while a live or ambiguously read agent still surfaces once.
+# bounded cadence, while a live or ambiguously read agent still surfaces once
+# and then joins that same cadence - once per declared pause, not once per pane
+# hash, so redraws of an idle paused pane never re-open that first sighting.
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
@@ -326,11 +329,14 @@ busy_turn_over_age() {  # <task>
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
-# stale poll once pause_state_class permits the bounded cadence, so it must be
-# cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
-# status file mtime, not a per-hash marker, so a churny idle pane (a ticking
-# clock, a token counter) cannot keep resetting the cadence the way a hash-tied
-# timer would. A .paused-resurfaced-<key> throttle marker records the last
+# stale poll once pause_state_class permits the bounded cadence, and on every
+# later poll while the .paused-<key> flag records that this key is already on
+# it, so it must be cheap: it NEVER re-reads crew state. The cadence itself is
+# not tied to a pane hash: the re-surface age is anchored on the status file
+# mtime, so a churny idle pane (a ticking clock, a token counter) cannot keep
+# resetting the cadence the way a hash-tied timer would, and its redraws cannot
+# be re-classified as fresh first sightings either. A .paused-resurfaced-<key>
+# throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
@@ -445,6 +451,53 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   local f=$1 m
   m=$(stat_mtime "$f") || { echo 999999; return; }
   echo $(( $(date +%s) - m ))
+}
+
+dashboard_transition_observe() {
+  "$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$1" "$2" "$3"
+}
+
+dashboard_refresh() {
+  [ -x "$SCRIPT_DIR/fm-dashboard.sh" ] || return 0
+  "$SCRIPT_DIR/fm-dashboard.sh" refresh >/dev/null 2>&1 \
+    || triage_log "dashboard refresh failed"
+}
+
+dashboard_refresh_after_wake() {
+  dashboard_refresh
+}
+
+export FM_WAKE_POST_DELIVERY_ACTION=dashboard_refresh_after_wake
+
+dashboard_transition_reconcile() {
+  local task=$1 line state transition_at
+  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null || true)
+  case "$line" in
+    state:\ *) state=${line#state: }; state=${state%% *} ;;
+    *) return 0 ;;
+  esac
+  case "$state" in working|parked|paused|blocked|failed|done|unknown) ;; *) return 0 ;; esac
+  case "$line" in *' · source: run-step · '*) return 0 ;; esac
+  transition_at=$(printf '%s\n' "$line" | sed -n 's/.*transition_at: \([0-9][0-9]*\).*/\1/p' | head -1)
+  case "$transition_at" in ''|*[!0-9]*) return 0 ;; esac
+  dashboard_transition_observe "$task" "$state" "$transition_at" || triage_log "dashboard transition write failed for $task"
+}
+
+dashboard_recovery_reconcile() {
+  [ -x "$SCRIPT_DIR/fm-dashboard-recovery.sh" ] || return 0
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-dashboard-recovery.sh" observe "$1" >/dev/null 2>&1 \
+    || triage_log "dashboard recovery check failed for $1"
+}
+
+dashboard_recovery_reconcile_metadata() {
+  local meta task kind
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    task=$(basename "$meta" .meta)
+    case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    kind=$(fm_meta_get "$meta" kind)
+    case "$kind" in ship|scout|'') dashboard_recovery_reconcile "$task" ;; esac
+  done
 }
 
 # Layer 2 + 3 signal scan: status files and turn-end markers. Each file is
@@ -573,7 +626,10 @@ fm_active_check_stop() {
 }
 
 run_check_capture() {
-  local pgid
+  local pgid stop_active_check=0
+  case "${1:-}" in
+    --stop-active-check-on-signal) stop_active_check=1; shift ;;
+  esac
   fm_check_output_cleanup
   FM_CHECK_RESULT=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
@@ -586,13 +642,26 @@ run_check_capture() {
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
-  trap 'exit 1' HUP INT TERM
+  if [ "$stop_active_check" -eq 1 ]; then
+    trap 'fm_active_check_stop || true; fm_check_output_cleanup; exit 1' HUP INT TERM
+  else
+    trap 'fm_check_output_cleanup; exit 1' HUP INT TERM
+  fi
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
     fm_check_output_cleanup
     return 1
   fi
-  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  # A signal delivered between installing the pending-flag trap and swapping in
+  # the real one lands here instead of in a handler, so this exit owes the same
+  # guarantee the swapped-in trap gives: under --stop-active-check-on-signal the
+  # forked check's whole process group is stopped first, or it would outlive the
+  # caller with only its recorded child pid known to any later reaper.
+  if [ -n "$FM_CHECK_SIGNAL_PENDING" ]; then
+    [ "$stop_active_check" -eq 0 ] || fm_active_check_stop || true
+    fm_check_output_cleanup
+    exit 1
+  fi
   wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
@@ -1000,6 +1069,8 @@ EOF
     fi
   fi
 
+  dashboard_recovery_reconcile_metadata
+
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
@@ -1007,6 +1078,7 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    dashboard_transition_reconcile "$task"
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}
@@ -1098,11 +1170,13 @@ EOF
           #   - paused: the crew declared an external wait, or a declared pause or
           #     captain hold is paired with a confidently dead agent, so absorb on
           #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
-          #   - none: no running pipeline, no exact busy verdict, no declared pause.
-          #     Surface immediately so firstmate inspects the inconclusive state
-          #     (it may be done via an interactive menu that wrote no done: status,
-          #     waiting on a decision, or wedged) instead of leaving the finish to
-          #     wait out the timer.
+          #   - none: no running pipeline, no exact busy verdict, and no pause
+          #     that a dead agent confirms - which also covers a DECLARED pause
+          #     whose agent is still live. Surface immediately so firstmate
+          #     inspects the inconclusive state (it may be done via an
+          #     interactive menu that wrote no done: status, waiting on a
+          #     decision, or wedged) instead of leaving the finish to wait out
+          #     the timer - unless this key is already on the pause cadence.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
@@ -1116,7 +1190,18 @@ EOF
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
               *)
-                surface_nonterminal_stale "$w" "$h"
+                # A live (or ambiguously read) agent under a declared pause
+                # returns none, so this is also the pause path once its bounded
+                # cadence is established. .paused-<key> is that record, and it
+                # outlives any single pane hash: a redraw (or a watcher restart
+                # between recording a hash and classifying it) must not reopen a
+                # first sighting and surface another bare stale. Only a pause
+                # with no cadence yet gets its one immediate surface.
+                if [ -e "$pf" ]; then
+                  handle_paused_stale "$w" "$task" "$h"
+                else
+                  surface_nonterminal_stale "$w" "$h"
+                fi
                 ;;
             esac
           else
@@ -1159,8 +1244,19 @@ EOF
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
-          paused) handle_paused_stale "$w" "$task" "$h" ;;
-          *)      clear_pause_tracking "$w" ;;
+          paused)  handle_paused_stale "$w" "$task" "$h" ;;
+          working) clear_pause_tracking "$w" ;;
+          # Same anchoring rule as the stale path above: a still-declared pause
+          # already on the bounded cadence keeps it across a hash change, and
+          # the suppressor advances to the new hash so the redraw cannot be
+          # re-classified as a fresh stale. Only working (the crew resumed)
+          # ends the cadence here; the loop head owns ending it when the status
+          # line itself stops declaring a pause.
+          *)       if [ -e "$pf" ]; then
+                     handle_paused_stale "$w" "$task" "$h"
+                   else
+                     clear_pause_tracking "$w"
+                   fi ;;
         esac
       else
         [ -e "$pf" ] && clear_pause_tracking "$w"
@@ -1176,7 +1272,9 @@ EOF
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
+  DASHBOARD_DUE=0
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    DASHBOARD_DUE=1
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
@@ -1199,6 +1297,13 @@ EOF
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
+  fi
+
+  # The private dashboard is a checkpointed projection, not a second watcher.
+  # Refresh it on the existing heartbeat cadence so it uses the same canonical
+  # current-state reconciliation without adding a controller or poll loop.
+  if [ "$DASHBOARD_DUE" = 1 ]; then
+    dashboard_refresh
   fi
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),

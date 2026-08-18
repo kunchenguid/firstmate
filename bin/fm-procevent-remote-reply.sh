@@ -295,8 +295,10 @@ normalize_payload() { # <source> <destination>
 # raises itself - is at most once on exact bytes.
 # Returns 0 appended, 1 already present, 2 the write itself failed.
 append_status_once() { # <status-file> <line>
+  local id
   grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
-  printf '%s\n' "$2" >> "$1" || return 2
+  id=$(basename "$1" .status)
+  "$SCRIPT_DIR/fm-status-event.sh" append "$STATE" "$id" "$2" || return 2
   return 0
 }
 

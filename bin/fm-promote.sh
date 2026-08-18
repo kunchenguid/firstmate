@@ -19,6 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -79,6 +80,8 @@ CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
+PREFLIGHT_LOCK=
+PREFLIGHT_LOCK_HELD=0
 TMP=
 promote_cleanup() {
   local status=$?
@@ -86,6 +89,10 @@ promote_cleanup() {
   if [ "$META_LOCK_HELD" = 1 ]; then
     META_LOCK_HELD=0
     fm_lock_release "$META_LOCK" || true
+  fi
+  if [ "$PREFLIGHT_LOCK_HELD" = 1 ]; then
+    PREFLIGHT_LOCK_HELD=0
+    fm_lock_release "$PREFLIGHT_LOCK" || true
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
@@ -102,18 +109,33 @@ CONTROL_LOCK_HELD=1
 "$FM_ROOT/bin/fm-guard.sh" || true
 META="$STATE/$ID.meta"
 [ -d "$STATE" ] || { echo "error: state dir not found: $STATE" >&2; exit 1; }
+PREFLIGHT_DIR="$DATA/$ID"
+[ -d "$PREFLIGHT_DIR" ] && [ ! -L "$PREFLIGHT_DIR" ] || {
+  echo "error: no valid private preflight record" >&2
+  exit 1
+}
+PREFLIGHT_LOCK="$PREFLIGHT_DIR/.ship-preflight.lock"
+fm_lock_acquire_wait "$PREFLIGHT_LOCK"
+PREFLIGHT_LOCK_HELD=1
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+  "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-current "$ID") || exit 1
+case "$PREFLIGHT_RESULT" in
+  fingerprint=*) PREFLIGHT_FINGERPRINT=${PREFLIGHT_RESULT#fingerprint=} ;;
+  *) echo "error: preflight verification returned no fingerprint for task $ID" >&2; exit 1 ;;
+esac
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^preflight_fingerprint=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  echo "preflight_fingerprint=$PREFLIGHT_FINGERPRINT"
 } >> "$TMP"
 mv "$TMP" "$META"
 TMP=

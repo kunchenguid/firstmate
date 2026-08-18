@@ -140,10 +140,9 @@ fm_watcher_healthy() {
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
-#   autoarm     Claude's Stop-hook auto-arm and Cursor's stop-hook park: the
-#               watcher is armed at each turn end and exits on its wake, so it
-#               runs only BETWEEN turns. Mid-turn a fresh beacon with no live
-#               watcher process is the healthy state.
+#   autoarm     Claude's Stop-hook auto-arm: the watcher is armed at each turn
+#               end and exits on its wake, so it runs only BETWEEN turns.
+#               Mid-turn a fresh beacon with no live watcher process is healthy.
 #   extension   Pi (and pi-signed): .pi/extensions/fm-primary-pi-watch.ts owns
 #               continuity. It tears the watcher down on every actionable wake and
 #               spawns the replacement itself, so a genuinely unheld singleton lock
@@ -162,7 +161,7 @@ fm_supervision_model() {
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
-    claude|cursor) printf 'autoarm\n' ;;
+    claude) printf 'autoarm\n' ;;
     pi|pi-signed) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac
@@ -724,10 +723,14 @@ fm_recovery_marker_arm_check() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 pid steal cur rc steal_owner primary_owner parent
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
+
+  parent=${lockdir%/*}
+  [ "$parent" != "$lockdir" ] || parent=.
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
 
   if fm_lock_try_create "$lockdir"; then
     return 0
@@ -1132,6 +1135,8 @@ EOF
 
 FM_WAKE_EVENT_LINE=
 FM_WAKE_UNREAD_LINES=
+FM_WAKE_UNREAD_COMPLETE=true
+FM_WAKE_UNREAD_OMITTED=0
 fm_wake_status_cursor_offset() {  # <validated-status-path> -> already-presented byte offset
   local path=$1 offset
   command -v status_presentation_cursor_offset >/dev/null 2>&1 || return 1
@@ -1140,18 +1145,22 @@ fm_wake_status_cursor_offset() {  # <validated-status-path> -> already-presented
   printf '%s' "$offset"
 }
 
-# O_NOFOLLOW read of every still-unread status byte. min-offset is the
+# O_NOFOLLOW read of a bounded unread status span. min-offset is the
 # already-presented cursor from classify-lib. Lines whose bytes begin before
-# that offset are not replayed. Prints nothing and returns 1 when no unread
-# non-blank line exists.
-fm_wake_unread_events() {  # <validated-status-path> <unused-tail-byte-cap> <min-offset> [<end-offset>]
-  local path=$1 min_offset=$3 end_offset=${4:-} result size chunk chunk_start
+# that offset are not replayed.
+fm_wake_unread_events() {  # <validated-status-path> <byte-cap> <min-offset> [<end-offset>] [<line-cap>]
+  local path=$1 byte_cap=$2 min_offset=$3 end_offset=${4:-} line_cap=${5:-8}
+  local result read_end complete omitted rest chunk
   local LC_ALL=C
   FM_WAKE_EVENT_LINE=
   FM_WAKE_UNREAD_LINES=
+  FM_WAKE_UNREAD_COMPLETE=true
+  FM_WAKE_UNREAD_OMITTED=0
   case "$min_offset" in ''|*[!0-9]*) min_offset=0 ;; esac
+  case "$byte_cap" in ''|*[!0-9]*|0) return 1 ;; esac
+  case "$line_cap" in ''|*[!0-9]*|0) return 1 ;; esac
   result=$(perl -MFcntl=:DEFAULT -e '
-    my ($path, $start, $end) = @ARGV;
+    my ($path, $start, $end, $byte_cap, $line_cap) = @ARGV;
     sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
     my @stat = stat $file or exit 1;
     exit 1 unless -f _;
@@ -1159,34 +1168,61 @@ fm_wake_unread_events() {  # <validated-status-path> <unused-tail-byte-cap> <min
     exit 1 unless $size =~ /\A\d+\z/ && $start =~ /\A\d+\z/ && $start <= $size;
     $end = $size unless length $end;
     exit 1 unless $end =~ /\A\d+\z/ && $start <= $end && $end <= $size;
+    exit 1 unless $byte_cap =~ /\A[1-9]\d*\z/ && $line_cap =~ /\A[1-9]\d*\z/;
     seek($file, $start, 0) or exit 1;
-    printf "%s\t", $end or exit 1;
-    my $remaining = $end - $start;
+    my $read_end = $end;
+    $read_end = $start + $byte_cap if $read_end - $start > $byte_cap;
+    my $remaining = $read_end - $start;
+    my $buffer = q{};
     while ($remaining > 0) {
-      my $read = read($file, my $buffer, $remaining);
-      exit 1 unless defined $read;
-      last unless $read;
-      print $buffer or exit 1;
+      my $want = $remaining > 65536 ? 65536 : $remaining;
+      my $read = read($file, my $part, $want);
+      exit 1 unless defined $read && $read > 0;
+      $buffer .= $part;
       $remaining -= $read;
     }
-  ' "$path" "$min_offset" "$end_offset" 2>/dev/null) || return 1
-  size=${result%%$'\t'*}
-  chunk=${result#*$'\t'}
-  case "$size" in ''|*[!0-9]*) return 1 ;; esac
-  [ -n "$chunk" ] || return 1
-  [ "$min_offset" -lt "$size" ] || return 1
-  chunk_start=$min_offset
-  FM_WAKE_UNREAD_LINES=$(printf '%s' "$chunk" | LC_ALL=C awk -v start="$chunk_start" -v min="$min_offset" '
-    BEGIN { pos = start + 0 }
-    {
-      line_start = pos
-      pos += length($0) + 1
-      if ($0 ~ /[^[:space:]]/ && line_start >= min) print $0
+    my $complete = $read_end == $end;
+    my $ends_at_line = $buffer =~ /\n\z/;
+    my @lines = split /\n/, $buffer, -1;
+    pop @lines if @lines && $lines[-1] eq q{};
+    if (!$ends_at_line && $read_end < $size) {
+      pop @lines;
+      $complete = 0;
     }
-  ') || return 1
-  [ -n "$FM_WAKE_UNREAD_LINES" ] || return 1
+    @lines = grep { /[^[:space:]]/ } @lines;
+    my $omitted = 0;
+    if (@lines > $line_cap) {
+      $omitted = @lines - $line_cap;
+      @lines = @lines[0 .. $line_cap - 1];
+      $complete = 0;
+    }
+    print join("\t", $read_end, $complete ? 1 : 0, $omitted), "\t" or exit 1;
+    print join("\n", @lines) or exit 1;
+  ' "$path" "$min_offset" "$end_offset" "$byte_cap" "$line_cap" 2>/dev/null) || return 1
+  read_end=${result%%$'\t'*}
+  rest=${result#*$'\t'}
+  complete=${rest%%$'\t'*}
+  rest=${rest#*$'\t'}
+  omitted=${rest%%$'\t'*}
+  chunk=${rest#*$'\t'}
+  case "$read_end" in ''|*[!0-9]*) return 1 ;; esac
+  case "$complete" in 0|1) ;; *) return 1 ;; esac
+  case "$omitted" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$min_offset" -lt "$read_end" ] || return 1
+  if [ "$complete" = 1 ] && [ "$omitted" -eq 0 ]; then
+    FM_WAKE_UNREAD_COMPLETE=true
+  else
+    FM_WAKE_UNREAD_COMPLETE=false
+  fi
+  FM_WAKE_UNREAD_OMITTED=$omitted
+  FM_WAKE_UNREAD_LINES=$chunk
+  [ -n "$FM_WAKE_UNREAD_LINES" ] || {
+    [ "$FM_WAKE_UNREAD_COMPLETE" = true ] || return 2
+    return 1
+  }
   FM_WAKE_EVENT_LINE=$(printf '%s\n' "$FM_WAKE_UNREAD_LINES" | tail -1)
   FM_WAKE_EVENT_LINE=$(printf '%s' "$FM_WAKE_EVENT_LINE" | LC_ALL=C tr '\t\r' '  ')
+  [ "$FM_WAKE_UNREAD_COMPLETE" = true ] || return 2
 }
 
 fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
@@ -1197,8 +1233,11 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 # raw queue consumption and released the append lock.
 fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   local rows=$1 snapshot=${2:-} manifest status_key mode path prefix line task endpoint
-  local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line
+  local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line event_rc snapshot_skip=false snapshot_visible=true
+  local output='' used=0 omitted=0 read_omitted=0 task_complete line_bytes
+  local read_bytes=8192 line_cap=8 item_bytes=2048 global_bytes=8192 read_cap=8 reads=0 marker_reserve=256
   local LC_ALL=C
+  FM_WAKE_ANNOTATION_FULLY_PRESENTED_TASKS=
 
   manifest=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
     {
@@ -1226,6 +1265,11 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
 
   while IFS=$(printf '\t') read -r status_key mode; do
     [ -n "$status_key" ] || continue
+    if [ "$reads" -ge "$read_cap" ]; then
+      read_omitted=$((read_omitted + 1))
+      continue
+    fi
+    reads=$((reads + 1))
     path="$STATE/$status_key"
     # A turn-ended-only (historical) row's annotation would show unread status
     # lines even when those bytes are fully covered by the seen marker - already
@@ -1244,20 +1288,38 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
     endpoint=
     if [ -n "$snapshot" ]; then
       task=${status_key%.status}
-      while IFS=$(printf '\t') read -r snapshot_task snapshot_endpoint _snapshot_ident; do
-        if [ "$snapshot_task" = "$task" ]; then endpoint=$snapshot_endpoint; break; fi
+      while IFS=$(printf '\t') read -r snapshot_task snapshot_endpoint _snapshot_ident snapshot_start _snapshot_end snapshot_overlong _snapshot_scan snapshot_skip snapshot_visible; do
+        if [ "$snapshot_task" = "$task" ]; then
+          endpoint=$snapshot_endpoint
+          [ -z "$snapshot_start" ] || offset=$snapshot_start
+          break
+        fi
       done <<EOF
 $snapshot
 EOF
       [ -n "$endpoint" ] || continue
     fi
-    if [ -n "$endpoint" ] && [ "$offset" -ge "$endpoint" ]; then continue; fi
-    if ! fm_wake_unread_events "$path" 0 "$offset" "$endpoint"; then
+    [ "${snapshot_visible:-true}" != false ] || continue
+    [ "${snapshot_skip:-false}" != true ] || continue
+    if [ -n "$endpoint" ] && [ "$offset" -ge "$endpoint" ]; then
+      if [ "${snapshot_overlong:-false}" = true ]; then
+        printf 'wake annotation: status line exceeds the bounded presentation cap: %s\n' "$status_key" || return 1
+      fi
+      continue
+    fi
+    fm_wake_unread_events "$path" "$read_bytes" "$offset" "$endpoint" "$line_cap"
+    event_rc=$?
+    if [ "$event_rc" -ne 0 ] && [ "$event_rc" -ne 2 ]; then
       # Annotation enrichment is supplemental to the already-printed durable
       # wake rows. A file that disappears, rotates, or becomes unreadable after
       # the snapshot must not suppress annotations for other status files; the
       # presentation commit will reject a changed snapshot identity.
       continue
+    fi
+    task_complete=true
+    if [ "$event_rc" -eq 2 ] || [ "$FM_WAKE_UNREAD_COMPLETE" != true ]; then
+      task_complete=false
+      read_omitted=$((read_omitted + 1))
     fi
     last_event=$FM_WAKE_EVENT_LINE
     while IFS= read -r event_line || [ -n "$event_line" ]; do
@@ -1271,13 +1333,35 @@ EOF
         prefix="$prefix; historical / not necessarily the triggering event"
       fi
       line="$prefix: $status_key: $event_line"
-      printf '%s\n' "$line" || return 1
+      if [ ${#line} -gt "$item_bytes" ]; then
+        line="${line:0:$((item_bytes - 12))} [truncated]"
+      fi
+      line_bytes=$(( ${#line} + 1 ))
+      if [ $((used + line_bytes + marker_reserve)) -gt "$global_bytes" ]; then
+        omitted=$((omitted + 1))
+        task_complete=false
+        continue
+      fi
+      output="${output}${line}"$'\n'
+      used=$((used + line_bytes))
     done <<EOF
 $FM_WAKE_UNREAD_LINES
 EOF
+    if [ "$task_complete" = true ] && [ "$mode" = direct ]; then
+      task=${status_key%.status}
+      FM_WAKE_ANNOTATION_FULLY_PRESENTED_TASKS="${FM_WAKE_ANNOTATION_FULLY_PRESENTED_TASKS}${FM_WAKE_ANNOTATION_FULLY_PRESENTED_TASKS:+$'\n'}$task"
+    fi
   done <<EOF
 $manifest
 EOF
+
+  printf '%s' "$output" || return 1
+  if [ "$omitted" -gt 0 ]; then
+    printf 'wake annotation: %s annotations omitted (global enrichment byte cap)\n' "$omitted" || return 1
+  fi
+  if [ "$read_omitted" -gt 0 ]; then
+    printf 'wake annotation: %s status contexts remain unread (enrichment read cap)\n' "$read_omitted" || return 1
+  fi
 
   return 0
 }

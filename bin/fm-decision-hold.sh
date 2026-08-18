@@ -25,7 +25,7 @@
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
 #   fm-decision-hold.sh answer <origin-id> <decision-key> --decision-file <path>
-#   fm-decision-hold.sh answers <origin-id> --source <provenance>   (keyed answers on stdin)
+#   fm-decision-hold.sh answers <origin-id> --source <provenance>
 #   fm-decision-hold.sh bind <source-id> <origin-id>
 #   fm-decision-hold.sh unbind <source-id>
 #   fm-decision-hold.sh binding <source-id>
@@ -40,61 +40,17 @@
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
 #
-# `resolve`, `answer`, and `decline` close active holds; `repair` attests a hold
-# already closed outside this script. All four paths require a non-empty captain
-# decision file of at most 8192 bytes, record the same durable resolution block in
-# the hold body, and store the decision digest plus routed identities so an exact
-# retry is idempotent while a changed decision or, for `resolve`, routed set is
-# rejected. New records include a `Resolution mode:` naming their path; older
-# routed records remain valid.
+# `resolve` and `decline` close active holds; `repair` attests a hold already closed
+# outside this script. All three paths require a non-empty captain decision file of
+# at most 8192 bytes, record the same durable resolution block in the hold body, and
+# store the decision digest plus routed identities so an exact retry is idempotent
+# while a changed decision or, for `resolve`, routed set is rejected. New records
+# include a `Resolution mode:` naming their path; older routed records remain valid.
 #
 # `resolve` is the routed path. It requires every --routed-to task to exist and to
 # be blocked by the hold. It writes the captain decision and routed identities into
 # the hold body, clears those dependency edges, and only then marks the hold Done.
 # A failure before the final step leaves the captain hold open.
-#
-# `answer` is the answer-time closure path, the hold ledger's counterpart to
-# `fm-send.sh --resolve-key`: it exists so the act that carries the captain's
-# answer is the act that closes the hold, instead of leaving closure to a
-# separate later call nobody is forced to make. It records the captain's answer
-# on an actively held hold, records `(none)` as the routed identities because no
-# follow-up work has been routed behind the hold yet, and closes it. It shares
-# every guard `decline` has, including the refusal while any task is still
-# blocked by the hold, so a decision whose follow-up work is already routed still
-# goes through `resolve` and the routed-vs-unrouted distinction survives. It says
-# only that the captain answered; `decline` still says the captain answered with
-# no follow-up work at all.
-#
-# ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
-# "A keyed answer closes its matching hold" is a single capability, owned here
-# and nowhere else. `answers` is its channel-agnostic entry point: it reads
-# `<decision-key>\t<answer>\t<label>` lines on stdin, maps each key to this
-# origin's `<origin-id>-decision-<key>` hold, and closes it through the very same
-# `answer` path above, so every guard applies identically no matter which channel
-# the answer arrived on. `--source` is provenance text recorded in the durable
-# decision, never a behavior switch: this command has no per-channel branch and
-# no knowledge of chat, review decks, or any transport.
-#
-# A channel's ONLY job is to turn whatever it received into those keyed lines and
-# pipe them here. It must never map keys to holds, build decision records, decide
-# resolve-versus-decline, or close a hold itself. A future channel needs no change
-# here at all.
-#
-# The decision text is a pure function of (source, key, answer, label), which is
-# what makes a replayed delivery an idempotent no-op rather than a rejected
-# "different captain decision". A key whose hold is absent, already closed, or
-# still blocking routed work is reported as `skipped:` and left for `resolve`;
-# skipping is never forced closure, and the command exits nonzero when any key
-# was skipped.
-#
-# `bind`, `unbind`, and `binding` record which origin a captured-answer SOURCE
-# belongs to, for any channel whose answers arrive detached from the origin (a
-# process-event source id, for example). The binding is a private record under
-# `state/decision-bindings/`; a source with no binding feeds nothing, so this
-# whole path is opt-in per source and an unbound source behaves as if it did not
-# exist. `bind` deliberately does not require the source to exist yet, so a
-# channel can be bound BEFORE it is armed and never produce an answer that has
-# nowhere to go.
 #
 # `decline` is the unrouted path for a decision the captain answered with no
 # follow-up work. It takes no --routed-to task, records `(none)` as the routed
@@ -493,17 +449,10 @@ EOF
 
     # Transfer any still-open status decision to its durable backlog owner so the
     # live status fold does not duplicate the same Captain's Call item.
-    # The transfer line is this home's own bookkeeping close, written by the
-    # turn that just reviewed the decision, so it uses the guarded
-    # self-announced append (bin/fm-wake-lib.sh) and does not wake this same
-    # session; an append failure still fails this command loudly.
-    while IFS=$'\t' read -r key _verb _summary; do
-      [ -n "$key" ] || continue
-      list_has_key "$keys" "$key" || continue
-      transfer_rc=0
-      fm_wake_status_append_self_announced "$STATE" "$status_file" \
-        "captain-held [key=$key]: tracked by $(hold_id "$origin" "$key")" || transfer_rc=$?
-      [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin/$key"
+      while IFS=$'\t' read -r key _verb _summary; do
+        [ -n "$key" ] || continue
+        list_has_key "$keys" "$key" || continue
+      "$SCRIPT_DIR/fm-status-event.sh" self-append "$STATE" "$origin" "captain-held [key=$key]: tracked by $(hold_id "$origin" "$key")"
       key_seen=1
     done <<EOF
 $raw_open
@@ -622,12 +571,7 @@ parse_decision_only_flags() {  # <args...>; prints the --decision-file value
   printf '%s' "$decision_file"
 }
 
-# The one unrouted close path, shared by `answer` and `decline`. They differ only
-# in the resolution mode they record and the outcome word they print; every
-# guard - the captain decision file, the active-hold requirement, the retry
-# identity, and the refusal to release still-routed work - is identical, so
-# neither can drift into a weaker close than the other.
-close_unrouted_hold() {  # <mode> <outcome-word> <origin-id> <decision-key> <flag-args...>
+close_unrouted_hold() {
   local mode=$1 outcome=$2 origin=$3 key=$4 decision_file id body hold_show hold_body state dependents
   shift 4
   decision_file=$(parse_decision_only_flags "$@") || exit 2
@@ -670,23 +614,17 @@ command_answer() {
   close_unrouted_hold answered answered "$@"
 }
 
-# --- the one keyed-answer intake, and the source bindings that feed it --------
-
 BINDING_DIR="$STATE/decision-bindings"
 BINDING_SCHEMA=fm-decision-binding.v1
 
-validate_source_id() {  # <source-id>
+validate_source_id() {
   validate_slug source-id "$1"
   [ "${#1}" -le 64 ] || fail "source-id must be at most 64 characters: $1"
 }
 
 binding_path() { printf '%s/%s.origin\n' "$BINDING_DIR" "$1"; }
 
-# The origin a captured-answer source belongs to, or empty when it is unbound.
-# An unreadable or wrong-schema record is a hard error rather than a silent
-# "unbound": feeding nothing is the safe direction only when it is a deliberate
-# choice, never when it is a corrupted record.
-read_binding() {  # <source-id>
+read_binding() {
   local path origin schema
   path=$(binding_path "$1")
   [ -e "$path" ] || return 0
@@ -734,17 +672,14 @@ command_binding() {
   printf '%s\n' "$origin"
 }
 
-# The durable captain decision one keyed answer records. Pure function of its
-# inputs, so the same answer delivered twice is idempotent rather than a
-# conflicting decision.
-keyed_decision_text() {  # <source> <key> <answer> <label>
+keyed_decision_text() {
   printf 'Captain answered this decision through %s.\n' "$1"
   printf 'Decision key: %s\n' "$2"
   printf 'Answer: %s\n' "$3"
   [ -z "$4" ] || printf 'Answer as shown to the captain: %s\n' "$4"
 }
 
-sanitize_field() {  # <text>
+sanitize_field() {
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-512
 }
 
