@@ -10,15 +10,17 @@ TMP_ROOT=$(fm_test_tmproot fm-remote-reply)
 PARENT="$TMP_ROOT/parent"
 REMOTE="$TMP_ROOT/remote"
 REMOTE_INTERLEAVE="$TMP_ROOT/remote-interleave"
+REMOTE_UTF8="$TMP_ROOT/remote-utf8"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE/state" "$REMOTE/data/reply" \
-  "$REMOTE_INTERLEAVE/state" "$REMOTE_INTERLEAVE/data" "$CLAIMS"
+  "$REMOTE_INTERLEAVE/state" "$REMOTE_INTERLEAVE/data" "$REMOTE_UTF8/state" "$CLAIMS"
 trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; fm_test_cleanup' EXIT
 
 cat > "$PARENT/data/secondmates.md" <<EOF
 - ios - iOS delivery (host: remote-mac; root: $ROOT; home: $REMOTE; scope: iOS work; projects: alpha; added 2026-08-02)
 - interleave - interleaved reply fixture (host: remote-interleave; root: $ROOT; home: $REMOTE_INTERLEAVE; scope: test; projects: alpha; added 2026-08-02)
+- utf8 - utf8 reply fixture (host: remote-utf8; root: $ROOT; home: $REMOTE_UTF8; scope: test; projects: alpha; added 2026-08-02)
 EOF
 printf '# Detailed remote answer\n\nThe build is green.\n' > "$REMOTE/data/reply/report.md"
 : > "$REMOTE/state/parent-replies.status"
@@ -37,7 +39,7 @@ done
 host=$1
 entry=$2
 shift 2
-  case "$host" in remote-mac|remote-interleave) ;;
+  case "$host" in remote-mac|remote-interleave|remote-utf8) ;;
     *) exit 91 ;;
   esac
 [ "$entry" = fm-remote-entrypoint.sh ] || exit 92
@@ -183,12 +185,11 @@ pass "later generations cannot invalidate an unacknowledged ingested result"
 
 # An uncorrelated line after the legacy prefix must not discard surrounding
 # correlated replies or prevent the cursor from advancing past the delta.
-printf 'working [corr=aaaaaaaaaaaaaaaa]: first interleaved reply\n' \
-  >> "$REMOTE_INTERLEAVE/state/parent-replies.status"
-printf 'working: uncorrelated noise after a correlated reply\n' \
-  >> "$REMOTE_INTERLEAVE/state/parent-replies.status"
-printf 'done [corr=bbbbbbbbbbbbbbbb]: second interleaved reply\n' \
-  >> "$REMOTE_INTERLEAVE/state/parent-replies.status"
+{
+  printf 'working [corr=aaaaaaaaaaaaaaaa]: first interleaved reply\n'
+  printf 'working: uncorrelated noise after a correlated reply\n'
+  printf 'done [corr=bbbbbbbbbbbbbbbb]: second interleaved reply\n'
+} >> "$REMOTE_INTERLEAVE/state/parent-replies.status"
 INTERLEAVE_SID=$(remote_env "$ADAPTER" source-id interleave)
 remote_env "$ADAPTER" arm interleave >/dev/null \
   || fail "could not arm the interleaved reply fixture"
@@ -224,6 +225,104 @@ if tail -n "+$((interleave_payload_boundary + 1))" "$INTERLEAVE_RESULT_TWO" \
   fail "the second capture replayed bytes from the rejected delta"
 fi
 pass "uncorrelated lines are skipped while correlated replies ingest and the cursor advances"
+
+# Correlated UTF-8 status text must ingest without rejecting the whole delta.
+printf 'working [corr=dddddddddddddddd]: reviewer\xe2\x80\x99s note complete\n' \
+  > "$REMOTE_UTF8/state/parent-replies.status"
+UTF8_SID=$(remote_env "$ADAPTER" source-id utf8)
+remote_env "$ADAPTER" arm utf8 >/dev/null \
+  || fail "could not arm the utf8 reply fixture"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$UTF8_SID" >/dev/null \
+  || fail "utf8 reply fixture was not captured"
+UTF8_RESULT="$PARENT/state/procevent-inbox/$UTF8_SID.1.result"
+utf8_out=$(remote_env "$ADAPTER" handle utf8 1 "$UTF8_RESULT") \
+  || fail "valid correlated UTF-8 status text was rejected"
+assert_contains "$utf8_out" 'ingested: utf8 appended=1' \
+  "utf8 correlated line was not ingested"
+assert_grep 'reviewer' "$PARENT/state/utf8.status" \
+  "utf8 status note did not reach the parent status channel"
+UTF8_OFFSET=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/utf8.cursor")
+[ "$UTF8_OFFSET" -gt 0 ] \
+  || fail "utf8 ingest did not advance the cursor"
+pass "correlated UTF-8 status text ingests and advances the cursor"
+
+# Non-printable bytes still reject the delta at the public ingest boundary.
+# Each crafted delta continues the live utf8 cursor so the failure is the
+# status-line validation, not cursor continuity.
+craft_utf8_delta() { # <payload-file> <destination>
+  local payload=$1 destination=$2 boundary bytes hash from_offset from_hash
+  cp "$UTF8_RESULT" "$destination"
+  boundary=$(grep -n -m 1 '^$' "$destination" | cut -d: -f1)
+  bytes=$(LC_ALL=C wc -c < "$payload" | tr -d ' ')
+  hash=$(sha256_file "$payload")
+  from_offset=$(sed -n 's/^to_offset=//p' "$UTF8_RESULT")
+  from_hash=$(sed -n 's/^to_prefix_sha256=//p' "$UTF8_RESULT")
+  head -n "$boundary" "$destination" \
+    | sed "s/^payload_sha256=.*/payload_sha256=$hash/;s/^payload_bytes=.*/payload_bytes=$bytes/;s/^from_offset=.*/from_offset=$from_offset/;s/^from_prefix_sha256=.*/from_prefix_sha256=$from_hash/;s/^to_offset=.*/to_offset=$((from_offset + bytes))/" \
+    > "$destination.header"
+  cat "$destination.header" "$payload" > "$destination"
+  rm -f "$destination.header"
+}
+printf 'working [corr=eeeeeeeeeeeeeeee]: bad \xff byte\n' > "$TMP_ROOT/invalid-utf8.payload"
+printf 'working [corr=eeeeeeeeeeeeeeee]: trailing return\r\n' > "$TMP_ROOT/carriage-return.payload"
+printf 'working [corr=eeeeeeeeeeeeeeee]: \xc2\x9b31mtinted note\n' > "$TMP_ROOT/c1-control.payload"
+for bad in invalid-utf8 carriage-return c1-control; do
+  craft_utf8_delta "$TMP_ROOT/$bad.payload" "$TMP_ROOT/$bad.result"
+  set +e
+  bad_out=$(remote_env "$ADAPTER" ingest utf8 "$TMP_ROOT/$bad.result" 2>&1)
+  bad_rc=$?
+  set -e
+  [ "$bad_rc" -ne 0 ] || fail "ingest accepted a $bad status line"
+  assert_contains "$bad_out" 'invalid status line' \
+    "$bad delta was not rejected by status-line validation"
+done
+assert_grep "offset=$UTF8_OFFSET" "$PARENT/state/remote-replies/utf8.cursor" \
+  "a rejected non-printable delta moved the cursor"
+pass "ingest rejects invalid UTF-8, carriage-return, and C1-control status lines"
+
+# After a rejected delta, rebase can advance the cursor without duplicating bytes.
+printf 'done [corr=ffffffffffffffff]: second utf8 reply\n' \
+  >> "$REMOTE_UTF8/state/parent-replies.status"
+remote_env "$ADAPTER" arm utf8 >/dev/null \
+  || fail "could not re-arm the utf8 fixture for rebase recovery"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$UTF8_SID" >/dev/null \
+  || fail "utf8 second capture was not recorded"
+UTF8_RESULT_TWO="$PARENT/state/procevent-inbox/$UTF8_SID.2.result"
+rebase_offset=$(sed -n 's/^to_offset=//p' "$UTF8_RESULT_TWO")
+rebase_hash=$(sed -n 's/^to_prefix_sha256=//p' "$UTF8_RESULT_TWO")
+[ -n "$rebase_offset" ] && [ -n "$rebase_hash" ] \
+  || fail "utf8 second capture did not record its committed cursor"
+printf 'done [corr=1010101010101010]: third utf8 reply\n' \
+  >> "$REMOTE_UTF8/state/parent-replies.status"
+remote_env "$ADAPTER" rebase utf8 "$rebase_offset" "$rebase_hash" >/dev/null \
+  || fail "cursor rebase could not recover past a rejected delta on a grown log"
+assert_grep "offset=$rebase_offset" "$PARENT/state/remote-replies/utf8.cursor" \
+  "cursor rebase did not commit the validated offset"
+utf8_handle_two=$(remote_env "$ADAPTER" handle utf8 2 "$UTF8_RESULT_TWO") \
+  || fail "rebased cursor could not acknowledge the captured generation"
+assert_contains "$utf8_handle_two" 'ingested: utf8 appended=1' \
+  "post-rebase handle did not ingest the skipped correlated line once"
+[ "$(grep -cF 'second utf8 reply' "$PARENT/state/utf8.status")" -eq 1 ] \
+  || fail "post-rebase handle duplicated the recovered status line"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$UTF8_SID" >/dev/null \
+  || fail "utf8 source did not capture after cursor rebase"
+UTF8_RESULT_THREE="$PARENT/state/procevent-inbox/$UTF8_SID.3.result"
+utf8_payload_boundary=$(grep -n -m 1 '^$' "$UTF8_RESULT_THREE" | cut -d: -f1)
+tail -n "+$((utf8_payload_boundary + 1))" "$UTF8_RESULT_THREE" \
+  | grep -F -q 'third utf8 reply' \
+  || fail "post-rebase capture did not begin after the rebased cursor"
+if tail -n "+$((utf8_payload_boundary + 1))" "$UTF8_RESULT_THREE" \
+  | grep -F -q 'second utf8 reply'; then
+  fail "post-rebase capture replayed bytes from the rebased delta"
+fi
+pass "cursor rebase recovers a rejected delta without replaying committed bytes"
+
+EMPTY_PREFIX_HASH=$(sha256_file /dev/null)
+remote_env "$ADAPTER" rebase interleave 0 "$EMPTY_PREFIX_HASH" >/dev/null \
+  || fail "cursor rebase to offset zero was rejected"
+assert_grep 'offset=0' "$PARENT/state/remote-replies/interleave.cursor" \
+  "zero-offset rebase did not commit the empty cursor"
+pass "cursor rebase validates offset zero against the empty prefix"
 
 # A digest-valid but uncorrelated line is still rejected at the public ingest
 # boundary. Recalculate its payload commitment so the behavioral assertion is

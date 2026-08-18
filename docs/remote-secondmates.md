@@ -162,6 +162,7 @@ The remote charter appends replies to `state/parent-replies.status` in the remot
 A process-event source performs a non-destructive, cursor-anchored delta read, validates bounded correlated status lines, fetches only referenced `data/*.md` documents through the confined reader, and appends each accepted line at most once to the primary status channel.
 The source log is never truncated or consumed.
 A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
+A stopped or rejected cursor recovers only through the adapter's guarded `rebase` command, which advances the cursor solely after validating the remote log's prefix hash at the requested offset and never ingests or bypasses line validation; its [script header](../bin/fm-procevent-remote-reply.sh) owns the exact contract.
 
 An SSH exit status of 255 always means transport failure or unknown remote completion.
 The transport never retries automatically.

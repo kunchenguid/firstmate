@@ -7,6 +7,7 @@
 #   fm-procevent-remote-reply.sh classify <result-file>
 #   fm-procevent-remote-reply.sh terminal <result-file>
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
+#   fm-procevent-remote-reply.sh rebase <secondmate-id> <offset> <prefix-sha256>
 #   fm-procevent-remote-reply.sh retire <secondmate-id>
 #
 # `arm` registers one blocking, non-destructive delta source for the remote
@@ -16,7 +17,9 @@
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. A continuity break is escalated and not re-armed.
 #
-# Ingest accepts bounded, printable status lines with an allowed lifecycle verb.
+# Ingest accepts bounded, printable UTF-8 status lines with an allowed lifecycle
+# verb. `rebase` advances the cursor only after validating the remote log prefix
+# hash at the requested offset; it never ingests or bypasses line validation.
 # New lines must carry corr=<16hex>, while legacy lines without corr= are
 # skipped after the byte-zero compatibility prefix and never block the cursor.
 # Exact lines are appended at most once to the parent's state/<id>.status.
@@ -43,7 +46,7 @@ MAX_DOC_BYTES=${FM_REMOTE_REPLY_MAX_DOC_BYTES:-262144}
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -52,6 +55,16 @@ sha256_file() {
     sha256sum "$1" | awk '{print $1}'
   else
     die "no SHA-256 tool is available"
+  fi
+}
+
+sha256_stdin() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    return 1
   fi
 }
 
@@ -231,13 +244,53 @@ fetch_document() { # <id> <remote-relative> <result-var>
   printf -v "$result_var" '%s' "$local_rel"
 }
 
-line_status_valid() { # <line>
+line_bytes_bounded_printable() { # <line>
   local line=$1 bytes
   [ -n "$line" ] || return 1
   bytes=$(printf '%s' "$line" | LC_ALL=C wc -c | tr -d ' ')
   [ "$bytes" -le "$MAX_LINE_BYTES" ] || return 1
-  [ -z "$(printf '%s' "$line" | LC_ALL=C tr -d '\11\40-\176')" ] || return 1
+  printf '%s' "$line" | perl -0777 -ne '
+    use Encode qw(decode FB_CROAK);
+    my $decoded;
+    eval { $decoded = decode("UTF-8", $_, Encode::FB_CROAK); 1 } or exit 1;
+    exit 1 if $decoded =~ /[\x00-\x08\x0A-\x1F\x7F-\x9F]/;
+    exit 0;
+  ' || return 1
+}
+
+line_status_valid() { # <line>
+  local line=$1
+  line_bytes_bounded_printable "$line" || return 1
   printf '%s' "$line" | grep -Eq '^(working|needs-decision|blocked|paused|done|failed|resolved)([[:space:]]+\[[^]]+\])?:' || return 1
+}
+
+validate_sha256() { # <value>
+  case "$1" in *[!A-Fa-f0-9]*|'') return 1 ;; esac
+  [ "${#1}" -eq 64 ] || return 1
+}
+
+remote_log_prefix_hash() { # <id> <offset>
+  local id=$1 offset=$2 tmp size prefix_hash
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$offset" -le "$MAX_DOC_BYTES" ] || return 1
+  if [ "$offset" -eq 0 ]; then
+    empty_hash
+    return
+  fi
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-remote-reply-prefix.XXXXXX") || return 1
+  if ! "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$REMOTE_LOG" "$MAX_DOC_BYTES" < /dev/null > "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  size=$(LC_ALL=C wc -c < "$tmp" | tr -d ' ')
+  if [ "$size" -lt "$offset" ]; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  prefix_hash=$(head -c "$offset" "$tmp" | sha256_stdin)
+  rm -f -- "$tmp"
+  [ -n "$prefix_hash" ] || return 1
+  printf '%s\n' "$prefix_hash"
 }
 
 line_has_valid_corr() { # <line>
@@ -406,6 +459,23 @@ retirement_capture_scan() {
   return 0
 }
 
+cmd_rebase() {
+  local id=${1:-} offset=${2:-} hash=${3:-} actual lock
+  validate_id "$id"
+  remote_route_exists "$id"
+  case "$offset" in ''|*[!0-9]*) die "rebase offset must be a nonnegative integer" ;; esac
+  validate_sha256 "$hash" || die "rebase prefix hash must be a 64-character SHA-256 value"
+  hash=$(printf '%s' "$hash" | tr 'A-F' 'a-f')
+  actual=$(remote_log_prefix_hash "$id" "$offset") \
+    || die "remote reply log prefix could not be validated for $id"
+  [ "$actual" = "$hash" ] || die "rebase prefix hash does not match the remote reply log"
+  lock="$STATE/.remote-reply-ingest-$id.lock"
+  fm_lock_acquire_wait "$lock" || die "cannot lock remote reply ingest for $id"
+  write_cursor "$id" "$offset" "$hash" || { fm_lock_release "$lock"; die "cannot commit remote reply cursor"; }
+  fm_lock_release "$lock"
+  printf 'rebased: %s offset=%s\n' "$id" "$offset"
+}
+
 cmd_retire_quiesce_locked() {
   local id=${1:-} force=${2:-} sid
   validate_id "$id"
@@ -471,6 +541,7 @@ case "${1:-}" in
   source) shift; [ "$#" -eq 1 ] || usage; cmd_source "$@" ;;
   handle) shift; [ "$#" -eq 3 ] || usage; cmd_handle "$@" ;;
   ingest) shift; [ "$#" -eq 2 ] || usage; cmd_ingest "$@" ;;
+  rebase) shift; [ "$#" -eq 3 ] || usage; cmd_rebase "$@" ;;
   classify) shift; [ "$#" -eq 1 ] || usage; classify_result "$1" ;;
   terminal) shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;
