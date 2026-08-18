@@ -110,3 +110,4 @@ lavish.test.sh	hermetic
 operating-fundamentals.test.sh	hermetic
 runner-entry-probe.test.sh	hermetic
 test-suite-seal.test.sh	hermetic
+fm-azure-cell-image.test.sh	hermetic

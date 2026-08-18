@@ -19,6 +19,7 @@
 180	tests/fm-auto-reap-herdr-e2e.test.sh
 22300	tests/fm-auto-reap.test.sh
 5950	tests/fm-autocompact.test.sh
+1000	tests/fm-azure-cell-image.test.sh
 1000	tests/fm-azure-pilot.test.sh
 5000	tests/fm-azure-runner.test.sh
 6000	tests/fm-azure-validation.test.sh
@@ -48,6 +49,7 @@
 2107	tests/fm-checkout-identity-cost.test.sh
 475500	tests/fm-checkout-refresh.test.sh
 336	tests/fm-checkout-return-boundary.test.sh
+1000	tests/fm-cloud-state.test.sh
 263	tests/fm-composer-ghost.test.sh
 30	tests/fm-composer-lib.test.sh
 10055	tests/fm-crew-state.test.sh
@@ -109,12 +111,11 @@
 95645	tests/fm-watch-triage.test.sh
 20435	tests/fm-watcher-lock.test.sh
 8000	tests/fm-worker-lifecycle.test.sh
-1000	tests/fm-worker-supervisor.test.sh
 1000	tests/fm-worker-outcome-transport.test.sh
+1000	tests/fm-worker-supervisor.test.sh
 23744	tests/fm-x-mode.test.sh
 250	tests/lavish-repair.test.sh
 6200	tests/lavish.test.sh
 92	tests/operating-fundamentals.test.sh
 100	tests/runner-entry-probe.test.sh
 1000	tests/test-suite-seal.test.sh
-1000	tests/fm-cloud-state.test.sh

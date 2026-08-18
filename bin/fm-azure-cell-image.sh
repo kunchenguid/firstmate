@@ -65,8 +65,30 @@ az vm create --resource-group "$RESOURCE_GROUP" --name "$BUILDER" \
   --public-ip-address "" --nsg "" --output none
 
 BAKE=$(mktemp)
-trap 'rm -f "$BAKE"; rm -rf "$KEYDIR"' EXIT
+# The builder is BILLABLE COMPUTE. Until now only local temp files were cleaned,
+# so any bake that refused to capture left a running D4as_v6 behind with nothing
+# owning it; the refused bake above did exactly that. Deallocate on the way out
+# unless the capture succeeded and cleared the flag.
+BUILDER_LIVE=1
+cleanup_builder() {
+  rm -f "$BAKE"
+  rm -rf "$KEYDIR"
+  if [ "$BUILDER_LIVE" = 1 ]; then
+    echo "fm-azure-cell-image: deallocating builder $BUILDER (bake did not capture)" >&2
+    command az vm deallocate --resource-group "$RESOURCE_GROUP" --name "$BUILDER" \
+      --subscription "$SUBSCRIPTION" --only-show-errors --output none 2>/dev/null || \
+      echo "fm-azure-cell-image: WARNING builder $BUILDER may still be running and billing" >&2
+  fi
+}
+trap cleanup_builder EXIT
 cat >"$BAKE" <<EOF
+# Azure's RunShellScript hands this file to /bin/sh, which on Ubuntu is dash and
+# has no pipefail: \`set -euxo pipefail\` fails on LINE 1 and the whole bake is a
+# no-op. That is not hypothetical, it is what produced gallery version
+# 1.0.1786940035 - an image captured with NOTHING staged, no /opt/fm-tools at
+# all - because the pre-gate script could not tell a refused bake from a clean
+# one. Re-exec under bash so the strict-mode options below mean what they say.
+if [ -z "\${BASH_VERSION:-}" ]; then exec /bin/bash "\$0" "\$@"; fi
 set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -111,6 +133,7 @@ esac
 
 echo "fm-azure-cell-image: capturing image $IMAGE" >&2
 az vm deallocate --resource-group "$RESOURCE_GROUP" --name "$BUILDER" --output none
+BUILDER_LIVE=0
 az vm generalize --resource-group "$RESOURCE_GROUP" --name "$BUILDER" --output none
 az image create --resource-group "$RESOURCE_GROUP" --name "$IMAGE" \
   --source "$BUILDER" --hyper-v-generation V2 --output none
