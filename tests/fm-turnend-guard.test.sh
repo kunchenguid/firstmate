@@ -116,6 +116,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-timing-lib.sh" "$dir/bin/fm-timing-lib.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
@@ -1678,6 +1679,196 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
+# --- claim publication ordering ----------------------------------------------
+# The Stop hook array fires the guard and the auto-arm on the SAME event. Before
+# the in-progress claim the auto-arm published nothing until after its identity
+# gate, whose ancestry walk costs up to three `ps` forks per hop; the guard
+# reached its verdict inside that window, announced that no recovery was under
+# way while recovery was under way, and spent a forced continuation on it.
+# These tests drive the two signals apart deliberately: the auto-arm is parked
+# INSIDE its identity gate with the claim published and nothing else on disk,
+# which is exactly the window that used to block. See docs/turnend-guard.md.
+
+# A `ps` shim that parks the ancestry walk once the claim exists, so the auto-arm
+# is provably still inside its identity gate while the guard runs. Parking on the
+# claim's presence rather than on a call count keeps the fixture correct on hosts
+# whose earlier gates fork `ps` too.
+install_ancestry_park() {
+  local dir=$1 real_ps
+  real_ps=$(command -v ps) || fail "ps not found for the ancestry-park fixture"
+  mkdir -p "$dir/parkbin"
+  cat > "$dir/parkbin/ps" <<SH
+#!/usr/bin/env bash
+if [ -e "\$FM_HOME/state/.claude-autoarm-claim" ]; then
+  : > "\$FM_HOME/state/ancestry-parked"
+  n=0
+  while [ ! -e "\$FM_HOME/state/ancestry-release" ] && [ "\$n" -lt 100 ]; do
+    sleep 0.1
+    n=\$((n + 1))
+  done
+fi
+exec $real_ps "\$@"
+SH
+  chmod +x "$dir/parkbin/ps"
+}
+
+write_integrated_healthy_arm() {
+  local dir=$1
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+}
+
+PARKED_AUTOARM_PID=
+
+start_parked_autoarm() {
+  local dir=$1 home
+  home=$(cd "$dir" && pwd)
+  # shellcheck disable=SC2016 # the fake harness expands FM_HOME inside its child shell.
+  printf '{"session_id":"sess-claude-mode","stop_hook_active":false}\n' \
+    | PATH="$dir/parkbin:$PATH" FM_HOME="$home" "$dir/fake-claude" -c '
+        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+        "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+      ' > "$dir/autoarm.out" 2>&1 &
+  PARKED_AUTOARM_PID=$!
+}
+
+release_parked_autoarm() {
+  local dir=$1
+  : > "$dir/state/ancestry-release"
+  [ -n "$PARKED_AUTOARM_PID" ] || return 0
+  wait "$PARKED_AUTOARM_PID" 2>/dev/null || true
+  PARKED_AUTOARM_PID=
+}
+
+wait_for_path() {
+  local path=$1 n=0
+  while [ ! -e "$path" ]; do
+    sleep 0.1
+    n=$((n + 1))
+    [ "$n" -lt 100 ] || return 1
+  done
+}
+
+# The reproduction, as a regression: a real auto-arm process concurrent with a
+# real guard process, held in the pre-identity window where the incident lived.
+test_hook_claude_mode_early_claim_is_the_whole_difference() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-early-claim")
+  install_integrated_autoarm "$dir"
+  install_ancestry_park "$dir"
+  write_integrated_healthy_arm "$dir"
+  : > "$dir/state/task1.meta"
+  start_parked_autoarm "$dir"
+  wait_for_path "$dir/state/ancestry-parked" || {
+    release_parked_autoarm "$dir"
+    fail "no in-progress claim appeared before the auto-arm's identity gate: $(cat "$dir/autoarm.out" 2>/dev/null)"
+  }
+
+  # Drive the signals apart: the claim is the ONLY evidence of recovery on disk.
+  assert_present "$dir/state/.claude-autoarm-claim" "auto-arm published no in-progress claim before its identity gate"
+  assert_absent "$dir/state/.claude-autoarm.lock" "owner lock already existed, so this is not the pre-identity window"
+  assert_absent "$dir/state/.claude-autoarm-epoch" "epoch ledger already existed, so this is not the pre-identity window"
+
+  # Counterfactual first: without the claim this exact instant forces a turn.
+  mv "$dir/state/.claude-autoarm-claim" "$dir/claim.hidden"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "an unobservable in-flight auto-arm must still be the blocking case"
+  assert_contains "$out" "TURN WOULD END BLIND" "the unclaimed pre-identity window lost its blind-turn banner"
+  assert_present "$dir/state/.turnend-claude-blocks" "the unclaimed block did not consume the continuation budget"
+
+  mv "$dir/claim.hidden" "$dir/state/.claude-autoarm-claim"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "--claude forced a continuation while the auto-arm was provably still inside its identity gate"
+  [ -z "$out" ] || fail "--claude early-claim allow produced output: $out"
+  # The budget is not reset here on purpose: only genuine watcher health clears
+  # the bounded progression. What the claim must buy is that the count does not
+  # grow, which is exactly the token the incident spent on every turn.
+  [ "$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")" = 1 ] \
+    || fail "the early-claim allow spent another forced continuation: $(cat "$dir/state/.turnend-claude-blocks")"
+
+  release_parked_autoarm "$dir"
+  assert_present "$dir/state/.claude-autoarm-epoch" "the released auto-arm never reached its epoch ledger: $(cat "$dir/autoarm.out" 2>/dev/null)"
+  assert_absent "$dir/state/.claude-autoarm-claim" "a completed auto-arm left its in-progress claim behind"
+  assert_absent "$dir/state/.claude-autoarm.lock" "a completed auto-arm left its owner lock behind"
+  pass "fm-turnend-guard --claude: the early claim is the whole difference in the pre-identity window (incident regression)"
+}
+
+# The claim carries the same liveness standard as the owner lock: a publisher
+# that died, or a pid the OS has since handed to something else, proves nothing.
+test_hook_claude_mode_claim_requires_live_matched_publisher() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-claim-liveness")
+  : > "$dir/state/task1.meta"
+  printf 'pid=%s\nidentity=fixture-identity\nstarted_at=%s\n' "$(nonexistent_pid)" "$(date +%s)" \
+    > "$dir/state/.claude-autoarm-claim"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "a claim whose publisher is gone must not stand in for recovery"
+  assert_contains "$out" "TURN WOULD END BLIND" "the dead-publisher claim lost its blind-turn banner"
+
+  sleep 60 &
+  pid=$!
+  printf 'pid=%s\nidentity=identity-of-some-earlier-process\nstarted_at=%s\n' "$pid" "$(date +%s)" \
+    > "$dir/state/.claude-autoarm-claim"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "a claim whose pid the OS reused must not stand in for recovery"
+
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify the live claim publisher"
+  }
+  printf 'pid=%s\nidentity=%s\nstarted_at=%s\n' "$pid" "$identity" "$(date +%s)" \
+    > "$dir/state/.claude-autoarm-claim"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a live identity-matched claim must be accepted as recovery under way"
+  [ -z "$out" ] || fail "--claude live-claim allow produced output: $out"
+  pass "fm-turnend-guard --claude: an in-progress claim is trusted only while its publisher is alive and unchanged"
+}
+
+# `arming` is the one epoch outcome that unambiguously means "arming right now",
+# and the incident's sixth occurrence blocked while it stood on disk.
+test_hook_claude_mode_allows_on_fresh_arming_epoch() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-arming-epoch")
+  : > "$dir/state/task1.meta"
+  printf 'epoch=3 owner_pid=%s outcome=arming updated_at=%s\n' "$(nonexistent_pid)" "$(date +%s)" \
+    > "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "--claude must not force a turn against a fresh arming epoch"
+  [ -z "$out" ] || fail "--claude arming-epoch allow produced output: $out"
+  pass "fm-turnend-guard --claude: a fresh arming epoch is recovery under way, not a missing claim"
+}
+
+# The masking condition was host load: each wait pass forks, so a budget spent as
+# a pass COUNT runs for an unbounded multiple of the milliseconds it names - 29.8s
+# for a nominal 800ms at the turn boundary in the reproduction.
+test_hook_claude_mode_wait_is_bounded_by_elapsed_time() {
+  local dir out status started elapsed real_sleep
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-wait-deadline")
+  : > "$dir/state/task1.meta"
+  real_sleep=$(command -v sleep) || fail "sleep not found for the loaded-host fixture"
+  mkdir -p "$dir/slowbin"
+  cat > "$dir/slowbin/sleep" <<SH
+#!/usr/bin/env bash
+exec $real_sleep 1
+SH
+  chmod +x "$dir/slowbin/sleep"
+  started=$(date +%s)
+  # The assignments stay inside this command substitution's own subshell.
+  out=$(PATH="$dir/slowbin:$PATH" FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=800 run_hook_claude "$dir" true); status=$?
+  elapsed=$(( $(date +%s) - started ))
+  expect_code 2 "$status" "an unclaimed unhealthy stop must still block after the bounded wait"
+  assert_contains "$out" "TURN WOULD END BLIND" "the bounded-wait block lost its blind-turn banner"
+  [ "$elapsed" -lt 5 ] || fail "an 800ms cooperative wait ran ${elapsed}s on a slow host: it is counting passes, not elapsed time"
+  pass "fm-turnend-guard --claude: the cooperative wait is bounded by elapsed time, not by a pass count"
+}
+
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -1745,3 +1936,7 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
+test_hook_claude_mode_early_claim_is_the_whole_difference
+test_hook_claude_mode_claim_requires_live_matched_publisher
+test_hook_claude_mode_allows_on_fresh_arming_epoch
+test_hook_claude_mode_wait_is_bounded_by_elapsed_time

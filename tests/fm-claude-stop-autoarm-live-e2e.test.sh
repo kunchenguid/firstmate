@@ -3,10 +3,15 @@
 # (bin/fm-claude-stop-autoarm.sh + bin/fm-turnend-guard.sh --claude).
 # Proves, against the real installed Claude Code and the real tracked hook
 # registration: a fresh session with in-flight work, no watcher, and a stale
-# session lock can run fm-session-start.sh first; session start reclaims the
-# dead owner; at least two tokenless auto-arm and rewake cycles then complete
+# session lock runs session start at session open through the run-tier
+# SessionStart hook; session start reclaims the dead owner; at least two
+# tokenless auto-arm and rewake cycles then complete
 # with zero model-issued arm commands; and the cooperative guard consumes no
 # forced continuation while the hook's launch is healthy.
+# The session runs under a deliberately loaded pid-query shim, which is the
+# condition that used to mask the claim-ordering defect: the auto-arm's identity
+# gate then outlasts the guard's cooperative wait on every Stop boundary, so a
+# guard that cannot observe recovery already under way would force a turn here.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication. No live fleet home, worktree, or session is touched.
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
@@ -107,11 +112,29 @@ printf 'stale: fixture-rapid drained\n'
 SH
 chmod +x "$PROJECT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-wake-drain.sh"
 
-PROMPT='Run exactly `bin/fm-session-start.sh` with Bash as your first tool call. After reading its complete digest, reply with exactly CYCLE0 and stop. Whenever a Stop hook feedback message wakes you, run exactly `bin/fm-wake-drain.sh` once with Bash, then reply with exactly ACK and stop. Never run bin/fm-watch-arm.sh or any other arm command, and never use any other tool.'
+# Loaded-host shim: every pid query costs a fixed slice, so the auto-arm's
+# ancestry walk is reliably slower than the guard's cooperative wait. The delay
+# is unconditional, so a regression that removes the auto-arm's in-progress
+# claim cannot make this guard pass by never triggering the load condition.
+REAL_PS=$(command -v ps) || fail "ps not found"
+mkdir -p "$LAB/loadbin"
+cat > "$LAB/loadbin/ps" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" -p "*)
+    sleep 0.3
+    printf 'delayed\n' >> "\$FM_HOME/state/ps-delayed.log" 2>/dev/null || true
+    ;;
+esac
+exec $REAL_PS "\$@"
+SH
+chmod +x "$LAB/loadbin/ps"
+
+PROMPT='Session start has already run for this session through its own hook, so use no tool now: reply with exactly CYCLE0 and stop. Whenever a Stop hook feedback message wakes you, run exactly `bin/fm-wake-drain.sh` once with Bash, then reply with exactly ACK and stop. Never run bin/fm-watch-arm.sh or any other arm command, and never use any other tool.'
 
 (
   cd "$PROJECT" || exit 1
-  FM_HOME="$HOME_DIR" CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
+  PATH="$LAB/loadbin:$PATH" FM_HOME="$HOME_DIR" CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false \
     claude -p "$PROMPT" --dangerously-skip-permissions --effort low --output-format stream-json --verbose
 ) > "$TRANSCRIPT" 2>&1 || fail "Claude credentialed auto-arm session failed: $(tail -20 "$TRANSCRIPT")"
 
@@ -123,8 +146,27 @@ REWAKES=$(grep -c 'Stop hook feedback' "$TRANSCRIPT" 2>/dev/null || true)
 [ "$REWAKES" -ge 2 ] || fail "expected at least 2 exit-2 rewake deliveries, got $REWAKES"
 grep -q 'stale: fixture-rapid-1' "$TRANSCRIPT" || fail "first rapid rewake reason missing from the transcript"
 grep -q 'stale: fixture-rapid-2' "$TRANSCRIPT" || fail "second rapid rewake reason missing from the transcript"
-[ "$(sed -n '1p' "$HOME_DIR/state/tool-calls.log" 2>/dev/null)" = 'bin/fm-session-start.sh' ] \
-  || fail "fresh Claude session did not run session start first: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)"
+# Three delayed pid queries is a single ancestry hop and already 0.9s, past the
+# 800ms cooperative wait; four proves the identity gate outlasted it with margin,
+# so the absence of a forced continuation below is a real result, not a fast host.
+DELAYED=$(wc -l < "$HOME_DIR/state/ps-delayed.log" 2>/dev/null | tr -d ' ')
+case "$DELAYED" in ''|*[!0-9]*) DELAYED=0 ;; esac
+[ "$DELAYED" -ge 4 ] \
+  || fail "Claude $CLAUDE_VERSION: the loaded-host condition never materialized ($DELAYED delayed pid queries), so this run proves nothing about the claim-ordering window"
+! grep -q 'TURN WOULD END BLIND' "$TRANSCRIPT" \
+  || fail "Claude $CLAUDE_VERSION: cooperative guard consumed a forced continuation while the auto-arm launch was healthy but still inside its identity gate"
+# Everything below asserts model behavior rather than the claim-ordering window,
+# so it follows the verdict above: a session that drifts from the prompt must not
+# hide whether the real Stop boundary forced a continuation.
+# The tracked SessionStart registration is the RUN tier (bin/fm-sessionstart-run.sh),
+# so session start runs at session open rather than as a model tool call. What has
+# to hold is that it ran for THIS home before the fleet did anything, not that the
+# model typed the command; with DRAIN_RUNS above, two model drains leave exactly
+# one drain owned by session start.
+grep -Fq "SESSION START - $HOME_DIR" "$TRANSCRIPT" \
+  || fail "Claude $CLAUDE_VERSION: the run-tier SessionStart hook delivered no session-start digest for this home"
+[ "$(grep -c 'fm-wake-drain.sh' "$HOME_DIR/state/tool-calls.log" 2>/dev/null || true)" = 2 ] \
+  || fail "Claude $CLAUDE_VERSION: expected exactly two model wake drains, got: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)"
 [ "$(cat "$HOME_DIR/state/.lock" 2>/dev/null)" != 9999999 ] \
   || fail "session start did not reclaim the stale dead-owner lock"
 if [ -f "$HOME_DIR/state/tool-calls.log" ]; then
@@ -133,8 +175,6 @@ if [ -f "$HOME_DIR/state/tool-calls.log" ]; then
   ! grep -q '&' "$HOME_DIR/state/tool-calls.log" \
     || fail "model used a shell ampersand: $(cat "$HOME_DIR/state/tool-calls.log")"
 fi
-! grep -q 'TURN WOULD END BLIND' "$TRANSCRIPT" \
-  || fail "cooperative guard consumed a forced continuation while the auto-arm launch was healthy"
 [ "$(sed -n 's/^.*outcome=\([a-z][a-z]*\) .*$/\1/p' "$HOME_DIR/state/.claude-autoarm-epoch" 2>/dev/null)" = rewake ] \
   || fail "auto-arm epoch ledger must record the rewake outcome"
 [ ! -e "$HOME_DIR/state/.claude-autoarm.lock" ] || fail "auto-arm owner lock was left behind"
@@ -161,4 +201,4 @@ printf '%s\n' '{"session_id":"live-owner-control"}' \
 [ ! -s "$LAB/live-owner.out" ] && [ ! -s "$LAB/live-owner.err" ] || fail "competing Stop hook produced a rewake while another live session owned the home"
 wait "$LIVE_OWNER_PID"
 
-printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"
+printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles under a loaded identity gate, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"

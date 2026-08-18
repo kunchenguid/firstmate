@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # fm-timing-lib.sh - the single owner of the deferred network stage's elapsed-time
-# instrumentation.
+# instrumentation, and of the shared fork-free millisecond clock (fm_timing_now_ms)
+# that any caller needing a sub-second wall-clock deadline reads rather than
+# reimplementing. bin/fm-turnend-guard.sh is the other caller: it bounds its
+# cooperative auto-arm wait by elapsed time, which is the one thing a loop of
+# fork-heavy passes cannot bound for itself.
 #
 # Sourced, never executed.
 #
