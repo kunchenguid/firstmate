@@ -36,6 +36,8 @@ Real harness credential tests remain opt-in rather than part of default CI.
 ## Watching and task containers
 
 The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.
+Each worker's own pane is titled `<home> · <task-id>` - the same home label as the workspace, so herdr's UI shows the worker nested under its home by name (matching the `<home> · firstmate` entrypoint pane).
+The tab label stays `fm-<id>` (recovery and dedup resolve tabs by it), and the pane title is display-only, so a rename refusal only warns and leaves the default label rather than aborting the spawn.
 When the launcher has no Herdr workspace to inherit, the adapter maintains one durable home-labeled workspace instead.
 The primary home label is the home name, the `FM_HOME` basename, so each home groups under its own name in Herdr's spaces sidebar (a degenerate basename falls back to `firstmate`).
 A secondmate home label is `2ndmate-<secondmate-id>`, derived from its validated `.fm-secondmate-home` marker.
