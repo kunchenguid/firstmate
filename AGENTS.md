@@ -381,6 +381,13 @@ Keep dependency judgment coarse: same repo plus overlapping area means serialize
 Treat read-mostly scouts as almost never blocked.
 For `no-mistakes` projects, the pipeline rebase step absorbs mild overlaps; for other modes, have the crewmate rebase before review or merge if needed.
 
+**Ground the ask in its owning docs before briefing it.**
+Find the document that owns the subsystem and read it; docs in this repo say so outright ("This document owns ..."), and scripts own their command mechanics in their headers.
+Session anchors, checkpoints, handoff notes, completion reports, and evidence folders are state, never intent: never take scope or requirements from one, and when resuming such work, reconcile it against the owning docs first and report what the anchor missed.
+When an initiative spans compartments, list the sibling docs in that family before starting; a limitation documented for one compartment is that compartment's, not the system's, until a sibling doc is checked.
+The Azure fleet family is `docs/azure-pilot.md`, `docs/azure-runner.md`, `docs/azure-validation.md`, `docs/azure-crosscheck.md`, and `docs/azure-workers.md`; `docs/azure-worker-runtime.md` is a design leaf whose built behavior `docs/azure-workers.md` owns.
+Name the owning docs by path in the brief so the crewmate starts from intent rather than from your notes.
+
 Write the brief per section 11.
 
 ### Spawn
