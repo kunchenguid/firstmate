@@ -869,17 +869,28 @@ fm_busy_grok_tail_busy() {
 # (data/learnings.md, 2026-08-17), corroborating the session-limit wording
 # above from a real stuck pane.
 #
-# Matching is anchored to the COMPOSER REGION of the captured tail: Claude
-# Code's composer box (its rounded top border down to the trailing hint line)
-# plus at most FM_BUSY_CLAUDE_LIMIT_REGION_LINES lines directly above that
-# border, where the limit widget renders. Nothing outside that region is ever
+# Matching is anchored to the COMPOSER REGION of the captured tail, and that
+# region is EXACTLY: at most FM_BUSY_CLAUDE_LIMIT_REGION_LINES lines
+# immediately above the composer box's top border, the box's own rows (top
+# border through bottom border), and the status/hint line immediately below it
+# (e.g. "? for shortcuts"). That is where Claude Code renders the limit widget
+# and nothing else. Transcript lines further up are NEVER
 # consulted, so scrollback, a diff, a transcript, or this very file's comments
 # can never trigger the override no matter what they contain. A tail with no
 # composer box in it has no region at all and simply does not match.
 #
 # Inside the region a BLOCKING auto-continue widget phrase is REQUIRED for the
 # paused verdict: "press enter to continue", "continuing automatically", or
-# "Automatic continue stopped after repeated usage-limit hits". The limit NAME
+# "Automatic continue stopped after repeated usage-limit hits". That phrase
+# must sit on a line that also carries the widget's own "usage limit" /
+# "usage-limit" token, exactly as all three verified renderings do ("Your
+# usage limit has reset \xB7 press enter to continue", "Usage limit reached
+# \xB7 continuing automatically at <time>", "Automatic continue stopped after
+# repeated usage-limit hits"). Without that token a bare prose line that
+# happens to say "press enter to continue" - a grep hit, a diff, this file's
+# own comments scrolling one line above the composer - would still qualify
+# inside the region, so the token is what makes the match provably the widget.
+# The limit NAME
 # is used only to enrich the detail - a name on the same or an adjacent line
 # as the widget prints that name line (it carries the reset hint), otherwise
 # the detail reports the limit type as unspecified.
@@ -896,23 +907,29 @@ fm_busy_grok_tail_busy() {
 # whose pane shows no widget is therefore not reported paused immediately - it
 # is still caught by the existing stale/idle pane detection in bin/fm-watch.sh,
 # just on that path's cadence rather than at once.
-FM_BUSY_CLAUDE_LIMIT_REGION_LINES=${FM_BUSY_CLAUDE_LIMIT_REGION_LINES:-6}
+FM_BUSY_CLAUDE_LIMIT_REGION_LINES=${FM_BUSY_CLAUDE_LIMIT_REGION_LINES:-2}
 
 # Print the composer region of the tail on stdin (see the header above), or
 # fail when the tail carries no composer box. Lowercasing goes through tr, not
 # bash 4's ${var,,}, because this repo still runs on macOS bash 3.2.
 fm_busy_claude_composer_region() {
-  local line border=-1 idx=0 start
+  local line top=-1 bottom=-1 idx=0 start end last
   local -a lines=()
   while IFS= read -r line; do
     lines+=("$line")
-    case "$line" in *'╭'*|*'┌'*) border=$idx ;; esac
+    case "$line" in
+      *'╭'*|*'┌'*) top=$idx; bottom=-1 ;;
+      *'╰'*|*'└'*) if [ "$top" -ge 0 ] && [ "$bottom" -lt 0 ]; then bottom=$idx; fi ;;
+    esac
     idx=$((idx + 1))
   done
-  [ "$border" -ge 0 ] || return 1
-  start=$((border - FM_BUSY_CLAUDE_LIMIT_REGION_LINES))
+  [ "$top" -ge 0 ] || return 1
+  last=$(( ${#lines[@]} - 1 ))
+  start=$((top - FM_BUSY_CLAUDE_LIMIT_REGION_LINES))
   [ "$start" -lt 0 ] && start=0
-  for ((idx = start; idx < ${#lines[@]}; idx++)); do
+  if [ "$bottom" -ge 0 ]; then end=$((bottom + 1)); else end=$last; fi
+  [ "$end" -gt "$last" ] && end=$last
+  for ((idx = start; idx <= end; idx++)); do
     printf '%s\n' "${lines[idx]}"
   done
 }
@@ -927,6 +944,10 @@ fm_busy_claude_limit_banner() {
   done < <(fm_busy_claude_composer_region)
   [ "${#region_lines[@]}" -gt 0 ] || return 1
   for ((idx = 0; idx < ${#region_lines[@]}; idx++)); do
+    case "${region_lower[idx]}" in
+      *'usage limit'*|*'usage-limit'*) ;;
+      *) continue ;;
+    esac
     case "${region_lower[idx]}" in
       *'press enter to continue'*|*'continuing automatically'*|*'automatic continue stopped after repeated usage-limit hits'*)
         widget=$idx ;;

@@ -165,10 +165,14 @@ map_log_state() {  # <line>
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
-# pane_readable is consulted ONLY in the no-run fallback below. The run-step path
-# stays authoritative regardless of pane liveness - judge by the run-step, not the
-# shell - so a finished crew whose endpoint has closed still reports its run-step
-# state (e.g. done) instead of being masked as unknown. Backend-aware
+# pane_readable has two callers: the no-run fallback below, and claude_limit_scan
+# right beneath it (which the run-step path also consults for a harness=claude
+# crew, costing that path one liveness probe plus one 40-line capture per read).
+# Neither makes the pane authoritative for a crew WITH a run: the run-step path
+# still judges by the run-step, not the shell - an unreadable pane merely makes
+# claude_limit_scan return non-zero and the run state is emitted unchanged - so a
+# finished crew whose endpoint has closed still reports its run-step state
+# (e.g. done) instead of being masked as unknown. Backend-aware
 # (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
 # herdr task is read through fm_backend_capture instead of a bare tmux probe.
 TASK_BACKEND=$(fm_backend_of_meta "$META")

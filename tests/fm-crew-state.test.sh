@@ -1029,11 +1029,7 @@ Usage limit reached · continuing automatically at 3:00pm · esc to cancel
 # wait, and the auto-continue-stopped state is the most wedged wait of all.
 test_no_run_claude_widget_only_tail_paused() {
   local widget
-  for widget in "Usage limit reached · continuing automatically at 3:00pm · esc to cancel
-╭──────────────────────────────╮
-│ >                            │
-╰──────────────────────────────╯
-  ? for shortcuts" \
+  for widget in "Usage limit reached · continuing automatically at 3:00pm · esc to cancel" \
                 "Your usage limit has reset · press enter to continue" \
                 "Automatic continue stopped after repeated usage-limit hits"; do
     reset_fakes
@@ -1203,10 +1199,38 @@ test_no_run_claude_bare_limit_notice_annotates_working() {
   pass "a bare Claude limit notice annotates the working detail instead of pausing"
 }
 
-# The blocking widget phrases are matched ONLY inside the composer region. A
-# crewmate grepping this repo (whose sources carry the literal phrase) while
-# genuinely mid-turn has the hit in scrollback with an ordinary busy footer at
-# the bottom, and must keep reading working.
+# The blocking widget is matched ONLY inside the composer region: the composer
+# box, its hint line, and the two lines directly above the box's top border.
+# (a) A real widget rendered there is the pause signal.
+test_no_run_claude_widget_in_composer_region_paused() {
+  reset_fakes
+  local d; d=$(new_case claude-widget-in-region)
+  make_repo_on_branch "$d/wt" fm/feat-widgetregion
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-widgetregion.meta" "window=fm:fm-feat-widgetregion" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="  ran the test suite, 41 passed
+Your usage limit has reset · press enter to continue
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-widgetregion)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-widgetregion busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-widgetregion)
+  assert_contains "$out" "state: paused" "a widget rendered in the composer region reads paused"
+  assert_contains "$out" "source: pane" "the override stays pane-sourced"
+  pass "a blocking widget inside the composer region reads paused"
+}
+
+# (b) The identical phrase in transcript/scrollback above that region, with an
+# ordinary composer box and busy footer below it, must keep reading working -
+# the reviewer's confirmed false-positive case. The prose line also lacks the
+# widget's own "usage limit" token, which is the second half of the narrowing.
 test_no_run_claude_widget_phrase_in_scrollback_stays_working() {
   reset_fakes
   local d; d=$(new_case claude-widget-scrollback)
@@ -1217,8 +1241,11 @@ test_no_run_claude_widget_phrase_in_scrollback_stays_working() {
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
   FM_FAKE_BUSY_TEXT="bin/fm-busy-lib.sh: says press enter to continue once stale
-· Thinking…
-esc to interrupt"
+· Thinking… (12s · esc to interrupt)
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
   export FM_FAKE_BUSY_TEXT
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-widgetscroll)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-widgetscroll busy --gen "$gen" \
@@ -1227,6 +1254,35 @@ esc to interrupt"
   assert_contains "$out" "state: working" "a widget phrase in scrollback keeps the worker working"
   assert_not_contains "$out" "state: paused" "a widget phrase outside the composer region never pauses"
   pass "a busy Claude worker with a widget phrase in scrollback is not misread as paused"
+}
+
+# (b2) Same phrase pushed further up the transcript: still outside the region,
+# still working, so the bound does not depend on how far above the box it sits.
+test_no_run_claude_widget_phrase_deep_in_transcript_stays_working() {
+  reset_fakes
+  local d; d=$(new_case claude-widget-deep)
+  make_repo_on_branch "$d/wt" fm/feat-widgetdeep
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-widgetdeep.meta" "window=fm:fm-feat-widgetdeep" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="Your usage limit has reset · press enter to continue
+  (quoted from bin/fm-busy-lib.sh while editing the matcher)
+  editing tests/fm-crew-state.test.sh
+· Thinking… (12s · esc to interrupt)
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+  ? for shortcuts"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-widgetdeep)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-widgetdeep busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-widgetdeep)
+  assert_contains "$out" "state: working" "a verbatim widget line deep in the transcript keeps the worker working"
+  assert_not_contains "$out" "state: paused" "only the composer region may produce the pause"
+  pass "a verbatim widget line quoted deep in the transcript never pauses the worker"
 }
 
 test_no_run_herdr_unknown_uses_backend_capture() {
@@ -2061,7 +2117,9 @@ test_parked_run_claude_limit_banner_paused
 test_active_run_claude_limit_banner_annotates_working
 test_no_run_claude_approaching_limit_warning_stays_working
 test_no_run_claude_bare_limit_notice_annotates_working
+test_no_run_claude_widget_in_composer_region_paused
 test_no_run_claude_widget_phrase_in_scrollback_stays_working
+test_no_run_claude_widget_phrase_deep_in_transcript_stays_working
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
