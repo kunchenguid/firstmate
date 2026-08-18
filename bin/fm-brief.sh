@@ -53,6 +53,9 @@
 # .github/pr-media/<task-id>/ and referenced by the branch's GitHub blob URL with
 # ?raw=true, which renders inline in a PR body even on a private repository;
 # local filesystem paths are forbidden because no reviewer can open them.
+# Private-repo inline rendering was confirmed by direct captain verification on
+# 2026-08-18 - a signed-in browser displayed a blob ?raw=true image on the
+# private Scripe-GmbH/scripe repository.
 # no-mistakes mode carries those image lines in --intent, the only worker text
 # the pipeline keeps verbatim when it regenerates the PR body; direct-PR mode
 # writes them into the PR body. local-only has no PR, so the section is omitted.
