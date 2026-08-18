@@ -29,6 +29,25 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
+write_metrics_stub() {
+  local path=$1
+  cat > "$path" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  prepare|commit) exit 0 ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$path"
+}
+
+write_tmux_adapter_stub() {
+  local path=$1
+  cat > "$path" <<'SH'
+fm_backend_tmux_kill() { return 0; }
+SH
+}
+
 TMP_ROOT=
 
 cleanup() {
@@ -50,12 +69,10 @@ make_fake_root() {
   mkdir -p "$fake/bin/backends" "$fake/state"
   # Symlink the REAL teardown so the test exercises actual code, not a copy.
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
-  # fm-backend.sh + its tmux adapter: symlink the REAL files (teardown sources
-  # fm-backend.sh unconditionally, and dispatches the kill call through the
-  # tmux adapter; both are unchanged by this suite's fixture, just newly
-  # required siblings since the P1 backend extraction).
+  # Source the real backend dispatcher, with a no-op tmux kill adapter so this
+  # cleanup test cannot touch or depend on live multiplexer state.
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
-  ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
+  write_tmux_adapter_stub "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
@@ -78,6 +95,9 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
+  # Metrics has its own focused tests; this fixture only needs teardown's
+  # prepare/commit collaborator to succeed so tasktmp cleanup is observable.
+  write_metrics_stub "$fake/bin/fm-task-metrics.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -136,7 +156,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   mkdir -p "$fake/bin/backends" "$fake/state"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
-  ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
+  write_tmux_adapter_stub "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
@@ -156,6 +176,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
+  write_metrics_stub "$fake/bin/fm-task-metrics.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
