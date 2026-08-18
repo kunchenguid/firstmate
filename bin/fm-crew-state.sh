@@ -284,28 +284,11 @@ log_reports_ci_ready() {
 }
 
 nm_ci_step_status() {
-  local row rest
-  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
-  [ -n "$row" ] || return 0
-  row=$(trim "$row")
-  rest=${row#*,}
-  strip_quotes "$(trim "${rest%%,*}")"
+  fm_nm_ci_step_row_status "$RUN_OUT"
 }
 
 nm_effective_ci_step_status() {
-  local step_status
-  if [ "${RUN_STATUS:-}" = fixing ]; then
-    printf 'fixing'
-    return 0
-  fi
-  step_status=$(nm_ci_step_status)
-  if [ -n "$step_status" ]; then
-    printf '%s' "$step_status"
-    return 0
-  fi
-  if [ "${RUN_STATUS:-}" = ci ]; then
-    printf 'running'
-  fi
+  fm_nm_effective_ci_step_status "$RUN_OUT" "${RUN_STATUS:-}"
 }
 
 # Root cause of the PR #252 incident (2026-07): for a repo where merge is left

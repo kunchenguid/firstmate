@@ -32,6 +32,9 @@ make_fakebin() {  # <dir>
 # beside the argv: a test can assert WHICH repository was actually queried.
 [ -z "${FAKE_NM_LOG:-}" ] || printf '%s\t%s\n' "$PWD" "$*" >> "$FAKE_NM_LOG"
 [ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 30
+# The real CLI is free to read stdin. A probe that inherits the collector's own
+# open probe spec would drain it, so this fixture reproduces that consumer.
+[ "${FAKE_NM_DRAIN_STDIN:-0}" != 1 ] || cat > /dev/null 2>&1 || true
 if [ "${1:-}" = runs ]; then
   [ -z "${FAKE_NM_RUNS:-}" ] || { [ ! -f "$FAKE_NM_RUNS" ] || cat "$FAKE_NM_RUNS"; }
 elif [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
@@ -42,7 +45,11 @@ elif [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
     fake_head=$(git rev-parse HEAD 2>/dev/null) || fake_head=
     printf 'id: run-%s\nbranch: %s\nhead: %s\nstatus: ci\n' \
       "${fake_branch##*/}" "$fake_branch" "$fake_head"
-    printf 'steps[1]{step,status,detail}:\n  ci, running, monitoring checks\n'
+    # A run that has not emitted a steps table yet is still a ci-phase run: the
+    # top-level status is the only evidence, and both the collector and the
+    # reader have to agree about that shape.
+    [ "${FAKE_NM_STATUS_NO_STEPS:-0}" = 1 ] \
+      || printf 'steps[1]{step,status,detail}:\n  ci, running, monitoring checks\n'
   fi
   [ -z "${FAKE_NM_STATUS:-}" ] || { [ ! -f "$FAKE_NM_STATUS" ] || cat "$FAKE_NM_STATUS"; }
 elif [ "${1:-}" = axi ] && [ "${2:-}" = logs ]; then
@@ -1027,6 +1034,88 @@ EOF
       and (.current.reason | test("green=done"))
   ' >/dev/null || fail "collected ci log did not drive the checks-green verdict: $canonical"
   pass "a collected green ci log still drives the checks-green verdict"
+}
+
+# The probe loop reads its spec on its OWN stdin, so a probe that reads stdin
+# and does not have it redirected drains the spec and the loop sees EOF early.
+# Every child queued behind that point silently loses its evidence while still
+# being handed set-but-empty variables, which fm-crew-state.sh reads as "already
+# asked, no answer" and never retries. One probe per wave makes the truncation
+# deterministic rather than a fork race.
+test_stdin_reading_probe_never_truncates_the_wave() {
+  local home mate fakebin i wt calls
+  home=$(make_home stdinprobe-home-state)
+  mate="$TMP_ROOT/stdinprobe-home-state-mate"
+  make_valid_secondmate_home stdinprobe-state "$mate"
+  append_secondmate_registry "$home" stdinprobe-state "$mate"
+  fm_write_secondmate_meta "$home/state/stdinprobe-state.meta" "$mate" \
+    "firstmate:fm-stdinprobe-state" sample
+  seed_ship_children "$mate" sp 3
+  fakebin=$(make_fakebin "$home")
+  : > "$home/stdinprobe-nm.log"
+  PATH="$fakebin:$PATH" FM_HOME="$mate" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY=1 \
+    FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=5 \
+    FAKE_NM_DRAIN_STDIN=1 FAKE_NM_LOG="$home/stdinprobe-nm.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary >/dev/null
+  # Three children in three repositories: one status probe each plus one coarse
+  # inventory each.
+  calls=$(wc -l < "$home/stdinprobe-nm.log" | tr -d ' ')
+  [ "$calls" -eq 6 ] \
+    || fail "a stdin-reading probe truncated the wave to $calls of 6 queries: $(cat "$home/stdinprobe-nm.log")"
+  for i in 1 2 3; do
+    wt=$(cd "$mate/projects/sp$i" && pwd -P)
+    nm_log_queried_repo "$home/stdinprobe-nm.log" "$wt" \
+      || fail "child sp$i lost its collected state to a stdin-draining probe"
+  done
+  pass "a stdin-reading probe cannot drain the collector's probe spec"
+}
+
+# The collector decides which children need a ci log and the reader decides
+# which children may use one. A run whose only ci evidence is its top-level
+# status - no steps table emitted yet - is the shape where a collector narrower
+# than its reader hands over set-but-empty evidence, pinning a green-CI child at
+# unknown readiness instead of letting it fall back to its own query.
+test_step_table_less_ci_child_still_collects_its_log() {
+  local home mate wt fakebin canonical
+  home=$(make_home cinosteps-home-state)
+  mate="$TMP_ROOT/cinosteps-home-state-mate"
+  make_valid_secondmate_home cinosteps-state "$mate"
+  append_secondmate_registry "$home" cinosteps-state "$mate"
+  fm_write_secondmate_meta "$home/state/cinosteps-state.meta" "$mate" \
+    "firstmate:fm-cinosteps-state" sample
+  wt="$mate/projects/nosteps"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b fm/nosteps
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] nosteps - Step-table-less CI child (repo: sample) (kind: ship) (since 2026-08-17)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/nosteps.meta" \
+    "window=firstmate:fm-nosteps" "worktree=$wt" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" nosteps busy
+  printf 'working: validating\n' > "$mate/state/nosteps.status"
+  printf 'all CI checks passed - still monitoring until merged or closed\n' \
+    > "$TMP_ROOT/cinosteps.log"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FAKE_NM_STATUS_CI=1 FAKE_NM_STATUS_NO_STEPS=1 \
+    FAKE_NM_CILOG="$TMP_ROOT/cinosteps.log" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "cinosteps-state")
+    | .current.state == "unknown"
+      and (.current.reason | test("terminal child state"))
+      and (.current.reason | test("nosteps=done"))
+  ' >/dev/null || fail "a step-table-less ci child never got its collected log: $canonical"
+  pass "a ci child with no steps table still gets its ci log collected"
 }
 
 # A run parked at a captain gate is plain `running` in the coarse inventory, and
@@ -2603,6 +2692,8 @@ test_home_summary_bound_options_govern_collection
 test_gate_parked_child_without_logged_decision_is_held
 test_ci_phase_children_keep_the_summary_bounded
 test_collected_ci_log_still_reports_checks_green
+test_step_table_less_ci_child_still_collects_its_log
+test_stdin_reading_probe_never_truncates_the_wave
 test_child_state_tempdir_is_cleaned_on_termination
 test_terminated_batched_collection_stops_instead_of_resuming
 test_oversized_secondmate_summary_stays_strict_unknown

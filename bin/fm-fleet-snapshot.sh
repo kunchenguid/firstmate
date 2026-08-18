@@ -188,7 +188,11 @@ clears a child's open captain decision. A remote home summary runs under the
 remote job worker's fixed empty environment, so it can NOT read these bounds
 from any environment: the parent passes them explicitly as --state-timeout,
 --state-concurrency, and --children over the fm-on argv transport, and the
-caller's own values therefore govern the remote read.
+caller's own values therefore govern the remote read. A remote code root that
+predates those options answers with the usage status, and only that status
+retries the legacy no-flag call once, under the REMAINING share of the same
+FM_SNAPSHOT_SECONDMATE_TIMEOUT; a timeout, an unavailable transport, or any
+other failure is never retried.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
@@ -718,6 +722,8 @@ task_json_lines() {
 # falls back to its pane/status reading exactly as it does when its own query
 # does not answer. No unbounded retry is issued anywhere.
 SECONDMATE_CHILD_STATE_DIR=
+SECONDMATE_REMOTE_SUMMARY=
+SECONDMATE_REMOTE_SUMMARY_RC=0
 
 secondmate_child_state_cleanup() {
   [ -n "$SECONDMATE_CHILD_STATE_DIR" ] || return 0
@@ -748,6 +754,10 @@ secondmate_scope_key() {  # <scope>
 # time. This is deliberately NOT the reported-row cap: lowering how many child
 # rows a summary prints must never serialize collection into
 # ceil(children / rows) sequential bounds and re-create the false timeout.
+# Every probe reads from /dev/null: this loop's own stdin IS the open probe
+# spec, and a probe that read stdin would drain it and silently truncate the
+# wave, leaving the remaining children with set-but-empty collected evidence -
+# which fm-crew-state.sh reads as "already asked, no answer" and never retries.
 secondmate_child_state_probes() {  # <spec-file>
   local cap=$FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY running=0 probe target arg
   local limit=${FM_CREW_STATE_RUNS_LIMIT:-200}
@@ -758,16 +768,17 @@ secondmate_child_state_probes() {  # <spec-file>
     case "$probe" in
       status)
         fm_nm_run_bounded "$target" "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
-          axi status > "$SECONDMATE_CHILD_STATE_DIR/$arg.status" 2>/dev/null &
+          axi status < /dev/null \
+          > "$SECONDMATE_CHILD_STATE_DIR/$arg.status" 2>/dev/null &
         ;;
       runs)
         fm_nm_run_bounded "$target" "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
-          runs --limit "$limit" \
+          runs --limit "$limit" < /dev/null \
           > "$SECONDMATE_CHILD_STATE_DIR/inv.$arg" 2>/dev/null &
         ;;
       cilog)
         fm_nm_run_bounded "$target" "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
-          axi logs --step ci --run "${arg#*:}" \
+          axi logs --step ci --run "${arg#*:}" < /dev/null \
           > "$SECONDMATE_CHILD_STATE_DIR/${arg%%:*}.cilog" 2>/dev/null &
         ;;
       *) continue ;;
@@ -830,13 +841,15 @@ secondmate_collect_child_state() {
 
 # `axi status` cannot tell "still waiting on checks" from "checks green, waiting
 # on merge" - only the ci step's own log records that transition, and
-# fm-crew-state.sh reads it for any child whose run is in the ci phase. That read
+# fm-crew-state.sh reads it for any child whose run is in the ci phase, as
+# decided by fm_nm_effective_ci_step_status - the single owner of that rule, so
+# this collector can never become narrower than the reader it feeds. That read
 # needs the run id the first wave just collected, so it forms a SECOND bounded
 # wave rather than a per-child call escaping into the sequential summary loop.
 # Each wave costs ceil(probes / FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY) bounds,
 # not one query per child.
 secondmate_collect_child_ci_logs() {
-  local status id run_id spec
+  local status id run_id spec out
   [ -n "$SECONDMATE_CHILD_STATE_DIR" ] || return 1
   spec="$SECONDMATE_CHILD_STATE_DIR/.probes.ci"
   : > "$spec"
@@ -844,9 +857,10 @@ secondmate_collect_child_ci_logs() {
     [ -e "$status" ] || continue
     [ -s "$status" ] || continue
     id=$(basename "$status"); id=${id%.status}
-    grep -qE '^[[:space:]]*(status:[[:space:]]*"?ci"?|ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,)' \
-      "$status" || continue
-    run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$(cat "$status")" id)")
+    out=$(cat "$status")
+    [ -n "$(fm_nm_effective_ci_step_status "$out" \
+      "$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")")" ] || continue
+    run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
     case "$run_id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
     printf 'cilog\t%s\t%s:%s\n' "$(cat "$SECONDMATE_CHILD_STATE_DIR/$id.wt")" "$id" "$run_id" >> "$spec"
   done
@@ -1382,6 +1396,41 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
        inconclusive:any(($activity_results + $decision_results)[]; .verdict == "inconclusive")}'
 }
 
+# One remote home summary, inside ONE aggregate FM_SNAPSHOT_SECONDMATE_TIMEOUT
+# deadline. The remote entrypoint execs under an empty environment, so argv is
+# the only way the caller's bounds reach the remote home - but a remote code root
+# that has not been updated yet does not know those options and answers with the
+# usage status. bin/fm-update.sh updates every remote root independently and may
+# legitimately report "already current" or "skipped", so caller-newer-than-remote
+# is an ordinary rollout state, not a broken home.
+#
+# So exit 2 - and ONLY exit 2, the one status that means "this argv was not
+# understood" - retries the legacy no-flag call once. A timeout (124), an
+# unavailable or unknown-completion transport (255), or any other status is a
+# real failure and is never repeated: retrying those would double the cost of
+# exactly the slow home this bounding exists to protect. The retry runs under the
+# REMAINING budget, so the fallback can never extend this home's aggregate bound,
+# and a legacy attempt that also fails leaves the caller fail-closed as before.
+secondmate_remote_home_summary() {  # <secondmate-id>
+  local id=$1 started elapsed remaining
+  SECONDMATE_REMOTE_SUMMARY=
+  started=$(date +%s)
+  SECONDMATE_REMOTE_SUMMARY=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
+    "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary \
+    --state-timeout "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
+    --state-concurrency "$FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY" \
+    --children "$FM_SNAPSHOT_SECONDMATE_CHILDREN" < /dev/null 2>/dev/null)
+  SECONDMATE_REMOTE_SUMMARY_RC=$?
+  [ "$SECONDMATE_REMOTE_SUMMARY_RC" -eq 2 ] || return 0
+  elapsed=$(( $(date +%s) - started ))
+  remaining=$(( FM_SNAPSHOT_SECONDMATE_TIMEOUT - elapsed ))
+  [ "$remaining" -ge 1 ] || return 0
+  SECONDMATE_REMOTE_SUMMARY=$(fm_run_timed "$remaining" \
+    "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary \
+    < /dev/null 2>/dev/null)
+  SECONDMATE_REMOTE_SUMMARY_RC=$?
+}
+
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home host remote registered registry_error task status_file event_raw event_note event_epoch event_age
@@ -1460,14 +1509,9 @@ secondmate_current_json() {  # <parent-tasks-json>
     fi
     if [ -z "$reason" ]; then
       if [ "$remote" = true ]; then
-        # The remote entrypoint execs the summary under an empty environment,
-        # so argv is the ONLY way the caller's bounds reach it.
-        summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
-          "$SCRIPT_DIR/fm-on.sh" "$id" fm-fleet-snapshot.sh --secondmate-home-summary \
-          --state-timeout "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
-          --state-concurrency "$FM_SNAPSHOT_SECONDMATE_STATE_CONCURRENCY" \
-          --children "$FM_SNAPSHOT_SECONDMATE_CHILDREN" < /dev/null 2>/dev/null)
-        summary_rc=$?
+        secondmate_remote_home_summary "$id"
+        summary=$SECONDMATE_REMOTE_SUMMARY
+        summary_rc=$SECONDMATE_REMOTE_SUMMARY_RC
       else
         summary=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" env \
           FM_ROOT_OVERRIDE="$FM_ROOT" \

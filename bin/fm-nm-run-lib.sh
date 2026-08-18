@@ -98,3 +98,44 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   [ "$run_full" = "$local_full" ] && return 0
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
 }
+
+# The ci step row's own status inside captured `axi status` output $1, or empty
+# when the steps table has no active ci row.
+fm_nm_ci_step_row_status() {  # <toon-output>
+  local row rest
+  row=$(printf '%s\n' "$1" \
+    | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' \
+    | head -1)
+  [ -n "$row" ] || return 0
+  row=$(fm_nm_trim "$row")
+  rest=${row#*,}
+  fm_nm_strip_quotes "$(fm_nm_trim "${rest%%,*}")"
+}
+
+# ONE owner for "is this run in the ci phase, and in which sub-state" - the
+# question bin/fm-crew-state.sh asks to decide whether to read the ci step log at
+# all, and the question bin/fm-fleet-snapshot.sh's home summary asks to decide
+# whether to COLLECT that log up front for a child. Two copies of this rule can
+# only diverge in one direction that matters: a collector narrower than the
+# reader hands the reader a set-but-empty log, which pins a green-CI child at
+# `unknown` readiness instead of letting it fall back to its own query.
+#
+# Answers "running", "fixing", or empty (not a ci-phase run), given the captured
+# output $1 and the run's own top-level status $2. Top-level `fixing` wins
+# because it describes the whole run, then the steps table, then a top-level
+# `ci` with no steps table at all.
+fm_nm_effective_ci_step_status() {  # <toon-output> <top-level-status>
+  local step_status
+  if [ "${2:-}" = fixing ]; then
+    printf 'fixing'
+    return 0
+  fi
+  step_status=$(fm_nm_ci_step_row_status "$1")
+  if [ -n "$step_status" ]; then
+    printf '%s' "$step_status"
+    return 0
+  fi
+  if [ "${2:-}" = ci ]; then
+    printf 'running'
+  fi
+}

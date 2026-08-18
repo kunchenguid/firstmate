@@ -640,6 +640,8 @@ A remote secondmate-home summary runs through `bin/fm-on.sh`, and the remote ent
 The calling home therefore passes those three bounds explicitly on the remote command line as `--state-timeout`, `--state-concurrency`, and `--children`, so the caller's own values govern the remote read.
 The same options work for a direct `bin/fm-on.sh <id> fm-fleet-snapshot.sh --secondmate-home-summary` invocation.
 `bin/fm-fleet-snapshot.sh` accepts them only with `--secondmate-home-summary`, requires a positive integer for each, and exits 2 on a missing, malformed, or unsupported option instead of falling back to a default.
+Because `bin/fm-update.sh` updates each remote code root independently, a calling home can legitimately be newer than a remote one; a remote root that predates these options answers with that same usage status, and the caller then retries the legacy no-option call once under the remaining share of the same `FM_SNAPSHOT_SECONDMATE_TIMEOUT`, so the un-updated home stays readable at the remote defaults instead of becoming a failed home.
+A timeout, an unavailable transport, or any other failure is never retried, and a legacy attempt that also fails leaves the home fail-closed as before.
 
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.
 `FM_TREEHOUSE_RETURN_LOCK_RETRIES` accepts a nonnegative integer, and an unset, blank, or invalid value uses the default of 3.

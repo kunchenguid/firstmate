@@ -1148,6 +1148,61 @@ DIRECT_BAD=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-fleet-snapshot.sh \
   || fail "remote home summary accepted an unsupported option (exit $direct_rc)"
 pass "remote home summary bounds travel as argv and are refused fail-closed when malformed"
 
+# Rollout skew is ordinary: bin/fm-update.sh updates each remote code root
+# independently and may report "already current" or "skipped", so a calling home
+# can be newer than a remote one. A remote root that predates the bound options
+# rejects them with the usage status, which must NOT turn a healthy home into a
+# failed one. Stand in for that older checkout with a script that accepts only
+# the bare legacy invocation and delegates to the real summary.
+cp "$REMOTE_ROOT/bin/fm-fleet-snapshot.sh" "$REMOTE_ROOT/bin/fm-fleet-snapshot-current.sh"
+chmod +x "$REMOTE_ROOT/bin/fm-fleet-snapshot-current.sh"
+LEGACY_LOG="$TMP_ROOT/remote-legacy-argv.log"
+: > "$LEGACY_LOG"
+write_legacy_remote_snapshot() {  # <exit-status-for-flagged-call>
+  cat > "$REMOTE_ROOT/bin/fm-fleet-snapshot.sh" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "\$*" >> '$LEGACY_LOG'
+[ "\${1:-}" = --secondmate-home-summary ] || exit $1
+[ "\$#" -eq 1 ] || exit $1
+exec '$REMOTE_ROOT/bin/fm-fleet-snapshot-current.sh' --secondmate-home-summary
+SH
+  chmod +x "$REMOTE_ROOT/bin/fm-fleet-snapshot.sh"
+}
+write_legacy_remote_snapshot 2
+LEGACY_SNAPSHOT=$(FM_SNAPSHOT_SECONDMATE_TIMEOUT=25 \
+  remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+printf '%s' "$LEGACY_SNAPSHOT" | jq -e '
+  .secondmate_current.records[] | select(.id == "ios")
+  | .provenance.selected == "structured-home"
+    and .current.reason == null
+    and (.active_children | length) == 2
+' >/dev/null || fail "an un-updated remote code root became a failed home: $LEGACY_SNAPSHOT"
+[ "$(wc -l < "$LEGACY_LOG" | tr -d ' ')" -eq 2 ] \
+  || fail "expected exactly one tuned attempt plus one legacy retry: $(cat "$LEGACY_LOG")"
+head -1 "$LEGACY_LOG" | grep -q -- '--state-timeout' \
+  || fail "the first remote attempt did not carry the caller's bounds: $(cat "$LEGACY_LOG")"
+[ "$(tail -1 "$LEGACY_LOG")" = "--secondmate-home-summary" ] \
+  || fail "the retry was not the bare legacy invocation: $(cat "$LEGACY_LOG")"
+
+# Only the usage status means "this argv was not understood". Any other failure
+# is a real one and must never be repeated, or a genuinely slow or broken home
+# would cost twice as much as its bound promises.
+write_legacy_remote_snapshot 3
+: > "$LEGACY_LOG"
+BROKEN_SNAPSHOT=$(FM_SNAPSHOT_SECONDMATE_TIMEOUT=25 \
+  remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+printf '%s' "$BROKEN_SNAPSHOT" | jq -e '
+  .secondmate_current.records[] | select(.id == "ios")
+  | .current.state == "unknown"
+    and .current.reason == "structured home snapshot failed"
+    and .provenance.selected != "structured-home"
+' >/dev/null || fail "a genuinely failing remote home was not fail-closed: $BROKEN_SNAPSHOT"
+[ "$(wc -l < "$LEGACY_LOG" | tr -d ' ')" -eq 1 ] \
+  || fail "a non-usage remote failure was retried: $(cat "$LEGACY_LOG")"
+mv "$REMOTE_ROOT/bin/fm-fleet-snapshot-current.sh" "$REMOTE_ROOT/bin/fm-fleet-snapshot.sh"
+pass "an un-updated remote code root falls back to the legacy summary, other failures do not retry"
+
 rm -f "$REMOTE_ROOT/bin/no-mistakes" \
   "$REMOTE_HOME/state/bounded-summary.meta" "$REMOTE_HOME/state/bounded-summary.status" \
   "$REMOTE_HOME/state/bounded-summary.busy-state" "$REMOTE_HOME/state/bounded-summary.busy-gen" \
