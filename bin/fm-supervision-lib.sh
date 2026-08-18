@@ -6,9 +6,9 @@
 # (a state/<id>.meta exists, except a secondmate already idle on a local done
 # status), an X-mode relay poll (state/x-watch.check.sh), or an active
 # process-event source (remote-reply sources count only while that secondmate
-# has an open pending reply), and whether its watcher has a fresh liveness
-# beacon (state/.last-watcher-beat, touched every poll cycle, within the grace
-# window).
+# has pending-reply or captured-result work), and whether its watcher has a fresh
+# liveness beacon (state/.last-watcher-beat, touched every poll cycle, within
+# the grace window).
 # bin/fm-turnend-guard.sh uses the PID-strict fm_watcher_healthy from
 # bin/fm-wake-lib.sh for its block decision. bin/fm-guard.sh uses the model-aware
 # fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh), which owns what a
@@ -30,8 +30,8 @@ fm_sup_record_value() {  # <file> <key>
   sed -n "s/^${key}=//p" "$file" | tail -1
 }
 
-fm_sup_task_has_open_pending_reply() {  # <state-dir> <task-id>
-  local state=$1 task_id=$2 dir rec tid phase
+fm_sup_task_needs_pending_reply_supervision() {  # <state-dir> <task-id>
+  local state=$1 task_id=$2 dir rec tid phase escalated closed
   dir="$state/pending-replies"
   [ -d "$dir" ] || return 1
   for rec in "$dir"/*; do
@@ -39,7 +39,11 @@ fm_sup_task_has_open_pending_reply() {  # <state-dir> <task-id>
     tid=$(fm_sup_record_value "$rec" task_id)
     [ "$tid" = "$task_id" ] || continue
     phase=$(fm_sup_record_value "$rec" phase)
-    [ "$phase" != resolved ] || continue
+    if [ "$phase" = resolved ]; then
+      escalated=$(fm_sup_record_value "$rec" escalated_epoch)
+      closed=$(fm_sup_record_value "$rec" escalation_closed_epoch)
+      [ -n "$escalated" ] && [ -z "$closed" ] || continue
+    fi
     return 0
   done
   return 1
@@ -49,12 +53,27 @@ fm_sup_secondmate_idle() {  # <state-dir> <task-id> <meta-file>
   local state=$1 task_id=$2 meta=$3 kind status_file last verb
   kind=$(fm_sup_record_value "$meta" kind)
   [ "$kind" = secondmate ] || return 1
-  fm_sup_task_has_open_pending_reply "$state" "$task_id" && return 1
+  fm_sup_task_needs_pending_reply_supervision "$state" "$task_id" && return 1
   status_file="$state/$task_id.status"
   [ -f "$status_file" ] || return 1
   last=$(awk 'NF { line=$0 } END { print line }' "$status_file")
   verb=${last%%[[:space:]:]*}
   [ "$verb" = "done" ]
+}
+
+fm_sup_source_has_unhandled_capture() {  # <state-dir> <source-id>
+  local state=$1 source_id=$2 inbox result base seq
+  inbox="$state/procevent-inbox"
+  [ -d "$inbox" ] || return 1
+  for result in "$inbox/$source_id".*.result; do
+    [ -f "$result" ] && [ ! -L "$result" ] || continue
+    base=${result%.result}
+    seq=${base##*.}
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    [ -e "$base.handled" ] && continue
+    return 0
+  done
+  return 1
 }
 
 fm_sup_source_counts() {  # <state-dir> <source-file>
@@ -64,7 +83,8 @@ fm_sup_source_counts() {  # <state-dir> <source-file>
     remote-reply-*.source)
       id=${base#remote-reply-}
       id=${id%.source}
-      fm_sup_task_has_open_pending_reply "$state" "$id"
+      fm_sup_source_has_unhandled_capture "$state" "remote-reply-$id" \
+        || fm_sup_task_needs_pending_reply_supervision "$state" "$id"
       return
       ;;
   esac
