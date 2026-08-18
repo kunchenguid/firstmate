@@ -435,6 +435,22 @@ test_claude_threads_model_and_effort() {
   pass "claude receives --model and --effort profile flags"
 }
 
+test_claude_absolute_autocompact_uses_supported_launch_flag() {
+  local rec id out status launch
+  id=profile-claude-autocompact-z2a
+  rec=$(make_spawn_case profile-claude-autocompact claude "$id")
+  read_case_record "$rec"
+  printf '150000\n' > "$HOME_DIR/config/crew-autocompact"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model sonnet)
+  status=$?
+  expect_code 0 "$status" "Claude spawn with absolute auto-compaction should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--autocompact '150000'" \
+    "Claude absolute auto-compaction did not use its supported per-launch flag"
+  pass "Claude receives supported absolute auto-compaction values per launch"
+}
+
 test_codex_threads_model_and_effort() {
   local rec id out status launch
   id=profile-codex-z3
@@ -448,7 +464,53 @@ test_codex_threads_model_and_effort() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "codex launch did not thread model and reasoning effort config"
+  assert_not_contains "$launch" "model_auto_compact_token_limit" \
+    "absent crew-autocompact changed the Codex launch command"
   pass "codex receives --model and model_reasoning_effort profile flags"
+}
+
+test_codex_percent_autocompact_uses_effective_model_window() {
+  local rec id out status launch codex_home
+  id=profile-codex-autocompact-percent-z3a
+  rec=$(make_spawn_case profile-codex-autocompact-percent codex "$id")
+  read_case_record "$rec"
+  codex_home="$CASE_DIR/codex-home"
+  mkdir -p "$codex_home"
+  printf '50%%\n' > "$HOME_DIR/config/crew-autocompact"
+  printf '%s\n' '{"models":[{"slug":"gpt-test","context_window":200000,"effective_context_window_percent":80}]}' \
+    > "$codex_home/models_cache.json"
+
+  out=$(CODEX_HOME="$codex_home" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model gpt-test)
+  status=$?
+  expect_code 0 "$status" "Codex spawn with percentage auto-compaction should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "-c 'model_auto_compact_token_limit=80000' -c 'model_auto_compact_token_limit_scope=\"total\"'" \
+    "Codex percentage auto-compaction did not use half of the effective model window"
+  pass "Codex percentage auto-compaction resolves against the effective model context window"
+}
+
+test_codex_unknown_autocompact_window_warns_and_omits_override() {
+  local rec id out status launch codex_home
+  id=profile-codex-autocompact-unknown-z3b
+  rec=$(make_spawn_case profile-codex-autocompact-unknown codex "$id")
+  read_case_record "$rec"
+  codex_home="$CASE_DIR/codex-home"
+  mkdir -p "$codex_home"
+  printf '50%%\n' > "$HOME_DIR/config/crew-autocompact"
+  printf '%s\n' '{"models":[{"slug":"another-model","context_window":200000,"effective_context_window_percent":95}]}' \
+    > "$codex_home/models_cache.json"
+
+  out=$(CODEX_HOME="$codex_home" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --model unknown-model)
+  status=$?
+  expect_code 0 "$status" "unknown Codex context window should not block spawn"
+  assert_contains "$out" "cannot determine Codex model 'unknown-model' context window" \
+    "unknown Codex context window did not emit the spawn warning"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "model_auto_compact_token_limit" \
+    "unknown Codex context window still emitted an auto-compaction override"
+  pass "unknown Codex context windows warn and omit the per-launch override"
 }
 
 test_codex_omits_invalid_max_effort() {
@@ -838,7 +900,10 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
+test_claude_absolute_autocompact_uses_supported_launch_flag
 test_codex_threads_model_and_effort
+test_codex_percent_autocompact_uses_effective_model_window
+test_codex_unknown_autocompact_window_warns_and_omits_override
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
