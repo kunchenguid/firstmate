@@ -366,16 +366,16 @@ fingerprint_for() { # <classified-json> <task> <reason-code>
   sha256_text "$(printf '%s' "$classified" | jq -c '.')|task=${task:-}|reason=$reason"
 }
 
+repo_state_key() { # <repo>
+  sha256_text "$1"
+}
+
 fingerprint_path() { # <repo> <number>
-  local repo=$1 number=$2 safe
-  safe=$(printf '%s' "$repo" | tr '/:' '__')
-  printf '%s/%s-%s.fp\n' "$FINGERPRINT_DIR" "$safe" "$number"
+  printf '%s/%s-%s.fp\n' "$FINGERPRINT_DIR" "$(repo_state_key "$1")" "$2"
 }
 
 delivered_path() { # <repo> <number>
-  local repo=$1 number=$2 safe
-  safe=$(printf '%s' "$repo" | tr '/:' '__')
-  printf '%s/%s-%s.delivered\n' "$DELIVERED_DIR" "$safe" "$number"
+  printf '%s/%s-%s.delivered\n' "$DELIVERED_DIR" "$(repo_state_key "$1")" "$2"
 }
 
 accelerate_path() { # <url>
@@ -384,9 +384,7 @@ accelerate_path() { # <url>
 }
 
 merged_notice_path() { # <repo> <number>
-  local repo=$1 number=$2 safe
-  safe=$(printf '%s' "$repo" | tr '/:' '__')
-  printf '%s/%s-%s.noticed\n' "$MERGED_DIR" "$safe" "$number"
+  printf '%s/%s-%s.noticed\n' "$MERGED_DIR" "$(repo_state_key "$1")" "$2"
 }
 
 read_fingerprint() { # <path>
@@ -573,7 +571,7 @@ scan_repo() { # <project> <repo> <deadline>
     }
     [ -z "${ACTIONABLE:-}" ] || return 0
   done < <(printf '%s' "$list_json" | jq -r '.[].number | tostring')
-  safe=$(printf '%s' "$repo" | tr '/:' '__')
+  safe=$(repo_state_key "$repo")
   for fp in "$FINGERPRINT_DIR"/"$safe"-*.fp; do
     [ -e "$fp" ] || continue
     [ "$(date +%s)" -lt "$deadline" ] || return 3
@@ -590,7 +588,7 @@ scan_repo() { # <project> <repo> <deadline>
 }
 
 scan_pass() { # <cursor> <after|through> <deadline>
-  local cursor=$1 range=$2 deadline=$3 project repo repos='' started=0
+  local cursor=$1 range=$2 deadline=$3 project repo repos='' started=0 repo_rc
   while IFS= read -r project; do
     [ -n "$project" ] || continue
     repo=$(project_repo_slug "$project") || continue
@@ -610,19 +608,21 @@ scan_pass() { # <cursor> <after|through> <deadline>
         fi
         ;;
       through)
-        [ -n "$cursor" ] && [ "$started" -eq 0 ] && [ "$project" != "$cursor" ] && continue
-        [ "$project" = "$cursor" ] && started=1 && continue
-        [ "$started" -eq 1 ] || continue
+        :
         ;;
     esac
-    write_scan_marker "$project" || return 1
-    scan_repo "$project" "$repo" "$deadline" || {
-      case "$?" in
-        3) return 3 ;;
-        *) return 1 ;;
-      esac
-    }
+    repo_rc=0
+    scan_repo "$project" "$repo" "$deadline" || repo_rc=$?
+    case "$repo_rc" in
+      0) ;;
+      3) return 3 ;;
+      *) return 1 ;;
+    esac
     [ -z "${ACTIONABLE:-}" ] || return 0
+    write_scan_marker "$project" || return 1
+    if [ "$range" = through ] && [ -n "$cursor" ] && [ "$project" = "$cursor" ]; then
+      return 0
+    fi
   done <<EOF
 $repos
 EOF

@@ -52,6 +52,8 @@ fi
 if [ "${1:-}" = api ] && [ "${2:-}" = graphql ]; then
   f="$FIX/view/${owner}__${name}-${num}.json"
   [ -f "$f" ] || exit 99
+  delay="$FIX/delay/${owner}__${name}"
+  [ ! -f "$delay" ] || sleep "$(cat "$delay")"
   jq -c '{data:{repository:{pullRequest:{headRefOid,reviewThreads:(.reviewThreads // {nodes:[]})}}}}' "$f"
   after="$FIX/after-graphql/${owner}__${name}-${num}.json"
   if [ -f "$after" ]; then
@@ -88,15 +90,21 @@ make_world() { # <name>
 }
 
 setup_project() { # <home> <fixture>
-  local home=$1 fixture=$2 bare
+  local home=$1 fixture=$2
   cat > "$home/data/projects.md" <<'EOF'
 - alpha [direct-PR] - test project (added 2026-01-01)
 EOF
-  fm_git_init_commit "$home/projects/alpha"
-  bare="$home/projects/alpha.origin.git"
-  fm_git_add_origin "$home/projects/alpha" "$bare"
-  git -C "$home/projects/alpha" remote set-url origin "https://github.com/acme/alpha.git"
+  setup_named_project "$home" alpha acme/alpha
   mkdir -p "$fixture/open" "$fixture/view"
+}
+
+setup_named_project() { # <home> <project> <repo>
+  local home=$1 project=$2 repo=$3 bare
+  mkdir -p "$home/projects/$project"
+  fm_git_init_commit "$home/projects/$project"
+  bare="$home/projects/$project.origin.git"
+  fm_git_add_origin "$home/projects/$project" "$bare"
+  git -C "$home/projects/$project" remote set-url origin "https://github.com/$repo.git"
 }
 
 run_delivery() { # <home> <fixture> <cmd> [args...]
@@ -271,6 +279,60 @@ test_closed_pr_state_retires_and_reopens() {
   pass "closed PR state retires and unchanged reopen re-evaluates"
 }
 
+test_repository_state_keys_do_not_alias() {
+  local home fixture count
+  home=$(make_world repokeys)
+  fixture="$TMP_ROOT/fix-repokeys"
+  cat > "$home/data/projects.md" <<'EOF'
+- alpha [direct-PR] - collision one (added 2026-01-01)
+- beta [direct-PR] - collision two (added 2026-01-01)
+EOF
+  setup_named_project "$home" alpha a_b/c
+  setup_named_project "$home" beta a/b_c
+  mkdir -p "$fixture/open" "$fixture/view"
+  write_open "$fixture" a_b/c '[{"number":14,"url":"https://github.com/a_b/c/pull/14","headRefName":"fm/key14a","headRefOid":"mmm","baseRefName":"main","reviewDecision":"","mergeable":"CONFLICTING","statusCheckRollup":[]}]'
+  write_view "$fixture" a_b/c 14 '{"number":14,"url":"https://github.com/a_b/c/pull/14","headRefName":"fm/key14a","headRefOid":"mmm","baseRefName":"main","reviewDecision":"","mergeable":"CONFLICTING","statusCheckRollup":[],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_open "$fixture" a/b_c '[{"number":14,"url":"https://github.com/a/b_c/pull/14","headRefName":"fm/key14b","headRefOid":"nnn","baseRefName":"main","reviewDecision":"","mergeable":"CONFLICTING","statusCheckRollup":[]}]'
+  write_view "$fixture" a/b_c 14 '{"number":14,"url":"https://github.com/a/b_c/pull/14","headRefName":"fm/key14b","headRefOid":"nnn","baseRefName":"main","reviewDecision":"","mergeable":"CONFLICTING","statusCheckRollup":[],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  run_delivery "$home" "$fixture" _scan-locked 1 >/dev/null
+  count=$(find "$home/state/pr-delivery/fingerprints" -type f -name '*.fp' | wc -l | tr -d ' ')
+  [ "$count" -eq 2 ] || fail "distinct repositories aliased to one persisted PR state key"
+  pass "repository state keys remain distinct"
+}
+
+test_deadline_retries_incomplete_repository() {
+  local home fixture out
+  home=$(make_world cursor)
+  fixture="$TMP_ROOT/fix-cursor"
+  cat > "$home/data/projects.md" <<'EOF'
+- alpha [direct-PR] - cursor start (added 2026-01-01)
+- beta [direct-PR] - deadline target (added 2026-01-01)
+- gamma [direct-PR] - cursor tail (added 2026-01-01)
+EOF
+  setup_named_project "$home" alpha acme/alpha
+  setup_named_project "$home" beta acme/beta
+  setup_named_project "$home" gamma acme/gamma
+  mkdir -p "$fixture/open" "$fixture/view" "$fixture/delay"
+  write_open "$fixture" acme/alpha '[]'
+  write_open "$fixture" acme/beta '[{"number":15,"url":"https://github.com/acme/beta/pull/15","headRefName":"fm/cursor15","headRefOid":"ooo","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/beta 15 '{"number":15,"url":"https://github.com/acme/beta/pull/15","headRefName":"fm/cursor15","headRefOid":"ooo","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_open "$fixture" acme/gamma '[]'
+  fm_write_meta "$home/state/cursor15.meta" \
+    'window=fm-cursor15' "worktree=$home/projects/cursor15" 'project=beta' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+  mkdir -p "$home/state/pr-delivery"
+  printf 'epoch=1\ncursor=alpha\n' > "$home/state/pr-delivery/.scan-marker"
+  printf '1.2\n' > "$fixture/delay/acme__beta"
+  FM_PR_DELIVERY_BUDGET_SECS=1 run_delivery "$home" "$fixture" _scan-locked 1 >/dev/null
+  grep -qxF 'cursor=alpha' "$home/state/pr-delivery/.scan-marker" \
+    || fail "deadline committed the incomplete repository as cursor"
+  rm -f "$fixture/delay/acme__beta"
+  out=$(FM_PR_DELIVERY_BUDGET_SECS=5 run_delivery "$home" "$fixture" _scan-locked 1)
+  printf '%s\n' "$out" | grep -Fq 'repo=acme/beta' \
+    || fail "deadline advanced past an incomplete repository"
+  pass "deadline retries the incomplete repository"
+}
+
 test_accelerate_marker() {
   local home fixture out
   home=$(make_world accel)
@@ -390,6 +452,8 @@ test_head_change_during_review_fetch
 test_optional_review_silence
 test_post_merge_routing
 test_closed_pr_state_retires_and_reopens
+test_repository_state_keys_do_not_alias
+test_deadline_retries_incomplete_repository
 test_accelerate_marker
 test_show_blocked_queue
 test_secondmate_refuses_scan
