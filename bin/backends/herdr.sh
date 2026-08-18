@@ -483,20 +483,43 @@ fm_backend_herdr_workspace_record_identity_base() {  # <base-identity-label>
   return 0
 }
 
-# fm_backend_herdr_workspace_label_is_own: does <label> belong to THIS home?
-# The owned set is this home's legacy title, every title its own assigned
-# identity can currently or previously have carried - name-only, and name plus
-# any syntactically valid registered repository slug - and the same forms of the
-# identity title this home last recorded for itself, so a supported reassignment
-# retitles instead of refusing. A home's registered project set is mutable, so
-# its durable Space title is not; identity ownership is what stays exact here.
-# Refuses every other label, including another home's identity title.
+# fm_backend_herdr_workspace_label_is_own: does <label> belong to THIS home by
+# TITLE ALONE? The owned set is this home's legacy title plus every title its
+# own currently assigned identity can carry - name-only, and name plus any
+# syntactically valid registered repository slug. This is the only predicate
+# label SEARCH may use: an unbound search must never claim a Space on
+# historical or merely-unclaimed titles, or one home would adopt another's.
 fm_backend_herdr_workspace_label_is_own() {  # <label> [<base-identity-label>]
-  local candidate=$1 base=${2-} prior
+  local candidate=$1 base=${2-}
   [ -n "${2+set}" ] || base=$(fm_backend_herdr_workspace_identity_base_label) || return 1
   [ "$candidate" = "$(fm_backend_herdr_workspace_legacy_label)" ] && return 0
-  fm_backend_herdr_workspace_label_matches_base "$candidate" "$base" && return 0
-  prior=$(fm_backend_herdr_workspace_recorded_identity_base) || return 1
+  fm_backend_herdr_workspace_label_matches_base "$candidate" "$base"
+}
+
+# fm_backend_herdr_workspace_label_is_own_bound: the wider predicate for a
+# workspace ALREADY proven to be this home's own by an exact session/workspace
+# binding (launcher ancestry, durable task metadata, or the guarded migration).
+# On top of the title-alone set it also accepts this home's last recorded
+# identity title, and - marker-free, so a legacy or hand-renamed Space is not
+# deadlocked - an exact canonical title of the configured roster that the live
+# config reserves for nobody. A title the config assigns to another home, or one
+# absent from the roster, is still refused loudly.
+fm_backend_herdr_workspace_label_is_own_bound() {  # <label> [<base-identity-label>]
+  local candidate=$1 base=${2-} prior stem identity roster
+  local FM_CREW_IDENTITY_CONFIG
+  [ -n "${2+set}" ] || base=$(fm_backend_herdr_workspace_identity_base_label) || return 1
+  fm_backend_herdr_workspace_label_is_own "$candidate" "$base" && return 0
+  prior=$(fm_backend_herdr_workspace_recorded_identity_base) || prior=""
+  # shellcheck disable=SC2034 # read by the sourced crew-identity library.
+  FM_CREW_IDENTITY_CONFIG=$(fm_backend_herdr_crew_identity_config_path)
+  if fm_crew_identity_config_present && roster=$(fm_crew_identity_config_roster); then
+    stem=${candidate%% — *}
+    if fm_backend_herdr_workspace_label_matches_base "$candidate" "$stem" \
+       && identity=$(fm_crew_identity_id_for_space_label "$roster" "$stem"); then
+      fm_crew_identity_config_assigns "$identity" && return 1
+      return 0
+    fi
+  fi
   [ -n "$prior" ] || return 1
   fm_backend_herdr_workspace_label_matches_base "$candidate" "$prior"
 }
@@ -529,8 +552,8 @@ fm_backend_herdr_workspace_identity_rename_exact() { # <session> <workspace-id> 
     fm_backend_herdr_workspace_record_identity_base "$base"
     return 0
   fi
-  fm_backend_herdr_workspace_label_is_own "$current" "$base" || {
-    echo "error: Herdr workspace '$workspace' is labelled '$current', which is not one of this home's own titles (legacy '$(fm_backend_herdr_workspace_legacy_label)', identity '$base', or recorded prior identity '$(fm_backend_herdr_workspace_recorded_identity_base)'); refusing identity rename" >&2
+  fm_backend_herdr_workspace_label_is_own_bound "$current" "$base" || {
+    echo "error: Herdr workspace '$workspace' is labelled '$current', which is not one of this home's own titles (legacy '$(fm_backend_herdr_workspace_legacy_label)', identity '$base', or recorded prior identity '$(fm_backend_herdr_workspace_recorded_identity_base)') and is not an unreserved canonical title of the configured roster; refusing identity rename" >&2
     return 1
   }
   fm_backend_herdr_cli "$session" workspace rename "$workspace" "$desired" >/dev/null 2>&1 || return 1

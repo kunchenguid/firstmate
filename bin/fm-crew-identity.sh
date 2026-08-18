@@ -153,6 +153,29 @@ fm_crew_identity_record_json() { # <roster> <identity>
   jq -ce --arg identity "$identity" '.identities[] | select(.id == $identity)' "$path"
 }
 
+# fm_crew_identity_id_for_space_label: the single roster identity carrying this
+# exact canonical Space label. Roster schema validation already enforces unique
+# space_labels, so a match is unambiguous; anything else fails.
+fm_crew_identity_id_for_space_label() { # <roster> <space-label>
+  local roster=$1 label=$2 path
+  fm_crew_identity_validate_roster "$roster" || return 1
+  path=$(fm_crew_identity_roster_path "$roster") || return 1
+  jq -er --arg label "$label" '
+    [.identities[] | select(.space_label == $label) | .id] as $ids
+    | if ($ids | length) == 1 then $ids[0] else error("ambiguous") end
+  ' "$path" 2>/dev/null
+}
+
+# Is this identity currently reserved by ANY entry of the live config?
+fm_crew_identity_config_assigns() { # <identity>
+  fm_crew_identity_config_present || return 1
+  fm_crew_identity_validate_config || return 1
+  jq -e --arg identity "$1" '
+    ([.captain?, .primary?] + [(.agents // {})[]] | map(select(type == "string")))
+    | any(. == $identity)
+  ' "$FM_CREW_IDENTITY_CONFIG" >/dev/null 2>&1
+}
+
 fm_crew_identity_space_label() { # <roster> <identity>
   fm_crew_identity_record_json "$1" "$2" | jq -er '.space_label'
 }

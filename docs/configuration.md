@@ -75,7 +75,7 @@ It reports how many Space titles it actually renamed, so a converged rerun repor
 It never stops or restarts an agent.
 The Aubrey/Pullings example renders the primary Space as `Lt Pullings`; configured agents use the roster's short canonical labels, such as `Mr Allen`, `Dr Maturin`, and `Lt Mowett`.
 A project-owning persistent secondmate Space appends its exact registered repository slug, for example `Mr Allen — developer-setup` and `Lt Mowett — pco-projects-mda`; project-less agents stay name-only.
-Reassigning an identity retitles that home's own Space on the next spawn or relaunch, because each home records the identity title it last applied to itself; another home's title is still refused loudly.
+Reassigning an identity retitles that home's own Space on the next spawn or relaunch: a Space bound to the home by its exact workspace id may move from any unreserved canonical roster title to the newly configured one, while Space discovery by title alone still matches only the current assignment, so a title the config reserves for another home is refused loudly.
 Full names and expanded ranks remain in charters and detailed fleet JSON.
 
 ## Pi Calm preference (config/calm)

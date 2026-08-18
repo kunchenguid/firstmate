@@ -421,7 +421,7 @@ test_workspace_identity_rename_uses_recorded_metadata_over_live_config() {
   # The captain removes the sd-1 assignment entirely: relaunch must still keep
   # the recorded title rather than refusing as 'Unassigned crew'.
   : > "$log"; rm -f "$resp/.count"
-  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{}}' \
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"sd-2":"stephen-maturin"}}' \
     > "$home/config/crew-identities.json"
   printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sd","label":"Mr Bonden"}}}' > "$resp/1.out"
   : > "$resp/2.out"
@@ -474,7 +474,7 @@ test_workspace_identity_reassignment_retitles_this_homes_own_space() {
   # The captain deliberately reassigns the primary identity: the home's own
   # previous title must be retitled, not deadlocked.
   : > "$log"; rm -f "$resp/.count"
-  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"william-mowett","agents":{}}' \
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"william-mowett","agents":{"sd-9":"stephen-maturin"}}' \
     > "$home/config/crew-identities.json"
   printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Lt Pullings"}}}' > "$resp/1.out"
   : > "$resp/2.out"
@@ -552,7 +552,7 @@ test_workspace_identity_rename_follows_registered_project_transitions() {
   base="$TMP_ROOT/identity-slug-drift"
   home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
   mkdir -p "$home/config" "$home/data" "$resp"; : > "$log"
-  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"gentech":"john-allen"}}' \
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"gentech":"john-allen","fmdev":"stephen-maturin"}}' \
     > "$home/config/crew-identities.json"
   printf 'gentech\n' > "$home/.fm-secondmate-home"
   fb=$(make_herdr_fakebin "$dir")
@@ -607,6 +607,81 @@ test_workspace_identity_rename_follows_registered_project_transitions() {
   fi
   assert_not_contains "$(cat "$log")" "rename" "a foreign Space title was renamed"
   pass "Herdr identity renames follow registered-project transitions and still refuse foreign titles"
+}
+
+test_identity_exchange_never_lets_one_home_adopt_anothers_space() {
+  local base primary dir log resp fb out
+  base="$TMP_ROOT/identity-exchange"
+  primary="$base/primary"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$primary/config" "$resp"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+
+  # The primary once carried Lt Pullings and recorded it as its own title.
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{}}' \
+    > "$primary/config/crew-identities.json"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Lt Pullings"}}}' > "$resp/1.out"
+  rm -f "$resp/.count"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$primary" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact s w-p' \
+      "$ROOT" >/dev/null 2>&1 || fail "the primary could not confirm its own converged title"
+
+  # The captain swaps: the primary becomes Lt Mowett and a secondmate takes
+  # Lt Pullings. An unbound label search must not claim the secondmate's Space.
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"william-mowett","agents":{"sd-1":"thomas-pullings"}}' \
+    > "$primary/config/crew-identities.json"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-sd","label":"Lt Pullings — npi-brain"},{"workspace_id":"w-other","label":"Lt Pullings"}]}}' \
+    > "$resp/1.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$primary" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_find_all s' "$ROOT")
+  [ -z "$out" ] || fail "a reassigned home claimed another home's Space by label search: '$out'"
+
+  # Even bound by an exact workspace id, a title the config reserves for
+  # another home is refused loudly rather than retitled.
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sd","label":"Lt Pullings — npi-brain"}}}' > "$resp/1.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$primary" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact s w-sd' \
+      "$ROOT" 2>&1) && fail "a title reserved for another home was retitled"
+  assert_contains "$out" "refusing identity rename" "the reserved-title refusal did not explain itself"
+  assert_not_contains "$(cat "$log")" "rename" "another home's Space was renamed"
+  pass "Herdr identity exchange never lets one home adopt or retitle another home's Space"
+}
+
+test_bound_space_reassignment_needs_no_recorded_marker() {
+  local base home dir log resp fb out
+  base="$TMP_ROOT/identity-marker-free"
+  home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/config" "$resp"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  # A Space titled by an earlier build: no .fm-herdr-space-identity exists.
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"william-mowett","agents":{}}' \
+    > "$home/config/crew-identities.json"
+  [ ! -e "$home/.fm-herdr-space-identity" ] || fail "this case must start without a recorded identity marker"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Lt Pullings"}}}' > "$resp/1.out"
+  : > "$resp/2.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"Lt Mowett"}}}' > "$resp/3.out"
+  rm -f "$resp/.count"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact s w-p' \
+      "$ROOT" 2>&1) || fail "a marker-free bound Space deadlocked after reassignment: $out"
+  assert_contains "$(cat "$log")" $'workspace\x1frename\x1fw-p\x1fLt Mowett' \
+    "the marker-free bound Space was not retitled to its newly configured identity"
+
+  # A title that is not a canonical identity of the configured roster is still refused.
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-p","label":"captain scratch space"}}}' > "$resp/1.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_identity_rename_exact s w-p' \
+      "$ROOT" 2>&1) && fail "an unknown Space title was accepted as this home's own"
+  assert_contains "$out" "refusing identity rename" "the unknown-title refusal did not explain itself"
+  assert_not_contains "$(cat "$log")" "rename" "an unknown Space title was renamed"
+  pass "Herdr reassignment retitles a bound Space with no recorded marker and still refuses unknown titles"
 }
 
 test_workspace_find_all_tolerates_registered_project_drift() {
@@ -4853,6 +4928,8 @@ test_workspace_identity_rename_preserves_a_recorded_title_without_config
 test_workspace_identity_rename_uses_recorded_metadata_over_live_config
 test_workspace_identity_reassignment_retitles_this_homes_own_space
 test_unassigned_projection_titles_keep_their_concise_task_label
+test_identity_exchange_never_lets_one_home_adopt_anothers_space
+test_bound_space_reassignment_needs_no_recorded_marker
 test_workspace_find_all_tolerates_registered_project_drift
 test_exact_legacy_workspace_identity_rename_is_id_bound
 test_cli_helper_sets_env_and_appends_trailing_session_flag
