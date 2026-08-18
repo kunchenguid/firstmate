@@ -20,8 +20,11 @@
 # duplicate generation handling, normalized result storage, deterministic report
 # generation, AIME-created Feishu document identity validation, handled
 # acknowledgement, and re-arming after a nonterminal/unavailable observation.
-# Raw event/tool payloads remain private under state/cloud-tasks and never enter a
-# status event or report.
+# A malformed capture remains rejected until a later identity-bound observation
+# is applied; `handle` then preserves the superseded bytes as task evidence
+# before acknowledging that older generation through the adapter-owned path.
+# `source` reduces replay history to one bounded summary before transport; raw
+# replay event/tool payloads never enter an observation, status event, or report.
 #
 # Every source invocation exits 0 with one bounded JSON observation, including
 # provider errors.
@@ -100,6 +103,21 @@ error_json() { # <stdout> <stderr> <destination>
   fi
 }
 
+write_replay_summary() { # <replay-response> <destination>
+  jq -c '
+    {
+      status:"success",
+      data:{
+        session_id:.data.session_id,
+        terminal:(.data.terminal == true),
+        last_event_offset:(.data.last_event_offset // null),
+        event_count:(.data.events | length)
+      },
+      error:null
+    }
+  ' "$1" >"$2"
+}
+
 cmd_source() {
   local id=${1-} root replay_out replay_err session_out session_err output_out output_err
   local replay_ok=false session_ok=false output_ok=false class='' cursor terminal=false
@@ -125,6 +143,10 @@ cmd_source() {
     && jq -e '.data.events | type == "array"' "$replay_out" >/dev/null 2>&1; then
     replay_ok=true
     terminal=$(jq -r '.data.terminal == true' "$replay_out")
+    write_replay_summary "$replay_out" "$root/replay-summary.json" \
+      || die "cannot summarize AIME replay"
+    mv -f -- "$root/replay-summary.json" "$replay_out" \
+      || die "cannot stage AIME replay summary"
   else
     error_json "$replay_out" "$replay_err" "$root/replay-error.json"
     class=$(fm_aime_error_classify "$root/replay-error.json")
@@ -163,7 +185,7 @@ cmd_source() {
     jq -n '{status:"not-requested"}' >"$output_out"
   fi
 
-  jq -n \
+  jq -cn \
     --arg schema "$AIME_OBSERVATION_SCHEMA" \
     --arg task_id "$id" \
     --arg session_id "$AIME_STATE_SESSION_ID" \
@@ -362,13 +384,70 @@ resolve_result_unavailable() { # <id>
     "resolved [key=aime-result-unavailable]: authoritative AIME readback recovered"
 }
 
+newer_observation_was_applied() { # <task-id> <source-id> <older-sequence>
+  local id=$1 source=$2 older_seq=$3 current_observation current_sha candidate candidate_sha
+  local candidate_seq candidate_adapter observed_from observed_cursor event_count inbox task_dir
+  current_observation=$(jq -r '.result_path // ""' "$AIME_STATE_FILE") || return 1
+  task_dir=$(fm_aime_task_dir "$id") || return 1
+  case "$current_observation" in
+    "$task_dir"/artifacts/*-observation.json) ;;
+    *) return 1 ;;
+  esac
+  [ -f "$current_observation" ] && [ ! -L "$current_observation" ] || return 1
+  current_sha=$(fm_aime_sha256_file "$current_observation") || return 1
+  inbox=$(fm_procevent_inbox_dir "$STATE")
+  for candidate in "$inbox/$source".*.result; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    candidate_seq=$(fm_procevent_result_sequence "$candidate") || continue
+    case "$candidate_seq" in ''|*[!0-9]*) continue ;; esac
+    [ "$candidate_seq" -gt "$older_seq" ] || continue
+    fm_procevent_is_handled "$STATE" "$source" "$candidate_seq" || continue
+    candidate_adapter=$(fm_procevent_result_adapter "$candidate" 2>/dev/null || true)
+    [ "$candidate_adapter" = aime ] || continue
+    validate_observation "$candidate" "$id" || continue
+    [ "$(jq -r '.session_id' "$candidate")" = "$AIME_STATE_SESSION_ID" ] || continue
+    [ "$(jq -r '.site' "$candidate")" = "$AIME_STATE_SITE" ] || continue
+    jq -e '.replay_ok == true and .session_ok == true' "$candidate" >/dev/null 2>&1 || continue
+    observed_from=$(jq -r '.from_offset' "$candidate")
+    observed_cursor=$(jq -r '.replay.data.last_event_offset // .from_offset' "$candidate")
+    event_count=$(jq -r '.replay.data.event_count // 0' "$candidate")
+    case "$observed_from:$observed_cursor:$event_count" in
+      *[!0-9:]*) continue ;;
+    esac
+    [ "$event_count" -gt 0 ] && [ "$observed_cursor" -gt "$observed_from" ] \
+      && [ "$AIME_STATE_CURSOR" -ge "$observed_cursor" ] || continue
+    candidate_sha=$(fm_aime_sha256_file "$candidate") || continue
+    [ "$candidate_sha" = "$current_sha" ] || continue
+    return 0
+  done
+  return 1
+}
+
+recover_superseded_malformed_observation() { # <task-id> <source-id> <sequence> <result>
+  local id=$1 source=$2 seq=$3 result=$4 expected adapter artifact
+  expected="$(fm_procevent_inbox_dir "$STATE")/$source.$seq.result"
+  [ "$result" = "$expected" ] || return 1
+  adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
+  [ "$adapter" = aime ] || return 1
+  newer_observation_was_applied "$id" "$source" "$seq" || return 1
+  artifact=$(fm_aime_artifact_store "$id" malformed-observation "$result") || return 1
+  "$SCRIPT_DIR/fm-procevent.sh" handled "$source" "$seq" >/dev/null || return 1
+  printf 'handled: %s malformed-superseded=true evidence=%s cursor=%s\n' \
+    "$id" "$artifact" "$AIME_STATE_CURSOR"
+}
+
 cmd_handle_locked() {
   local id=$1 seq=$2 result=$3 source observation artifact cursor class terminal=false output_file
   local report document_json='' document_state_json='' current_cursor content_file observed_from observed_cursor
   local provider_status
   source=$(fm_aime_source_id "$id") || die "invalid task id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer" ;; esac
-  validate_observation "$result" "$id" || die "AIME observation is malformed"
+  if ! validate_observation "$result" "$id"; then
+    fm_aime_state_load "$id" || die "AIME task state is missing or invalid"
+    recover_superseded_malformed_observation "$id" "$source" "$seq" "$result" \
+      || die "AIME observation is malformed"
+    return 0
+  fi
   fm_aime_state_load "$id" || die "AIME task state is missing or invalid"
   if fm_procevent_is_handled "$STATE" "$source" "$seq"; then
     case "$AIME_STATE_PHASE" in

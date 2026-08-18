@@ -163,7 +163,7 @@ case "$args" in
     ;;
   *" aime session replay-events "*)
     case "${FM_AIME_FAKE_REPLAY:-terminal}" in
-      block)
+      block|oversized-block)
         trigger=${FM_AIME_FAKE_TRIGGER:?}
         while [ ! -e "$trigger" ]; do sleep 0.02; done
         ;;
@@ -179,7 +179,13 @@ case "$args" in
         fi
         ;;
     esac
-    if [ "${FM_AIME_FAKE_REPLAY:-terminal}" = nonterminal ]; then
+    if [ "${FM_AIME_FAKE_REPLAY:-terminal}" = oversized ] \
+      || [ "${FM_AIME_FAKE_REPLAY:-terminal}" = oversized-block ]; then
+      jq -cn \
+        --arg session "$session" \
+        --rawfile payload "${FM_AIME_FAKE_REPLAY_PAYLOAD:?}" \
+        '{status:"success",data:{session_id:$session,terminal:true,last_event_offset:73,events:[{offset:4,type:"progress",tool_payload:$payload},{offset:73,type:"terminal"}]},error:null}'
+    elif [ "${FM_AIME_FAKE_REPLAY:-terminal}" = nonterminal ]; then
       success "{\"session_id\":\"$session\",\"terminal\":false,\"last_event_offset\":4,\"events\":[{\"offset\":4,\"type\":\"progress\"}]}"
     else
       success "{\"session_id\":\"$session\",\"terminal\":true,\"last_event_offset\":9,\"events\":[{\"offset\":9,\"type\":\"terminal\"}]}"
@@ -230,6 +236,7 @@ run_aime() { # <home> <fakebin> <args...>
   FM_AIME_FAKE_MESSAGE_ID="$MESSAGE_ID" \
   FM_AIME_FAKE_FAILURE="${FM_AIME_FAKE_FAILURE:-}" \
   FM_AIME_FAKE_REPLAY="${FM_AIME_FAKE_REPLAY:-terminal}" \
+  FM_AIME_FAKE_REPLAY_PAYLOAD="${FM_AIME_FAKE_REPLAY_PAYLOAD:-}" \
   FM_AIME_FAKE_TRIGGER="${FM_AIME_FAKE_TRIGGER:-}" \
   FM_AIME_FAKE_OUTPUT_MODE="${FM_AIME_FAKE_OUTPUT_MODE:-success}" \
   FM_AIME_FAKE_CONTENT="${FM_AIME_FAKE_CONTENT:-}" \
@@ -252,6 +259,7 @@ dispatch_aime() { # <home> <fakebin> <id> [extra args...]
   FM_AIME_FAKE_MESSAGE_ID="$MESSAGE_ID" \
   FM_AIME_FAKE_FAILURE="${FM_AIME_FAKE_FAILURE:-}" \
   FM_AIME_FAKE_REPLAY="${FM_AIME_FAKE_REPLAY:-terminal}" \
+  FM_AIME_FAKE_REPLAY_PAYLOAD="${FM_AIME_FAKE_REPLAY_PAYLOAD:-}" \
   FM_AIME_FAKE_TRIGGER="${FM_AIME_FAKE_TRIGGER:-}" \
   FM_AIME_FAKE_OUTPUT_MODE="${FM_AIME_FAKE_OUTPUT_MODE:-success}" \
   FM_AIME_FAKE_CONTENT="${FM_AIME_FAKE_CONTENT:-}" \
@@ -459,6 +467,83 @@ test_dispatch_completion_and_duplicate_replay() {
   [ "$(count_log "$home/bytedcli.log" "aime session send")" -eq 1 ] \
     || fail "restart dispatch issued a second send"
   pass "AIME dispatch checkpoints identity, completes asynchronously, wakes once, and replays safely"
+}
+
+test_oversized_replay_stays_valid_through_runner_capture() {
+  local home fakebin id payload trigger malformed malformed_seq result='' recovery_out evidence
+  local early_recovery_rc=0 tries=200 runner_bound=1048576
+  home=$(new_home oversized-replay)
+  fakebin=$(make_fake_bytedcli "$home")
+  write_config "$home" true
+  id=oversized
+  new_task "$home" "$id"
+  : >"$home/bytedcli.log"
+  payload="$home/replay-payload"
+  head -c "$((runner_bound + 4096))" /dev/zero | tr '\0' x >"$payload"
+  [ "$(wc -c <"$payload" | tr -d '[:space:]')" -gt "$runner_bound" ] \
+    || fail "oversized replay fixture does not exceed the runner capture bound"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-procevent.sh" register aime aime-oversized -- \
+      /bin/printf '{"truncated":' >/dev/null \
+    || fail "could not register the pre-fix malformed capture fixture"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-procevent.sh" start aime-oversized >/dev/null 2>&1 \
+    || fail "could not capture the pre-fix malformed result fixture"
+  malformed=$(find "$home/state/procevent-inbox" -name 'aime-oversized.*.result' | head -1)
+  [ -n "$malformed" ] || fail "pre-fix malformed result fixture was not captured"
+  malformed_seq=${malformed##*/}
+  malformed_seq=${malformed_seq%.result}
+  malformed_seq=${malformed_seq##*.}
+
+  trigger="$home/oversized-ready"
+  FM_PROCEVENT_MAX_OUTPUT_BYTES="$runner_bound" \
+    FM_AIME_FAKE_REPLAY=oversized-block FM_AIME_FAKE_REPLAY_PAYLOAD="$payload" \
+    FM_AIME_FAKE_TRIGGER="$trigger" FM_AIME_FAKE_CONTENT='# Oversized replay result' \
+    dispatch_aime "$home" "$fakebin" "$id" >/dev/null \
+    || fail "oversized-replay AIME dispatch failed"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" handle "$id" "$malformed_seq" "$malformed" \
+    >"$home/early-recovery.out" 2>"$home/early-recovery.err" || early_recovery_rc=$?
+  [ "$early_recovery_rc" -ne 0 ] \
+    || fail "malformed capture was acknowledged before a newer observation was applied"
+  assert_absent "$home/state/procevent-inbox/aime-oversized.$malformed_seq.handled" \
+    "rejected malformed recovery left a handled acknowledgement"
+  touch "$trigger"
+  while [ "$tries" -gt 0 ]; do
+    result=$(find "$home/state/procevent-inbox" -name 'aime-oversized.*.result' ! -path "$malformed" 2>/dev/null | head -1)
+    [ -n "$result" ] && break
+    sleep 0.05
+    tries=$((tries - 1))
+  done
+  [ -n "$result" ] || fail "oversized replay produced no captured observation"
+  [ "$(wc -c <"$result" | tr -d '[:space:]')" -lt "$runner_bound" ] \
+    || fail "oversized replay observation reached the runner capture bound"
+  jq -s -e '
+    length == 1
+    and .[0].schema == "fm-aime-observation.v1"
+    and .[0].from_offset == 0
+    and .[0].terminal_candidate == true
+    and .[0].replay.data.last_event_offset == 73
+    and .[0].replay.data.event_count == 2
+    and (.[0].replay.data | has("events") | not)
+  ' "$result" >/dev/null || fail "captured oversized replay observation is malformed or lost its authoritative boundary"
+  wait_phase "$home" "$id" terminal-success
+  jq -e '.event_cursor == 73 and .outcome == "succeeded"' "$(state_file "$home" "$id")" >/dev/null \
+    || fail "oversized replay did not advance the durable cursor to the authoritative offset"
+  assert_grep '# Oversized replay result' "$home/data/$id/report.md" \
+    "oversized replay did not produce the self-contained terminal report"
+  recovery_out=$(FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" handle "$id" "$malformed_seq" "$malformed") \
+    || fail "adapter did not recover the older malformed capture after authoritative replay"
+  assert_contains "$recovery_out" "malformed-superseded=true" \
+    "malformed recovery did not report its superseded evidence outcome"
+  assert_present "$home/state/procevent-inbox/aime-oversized.$malformed_seq.handled" \
+    "adapter-owned recovery did not retire the malformed generation"
+  evidence=$(find "$home/state/cloud-tasks/$id/artifacts" -name '*-malformed-observation.json' | head -1)
+  if [ -z "$evidence" ] || ! cmp -s "$malformed" "$evidence"; then
+    fail "adapter-owned recovery did not preserve the exact malformed evidence"
+  fi
+  pass "oversized replay history stays bounded, handles to terminal success, and safely supersedes the malformed capture"
 }
 
 test_restart_adoption_and_cancellation() {
@@ -826,6 +911,7 @@ test_probe_and_disabled_gate
 test_probe_failures_are_distinct
 test_sandbox_verification_is_explicit_and_stays_disabled
 test_dispatch_completion_and_duplicate_replay
+test_oversized_replay_stays_valid_through_runner_capture
 test_restart_adoption_and_cancellation
 test_acceptance_unknown_and_explicit_failures
 test_document_mode_and_terminal_result_failures
