@@ -196,7 +196,7 @@ test_kimi_launch_then_send_is_verified() {
     || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
-  assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
+  assert_not_contains "$launch" "__TURNEND_SIGNAL__" "kimi launch retained a turn-end placeholder"
 
   brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
   pointer=$(cat "$CASE_DIR/pointer.log")
@@ -355,7 +355,7 @@ test_kimi_hook_install_refuses_without_jq() {
 }
 
 test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
-  local id rec out rc hook target token no_token snapshot_before snapshot_after fakebin
+  local id rec out rc hook target token registry registry_content no_token snapshot_before snapshot_after fakebin
   id=kimi-hook-auth-z6
   rec=$(make_spawn_case hook-auth "$id")
   read_spawn_record "$rec"
@@ -365,7 +365,8 @@ test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
   hook="$HOME_DIR/.kimi-code/fm-turn-end.sh"
   target="$HOME_DIR/state/$id.turn-ended"
   token=$(sed -n 's/^token=//p' "$WT_DIR/.fm-kimi-turnend")
-  assert_present "$HOME_DIR/.kimi-code/fm-turn-end.d/$token" "Kimi registry token is missing"
+  registry="$HOME_DIR/.kimi-code/fm-turn-end.d/$token"
+  assert_present "$registry" "Kimi registry token is missing"
 
   no_token="$CASE_DIR/no-token-workspace"
   mkdir -p "$no_token"
@@ -387,7 +388,25 @@ test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
   [ -z "$out" ] || fail "registered Kimi hook invocation printed output: $out"
   assert_present "$target" "registered Kimi hook invocation did not touch the turn-end marker"
 
-  rm "$target"
+  rm -f "$target"
+  registry_content=$(cat "$registry")
+  printf '%s\n' "$target" > "$registry"
+  out=$(printf '{"hook_event_name":"Stop","session_id":"legacy","cwd":"%s","stop_hook_active":false}\n' "$WT_DIR" \
+    | HOME="$HOME_DIR" bash "$hook" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "legacy-registry Kimi hook invocation did not exit zero"
+  [ -z "$out" ] || fail "legacy-registry Kimi hook invocation printed output: $out"
+  assert_absent "$target" "a legacy one-line Kimi registry entry remained active"
+  printf '%s\n' "$registry_content" > "$registry"
+
+  rm -f "$target" "$HOME_DIR/state/$id.meta"
+  out=$(printf '{"hook_event_name":"Stop","session_id":"retired","cwd":"%s","stop_hook_active":false}\n' "$WT_DIR" \
+    | HOME="$HOME_DIR" bash "$hook" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "retired Kimi hook invocation did not exit zero"
+  [ -z "$out" ] || fail "retired Kimi hook invocation printed output: $out"
+  assert_absent "$target" "a retired task's Kimi token recreated its turn-end marker"
+
   fakebin=$(fm_fakebin "$CASE_DIR/no-jq")
   ln -s "$(command -v bash)" "$fakebin/bash"
   out=$(printf '{"hook_event_name":"Stop","session_id":"crew","cwd":"%s","stop_hook_active":false}\n' "$WT_DIR" \

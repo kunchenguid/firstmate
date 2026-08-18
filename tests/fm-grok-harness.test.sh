@@ -57,7 +57,7 @@ run_grok_spawn() {
 }
 
 test_grok_hook_requires_registered_token() {
-  local rec case_dir home proj wt fakebin grok_home id out status hook token target evil evil_target
+  local rec case_dir home proj wt fakebin grok_home id out status hook token target registry registry_content evil evil_target
   rec=$(make_spawn_case hook-auth)
   IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
 $rec
@@ -73,7 +73,8 @@ EOF
   target="$home/state/$id.turn-ended"
   assert_no_grep "$target" "$wt/.fm-grok-turnend" "grok pointer exposed the turn-end path"
   token=$(sed -n 's/^token=//p' "$wt/.fm-grok-turnend")
-  assert_present "$grok_home/hooks/fm-turn-end.d/$token" "grok auth registry entry was not written"
+  registry="$grok_home/hooks/fm-turn-end.d/$token"
+  assert_present "$registry" "grok auth registry entry was not written"
 
   evil="$case_dir/evil"
   evil_target="$case_dir/evil-target.turn-ended"
@@ -92,6 +93,17 @@ EOF
   printf 'token=%s\n' "$token" > "$wt/.fm-grok-turnend"
   GROK_WORKSPACE_ROOT="$wt" bash "$hook"
   assert_present "$target" "registered grok pointer did not touch the task turn-end file"
+
+  rm -f "$target"
+  registry_content=$(cat "$registry")
+  printf '%s\n' "$target" > "$registry"
+  GROK_WORKSPACE_ROOT="$wt" bash "$hook"
+  assert_absent "$target" "a legacy one-line grok registry entry remained active"
+  printf '%s\n' "$registry_content" > "$registry"
+
+  rm -f "$target" "$home/state/$id.meta"
+  GROK_WORKSPACE_ROOT="$wt" bash "$hook"
+  assert_absent "$target" "a retired task's grok token recreated its turn-end marker"
   pass "grok global hook requires a firstmate registry token"
 }
 

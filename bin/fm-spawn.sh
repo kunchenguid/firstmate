@@ -152,8 +152,10 @@
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
-#     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
-#                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
+#     __TURNEND_SIGNAL__ absolute path to bin/fm-turnend-signal.sh
+#     __STATE__     absolute path to the task's state directory
+#     __TASK_ID__   canonical task id
+#     __SPAWN_GEN__ per-launch incarnation bound to the task's metadata
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
@@ -1116,7 +1118,7 @@ launch_template() {
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"__TURNEND_SIGNAL__ __STATE__ __TASK_ID__ __SPAWN_GEN__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -2279,6 +2281,8 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+TURNEND_SIGNAL="$FM_ROOT/bin/fm-turnend-signal.sh"
+SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -2352,7 +2356,8 @@ if [ "$KIND" != secondmate ]; then
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
       j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
-      j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+      turnend_cmd="$(shell_quote "$TURNEND_SIGNAL") $(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$SPAWN_GEN")"
+      j_stop=$(json_escape "$turnend_cmd; $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
       cat > "$WT/.claude/settings.local.json" <<EOF
@@ -2404,7 +2409,7 @@ export const FmBusyState = async () => {
           await busyEvent("idle", "session-idle");
         }
         await new Promise((resolve) => {
-          execFile("touch", ["$TURNEND"], () => resolve());
+          execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"], () => resolve());
         });
       }
     },
@@ -2442,7 +2447,7 @@ export default function (pi: any) {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
     return busyEvent("idle", "agent-settled");
   });
-  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  pi.on("turn_end", () => execFile("$TURNEND_SIGNAL", ["$STATE_REAL", "$ID", "$SPAWN_GEN"]));
 }
 EOF
       ;;
@@ -2454,7 +2459,8 @@ EOF
       # firstmate-launched worker. Codex therefore classifies unknown with
       # an explicit reason rather than falling back to idle, and no busy
       # wiring is installed. The turn-end NOTIFICATION marker still rides
-      # the launch command via -c notify=[...] and __TURNEND__.
+      # the launch command via -c notify=[...] and the generation-bound
+      # fm-turnend-signal.sh command.
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
@@ -2478,7 +2484,8 @@ EOF
       umask 077
       auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
       umask "$old_umask"
-      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf 'target=%s\nspawn_gen=%s\nsignal=%s\n' \
+        "$TURNEND" "$SPAWN_GEN" "$TURNEND_SIGNAL" > "$auth_file"
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.grok-turnend-token"
       sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
       cat > "$GROK_HOOKS_DIR/fm-turn-end.sh" <<EOF
@@ -2494,9 +2501,20 @@ IFS= read -r -n 256 first < "\$p" 2>/dev/null || [ -n "\$first" ] || exit 0
 case "\$first" in token=*) token=\${first#token=} ;; *) exit 0 ;; esac
 case "\$token" in fm.????????????) : ;; *) exit 0 ;; esac
 case "\$token" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
-t=\$(cat "\$auth_dir/\$token" 2>/dev/null) || exit 0
-case "\$t" in /*.turn-ended) : ;; *) exit 0 ;; esac
-touch "\$t" 2>/dev/null || true
+registry="\$auth_dir/\$token"
+target= spawn_gen= signal= extra=
+IFS= read -r target < "\$registry" 2>/dev/null || exit 0
+IFS= read -r spawn_gen < <(sed -n '2p' "\$registry") || exit 0
+IFS= read -r signal < <(sed -n '3p' "\$registry") || exit 0
+IFS= read -r extra < <(sed -n '4p' "\$registry") || true
+case "\$target" in target=/*.turn-ended) target=\${target#target=} ;; *) exit 0 ;; esac
+case "\$spawn_gen" in spawn_gen=*) spawn_gen=\${spawn_gen#spawn_gen=} ;; *) exit 0 ;; esac
+case "\$signal" in signal=/*/bin/fm-turnend-signal.sh) signal=\${signal#signal=} ;; *) exit 0 ;; esac
+[ -z "\$extra" ] || exit 0
+state=\${target%/*}
+name=\${target##*/}
+id=\${name%.turn-ended}
+"\$signal" "\$state" "\$id" "\$spawn_gen" >/dev/null 2>&1 || true
 exit 0
 EOF
       chmod +x "$GROK_HOOKS_DIR/fm-turn-end.sh"
@@ -2566,7 +2584,8 @@ EOF
       umask 077
       auth_file=$(mktemp "$KIMI_AUTH_DIR/fm.XXXXXXXXXXXX")
       umask "$old_umask"
-      printf '%s\n' "$TURNEND" > "$auth_file"
+      printf 'target=%s\nspawn_gen=%s\nsignal=%s\n' \
+        "$TURNEND" "$SPAWN_GEN" "$TURNEND_SIGNAL" > "$auth_file"
       printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
       printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
       exclude_path '.fm-kimi-turnend'
@@ -2620,7 +2639,6 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -2706,7 +2724,10 @@ fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
-sq_turnend=$(shell_quote "$TURNEND")
+sq_turnend_signal=$(shell_quote "$TURNEND_SIGNAL")
+sq_state=$(shell_quote "$STATE_REAL")
+sq_task_id=$(shell_quote "$ID")
+sq_spawn_gen=$(shell_quote "$SPAWN_GEN")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
@@ -2717,7 +2738,10 @@ EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
-LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
+LAUNCH=${LAUNCH//__TURNEND_SIGNAL__/$sq_turnend_signal}
+LAUNCH=${LAUNCH//__STATE__/$sq_state}
+LAUNCH=${LAUNCH//__TASK_ID__/$sq_task_id}
+LAUNCH=${LAUNCH//__SPAWN_GEN__/$sq_spawn_gen}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}

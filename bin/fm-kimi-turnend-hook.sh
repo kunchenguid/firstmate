@@ -89,9 +89,20 @@ case "$token" in fm.????????????) : ;; *) exit 0 ;; esac
 case "$token" in *[!A-Za-z0-9._-]*) exit 0 ;; esac
 auth_dir=${HOME:-}/.kimi-code/fm-turn-end.d
 [ -n "${HOME:-}" ] || exit 0
-target=$(cat "$auth_dir/$token" 2>/dev/null) || exit 0
-case "$target" in /*.turn-ended) : ;; *) exit 0 ;; esac
-touch -- "$target" 2>/dev/null || true
+registry="$auth_dir/$token"
+target= spawn_gen= signal= extra=
+IFS= read -r target < "$registry" 2>/dev/null || exit 0
+IFS= read -r spawn_gen < <(sed -n '2p' "$registry") || exit 0
+IFS= read -r signal < <(sed -n '3p' "$registry") || exit 0
+IFS= read -r extra < <(sed -n '4p' "$registry") || true
+case "$target" in target=/*.turn-ended) target=${target#target=} ;; *) exit 0 ;; esac
+case "$spawn_gen" in spawn_gen=*) spawn_gen=${spawn_gen#spawn_gen=} ;; *) exit 0 ;; esac
+case "$signal" in signal=/*/bin/fm-turnend-signal.sh) signal=${signal#signal=} ;; *) exit 0 ;; esac
+[ -z "$extra" ] || exit 0
+state=${target%/*}
+name=${target##*/}
+id=${name%.turn-ended}
+"$signal" "$state" "$id" "$spawn_gen" >/dev/null 2>&1 || true
 exit 0
 '''
 
