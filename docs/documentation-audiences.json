@@ -381,6 +381,266 @@
       "audience": "operator-current"
     },
     {
+      "path": ".agents/skills/flux-classic-gitops/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/gitops-knowledge/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/gitops-repo-audit/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/NOTICE.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/alert-notification-v1beta3.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/artifactgenerator-source-v1beta1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/bucket-source-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/externalartifact-source-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/fluxinstance-fluxcd-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/fluxreport-fluxcd-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/gitrepository-source-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/helmchart-source-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/helmrelease-helm-v2.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/helmrepository-source-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/imagepolicy-image-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/imagerepository-image-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/imageupdateautomation-image-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/kustomization-kustomize-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/ocirepository-source-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/provider-notification-v1beta3.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/receiver-notification-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/resourceset-fluxcd-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/assets/schemas/resourcesetinputprovider-fluxcd-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/best-practices.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/flux-cli.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/flux-operator.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/gitless-gitops.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/gitless-image-automation.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/helmrelease.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/image-automation.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/kustomization.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/mcp-server.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/notifications.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/repo-patterns.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/resourcesets.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/sources.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/terraform-bootstrap.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-knowledge/references/web-ui.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/alert-notification-v1beta3.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/artifactgenerator-source-v1beta1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/bucket-source-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/externalartifact-source-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/fluxinstance-fluxcd-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/fluxreport-fluxcd-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/gitrepository-source-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/helmchart-source-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/helmrelease-helm-v2.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/helmrepository-source-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/imagepolicy-image-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/imagerepository-image-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/imageupdateautomation-image-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/kustomization-kustomize-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/ocirepository-source-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/provider-notification-v1beta3.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/receiver-notification-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/resourceset-fluxcd-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/assets/schemas/resourcesetinputprovider-fluxcd-v1.fields.txt",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/references/api-migration.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/references/best-practices.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/references/flux-api-summary.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/references/flux-operator-api-summary.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/references/repo-patterns.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/vendor/fluxcd-agent-skills/gitops-repo-audit/references/security-audit.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
     },

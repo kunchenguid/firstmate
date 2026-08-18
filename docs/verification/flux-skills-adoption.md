@@ -1,7 +1,3 @@
----
-audience: maintainer-verification
----
-
 # Flux CD agent skills adoption
 
 This record supports the guarded adoption of `gitops-knowledge` and `gitops-repo-audit` from `fluxcd/agent-skills` and the Firstmate `flux-classic-gitops` amendment.
