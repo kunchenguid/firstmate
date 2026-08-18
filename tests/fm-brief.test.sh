@@ -819,6 +819,80 @@ test_scaffold_tokens_match_spawn_guard_expectations() {
   pass "fm-brief.sh: no scaffold variant emits uppercase brace tokens beyond its expected placeholders (spawn-guard regression)"
 }
 
+# Ship briefs must verify the base against the tracked upstream before branching,
+# not assert a false "detached HEAD on a clean default branch" that may be stale.
+test_ship_base_verification_before_branching() {
+  local home brief
+  home="$TMP_ROOT/base-verify-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    local id="brief-base-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_no_grep "at a detached HEAD on a clean default branch" "$brief" \
+      "$mode: brief still asserts a clean detached HEAD that may be stale"
+    assert_grep "git rev-parse --abbrev-ref main@{upstream}" "$brief" \
+      "$mode: brief does not derive the tracked upstream before branching"
+    assert_grep "same reasoning rule 3 uses for the PR target" "$brief" \
+      "$mode: brief does not tie the base-verification reasoning to the PR-target rule"
+    assert_grep "blocked: default branch has no tracking configured" "$brief" \
+      "$mode: brief does not block on missing tracking configuration"
+    assert_grep "git merge --ff-only" "$brief" \
+      "$mode: brief does not fast-forward when behind"
+  done
+  pass "fm-brief.sh: ship briefs verify base against tracked upstream before branching"
+}
+
+# Scout briefs must not assert a false detached HEAD either.
+test_scout_does_not_assert_false_detached_head() {
+  local home id brief
+  home="$TMP_ROOT/scout-head-home"
+  mkdir -p "$home/data"
+  id="brief-scout-head"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "at a detached HEAD on a clean default branch" "$brief" \
+    "scout brief still asserts a clean detached HEAD that may be stale"
+  pass "fm-brief.sh: scout brief does not assert a false detached HEAD"
+}
+
+# All brief variants must list long local processes as the first paused example.
+test_paused_examples_include_long_local_processes() {
+  local home id brief
+  home="$TMP_ROOT/paused-examples-home"
+  mkdir -p "$home/data"
+
+  # Ship
+  id="brief-paused-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "a long local test suite, build, or render" "$brief" \
+    "ship brief does not list the most common paused wait (long local process)"
+  assert_grep "an upstream" "$brief" \
+    "ship brief lost the existing upstream-release paused example"
+
+  # Scout
+  id="brief-paused-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "a long local test suite, build, or render" "$brief" \
+    "scout brief does not list the most common paused wait (long local process)"
+  assert_grep "an upstream" "$brief" \
+    "scout brief lost the existing upstream-release paused example"
+
+  # Secondmate
+  id="brief-paused-secondmate"
+  FM_SECONDMATE_CHARTER='Test charter.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate alpha >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "a long local test suite, build, or render" "$brief" \
+    "secondmate brief does not list the most common paused wait (long local process)"
+  assert_grep "an upstream" "$brief" \
+    "secondmate brief lost the existing upstream-release paused example"
+
+  pass "fm-brief.sh: paused examples list long local processes as the first example"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -840,3 +914,7 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scaffold_tokens_match_spawn_guard_expectations
+test_ship_base_verification_before_branching
+test_scout_does_not_assert_false_detached_head
+test_paused_examples_include_long_local_processes
+

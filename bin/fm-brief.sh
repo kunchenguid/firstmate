@@ -237,7 +237,7 @@ Handle routine work yourself.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
-Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own; use \`blocked:\` when you are stuck and need firstmate to act.
+Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known wait you expect to clear on its own (a long local test suite, build, or render; an upstream release, a rate-limit reset); use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, or work ready for review.
 This is also how you return the answer to a marked from-firstmate request above.
 A marked request requires one correlated answer after the work; it does not require a separate receipt or start acknowledgement.
@@ -308,7 +308,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -335,9 +335,9 @@ The report is the only thing that survives, so anything worth keeping must be in
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
-   firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
-   treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   known wait you expect to clear on its own (a long local test suite, build, or render; an upstream
+   release, a rate-limit reset): firstmate then leaves your idle pane alone and rechecks it on a long
+   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -436,13 +436,18 @@ If the check fails or was not run, you are not done.
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO.
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: verify your base is current and create your branch.
+   The worktree may have been pooled before the latest upstream commits landed.
+   Derive the tracked upstream with \`git rev-parse --abbrev-ref main@{upstream}\` - the same reasoning rule 3 uses for the PR target, so the two cannot drift apart.
+   If tracking is not configured, append \`blocked: default branch has no tracking configured; cannot verify base\` to the status file and stop.
+   Fetch that remote (the part before the \`/\`) and, if HEAD is behind the upstream ref, fast-forward with \`git merge --ff-only\` before branching.
+   Then: \`git checkout -b fm/$ID\`$SETUP2
 
 # Rules
 $RULE1
@@ -469,9 +474,9 @@ $RULE1
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
-   a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
-   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   known wait you expect to clear on its own (a long local test suite, build, or render; an upstream
+   release, a rate-limit reset, a scheduled window): firstmate then leaves your idle pane alone
+   and rechecks it on a long cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
    Never end a turn with uncommitted work, an unopened PR, or no terminal status line - the status line is the only thing that makes your work visible, and without it the task has produced nothing from the supervisor's side.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
