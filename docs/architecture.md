@@ -50,10 +50,9 @@ A run object is a durable record rather than a heartbeat: a reboot, a killed age
 One freshness verdict per read settles it - the `active_steps` `last_activity` age against `FM_RUN_STEP_LIVENESS_MAX` (default 30 minutes, `active_for` deliberately ignored), else a steps table whose rows have all left running or fixing, and absent both signals the run keeps its authority.
 When that verdict is false and the branch's PR is already recorded in meta, the crew's own later `paused:`/`done:` line wins over the frozen reading.
 This governs every verdict a stale run would otherwise supply about being mid-work: what its ci step row and ci.log tail say about CI, because those stopped at the same instant the run did, and equally its claim to have superseded a declared `needs-decision:`/`blocked:` gate, because only a run that is still moving can have resolved one.
-A pre-merge CI regression behind an already-reported-green PR is out of scope for this reader, and no fleet component watches for one today either - `bin/fm-pr-poll.sh` emits only `merged` and stays silent otherwise.
-That gap is pre-existing rather than opened by this precedence, since a stale `done: ... checks green` log already reported done beforehand, and a run object still fresh enough to describe the present does catch such a relapse.
 Terminal outcomes and gate parks are exempt by construction, since `passed` or a waiting gate stays true however long ago it was written, so only claims of current activity are ever demoted.
-The coarse runs-list fallback carries no step detail to judge recency by and never takes that deferral; the script header owns the exact freshness and recorded-PR conditions.
+The coarse runs-list fallback carries no step detail to judge recency by and never takes that deferral.
+The `bin/fm-crew-state.sh` header owns the exact freshness and recorded-PR conditions, the argument for them (including the accepted pre-merge-CI-regression gap), and the two limitations accepted alongside them.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.

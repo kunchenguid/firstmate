@@ -70,6 +70,21 @@
 #      no matter how long ago it was written, so only claims of CURRENT
 #      activity are ever demoted. The coarse runs-list fallback carries no step
 #      detail to judge recency by and keeps its authority unchanged.
+#
+#      This paragraph is the single owner of that argument: the two inline
+#      comments at the decision points below, docs/architecture.md, and
+#      AGENTS.md all point here instead of restating it.
+#
+#      Two consequences of this shape are KNOWN AND ACCEPTED by explicit
+#      captain decision - do not "fix" them by changing the precedence:
+#        - The needs-decision/blocked supersession turns on freshness alone,
+#          with none of the pr= corroboration that guards the paused/done
+#          deferral, so a genuinely live run that merely goes quiet for longer
+#          than FM_RUN_STEP_LIVENESS_MAX can re-emit an already-resolved
+#          blocked:/needs-decision: line as the current state.
+#        - The steps-table half of the freshness verdict has no age to read, so
+#          a read landing between one step finishing and the next registering
+#          classifies a live run as frozen.
 #   3. Reconcile the status log: if its last line says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
@@ -657,8 +672,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     else
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
-        running)        RUN_STATE=working; RUN_DETAIL="validating (running)" ;;
-        fixing)         RUN_STATE=working; RUN_DETAIL="validating (fixing)" ;;
+        running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
         failed)         RUN_STATE=failed;  RUN_DETAIL="run failed" ;;
         cancelled)      RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
@@ -714,15 +728,8 @@ if [ "$HAVE_RUN" = 1 ]; then
   # below, since a genuine gate resolving and the run resuming is the routine
   # case there, not the exception. Only the pr=-backed paused/done pair is
   # settled here; a frozen run loses to a declared gate down there instead.
-  # Nothing else is consulted here, CI state least of all: a frozen run's ci
-  # step row and its ci.log tail stopped at the same instant the run did, so
-  # they cannot report on a PR's checks now either. A pre-merge CI regression
-  # behind an already-reported-green PR is out of scope for this reader, and
-  # and no fleet component watches for one today - fm-pr-poll.sh emits only
-  # `merged` and stays silent otherwise. That gap is pre-existing rather than
-  # opened here (a stale "done: ... checks green" log already reported done
-  # before any of this), and a run object still fresh enough to describe now
-  # does catch such a relapse, through the ci-step reading just above.
+  # Nothing else is consulted here, CI state least of all; the script header's
+  # freshness paragraph owns why, including the accepted CI-regression gap.
   if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE_FRESH" = 0 ] && [ -n "$(meta_value pr)" ]; then
     LOG_OVERRIDE=$(map_log_state "$LOG_LINE")
     case "$LOG_OVERRIDE" in
