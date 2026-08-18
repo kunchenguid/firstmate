@@ -25,6 +25,17 @@ herdr_forget_inherited_pane
 TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
+# The primary home's own workspace label is now fm_backend_herdr_workspace_label
+# = the FM_HOME basename (was the constant "firstmate"). Pin FM_HOME to a
+# "firstmate"-named fixture so every case that relies on the primary label
+# resolves to the constant "firstmate" these fakes were written against,
+# independent of the repo checkout dir name (the harness unsets FM_HOME and cds
+# to the repo root, so without this the label would be that root's basename).
+# Cases that need a secondmate or other home set their own FM_HOME inline,
+# overriding this for just that call.
+export FM_HOME="$TMP_ROOT/firstmate"
+mkdir -p "$FM_HOME"
+
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
 # unit-separated args, to $FM_HERDR_LOG) and returns the canned response for
 # that call read from $FM_HERDR_RESPONSES/<n>.out, consumed IN ORDER (call 1
@@ -228,10 +239,17 @@ test_version_check_refuses_missing_herdr() {
 
 test_workspace_label_primary_home_no_marker() {
   local home
-  home="$TMP_ROOT/primary-home-no-marker"; mkdir -p "$home"
+  home="$TMP_ROOT/distro"; mkdir -p "$home"
   out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
-  [ "$out" = "firstmate" ] || fail "a primary home (no .fm-secondmate-home marker) should resolve to label 'firstmate', got '$out'"
-  pass "fm_backend_herdr_workspace_label: a primary home (no marker) resolves to 'firstmate'"
+  [ "$out" = "distro" ] || fail "a primary home (no .fm-secondmate-home marker) should resolve to its FM_HOME basename, got '$out'"
+  pass "fm_backend_herdr_workspace_label: a primary home (no marker) resolves to the FM_HOME basename (home name)"
+}
+
+test_workspace_label_degenerate_home_falls_back_to_firstmate() {
+  local out
+  out=$( FM_HOME="/" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
+  [ "$out" = "firstmate" ] || fail "a degenerate FM_HOME (/) should fall back to 'firstmate', got '$out'"
+  pass "fm_backend_herdr_workspace_label: a degenerate FM_HOME basename falls back to 'firstmate'"
 }
 
 test_workspace_label_secondmate_home_uses_marker_id() {
@@ -254,11 +272,11 @@ test_workspace_label_secondmate_marker_trims_whitespace() {
 
 test_workspace_label_empty_marker_falls_back_to_primary() {
   local home
-  home="$TMP_ROOT/secondmate-home-empty"; mkdir -p "$home"
+  home="$TMP_ROOT/empty-marker-home"; mkdir -p "$home"
   : > "$home/.fm-secondmate-home"
   out=$( FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label' "$ROOT" )
-  [ "$out" = "firstmate" ] || fail "an empty/unreadable marker should fall back to 'firstmate', got '$out'"
-  pass "fm_backend_herdr_workspace_label: an empty marker file falls back to the primary label 'firstmate'"
+  [ "$out" = "empty-marker-home" ] || fail "an empty/unreadable marker should fall back to the primary (home basename) label, got '$out'"
+  pass "fm_backend_herdr_workspace_label: an empty marker file falls back to the primary home-basename label"
 }
 
 test_workspace_label_different_secondmates_get_different_labels() {
@@ -456,6 +474,8 @@ test_workspace_ensure_prefers_the_launcher_over_the_first_label_match() {
 test_workspace_ensure_refuses_an_ambiguous_label_with_no_launcher() {
   local dir log resp fb out status
   dir="$TMP_ROOT/ensure-ambiguous"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Two workspaces sharing this home's own label (the "firstmate" fixture) with
+  # no launcher pane to disambiguate must fail closed with exit 3.
   printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w7","label":"firstmate"}]}}\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
@@ -4427,6 +4447,7 @@ test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
 test_version_check_refuses_missing_herdr
 test_workspace_label_primary_home_no_marker
+test_workspace_label_degenerate_home_falls_back_to_firstmate
 test_workspace_label_secondmate_home_uses_marker_id
 test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary

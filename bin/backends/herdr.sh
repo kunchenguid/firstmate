@@ -338,26 +338,37 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
 }
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
-# label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no
-# secondmate marker) resolves to the constant "firstmate", byte-identical to
-# every pre-existing task's recorded label - no forced migration. A SECONDMATE
-# home resolves to "2ndmate-<secondmate-id>", so its tasks land in their own
-# workspace, obviously distinguishable from the primary's (and from every
-# other secondmate's) in herdr's spaces sidebar. Read fresh from FM_HOME on
-# every call rather than cached at source time: FM_HOME is the home's own
-# durable identity, not env plumbing threaded through a call chain, so the
-# label is automatically stable across every respawn/recovery for the life of
-# that home. fm-spawn.sh briefly shadows FM_HOME to a secondmate's own home
-# when the PRIMARY spawns that secondmate (its own process's FM_HOME still
-# names the primary at that point) - see fm-spawn.sh's herdr case arm.
+# label (docs/herdr-backend.md "Default task container shape"), and THE single
+# source of truth for a home's workspace label across spawn, recovery
+# (fm_backend_herdr_list_live), cleanup, and session-start labeling
+# (bin/fm-herdr-home-label.sh) - every one of those resolves a home's own
+# workspace by this exact label, so they must all agree on it. The PRIMARY home
+# (no secondmate marker) resolves to the home NAME - the FM_HOME basename - so
+# herdr's spaces sidebar groups each home under its own name instead of a flat
+# "firstmate" (epic hlay, Q1 signed 2026-08-18). A SECONDMATE home resolves to
+# "2ndmate-<secondmate-id>", so its tasks land in their own workspace, obviously
+# distinguishable from the primary's (and from every other secondmate's). Read
+# fresh from FM_HOME on every call rather than cached at source time: FM_HOME is
+# the home's own durable identity, not env plumbing threaded through a call
+# chain, so the label is automatically stable across every respawn/recovery for
+# the life of that home. fm-spawn.sh briefly shadows FM_HOME to a secondmate's
+# own home when the PRIMARY spawns that secondmate (its own process's FM_HOME
+# still names the primary at that point) - see fm-spawn.sh's herdr case arm. An
+# empty/unreadable basename falls through to "firstmate" so a degenerate FM_HOME
+# never yields an empty label.
 fm_backend_herdr_workspace_label() {
-  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id name
   if [ -f "$marker" ]; then
     id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
     if [ -n "$id" ]; then
       printf '2ndmate-%s' "$id"
       return 0
     fi
+  fi
+  name=$(basename -- "$FM_HOME" 2>/dev/null)
+  if [ -n "$name" ] && [ "$name" != / ] && [ "$name" != . ]; then
+    printf '%s' "$name"
+    return 0
   fi
   printf 'firstmate'
 }
