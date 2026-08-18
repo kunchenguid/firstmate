@@ -330,11 +330,12 @@ busy_turn_over_age() {  # <task>
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, and on every
 # later poll while the .paused-<key> flag records that this key is already on
-# it, so it must be cheap: it NEVER re-reads crew state. NOTHING here is tied to
-# a pane hash: the re-surface age is anchored on the status file mtime, so a
-# churny idle pane (a ticking clock, a token counter) cannot keep resetting the
-# cadence the way a hash-tied timer would, and its redraws cannot be
-# re-classified as fresh first sightings either. A .paused-resurfaced-<key> throttle marker records the last
+# it, so it must be cheap: it NEVER re-reads crew state. The cadence itself is
+# not tied to a pane hash: the re-surface age is anchored on the status file
+# mtime, so a churny idle pane (a ticking clock, a token counter) cannot keep
+# resetting the cadence the way a hash-tied timer would, and its redraws cannot
+# be re-classified as fresh first sightings either. A .paused-resurfaced-<key>
+# throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
