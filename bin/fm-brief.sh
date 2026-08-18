@@ -41,6 +41,11 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Ship and scout briefs also carry a conditional local-runtime-config rule: when
+# verifying the work needs the app run locally, copy the gitignored runtime config
+# it needs to start (e.g. .env) from a firstmate-provided or sibling checkout,
+# keeping it gitignored and out of the PR, and ask firstmate if the source cannot
+# be found. The generated scaffold text owns the full rule.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
@@ -298,6 +303,22 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# Shared runtime-config rule, authored once and inserted into both the ship and
+# scout scaffolds (both run the app in a fresh worktree to verify work), but not
+# the secondmate charter. It is phrased conditionally so it is harmless when the
+# task never runs the app. Built with the `read -r -d ''` idiom, never a heredoc
+# wrapped in a command substitution, to stay Bash 3.2 parse-safe (see the header
+# of tests/fm-brief.test.sh).
+IFS= read -r -d '' RUNTIME_CONFIG_SECTION <<'EOF' || true
+# Local runtime config
+If verifying your work requires running the app or site locally, and this fresh worktree is missing gitignored runtime config the app needs to start (such as `.env` or `.env.local`), copy those required config files from the project's canonical local checkout into your worktree at the same relative path before running.
+A fresh worktree does not carry gitignored files, so a local run silently fails without them.
+Find the source from a path firstmate gave you, or from a sibling local checkout of the same repo already on this machine; if you cannot find it, append `blocked:` (or `needs-decision:` when it is a genuine choice) and ask firstmate rather than guessing or fabricating config values.
+Copy only the runtime config the app actually needs to start and verify - env files and their direct equivalents - never `node_modules`, build output, caches, or unrelated secrets.
+Keep every copied file gitignored: never commit it, never let it enter your PR or diff, and never print its secret values in the status file, logs, or the PR.
+EOF
+RUNTIME_CONFIG_SECTION=${RUNTIME_CONFIG_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -312,6 +333,8 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
+
+$RUNTIME_CONFIG_SECTION
 
 # Rules
 1. Never push to any remote and never open a PR.
@@ -426,6 +449,8 @@ The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+
+$RUNTIME_CONFIG_SECTION
 
 # Rules
 $RULE1
