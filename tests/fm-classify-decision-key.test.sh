@@ -268,6 +268,9 @@ test_paused_key_mention_never_closes_a_decision() {
   expected=$(printf 'review-gate-m3-recv-core\tneeds-decision\tchoose the review path\n')
   assert_fold "$f" "$expected" "a pause that mentions the key in prose"
 
+  printf 'paused [key=review-gate-m3-recv-core]: awaiting captain decision\n' >> "$f"
+  assert_fold "$f" "$expected" "a pause that carries the open key"
+
   # The closing-verb names are overridable for compatibility. Even if one
   # consumer inherits a conflicting override, the configured pause verb must
   # remain a no-op so its full fold cannot disagree with a normal drain fold.
@@ -280,7 +283,7 @@ test_paused_key_mention_never_closes_a_decision() {
 
   printf 'resolved [key=review-gate-m3-recv-core]: answered: use the core path\n' >> "$f"
   assert_fold "$f" "" "an explicit resolution after a pause"
-  pass "a paused key mention never closes a decision; an explicit resolution does"
+  pass "paused key mentions and carried keys stay open until explicit resolution"
 }
 
 test_stated_key_is_honored_in_both_positions
