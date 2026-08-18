@@ -28,33 +28,74 @@
 #
 #   1. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
-#   2. bootstrap      - home-local stale Herdr projection cleanup runs only
-#                       when this session actually holds the lock. Detect-only
-#                       diagnostics always run. Bootstrap's seven MUTATING sweeps
+#   2. bootstrap      - detect-only tool/version, worktree-tangle, harness,
+#                       crew-dispatch, and backlog-backend diagnostics always
+#                       run, with routine confirmations silent by default.
+#                       A lock-refused session gets read-only tangle advice and
+#                       no checkout-repair command. Home-local stale Herdr
+#                       projection cleanup and bootstrap's seven MUTATING sweeps
 #                       (legacy PR-check migration, fork-upstream probing,
 #                       secondmate convergence, secondmate liveness, pending
 #                       remote handoff retry, X-mode artifact writes, fleet sync)
-#                       also run only when locked; the five network sweeps run in the deferred
-#                       stage rather than this synchronous bootstrap section.
+#                       run only when this session holds the lock; the five
+#                       network sweeps run in the deferred stage instead. The
+#                       liveness sweep accounts
+#                       deterministically for every registered secondmate,
+#                       relaunches only recovery-grade `dead` or `missing`
+#                       endpoints, preserves ambiguous, unreadable, or
+#                       unreachable targets, and reports skipped or failed
+#                       guarantees as SECONDMATE_LIVENESS lines. fm-bootstrap.sh,
+#                       fm_backend_agent_state in fm-backend.sh, and
+#                       docs/remote-secondmates.md own that classification.
 #   3. inactive outcomes + wake-drain - runs the local bounded inactive-outcome
-#                       reconciliation before presenting durable wakes and advancing
-#                       recovery handling state, so both only run when locked.
+#                       reconciliation before presenting durable wakes and
+#                       advancing recovery handling state, so both run only
+#                       when locked. Raw queued records are this turn's first
+#                       work queue; a valid signal's clearly labeled
+#                       status-event annotation can include every status line
+#                       still unread at the presentation cursor, but never
+#                       replaces the raw record or current-state reconciliation.
+#                       A lapsed watcher chain still surfaces through the same
+#                       guard alarm. Presented records remain durable until the
+#                       printed generation-bound acknowledgement runs after
+#                       handling. The bounded fleet-wide OPEN DECISIONS section
+#                       remains actionable whenever durable decisions are open,
+#                       even with an empty queue, and must be reconciled before
+#                       continuing. The unbounded UNREAD STATUS section presents
+#                       every unseen note and pending-reply resolution since the
+#                       last presentation only once and never reprints them.
+#                       A lock-refused session leaves the queue untouched and
+#                       gets read-only tangle and watcher-liveness advice with
+#                       no drain, supervision repair, or checkout repair.
 #   4. supervision-instructions - the one emitted operating block for the
-#                       detected primary harness.
+#                       detected primary harness, after the wake queue and
+#                       before both digests, followed by their read-once
+#                       contract. This script never starts supervision; the
+#                       emitted protocol owns the exact wait or wake mechanism.
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       every state/*.meta, a bounded state/*.status tail labeled
+#                       as wake-event history with its full log path, state/.afk,
+#                       and a cheap per-task endpoint-liveness read: read-only,
+#                       always runs. That alive/dead read is only a fast presence
+#                       check; fm-crew-state.sh owns the deeper current-state
+#                       read, which this digest deliberately skips.
 #   7. network checks - the result of the deferred network stage started back at
-#                       step 1, harvested WITHOUT waiting for it.
-#   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
-#                       data/captain-shared.md, data/learnings.md: read-only,
-#                       always safe, always runs.
+#                       step 1, or an exact statement of what is still
+#                       unconfirmed, harvested WITHOUT waiting for it. A
+#                       read-only session runs none of these checks and says so.
+#   8. context digest - the full, clearly delimited data/projects.md,
+#                       data/secondmates.md, data/captain.md,
+#                       data/captain-shared.md, and data/learnings.md: read-only,
+#                       always safe, always runs. Each missing file prints an
+#                       explicit ABSENT marker rather than looking empty;
+#                       absence carries the defaults and rebuild meaning in
+#                       AGENTS.md section 3.
 #   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
-#                       block and deliberately never arms the watcher itself.
+#                       block, preserves only lock, away-mode, Relay, and
+#                       read-once reminders, and never arms the watcher itself.
 #
 # Those nine names are also the runtime-bound stage list below, so a truncated
 # startup can name exactly which of them never ran.
