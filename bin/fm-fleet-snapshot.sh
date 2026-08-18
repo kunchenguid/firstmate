@@ -160,12 +160,16 @@ queued with hold_reason, hold_kind, and plural blocker fields for downstream
 projections. A captain hold is actionable only when every blocker is Done.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
 bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT (default 15 seconds), and
-FM_SNAPSHOT_SECONDMATE_MAX_BYTES. Home summaries reuse one coarse no-mistakes
-run inventory per child repository, bounded by
-FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT (default 3 seconds), instead of issuing one
-query per child; a coarse row never clears a child's open captain decision.
-A remote home summary runs under the remote job worker's fixed environment, so
-these bounds are read from the remote home's own environment, not the caller's.
+FM_SNAPSHOT_SECONDMATE_MAX_BYTES. A home summary collects its children's
+no-mistakes evidence up front in one CONCURRENT wave - one `axi status` per ship
+child plus one coarse run inventory per distinct child repository - each query
+bounded by FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT (default 3 seconds) and at most
+FM_SNAPSHOT_SECONDMATE_CHILDREN queries in flight, so child-state cost is that
+one bound rather than one 10-second query per child. Children the wave could not
+answer for fall back to pane/status evidence, and a coarse row never clears a
+child's open captain decision. A remote home summary runs under the remote job
+worker's fixed environment, so these bounds are read from the remote home's own
+environment, not the caller's.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
@@ -210,6 +214,7 @@ last_nonempty_line() {  # <file>
 
 crew_state_json() {  # <id>
   local id=$1 raw rest state source detail sep
+  secondmate_child_state_env "$id"
   raw=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
@@ -614,51 +619,148 @@ task_json_lines() {
   done | jq -s 'sort_by(.id)'
 }
 
-# A secondmate home summary needs every child's current classification, but a
-# full no-mistakes status query per ship child makes latency grow with child
-# count and can exceed the parent home's deadline. The top-level runs inventory
-# is the same coarse public fallback fm-crew-state.sh already uses when a full
-# status query cannot be attributed. Capture it once under a smaller inner bound
-# so children of that repository share one bounded attempt and then fall back to
-# their pane/status evidence without retrying.
+# A secondmate home summary needs every child's current classification, and the
+# per-child no-mistakes query is where its latency actually goes: read
+# sequentially, one bounded `axi status` per ship child costs children x
+# FM_CREW_STATE_NM_TIMEOUT (10s each) and blows past the parent home's deadline
+# as soon as a home has more than a couple of children - the false "structured
+# home snapshot timed out" result this collection exists to remove.
 #
-# `no-mistakes runs` lists runs FOR THE CURRENT REPOSITORY (verified against the
-# installed CLI, v1.51.1: its own help says so, and outside an initialized repo
-# it prints nothing on stdout and exits 1). $FM_HOME is the Firstmate home, not
-# the code a ship child validates - children work in their project clone under
-# $PROJECTS - so the inventory is captured in a ship child's own repository root
-# and is handed to fm-crew-state.sh together with that root. A child of any other
-# repository ignores it and issues its own bounded query, so a multi-project home
-# is never answered with another repository's runs.
-secondmate_crew_repo_root() {  # <worktree>
-  git -C "$1" rev-parse --show-toplevel 2>/dev/null
+# So the home collects child run state ONCE, up front, for the whole home:
+#   - one coarse `no-mistakes runs` inventory per distinct child REPOSITORY, and
+#   - one `no-mistakes axi status` per ship child, for authoritative gate detail,
+# every query bounded by FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT and launched
+# CONCURRENTLY, so the wall-clock cost of the whole wave is that one bound rather
+# than the sum over children. fm-crew-state.sh is then handed each child's own
+# result and issues no query of its own, so a home summary's child-state cost no
+# longer scales with child count. Concurrency is capped at
+# FM_SNAPSHOT_SECONDMATE_CHILDREN probes per wave, so a home with more children
+# than that cap costs ceil(children / cap) bounds instead of one.
+#
+# Repository identity is the scope no-mistakes itself resolves, NOT the task
+# worktree: every ship task runs in its own isolated git worktree leased from the
+# project clone (bin/fm-spawn.sh's validate_spawn_worktree refuses anything else),
+# and the CLI resolves a linked worktree to the clone it was registered under
+# (verified against the installed CLI, v1.51.1: `runs` inside a treehouse
+# worktree lists the registered clone's runs, and outside any initialized repo it
+# prints nothing on stdout and exits 1). Keying on the worktree root would give
+# every child a private key and share nothing; keying on the main worktree behind
+# git-common-dir is exactly the CLI's own repository scope, so all children leased
+# from one clone genuinely share one inventory.
+#
+# Results are fail-closed by omission: a probe that times out, errors, or returns
+# nothing leaves that child without pre-collected evidence, and fm-crew-state.sh
+# falls back to its pane/status reading exactly as it does when its own query
+# does not answer. No unbounded retry is issued anywhere.
+SECONDMATE_CHILD_STATE_DIR=
+
+secondmate_child_state_cleanup() {
+  [ -n "$SECONDMATE_CHILD_STATE_DIR" ] || return 0
+  rm -f -- "$SECONDMATE_CHILD_STATE_DIR"/* "$SECONDMATE_CHILD_STATE_DIR"/.probes 2>/dev/null || true
+  rmdir -- "$SECONDMATE_CHILD_STATE_DIR" 2>/dev/null || true
+  SECONDMATE_CHILD_STATE_DIR=
 }
 
-secondmate_crew_runs_snapshot() {  # <repo-root>
+# The repository scope no-mistakes resolves for <worktree>: the main worktree
+# behind git-common-dir. Non-zero when the path is not in a git repository.
+secondmate_nm_repo_scope() {  # <worktree>
+  local common
+  common=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  case "$common" in
+    /*) ;;
+    *) common=$(cd "$1" 2>/dev/null && cd "$common" 2>/dev/null && pwd -P) || return 1 ;;
+  esac
+  [ -n "$common" ] || return 1
+  ( cd "$(dirname "$common")" 2>/dev/null && pwd -P ) || return 1
+}
+
+# Filesystem-safe, collision-resistant key for a repository scope path.
+secondmate_scope_key() {  # <scope>
+  printf '%s' "$1" | cksum | tr -cd '0-9 ' | tr ' ' '-'
+}
+
+# Run every queued probe, at most $FM_SNAPSHOT_SECONDMATE_CHILDREN at a time.
+secondmate_child_state_probes() {  # <spec-file>
+  local cap=$FM_SNAPSHOT_SECONDMATE_CHILDREN running=0 probe target arg
   local limit=${FM_CREW_STATE_RUNS_LIMIT:-200}
-  case "$limit" in ''|*[!0-9]*) limit=200 ;; esac
-  fm_nm_run_bounded "$1" "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
-    runs --limit "$limit" 2>/dev/null || true
+  case "$cap" in ''|*[!0-9]*|0) cap=20 ;; esac
+  case "$limit" in ''|*[!0-9]*|0) limit=200 ;; esac
+  while IFS=$'\t' read -r probe target arg; do
+    case "$probe" in
+      status)
+        fm_nm_run_bounded "$target" "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
+          axi status > "$SECONDMATE_CHILD_STATE_DIR/$arg.status" 2>/dev/null &
+        ;;
+      runs)
+        fm_nm_run_bounded "$target" "$FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT" \
+          runs --limit "$limit" \
+          > "$SECONDMATE_CHILD_STATE_DIR/inv.$arg" 2>/dev/null &
+        ;;
+      *) continue ;;
+    esac
+    running=$((running + 1))
+    if [ "$running" -ge "$cap" ]; then
+      wait
+      running=0
+    fi
+  done < "$1"
+  wait
 }
 
-# Repository root of the first ship child that could carry an attributable run,
-# or non-zero when this home has none (so no inventory query is issued at all).
-secondmate_crew_runs_repo() {
-  local meta kind worktree root
+# Collect every ship child's run evidence for this home in one bounded wave.
+secondmate_collect_child_state() {
+  local meta id worktree scope key spec scopes=''
   command -v no-mistakes >/dev/null 2>&1 || return 1
+  SECONDMATE_CHILD_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-child-state.XXXXXX") || return 1
+  trap secondmate_child_state_cleanup EXIT
+  spec="$SECONDMATE_CHILD_STATE_DIR/.probes"
+  : > "$spec"
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
-    kind=$(meta_value "$meta" kind)
-    [ "$kind" = ship ] || continue
+    [ "$(meta_value "$meta" kind)" = ship ] || continue
+    id=$(basename "$meta"); id=${id%.meta}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
     worktree=$(meta_value "$meta" worktree)
-    [ -d "$worktree" ] || continue
+    [ -n "$worktree" ] && [ -d "$worktree" ] || continue
     git -C "$worktree" symbolic-ref --quiet --short HEAD >/dev/null 2>&1 || continue
-    root=$(secondmate_crew_repo_root "$worktree") || continue
-    [ -n "$root" ] || continue
-    printf '%s' "$root"
-    return 0
+    scope=$(secondmate_nm_repo_scope "$worktree") || continue
+    [ -n "$scope" ] || continue
+    key=$(secondmate_scope_key "$scope")
+    printf '%s\n' "$scope" > "$SECONDMATE_CHILD_STATE_DIR/$id.scope"
+    printf 'status\t%s\t%s\n' "$worktree" "$id" >> "$spec"
+    case $'\n'"$scopes" in
+      *$'\n'"$key"$'\n'*) ;;
+      *)
+        scopes="${scopes}${key}"$'\n'
+        printf 'runs\t%s\t%s\n' "$scope" "$key" >> "$spec"
+        ;;
+    esac
   done
-  return 1
+  if [ ! -s "$spec" ]; then
+    secondmate_child_state_cleanup
+    return 1
+  fi
+  secondmate_child_state_probes "$spec"
+  return 0
+}
+
+# Hand one child its own pre-collected evidence. The variables are exported when
+# this home collected for that child and unset otherwise, so fm-crew-state.sh can
+# tell "collected, no answer" (do not query again) from "not collected at all"
+# (query normally).
+secondmate_child_state_env() {  # <id>
+  local id=$1 scope key
+  unset FM_CREW_STATE_RUN_STATUS FM_CREW_STATE_RUNS_SNAPSHOT FM_CREW_STATE_RUNS_SNAPSHOT_REPO
+  [ -n "$SECONDMATE_CHILD_STATE_DIR" ] || return 0
+  [ -f "$SECONDMATE_CHILD_STATE_DIR/$id.scope" ] || return 0
+  scope=$(cat "$SECONDMATE_CHILD_STATE_DIR/$id.scope")
+  [ -n "$scope" ] || return 0
+  key=$(secondmate_scope_key "$scope")
+  FM_CREW_STATE_RUN_STATUS=$(cat "$SECONDMATE_CHILD_STATE_DIR/$id.status" 2>/dev/null || true)
+  FM_CREW_STATE_RUNS_SNAPSHOT=$(cat "$SECONDMATE_CHILD_STATE_DIR/inv.$key" 2>/dev/null || true)
+  FM_CREW_STATE_RUNS_SNAPSHOT_REPO=$scope
+  export FM_CREW_STATE_RUN_STATUS FM_CREW_STATE_RUNS_SNAPSHOT FM_CREW_STATE_RUNS_SNAPSHOT_REPO
 }
 
 # Main-home current-inventory validity: same orphan / unstructured-current checks
@@ -1403,12 +1505,9 @@ scout_report_lines() {
     | jq -s 'sort_by(.id)'
 }
 
+unset FM_CREW_STATE_RUN_STATUS FM_CREW_STATE_RUNS_SNAPSHOT FM_CREW_STATE_RUNS_SNAPSHOT_REPO
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
-  unset FM_CREW_STATE_RUNS_SNAPSHOT FM_CREW_STATE_RUNS_SNAPSHOT_REPO
-  if FM_CREW_STATE_RUNS_SNAPSHOT_REPO=$(secondmate_crew_runs_repo); then
-    FM_CREW_STATE_RUNS_SNAPSHOT=$(secondmate_crew_runs_snapshot "$FM_CREW_STATE_RUNS_SNAPSHOT_REPO")
-    export FM_CREW_STATE_RUNS_SNAPSHOT FM_CREW_STATE_RUNS_SNAPSHOT_REPO
-  fi
+  secondmate_collect_child_state || true
 fi
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }

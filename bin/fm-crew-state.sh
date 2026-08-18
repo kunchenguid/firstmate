@@ -22,12 +22,18 @@
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
-#      fallback)? A caller may supply one already-bounded coarse runs inventory
-#      through FM_CREW_STATE_RUNS_SNAPSHOT, plus the repository root it was
-#      captured in through FM_CREW_STATE_RUNS_SNAPSHOT_REPO, so a fleet summary
-#      can reuse one query across every child of that repository; a child of any
-#      other repository still issues its own bounded query. A coarse row carries
-#      no gate detail, so it never overrides a still-open keyed decision.
+#      fallback)? A caller that already collected this crew's evidence may hand
+#      it over instead of paying for a second query: FM_CREW_STATE_RUN_STATUS
+#      carries this crew's own `axi status` output (so the authoritative gate and
+#      step detail below is reached with no query at all), and
+#      FM_CREW_STATE_RUNS_SNAPSHOT plus FM_CREW_STATE_RUNS_SNAPSHOT_REPO carry a
+#      bounded coarse inventory and the repository scope it was captured in. A
+#      fleet home summary collects both for every child in one bounded parallel
+#      wave, so its child-state cost does not grow with child count. Either
+#      variable set but EMPTY means the collection already tried and got no
+#      answer, so no query is issued here either and the crew falls through to
+#      its pane/status evidence. A coarse row carries no gate detail, so it never
+#      overrides a still-open keyed decision.
 #      Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
@@ -362,15 +368,33 @@ nm_ci_checks_state() {
 # FM_CREW_STATE_RUNS_SNAPSHOT, but `no-mistakes runs` lists runs for the CURRENT
 # REPOSITORY only (verified against the installed CLI: outside an initialized
 # repo it prints nothing on stdout and exits 1). A snapshot is therefore only
-# usable here when FM_CREW_STATE_RUNS_SNAPSHOT_REPO names this worktree's own
-# repository root; a snapshot captured in some other project clone answers about
+# usable here when FM_CREW_STATE_RUNS_SNAPSHOT_REPO names this crew's own
+# repository scope; a snapshot captured in some other project clone answers about
 # other code entirely and is ignored in favour of this crew's own bounded query.
+#
+# The scope is the repository the CLI itself resolves, which for a ship crew is
+# NOT its worktree root: every ship task gets its own isolated worktree leased
+# from the project clone, and the CLI resolves a linked worktree to the clone it
+# was registered under (verified against the installed CLI, v1.51.1). The main
+# worktree behind git-common-dir is that clone, so all crews leased from one
+# clone share one inventory instead of each holding a private, unshareable key.
+crew_nm_repo_scope() {
+  local common
+  common=$(git -C "$WT" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  case "$common" in
+    /*) ;;
+    *) common=$(cd "$WT" 2>/dev/null && cd "$common" 2>/dev/null && pwd -P) || return 1 ;;
+  esac
+  [ -n "$common" ] || return 1
+  ( cd "$(dirname "$common")" 2>/dev/null && pwd -P ) || return 1
+}
 crew_runs_snapshot_applies() {
-  local root
+  local scope
   [ "${FM_CREW_STATE_RUNS_SNAPSHOT+x}" = x ] || return 1
   [ -n "${FM_CREW_STATE_RUNS_SNAPSHOT_REPO:-}" ] || return 1
-  root=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null) || return 1
-  [ "$root" = "$FM_CREW_STATE_RUNS_SNAPSHOT_REPO" ]
+  scope=$(crew_nm_repo_scope) || return 1
+  [ "$scope" = "$FM_CREW_STATE_RUNS_SNAPSHOT_REPO" ]
 }
 nm_runs_status_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
@@ -433,32 +457,40 @@ COARSE_STATUS=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
-  if crew_runs_snapshot_applies; then
+  # A fleet home summary collects every child's `axi status` up front in one
+  # bounded parallel wave and hands this crew its own result through
+  # FM_CREW_STATE_RUN_STATUS, so the authoritative gate/step detail below is
+  # still reached without any per-crew query. The variable being SET but empty
+  # means that wave already tried and got no answer, so no query is issued here
+  # either; only an entirely uncollected crew calls the CLI itself.
+  if [ "${FM_CREW_STATE_RUN_STATUS+x}" = x ]; then
+    RUN_OUT=$FM_CREW_STATE_RUN_STATUS
+  elif ! crew_runs_snapshot_applies; then
+    RUN_OUT=$(nm_run axi status)
+  fi
+  if [ -n "$RUN_OUT" ]; then
+    run_branch=$(strip_quotes "$(nm_field branch)")
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+      HAVE_RUN=1
+    else
+      # The active-or-most-recent run is for another branch, or same branch with
+      # a rewritten/diverged head (the CLI is alive and answered; only the
+      # attribution missed) - try the coarse fallback.
+      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
+      if [ -n "$COARSE_STATUS" ]; then
+        HAVE_RUN=1
+        RUN_SOURCE=coarse
+      fi
+    fi
+  elif crew_runs_snapshot_applies; then
+    # No full status for this crew, but a coarse inventory for its repository is
+    # already in hand, so consulting it costs nothing. Without one, a second
+    # bounded call after an unanswered primary would just double the wait for no
+    # better answer, so none is made.
     COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
     if [ -n "$COARSE_STATUS" ]; then
       HAVE_RUN=1
       RUN_SOURCE=coarse
-    fi
-  else
-    RUN_OUT=$(nm_run axi status)
-    if [ -n "$RUN_OUT" ]; then
-      run_branch=$(strip_quotes "$(nm_field branch)")
-      if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
-        HAVE_RUN=1
-      else
-        # The active-or-most-recent run is for another branch, or same branch with
-        # a rewritten/diverged head (the CLI is alive and answered; only the
-        # attribution missed) - try the coarse fallback.
-        # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
-        # primary call means the CLI itself did not respond, so retrying it
-        # immediately with a second bounded call would just double the wait
-        # for no better answer.
-        COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-        if [ -n "$COARSE_STATUS" ]; then
-          HAVE_RUN=1
-          RUN_SOURCE=coarse
-        fi
-      fi
     fi
   fi
 fi

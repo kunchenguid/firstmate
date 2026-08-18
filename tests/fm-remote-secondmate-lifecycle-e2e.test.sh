@@ -1057,24 +1057,34 @@ printf '%s' "$BOUNDED_SNAPSHOT" | jq -e '
     and .current.state == "active_child_work"
     and [.active_children[].id] == ["bounded-summary"]
 ' >/dev/null || fail "bounded remote summary did not retain healthy structured state"
-[ "$(wc -l < "$TMP_ROOT/remote-summary-nm.log" | tr -d ' ')" -eq 1 ] \
-  || fail "remote home summary issued more than one no-mistakes inventory query"
-# `no-mistakes runs` answers for the repository of its working directory, so the
-# shared inventory has to be captured in the ship child's project clone - never
-# in the remote Firstmate home, which is a different repository entirely.
-BOUNDED_QUERY_DIR=$(cut -f1 "$TMP_ROOT/remote-summary-nm.log" | head -1)
-BOUNDED_QUERY_DIR=$(cd "$BOUNDED_QUERY_DIR" && pwd -P)
-[ "$BOUNDED_QUERY_DIR" = "$(cd "$REMOTE_HOME/projects/alpha" && pwd -P)" ] \
-  || fail "remote shared inventory was captured outside the child's repository: $BOUNDED_QUERY_DIR"
+# One child means exactly one status probe plus one repository inventory - the
+# whole up-front wave, with nothing left for a per-child query to repeat.
+[ "$(wc -l < "$TMP_ROOT/remote-summary-nm.log" | tr -d ' ')" -eq 2 ] \
+  || fail "remote home summary did not issue exactly one bounded child-state wave: $(cat "$TMP_ROOT/remote-summary-nm.log")"
 grep -q $'\t''runs --limit' "$TMP_ROOT/remote-summary-nm.log" \
   || fail "remote home summary did not use the public coarse run inventory: $(cat "$TMP_ROOT/remote-summary-nm.log")"
+grep -q $'\t''axi status' "$TMP_ROOT/remote-summary-nm.log" \
+  || fail "remote home summary did not collect authoritative per-child run status: $(cat "$TMP_ROOT/remote-summary-nm.log")"
+# Both queries answer for the repository of their working directory, so they have
+# to run in the ship child's project clone - never in the remote Firstmate home,
+# which is a different repository entirely.
+BOUNDED_ALPHA=$(cd "$REMOTE_HOME/projects/alpha" && pwd -P)
+BOUNDED_HOME_REAL=$(cd "$REMOTE_HOME" && pwd -P)
+while IFS=$'\t' read -r BOUNDED_QUERY_DIR _; do
+  [ -n "$BOUNDED_QUERY_DIR" ] || continue
+  BOUNDED_QUERY_DIR=$(cd "$BOUNDED_QUERY_DIR" && pwd -P)
+  [ "$BOUNDED_QUERY_DIR" != "$BOUNDED_HOME_REAL" ] \
+    || fail "remote child state was collected from the Firstmate home instead of a project clone"
+  [ "$BOUNDED_QUERY_DIR" = "$BOUNDED_ALPHA" ] \
+    || fail "remote child state was collected outside the child's repository: $BOUNDED_QUERY_DIR"
+done < "$TMP_ROOT/remote-summary-nm.log"
 rm -f "$REMOTE_ROOT/bin/no-mistakes" \
   "$REMOTE_HOME/state/bounded-summary.meta" "$REMOTE_HOME/state/bounded-summary.status" \
   "$REMOTE_HOME/state/bounded-summary.busy-state" "$REMOTE_HOME/state/bounded-summary.busy-gen"
 mv "$TMP_ROOT/remote-backlog.before-bounded-summary" "$REMOTE_HOME/data/backlog.md"
 git -C "$REMOTE_HOME/projects/alpha" checkout -q main
 git -C "$REMOTE_HOME/projects/alpha" branch -D fm/bounded-summary >/dev/null 2>&1 || true
-pass "remote fleet snapshot bounds one shared child run inventory below its outer deadline"
+pass "remote fleet snapshot bounds its whole child-state wave below its outer deadline"
 
 # The remote code root updates independently, then the persistent home imports
 # and fast-forwards to that host-local commit without touching project clones.

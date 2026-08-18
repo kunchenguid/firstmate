@@ -28,12 +28,14 @@ make_fakebin() {  # <dir>
   fb=$(fm_fakebin "$1")
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-# The real CLI lists runs for the repository of its CWD, so the cwd is recorded
+# The real CLI answers for the repository of its CWD, so the cwd is recorded
 # beside the argv: a test can assert WHICH repository was actually queried.
 [ -z "${FAKE_NM_LOG:-}" ] || printf '%s\t%s\n' "$PWD" "$*" >> "$FAKE_NM_LOG"
 [ "${FAKE_NM_SLEEP:-0}" = 1 ] && sleep 30
-if [ "${1:-}" = runs ] && [ -n "${FAKE_NM_RUNS:-}" ] && [ -f "$FAKE_NM_RUNS" ]; then
-  cat "$FAKE_NM_RUNS"
+if [ "${1:-}" = runs ]; then
+  [ -z "${FAKE_NM_RUNS:-}" ] || { [ ! -f "$FAKE_NM_RUNS" ] || cat "$FAKE_NM_RUNS"; }
+elif [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
+  [ -z "${FAKE_NM_STATUS:-}" ] || { [ ! -f "$FAKE_NM_STATUS" ] || cat "$FAKE_NM_STATUS"; }
 fi
 exit 0
 SH
@@ -559,16 +561,133 @@ EOF
       and [.active_children[].id] == ["active"]
   ' >/dev/null || fail "bounded coarse inventory did not preserve the structured home: $canonical"
   calls=$(wc -l < "$home/nm.log" | tr -d ' ')
-  [ "$calls" -eq 1 ] || fail "home summary issued $calls no-mistakes queries instead of one bounded inventory"
+  [ "$calls" -eq 2 ] \
+    || fail "home summary issued $calls no-mistakes queries instead of one status plus one inventory: $(cat "$home/nm.log")"
   assert_grep 'runs --limit 200' "$home/nm.log" \
     "home summary did not use the public coarse run inventory"
-  # `no-mistakes runs` answers for the repository of its CWD, and a ship child
+  assert_grep 'axi status' "$home/nm.log" \
+    "home summary did not collect authoritative per-child run status"
+  # Both queries answer for the repository of their CWD, and a ship child
   # validates its project clone, never the Firstmate home. Querying the home
-  # would list some unrelated repository's runs (or nothing at all).
-  repo_root=$(git -C "$wt" rev-parse --show-toplevel)
-  grep -q "^$repo_root"$'\t'"runs --limit 200$" "$home/nm.log" \
-    || fail "shared inventory was not captured in the child's own repository: $(cat "$home/nm.log")"
-  pass "home summary reuses one bounded run inventory and stays within its outer deadline"
+  # would answer about some unrelated repository (or nothing at all).
+  repo_root=$(cd "$wt" && pwd -P)
+  nm_log_queried_repo "$home/nm.log" "$repo_root" \
+    || fail "child state was not collected in the child's own repository: $(cat "$home/nm.log")"
+  ! nm_log_queried_repo "$home/nm.log" "$(cd "$mate" && pwd -P)" \
+    || fail "child state was collected from the Firstmate home instead of a project clone"
+  pass "home summary collects one bounded child-state wave and stays within its outer deadline"
+}
+
+# The reported failure: a home with several ship children paid one full
+# no-mistakes query PER CHILD, so a stalled CLI multiplied the per-child bound by
+# the child count and blew past the home deadline as a false "structured home
+# snapshot timed out". The collection is now one concurrent wave under a single
+# per-query bound, so wall-clock cost must not grow with child count.
+test_multi_child_home_summary_stays_bounded() {
+  local home mate fakebin canonical started elapsed i wt ids
+  home=$(make_home manychild-home-state)
+  mate="$TMP_ROOT/manychild-home-state-mate"
+  make_valid_secondmate_home manychild-state "$mate"
+  append_secondmate_registry "$home" manychild-state "$mate"
+  fm_write_secondmate_meta "$home/state/manychild-state.meta" "$mate" \
+    "firstmate:fm-manychild-state" sample
+  {
+    printf '## In flight\n'
+    for i in 1 2 3 4 5 6; do
+      printf -- '- [ ] child%s - Child %s (repo: sample) (kind: ship) (since 2026-08-17)\n' "$i" "$i"
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$mate/data/backlog.md"
+  # Every ship task runs in its OWN isolated git worktree (fm-spawn.sh refuses
+  # anything else), which is exactly the shape a per-worktree cache cannot share.
+  for i in 1 2 3 4 5 6; do
+    wt="$mate/projects/child$i"
+    fm_git_init_commit "$wt"
+    git -C "$wt" checkout -q -b "fm/child$i"
+    fm_write_meta "$mate/state/child$i.meta" \
+      "window=firstmate:fm-child$i" "worktree=$wt" "project=sample" \
+      "harness=claude" "kind=ship" "mode=no-mistakes"
+    record_claude_state "$mate/state" "child$i" busy
+    printf 'working: child %s\n' "$i" > "$mate/state/child$i.status"
+  done
+  fakebin=$(make_fakebin "$home")
+  started=$(date +%s)
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FM_SNAPSHOT_SECONDMATE_TIMEOUT=15 \
+    FM_SNAPSHOT_SECONDMATE_STATE_TIMEOUT=2 \
+    FAKE_NM_SLEEP=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  elapsed=$(( $(date +%s) - started ))
+  # Sequential per-child reads would cost at least 6 x the per-query bound here;
+  # one concurrent wave costs about one bound plus fixed snapshot work.
+  [ "$elapsed" -lt 12 ] \
+    || fail "multi-child home summary cost grew with child count (${elapsed}s for 6 children)"
+  ids=$(printf '%s' "$canonical" | jq -c '
+    .secondmate_current.records[] | select(.id == "manychild-state")
+    | [.active_children[].id] | sort')
+  [ "$ids" = '["child1","child2","child3","child4","child5","child6"]' ] \
+    || fail "stalled child-state wave did not degrade to pane evidence for every child: $canonical"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "manychild-state")
+    | .provenance.selected == "structured-home" and .current.reason == null
+  ' >/dev/null || fail "multi-child home summary lost its structured state: $canonical"
+  pass "multi-child home summary collects child state in one bounded wave"
+}
+
+# A run parked at a captain gate is plain `running` in the coarse inventory, and
+# a crew that wedges or dies at the gate never appends its needs-decision line.
+# The authoritative axi status collection must still surface the gate, so the
+# home reports the child as held rather than as ordinary active work.
+test_gate_parked_child_without_logged_decision_is_held() {
+  local home mate wt fakebin canonical sha
+  home=$(make_home silentgate-home-state)
+  mate="$TMP_ROOT/silentgate-home-state-mate"
+  make_valid_secondmate_home silentgate-state "$mate"
+  append_secondmate_registry "$home" silentgate-state "$mate"
+  fm_write_secondmate_meta "$home/state/silentgate-state.meta" "$mate" \
+    "firstmate:fm-silentgate-state" sample
+  wt="$mate/projects/silent"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b fm/silent
+  sha=$(git -C "$wt" rev-parse HEAD)
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] silent - Silent gate child (repo: sample) (kind: ship) (since 2026-08-17)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/silent.meta" \
+    "window=firstmate:fm-silent" "worktree=$wt" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" silent busy
+  # The crew never appended a needs-decision line: only the run itself knows.
+  printf 'working: validating the change\n' > "$mate/state/silent.status"
+  cat > "$TMP_ROOT/silent-status.txt" <<EOF
+branch: fm/silent
+head: $sha
+status: awaiting_approval
+gate: review
+findings[2]{id,severity}:
+EOF
+  printf 'running fm/silent %s 2026-08-17\n' "$(git -C "$wt" rev-parse --short HEAD)" \
+    > "$TMP_ROOT/silent-runs.txt"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-08-17T12:00:00Z \
+    FAKE_NM_STATUS="$TMP_ROOT/silent-status.txt" \
+    FAKE_NM_RUNS="$TMP_ROOT/silent-runs.txt" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "silentgate-state")
+    | .provenance.selected == "structured-home"
+      and .current.state == "externally_held"
+      and ([.holds[].id] | index("silent") != null)
+      and ([.active_children[].id] | index("silent") == null)
+  ' >/dev/null || fail "gate-parked child without a logged decision was reported as active work: $canonical"
+  pass "gate-parked child with no logged decision surfaces as held, not active work"
 }
 
 # The coarse runs list reports a run parked at a captain gate as plain `running`,
@@ -2084,6 +2203,8 @@ test_bad_secondmate_homes_never_revive_parent_work
 test_home_summary_reuses_one_bounded_run_inventory
 test_home_summary_keeps_gate_parked_child_decision
 test_home_summary_never_shares_inventory_across_repositories
+test_multi_child_home_summary_stays_bounded
+test_gate_parked_child_without_logged_decision_is_held
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed
 test_parent_decision_is_untrusted_contradiction_only
