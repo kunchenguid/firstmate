@@ -73,13 +73,14 @@ Exit 0 means an identity is available to the current process; exit 1 means none.
 Decrypted output has no generally safe field allowlist and must never be relayed to chat, logs, or saved diagnostics.
 For verification, discard decrypted stdout and use only the command exit status.
 
-`with-age-key` runs a child command with age identity available only inside that child.
+`with-age-key` runs a supported direct SOPS command with age identity available only inside that child.
 Modes:
 
-- `bws <PROJECT_ID> -- <command...>` runs `bws run --project-id <PROJECT_ID> -- <command...>` so the age key stays in the trusted child environment.
-- `file <KEY_FILE> -- <command...>` sets `SOPS_AGE_KEY_FILE` for the child only when the operator provides a readable key file outside chat.
+- `bws <PROJECT_ID> -- <sops-command...>` runs `bws run --project-id <PROJECT_ID> -- <sops-command...>` so the age key stays in the trusted child environment.
+- `file <KEY_FILE> -- <sops-command...>` sets `SOPS_AGE_KEY_FILE` for the child only when the operator provides a readable key file outside chat.
 
-The wrapper refuses commands whose arguments contain `AGE-SECRET-KEY-...`, suppresses stdout from direct `sops -d`, `sops --decrypt`, and `sops decrypt` commands, and unsets `SOPS_AGE_KEY` and `SOPS_AGE_KEY_FILE` after the child exits.
+The wrapper accepts only direct SOPS decrypt, encrypt, edit, updatekeys, and rotate operations, refuses commands whose arguments contain `AGE-SECRET-KEY-...`, suppresses decrypt stdout, and unsets `SOPS_AGE_KEY` and `SOPS_AGE_KEY_FILE` after the child exits.
+It rejects intermediary executables such as `env` and shells because their eventual output cannot be classified safely.
 
 ## Environment separation
 

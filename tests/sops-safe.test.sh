@@ -36,6 +36,9 @@ case "${1:-}" in
     printf 'sops: failed to decrypt\n' >&2
     exit 1
     ;;
+  edit)
+    exit 0
+    ;;
 esac
 printf 'unhandled sops fake: %s\n' "$*" >&2
 exit 1
@@ -213,6 +216,24 @@ test_with_age_key_bws_mode() {
   pass 'with-age-key bws mode delegates to bws run'
 }
 
+test_with_age_key_refuses_indirect_commands() {
+  local key_file case_dir fakebin rc=0 out
+  key_file="$TMP_ROOT/refuse-indirect.txt"
+  printf 'AGE-SECRET-KEY-TESTKEYTESTKEYTESTKEYTESTKEYTESTKEYTEST\n' > "$key_file"
+  chmod 600 "$key_file"
+  case_dir="$TMP_ROOT/refuse-indirect"
+  fakebin=$(make_fake_sops_age "$case_dir" ready ready)
+  set +e
+  out=$(env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE PATH="$fakebin:/usr/bin:/bin" \
+    "$HELPER" with-age-key file "$key_file" -- env sops --decrypt secret.enc.yaml 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "indirect decrypt should exit 2, got $rc"
+  assert_not_contains "$out" 'super-secret-value' 'refused indirect decrypt must not print plaintext'
+  assert_contains "$out" 'accepts direct sops' 'indirect decrypt should explain the direct-command boundary'
+  pass 'with-age-key refuses indirect decrypt commands'
+}
+
 test_with_age_key_unsets_identity_after() {
   local key_file rc=0
   key_file="$TMP_ROOT/unset-after.txt"
@@ -221,7 +242,7 @@ test_with_age_key_unsets_identity_after() {
   case_dir="$TMP_ROOT/unset-after"
   make_fake_sops_age "$case_dir" ready ready >/dev/null
   env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE PATH="$case_dir/fakebin:/usr/bin:/bin" \
-    "$HELPER" with-age-key file "$key_file" -- true
+    "$HELPER" with-age-key file "$key_file" -- sops edit secret.enc.yaml
   set +e
   env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE "$HELPER" detect-age-identity >/dev/null
   rc=$?
@@ -239,4 +260,5 @@ test_detect_age_identity_file
 test_with_age_key_refuses_key_in_args
 test_with_age_key_file_mode
 test_with_age_key_bws_mode
+test_with_age_key_refuses_indirect_commands
 test_with_age_key_unsets_identity_after

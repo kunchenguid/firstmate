@@ -8,8 +8,8 @@
 # Usage:
 #   sops-safe.sh probe
 #   sops-safe.sh detect-age-identity
-#   sops-safe.sh with-age-key bws <PROJECT_ID> -- <command...>
-#   sops-safe.sh with-age-key file <KEY_FILE> -- <command...>
+#   sops-safe.sh with-age-key bws <PROJECT_ID> -- <sops-command...>
+#   sops-safe.sh with-age-key file <KEY_FILE> -- <sops-command...>
 #
 # probe prints one sanitized key=value line per fact on stdout:
 #   status= ready | sops_absent | age_absent | unavailable
@@ -18,8 +18,8 @@
 #
 # detect-age-identity never prints key material; exit 0 when present, 1 when absent.
 #
-# with-age-key runs the child with SOPS age identity available only inside the
-# child process, suppresses direct SOPS decrypt stdout, then unsets
+# with-age-key runs a supported direct SOPS operation with age identity
+# available only inside the child process, suppresses decrypt stdout, then unsets
 # SOPS_AGE_KEY and SOPS_AGE_KEY_FILE before exit.
 set -u
 
@@ -34,8 +34,8 @@ sops-safe.sh - safe helper for Mozilla SOPS and age
 Usage:
   sops-safe.sh probe
   sops-safe.sh detect-age-identity
-  sops-safe.sh with-age-key bws <PROJECT_ID> -- <command...>
-  sops-safe.sh with-age-key file <KEY_FILE> -- <command...>
+  sops-safe.sh with-age-key bws <PROJECT_ID> -- <sops-command...>
+  sops-safe.sh with-age-key file <KEY_FILE> -- <sops-command...>
 
 Never prints age private keys or decrypted secret values.
 EOF
@@ -129,13 +129,30 @@ assert_no_key_in_args() {
   done
 }
 
-is_sops_decrypt() {
+classify_sops_command() {
   local executable=${1:-} arg
   shift || true
   [ "${executable##*/}" = sops ] || return 1
   for arg in "$@"; do
     case "$arg" in
       -d|--decrypt|decrypt)
+        printf 'decrypt\n'
+        return 0
+        ;;
+      -e|--encrypt|encrypt)
+        printf 'encrypt\n'
+        return 0
+        ;;
+      edit)
+        printf 'edit\n'
+        return 0
+        ;;
+      updatekeys)
+        printf 'updatekeys\n'
+        return 0
+        ;;
+      -r|--rotate|rotate)
+        printf 'rotate\n'
         return 0
         ;;
       --)
@@ -147,7 +164,7 @@ is_sops_decrypt() {
 }
 
 cmd_with_age_key() {
-  local mode=${1:-}
+  local mode=${1:-} operation
   shift || true
   case "$mode" in
     bws)
@@ -158,9 +175,10 @@ cmd_with_age_key() {
       shift
       [ $# -gt 0 ] || die_usage "with-age-key bws requires a command after --"
       assert_no_key_in_args "$project_id" "$@"
+      operation=$(classify_sops_command "$@") || die_usage "with-age-key accepts direct sops decrypt, encrypt, edit, updatekeys, or rotate commands only"
       command -v bws >/dev/null 2>&1 || die_usage "bws is required for with-age-key bws"
       unset_age_identity
-      if is_sops_decrypt "$@"; then
+      if [ "$operation" = decrypt ]; then
         bws run --project-id "$project_id" -- "$@" >/dev/null
       else
         bws run --project-id "$project_id" -- "$@"
@@ -177,9 +195,10 @@ cmd_with_age_key() {
       shift
       [ $# -gt 0 ] || die_usage "with-age-key file requires a command after --"
       assert_no_key_in_args "$key_file" "$@"
+      operation=$(classify_sops_command "$@") || die_usage "with-age-key accepts direct sops decrypt, encrypt, edit, updatekeys, or rotate commands only"
       [ -r "$key_file" ] || die_usage "KEY_FILE is not readable"
       unset_age_identity
-      if is_sops_decrypt "$@"; then
+      if [ "$operation" = decrypt ]; then
         SOPS_AGE_KEY_FILE=$key_file "$@" >/dev/null
       else
         SOPS_AGE_KEY_FILE=$key_file "$@"
