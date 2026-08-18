@@ -1218,6 +1218,7 @@ test_guard_first_delayed_boundary_preserves_new_rewake_proof() {
   write_integrated_actionable_arm "$dir"
   marker="$dir/state/.claude-rewake-turn"
   printf 'epoch=2 session_pid=999\n' > "$marker"
+  # shellcheck disable=SC2016 # Expand these expressions in the fake Claude child shell.
   FM_HOME="$dir" "$dir/fake-claude" -c '
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
     printf "%s\n" "{\"stop_hook_active\":false,\"session_id\":\"sess-claude-mode\"}" \
