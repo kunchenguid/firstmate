@@ -51,11 +51,21 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
+  capture-pane)
+    if [ -f "${FM_FAKE_PIN_PENDING_FILE:-}" ]; then
+      cat "${FM_FAKE_PIN_PENDING_FILE}"
+      touch "${FM_FAKE_PANE_PINNED_FILE:?FM_FAKE_PANE_PINNED_FILE unset}"
+      rm -f "${FM_FAKE_PIN_PENDING_FILE}"
+    fi
+    exit 0
+    ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     case "$*" in
-      *"cd -- "*) touch "${FM_FAKE_PANE_PINNED_FILE:?FM_FAKE_PANE_PINNED_FILE unset}" ;;
+      *"cd -- "*)
+        printf '%s\n' "$*" | sed -n "s/.*'\(fm-pin-[^']*\)'.*/\1/p" > "${FM_FAKE_PIN_PENDING_FILE:?FM_FAKE_PIN_PENDING_FILE unset}"
+        ;;
       *" -l "*) [ -f "${FM_FAKE_PANE_PINNED_FILE:-}" ] && launch_cwd=${FM_FAKE_PANE_PATH:-} || launch_cwd=${FM_FAKE_PRIMARY_PATH:-}; printf '%s\n' "$launch_cwd" > "${FM_FAKE_LAUNCH_CWD_FILE:?FM_FAKE_LAUNCH_CWD_FILE unset}" ;;
     esac
     exit 0
@@ -74,7 +84,7 @@ SH
 # entirely, distinct from both the project and the worktree - mirroring the
 # live incident where the stale read was another real firstmate home).
 make_settle_case() {
-  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile pinned launchcwd
+  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile pinned pinpending launchcwd
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$home/projects/project"
@@ -82,6 +92,7 @@ make_settle_case() {
   stale="$case_dir/stale-other-checkout"
   countfile="$case_dir/pane-call-count"
   pinned="$case_dir/pane-pinned"
+  pinpending="$case_dir/pin-pending"
   launchcwd="$case_dir/launch-cwd"
   fakebin=$(make_settle_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
@@ -91,11 +102,11 @@ make_settle_case() {
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
-  printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin|$countfile|$stale_reads|$pinned|$launchcwd"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin|$countfile|$stale_reads|$pinned|$pinpending|$launchcwd"
 }
 
 read_settle_record() {
-  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS PINNED_FILE LAUNCH_CWD_FILE <<EOF
+  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS PINNED_FILE PIN_PENDING_FILE LAUNCH_CWD_FILE <<EOF
 $1
 EOF
 }
@@ -108,6 +119,7 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PRIMARY_PATH="$PROJ_DIR" FM_FAKE_PANE_PINNED_FILE="$PINNED_FILE" \
+    FM_FAKE_PIN_PENDING_FILE="$PIN_PENDING_FILE" \
     FM_FAKE_LAUNCH_CWD_FILE="$LAUNCH_CWD_FILE" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" \

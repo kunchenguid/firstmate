@@ -2266,14 +2266,23 @@ fi
 
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   TASK_WORKTREE=$WT
-  spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$TASK_WORKTREE")"
+  pin_ack="fm-pin-$ID-${BASHPID:-$$}-$RANDOM"
+  spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$TASK_WORKTREE") && printf '%s\n' $(shell_quote "$pin_ack")"
   pinned=
+  pin_seen=0
   for _ in $(seq 1 10); do
+    if fm_backend_capture "$BACKEND" "$T" 20 "$W" 2>/dev/null | grep -Fxq "$pin_ack"; then
+      pin_seen=1
+    fi
     pinned=$(spawn_current_path "$WT_TARGET" || true)
-    [ -z "$pinned" ] || [ "$(real_path_or_raw "$pinned")" != "$(real_path_or_raw "$TASK_WORKTREE")" ] || break
+    if [ "$pin_seen" -eq 1 ] && [ -n "$pinned" ] \
+      && [ "$(real_path_or_raw "$pinned")" = "$(real_path_or_raw "$TASK_WORKTREE")" ]; then
+      break
+    fi
     sleep 0.5
   done
-  if [ -z "$pinned" ] || [ "$(real_path_or_raw "$pinned")" != "$(real_path_or_raw "$TASK_WORKTREE")" ]; then
+  if [ "$pin_seen" -ne 1 ] || [ -z "$pinned" ] \
+    || [ "$(real_path_or_raw "$pinned")" != "$(real_path_or_raw "$TASK_WORKTREE")" ]; then
     echo "error: task $ID's endpoint did not stay in acquired worktree '$TASK_WORKTREE' (resolved '${pinned:-unknown}'); refusing to publish metadata or launch in the primary checkout" >&2
     exit 1
   fi
