@@ -480,6 +480,11 @@ pause_state_class() {  # <window> <task>
   # pause cadence.
   if [ "$agent_alive" = alive ]; then
     printf 'trusted' > "$recheck_file"
+  elif [ "$agent_alive" = unknown ]; then
+    case "$recheck_state" in
+      surfaced|trusted) printf '%s' "$recheck_state" > "$recheck_file" ;;
+      *) printf 'unknown' > "$recheck_file" ;;
+    esac
   fi
   printf 'paused'
 }

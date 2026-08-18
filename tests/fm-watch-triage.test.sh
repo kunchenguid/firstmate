@@ -901,6 +901,76 @@ test_declared_pause_liveness_decides_trust() {
   pass "a declared pause is absorbed for a live or unmeasurable agent and surfaced only for a confidently dead one"
 }
 
+test_unknown_declared_pause_caches_authoritative_rechecks() {
+  local dir state fakebin out capture_file statusf count_file window key pane pane_hash pid reads
+  dir=$(make_case unknown-declared-pause-cache); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  count_file="$dir/crew-state-count"; window="test:fm-held"
+  pane='idle, holding for the upstream tool release'
+  printf '%s\n' "$pane" > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '0\n' > "$count_file"
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+count=$(cat "$FM_FAKE_CREW_STATE_COUNT_FILE")
+printf '%s\n' $((count + 1)) > "$FM_FAKE_CREW_STATE_COUNT_FILE"
+printf '%s\n' "$FM_FAKE_CREW_STATE"
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND='' \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release' \
+    FM_FAKE_CREW_STATE_COUNT_FILE="$count_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 100; then
+    reap "$pid"
+    fail "unknown-liveness declared pause surfaced instead of absorbing: $(cat "$out")"
+  fi
+  reap "$pid"
+  reads=$(cat "$count_file")
+  [ "$reads" -eq 1 ] \
+    || fail "unknown-liveness declared pause ran $reads authoritative reads across ten seconds (want one)"
+  [ -e "$state/.paused-$key" ] || fail "unknown-liveness declared pause lost its pause marker"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] \
+    || fail "unknown-liveness declared pause lost its stale hash"
+  [ "$(queued_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "unknown-liveness declared pause queued a stale wake"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the unknown-liveness absorb"
+
+  set_mtime $(( $(date +%s) - 500 )) "$state/.paused-rechecked-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND='' \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release' \
+    FM_FAKE_CREW_STATE_COUNT_FILE="$count_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "expired unknown-liveness cache surfaced instead of absorbing: $(cat "$out")"
+  fi
+  reap "$pid"
+  reads=$(cat "$count_file")
+  [ "$reads" -eq 2 ] \
+    || fail "expired unknown-liveness cache reached $reads authoritative reads (want exactly two total)"
+  [ "$(queued_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "expired unknown-liveness cache queued a stale wake"
+  pass "unknown liveness caches authoritative pause reads until the bounded recheck expires"
+}
+
 test_live_declared_pause_surfaces_once_after_agent_dies() {
   local dir state fakebin out capture_file statusf window key pane pane_hash pid round wakes
   local command label total_wakes surface_recheck_mtime
@@ -2321,6 +2391,7 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_declared_pause_liveness_decides_trust
+test_unknown_declared_pause_caches_authoritative_rechecks
 test_live_declared_pause_surfaces_once_after_agent_dies
 test_exited_declared_pause_surfaces_once_while_live_pane_holds
 test_secondmate_paused_resurfaces_in_normal_mode
