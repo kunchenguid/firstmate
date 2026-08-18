@@ -17,6 +17,23 @@ make_fake_sops_age() {
   cat > "$fakebin/sops" <<'SH'
 #!/usr/bin/env bash
 MODE="${FM_FAKE_SOPS_MODE:-ready}"
+DECRYPT_REQUESTED=0
+for ARG in "$@"; do
+  case "$ARG" in
+    -d|--decrypt|decrypt) DECRYPT_REQUESTED=1 ;;
+  esac
+done
+if [ "$DECRYPT_REQUESTED" -eq 1 ]; then
+  if [ -n "${SOPS_AGE_KEY:-}${SOPS_AGE_KEY_FILE:-}" ] || [ -n "${FM_FAKE_BWS_INJECTED:-}" ]; then
+    if [ -n "${FM_FAKE_DECRYPT_MARKER:-}" ]; then
+      : > "$FM_FAKE_DECRYPT_MARKER"
+    fi
+    printf 'password: super-secret-value\n'
+    exit 0
+  fi
+  printf 'sops: failed to decrypt\n' >&2
+  exit 1
+fi
 case "${1:-}" in
   --version)
     case "$MODE" in
@@ -24,17 +41,6 @@ case "${1:-}" in
       broken) exit 1 ;;
       *) printf 'sops 3.9.0\n'; exit 0 ;;
     esac
-    ;;
-  -d|--decrypt|decrypt)
-    if [ -n "${SOPS_AGE_KEY:-}${SOPS_AGE_KEY_FILE:-}" ] || [ -n "${FM_FAKE_BWS_INJECTED:-}" ]; then
-      if [ -n "${FM_FAKE_DECRYPT_MARKER:-}" ]; then
-        : > "$FM_FAKE_DECRYPT_MARKER"
-      fi
-      printf 'password: super-secret-value\n'
-      exit 0
-    fi
-    printf 'sops: failed to decrypt\n' >&2
-    exit 1
     ;;
   edit)
     exit 0
@@ -234,6 +240,23 @@ test_with_age_key_refuses_indirect_commands() {
   pass 'with-age-key refuses indirect decrypt commands'
 }
 
+test_with_age_key_refuses_conflicting_operations() {
+  local key_file case_dir fakebin rc=0 out
+  key_file="$TMP_ROOT/refuse-conflicting.txt"
+  printf 'AGE-SECRET-KEY-TESTKEYTESTKEYTESTKEYTESTKEYTESTKEYTEST\n' > "$key_file"
+  chmod 600 "$key_file"
+  case_dir="$TMP_ROOT/refuse-conflicting"
+  fakebin=$(make_fake_sops_age "$case_dir" ready ready)
+  set +e
+  out=$(env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE PATH="$fakebin:/usr/bin:/bin" \
+    "$HELPER" with-age-key file "$key_file" -- sops encrypt --decrypt 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "conflicting operations should exit 2, got $rc"
+  assert_not_contains "$out" 'super-secret-value' 'refused conflicting operations must not print plaintext'
+  pass 'with-age-key refuses conflicting operation tokens'
+}
+
 test_with_age_key_unsets_identity_after() {
   local key_file rc=0
   key_file="$TMP_ROOT/unset-after.txt"
@@ -261,4 +284,5 @@ test_with_age_key_refuses_key_in_args
 test_with_age_key_file_mode
 test_with_age_key_bws_mode
 test_with_age_key_refuses_indirect_commands
+test_with_age_key_refuses_conflicting_operations
 test_with_age_key_unsets_identity_after

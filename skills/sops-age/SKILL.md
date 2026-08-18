@@ -80,6 +80,7 @@ Modes:
 - `file <KEY_FILE> -- <sops-command...>` sets `SOPS_AGE_KEY_FILE` for the child only when the operator provides a readable key file outside chat.
 
 The wrapper accepts only direct SOPS decrypt, encrypt, edit, updatekeys, and rotate operations, refuses commands whose arguments contain `AGE-SECRET-KEY-...`, suppresses decrypt stdout, and unsets `SOPS_AGE_KEY` and `SOPS_AGE_KEY_FILE` after the child exits.
+The operation token must immediately follow the `sops` executable, and any second operation token makes the command invalid.
 It rejects intermediary executables such as `env` and shells because their eventual output cannot be classified safely.
 
 ## Environment separation

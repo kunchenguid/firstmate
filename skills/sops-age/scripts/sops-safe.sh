@@ -130,37 +130,39 @@ assert_no_key_in_args() {
 }
 
 classify_sops_command() {
-  local executable=${1:-} arg
+  local executable=${1:-} operation_token operation arg
   shift || true
   [ "${executable##*/}" = sops ] || return 1
+  operation_token=${1:-}
+  shift || true
+  case "$operation_token" in
+    -d|--decrypt|decrypt)
+      operation=decrypt
+      ;;
+    -e|--encrypt|encrypt)
+      operation=encrypt
+      ;;
+    edit)
+      operation=edit
+      ;;
+    updatekeys)
+      operation=updatekeys
+      ;;
+    -r|--rotate|rotate)
+      operation=rotate
+      ;;
+    *)
+      return 1
+      ;;
+  esac
   for arg in "$@"; do
     case "$arg" in
-      -d|--decrypt|decrypt)
-        printf 'decrypt\n'
-        return 0
-        ;;
-      -e|--encrypt|encrypt)
-        printf 'encrypt\n'
-        return 0
-        ;;
-      edit)
-        printf 'edit\n'
-        return 0
-        ;;
-      updatekeys)
-        printf 'updatekeys\n'
-        return 0
-        ;;
-      -r|--rotate|rotate)
-        printf 'rotate\n'
-        return 0
-        ;;
-      --)
+      -d|--decrypt|decrypt|-e|--encrypt|encrypt|edit|updatekeys|-r|--rotate|rotate)
         return 1
         ;;
     esac
   done
-  return 1
+  printf '%s\n' "$operation"
 }
 
 cmd_with_age_key() {
