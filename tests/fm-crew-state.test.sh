@@ -879,6 +879,106 @@ test_no_run_grok_uses_isolated_fallback() {
   pass "grok still reads working through its isolated rendered-tail fallback"
 }
 
+# Regression for the 2026-08-18 sm-snacksuite incident: two freshly spawned
+# Claude crewmates on a quota-exhausted account read "working" for minutes
+# because claude-hook had opened a turn on UserPromptSubmit and no
+# Stop/StopFailure fired while the pane sat on Claude Code's own account-limit
+# banner. A Claude worker parked on that banner is an external wait, not a
+# working turn, so fm_busy_claude_limit_banner (bin/fm-busy-lib.sh) overrides
+# the busy verdict to paused once its pane tail shows the banner.
+test_no_run_claude_session_limit_banner_paused() {
+  reset_fakes
+  local d; d=$(new_case claude-session-limit)
+  make_repo_on_branch "$d/wt" fm/feat-limit5h
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-limit5h.meta" "window=fm:fm-feat-limit5h" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limit5h)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limit5h busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-limit5h)
+  assert_contains "$out" "state: paused" "the 5h session-limit banner overrides busy to paused"
+  assert_contains "$out" "source: pane" "the override stays pane-sourced"
+  assert_contains "$out" "session limit" "the detail names the limit that was hit"
+  assert_contains "$out" "resets 2:30pm" "the detail carries the banner's reset hint"
+  pass "a Claude worker parked on the 5h session-limit banner reads paused, not working"
+}
+
+# Same override for the 7-day weekly-limit banner (wLt.seven_day="weekly
+# limit" in the claude-cli 2.1.234 bundle - see fm_busy_claude_limit_banner's
+# header for the verified wording and its source).
+test_no_run_claude_weekly_limit_banner_paused() {
+  reset_fakes
+  local d; d=$(new_case claude-weekly-limit)
+  make_repo_on_branch "$d/wt" fm/feat-limit7d
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-limit7d.meta" "window=fm:fm-feat-limit7d" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your weekly limit · resets Tue 2:30pm"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limit7d)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limit7d busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-limit7d)
+  assert_contains "$out" "state: paused" "the weekly-limit banner overrides busy to paused"
+  assert_contains "$out" "source: pane" "the override stays pane-sourced"
+  assert_contains "$out" "weekly limit" "the detail names the limit that was hit"
+  pass "a Claude worker parked on the weekly-limit banner reads paused, not working"
+}
+
+# An ordinary busy pane (no limit banner text) must keep reading working -
+# the override only fires on the verified banner wording, never on a plain
+# claude-hook busy verdict.
+test_no_run_claude_ordinary_busy_tail_stays_working() {
+  reset_fakes
+  local d; d=$(new_case claude-ordinary-busy)
+  make_repo_on_branch "$d/wt" fm/feat-ordinary
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ordinary.meta" "window=fm:fm-feat-ordinary" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT='esc to interrupt'
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-ordinary)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-ordinary busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-ordinary)
+  assert_contains "$out" "state: working" "an ordinary busy tail stays working"
+  assert_not_contains "$out" "state: paused" "no limit banner text means no override"
+  pass "a Claude worker with an ordinary busy pane still reads working"
+}
+
+# A non-Claude harness must never be classified by this banner text, even
+# when its pane happens to show similar wording: the override is scoped to
+# harness=claude only (fm_busy_claude_limit_banner is consulted only from
+# fm-crew-state.sh's claude* arm).
+test_no_run_non_claude_harness_ignores_limit_banner_text() {
+  reset_fakes
+  local d; d=$(new_case opencode-similar-text)
+  make_repo_on_branch "$d/wt" fm/feat-opencode
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-opencode.meta" "window=fm:fm-feat-opencode" "worktree=$d/wt" "kind=ship" "harness=opencode"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-opencode)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-opencode busy --gen "$gen" \
+    --source opencode-plugin --event session-status
+  local out; out=$(run_crew_state "$d" feat-opencode)
+  assert_contains "$out" "state: working" "a non-claude harness keeps the plain busy -> working mapping"
+  assert_not_contains "$out" "state: paused" "similar pane text never overrides a non-claude harness"
+  pass "a non-Claude harness ignores lookalike limit-banner text in its pane"
+}
+
 test_no_run_herdr_unknown_uses_backend_capture() {
   command -v jq >/dev/null 2>&1 || { pass "herdr pane fallback skipped without jq"; return; }
   reset_fakes
@@ -1700,6 +1800,10 @@ test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
+test_no_run_claude_session_limit_banner_paused
+test_no_run_claude_weekly_limit_banner_paused
+test_no_run_claude_ordinary_busy_tail_stays_working
+test_no_run_non_claude_harness_ignores_limit_banner_text
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle

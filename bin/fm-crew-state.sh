@@ -49,7 +49,12 @@
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. For harness=claude, a
+#      busy pane verdict is overridden to paused when the pane's own rendered
+#      tail shows Claude Code's account/usage-limit banner (see bin/fm-busy-
+#      lib.sh's fm_busy_claude_limit_banner for the verified wordings): the
+#      worker is stalled on an external wait, not a working turn, even though
+#      its UserPromptSubmit hook already opened a turn.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -705,7 +710,22 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
-    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    busy)
+      # A Claude worker parked on its own account/usage-limit banner is an
+      # external wait, not a working turn - report paused instead of the
+      # generic hook-derived busy, per fm_busy_claude_limit_banner's contract
+      # (bin/fm-busy-lib.sh). Scoped to harness=claude only; every other
+      # harness keeps the plain busy -> working mapping below.
+      case "$HARNESS" in
+        claude*)
+          LIMIT_TAIL=$(fm_backend_capture "$TASK_BACKEND" "$BACKEND_TARGET" 40 "$EXPECTED_LABEL" 2>/dev/null) || LIMIT_TAIL=''
+          if LIMIT_DETAIL=$(printf '%s' "$LIMIT_TAIL" | fm_busy_claude_limit_banner); then
+            emit paused pane "account limit: $LIMIT_DETAIL"
+          fi
+          ;;
+      esac
+      emit working pane "harness busy (${BUSY_VERDICT#* })"
+      ;;
     idle) ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac

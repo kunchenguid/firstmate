@@ -61,6 +61,17 @@
 # footers for submit acknowledgement and away-mode supervisor injection only;
 # neither is a recorded worker state source.
 #
+# fm_busy_claude_limit_banner is a SEPARATE, narrower rendered-text helper: it
+# does not classify busy/idle and fm_busy_classify never calls it, so
+# claude-hook's busy verdict is untouched here. It only recognizes Claude
+# Code's own account/usage-limit banner text so the crew-state resolution
+# layer (bin/fm-crew-state.sh) can apply a higher-priority override on top of
+# an already-busy claude-hook verdict: a worker parked on its own account
+# limit is an external wait (paused), not a working turn, even though the
+# UserPromptSubmit hook already opened a turn that no Stop/StopFailure will
+# close until the limit clears. See that function's own header for the
+# verified wordings and bin/fm-crew-state.sh for where the override applies.
+#
 # The muse pull source is semantic, not rendered: it folds muse's own durable
 # session event log. It has no writer, no arm, and no gen, because
 # muse's default build ships no hook or plugin surface that could push events
@@ -829,6 +840,48 @@ fm_busy_cursor_turn_state() {  # <transcript>
 fm_busy_grok_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
     | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
+}
+
+# fm_busy_claude_limit_banner: recognize Claude Code's own rendered
+# account/usage-limit banner in a captured pane tail (read on stdin). See the
+# header note above this helper's contract; it is consulted only by
+# bin/fm-crew-state.sh, as a higher-priority override on top of an already-
+# busy claude-hook verdict, never by fm_busy_classify itself.
+#
+# Verified against claude-cli 2.1.234 (2026-08-18) by extracting strings from
+# its installed compiled bundle (~/.local/share/claude/versions/2.1.234):
+# the 5-hour window is named "session limit" and the 7-day window "weekly
+# limit" (`wLt = {five_hour:"session limit", seven_day:"weekly limit", ...}`),
+# and a rejected turn renders "You've hit your <name> \xB7 resets <time>"
+# (functions Y4b/MYe - the \xB7 is a literal middot separator). The companion
+# auto-continue widget renders "Usage limit reached \xB7 continuing
+# automatically at <time> \xB7 esc to cancel" while armed, and "Your usage
+# limit has reset \xB7 press enter to continue" once stale and awaiting a
+# keypress (function meo). This is SOURCE verification (decompiled strings),
+# not a live-triggered pane capture - reaching the weekly banner live would
+# require actually exhausting a 7-day quota window, which was not done here.
+# A secondmate fleet note independently observed the rendered pane pairing
+# "session limit ... Press Enter" at the 5-hour reset marks
+# (data/learnings.md, 2026-08-17), corroborating the session-limit wording
+# above from a real stuck pane.
+#
+# Matching requires the limit's name ("session limit" or "weekly limit")
+# together with one of the verified wait/reset phrases anywhere in the same
+# tail, so a bare on-screen mention of one of those names with no
+# accompanying wait signal never misclassifies. Prints the matched name line
+# as the detail (it already carries the reset hint), or fails when neither
+# banner is present.
+fm_busy_claude_limit_banner() {
+  local tail_text name_line
+  # `read -d ''` reads all of stdin into one variable using only a bash
+  # builtin (no external `cat`), preserving embedded newlines; it always
+  # returns non-zero at EOF with no NUL delimiter, so that status is ignored.
+  IFS= read -r -d '' tail_text || true
+  name_line=$(printf '%s\n' "$tail_text" | LC_ALL=C grep -iE 'session limit|weekly limit' | tail -1) || return 1
+  [ -n "$name_line" ] || return 1
+  printf '%s\n' "$tail_text" | LC_ALL=C grep -qiE \
+    'resets|press enter|continuing automatically|usage limit has reset|esc to cancel' || return 1
+  printf '%s' "$name_line"
 }
 
 # fm_busy_classify: semantic classification for a task whose endpoint the
