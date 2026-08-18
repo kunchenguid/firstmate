@@ -27,6 +27,10 @@
 # Within the cohort proof the signals are AND-ed, not OR-ed, because the one
 # property that must survive is that a genuinely separate concurrent session is
 # still refused.
+#
+# The cohort proof is per-harness and currently reaches only Claude; every other
+# adapter is decided by ancestry alone. FM_SESSION_LAUNCH_MARKERS below owns that
+# scope limit, why it is safe, and what extending it requires.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
 # deliberately not added to the tables below: Cursor's installed names are
@@ -303,11 +307,28 @@ fm_session_tty_of_pid() {  # <pid>
 # loses: it is written at exec time, so it survives the child being reparented,
 # rehosted under a fresh pty, or orphaned to init.
 #
-# Only markers verified against the real harness belong here; an unverified
-# guess would be a name that is never present, which is indistinguishable from
-# having no entry. A harness with no verified marker keeps the ancestry-only
-# verdict, which is exactly today's behavior. docs/verification/runtime-backends.md
-# records the per-harness result and the guard that refreshes it.
+# SCOPE LIMIT, stated because it is easy to assume away: this table has exactly
+# ONE entry, so the cohort proof below can only ever fire for Claude. codex,
+# opencode, pi, pi-signed, grok, kimi, and cursor have no verified marker, so on
+# those harnesses fm_session_lock_owned_by_self is decided by ancestry alone and
+# a session the harness rehosted outside its own process tree still refuses its
+# own home and degrades that session start to read-only. That is the unfixed
+# half of the defect for those adapters, not a fixed one.
+#
+# Why leaving it that way is safe rather than merely incomplete: a missing marker
+# removes an ACCEPT path and never a refusal, so a marker-less harness lands
+# exactly on the behavior it had before this mechanism existed. The alternative
+# is worse in both directions. A guessed variable name that no harness sets is
+# indistinguishable from no entry, so it buys nothing while reading as coverage;
+# a guessed name a harness does set for some other purpose would be believed,
+# and a launch marker is one half of the proof that keeps a genuinely separate
+# concurrent session out of this home.
+#
+# Extending it is therefore a verification task, not an editing one: observe the
+# variable in a real child of a real session of that harness, add the row, and
+# refresh the per-harness record in docs/verification/runtime-backends.md, whose
+# opt-in guard reports the marker it actually observed for every installed
+# harness. Do not add a row from documentation or inference.
 FM_SESSION_LAUNCH_MARKERS='CLAUDE_PID'
 
 # Print the harness session pid recorded in pid $1's inherited environment, or

@@ -225,7 +225,11 @@ child inherits CLAUDE_PID=179487
 
 The marker names the session pid, every child inherits it, and it matches the pid the ancestry walk resolves.
 A later `export` does not rewrite `/proc/<pid>/environ`, so the value a process was started with survives its own reassignment, which is what carries the relationship across a reparented tree.
-Claude is the only adapter with a verified marker at this date; the others keep the ancestry-only verdict, which is the behavior they had before this record existed.
+Claude is the only adapter with a verified marker at this date.
+codex, opencode, pi, pi-signed, grok, kimi, and cursor have none, so on those harnesses session-lock ownership is decided by process ancestry alone and a session rehosted outside its own process tree still refuses its own home.
+That is the behavior they had before this record existed rather than a regression, because a missing marker removes an accept path and never a refusal.
+Adding a row is a verification task: observe the variable in a real child of a real session of that harness, then refresh this table.
+The guard above reports the marker it actually observed per harness, and reports `no descendant of a bare launch carried a launch marker` when a prompt-free launch started no child to read.
 
 Suspension is confirmed over several samples, and this run also recorded a kernel behavior worth keeping: on this WSL2 build `SIGSTOP` does not stop a pty **session leader** at all, while it stops an ordinary child normally.
 
