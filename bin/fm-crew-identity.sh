@@ -247,30 +247,14 @@ fm_crew_identity_meta_value() { # <meta> <key>
   awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$meta"
 }
 
-fm_crew_identity_check_active() { # <task-id> <roster> <identity> [<state-dir>]
+# fm_crew_identity_check_active_tasks: duplicate detection against the durable
+# state metadata of OTHER active tasks only. Relaunch uses this alone, because
+# the identity it re-asserts is the one already recorded for this task; a later
+# edit to the live config must never block an agent that is already sailing.
+fm_crew_identity_check_active_tasks() { # <task-id> <roster> <identity> [<state-dir>]
   local id=$1 roster=$2 identity=$3 state=${4:-$FM_CREW_IDENTITY_STATE_DIR}
-  local captain primary configured_owner config_roster meta other other_identity other_roster
+  local meta other other_identity other_roster
   [ "$identity" != unassigned ] || return 0
-  if fm_crew_identity_config_present; then
-    captain=$(fm_crew_identity_assignment captain) || return 1
-    primary=$(fm_crew_identity_assignment primary) || return 1
-    config_roster=$(fm_crew_identity_config_roster) || return 1
-    if [ "$captain" = "$identity" ] && [ "$config_roster" = "$roster" ]; then
-      echo "error: crew identity '$roster/$identity' is already assigned to the active captain" >&2
-      return 1
-    fi
-    if [ "$primary" = "$identity" ] && [ "$config_roster" = "$roster" ]; then
-      echo "error: crew identity '$roster/$identity' is already assigned to the active primary first mate" >&2
-      return 1
-    fi
-    configured_owner=$(jq -r --arg identity "$identity" --arg id "$id" '
-      [(.agents // {}) | to_entries[] | select(.value == $identity and .key != $id) | .key][0] // ""
-    ' "$FM_CREW_IDENTITY_CONFIG") || return 1
-    if [ -n "$configured_owner" ] && [ "$config_roster" = "$roster" ]; then
-      echo "error: crew identity '$roster/$identity' is reserved for configured task '$configured_owner'; refusing assignment to '$id'" >&2
-      return 1
-    fi
-  fi
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     other=$(basename "$meta" .meta)
@@ -293,6 +277,33 @@ fm_crew_identity_check_active() { # <task-id> <roster> <identity> [<state-dir>]
       return 1
     fi
   done
+}
+
+fm_crew_identity_check_active() { # <task-id> <roster> <identity> [<state-dir>]
+  local id=$1 roster=$2 identity=$3 state=${4:-$FM_CREW_IDENTITY_STATE_DIR}
+  local captain primary configured_owner config_roster
+  [ "$identity" != unassigned ] || return 0
+  if fm_crew_identity_config_present; then
+    captain=$(fm_crew_identity_assignment captain) || return 1
+    primary=$(fm_crew_identity_assignment primary) || return 1
+    config_roster=$(fm_crew_identity_config_roster) || return 1
+    if [ "$captain" = "$identity" ] && [ "$config_roster" = "$roster" ]; then
+      echo "error: crew identity '$roster/$identity' is already assigned to the active captain" >&2
+      return 1
+    fi
+    if [ "$primary" = "$identity" ] && [ "$config_roster" = "$roster" ]; then
+      echo "error: crew identity '$roster/$identity' is already assigned to the active primary first mate" >&2
+      return 1
+    fi
+    configured_owner=$(jq -r --arg identity "$identity" --arg id "$id" '
+      [(.agents // {}) | to_entries[] | select(.value == $identity and .key != $id) | .key][0] // ""
+    ' "$FM_CREW_IDENTITY_CONFIG") || return 1
+    if [ -n "$configured_owner" ] && [ "$config_roster" = "$roster" ]; then
+      echo "error: crew identity '$roster/$identity' is reserved for configured task '$configured_owner'; refusing assignment to '$id'" >&2
+      return 1
+    fi
+  fi
+  fm_crew_identity_check_active_tasks "$id" "$roster" "$identity" "$state"
 }
 
 fm_crew_identity_cli() {

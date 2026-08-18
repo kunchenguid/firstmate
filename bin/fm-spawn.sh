@@ -1059,7 +1059,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     [ "$CREW_IDENTITY" = unassigned ] \
       || fm_crew_identity_record_json "$CREW_ROSTER" "$CREW_IDENTITY" >/dev/null \
       || { echo "error: task $ID records an invalid crew identity '$CREW_ROSTER/$CREW_IDENTITY'" >&2; exit 1; }
-    fm_crew_identity_check_active "$ID" "$CREW_ROSTER" "$CREW_IDENTITY" "$STATE" || exit 1
+    fm_crew_identity_check_active_tasks "$ID" "$CREW_ROSTER" "$CREW_IDENTITY" "$STATE" || exit 1
   fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
@@ -1085,7 +1085,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
     if [ "$KIND" = secondmate ] && [ -n "$CREW_IDENTITY" ]; then
       FM_HOME="$FIRSTMATE_HOME" fm_backend_herdr_workspace_identity_rename_exact \
-        "$HERDR_SES" "$HERDR_WORKSPACE_ID" || {
+        "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$CREW_ROSTER" "$CREW_IDENTITY" || {
           echo "error: could not safely migrate secondmate $ID's exact Herdr Space title" >&2
           exit 1
         }

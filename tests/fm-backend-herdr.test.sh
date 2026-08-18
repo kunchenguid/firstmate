@@ -395,6 +395,61 @@ test_workspace_identity_rename_preserves_a_recorded_title_without_config() {
   pass "Herdr identity rename preserves an already recorded Space title when no identity config applies"
 }
 
+test_workspace_identity_rename_uses_recorded_metadata_over_live_config() {
+  local base home dir log resp fb out
+  base="$TMP_ROOT/identity-recorded-metadata"
+  home="$base/home"; dir="$base/herdr"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$home/config" "$home/data" "$resp"; : > "$log"
+  printf 'sd-1\n' > "$home/.fm-secondmate-home"
+  printf -- '- stream-deck-configuration - registered clone (added 2026-01-01)\n' > "$home/data/projects.md"
+  fb=$(make_herdr_fakebin "$dir")
+
+  # The captain reassigns sd-1 to another character after launch. The recorded
+  # roster/identity still owns the live Space, so nothing is retitled.
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"sd-1":"stephen-maturin"}}' \
+    > "$home/config/crew-identities.json"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sd","label":"Mr Bonden — stream-deck-configuration"}}}' > "$resp/1.out"
+  rm -f "$resp/.count"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"
+       fm_backend_herdr_workspace_identity_rename_exact s w-sd master-and-commander barrett-bonden' \
+      "$ROOT" 2>&1) \
+    || fail "a reassigned live config blocked a relaunch of an already-recorded identity: $out"
+  assert_not_contains "$(cat "$log")" "rename" "a live config edit retitled an active agent's Space"
+
+  # The captain removes the sd-1 assignment entirely: relaunch must still keep
+  # the recorded title rather than refusing as 'Unassigned crew'.
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{}}' \
+    > "$home/config/crew-identities.json"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sd","label":"Mr Bonden"}}}' > "$resp/1.out"
+  : > "$resp/2.out"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sd","label":"Mr Bonden — stream-deck-configuration"}}}' > "$resp/3.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"
+       fm_backend_herdr_workspace_identity_rename_exact s w-sd master-and-commander barrett-bonden' \
+      "$ROOT" 2>&1) \
+    || fail "a removed live assignment blocked relaunch of a recorded identity: $out"
+  assert_contains "$(cat "$log")" $'workspace\x1frename\x1fw-sd\x1fMr Bonden — stream-deck-configuration' \
+    "the recorded identity did not keep its own name-plus-slug Space title"
+  assert_not_contains "$(cat "$log")" "Unassigned crew" "a recorded identity fell back to an unassigned title"
+
+  # A Space owned by a different character is still refused untouched.
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"w-sd","label":"Dr Maturin — stream-deck-configuration"}}}' > "$resp/1.out"
+  if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+      '. "$0/bin/backends/herdr.sh"
+       fm_backend_herdr_workspace_identity_rename_exact s w-sd master-and-commander barrett-bonden' \
+      "$ROOT" >/dev/null 2>&1; then
+    fail "another crew member's Space title was accepted for a recorded identity"
+  fi
+  assert_not_contains "$(cat "$log")" "rename" "a foreign Space title was renamed on the recorded-identity path"
+  pass "Herdr identity renames follow recorded task metadata, not later live config edits"
+}
+
 test_projection_journal_v2_stays_valid_once_identity_config_appears() {
   local dir state home config out
   dir="$TMP_ROOT/projection-journal-v2-identity-later"; state="$dir/state"; home="$dir/home"
@@ -4727,6 +4782,7 @@ test_projection_journal_v2_stays_valid_once_identity_config_appears
 test_workspace_identity_rename_follows_registered_project_transitions
 test_workspace_identity_title_prefers_character_and_slug_over_a_generic_role
 test_workspace_identity_rename_preserves_a_recorded_title_without_config
+test_workspace_identity_rename_uses_recorded_metadata_over_live_config
 test_workspace_find_all_tolerates_registered_project_drift
 test_exact_legacy_workspace_identity_rename_is_id_bound
 test_cli_helper_sets_env_and_appends_trailing_session_flag

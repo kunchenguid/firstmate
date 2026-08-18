@@ -775,6 +775,41 @@ test_crew_identity_roster_config_and_brief_capture() {
   pass "crew identities: 29+ sourced roster, config parsing, brief detail, and active uniqueness"
 }
 
+test_relaunch_uniqueness_uses_recorded_metadata_not_live_config() {
+  local home out rc
+  home="$TMP_ROOT/crew-identity-relaunch-uniqueness"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' '{"version":1,"roster":"master-and-commander","captain":"jack-aubrey","primary":"thomas-pullings","agents":{"other-task":"john-allen"}}' \
+    > "$home/config/crew-identities.json"
+  printf '%s\n' 'window=fm-a' 'crew_roster=master-and-commander' 'crew_identity=john-allen' \
+    > "$home/state/active-a.meta"
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+    '. "$0/bin/fm-crew-identity.sh"
+     fm_crew_identity_check_active_tasks active-a master-and-commander john-allen "$1"' \
+    "$ROOT" "$home/state" 2>&1); rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "re-keying the live config blocked relaunch of an already recorded identity: $out"
+
+  printf '%s\n' 'window=fm-b' 'crew_roster=master-and-commander' 'crew_identity=john-allen' \
+    > "$home/state/active-b.meta"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" bash -c \
+    '. "$0/bin/fm-crew-identity.sh"
+     fm_crew_identity_check_active_tasks active-a master-and-commander john-allen "$1"' \
+    "$ROOT" "$home/state" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a genuinely duplicated active identity was accepted on relaunch"
+  assert_contains "$out" "already assigned to active task 'active-b'" \
+    "the duplicate-active refusal did not name the other live task"
+
+  rm -f "$home/state/active-b.meta"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    "$ROOT/bin/fm-crew-identity.sh" check-active fresh-task master-and-commander john-allen "$home/state" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "a fresh spawn ignored the configured owner of an identity"
+  assert_contains "$out" "reserved for configured task 'other-task'" \
+    "the fresh-spawn reservation refusal did not name the configured owner"
+  pass "crew identities: relaunch uniqueness follows recorded metadata while fresh spawns still honour config"
+}
+
 test_identity_free_briefs_keep_their_historical_opening_bytes() {
   local home brief
   home="$TMP_ROOT/crew-identity-absent"
@@ -824,3 +859,4 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_crew_identity_roster_config_and_brief_capture
 test_identity_free_briefs_keep_their_historical_opening_bytes
+test_relaunch_uniqueness_uses_recorded_metadata_not_live_config

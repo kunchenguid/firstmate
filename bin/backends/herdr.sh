@@ -398,8 +398,21 @@ fm_backend_herdr_workspace_identity_base_label() {
   fm_crew_identity_space_label "$roster" "$identity"
 }
 
+# fm_backend_herdr_workspace_identity_titled_label: one name-only identity
+# title plus this home's exact registered repository slug when it owns exactly
+# one project. Identity title first, slug second; a project-less or ambiguous
+# home stays name-only.
+fm_backend_herdr_workspace_identity_titled_label() { # <base-identity-label>
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" label=$1 slug
+  if [ -f "$marker" ]; then
+    slug=$(fm_backend_herdr_home_project_slug)
+    [ -z "$slug" ] || label="$label — $slug"
+  fi
+  printf '%s' "$label"
+}
+
 fm_backend_herdr_workspace_label() {
-  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id label slug status
+  local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id label status
   label=$(fm_backend_herdr_workspace_identity_base_label) && status=0 || status=$?
   case "$status" in
     0) ;;
@@ -407,11 +420,7 @@ fm_backend_herdr_workspace_label() {
     *) return 1 ;;
   esac
   if [ -n "$label" ]; then
-    if [ -f "$marker" ]; then
-      slug=$(fm_backend_herdr_home_project_slug)
-      [ -z "$slug" ] || label="$label — $slug"
-    fi
-    printf '%s' "$label"
+    fm_backend_herdr_workspace_identity_titled_label "$label"
     return 0
   fi
   if [ -f "$marker" ]; then
@@ -460,15 +469,21 @@ fm_backend_herdr_workspace_label_is_own() {  # <label> [<base-identity-label>]
 # an earlier registered-project set. The workspace id comes from launcher
 # ancestry or durable task metadata, never a label search. A foreign or
 # unreadable binding refuses without touching another Space.
-fm_backend_herdr_workspace_identity_rename_exact() { # <session> <workspace-id>
-  local session=$1 workspace=$2 desired base out current verify
-  fm_backend_herdr_crew_identity_config_present || return 0
-  desired=$(fm_backend_herdr_workspace_label) || return 1
-  [ "$desired" != "Unassigned crew" ] || {
-    echo "error: crew identity config is active but this persistent home is unassigned; refusing an ambiguous Herdr Space title" >&2
-    return 1
-  }
-  base=$(fm_backend_herdr_workspace_identity_base_label) || return 1
+fm_backend_herdr_workspace_identity_rename_exact() { # <session> <workspace-id> [<recorded-roster> <recorded-identity>]
+  local session=$1 workspace=$2 roster=${3-} identity=${4-} desired base out current verify
+  if [ -n "$roster" ] && [ -n "$identity" ]; then
+    [ "$identity" != unassigned ] || return 0
+    base=$(fm_crew_identity_space_label "$roster" "$identity") || return 1
+    desired=$(fm_backend_herdr_workspace_identity_titled_label "$base")
+  else
+    fm_backend_herdr_crew_identity_config_present || return 0
+    desired=$(fm_backend_herdr_workspace_label) || return 1
+    [ "$desired" != "Unassigned crew" ] || {
+      echo "error: crew identity config is active but this persistent home is unassigned; refusing an ambiguous Herdr Space title" >&2
+      return 1
+    }
+    base=$(fm_backend_herdr_workspace_identity_base_label) || return 1
+  fi
   out=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
   current=$(printf '%s' "$out" | jq -er --arg workspace "$workspace" \
     'select(.result.workspace.workspace_id == $workspace) | .result.workspace.label' 2>/dev/null) || return 1
