@@ -291,7 +291,7 @@ HERDR_SECTION=$(printf '%s\n' \
 else
 IFS= read -r -d '' HERDR_SECTION <<'EOF' || true
 # Herdr lifecycle declaration - NOT ENABLED
-**HARD SAFETY GATE:** this scaffold cannot inspect the task text that replaces `{TASK}` later.
+**HARD SAFETY GATE:** this scaffold cannot inspect the task text substituted later.
 If the task will start, stop, delete, restart, profile, or otherwise drive Herdr lifecycle behavior, stop and regenerate the brief with `--herdr-lab` before dispatch.
 Do not add Herdr lifecycle commands to this unguarded brief by hand.
 EOF
@@ -317,6 +317,15 @@ The report is the only thing that survives, so anything worth keeping must be in
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3a. Evidence discipline - your context is a budget, and pulling bytes into it costs real money:
+   - Run a gate or test command to completion and read only its summary and failures:
+     \`LOG_LEVEL=silent npm test 2>&1 | tail -40\` (or the project's equivalent). Never poll a running
+     suite or dev server for streamed output.
+   - Keep any single command's output under ~8KB. Read the range of a file you need, not the
+     whole file, and never re-read a range you already read in this session.
+   - Prefer one prepared \`git diff\` over reading each changed file end to end.
+   - Do NOT spawn a sub-agent to review, re-check, or second-guess your own work. Firstmate runs
+     a separate independent review; a self-review duplicates it at full cost and is not independent.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -431,6 +440,15 @@ If the top-level path is the primary checkout or not the worktree you were launc
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3a. Evidence discipline - your context is a budget, and pulling bytes into it costs real money:
+   - Run a gate or test command to completion and read only its summary and failures:
+     \`LOG_LEVEL=silent npm test 2>&1 | tail -40\` (or the project's equivalent). Never poll a running
+     suite or dev server for streamed output.
+   - Keep any single command's output under ~8KB. Read the range of a file you need, not the
+     whole file, and never re-read a range you already read in this session.
+   - Prefer one prepared \`git diff\` over reading each changed file end to end.
+   - Do NOT spawn a sub-agent to review, re-check, or second-guess your own work. Firstmate runs
+     a separate independent review; a self-review duplicates it at full cost and is not independent.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
