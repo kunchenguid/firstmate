@@ -110,12 +110,12 @@ fi
 mkdir -p "$VENDOR_ROOT"
 cp "$clone_dir/LICENSE" "$VENDOR_ROOT/LICENSE"
 for skill in "${ADOPTED_SKILLS[@]}"; do
-  rm -rf "$VENDOR_ROOT/$skill"
+  rm -rf "${VENDOR_ROOT:?}/$skill"
   cp -a "$clone_dir/skills/$skill" "$VENDOR_ROOT/$skill"
 done
 
 for skill in "${EXCLUDED_SKILLS[@]}"; do
-  rm -rf "$VENDOR_ROOT/$skill"
+  rm -rf "${VENDOR_ROOT:?}/$skill"
 done
 
 cat >"$VENDOR_ROOT/MANIFEST" <<EOF
