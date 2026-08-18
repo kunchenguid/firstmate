@@ -56,6 +56,18 @@
       "upstream_after": "64d61aed84373e02b1a28c4e6b262908ed8128d5",
       "touched": [],
       "validation_pr": null
+    },
+    {
+      "date": "2026-08-18",
+      "fork_before": "0abbc696e21c4b9df7e212126eb36d54b42e5001",
+      "upstream_before": "64d61aed84373e02b1a28c4e6b262908ed8128d5",
+      "upstream_after": "d023c451e00fb64f9845b27fa949c02beed8c551",
+      "touched": [
+        "firstmate-brief-scaffold-trim-v2",
+        "fork-main-integration",
+        "supervision-owner-aware-recovery"
+      ],
+      "validation_pr": null
     }
   ],
   "divergences": [
