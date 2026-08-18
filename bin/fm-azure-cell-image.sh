@@ -90,6 +90,23 @@ cat >"$BAKE" <<EOF
 # one. Re-exec under bash so the strict-mode options below mean what they say.
 if [ -z "\${BASH_VERSION:-}" ]; then exec /bin/bash "\$0" "\$@"; fi
 set -euxo pipefail
+# NAT egress is not usable the instant \`az vm create\` returns. Two consecutive
+# bakes died here with apt "connection timed out" against the mirror, and the
+# same builder reached the same URL fine a minute later, so this is a race with
+# the outbound path coming up, not a broken network. Everything below downloads
+# something, so prove egress before trusting it.
+egress_ready=0
+for attempt in \$(seq 1 30); do
+  if curl -fsS -o /dev/null --max-time 10 http://azure.archive.ubuntu.com/ubuntu/; then
+    egress_ready=1
+    break
+  fi
+  sleep 10
+done
+if [ "\$egress_ready" != 1 ]; then
+  echo "fm-azure-cell-image: builder has no egress after 30 attempts" >&2
+  exit 1
+fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \

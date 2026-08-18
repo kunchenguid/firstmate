@@ -59,6 +59,27 @@ run_guest_script_survives_dash() {
   pass "the guest bake script re-execs under bash before using pipefail"
 }
 
+run_guest_waits_for_egress_before_downloading() {
+  # NAT egress is not usable the instant `az vm create` returns. Two consecutive
+  # bakes died on apt "connection timed out" against the mirror, and the same
+  # builder reached the same URL fine a minute later. Every step in the bake
+  # downloads something, so the wait has to come before the FIRST one or it
+  # guards nothing.
+  local wait_line first_download
+  wait_line=$(grep -n 'egress_ready=1' "$SCRIPT" | head -1 | cut -d: -f1)
+  [ -n "$wait_line" ] || fail "the guest bake script does not wait for egress at all"
+  # The first thing that reaches the network: apt, or any curl of a pinned tool.
+  first_download=$(grep -nE '^(apt-get update|curl -fsSL)' "$SCRIPT" | head -1 | cut -d: -f1)
+  [ -n "$first_download" ] || fail "no download step found, so this ordering proves nothing"
+  [ "$wait_line" -lt "$first_download" ] \
+    || fail "the egress wait runs AFTER the first download, which is the one that fails"
+
+  # It must also give up rather than bake half an image against a dead network.
+  grep -q 'builder has no egress' "$SCRIPT" \
+    || fail "a builder with no egress does not refuse; it would bake an incomplete image"
+  pass "the guest bake script proves egress before its first download"
+}
+
 run_failed_bake_does_not_leak_the_builder() {
   # The builder is billable compute. A bake that refuses to capture used to
   # leave a running D4as_v6 behind with nothing owning it, reclaimed only
@@ -97,6 +118,7 @@ PROBE
 }
 
 run_guest_script_survives_dash
+run_guest_waits_for_egress_before_downloading
 run_failed_bake_does_not_leak_the_builder
 
 echo "# fm-azure-cell-image.test.sh: all assertions passed"
