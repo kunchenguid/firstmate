@@ -58,6 +58,54 @@
       "validation_pr": null
     }
   ],
-  "divergences": [],
+  "divergences": [
+    {
+      "id": "fork-main-integration",
+      "summary": "Permanent fork-main integration workflow: guarded remote topology, isolated fork-target validation clone, divergence manifest and health report, topic integrate and discard helpers, upstream merge helper, and the startup upstream probe.",
+      "class": "pending",
+      "topic": "fm/divergence/fork-main-integration",
+      "introduced": "2026-08-17",
+      "upstream_pr": {
+        "url": "https://github.com/kunchenguid/firstmate/pull/1944",
+        "disposition": "open"
+      },
+      "retire_when": "Upstream pull request 1944 is merged into official upstream main, so official upstream ships the fork-main integration workflow itself.",
+      "paths": [
+        ".agents/skills/fork-main-integration/SKILL.md",
+        ".agents/skills/secondmate-provisioning/SKILL.md",
+        ".agents/skills/updatefirstmate/SKILL.md",
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "README.md",
+        "bin/fm-bootstrap.sh",
+        "bin/fm-brief.sh",
+        "bin/fm-ff-lib.sh",
+        "bin/fm-fork-integration.sh",
+        "bin/fm-fork-lib.sh",
+        "bin/fm-fork-merge.sh",
+        "bin/fm-fork-remotes.sh",
+        "bin/fm-fork-status.sh",
+        "bin/fm-fork-topic.sh",
+        "bin/fm-home-seed.sh",
+        "bin/fm-remote-home-provision.sh",
+        "bin/fm-remote-home-seed.sh",
+        "bin/fm-remote-secondmate-control.sh",
+        "bin/fm-session-start.sh",
+        "bin/fm-startup-network.sh",
+        "bin/fm-test-run.sh",
+        "bin/fm-update.sh",
+        "docs/architecture.md",
+        "docs/configuration.md",
+        "docs/documentation-audiences.json",
+        "docs/fork-main.md",
+        "docs/remote-secondmates.md",
+        "docs/scripts.md",
+        "tests/fm-fork-main.test.sh",
+        "tests/fm-secondmate-safety.test.sh",
+        "tests/fm-update.test.sh",
+        "tests/lib.sh"
+      ]
+    }
+  ],
   "retired_upstream": []
 }
