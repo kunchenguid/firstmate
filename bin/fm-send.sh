@@ -350,6 +350,19 @@ fi
 # send, is what keeps a mistyped key loud instead of delivering an answer that
 # silently leaves its decision open.
 RESOLVE_STATUS_FILE=
+RESOLVE_STATUS_KEYS=
+RESOLVE_HOLD_KEYS=
+
+fm_send_hold_is_active() {
+  local show
+  command -v tasks-axi >/dev/null 2>&1 || return 1
+  show=$( (cd "$FM_HOME" && tasks-axi show "$1-decision-$2" --full) 2>/dev/null ) || return 1
+  case "$show" in *"held: yes"*) : ;; *) return 1 ;; esac
+  case "$show" in *"hold_kind: captain"*) : ;; *) return 1 ;; esac
+  case "$show" in *"state: queued"*) return 0 ;; esac
+  return 1
+}
+
 if [ -n "$RESOLVE_KEYS" ]; then
   if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
     echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
@@ -368,12 +381,17 @@ if [ -n "$RESOLVE_KEYS" ]; then
   resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
   for k in $RESOLVE_KEYS; do
     case "$resolve_open_set" in
-      "$k"$'\t'*|*$'\n'"$k"$'\t'*) ;;
-      *)
-        echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE (already closed, mistyped, or transferred). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
-        exit 1
+      "$k"$'\t'*|*$'\n'"$k"$'\t'*)
+        RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
+        continue
         ;;
     esac
+    if fm_send_hold_is_active "$RESOLVE_TASK_ID" "$k"; then
+      RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$k"
+      continue
+    fi
+    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no active captain decision $RESOLVE_TASK_ID-decision-$k (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+    exit 1
   done
 fi
 
@@ -387,7 +405,7 @@ fi
 fm_send_close_resolved_keys() {  # <answer-text>
   local note=$1 k line
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
-  for k in $RESOLVE_KEYS; do
+  for k in $RESOLVE_STATUS_KEYS; do
     line="resolved [key=$k]: answered: $note"
     fm_cap_line_var "$line"
     if ! "$SCRIPT_DIR/fm-status-event.sh" self-resolve "$STATE" "$RESOLVE_TASK_ID" "$FM_LINE_CAP_LINE"; then
@@ -395,6 +413,20 @@ fm_send_close_resolved_keys() {  # <answer-text>
       return 1
     fi
   done
+}
+
+fm_send_feed_resolved_holds() {
+  local note=$1 k lines=''
+  [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
+  note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  for k in $RESOLVE_HOLD_KEYS; do
+    lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
+  done
+  if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-decision-hold.sh" answers "$RESOLVE_TASK_ID" \
+    --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
+    echo "error: the answer was delivered to $T, but this captain decision could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-decision-hold.sh (answer, or resolve when it routes work) - do not resend the answer." >&2
+    return 1
+  fi
 }
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
@@ -540,6 +572,7 @@ else
   # ledger (answerer-closes; see the header contract).
   if [ -n "$RESOLVE_KEYS" ]; then
     fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+    fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
   fi
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the

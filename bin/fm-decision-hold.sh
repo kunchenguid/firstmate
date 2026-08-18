@@ -24,6 +24,11 @@
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
 #     --decision-file <path> --routed-to <task-id> [--routed-to <task-id>...]
+#   fm-decision-hold.sh answer <origin-id> <decision-key> --decision-file <path>
+#   fm-decision-hold.sh answers <origin-id> --source <provenance>
+#   fm-decision-hold.sh bind <source-id> <origin-id>
+#   fm-decision-hold.sh unbind <source-id>
+#   fm-decision-hold.sh binding <source-id>
 #   fm-decision-hold.sh decline <origin-id> <decision-key> --decision-file <path>
 #   fm-decision-hold.sh repair <origin-id> <decision-key> --decision-file <path>
 #
@@ -566,10 +571,9 @@ parse_decision_only_flags() {  # <args...>; prints the --decision-file value
   printf '%s' "$decision_file"
 }
 
-command_decline() {
-  local origin=${1:-} key=${2:-} decision_file id body hold_show hold_body state dependents
-  [ "$#" -ge 2 ] || { usage >&2; exit 2; }
-  shift 2
+close_unrouted_hold() {
+  local mode=$1 outcome=$2 origin=$3 key=$4 decision_file id body hold_show hold_body state dependents
+  shift 4
   decision_file=$(parse_decision_only_flags "$@") || exit 2
   validate_slug origin-id "$origin"
   validate_slug decision-key "$key"
@@ -580,7 +584,7 @@ command_decline() {
     hold_show=$(task_show "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$DECISION_DIGEST" "$ROUTED_NONE"
-    printf 'declined: %s\n' "$id"
+    printf '%s: %s\n' "$outcome" "$id"
     return 0
   fi
   hold_show=$(task_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
@@ -597,12 +601,133 @@ command_decline() {
   dependents=$(tasks_blocked_by "$id") || exit 1
   [ -z "$dependents" ] \
     || fail "captain hold $id still blocks routed work ($dependents); use resolve to record that work"
-  body=$(resolution_body declined "$ROUTED_NONE")
+  body=$(resolution_body "$mode" "$ROUTED_NONE")
   tasks_axi update "$id" --body "$body" >/dev/null \
     || fail "could not record the captain decision on $id"
-  tasks_axi "done" "$id" >/dev/null || fail "could not close declined captain hold $id"
+  tasks_axi "done" "$id" >/dev/null || fail "could not close $mode captain hold $id"
   verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
-  printf 'declined: %s\n' "$id"
+  printf '%s: %s\n' "$outcome" "$id"
+}
+
+command_answer() {
+  [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+  close_unrouted_hold answered answered "$@"
+}
+
+BINDING_DIR="$STATE/decision-bindings"
+BINDING_SCHEMA=fm-decision-binding.v1
+
+validate_source_id() {
+  validate_slug source-id "$1"
+  [ "${#1}" -le 64 ] || fail "source-id must be at most 64 characters: $1"
+}
+
+binding_path() { printf '%s/%s.origin\n' "$BINDING_DIR" "$1"; }
+
+read_binding() {
+  local path origin schema
+  path=$(binding_path "$1")
+  [ -e "$path" ] || return 0
+  [ -f "$path" ] && [ ! -L "$path" ] || fail "decision binding is unsafe: $path"
+  schema=$(sed -n 's/^schema=//p' "$path" | head -1)
+  [ "$schema" = "$BINDING_SCHEMA" ] || fail "decision binding has an incompatible schema: $path"
+  origin=$(sed -n 's/^origin=//p' "$path" | head -1)
+  case "$origin" in
+    ''|*[!A-Za-z0-9._-]*) fail "decision binding has an invalid origin id: $path" ;;
+  esac
+  printf '%s\n' "$origin"
+}
+
+command_bind() {
+  local source=${1:-} origin=${2:-} dest tmp
+  [ "$#" -eq 2 ] || { usage >&2; exit 2; }
+  validate_source_id "$source"
+  validate_slug origin-id "$origin"
+  (umask 077; mkdir -p "$BINDING_DIR") || fail "cannot create $BINDING_DIR"
+  [ -d "$BINDING_DIR" ] && [ ! -L "$BINDING_DIR" ] || fail "decision binding dir is unsafe: $BINDING_DIR"
+  dest=$(binding_path "$source")
+  tmp=$(umask 077; mktemp "$BINDING_DIR/.origin.XXXXXX") || fail "cannot stage the decision binding"
+  if ! { printf 'schema=%s\norigin=%s\n' "$BINDING_SCHEMA" "$origin" > "$tmp" \
+    && chmod 0600 "$tmp" && mv -f -- "$tmp" "$dest"; }; then
+    rm -f -- "$tmp"
+    fail "cannot record the decision binding for $source"
+  fi
+  printf 'bound: %s -> %s\n' "$source" "$origin"
+}
+
+command_unbind() {
+  local source=${1:-}
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  validate_source_id "$source"
+  rm -f -- "$(binding_path "$source")"
+  printf 'unbound: %s\n' "$source"
+}
+
+command_binding() {
+  local source=${1:-} origin
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  validate_source_id "$source"
+  origin=$(read_binding "$source") || exit 1
+  [ -n "$origin" ] || return 1
+  printf '%s\n' "$origin"
+}
+
+keyed_decision_text() {
+  printf 'Captain answered this decision through %s.\n' "$1"
+  printf 'Decision key: %s\n' "$2"
+  printf 'Answer: %s\n' "$3"
+  [ -z "$4" ] || printf 'Answer as shown to the captain: %s\n' "$4"
+}
+
+sanitize_field() {
+  printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-512
+}
+
+command_answers() {
+  local origin=${1:-} source='' key answer label hold tmp err closed=0 skipped=0 reason
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --source) shift; source=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug origin-id "$origin"
+  [ -n "$source" ] || fail "--source provenance is required so the durable decision records where the answer came from"
+  source=$(sanitize_field "$source")
+  require_tasks_axi
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-keyed-decision.XXXXXX") || fail "cannot stage the captain decision"
+  err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-keyed-decision-err.XXXXXX") \
+    || { rm -f -- "$tmp"; fail "cannot stage the captain decision diagnostics"; }
+  while IFS=$'\t' read -r key answer label; do
+    [ -n "${key:-}" ] || continue
+    case "$key" in *[!A-Za-z0-9._-]*) continue ;; esac
+    [ "${#key}" -le 64 ] || continue
+    answer=$(sanitize_field "${answer:-}")
+    [ -n "$answer" ] || continue
+    label=$(sanitize_field "${label:-}")
+    hold="$origin-decision-$key"
+    keyed_decision_text "$source" "$key" "$answer" "$label" > "$tmp" \
+      || fail "cannot stage the captain decision for $hold"
+    if "$0" answer "$origin" "$key" --decision-file "$tmp" >/dev/null 2>"$err"; then
+      printf 'closed: %s\n' "$hold"
+      closed=$((closed + 1))
+    else
+      reason=$(tr -d '\n' < "$err" | sed 's/^fm-decision-hold: //')
+      printf 'skipped: %s (%s)\n' "$hold" "$reason"
+      skipped=$((skipped + 1))
+    fi
+  done
+  rm -f -- "$tmp" "$err"
+  printf 'answers: closed=%s skipped=%s origin=%s\n' "$closed" "$skipped" "$origin"
+  [ "$skipped" -eq 0 ]
+}
+
+command_decline() {
+  [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+  close_unrouted_hold declined declined "$@"
 }
 
 command_repair() {
@@ -648,6 +773,11 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   resolve) shift; command_resolve "$@" ;;
+  answer) shift; command_answer "$@" ;;
+  answers) shift; command_answers "$@" ;;
+  bind) shift; command_bind "$@" ;;
+  unbind) shift; command_unbind "$@" ;;
+  binding) shift; command_binding "$@" ;;
   decline) shift; command_decline "$@" ;;
   repair) shift; command_repair "$@" ;;
   -h|--help) usage ;;
