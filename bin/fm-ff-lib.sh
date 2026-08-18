@@ -85,7 +85,6 @@ path_is_ancestor_of() {
 }
 
 VALIDATED_HOME=""
-VALIDATED_MARKER_ID=""
 VALIDATION_ERROR=""
 VALIDATION_ERROR_PATH=""
 
@@ -140,20 +139,9 @@ validate_operational_dirs() {  # <abs-home> <abs-active-home> <abs-root>
   return 0
 }
 
-# The id-independent shape of a seeded secondmate home: a home that is neither
-# the active firstmate home nor the firstmate repo nor tangled with either,
-# operational directories that hold the rules above, an identity marker that is
-# a regular file naming SOME secondmate, and the firstmate home material
-# (AGENTS.md and bin/). validate_secondmate_home() asks this and then the one
-# id-dependent question on top - does the marker name THIS secondmate - so the
-# two sides of that question have a single definition between them.
-# Sets VALIDATED_HOME and VALIDATED_MARKER_ID on success, VALIDATION_ERROR
-# otherwise.
-validate_secondmate_home_shape() {  # <home>
-  local home=$1
-  local abs_home abs_active_home abs_root marker
+validate_secondmate_home() {
+  local id=$1 home=$2 abs_home abs_active_home abs_root marker_id
   VALIDATED_HOME=""
-  VALIDATED_MARKER_ID=""
   VALIDATION_ERROR=""
   abs_home=$(resolved_existing_dir "$home") || {
     VALIDATION_ERROR="not a directory"
@@ -195,19 +183,18 @@ validate_secondmate_home_shape() {  # <home>
     VALIDATION_ERROR="secondmate home cannot be an ancestor of the firstmate repo"
     return 1
   fi
-  marker="$abs_home/$SUB_HOME_MARKER"
   validate_operational_dirs "$abs_home" "$abs_active_home" "$abs_root" || return 1
-  if [ -L "$marker" ]; then
+  if [ -L "$abs_home/$SUB_HOME_MARKER" ]; then
     VALIDATION_ERROR="secondmate marker must not be a symlink"
     return 1
   fi
-  if [ ! -f "$marker" ]; then
+  if [ ! -f "$abs_home/$SUB_HOME_MARKER" ]; then
     VALIDATION_ERROR="not a seeded secondmate home"
     return 1
   fi
-  VALIDATED_MARKER_ID=$(cat "$marker" 2>/dev/null || true)
-  if [ -z "$VALIDATED_MARKER_ID" ]; then
-    VALIDATION_ERROR="secondmate marker does not name a secondmate"
+  marker_id=$(cat "$abs_home/$SUB_HOME_MARKER" 2>/dev/null || true)
+  if [ "$marker_id" != "$id" ]; then
+    VALIDATION_ERROR="marked for secondmate ${marker_id:-unknown}, expected $id"
     return 1
   fi
   if [ ! -f "$abs_home/AGENTS.md" ]; then
@@ -219,17 +206,6 @@ validate_secondmate_home_shape() {  # <home>
     return 1
   fi
   VALIDATED_HOME="$abs_home"
-  return 0
-}
-
-validate_secondmate_home() {
-  local id=$1 home=$2
-  validate_secondmate_home_shape "$home" || return 1
-  if [ "$VALIDATED_MARKER_ID" != "$id" ]; then
-    VALIDATION_ERROR="marked for secondmate ${VALIDATED_MARKER_ID:-unknown}, expected $id"
-    VALIDATED_HOME=""
-    return 1
-  fi
 }
 
 # A single fetch refreshes every worktree that shares an object store, so fetch

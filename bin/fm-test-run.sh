@@ -980,7 +980,15 @@ families_for_changed_path() {
       printf '%s\n' secondmate
       printf '%s\n' watcher-wake-lock
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
+    bin/fm-teardown.sh)
+      # Teardown's own family is pr-forge, but tests/fm-gotmp.test.sh
+      # (session-bootstrap) is the only fixture that enumerates the siblings the
+      # real teardown subprocess sources, so a change to that set has to
+      # re-select it here too.
+      printf '%s\n' pr-forge
+      printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
@@ -994,9 +1002,13 @@ families_for_changed_path() {
     bin/fm-home-return-lib.sh)
       # The shared clear-identity-around-the-pool-return transaction, sourced by
       # both bin/fm-teardown.sh's retirement (pr-forge) and bin/fm-home-seed.sh's
-      # failed-seed rollback (secondmate).
+      # failed-seed rollback (secondmate). session-bootstrap carries
+      # tests/fm-gotmp.test.sh, whose fake root must provide every sibling the
+      # real teardown subprocess sources, so adding or removing one here has to
+      # re-select that fixture.
       printf '%s\n' pr-forge
       printf '%s\n' secondmate
+      printf '%s\n' session-bootstrap
       ;;
     bin/fm-composer-lib.sh)
       # The shared shape catalogue is vendor-rendered signal; a change to it
