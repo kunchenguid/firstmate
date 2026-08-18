@@ -157,7 +157,7 @@ export function convergeConfiguredSession(home: string, input: {
   headerId: string;
   headerCwd: string;
   outboundAfterEntryId?: string | null;
-}): { changed: boolean; pairing: PairingRecord; binding: BindingRecord };
+}, options?: { requireEmptyDeliveryState?: boolean }): { changed: boolean; pairing: PairingRecord; binding: BindingRecord };
 export function publishFeishuInbound(home: string, raw: Record<string, unknown>, options?: {
   maxInboundBytes?: number;
   maxPendingInbound?: number;
@@ -193,6 +193,7 @@ export function claimLiveSession(home: string, binding: BindingRecord, session: 
 }, ownerToken: string): { ok: boolean; reason?: string; record?: Record<string, unknown> };
 export function releaseLiveSession(home: string, bindingId: string, ownerToken: string): boolean;
 export function ingressCounts(home: string): { pending: number; queued: number; delivered: number; other: number };
+export function assertManualRebindSafe(home: string): void;
 export function assistantSecretPattern(text: string): string | null;
 export function renderFeishuPostMarkdown(text: string): string;
 export function deterministicChunks(text: string, maxBytes?: number): string[];

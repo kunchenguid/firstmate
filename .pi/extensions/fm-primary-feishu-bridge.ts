@@ -106,6 +106,7 @@ function markLoaded(): void {
 }
 
 export default function (pi: ExtensionAPI) {
+  const nativeChannel = registerFeishuNativeChannel(pi);
   let stopListeningForSessionStart: (() => void) | undefined;
   const listenForSessionStart = () => {
     if (stopListeningForSessionStart) return;
@@ -148,6 +149,27 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("fm-feishu-rebind", {
+    description: "Safely rebind the configured private Feishu channel to this exact local Pi session.",
+    handler: async (_args, ctx) => {
+      try {
+        requireLocalTui(ctx);
+        const result = await nativeChannel.rebind(ctx);
+        ctx.ui.notify(
+          result === "already-current"
+            ? "Feishu channel is already bound to this Pi session and healthy."
+            : "Feishu channel rebound to this Pi session and is healthy.",
+          "info",
+        );
+      } catch {
+        ctx.ui.notify(
+          "Feishu rebind refused. Run /fm-feishu-status and bin/fm-feishu-transport.sh config-check locally, resolve pending delivery or ownership state, then retry /fm-feishu-rebind. If ownership remains ambiguous, fully exit other Pi processes for this Firstmate home and relaunch.",
+          "error",
+        );
+      }
+    },
+  });
+
   pi.on("session_start", () => {
     listenForSessionStart();
     markLoaded();
@@ -157,6 +179,5 @@ export default function (pi: ExtensionAPI) {
     stopListeningForSessionStart?.();
     stopListeningForSessionStart = undefined;
   });
-  registerFeishuNativeChannel(pi);
   markLoaded();
 }

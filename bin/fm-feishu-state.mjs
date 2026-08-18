@@ -805,7 +805,7 @@ export function configuredSessionMatches(home, input, session) {
     binding.session_header_cwd_realpath === identity.headerCwd;
 }
 
-export function convergeConfiguredSession(home, input, session) {
+export function convergeConfiguredSession(home, input, session, options = {}) {
   const desired = {
     appIdFingerprint: requireString(input.appIdFingerprint, "app id fingerprint", /^sha256:[a-f0-9]{64}$/),
     allowedUser: requireString(input.allowedUser, "allowed user open_id", /^ou_[A-Za-z0-9_-]{4,128}$/),
@@ -813,7 +813,7 @@ export function convergeConfiguredSession(home, input, session) {
   };
   const identity = validateSessionIdentity(session);
   const paths = ensurePrivateLayout(home);
-  return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => {
+  const converge = () => {
     repairInboundPublicationsLocked(paths);
     const priorPairingRaw = readJson(paths.pairing, { optional: true });
     const priorPairing = priorPairingRaw ? validatePairingRecord(priorPairingRaw) : undefined;
@@ -901,7 +901,15 @@ export function convergeConfiguredSession(home, input, session) {
     atomicJson(join(paths.bindings, `generation-${String(generation).padStart(8, "0")}.json`), binding);
     atomicJson(paths.activeBinding, binding);
     return { changed: true, pairing, binding };
-  }));
+  };
+  return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => (
+    options.requireEmptyDeliveryState
+      ? withLock(paths, "outbound-state", () => {
+        assertManualRebindSafeLocked(paths);
+        return converge();
+      })
+      : converge()
+  )));
 }
 
 function retargetPendingIngressLocked(paths, binding) {
@@ -1499,6 +1507,36 @@ export function ingressCounts(home) {
     else counts.other += 1;
   }
   return counts;
+}
+
+function assertManualRebindSafeLocked(paths) {
+  repairInboundLedgersLocked(paths);
+  const bindingRaw = readJson(paths.activeBinding, { optional: true });
+  const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
+  repairOutboundStateLocked(paths, binding);
+  const inbound = { pending: 0, offered: 0 };
+  for (const name of safeJsonNames(paths.inboundPending)) {
+    const ledger = requireSchema(readJson(join(paths.inboundLedger, name)), INBOUND_LEDGER_SCHEMA, "inbound ledger");
+    if (ledger.state === "pending") inbound.pending += 1;
+    if (ledger.state === "offered") inbound.offered += 1;
+  }
+  let outboundPending = 0;
+  let outboundUncertain = 0;
+  for (const name of safeJsonNames(paths.outboundLedger)) {
+    const ledger = requireSchema(readJson(join(paths.outboundLedger, name)), OUTBOUND_LEDGER_SCHEMA, "outbound ledger");
+    if (["pending", "retryable", "sending"].includes(ledger.state)) outboundPending += 1;
+    if (ledger.state === "delivery_uncertain") outboundUncertain += 1;
+  }
+  if (inbound.pending > 0 || inbound.offered > 0 || outboundPending > 0 || outboundUncertain > 0) {
+    throw new Error("manual Feishu rebind requires zero pending, offered, or uncertain delivery work; run /fm-feishu-status locally and wait for it to settle");
+  }
+}
+
+export function assertManualRebindSafe(home) {
+  const paths = ensurePrivateLayout(home);
+  return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => withLock(paths, "outbound-state", () => {
+    assertManualRebindSafeLocked(paths);
+  })));
 }
 
 const SECRET_PATTERNS = [
@@ -2261,6 +2299,11 @@ export function registerAssistantOutbound(home, input) {
   }
   const filename = `${sha(eventId)}.json`;
   return withLock(paths, "outbound-state", () => {
+    const currentBindingRaw = readJson(paths.activeBinding, { optional: true });
+    const currentBinding = currentBindingRaw ? validateBindingRecord(currentBindingRaw) : undefined;
+    if (!currentBinding || currentBinding.status !== "active" || currentBinding.binding_id !== binding.binding_id || currentBinding.generation !== binding.generation) {
+      return { status: "stale-binding" };
+    }
     if (existsSync(join(paths.outbox, filename))) {
       const outbox = readJson(join(paths.outbox, filename));
       if (outbox.assistant_entry_id !== assistantEntryId || outbox.session_order !== sessionOrder || outbox.session_entry_timestamp !== sessionEntryTimestamp || outbox.text_hash !== `sha256:${sha(text)}`) throw new Error("persisted Assistant entry conflicts with its existing Feishu outbound record");
