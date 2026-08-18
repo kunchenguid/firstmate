@@ -28,7 +28,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    ```sh
    bin/fm-update.sh
    ```
-   It fast-forwards this firstmate repo's default branch from origin, then updates every registered local or remote secondmate home through its placement-specific guarded path.
+   It fast-forwards this firstmate repo's default branch from each home's configured update source - `origin` by default, which is the fork itself when running fork-as-source (see [CONTRIBUTING.md](../../../CONTRIBUTING.md), "Running a fleet from your own fork") - then updates every registered local or remote secondmate home through its placement-specific guarded path.
    It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: fm-<id>...|none`
@@ -51,6 +51,21 @@ This touches only the firstmate repo and its own worktrees, never anything under
    Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both second mates are now on the latest."
    Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.
+
+## Feeding the fork from the original (fork-as-source only)
+
+When the fleet runs from the captain's fork (`origin`) and treats the original it was forked from (`upstream`) as a feed, `/updatefirstmate` alone only pulls each home up to the fork; it does not move the fork.
+To bring the original's newer work into the fork, run the on-demand feed step:
+
+```sh
+bin/fm-fork-sync.sh            # report only: is the fork behind the original?
+bin/fm-fork-sync.sh --apply    # fast-forward the fork, or publish an integration branch
+```
+
+It fast-forwards the fork's branch to the original's tip when that is a clean fast-forward, and otherwise publishes an integration branch for a reviewed merge into the fork - never forcing, never discarding the fork's own commits.
+Report only by default; `--apply` performs the push.
+This is a separate, captain-facing action, not part of the routine `/updatefirstmate` fleet sweep; surface it when the fork is behind the original and the captain wants the newer upstream work.
+For migrating a home between the `original-as-origin` and `fork-as-source` layouts, `bin/fm-repoint-home.sh` re-points one home reversibly (`status`, then a dry run, then `--apply`); the main home also needs `no-mistakes init` afterward so the gate follows the new `origin`.
 
 ## Safety
 

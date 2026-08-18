@@ -5,7 +5,12 @@
 # This is the one implementation of "advance a firstmate checkout to a base by a
 # clean fast-forward, never forcing, merging, or stashing" used by every sync
 # path:
-#   - /updatefirstmate (bin/fm-update.sh) pulls from origin: base_mode "origin".
+#   - /updatefirstmate (bin/fm-update.sh) pulls from each home's configured
+#     update remote (default origin): base_mode "origin". Under the standard
+#     fork-as-source convention a re-pointed home's origin IS the fork, so the
+#     default already fetches the fork; config/update-remote can also point a home
+#     at a differently-named remote without renaming origin (see
+#     resolve_update_remote).
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
@@ -190,20 +195,54 @@ validate_secondmate_home() {
   VALIDATED_HOME="$abs_home"
 }
 
+# Resolve which git remote a home's origin-mode fast-forward should fetch from.
+# Precedence: the FM_UPDATE_REMOTE env override (whole run), then the home's
+# gitignored config/update-remote file, then the default "origin". The value
+# must be a safe remote-name token; anything else falls back to "origin" so a
+# malformed or hostile config can neither redirect the fetch nor break it.
+#
+# This is what makes the fork-as-source migration per-home and reversible: every
+# home fetches from origin by default, and points at a different remote (e.g. an
+# added "fork") only when its own config/update-remote says so - reverting is
+# deleting that one file. Under the standard convention where a re-pointed home's
+# origin IS the fork, the default already fetches the fork with no config at all.
+#
+# The file is read relative to the checkout being advanced, which is the home's
+# own config/ dir for both the firstmate repo (FM_ROOT == its home) and every
+# secondmate home (the leased worktree == its home). A home whose FM_HOME is
+# deliberately relocated away from its checkout uses the FM_UPDATE_REMOTE
+# override instead.
+resolve_update_remote() {
+  local dir=$1 val=''
+  if [ -n "${FM_UPDATE_REMOTE:-}" ]; then
+    val=$FM_UPDATE_REMOTE
+  elif [ -f "$dir/config/update-remote" ]; then
+    val=$(sed -n '1p' "$dir/config/update-remote" 2>/dev/null | tr -d '[:space:]')
+  fi
+  case "$val" in
+    '') printf 'origin\n' ;;
+    *[!A-Za-z0-9._-]*) printf 'origin\n' ;;   # unsafe token -> safe default
+    *) printf '%s\n' "$val" ;;
+  esac
+}
+
 # A single fetch refreshes every worktree that shares an object store, so fetch
-# each distinct git-common-dir at most once. Used ONLY by the origin base mode;
-# the local-HEAD sync never fetches.
+# each distinct (git-common-dir, remote) pair at most once. Keying on the remote
+# as well as the common dir lets one shared object store hold an origin fetch and
+# a fork fetch for two homes that resolved different update remotes. Used ONLY by
+# the origin base mode; the local-HEAD sync never fetches.
 FETCHED=""
 fetch_once() {
-  local dir=$1 common
+  local dir=$1 remote=${2:-origin} common key
   common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  key="$common|$remote"
   if [ -n "$common" ]; then
     case " $FETCHED " in
-      *" $common "*) return 0 ;;
+      *" $key "*) return 0 ;;
     esac
   fi
-  if git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
-    [ -n "$common" ] && FETCHED="$FETCHED $common"
+  if git -C "$dir" fetch "$remote" --prune --quiet 2>/dev/null; then
+    [ -n "$common" ] && FETCHED="$FETCHED $key"
     return 0
   fi
   return 1
@@ -259,9 +298,13 @@ live_secondmate_meta_records() {
 #   FF_INSTR  = comma list of changed instruction paths (only when updated)
 #
 # base_mode selects where the fast-forward base comes from:
-#   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
-#                  path); requires an origin remote and network reachability.
-#   <commit-ish> - advance to that LOCAL commit with NO fetch and no origin
+#   origin       - "fetch mode": resolve this home's configured update remote
+#                  (resolve_update_remote, default origin), fetch it, and advance
+#                  to <update-remote>/<default> (the /updatefirstmate path);
+#                  requires that remote and network reachability. Passing the
+#                  literal "origin" keeps every caller unchanged while letting a
+#                  re-pointed home fetch from its own configured remote instead.
+#   <commit-ish> - advance to that LOCAL commit with NO fetch and no remote
 #                  dependency (the local-HEAD secondmate sync). The commit must
 #                  already exist in the target's object store, which it always does
 #                  for a worktree of this same repo; a standalone clone that lacks
@@ -290,17 +333,22 @@ ff_target() {
     return 0
   }
 
-  # Resolve the fast-forward base from base_mode (see header).
+  # Resolve the fast-forward base from base_mode (see header). The "origin"
+  # sentinel means "fetch mode": advance to <update-remote>/<default>, where the
+  # update remote is resolved per home from config (default origin). All other
+  # base_mode values are a LOCAL commit-ish, advanced to with no fetch.
   if [ "$base_mode" = origin ]; then
-    if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
-      echo "$label: skipped: no origin remote"
+    local remote
+    remote=$(resolve_update_remote "$dir")
+    if ! git -C "$dir" remote get-url "$remote" >/dev/null 2>&1; then
+      echo "$label: skipped: no $remote remote"
       return 0
     fi
-    if ! fetch_once "$dir"; then
+    if ! fetch_once "$dir" "$remote"; then
       echo "$label: skipped: fetch failed"
       return 0
     fi
-    base="origin/$default"
+    base="$remote/$default"
   else
     base="$base_mode"
   fi

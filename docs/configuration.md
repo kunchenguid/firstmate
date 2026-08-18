@@ -135,6 +135,21 @@ It does not set `commands.test` to a complete `tests/*.test.sh` walk.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
 
+## Fork-as-source update remote (config/update-remote, config/fork-feed-source, config/fork-feed-target)
+
+A fleet can run from the captain's own fork instead of the repo it was forked from, so its PRs land where the captain can merge them and it never waits on an outside maintainer.
+The standard convention names the remotes as git does: `origin` is the fork (the source of truth the fleet runs from and opens PRs against), and `upstream` is the original (a periodic feed of improvements).
+Under that layout `bin/fm-update.sh` already fetches each home from `origin` (the fork) with no extra config, and `no-mistakes` derives its PR base from `origin` (the fork), so both follow the fork automatically.
+
+`config/update-remote` is a per-home, gitignored, reversible override of which remote a home's `/updatefirstmate` fast-forward fetches from.
+Absent, empty, `origin`, or any unsafe token resolves to `origin`; a safe remote-name token (for example `fork`) points that one home at that remote instead, letting a home fetch the fork without renaming its `origin`.
+Reverting is deleting the one file.
+The value is read from the checkout's own `config/` dir (each home's config), or from the `FM_UPDATE_REMOTE` env override when a home's `FM_HOME` is deliberately relocated away from its checkout.
+[`bin/fm-ff-lib.sh`](../bin/fm-ff-lib.sh)'s `resolve_update_remote` owns the exact resolution and safety rules; every existing fast-forward guard (ff-only, never force/stash, skip a dirty/diverged/wrong-branch/offline home) is unchanged and applies to the configured remote.
+
+`config/fork-feed-source` (default `upstream`) and `config/fork-feed-target` (default `origin`) are the per-home defaults for [`bin/fm-fork-sync.sh`](../bin/fm-fork-sync.sh), the on-demand step that feeds the fork from the original: it fast-forwards the fork's branch to the original's tip when that is clean, and otherwise publishes an integration branch for a reviewed merge, never forcing and never discarding the fork's own commits.
+`bin/fm-fork-sync.sh --help` and `bin/fm-repoint-home.sh --help` own the exact flags and the reversible per-home re-pointing procedure; the overall model lives in [CONTRIBUTING.md](../CONTRIBUTING.md) ("Running a fleet from your own fork").
+
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
 Domain-local preferences for one captain's fleet live locally in each home's `data/captain.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.
