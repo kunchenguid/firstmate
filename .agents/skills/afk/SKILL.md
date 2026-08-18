@@ -160,10 +160,10 @@ Classify each wake this way:
 - `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
   If it remains declared and idle past `FM_PAUSE_RESURFACE_SECS` (default 3600s), housekeeping sends one awaiting-external recheck and resets the pause window.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
-- `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
+- `stale` with a terminal status or bare legacy captain-relevant line -> escalate, unless `bin/fm-crew-state.sh` positively proves a full current-code-matched active run step with recent `last_activity`, which supersedes that log and keeps wedge aging instead of escalating.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
-  If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
-  This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
+  If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s) with no such proven run-step activity, housekeeping escalates it as a possible wedge.
+  This bounds wedge-detection latency for a crew with nothing running to the threshold plus a tick: a delay, never a loss.
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a

@@ -255,7 +255,7 @@ ok - cursor primary: an away-mode escalation is delivered, confirmed, and proces
 
 The live run proved that session start acquires the fleet lock through Cursor's structural process identity in `bin/fm-cursor-lib.sh`; `tests/fm-session-lock-ancestry.test.sh` pins the same ancestry path portably.
 It also proved that Cursor's `autoarm` supervision model lets the mid-turn pull guard accept a fresh beacon after the between-turn watcher closes; `tests/fm-guard-stale-banner.test.sh` pins that model-aware verdict.
-The baton is claimed only by the next `stop`, so an actionable close before that claim can still produce one real follow-up from the sole existing park; durable wake handling is idempotent, and any older park still running after the claim stands down.
+The baton is claimed only by the next `stop`, so an actionable close before that claim can still produce one real follow-up from the sole existing park, bounded to one outstanding watcher follow-up per unacked durable-queue generation as [`turnend-guard.md`](../turnend-guard.md) specifies, and any older park still running after the claim stands down.
 Cursor's `beforeSubmitPrompt` step could close that exact window because it fires once on a real captain message and not on hook-driven follow-ups, but registering it is deliberately deferred alongside `preCompact`.
 
 Away-mode delivery needed no daemon change once the composer reader was correct for Cursor; [`runtime-backends.md`](runtime-backends.md#composer) owns that evidence.
