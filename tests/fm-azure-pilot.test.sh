@@ -1066,6 +1066,147 @@ OSDISK
   pass "the worker OS disk expression branches correctly and names one disk"
 }
 
+run_worker_power_gate_check() {
+  # The power gate itself, driven directly. Asserting only "a start happens
+  # before the run command" left the read, its query, its sentinel and both of
+  # its error paths completely unpinned: the whole gate could be reduced to an
+  # unconditional `az vm start` and stay green.
+  local tmp out status
+  fm_test_tmproot_into tmp fm-azure-worker-power
+  cat >"$tmp/driver.py" <<'POWERGATE'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("fm_provider", sys.argv[1])
+provider = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(provider)
+provider.VM_POWER_POLL_SECONDS = 0
+
+controller = {"resource_group": "rg-test", "subscription": "s", "prefix": "fmtest"}
+
+
+def make_az(states, fail_read=False, fail_start=False):
+    calls = []
+
+    def fake_az(controller, args, check=True, timeout=None):
+        calls.append(list(args))
+        if args[:2] == ["vm", "get-instance-view"]:
+            if fail_read:
+                return None, 1, "read boom"
+            return [states.pop(0)] if states else ["PowerState/running"], 0, ""
+        if args[:2] == ["vm", "start"]:
+            if fail_start:
+                return None, 1, "start boom"
+            return {}, 0, ""
+        return {}, 0, ""
+
+    return fake_az, calls
+
+
+# An ALREADY RUNNING worker must not be started. Nothing asserted this, so
+# deleting the power read entirely and starting unconditionally stayed green.
+provider.az, calls = make_az(["PowerState/running"])
+assert provider.ensure_worker_running(controller, "vm-x") is False
+assert not [c for c in calls if c[:2] == ["vm", "start"]], calls
+
+# The read has to actually ask for PowerState, or a renamed/broken query
+# silently returns nothing and every worker looks stopped.
+query = calls[0][calls[0].index("--query") + 1]
+assert "PowerState" in query, query
+
+# A deallocated worker is started, and the function only returns once the state
+# it reads back is running.
+provider.az, calls = make_az(["PowerState/deallocated", "PowerState/running"])
+assert provider.ensure_worker_running(controller, "vm-x") is True
+assert [c for c in calls if c[:2] == ["vm", "start"]], calls
+
+# Transitional states are WAITED OUT, not raced. The TTL schedule fires daily,
+# so a create meeting an in-flight deallocate is ordinary; issuing a start
+# against one earns an ARM 409 instead of a running VM.
+for transitional in ("PowerState/deallocating", "PowerState/stopping"):
+    provider.az, calls = make_az([transitional, "PowerState/running"])
+    provider.ensure_worker_running(controller, "vm-x")
+    starts = [i for i, c in enumerate(calls) if c[:2] == ["vm", "start"]]
+    assert not starts, (transitional, calls)
+
+# Both error paths must fail closed rather than report a running worker.
+provider.az, _ = make_az(["PowerState/deallocated"], fail_read=True)
+try:
+    provider.ensure_worker_running(controller, "vm-x")
+    raise AssertionError("an unreadable power state was treated as running")
+except provider.ProviderError as exc:
+    assert "unreadable" in str(exc), exc
+
+provider.az, _ = make_az(["PowerState/deallocated", "PowerState/deallocated"], fail_start=True)
+try:
+    provider.ensure_worker_running(controller, "vm-x")
+    raise AssertionError("a failed start was reported as success")
+except provider.ProviderError as exc:
+    assert "could not be started" in str(exc), exc
+
+# A create that fails AFTER this provider started the worker must put it back.
+# Otherwise it leaves billable compute the controller never records and the
+# reconcile loop never reclaims: it only deallocates a worker holding a release
+# proof, and a failed create holds none.
+deallocated = []
+
+
+def failing_build(controller, action):
+    raise provider.ProviderError("bootstrap exploded")
+
+
+provider.az, calls = make_az(["PowerState/deallocated", "PowerState/running"])
+provider.build_lifecycle_children = failing_build
+provider.expected_names = lambda controller, slot: {"vm": "vm-x"}
+try:
+    provider.create_lifecycle_children(controller, {"slot": 1})
+    raise AssertionError("the create swallowed its failure")
+except provider.ProviderError as exc:
+    assert "bootstrap exploded" in str(exc), exc
+assert [c for c in calls if c[:2] == ["vm", "deallocate"]], (
+    "a create that failed after starting the worker left it running", calls,
+)
+
+# THE CONVERGED EARLY RETURN. create_or_resume hands back an already-built
+# worker without ever reaching create_lifecycle_children, and the TTL schedule
+# deallocates idle workers daily, so this is the common shape, not the rare one.
+# Returning one as-is reports success while the controller marks the task
+# assigned; the NEXT action, execute, then hard-refuses deallocated compute, and
+# nothing recovers it because classify_worker only reports "deallocated" for a
+# worker holding a release proof. Guarding only the create path leaves exactly
+# the case the change exists for unguarded.
+existing_worker = {"slot": 1, "resources": {"vm": {"tags": {}}}}
+provider.az, calls = make_az(["PowerState/deallocated", "PowerState/running"])
+provider.inventory = lambda controller, include_metrics=True: {
+    "conflicts": [], "workers": [existing_worker],
+}
+provider.worker_by_slot = lambda snapshot, slot: existing_worker
+provider.recorded_exact = lambda action, existing: existing
+provider.expected_names = lambda controller, slot: {"vm": "vm-x"}
+provider.create_or_resume(controller, {"slot": 1, "bindings": {}})
+assert [c for c in calls if c[:2] == ["vm", "start"]], (
+    "a converged worker was returned while still deallocated, so the execute after it "
+    "refuses and nothing ever starts it", calls,
+)
+
+# And a create that did NOT start the worker must not deallocate it: that would
+# stop compute someone else is using.
+provider.az, calls = make_az(["PowerState/running"])
+try:
+    provider.create_lifecycle_children(controller, {"slot": 1})
+except provider.ProviderError:
+    pass
+assert not [c for c in calls if c[:2] == ["vm", "deallocate"]], (
+    "a create deallocated a worker it never started", calls,
+)
+print("OK")
+POWERGATE
+  if out=$(python3 "$tmp/driver.py" "$WORKER_PROVIDER" 2>&1); then status=0; else status=$?; fi
+  expect_code 0 "$status" "the worker power gate must hold: $out"
+  assert_contains "$out" "OK" "the power-gate driver did not complete: $out"
+  pass "the worker power gate reads, waits, starts and unwinds exactly once each"
+}
+
 run_guest_run_bound_check
 run_worker_os_disk_image_check
 
@@ -1242,9 +1383,27 @@ provider.upload_json_blob = recording_upload
 captured_az = []
 
 
+# The worker this create converges onto is DEALLOCATED, which is the ordinary
+# state of a worker whose TTL schedule has fired. The fixture MODELS THE
+# TRANSITION: a real `az vm start` makes the next power read report running, and
+# a fixture that keeps saying deallocated is not a stand-in for Azure, it is a
+# different machine that never boots.
+power_state = {"code": "PowerState/deallocated"}
+
+
 def recording_az(controller, args, check=True, timeout=None):
     captured_az.append((list(args), timeout))
+    if args[:2] == ["vm", "get-instance-view"]:
+        return [power_state["code"]], 0, ""
+    if args[:2] == ["vm", "start"]:
+        power_state["code"] = "PowerState/running"
+        return {}, 0, ""
     return {}, 0, ""
+
+
+# No real waiting in a hermetic test; the polling interval is production's
+# concern, not this case's.
+provider.VM_POWER_POLL_SECONDS = 0
 
 
 provider.az = recording_az
@@ -1277,6 +1436,29 @@ finally:
 # guest carries on, and the controller records a failed create for a VM that is
 # alive - which is the failure PROVIDER_CREATE_TIMEOUT_SECONDS is supposed to
 # prevent and cannot, from the outside, if the inner bound fires first.
+# Azure refuses run commands against stopped compute outright, and nothing else
+# in this provider can start a VM, so a create that does not start the worker it
+# converged onto wedges the slot with no owned way out.
+az_order = [args for args, _ in captured_az]
+start_indexes = [i for i, args in enumerate(az_order) if args[:2] == ["vm", "start"]]
+assert start_indexes, (
+    "the create never starts the deallocated worker it converged onto, so the bootstrap "
+    "below fails with OperationNotAllowed", [" ".join(a[:3]) for a in az_order],
+)
+guest_indexes = [
+    i for i, args in enumerate(az_order)
+    if args[:3] == ["vm", "run-command", "create"] or args[:3] == ["vm", "run-command", "update"]
+]
+assert guest_indexes and min(start_indexes) < min(guest_indexes), (
+    "the worker is started AFTER the first guest-facing call, which is the call that fails",
+    [" ".join(a[:3]) for a in az_order],
+)
+start_timeout = [timeout for args, timeout in captured_az if args[:2] == ["vm", "start"]][0]
+assert start_timeout is not None and start_timeout > provider.AZ_TIMEOUT_SECONDS, (
+    "starting a VM is an ARM power operation in minutes and cannot take the ordinary "
+    "control-plane bound", start_timeout,
+)
+
 run_commands = [
     (args, timeout) for args, timeout in captured_az
     if args[:3] == ["vm", "run-command", "create"]
@@ -1519,5 +1701,6 @@ PROVIDERBOUND
 
 run_create_replay_idempotence_check
 run_provider_action_bound_check
+run_worker_power_gate_check
 
 echo "# fm-azure-pilot.test.sh: all assertions passed"
