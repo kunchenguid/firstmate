@@ -22,8 +22,8 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
 
 # make_settle_fakebin <dir> builds a fake tmux whose `#{pane_current_path}`
 # query returns FM_FAKE_PANE_STALE for the first FM_FAKE_PANE_STALE_READS
-# calls, then FM_FAKE_PANE_PATH forever after - reproducing a pane that
-# transiently reports a stale cwd before settling into the real worktree.
+# calls, then briefly reports FM_FAKE_PANE_PATH before returning to the primary
+# shell cwd unless the spawn explicitly pins that shell in the acquired worktree.
 make_settle_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -37,10 +37,14 @@ case "$*" in
     [ -f "$countfile" ] && n=$(cat "$countfile")
     n=$((n + 1))
     printf '%s\n' "$n" > "$countfile"
-    if [ "$n" -le "${FM_FAKE_PANE_STALE_READS:-0}" ]; then
-      printf '%s\n' "${FM_FAKE_PANE_STALE:-}"
-    else
+    if [ -f "${FM_FAKE_PANE_PINNED_FILE:-}" ]; then
       printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    elif [ "$n" -le "${FM_FAKE_PANE_STALE_READS:-0}" ]; then
+      printf '%s\n' "${FM_FAKE_PANE_STALE:-}"
+    elif [ "$n" -le "$((FM_FAKE_PANE_STALE_READS + 2))" ]; then
+      printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    else
+      printf '%s\n' "${FM_FAKE_PRIMARY_PATH:-}"
     fi
     exit 0
     ;;
@@ -49,7 +53,13 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    case "$*" in
+      *"cd -- "*) touch "${FM_FAKE_PANE_PINNED_FILE:?FM_FAKE_PANE_PINNED_FILE unset}" ;;
+      *" -l "*) [ -f "${FM_FAKE_PANE_PINNED_FILE:-}" ] && launch_cwd=${FM_FAKE_PANE_PATH:-} || launch_cwd=${FM_FAKE_PRIMARY_PATH:-}; printf '%s\n' "$launch_cwd" > "${FM_FAKE_LAUNCH_CWD_FILE:?FM_FAKE_LAUNCH_CWD_FILE unset}" ;;
+    esac
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -64,13 +74,15 @@ SH
 # entirely, distinct from both the project and the worktree - mirroring the
 # live incident where the stale read was another real firstmate home).
 make_settle_case() {
-  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile
+  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile pinned launchcwd
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$home/projects/project"
   wt="$case_dir/wt"
   stale="$case_dir/stale-other-checkout"
   countfile="$case_dir/pane-call-count"
+  pinned="$case_dir/pane-pinned"
+  launchcwd="$case_dir/launch-cwd"
   fakebin=$(make_settle_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
@@ -79,11 +91,11 @@ make_settle_case() {
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
-  printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin|$countfile|$stale_reads"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$stale|$fakebin|$countfile|$stale_reads|$pinned|$launchcwd"
 }
 
 read_settle_record() {
-  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS <<EOF
+  IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS PINNED_FILE LAUNCH_CWD_FILE <<EOF
 $1
 EOF
 }
@@ -95,6 +107,8 @@ run_settle_spawn() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
+    FM_FAKE_PRIMARY_PATH="$PROJ_DIR" FM_FAKE_PANE_PINNED_FILE="$PINNED_FILE" \
+    FM_FAKE_LAUNCH_CWD_FILE="$LAUNCH_CWD_FILE" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$project" --mode no-mistakes --yolo off 2>&1
@@ -161,6 +175,8 @@ test_relative_project_records_launched_pane_cwd() {
     || fail "relative-project meta project '$meta_project' does not equal primary project '$PROJ_DIR'"
   [ "$meta_worktree" != "$meta_project" ] \
     || fail "relative-project meta collapsed worktree and project to '$meta_worktree'"
+  [ "$(cat "$LAUNCH_CWD_FILE")" = "$meta_worktree" ] \
+    || fail "relative-project launched pane cwd does not equal meta worktree '$meta_worktree'"
   assert_contains "$out" "worktree=$WT_DIR" \
     "relative-project success output did not report the launched pane cwd"
   pass "a relative projects/<repo> spawn records the launched pane cwd as worktree"

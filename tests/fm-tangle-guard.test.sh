@@ -125,16 +125,19 @@ test_bootstrap_line() {
 # The generated ship brief must carry the isolation assertion AHEAD of the
 # `git checkout -b` step, so the crewmate verifies its worktree before branching.
 test_brief_assertion_precedes_branch() {
-  local home brief iso br
+  local home brief iso br primary_real
   home="$TMP_ROOT/brief-home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/projects/alpha"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tangle-brief-cc3 alpha --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/tangle-brief-cc3/brief.md"
+  primary_real=$(cd "$home/projects/alpha" && pwd -P)
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "blocked: launched in primary checkout, not an isolated worktree" "$brief" \
     "brief is missing the isolation blocked-status contract"
-  assert_grep "Compare the physically resolved" "$brief" \
-    "brief must compare the worktree top-level with the primary clone path"
+  assert_grep "primary_clone='$primary_real'" "$brief" \
+    "brief must emit the resolved primary clone path"
+  assert_grep 'cd -- "$primary_clone" && pwd -P' "$brief" \
+    "brief must make the primary-clone comparison executable"
   assert_grep "A linked worktree normally has" "$brief" \
     "brief must explain that a linked worktree git-dir under the primary clone is normal"
   assert_no_grep "A reliable test that you are in a linked worktree" "$brief" \

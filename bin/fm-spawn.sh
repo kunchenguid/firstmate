@@ -2264,11 +2264,22 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
-# Freeze the endpoint-resolved path immediately after worktree acquisition and
-# validation. The caller's project argument can be the relative
-# projects/<repo> form, but metadata and launch composition must carry the live
-# pane path selected by treehouse, never reconstruct it from that input later.
-TASK_WORKTREE=$WT
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  TASK_WORKTREE=$WT
+  spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$TASK_WORKTREE")"
+  pinned=
+  for _ in $(seq 1 10); do
+    pinned=$(spawn_current_path "$WT_TARGET" || true)
+    [ -z "$pinned" ] || [ "$(real_path_or_raw "$pinned")" != "$(real_path_or_raw "$TASK_WORKTREE")" ] || break
+    sleep 0.5
+  done
+  if [ -z "$pinned" ] || [ "$(real_path_or_raw "$pinned")" != "$(real_path_or_raw "$TASK_WORKTREE")" ]; then
+    echo "error: task $ID's endpoint did not stay in acquired worktree '$TASK_WORKTREE' (resolved '${pinned:-unknown}'); refusing to publish metadata or launch in the primary checkout" >&2
+    exit 1
+  fi
+else
+  TASK_WORKTREE=$WT
+fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
