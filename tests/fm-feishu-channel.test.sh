@@ -472,6 +472,17 @@ for (const block of [tableBlock, quoteBlock, listBlock]) {
 }
 assert.throws(() => deterministicChunks(`${tableBlock}\n| ${"x".repeat(80)} | ready |`, 64), /complete Markdown construct/, "oversize table was split into invalid messages");
 
+const singleColumnTable = "| only |\n| --- |\n| alpha |\n| beta |";
+const singleColumnSource = ["Introduction paragraph text.", singleColumnTable, "Tail paragraph text."].join("\n\n");
+const singleColumnChunks = deterministicChunks(singleColumnSource, 48);
+assert(singleColumnChunks.length > 1, "single-column table fixture did not cross a chunk boundary");
+assert.equal(singleColumnChunks.join(""), singleColumnSource, "single-column table chunking changed output text");
+assert(singleColumnChunks.some((chunk) => chunk.includes(singleColumnTable)), "single-column GFM table was split across chunk boundaries");
+const bareDelimiterTable = "| only |\n---\n| alpha |";
+const bareDelimiterChunks = deterministicChunks(["Intro paragraph text.", bareDelimiterTable, "Tail paragraph text."].join("\n\n"), 40);
+assert(bareDelimiterChunks.some((chunk) => chunk.includes(bareDelimiterTable)), "bare-delimiter single-column GFM table was split across chunk boundaries");
+assert.throws(() => deterministicChunks(`| only |\n| --- |\n| ${"x".repeat(80)} |`, 64), /complete Markdown construct/, "oversize single-column table was split into invalid messages");
+
 const postSource = [
   "# Supported heading",
   "",
@@ -515,6 +526,17 @@ for (const supported of ["# Supported heading", tableBlock, quoteBlock, "- [x] t
 for (const literal of ["`$x^2 + y^2$`", "`<captain@example.test>`", "`[^safe]`", "`![diagram](img_v2_fixture)`", "`<at id=all></at>`", "```markdown\nSetext source\n=============\n```", "```markdown\n    printf 'indented code\\n'\n```", "```html\n<details>", "```html\n<section>", "```markdown\n[^safe]: Footnote destination.\n```"]) {
   assert(postRendered.includes(literal), `post Markdown rendering did not preserve unsupported source literally: ${literal}`);
 }
+for (const whitespaceIndented of ["hello\n    \nworld", "hello\n\t\nworld", "trailing\n    "]) {
+  const whitespaceRendered = renderFeishuPostMarkdown(whitespaceIndented);
+  for (const word of whitespaceIndented.split(/\s+/u).filter(Boolean)) {
+    assert(whitespaceRendered.includes(word), `post Markdown rendering lost ${word} around a whitespace-only indented line`);
+  }
+  assert.equal(renderFeishuPostMarkdown(whitespaceRendered), whitespaceRendered, "post Markdown rendering was not idempotent for whitespace-only indented lines");
+}
+const displayMathSource = "The result is $$E=mc^2$$ exactly.";
+const displayMathRendered = renderFeishuPostMarkdown(displayMathSource);
+assert(displayMathRendered.includes("`$$E=mc^2$$`"), "inline double-dollar display math was not preserved as one literal code span");
+assert.equal(renderFeishuPostMarkdown(displayMathRendered), displayMathRendered, "post Markdown rendering was not idempotent for inline double-dollar display math");
 const postRegistration = registerAssistantOutbound(home, {
   text: postSource,
   assistantEntryId: "0000001b",

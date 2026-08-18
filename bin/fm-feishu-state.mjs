@@ -1713,6 +1713,14 @@ function inlinePostMarkdown(text) {
         continue;
       }
     }
+    if (text[cursor] === "$" && text[cursor + 1] === "$" && !/\s/u.test(text[cursor + 2] ?? "")) {
+      end = findDelimited(text, cursor, "$$", "$$");
+      if (end >= 0) {
+        rendered += inlineLiteral(text.slice(cursor, end));
+        cursor = end;
+        continue;
+      }
+    }
     if (text[cursor] === "$" && text[cursor + 1] !== "$" && !/\s/u.test(text[cursor + 1] ?? "")) {
       for (let candidate = cursor + 1; candidate < text.length; candidate += 1) {
         if (text[candidate] === "\\") {
@@ -1774,7 +1782,8 @@ function rawHtmlBlockEnd(text, index) {
 }
 
 function indentedBlockEnd(text, index) {
-  if (!/^(?: {4}|\t)/u.test(lineAt(text, index).content)) return -1;
+  const first = lineAt(text, index);
+  if (first.content.trim().length === 0 || !/^(?: {4}|\t)/u.test(first.content)) return -1;
   let cursor = index;
   let contentEnd = index;
   while (cursor < text.length) {
@@ -1872,7 +1881,7 @@ function markdownTableEnd(text, index) {
   const header = lineAt(text, index);
   if (!header.content.includes("|") || header.end >= text.length) return -1;
   const delimiter = lineAt(text, header.end);
-  if (!/^ {0,3}\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/u.test(delimiter.content)) return -1;
+  if (!/^ {0,3}\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$/u.test(delimiter.content)) return -1;
   let cursor = delimiter.end;
   while (cursor < text.length) {
     const line = lineAt(text, cursor);
