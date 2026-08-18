@@ -1,7 +1,7 @@
 # Feishu channel verification
 
 This record contains current deterministic evidence for the optional Feishu current-Pi channel.
-The configuration-driven lifecycle was verified on 2026-08-12 against Pi `0.84.1` and the official Feishu Node SDK package metadata for `@larksuiteoapi/node-sdk` `1.73.0`.
+The configuration-driven lifecycle and outbound post Markdown path were verified on 2026-08-18 against Pi `0.84.2` and the official Feishu Node SDK package metadata for `@larksuiteoapi/node-sdk` `1.73.0`.
 
 ## Official SDK selection evidence
 
@@ -19,7 +19,8 @@ $ npm view @larksuiteoapi/node-sdk version dist-tags --json
 
 The package README's long-connection section documents `WSClient.start({ eventDispatcher })` with `EventDispatcher.register({ "im.message.receive_v1": ... })`.
 The package declarations expose `WSClient` lifecycle callbacks and `close()`, `Client.im.v1.chat.get`, `Client.im.v1.message.create`, and message `uuid` fields used for idempotency.
-The package README documents `msg_type: "interactive"` message cards with `elements: [{ tag: "markdown", content: ... }]`, which is the outbound rendering shape exercised below.
+The official message-create contract accepts `msg_type: "post"` with a JSON-stringified locale/content matrix, and the post content contract accepts an `md` element carrying Markdown text.
+The focused regression exercises the fixed `zh_cn` matrix with one row and one `{ "tag": "md", "text": ... }` element.
 The package is pinned in `package.json` and `package-lock.json`.
 No project dependency was installed into this worktree while recording this evidence.
 
@@ -41,7 +42,7 @@ $ bash tests/fm-feishu-channel.test.sh
 ok - native Pi steering, lock-contention recovery, state safety, and all-origin Assistant mirroring
 ok - local Pi bridge converges after delayed ownership and keeps only status and durable disable controls
 ok - secure config parsing and automatic Feishu lifecycle converge silently and fail closed
-ok - official-SDK long-connection transport is inert, identity-fenced, deduplicated, and durably serialized Markdown outbound
+ok - official-SDK long-connection transport is inert, identity-fenced, deduplicated, and durably serialized post Markdown outbound
 ```
 
 The first section uses disposable private homes and persisted fake Pi session headers.
@@ -49,7 +50,7 @@ It proves that the extension registers no TUI input, message-end, turn-start, or
 It proves that native TUI and ordinary Firstmate operational input do not enter Feishu state.
 It proves that accepted Feishu text is durably recorded and offered to Pi through native steer delivery with an exact session and generation fence.
 A separate live process holds the pairing lock beyond the normal acquisition wait while the public Pi lifecycle pump runs; the test proves one retry notice, pending-message preservation, automatic recovery after release, and one native-queue offer across repeated timer ticks.
-It separately proves stale dead-owner reclamation, refusal of a fresh dead owner during its grace period, malformed and unsafe lock refusal, non-retryable state-corruption shutdown, changed-generation refusal, marker reconciliation after exact resume, wrong-session suspension, event-ID and message-ID deduplication, allowlist and P2P refusal, finalized Assistant mirroring for Feishu, native TUI, and operational turns, pre-binding-history exclusion, exact `Captain, shipshape.`, `Captain，shipshape.`, and `船长，处理中。` exclusion with surrounding-whitespace normalization, close non-exact delivery, and local neutralization of a historical whitespace-carrying pending routine record, non-Assistant exclusion, restart deduplication, URL-, link-, code-span-, and code-block-preserving chunking, oversize-Markdown refusal, pre-persistence credential refusal, and private-state symlink and hardlink rejection.
+It separately proves stale dead-owner reclamation, refusal of a fresh dead owner during its grace period, malformed and unsafe lock refusal, non-retryable state-corruption shutdown, changed-generation refusal, marker reconciliation after exact resume, wrong-session suspension, event-ID and message-ID deduplication, allowlist and P2P refusal, finalized Assistant mirroring for Feishu, native TUI, and operational turns, pre-binding-history exclusion, exact `Captain, shipshape.`, `Captain，shipshape.`, and `船长，处理中。` exclusion with surrounding-whitespace normalization, close non-exact delivery, and local neutralization of a historical whitespace-carrying pending routine record, non-Assistant exclusion, restart deduplication, deterministic and idempotent post Markdown rendering, supported Markdown preservation, unsupported-source literal preservation, URL-, link-, code-span-, code-block-, table-, quote-, and list-preserving chunking, oversize-construct refusal, rendered-output resource refusal, pre-persistence credential refusal, and private-state symlink and hardlink rejection.
 
 The bridge lifecycle section reproduces the startup-order failure through the real Pi extension factories and their public lifecycle handlers.
 The initiating trigger is Pi's initial `session_start`; the masking condition is that Firstmate lock ownership becomes valid only after the bridge's first callback has returned; the visible symptom is an absent loaded marker with no pairing, binding, or transport.
@@ -61,14 +62,14 @@ The configuration lifecycle section drives `bin/fm-feishu-transport.sh config-ch
 It proves absent-config inertness without private state creation, strict key parsing, missing-field refusal, duplicate and unsupported-field refusal, exact `0600` enforcement, symlink and wrong-owner refusal, credential and P2P probing before binding mutation, silent first activation, unchanged-session idempotence, exact-session replacement with generation increment, prior-owner shutdown, stopped-transport recovery without generation churn, config-persisted disable, process-argument redaction, state-record redaction, and credential-rejection failure before binding state exists.
 
 The SDK section uses a local module implementing the documented `Client`, `WSClient`, and `EventDispatcher` calls.
-It proves unconfigured inertness, app-fingerprint refusal before SDK import, P2P verification before long-connection start, callback validation before durable ingress, reconnect callback handling, replay deduplication, canonical bound-chat SDK `message.create`, exact interactive-card Markdown encoding for special characters, multiline content, links, inline code, and fenced code, stable UUID retry, unsupported-response refusal without plain-text fallback, Retry-After preservation, outbound serialization, body-free health, and owner-verified graceful stop.
+It proves unconfigured inertness, app-fingerprint refusal before SDK import, P2P verification before long-connection start, callback validation before durable ingress, reconnect callback handling, replay deduplication, canonical bound-chat SDK `message.create`, the exact post locale/content matrix, supported and literal-preserved Markdown in the `md` element, routine-response zero-send with ordinary sibling delivery, stable UUID retry, unsupported-response refusal without card or plain-text fallback, Retry-After preservation, structured multi-chunk delivery, outbound single-flight serialization, body-free health, and owner-verified graceful stop.
 A sentinel executable on `PATH` proves the transport does not invoke the former command transport.
 
 ## Pi compatibility results
 
 ```console
 $ bash tests/fm-pi-primary-types.test.sh
-ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.1
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.2
 ```
 
 The check compiles the bridge, native-queue channel, watcher integration, turn-end integration, and shared state declarations with strict TypeScript settings against the installed Pi declarations.

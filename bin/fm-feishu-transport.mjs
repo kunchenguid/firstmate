@@ -234,10 +234,12 @@ function sdkFailureIsAuthentication(error) {
   return status === 401 || status === 403;
 }
 
-function renderMarkdownCard(markdown) {
+function renderMarkdownPost(markdown) {
   return JSON.stringify({
-    config: { wide_screen_mode: true },
-    elements: [{ tag: "markdown", content: markdown }],
+    zh_cn: {
+      title: "",
+      content: [[{ tag: "md", text: markdown }]],
+    },
   });
 }
 
@@ -249,8 +251,8 @@ async function sendOneOutbound(client, binding, ownerFence) {
   const payload = {
     data: {
       receive_id: claim.outbox.destination_chat_id,
-      content: renderMarkdownCard(claim.chunk.chunk),
-      msg_type: "interactive",
+      content: renderMarkdownPost(claim.chunk.chunk),
+      msg_type: "post",
       uuid: claim.chunk.idempotency_key,
     },
     params: { receive_id_type: "chat_id" },

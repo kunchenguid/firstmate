@@ -194,6 +194,7 @@ export function claimLiveSession(home: string, binding: BindingRecord, session: 
 export function releaseLiveSession(home: string, bindingId: string, ownerToken: string): boolean;
 export function ingressCounts(home: string): { pending: number; queued: number; delivered: number; other: number };
 export function assistantSecretPattern(text: string): string | null;
+export function renderFeishuPostMarkdown(text: string): string;
 export function deterministicChunks(text: string, maxBytes?: number): string[];
 export function registerAssistantOutbound(home: string, input: {
   text: string;
@@ -229,6 +230,8 @@ export interface OutboundClaim {
     binding_generation: number;
     destination_chat_id: string;
     text: string;
+    text_hash: string;
+    rendered_text_hash?: string;
     chunks: Array<{ index: number; count: number; chunk: string; chunk_hash: string; idempotency_key: string }>;
   };
   ledger: Record<string, unknown> & { attempt_id: string };
