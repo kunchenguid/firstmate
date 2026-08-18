@@ -913,6 +913,33 @@ Usage limit reached · continuing automatically at 3:00pm · esc to cancel
   pass "a Claude worker parked on the 5h session-limit banner reads paused, not working"
 }
 
+# Claude Code renders the auto-continue widget BELOW the composer box, so it is
+# the pane's very last line; the capture reaching the matcher has no trailing
+# newline. That last line must still be read as part of the composer region.
+test_no_run_claude_limit_widget_on_last_captured_line_paused() {
+  reset_fakes
+  local d; d=$(new_case claude-limit-last-line)
+  make_repo_on_branch "$d/wt" fm/feat-limitlast
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-limitlast.meta" "window=fm:fm-feat-limitlast" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT="You've hit your session limit · resets 2:30pm
+╭──────────────────────────────╮
+│ >                            │
+╰──────────────────────────────╯
+Usage limit reached · continuing automatically at 3:00pm · esc to cancel"
+  export FM_FAKE_BUSY_TEXT
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-limitlast)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-limitlast busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-limitlast)
+  assert_contains "$out" "state: paused" "a widget on the last captured line still overrides busy to paused"
+  assert_contains "$out" "continuing automatically at 3:00pm" "the detail quotes the widget on that last line"
+  pass "the limit widget on the pane's last captured line is not dropped"
+}
+
 # Same override for the 7-day weekly-limit banner (wLt.seven_day="weekly
 # limit" in the claude-cli 2.1.234 bundle - see fm_busy_claude_limit_banner's
 # header for the verified wording and its source).
@@ -2107,6 +2134,7 @@ test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_claude_session_limit_banner_paused
+test_no_run_claude_limit_widget_on_last_captured_line_paused
 test_no_run_claude_weekly_limit_banner_paused
 test_no_run_claude_ordinary_busy_tail_stays_working
 test_no_run_non_claude_harness_ignores_limit_banner_text

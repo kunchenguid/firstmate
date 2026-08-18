@@ -915,7 +915,7 @@ FM_BUSY_CLAUDE_LIMIT_REGION_LINES=${FM_BUSY_CLAUDE_LIMIT_REGION_LINES:-2}
 fm_busy_claude_composer_region() {
   local line top=-1 bottom=-1 idx=0 start end last
   local -a lines=()
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     lines+=("$line")
     case "$line" in
       *'╭'*|*'┌'*) top=$idx; bottom=-1 ;;
