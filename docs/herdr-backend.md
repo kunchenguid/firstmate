@@ -36,6 +36,7 @@ Real harness credential tests remain opt-in rather than part of default CI.
 ## Watching and task containers
 
 The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.
+The opt-in project topology described below instead puts each crewmate or scout task tab in its project's bound workspace.
 When the launcher has no Herdr workspace to inherit, the adapter maintains one durable home-labeled workspace instead.
 The primary home label is `firstmate`.
 A secondmate home label is `2ndmate-<secondmate-id>`, derived from its validated `.fm-secondmate-home` marker.
@@ -67,9 +68,38 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+## Project workspaces
+
+A home opts into per-project grouping by creating local gitignored `config/herdr-project-spaces` as an empty file or with the value `on`.
+The value `off` and an absent file preserve the existing flat or presentation behavior byte for byte.
+Values are compared with whitespace stripped and case ignored, and an unrecognized value warns and stays disabled rather than failing dispatch.
+The setting reaches only the Herdr backend and is inherited into secondmate homes through the normal configuration-convergence owner.
+
+When enabled, each project-resolvable crewmate or scout spawn uses the canonical spawn project directory and its registered project or repository basename.
+The workspace carries that project name as its cosmetic label and contains the ordinary `fm-<id>` task tabs for that project.
+Two tasks for one project therefore share one workspace as separate tabs, while different projects receive different workspaces.
+When both Herdr layout flags are enabled, `config/herdr-project-spaces` wins for project-resolvable crewmate and scout spawns, so no new disposable presentation workspace is created for those tasks.
+A task that still has a pending presentation journal from an earlier projected spawn runs the full journal recovery guard first, with or without grouping and whatever the current `config/herdr-presentation-spaces` value: a positively dead or agent-free projected endpoint proceeds under the existing recovery contract (exact bound reclaim when its metadata still binds it, ordinary placement otherwise), while a live or ambiguous one refuses the spawn, so a stale journal never admits a duplicate agent into a project workspace.
+A `--secondmate` spawn keeps its existing dedicated-home workspace behavior unchanged.
+
+Placement authority is the durable home-local `state/.herdr-project-space-<project-name>-<dir-hash>` binding, which records the canonical project directory, registered project name, named session, and exact workspace id.
+The `<dir-hash>` filename component is a stable short digest of the canonical project directory, so two projects that share a basename in different directories keep independent durable bindings instead of overwriting each other; the registered name remains only the cosmetic workspace label.
+Before every reuse, Firstmate validates that exact id live in the recorded named session and confirms its expected project label.
+A label is never searched, matched, or adopted, because Herdr does not enforce label uniqueness.
+If the exact workspace is missing, dead, renamed away from the registered project name, or bound to another project or named session, Firstmate creates a fresh workspace with `--no-focus` and records only the exact id returned by that create response.
+Two or more unrelated workspaces may carry the same label without affecting this decision; none is adopted without the exact durable binding.
+An unreadable or malformed binding, ambiguous live response, failed create, incomplete create response, unavailable placement lock, or failed atomic binding publication emits a warning and falls back to the existing flat placement instead of failing dispatch.
+
+The project binding chooses placement only and never becomes task, send, recovery, or cleanup authority.
+Normal task metadata continues to record the exact pane, tab, workspace, and named session for each worker.
+Cleanup and recovery therefore retain their existing behavior: they address only recorded panes, close only the exact task pane, never call `workspace close`, and never sweep or close a project workspace.
+Workspace and task-tab creation both use `--no-focus`, so grouping does not intentionally steal focus.
+
 ## Presentation spaces
 
 Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
+A project-resolvable spawn with `config/herdr-project-spaces` enabled uses its project workspace instead, even when presentation spaces are also enabled.
+A `--secondmate` spawn remains exempt from both child layouts and keeps its existing dedicated-workspace behavior.
 A home opts out by writing `off` into local gitignored `config/herdr-presentation-spaces`, and forces the projection on by writing `on`.
 An absent file leaves the choice to the version floor below, an empty file and the value `on` are both a deliberate opt-in, values are compared with whitespace stripped and case ignored, and an unrecognized value warns and follows the unconfigured default rather than failing a spawn over a purely visual setting.
 The empty file is the historical presence-based opt-in form, so every home that had already enabled the projection stays enabled with no migration step, and no previously enabled home can be turned off by the default or by the floor.

@@ -831,6 +831,148 @@ test_create_task_creates_with_no_focus_flag() {
   pass "fm_backend_herdr_create_task: tab create passes --no-focus"
 }
 
+# --- opt-in per-project workspaces -----------------------------------------
+
+test_project_spaces_flag_is_opt_in_and_presence_compatible() {
+  local dir config status
+  dir="$TMP_ROOT/project-spaces-config"; config="$dir/config"; mkdir -p "$config"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_project_spaces_enabled "$1"' "$ROOT" "$config"
+  status=$?
+  expect_code 1 "$status" "an absent project-spaces flag must preserve today's placement"
+  : > "$config/herdr-project-spaces"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_project_spaces_enabled "$1"' "$ROOT" "$config" \
+    || fail "an empty project-spaces file must opt in"
+  printf 'on\n' > "$config/herdr-project-spaces"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_project_spaces_enabled "$1"' "$ROOT" "$config" \
+    || fail "an explicit on must opt in"
+  printf 'off\n' > "$config/herdr-project-spaces"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_project_spaces_enabled "$1"' "$ROOT" "$config"
+  status=$?
+  expect_code 1 "$status" "an explicit off must disable project spaces"
+  pass "herdr project spaces: absence preserves existing placement while empty/on opt in"
+}
+
+test_project_workspace_create_reuse_and_project_separation() {
+  local dir state project_a project_b log fb out ws_a1 ws_a2 ws_b
+  dir="$TMP_ROOT/project-space-reuse"; state="$dir/home-state"; project_a="$dir/mf-website"; project_b="$dir/soul-site"
+  mkdir -p "$state" "$project_a" "$project_b"; log="$dir/log"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$dir/state.json" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_project_workspace_ensure fmtest "$1" "$3" mf-website || exit 1
+      ws_a1=$FM_BACKEND_HERDR_PROJECT_WS_ID
+      fm_backend_herdr_create_task "fmtest:$ws_a1" fm-task-a1 "$1" "$FM_BACKEND_HERDR_PROJECT_WS_SEEDED_TAB_ID" >/dev/null || exit 1
+      fm_backend_herdr_project_workspace_ensure fmtest "$1" "$3" mf-website || exit 1
+      ws_a2=$FM_BACKEND_HERDR_PROJECT_WS_ID
+      fm_backend_herdr_create_task "fmtest:$ws_a2" fm-task-a2 "$1" "$FM_BACKEND_HERDR_PROJECT_WS_SEEDED_TAB_ID" >/dev/null || exit 1
+      fm_backend_herdr_project_workspace_ensure fmtest "$2" "$3" soul-site || exit 1
+      ws_b=$FM_BACKEND_HERDR_PROJECT_WS_ID
+      fm_backend_herdr_create_task "fmtest:$ws_b" fm-task-b1 "$2" "$FM_BACKEND_HERDR_PROJECT_WS_SEEDED_TAB_ID" >/dev/null || exit 1
+      printf "%s %s %s\n" "$ws_a1" "$ws_a2" "$ws_b"
+    ' "$ROOT" "$project_a" "$project_b" "$state") || fail "project workspace create/reuse sequence failed"
+  read -r ws_a1 ws_a2 ws_b <<EOF
+$out
+EOF
+  [ "$ws_a1" = "$ws_a2" ] || fail "two tasks for one project did not reuse the exact bound workspace: $out"
+  [ "$ws_a1" != "$ws_b" ] || fail "two projects shared one workspace instead of receiving separate exact bindings"
+  [ "$(jq -r --arg w "$ws_a1" '[.tabs[] | select(.workspace_id == $w and (.label | startswith("fm-task-a")))] | length' "$dir/state.json")" = 2 ] \
+    || fail "project A did not retain two ordinary task tabs"
+  [ "$(jq -r '.workspaces | length' "$dir/state.json")" = 2 ] || fail "project grouping created an unexpected workspace count"
+  assert_contains "$(cat "$log")" $'workspace\x1fcreate\x1f--cwd\x1f'"$project_a"$'\x1f--label\x1fmf-website\x1f--no-focus' \
+    "project workspace creation did not use the registered project label and --no-focus"
+  pass "herdr project spaces: one project reuses one exact workspace while another project gets a separate workspace"
+}
+
+test_project_workspace_same_basename_projects_keep_stable_separate_bindings() {
+  local dir state project_a project_b log fb out ws_a1 ws_b1 ws_a2 ws_b2
+  dir="$TMP_ROOT/project-space-same-basename"; state="$dir/home-state"
+  project_a="$dir/clients/a/site"; project_b="$dir/clients/b/site"
+  mkdir -p "$state" "$project_a" "$project_b"; log="$dir/log"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$dir/state.json" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_project_workspace_ensure fmtest "$1" "$3" site || exit 1
+      ws_a1=$FM_BACKEND_HERDR_PROJECT_WS_ID
+      fm_backend_herdr_project_workspace_ensure fmtest "$2" "$3" site || exit 1
+      ws_b1=$FM_BACKEND_HERDR_PROJECT_WS_ID
+      fm_backend_herdr_project_workspace_ensure fmtest "$1" "$3" site || exit 1
+      ws_a2=$FM_BACKEND_HERDR_PROJECT_WS_ID
+      fm_backend_herdr_project_workspace_ensure fmtest "$2" "$3" site || exit 1
+      ws_b2=$FM_BACKEND_HERDR_PROJECT_WS_ID
+      printf "%s %s %s %s\n" "$ws_a1" "$ws_b1" "$ws_a2" "$ws_b2"
+    ' "$ROOT" "$project_a" "$project_b" "$state") || fail "same-basename alternating ensure sequence failed"
+  read -r ws_a1 ws_b1 ws_a2 ws_b2 <<EOF
+$out
+EOF
+  [ "$ws_a1" != "$ws_b1" ] || fail "two same-basename projects shared one workspace: $out"
+  [ "$ws_a1" = "$ws_a2" ] || fail "alternating spawns churned project A's exact binding: $out"
+  [ "$ws_b1" = "$ws_b2" ] || fail "alternating spawns churned project B's exact binding: $out"
+  [ "$(jq -r '.workspaces | length' "$dir/state.json")" = 2 ] \
+    || fail "same-basename projects did not stabilize on exactly two workspaces"
+  [ "$(find "$state" -name '.herdr-project-space-site-*' | wc -l | tr -d ' ')" = 2 ] \
+    || fail "same-basename projects did not keep two independent durable binding files"
+  pass "herdr project spaces: same-basename projects keep stable independent path-keyed bindings"
+}
+
+test_project_workspace_stale_binding_creates_fresh_workspace() {
+  local dir state project log fb first second third tmp binding
+  dir="$TMP_ROOT/project-space-stale"; state="$dir/home-state"; project="$dir/mf-website"
+  mkdir -p "$state" "$project"; log="$dir/log"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  first=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$dir/state.json" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_project_workspace_ensure fmtest "$1" "$2" mf-website || exit 1; printf "%s\n" "$FM_BACKEND_HERDR_PROJECT_WS_ID"' \
+      "$ROOT" "$project" "$state") || fail "initial project workspace create failed"
+  tmp="$dir/state.json.tmp"
+  jq --arg w "$first" '.workspaces |= [.[] | select(.workspace_id != $w)] | .tabs |= [.[] | select(.workspace_id != $w)]' \
+    "$dir/state.json" > "$tmp" && mv "$tmp" "$dir/state.json"
+  second=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$dir/state.json" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_project_workspace_ensure fmtest "$1" "$2" mf-website || exit 1; printf "%s\n" "$FM_BACKEND_HERDR_PROJECT_WS_ID"' \
+      "$ROOT" "$project" "$state") || fail "stale binding did not create a fresh project workspace"
+  [ "$first" != "$second" ] || fail "a dead exact workspace binding was reused"
+  binding=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_project_binding_path "$1" mf-website "$2"' \
+    "$ROOT" "$state" "$project") || fail "binding path resolution failed"
+  case "$binding" in
+    "$state/.herdr-project-space-mf-website-"*) ;;
+    *) fail "binding filename is not keyed by project name plus directory hash: $binding" ;;
+  esac
+  [ "$(sed -n 's/^workspace_id=//p' "$binding")" = "$second" ] \
+    || fail "the stale binding was not atomically replaced with the fresh response id"
+  jq --arg w "$second" '(.workspaces[] | select(.workspace_id == $w) | .label) = "renamed-by-human"' \
+    "$dir/state.json" > "$tmp" && mv "$tmp" "$dir/state.json"
+  third=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$dir/state.json" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_project_workspace_ensure fmtest "$1" "$2" mf-website || exit 1; printf "%s\n" "$FM_BACKEND_HERDR_PROJECT_WS_ID"' \
+      "$ROOT" "$project" "$state") || fail "renamed binding did not create a fresh project workspace"
+  [ "$second" != "$third" ] || fail "a renamed-away exact workspace binding was reused"
+  pass "herdr project spaces: dead and renamed-away exact bindings create and record fresh workspaces"
+}
+
+test_project_workspace_never_adopts_by_colliding_label() {
+  local dir state project log fb out existing1 existing2 bound
+  dir="$TMP_ROOT/project-space-label-collision"; state="$dir/home-state"; project="$dir/mf-website"
+  mkdir -p "$state" "$project"; log="$dir/log"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$dir/state.json" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      one=$(fm_backend_herdr_cli fmtest workspace create --cwd "$1" --label mf-website --no-focus) || exit 1
+      two=$(fm_backend_herdr_cli fmtest workspace create --cwd "$1" --label mf-website --no-focus) || exit 1
+      existing1=$(printf "%s" "$one" | jq -r .result.workspace.workspace_id)
+      existing2=$(printf "%s" "$two" | jq -r .result.workspace.workspace_id)
+      fm_backend_herdr_project_workspace_ensure fmtest "$1" "$2" mf-website || exit 1
+      printf "%s %s %s\n" "$existing1" "$existing2" "$FM_BACKEND_HERDR_PROJECT_WS_ID"
+    ' "$ROOT" "$project" "$state") || fail "label-collision project create failed"
+  read -r existing1 existing2 bound <<EOF
+$out
+EOF
+  [ "$bound" != "$existing1" ] && [ "$bound" != "$existing2" ] \
+    || fail "project grouping adopted a same-labeled workspace without an exact binding: $out"
+  [ "$(jq -r '.workspaces | length' "$dir/state.json")" = 3 ] \
+    || fail "label collision did not leave both foreign workspaces untouched and create one bound workspace"
+  pass "herdr project spaces: duplicate labels are never discovery or adoption authority"
+}
+
 # --- default-on disposable presentation projection --------------------------
 
 # make_release_fakebin: a `herdr` stub whose only job is `status --json`, so the
@@ -4357,6 +4499,11 @@ test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
+test_project_spaces_flag_is_opt_in_and_presence_compatible
+test_project_workspace_create_reuse_and_project_separation
+test_project_workspace_same_basename_projects_keep_stable_separate_bindings
+test_project_workspace_stale_binding_creates_fresh_workspace
+test_project_workspace_never_adopts_by_colliding_label
 test_presentation_defaults_on_at_or_above_the_floor
 test_presentation_default_falls_back_below_the_floor
 test_presentation_unreadable_release_falls_back
