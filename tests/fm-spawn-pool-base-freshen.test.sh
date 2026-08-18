@@ -19,6 +19,9 @@
 # The remoteless skip must also be loud: these tests assert the spawn's real captured
 # output carries one NOTICE naming the project when the skip fires, and carries none
 # when an origin is configured, so an operator sees a project that lost its remote.
+# That notice prints before the clean-worktree check, so it is asserted to report the
+# skipped origin freshen and the local branch taken as the base authority rather than a
+# launch the later checks may still refuse.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -27,6 +30,8 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 REMOTELESS_NOTICE='NOTICE: project'
 REMOTELESS_NOTICE_REASON='has no origin remote configured'
+REMOTELESS_NOTICE_SKIP='skipping the origin freshen'
+REMOTELESS_NOTICE_AUTHORITY='as the base authority'
 TMP_ROOT=$(fm_test_tmproot fm-spawn-pool-base-freshen)
 
 make_spawn_fakebin() {
@@ -49,8 +54,20 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# Build a spawn case. <remote> is `origin` (the default) for an origin-backed project,
+# or `none` for a project that genuinely has no remote at all. Only the remote varies:
+# every other part of the fixture - the firstmate home layout, the project, and the
+# pooled worktree - is built here once, so a remoteless case cannot drift from an
+# origin-backed one when this fixture later grows another required file.
+# Either way the project's authoritative default branch is advanced one commit past
+# the pooled worktree's base, so a spawn that skips the refresh is as visible as one
+# that refuses. Echoes a record for read_case_record.
 make_case() {
-  local name=$1 id=$2 default=${3:-main} case_dir home project origin pool publisher fakebin initial
+  local name=$1 id=$2 default=${3:-main} remote=${4:-origin} case_dir home project origin pool publisher fakebin initial
+  case "$remote" in
+    origin|none) ;;
+    *) fail "make_case got an unknown remote '$remote'; expected 'origin' or 'none'" ;;
+  esac
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   project="$case_dir/project"
@@ -68,46 +85,32 @@ make_case() {
   printf 'base\n' > "$project/README.md"
   git -C "$project" add README.md
   git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
-  git clone --quiet --bare "$project" "$origin"
-  git -C "$project" remote add origin "file://$origin"
+  if [ "$remote" = origin ]; then
+    git clone --quiet --bare "$project" "$origin"
+    git -C "$project" remote add origin "file://$origin"
+  fi
   initial=$(git -C "$project" rev-parse HEAD)
   git -C "$project" worktree add --quiet --detach "$pool" "$initial"
 
-  git clone --quiet "file://$origin" "$publisher"
-  printf 'must survive a newly spawned branch\n' > "$publisher/advanced-main.txt"
-  git -C "$publisher" add advanced-main.txt
-  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
-  git -C "$publisher" push --quiet origin "$default"
+  if [ "$remote" = origin ]; then
+    git clone --quiet "file://$origin" "$publisher"
+    printf 'must survive a newly spawned branch\n' > "$publisher/advanced-main.txt"
+    git -C "$publisher" add advanced-main.txt
+    git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
+    git -C "$publisher" push --quiet origin "$default"
+  else
+    [ -z "$(git -C "$project" remote)" ] || fail "$name: fixture is not remoteless"
+    advance_local_default "$project" "$initial"
+  fi
 
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
 
 # A project with NO origin remote at all, as a local-only project may genuinely be.
-# Its local default branch is advanced past the pooled worktree's base, so a spawn
-# that skips the refresh entirely is as visible as one that refuses.
-# Echoes the same record layout as make_case.
+# Echoes the same record layout as make_case, because it is make_case.
 make_remoteless_case() {
-  local name=$1 id=$2 default=${3:-main} case_dir home project pool fakebin initial
-  case_dir="$TMP_ROOT/$name"
-  home="$case_dir/home"
-  project="$case_dir/project"
-  pool="$case_dir/pool"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake")
-
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  printf 'codex\n' > "$home/config/crew-harness"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
-  touch "$home/state/.last-watcher-beat"
-
-  git init --quiet -b "$default" "$project"
-  printf 'base\n' > "$project/README.md"
-  git -C "$project" add README.md
-  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
-  initial=$(git -C "$project" rev-parse HEAD)
-  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
-  advance_local_default "$project" "$initial"
-
-  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
+  local name=$1 id=$2 default=${3:-main}
+  make_case "$name" "$id" "$default" none
 }
 
 # Move the project's checked-out local default branch one commit past <base>, so a
@@ -264,11 +267,13 @@ test_remoteless_project_launches_from_local_default() {
   [ "$(printf '%s\n' "$notice" | grep -c .)" = 1 ] \
     || fail "the remoteless launch printed $(printf '%s\n' "$notice" | grep -c .) skip notices, not exactly one"
   assert_contains "$notice" "$REMOTELESS_NOTICE_REASON" \
-    "the remoteless NOTICE did not say why the fetch was skipped"
+    "the remoteless NOTICE did not say why the origin freshen was skipped"
+  assert_contains "$notice" "$REMOTELESS_NOTICE_SKIP" \
+    "the remoteless NOTICE did not say the origin freshen was skipped"
   assert_contains "$notice" "$(spawn_rendered_project_path)" \
     "the remoteless NOTICE did not name the project path"
-  assert_contains "$notice" "$DEFAULT_BRANCH" \
-    "the remoteless NOTICE did not name the local default branch launched from"
+  assert_contains "$notice" "LOCAL default branch '$DEFAULT_BRANCH' $REMOTELESS_NOTICE_AUTHORITY" \
+    "the remoteless NOTICE did not name the local default branch it took as the base authority"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed remoteless notice: %s\n' "$notice"
     printf '# observed remoteless spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
@@ -316,6 +321,39 @@ test_remoteless_project_without_a_local_default_refuses() {
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved the pooled worktree while refusing an unresolvable local default branch"
   pass "a remoteless project with no resolvable default branch still refuses"
+}
+
+# The notice fires while the base ref is being resolved, ahead of the clean-worktree
+# and reset checks, so it may only claim what is already true at that moment. A
+# remoteless spawn into a dirty pool is where that matters: the notice still prints,
+# and the spawn still refuses, so a notice that announced a launch would have lied.
+test_remoteless_notice_survives_a_later_refusal() {
+  local rec id out status before notice
+  id='pool-no-remote-dirty-r6'
+  rec=$(make_remoteless_case no-remote-dirty "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded into a dirty remoteless pooled worktree"
+  assert_contains "$out" "is not clean" \
+    "spawn did not clearly refuse a dirty remoteless pooled worktree"
+  assert_not_contains "$out" "spawned $id" "a refused remoteless spawn reported a launch"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a dirty remoteless pooled worktree"
+  notice=$(remoteless_notice_lines "$out")
+  [ "$(printf '%s\n' "$notice" | grep -c .)" = 1 ] \
+    || fail "a refused remoteless spawn did not print exactly one skip notice"
+  assert_contains "$notice" "$REMOTELESS_NOTICE_SKIP" \
+    "the notice printed ahead of a refusal did not report the skipped origin freshen"
+  assert_contains "$notice" "$REMOTELESS_NOTICE_AUTHORITY" \
+    "the notice printed ahead of a refusal did not report the local branch as the base authority"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed notice before refusal: %s\n' "$notice"
+  fi
+  pass "the remoteless notice reports only the skip, so it stays true when the spawn then refuses"
 }
 
 test_direct_pr_and_scout_refresh_before_launch() {
@@ -398,5 +436,6 @@ test_unreachable_origin_refuses_stale_pool_base
 test_remoteless_project_launches_from_local_default
 test_remoteless_scout_launches_from_local_default
 test_remoteless_project_without_a_local_default_refuses
+test_remoteless_notice_survives_a_later_refusal
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

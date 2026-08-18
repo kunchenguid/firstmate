@@ -142,8 +142,11 @@
 #   genuinely be - has no remote history to be stale against, so its LOCAL default
 #   branch is the authority: the fetch is skipped and the worktree resets to that
 #   local tip instead of refusing. Taking that path is never silent - it prints one
-#   loud NOTICE naming the project and the local branch launched from, so a project
-#   that lost a remote it was meant to have is visible rather than assumed local-only.
+#   loud NOTICE naming the project and stating that the origin freshen is skipped and
+#   that the named LOCAL default branch is the base authority, so a project that lost a
+#   remote it was meant to have is visible rather than assumed local-only. The notice
+#   reports the skip only; the clean-worktree and reset checks below still apply and
+#   can refuse afterwards.
 #   Only a genuinely absent remote takes that path; a configured origin that cannot
 #   be fetched still refuses exactly as above.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
@@ -1743,8 +1746,11 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 # so any fetch or resolution failure refuses. With NO origin configured - which a
 # local-only project may genuinely be - there is no remote history to be stale
 # against, so the LOCAL default branch is authoritative and nothing needs fetching.
-# The skip is never silent: taking it prints one loud NOTICE naming the project, so
-# an operator sees a project that lost a remote it was meant to have.
+# The skip is never silent: taking it prints one loud NOTICE, so an operator sees a
+# project that lost a remote it was meant to have. The notice reports only what is
+# already true when it prints - the freshen was skipped and the local branch is the
+# base authority - because the caller's clean-worktree and reset checks run after
+# this resolution and can still refuse. The script header owns its exact mechanics.
 spawn_worktree_base_ref() {  # <worktree>
   local worktree=$1 default
   if ! git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
@@ -1752,7 +1758,7 @@ spawn_worktree_base_ref() {  # <worktree>
       echo "error: could not determine the local default branch for pooled worktree '$worktree' of a project with no origin remote; refusing to launch from a potentially stale base" >&2
       return 1
     }
-    echo "NOTICE: project '$PROJ_ABS' has no origin remote configured - launching from its LOCAL default branch '$default' (pooled worktree '$worktree') without fetching, because no remote history exists to be stale against. If this project is meant to have a remote, restore it before shipping." >&2
+    echo "NOTICE: project '$PROJ_ABS' has no origin remote configured - skipping the origin freshen for pooled worktree '$worktree' and taking its LOCAL default branch '$default' as the base authority, because no remote history exists to be stale against. If this project is meant to have a remote, restore it before shipping." >&2
     printf '%s\n' "refs/heads/$default"
     return 0
   fi
