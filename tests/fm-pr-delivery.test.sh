@@ -633,8 +633,8 @@ test_show_blocked_queue() {
   home=$(make_world showq)
   fixture="$TMP_ROOT/fix-show"
   setup_project "$home" "$fixture"
-  write_open "$fixture" acme/alpha '[{"number":2,"url":"https://github.com/acme/alpha/pull/2","headRefName":"fm/hold2","headRefOid":"iii","baseRefName":"main","reviewDecision":"","mergeable":"CONFLICTING","statusCheckRollup":[]}]'
-  write_view "$fixture" acme/alpha 2 '{"number":2,"url":"https://github.com/acme/alpha/pull/2","headRefName":"fm/hold2","headRefOid":"iii","baseRefName":"main","reviewDecision":"","mergeable":"CONFLICTING","statusCheckRollup":[],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_open "$fixture" acme/alpha '[{"number":2,"url":"https://github.com/acme/alpha/pull/2","headRefName":"fm/hold2","headRefOid":"iii","baseRefName":"main","reviewDecision":"","mergeable":"CONFLICTING","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/alpha 2 '{"number":2,"url":"https://github.com/acme/alpha/pull/2","headRefName":"fm/hold2","headRefOid":"iii","baseRefName":"main","reviewDecision":"","mergeable":"CONFLICTING","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/hold2.meta" \
     'window=fm-hold2' "worktree=$home/projects/hold2" 'project=alpha' \
     'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
