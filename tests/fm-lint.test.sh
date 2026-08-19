@@ -240,14 +240,109 @@ test_ci_invokes_the_owner() {
 
 test_codebase_pipeline_invokes_the_owner() {
   local pipeline="$ROOT/.codebase/pipelines/ci.yaml"
+  local expected_proxy expected_lint
+  expected_proxy="https_proxy=\$relay http_proxy=\$relay bin/fm-install-actionlint.sh"
+  expected_lint="PATH=\"/opt/firstmate/actionlint/bin:\$PATH\" bin/fm-lint.sh"
   assert_present "$pipeline" "the Codebase pipeline is missing"
-  grep -Eq '^ +- bin/fm-lint\.sh$' "$pipeline" \
-    || fail "the Codebase lint job must invoke the one-owner script"
+  grep -Fq 'bin/fm-install-actionlint.sh /opt/firstmate/actionlint/bin' "$pipeline" \
+    || fail "the Codebase lint job must install pinned actionlint in its isolated tool path"
+  grep -Fq "$expected_proxy" "$pipeline" \
+    || fail "the Codebase actionlint install must use the same relay proxy as ShellCheck"
+  grep -Fq "$expected_lint" "$pipeline" \
+    || fail "the Codebase lint job must expose its isolated actionlint to the one-owner script"
+  assert_no_grep 'fm-install-actionlint\.sh /usr/local/bin' "$pipeline" \
+    "the Codebase actionlint install must not share ShellCheck's destination"
   # `shellcheck --version` in the install step is fine; re-spelling the file set
   # is what drifts.
   assert_no_grep 'shellcheck bin/' "$pipeline" \
     "the Codebase pipeline must call fm-lint.sh, not re-spell its globs inline"
-  pass "Codebase MR pipeline calls the one-owner script, not an inline command"
+  pass "Codebase MR pipeline installs both pinned linters without path collision and calls the one owner"
+}
+
+test_codebase_behavior_setup_installs_actionlint() {
+  local tmp fixture_bin fakebin log out rc
+  tmp=$(fm_test_tmproot fm-codebase-setup-actionlint)
+  fixture_bin="$tmp/bin"
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/actionlint-install.log"
+  mkdir -p "$fixture_bin"
+  cp "$ROOT/bin/fm-ci-codebase-setup.sh" "$fixture_bin/"
+  cat > "$fixture_bin/fm-install-shellcheck.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fixture_bin/fm-install-actionlint.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n%s\n%s\n' "$1" "${https_proxy:-}" "${http_proxy:-}" > "$FM_TEST_ACTIONLINT_LOG"
+exit 73
+SH
+  cat > "$fixture_bin/fm-tasks-axi-lib.sh" <<'SH'
+FM_TASKS_AXI_MIN=1.0.0
+SH
+  chmod +x "$fixture_bin/fm-install-shellcheck.sh" "$fixture_bin/fm-install-actionlint.sh"
+  fm_fake_exit0 "$fakebin" apt-get install
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux 3.4\n'
+SH
+  cat > "$fakebin/ruby" <<'SH'
+#!/usr/bin/env bash
+printf 'ruby 3.0\n'
+SH
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+printf 'jq-1.7.1\n'
+SH
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+printf 'version: 0.11.0\n'
+SH
+  chmod +x "$fakebin/tmux" "$fakebin/ruby" "$fakebin/curl" "$fakebin/jq" "$fakebin/shellcheck"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_TEST_ACTIONLINT_LOG="$log" \
+    FM_CI_RELAY_PROXY=http://relay.test:8118 \
+    "$fixture_bin/fm-ci-codebase-setup.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 73 ] || fail "behavior setup did not reach the actionlint installer"$'\n'"$out"
+  [ "$(sed -n '1p' "$log")" = /opt/firstmate/actionlint/bin ] \
+    || fail "behavior setup did not keep actionlint in its isolated destination"
+  [ "$(sed -n '2p' "$log")" = http://relay.test:8118 ] \
+    || fail "behavior setup did not pass https_proxy to the actionlint installer"
+  [ "$(sed -n '3p' "$log")" = http://relay.test:8118 ] \
+    || fail "behavior setup did not pass http_proxy to the actionlint installer"
+  pass "Codebase behavior setup installs pinned actionlint through the relay in an isolated path"
+}
+
+test_codebase_behavior_lane_exposes_actionlint() {
+  local tmp fakebin log expected_path
+  tmp=$(fm_test_tmproot fm-codebase-lane-actionlint)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/runuser.log"
+  expected_path="/opt/node22/bin:/opt/firstmate/actionlint/bin:$fakebin:$PATH"
+  cat > "$fakebin/id" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fakebin/chown" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fakebin/runuser" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FM_TEST_RUNUSER_LOG"
+SH
+  chmod +x "$fakebin/id" "$fakebin/chown" "$fakebin/runuser"
+
+  PATH="$fakebin:$PATH" FM_TEST_RUNUSER_LOG="$log" \
+    "$ROOT/bin/fm-ci-codebase-lane.sh" --lane portable-parallel-1 \
+    || fail "behavior lane wrapper failed before invoking runuser"
+  grep -Fqx "PATH=$expected_path" "$log" \
+    || fail "behavior lane did not expose the independent actionlint path through runuser"
+  pass "Codebase behavior lane exposes pinned actionlint to tests that invoke fm-lint.sh"
 }
 
 test_nomistakes_invokes_the_owner() {
@@ -892,6 +987,8 @@ SH
 
 test_ci_invokes_the_owner
 test_codebase_pipeline_invokes_the_owner
+test_codebase_behavior_setup_installs_actionlint
+test_codebase_behavior_lane_exposes_actionlint
 test_nomistakes_invokes_the_owner
 test_list_files_reports_the_shell_inventory
 test_pins_an_explicit_version

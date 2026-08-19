@@ -46,9 +46,9 @@ jobs:
     image: hub.byted.org/codebase/ci_nodejs_20:latest
     timeout: 20
     steps:
-      # The pinned build, its checksum, and its version all belong to
-      # bin/fm-install-shellcheck.sh; only the relay proxy is added here,
-      # because github.com is not directly reachable from this runner.
+      # Each pinned build, checksum, and version belongs to its installer;
+      # only the relay proxy and separate destinations are added here because
+      # github.com is not directly reachable from this runner.
       - name: Install pinned ShellCheck
         commands:
           - |
@@ -56,6 +56,13 @@ jobs:
             relay=http://sys-proxy-rd-relay.byted.org:8118
             https_proxy=$relay http_proxy=$relay bin/fm-install-shellcheck.sh /usr/local/bin
             shellcheck --version
+      - name: Install pinned actionlint
+        commands:
+          - |
+            set -eu
+            relay=http://sys-proxy-rd-relay.byted.org:8118
+            https_proxy=$relay http_proxy=$relay bin/fm-install-actionlint.sh /opt/firstmate/actionlint/bin
+            /opt/firstmate/actionlint/bin/actionlint -version
       # Call the one owner of the lint definition rather than re-spelling its
       # globs here. This file's copy had drifted: it omitted control-root/, so
       # the scripts deployed to relay task hosts were never linted by the gate
@@ -64,7 +71,7 @@ jobs:
       # about the code. bin/fm-lint.sh also passes --norc, which this did not.
       - name: Shellcheck
         commands:
-          - bin/fm-lint.sh
+          - PATH="/opt/firstmate/actionlint/bin:$PATH" bin/fm-lint.sh
 
   # Deterministic proof that the portable parallel shards, the portable serial
   # shards, and the Herdr family together equal the complete tests/*.test.sh
