@@ -39,9 +39,8 @@ function lockOwnership(): LockOwnership {
   }
   if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
   if (lockPid === String(process.pid)) return "owned";
-  // A nested Pi command auto-discovers project extensions too. Its live primary
-  // ancestor owns the lock, but the nested process must not replace markers or
-  // claim lifecycle ownership that belongs to that primary process.
+  // Nested Pi commands also auto-discover project extensions. See
+  // docs/watcher-continuity.md#ownership for the exact lock-holder boundary.
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
