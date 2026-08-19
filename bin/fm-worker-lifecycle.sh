@@ -35,6 +35,7 @@
 #   fm-worker-lifecycle.sh proof-template --task <id> --task-generation <id>
 #   fm-worker-lifecycle.sh release --task <id> --task-generation <id> --proof-file <json>
 #   fm-worker-lifecycle.sh withdraw --task <id> --task-generation <id> --confirm-withdraw --confirm-subscription <uuid>
+#   fm-worker-lifecycle.sh abandon-claim --slot <n> --idempotency-key <sha256> --confirm-abandon --confirm-subscription <uuid>
 #   fm-worker-lifecycle.sh surrender --task <id> --task-generation <id> --reason <text> --output <json> --confirm-surrender --confirm-subscription <uuid>
 #   fm-worker-lifecycle.sh resume <exact recovery flags>
 #   fm-worker-lifecycle.sh steer <exact assignment flags>
@@ -49,7 +50,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 . "$SCRIPT_DIR/fm-cloud-state-lib.sh"
 
 case "${1:-}" in
-  request|release|resume|steer|execute|authority-receipt|capacity-reserve|capacity-reserve-shape|capacity-release)
+  request|release|resume|steer|execute|authority-receipt|capacity-reserve|capacity-reserve-shape|capacity-release|abandon-claim)
     fm_refuse_if_gate_agent
     exec python3 "$SCRIPT_DIR/fm-worker-lifecycle.py" "$@"
     ;;

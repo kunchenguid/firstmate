@@ -295,6 +295,7 @@ def environment():
         "state_dir": state_dir,
         "state_path": state_dir / "controller.json",
         "lock_path": state_dir / ".lock",
+        "slot_lock_dir": state_dir / "slots",
         "max_workers": max_workers,
         "cooldown_seconds": cooldown,
         "warm_idle": warm_idle,
@@ -344,6 +345,70 @@ def controller_lock(env):
             yield
         finally:
             _LOCK_STATE["held"] = False
+
+
+class SlotBusy(LifecycleError):
+    pass
+
+
+class SlotLease:
+    __slots__ = ("slot", "handle")
+
+    def __init__(self, slot, handle):
+        self.slot = slot
+        self.handle = handle
+
+
+@contextlib.contextmanager
+def slot_lease(env, slot):
+    """Exclusive claim on ONE slot's provider mutation, for the call's duration.
+
+    LOCK_NB is hardcoded here so no call site can choose otherwise: exactly one
+    lock in the system is ever waited on (the fleet lock), which makes deadlock
+    impossible even though the apply phase takes the fleet lock while holding
+    this one. The kernel drops it on process death, which is what makes a
+    crashed owner's claim drainable at once; a durable lease would wedge the
+    slot until manual repair, and a timed lease would have to exceed the
+    longest provider deadline, which is not a lease.
+    """
+    slot = str(slot)
+    if not slot.isdigit():
+        raise LifecycleError("slot lease requires one exact decimal slot")
+    env["slot_lock_dir"].mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(env["slot_lock_dir"], 0o700)
+    path = env["slot_lock_dir"] / "slot-{}.lock".format(slot)
+    with open(path, "a+", encoding="utf-8") as handle:
+        os.chmod(path, 0o600)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise SlotBusy("slot {} provider mutation is owned by a live process".format(slot))
+        yield SlotLease(slot, handle)
+
+
+def slot_lease_held(env, slot):
+    """Liveness display only: whether some live process holds this slot's lease."""
+    path = env["slot_lock_dir"] / "slot-{}.lock".format(str(slot))
+    if not path.exists():
+        return False
+    with open(path, "a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+
+
+def provider_mutate(env, action, lease):
+    """The only path to a provider mutation: a live lease on the exact slot."""
+    if not isinstance(lease, SlotLease) or lease.slot != str(action.get("slot")):
+        raise LifecycleError("provider mutation is not covered by its slot's lease")
+    response = _provider_call_raw(env, "mutate", action)
+    result = response.get("result")
+    if not isinstance(result, dict) or result.get("idempotency_key") != action["idempotency_key"]:
+        raise LifecycleError("provider mutation result is not bound to the exact idempotency key")
+    return result
 
 
 def empty_state(env):
@@ -563,6 +628,14 @@ def provider_action_timeout(action):
 
 
 def provider_call(env, operation, action=None):
+    if operation == "mutate":
+        # The only mutate path is provider_mutate, which requires a live slot
+        # lease; a bare mutate here is a call site the lock discipline missed.
+        raise LifecycleError("provider mutations go through provider_mutate with a slot lease")
+    return _provider_call_raw(env, operation, action)
+
+
+def _provider_call_raw(env, operation, action=None):
     request = {
         "schema": PROVIDER_REQUEST_SCHEMA,
         "operation": operation,
@@ -1128,6 +1201,8 @@ def action_id(action):
 
 
 def make_action(env, action_type, worker=None, item=None, **fields):
+    if action_type in ACTION_TYPES and worker is None:
+        raise LifecycleError("a provider mutation cannot be minted without its exact worker")
     action = {
         "type": action_type,
         "deployment_generation": env["deployment_generation"],
@@ -1296,10 +1371,21 @@ def apply_result_transactionally(env, state, action, result):
     state.update(working)
 
 
-def execute_action(env, state, action):
+def claim_pending(env, state, action):
+    """Durably claim one slot's provider mutation. Caller holds the fleet lock
+    AND the slot's lease; the claim's save must land before the provider is
+    called, or a crash there strands a cloud mutation with no replay owner."""
     slot = str(action.get("slot", ""))
     if not slot.isdigit():
         raise LifecycleError("provider mutation carries no exact slot")
+    existing = state["pending_actions"].get(slot)
+    if existing is not None and existing.get("idempotency_key") != action["idempotency_key"]:
+        # Overwriting a live claim silently discards its replay obligation:
+        # the first execution never lands in executions, its dedupe
+        # short-circuit never fires, and the guest command runs twice.
+        raise LifecycleError(
+            "slot {} still has an unapplied {} action; reconcile it first".format(
+                slot, existing.get("type", "provider")))
     # deepcopy is load-bearing, not hygiene: make_action aliases live state
     # into the action (action["request"] IS the queue entry; bindings and
     # resources are the worker's own dicts), and apply_action_result mutates
@@ -1307,13 +1393,69 @@ def execute_action(env, state, action):
     # hashed turns verify_state's self-hash check into a random wedge.
     state["pending_actions"][slot] = copy.deepcopy(action)
     save_state(env, state)
-    response = provider_call(env, "mutate", action)
-    result = response.get("result")
-    if not isinstance(result, dict) or result.get("idempotency_key") != action["idempotency_key"]:
-        raise LifecycleError("provider mutation result is not bound to the exact idempotency key")
+
+
+def apply_pending(env, action, result):
+    """Apply one mutation's result. Caller holds the fleet lock AND the lease.
+
+    The state is ALWAYS re-loaded here, never the caller's pre-call object:
+    the provider ran outside the fleet lock, and anything read before it may
+    already be stale.
+    """
+    state = load_state(env)
+    slot = str(action["slot"])
+    claimed = state["pending_actions"].get(slot)
+    if not isinstance(claimed, dict) or claimed.get("idempotency_key") != action["idempotency_key"]:
+        raise LifecycleError("durable claim for slot {} is no longer this action".format(slot))
     apply_result_transactionally(env, state, action, result)
     state["pending_actions"].pop(slot, None)
     save_state(env, state)
+    return state
+
+
+def drain_pending(env, slot=None, strict=True):
+    """Replay unapplied claims. Returns (drained_slots, refusals).
+
+    A claim whose owning process is still ALIVE is skipped, never replayed:
+    re-sending a key that is still in flight is the one thing the single
+    fleet lock used to make impossible, and the only new way this design
+    could create two cloud assignments for one key. Must not be called under
+    the fleet lock (controller_lock refuses re-entry).
+    """
+    with controller_lock(env):
+        snapshot = sorted(
+            (load_state(env).get("pending_actions") or {}).items(), key=lambda p: int(p[0]))
+    drained = []
+    refusals = []
+    for slot_key, action in snapshot:
+        if slot is not None and slot_key != str(slot):
+            continue
+        try:
+            with slot_lease(env, slot_key) as lease:
+                # The snapshot may be stale: another process can have applied
+                # this claim between the snapshot and this lease. Re-read
+                # before re-sending, or an already-applied key is mutated a
+                # second time for nothing and its absence then reads as a
+                # refusal.
+                with controller_lock(env):
+                    current = load_state(env).get("pending_actions", {}).get(slot_key)
+                if not isinstance(current, dict) or current.get("idempotency_key") != action.get("idempotency_key"):
+                    continue
+                result = provider_mutate(env, action, lease)
+                with controller_lock(env):
+                    apply_pending(env, action, result)
+            drained.append(slot_key)
+        except SlotBusy:
+            continue
+        except LifecycleError as exc:
+            if strict:
+                raise
+            with controller_lock(env):
+                clean = load_state(env)
+                record_refusal(clean, clean["workers"].get(slot_key), exc)
+                save_state(env, clean)
+            refusals.append({"type": "replay-refused", "slot": int(slot_key), "reason": str(exc)[:500]})
+    return drained, refusals
 
 
 def apply_action_result(env, state, action, result):
@@ -1418,24 +1560,14 @@ def apply_action_result(env, state, action, result):
         raise LifecycleError("unsupported provider mutation result: {}".format(action_type))
 
 
-def replay_pending(env, state):
-    drained = False
-    for slot in sorted(state.get("pending_actions") or {}, key=int):
-        action = state["pending_actions"][slot]
-        response = provider_call(env, "mutate", action)
-        result = response.get("result")
-        if not isinstance(result, dict) or result.get("idempotency_key") != action.get("idempotency_key"):
-            raise LifecycleError("replayed provider mutation is not idempotently bound")
-        apply_result_transactionally(env, state, action, result)
-        state["pending_actions"].pop(slot, None)
-        save_state(env, state)
-        drained = True
-    return drained
-
-
 def refresh_classifications(state, inventory, now=None):
     cloud = inventory_by_slot(inventory)
+    claimed = state.get("pending_actions") or {}
     for worker in state["workers"].values():
+        if str(worker["slot"]) in claimed:
+            # An unapplied mutation owns this slot; a display value derived
+            # from a record whose durable phase is not yet true would lie.
+            continue
         classification, note = classify_worker(worker, cloud.get(worker["slot"]), now=now)
         worker["last_classification"] = classification
         worker["classification_note"] = note
@@ -1460,7 +1592,16 @@ def next_reconcile_action(env, state, inventory, now=None):
     # Released work is the only path to ordinary destruction. With queued work,
     # reset immediately; otherwise deallocate first and honor the short cooldown.
     waiting = queued_items(state)
+    claimed = state.get("pending_actions") or {}
     for slot_key in sorted(state["workers"], key=int):
+        if slot_key in claimed:
+            # An unapplied mutation owns this slot, so its durable record is
+            # deliberately not yet the truth: delete-compute writes phase
+            # before it can raise, and reset marks the queue complete before
+            # parse_time can raise. The fleet-wide pre-drain used to make
+            # planning on such a record unreachable; this skip replaces that
+            # shield, and the post-convergence drain owns the replay.
+            continue
         worker = state["workers"][slot_key]
         current = cloud.get(worker["slot"])
         classification, note = classify_worker(worker, current, now=now)
@@ -1513,41 +1654,58 @@ def next_reconcile_action(env, state, inventory, now=None):
     return action
 
 
-def reconcile(env, state, apply, confirm_subscription):
+def reconcile(env, apply, confirm_subscription):
+    """One bounded convergence pass. Provider calls run OUTSIDE the fleet lock;
+    each iteration is (short hold: plan+claim) -> (no hold: mutate) ->
+    (short hold: re-read+apply). The drain of previously stranded claims runs
+    AFTER convergence, in command_reconcile: planning past a claimed slot is
+    safe (the planner skips it), so a wedged or hours-long replay can no
+    longer stop the fleet from converging, and the convergence work is
+    already durable when a drain blocks."""
     if apply and confirm_subscription != env["subscription"]:
         raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
-    if apply and replay_pending(env, state):
-        pass
     actions = []
+    inventory = None
     for _ in range(64):
-        response = provider_call(env, "inventory")
-        inventory = response["inventory"]
-        state["last_metrics"] = metrics_from_inventory(inventory)
-        refresh_classifications(state, inventory)
-        action = next_reconcile_action(env, state, inventory)
-        if action is None:
-            save_state(env, state)
-            return actions, inventory
-        if action.get("type") == "admission-refused":
-            actions.append(action)
-            save_state(env, state)
-            return actions, inventory
-        actions.append(action)
-        if not apply:
-            # Dry planning may have allocated an in-memory worker record. Do not
-            # persist or continue beyond the first mutation boundary.
-            if action["type"] == "create":
-                state["workers"].pop(str(action.get("slot")), None)
-                key = request_key(action["request"]["task"], action["request"]["task_generation"])
-                state["queue"][key]["status"] = "queued"
-            return actions, inventory
-        try:
-            execute_action(env, state, action)
-        except LifecycleError as exc:
-            worker = state["workers"].get(str(action.get("slot")))
-            record_refusal(state, worker, exc)
-            save_state(env, state)
-            raise
+        inventory = provider_call(env, "inventory")["inventory"]
+        with contextlib.ExitStack() as stack:
+            action = None
+            with controller_lock(env):
+                state = load_state(env)
+                state["last_metrics"] = metrics_from_inventory(inventory)
+                refresh_classifications(state, inventory)
+                action = next_reconcile_action(env, state, inventory)
+                if action is None:
+                    save_state(env, state)
+                    return actions, inventory
+                if action.get("type") == "admission-refused":
+                    actions.append(action)
+                    save_state(env, state)
+                    return actions, inventory
+                actions.append(action)
+                if not apply:
+                    # Dry planning may have allocated an in-memory worker
+                    # record. Do not persist or continue beyond the first
+                    # mutation boundary.
+                    if action["type"] == "create":
+                        state["workers"].pop(str(action.get("slot")), None)
+                        key = request_key(action["request"]["task"], action["request"]["task_generation"])
+                        state["queue"][key]["status"] = "queued"
+                    return actions, inventory
+                lease = stack.enter_context(slot_lease(env, action["slot"]))
+                claim_pending(env, state, action)
+            try:
+                result = provider_mutate(env, action, lease)
+                with controller_lock(env):
+                    apply_pending(env, action, result)
+            except LifecycleError as exc:
+                # NEVER the half-applied object: the refusal is recorded on a
+                # clean load, and the durable claim stays for the drain.
+                with controller_lock(env):
+                    clean = load_state(env)
+                    record_refusal(clean, clean["workers"].get(str(action.get("slot"))), exc)
+                    save_state(env, clean)
+                raise
     raise LifecycleError("reconcile exceeded its bounded 64-action convergence allowance")
 
 
@@ -1733,7 +1891,8 @@ def status_projection(env, state, inventory=None):
         "retained_disks": retained_disks,
         "cleanup_refusals": state["cleanup_refusals"][-10:],
         "pending_mutations": [
-            {"slot": int(slot), "type": action.get("type")}
+            {"slot": int(slot), "type": action.get("type"),
+             "lease_held": slot_lease_held(env, slot)}
             for slot, action in sorted(
                 (state.get("pending_actions") or {}).items(), key=lambda p: int(p[0]))
         ],
@@ -1813,6 +1972,15 @@ def parser():
         help="acknowledge that recorded execute outcomes never proven landed are discarded",
     )
     surrender_parser.add_argument("--confirm-subscription", required=True)
+    abandon_parser = sub.add_parser(
+        "abandon-claim",
+        help="retire one slot's unapplied claim by replaying its mutation to completion first",
+    )
+    abandon_parser.add_argument("--slot", required=True)
+    abandon_parser.add_argument("--idempotency-key", required=True)
+    abandon_parser.add_argument("--confirm-abandon", action="store_true")
+    abandon_parser.add_argument("--confirm-subscription", required=True)
+
     reconcile_parser = sub.add_parser("reconcile", help="plan or apply bounded convergence")
     reconcile_parser.add_argument("--apply", action="store_true")
     reconcile_parser.add_argument("--confirm-subscription")
@@ -2018,9 +2186,12 @@ def public_action(action):
 
 
 def command_reconcile(env, args):
+    actions, inventory = reconcile(env, args.apply, args.confirm_subscription)
+    if args.apply:
+        drained, refusals = drain_pending(env, strict=False)
+        actions.extend(refusals)
     with controller_lock(env):
         state = load_state(env)
-        actions, inventory = reconcile(env, state, args.apply, args.confirm_subscription)
         status = status_projection(env, state, inventory)
     safe_actions = [public_action(action) for action in actions]
     output = {"actions": safe_actions, "status": status}
@@ -2030,6 +2201,8 @@ def command_reconcile(env, args):
         for action in safe_actions:
             if action["type"] == "admission-refused":
                 print("admission refused: {}".format(action["reason"]))
+            elif action["type"] == "replay-refused":
+                print("replay refused: slot={} {}".format(action.get("slot"), action["reason"]))
             else:
                 print("{}: slot={} generation={}".format(
                     action["type"], action.get("slot"),
@@ -2403,7 +2576,9 @@ def command_execute(env, args):
         account_manifest = staged_directory_manifest(
             "account", args.account_dir, total_bound=ACCOUNT_TOTAL_BOUND,
         )
-    with controller_lock(env):
+    inventory = provider_call(env, "inventory")["inventory"]
+    with contextlib.ExitStack() as stack:
+      with controller_lock(env):
         state = load_state(env)
         key = request_key(require_id("task", args.task), require_id("task generation", args.task_generation))
         item = state["queue"].get(key)
@@ -2414,7 +2589,6 @@ def command_execute(env, args):
             raise LifecycleError("execute assignment generation is not exact")
         if worker.get("release_proof") is not None:
             raise LifecycleError("released work cannot execute")
-        inventory = provider_call(env, "inventory")["inventory"]
         cloud = inventory_by_slot(inventory).get(worker["slot"])
         classification, reason = classify_worker(worker, cloud)
         if classification != "assigned":
@@ -2457,8 +2631,12 @@ def command_execute(env, args):
             env, "execute", worker=worker, request=request,
             request_digest=request["request_digest"], **staged,
         )
-        execute_action(env, state, action)
-        result = state["executions"][request["request_digest"]]
+        lease = stack.enter_context(slot_lease(env, worker["slot"]))
+        claim_pending(env, state, action)
+      mutation = provider_mutate(env, action, lease)
+      with controller_lock(env):
+        applied = apply_pending(env, action, mutation)
+        result = applied["executions"][request["request_digest"]]
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 
 
@@ -2782,17 +2960,100 @@ def write_surrender_output(path, proof):
     )
 
 
+def command_abandon_claim(env, args):
+    """Retire one slot's unapplied claim after proving its mutation is complete.
+
+    The lock discipline removed the old, unsafe exit from a wedged claim: a
+    second execute used to blind-overwrite the first, silently discarding its
+    replay obligation and running the guest twice. The sanctioned exit must
+    exist, because an apply can refuse a provider result deterministically
+    (a version-skewed supervisor answering an outcome-expected execute with no
+    outcome disposition is the recorded case), and the planner deliberately
+    skips a claimed slot, so release, reset, and every other lane stays
+    blocked behind the claim forever.
+
+    This command takes the slot lease (no live owner), REPLAYS the claim
+    itself and requires the provider result to bind the exact idempotency key
+    - proving the mutation is complete at the provider and its result is
+    final under key-idempotency - then attempts the ordinary apply. The proof
+    is obtained BY submitting: for a claim that never reached the provider,
+    the replay IS the first submission (abandoning a create builds the VM),
+    because dropping a claim of unknown provider-side status could strand a
+    resource that exists and is billing. An abandoned refused create leaves
+    its cloud resources to the ordinary planner, which now sees the slot. An apply
+    that succeeds ends the claim normally. An apply that refuses is recorded
+    verbatim, with the result digest, in cleanup_refusals before the claim is
+    cleared, so the abandonment preserves the evidence it retires.
+    """
+    if not args.confirm_abandon:
+        raise LifecycleError("--confirm-abandon is required")
+    if args.confirm_subscription != env["subscription"]:
+        raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
+    slot = str(args.slot)
+    if not slot.isdigit():
+        raise LifecycleError("abandon-claim requires one exact decimal slot")
+    with controller_lock(env):
+        state = load_state(env)
+        action = (state.get("pending_actions") or {}).get(slot)
+        if not isinstance(action, dict):
+            raise LifecycleError("slot {} holds no unapplied claim".format(slot))
+        if action.get("idempotency_key") != args.idempotency_key:
+            raise LifecycleError(
+                "slot {} holds a different claim; pass its exact idempotency key".format(slot))
+    with slot_lease(env, slot) as lease:
+        # The pre-lease read may be stale: a drain can have applied and
+        # cleared this claim between the check above and this lease. Re-read
+        # under the lease before re-sending, exactly as the drain does, so an
+        # already-applied key is never mutated again without a durable claim
+        # naming it.
+        with controller_lock(env):
+            current = (load_state(env).get("pending_actions") or {}).get(slot)
+        if not isinstance(current, dict) or current.get("idempotency_key") != action["idempotency_key"]:
+            raise LifecycleError("slot {} claim changed while abandoning; retry".format(slot))
+        result = provider_mutate(env, action, lease)
+        with controller_lock(env):
+            try:
+                apply_pending(env, action, result)
+                print("claim applied cleanly; nothing was abandoned")
+                return
+            except LifecycleError as exc:
+                refusal = exc
+            clean = load_state(env)
+            current = (clean.get("pending_actions") or {}).get(slot)
+            if not isinstance(current, dict) or current.get("idempotency_key") != action["idempotency_key"]:
+                raise LifecycleError("slot {} claim changed while abandoning; retry".format(slot))
+            worker = clean["workers"].get(slot)
+            record_refusal(clean, worker, LifecycleError(
+                "claim abandoned by operator: {} (result digest {})".format(
+                    str(refusal)[:400], result.get("result_digest") or digest_value(result))))
+            clean["pending_actions"].pop(slot, None)
+            save_state(env, clean)
+    print("FM-ABANDONED-CLAIM {} {}".format(slot, action["idempotency_key"]))
+    print("abandoned claim recorded in cleanup refusals; the slot plans normally again")
+
+
 def command_resume(env, args):
     if not args.confirm_resume:
         raise LifecycleError("--confirm-resume is required")
     if args.confirm_subscription != env["subscription"]:
         raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
     require_binding("repository binding", args.repository_binding)
+    key = request_key(require_id("task", args.task), require_id("task generation", args.task_generation))
+    # A stranded claim on THIS slot must replay before resume can judge the
+    # worker, and it must replay strictly: resume's preconditions are only
+    # meaningful against fully applied state for this worker. Slot-scoping
+    # keeps an unrelated slot's wedged or hours-long replay from blocking or
+    # failing this resume; apply only touches the owning slot's compartment.
     with controller_lock(env):
+        peek = load_state(env)
+        peek_item = peek["queue"].get(key)
+        resume_slot = str((peek_item or {}).get("slot", ""))
+    if resume_slot.isdigit():
+        drain_pending(env, slot=resume_slot, strict=True)
+    inventory = provider_call(env, "inventory")["inventory"]
+    with contextlib.ExitStack() as stack:
+      with controller_lock(env):
         state = load_state(env)
-        if state.get("pending_actions"):
-            replay_pending(env, state)
-        key = request_key(require_id("task", args.task), require_id("task generation", args.task_generation))
         item = state["queue"].get(key)
         if item is None or item.get("status") != "assigned":
             raise LifecycleError("resume requires one exact assigned task generation")
@@ -2803,7 +3064,6 @@ def command_resume(env, args):
             raise LifecycleError("released work cannot use dirty-task resume")
         if worker.get("bindings", {}).get("repository_binding") != args.repository_binding:
             raise LifecycleError("retained repository/task generation proof is not exact")
-        inventory = provider_call(env, "inventory")["inventory"]
         cloud = inventory_by_slot(inventory).get(worker["slot"])
         classification, reason = classify_worker(worker, cloud)
         if classification != "retained-for-investigation" or cloud is None:
@@ -2829,7 +3089,11 @@ def command_resume(env, args):
                 "reservation_usd": worker["reservation_usd"],
             }),
         )
-        execute_action(env, state, action)
+        lease = stack.enter_context(slot_lease(env, worker["slot"]))
+        claim_pending(env, state, action)
+      mutation = provider_mutate(env, action, lease)
+      with controller_lock(env):
+        apply_pending(env, action, mutation)
     print("replacement generation attached the exact retained task and account disks")
 
 
@@ -2839,7 +3103,9 @@ def command_steer(env, args):
     if args.confirm_subscription != env["subscription"]:
         raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
     request_digest = require_binding("steer request digest", args.request_digest)
-    with controller_lock(env):
+    inventory = provider_call(env, "inventory")["inventory"]
+    with contextlib.ExitStack() as stack:
+      with controller_lock(env):
         state = load_state(env)
         key = request_key(require_id("task", args.task), require_id("task generation", args.task_generation))
         item = state["queue"].get(key)
@@ -2848,22 +3114,26 @@ def command_steer(env, args):
         worker = state["workers"].get(str(item.get("slot")))
         if worker is None or worker["assignment_generation"] != args.assignment_generation:
             raise LifecycleError("steer assignment generation is not exact")
-        inventory = provider_call(env, "inventory")["inventory"]
         cloud = inventory_by_slot(inventory).get(worker["slot"])
         classification, reason = classify_worker(worker, cloud)
         if classification != "assigned":
             raise LifecycleError("steer refuses a non-assigned or ambiguous worker: {}".format(reason))
         action = make_action(env, "steer", worker=worker, request_digest=request_digest)
-        execute_action(env, state, action)
+        lease = stack.enter_context(slot_lease(env, worker["slot"]))
+        claim_pending(env, state, action)
+      mutation = provider_mutate(env, action, lease)
+      with controller_lock(env):
+        apply_pending(env, action, mutation)
     print("steer request digest delivered to the exact worker generation")
 
 
 def command_status(env, args):
+    inventory = None
+    if args.live:
+        inventory = provider_call(env, "inventory")["inventory"]
     with controller_lock(env):
         state = load_state(env)
-        inventory = None
-        if args.live:
-            inventory = provider_call(env, "inventory")["inventory"]
+        if inventory is not None:
             state["last_metrics"] = metrics_from_inventory(inventory)
             refresh_classifications(state, inventory)
             save_state(env, state)
@@ -2921,6 +3191,8 @@ def main(argv=None):
         command_withdraw(env, args)
     elif args.command == "surrender":
         command_surrender(env, args)
+    elif args.command == "abandon-claim":
+        command_abandon_claim(env, args)
     elif args.command == "resume":
         command_resume(env, args)
     elif args.command == "steer":

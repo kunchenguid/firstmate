@@ -236,7 +236,8 @@ bin/fm-worker-lifecycle.sh reconcile \
   --confirm-subscription "$FM_AZURE_SUBSCRIPTION_ID"
 ```
 
-One home lock serializes local state; unapplied provider actions are durable per slot in `pending_actions`, every load is fenced to the lock hold that commits it, and a save whose on-disk revision moved since its load refuses instead of overwriting another writer's document.
+The home lock now covers only short read-validate-claim and apply sections; every provider mutation runs outside it under a non-blocking per-slot lease, so mutations for different slots run concurrently while readers and unrelated mutations proceed. Unapplied provider actions are durable per slot in `pending_actions`, every load is fenced to the lock hold that commits it, and a save whose on-disk revision moved since its load refuses instead of overwriting another writer's document.
+Reconcile drains stranded claims AFTER convergence, skipping any slot whose claim a live process still owns, so a wedged or hours-long replay cannot stop the fleet; a claim whose provider result is final but whose apply deterministically refuses is retired only through `abandon-claim`, which replays the mutation itself under the lease, proves the result binds the exact idempotency key, and records the refusal verbatim before clearing the claim.
 Each reconcile refreshes Azure before selecting the next action and stops after 64 actions even if a provider never converges.
 A provider error preserves the slot's pending action and records a bounded cleanup refusal.
 The next controller process replays that exact action before considering new work.

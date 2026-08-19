@@ -1678,18 +1678,27 @@ env = {
     "provider_argv": ["/usr/bin/true"],
 }
 try:
-    lifecycle.provider_call(env, "mutate", {"type": "create"})
+    # provider_call refuses "mutate" outright under the lock discipline; the
+    # subprocess bound under test lives on the raw path every mutate reaches
+    # through provider_mutate.
+    banned = None
+    try:
+        lifecycle.provider_call(env, "mutate", {"type": "create"})
+    except lifecycle.LifecycleError as exc:
+        banned = exc
+    assert banned is not None and "slot lease" in str(banned), banned
+    lifecycle._provider_call_raw(env, "mutate", {"type": "create"})
     create_timeout = captured["timeout"]
-    lifecycle.provider_call(
+    lifecycle._provider_call_raw(
         env, "mutate", {"type": "execute", "request": {"wall_seconds": 3600}}
     )
     execute_timeout = captured["timeout"]
 finally:
     lifecycle.subprocess.run = _real_run
 
-assert create_timeout >= 900, ("provider_call did not bound a create by its action", create_timeout)
+assert create_timeout >= 900, ("the raw provider path did not bound a create by its action", create_timeout)
 assert execute_timeout >= 3600 + 1800, (
-    "provider_call did not bound an execute by its guest run", execute_timeout,
+    "the raw provider path did not bound an execute by its guest run", execute_timeout,
 )
 print("OK")
 PROVIDERBOUND

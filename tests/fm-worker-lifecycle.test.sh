@@ -59,7 +59,8 @@ for marker in (
     "SPECIALIZED_SHAPE_VCPUS = 40", "SHARED_HEADROOM_VCPUS = 22", "MAX_WORKERS = 16",
     'FM_AZURE_WORKER_WARM_IDLE currently must remain zero', "pending_action",
     "pending_actions", "LEGACY_PENDING_SENTINEL", "superseded-by-pending-actions",
-    "revision moved from", "FencedState",
+    "revision moved from", "FencedState", "slot_lease", "LOCK_NB", "provider_mutate",
+    "drain_pending", "claim_pending", "apply_pending", "command_abandon_claim",
     "capacity-reserve", "capacity-reserve-shape", "capacity-release", "merged_specialized_reservations",
     "command_withdraw", "command_surrender", "WORKER AUTHORITY REFUSED",
     "--confirm-discard-unlanded",
@@ -792,9 +793,38 @@ import os
 from pathlib import Path
 import sys
 
+import fcntl
+
 path = Path(os.environ["FIXTURE_STATE"])
 request = json.load(sys.stdin)
 controller = request["controller"]
+
+def barrier(action):
+    # A real kernel rendezvous, not a sleep: arrival is an O_EXCL file named
+    # by the idempotency key; release is a blocking FIFO read. It must not
+    # perturb the action payload, which the key check below re-derives, and it
+    # must run BEFORE the fixture state lock, or the first parked mutate would
+    # hold the lock and the second could never arrive.
+    barrier_dir = os.environ.get("FIXTURE_BARRIER_DIR")
+    if not barrier_dir:
+        return
+    kinds = os.environ.get("FIXTURE_BARRIER_TYPES", "").split(",")
+    if action.get("type") not in kinds:
+        return
+    arrived = Path(barrier_dir) / "arrived"
+    arrived.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(arrived / action["idempotency_key"]), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.close(fd)
+    with open(Path(barrier_dir) / "release", "r") as gate:
+        gate.read(1)
+
+if request["operation"] == "mutate":
+    barrier(request["action"])
+# The stub is not concurrency-safe without this: two concurrent mutates would
+# lose one another's read-modify-write and fire the create assertion below
+# spuriously, indistinguishable from a controller bug.
+lock_handle = open(str(path) + ".lock", "a+")
+fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
 if path.exists():
     state = json.loads(path.read_text())
 else:
@@ -1201,6 +1231,32 @@ skewed = armed_execute(
     command="/bin/echo",
 )
 assert skewed.returncode != 0 and "no outcome disposition" in skewed.stderr, skewed.stderr
+
+# The skewed execute left a durable claim, and its apply refuses
+# deterministically (the provider result is final under key-idempotency), so
+# the slot is deliberately wedged: a different execute refuses instead of
+# blind-overwriting the claim, which is the double-run defect this discipline
+# closes. The sanctioned exit is abandon-claim, which replays the mutation
+# itself, proves the result binds the exact key, records the refusal with the
+# result digest, and only then clears the claim.
+skew_state = controller_state()
+skew_slot = str(skew_state["queue"]["task-2@gen-2"]["slot"])
+skew_claim = skew_state["pending_actions"][skew_slot]
+blocked = armed_execute(
+    "--payload-dir", str(payload_dir), "--account-dir", str(account_dir),
+    "--outcome-dir", str(outcome_dir),
+)
+assert blocked.returncode != 0 and "still has an unapplied execute action" in blocked.stderr, blocked.stderr
+refused_abandon = run("abandon-claim", "--slot", skew_slot, "--idempotency-key", "f" * 64,
+                      "--confirm-abandon", "--confirm-subscription",
+                      env["FM_AZURE_SUBSCRIPTION_ID"], check=False)
+assert refused_abandon.returncode != 0 and "different claim" in refused_abandon.stderr, refused_abandon.stderr
+run("abandon-claim", "--slot", skew_slot, "--idempotency-key", skew_claim["idempotency_key"],
+    "--confirm-abandon", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+after_abandon = controller_state()
+assert skew_slot not in after_abandon["pending_actions"], after_abandon["pending_actions"]
+assert any("claim abandoned by operator" in str(entry.get("note", ""))
+           for entry in after_abandon["cleanup_refusals"]), after_abandon["cleanup_refusals"]
 armed = armed_execute(
     "--payload-dir", str(payload_dir), "--account-dir", str(account_dir),
     "--outcome-dir", str(outcome_dir),
@@ -2124,7 +2180,7 @@ moved = {
     }
     for kind in controller.REQUIRED_RESOURCE_KINDS
 }
-# A real minted action: execute_action now durably claims it, and the claim
+# A real minted action: the call-site sequence durably claims it, and the claim
 # must self-hash at save, so a fake key would make this unit die at the save
 # and never reach the moved-identity apply it exists to test.
 MINT_WORKER = dict(copy.deepcopy(WORKER), sku="sku", sku_family="fam",
@@ -2133,97 +2189,157 @@ action = controller.make_action(
     {"deployment_generation": "dep-one", "owner": "owner"}, "create",
     worker=MINT_WORKER, item={"task": "one", "task_generation": "spawn:aaaaaaaaaaaaaaaa"})
 
-# The provider is the only thing stubbed; execute_action itself is the real one.
-controller.provider_call = lambda environment, operation, payload: {
-    "result": {"idempotency_key": action["idempotency_key"],
-               "worker": {"slot": 1, "resources": moved}}
+# The provider is the only thing stubbed, at the RAW boundary below the
+# mutate ban; claim_pending, provider_mutate, apply_pending and drain_pending
+# are the real ones, driven in the exact call-site sequence.
+import contextlib as _ctx
+
+def _stub(resources):
+    def raw(environment, operation, payload):
+        return {"result": {"idempotency_key": payload["idempotency_key"],
+                           "worker": {"slot": 1, "resources": copy.deepcopy(resources)}}}
+    return raw
+
+good = {
+    kind: {
+        "id": "/subscriptions/s/resourceGroups/g/providers/x/{}".format(kind),
+        "immutable_id": "imm-{}".format(kind),
+        "tags": dict(TAGS),
+    }
+    for kind in controller.REQUIRED_RESOURCE_KINDS
 }
 
-with controller.controller_lock(env):
-    state = controller.load_state(env)
-    state["workers"]["1"] = copy.deepcopy(WORKER)
-    state["queue"][WORKER["queue_key"]] = {"status": "queued", "slot": None}
-    controller.save_state(env, state)
-    raised = None
+# The mutate ban: no call site can reach the provider without a lease.
+banned = None
+try:
+    controller.provider_call(env, "mutate", action)
+except controller.LifecycleError as error:
+    banned = error
+assert banned is not None and "slot lease" in str(banned), banned
+
+controller._provider_call_raw = _stub(moved)
+with _ctx.ExitStack() as stack:
+    with controller.controller_lock(env):
+        state = controller.load_state(env)
+        state["workers"]["1"] = copy.deepcopy(WORKER)
+        state["queue"][WORKER["queue_key"]] = {"status": "queued", "slot": None}
+        lease = stack.enter_context(controller.slot_lease(env, 1))
+        controller.claim_pending(env, state, action)
+
+    # The claim is durable BEFORE any provider call: a crash in the provider
+    # window leaves a replay obligation, proven from the file.
+    durable = json.loads(env["state_path"].read_text())
+    assert durable["pending_actions"]["1"]["idempotency_key"] == action["idempotency_key"], (
+        "claim_pending returned without a durable claim on its slot")
+
+    # A DIFFERENT key on a claimed slot refuses: the blind overwrite that used
+    # to discard the first claim and run the guest twice is closed.
+    other = controller.make_action(
+        {"deployment_generation": "dep-one", "owner": "owner"}, "deallocate",
+        worker=MINT_WORKER)
+    with controller.controller_lock(env):
+        second = controller.load_state(env)
+        blocked = None
+        try:
+            controller.claim_pending(env, second, other)
+        except controller.LifecycleError as error:
+            blocked = error
+    assert blocked is not None and "still has an unapplied" in str(blocked), blocked
+
+    # A lease on the wrong slot never reaches the provider.
+    wrong = None
     try:
-        controller.execute_action(env, state, action)
+        controller.provider_mutate(env, dict(other, slot=2), lease)
     except controller.LifecycleError as error:
-        raised = error
-assert raised is not None, "execute_action accepted a moved identity"
+        wrong = error
+    assert wrong is not None and "slot's lease" in str(wrong), wrong
+
+    result = controller.provider_mutate(env, action, lease)
+    with controller.controller_lock(env):
+        raised = None
+        try:
+            controller.apply_pending(env, action, result)
+        except controller.LifecycleError as error:
+            raised = error
+assert raised is not None, "apply_pending accepted a moved identity"
 assert "identity" in str(raised) or "foreign" in str(raised) or "exact" in str(raised), (
     "the refusal was not the apply's; the unit degraded into testing something else", str(raised))
 
-# The crash-during-provider window: the durable claim must already be on disk
-# when the provider is called, or a crash there strands a cloud mutation with
-# no replay obligation. The file, not the caller's object, is the proof.
-durable = json.loads((env["state_path"]).read_text())
+# The failed apply changed NOTHING durable: the point-3 image (claim present,
+# worker untouched) is still exactly what the file holds.
+durable = json.loads(env["state_path"].read_text())
 assert durable["pending_actions"]["1"]["idempotency_key"] == action["idempotency_key"], (
-    "execute_action called the provider without a durable claim on its slot")
+    "a failed apply erased the durable replay obligation")
+assert durable["workers"]["1"]["phase"] == "creating"
+assert not durable["workers"]["1"]["resources"], (
+    "a failed apply left adopted resources on the durable record")
 
-def _boom(environment, operation, payload):
-    raise controller.LifecycleError("provider process modeled as crashing")
-controller.provider_call = _boom
-with controller.controller_lock(env):
-    crash_state = controller.load_state(env)
-    crashed = None
-    try:
-        controller.execute_action(env, crash_state, json.loads(json.dumps(action)))
-    except controller.LifecycleError as error:
-        crashed = error
-assert crashed is not None
-durable = json.loads((env["state_path"]).read_text())
+# drain_pending with strict=False records the refusal and RETAINS the claim;
+# the wedge stays visible instead of being silently discarded.
+drained, refusals = controller.drain_pending(env, strict=False)
+assert drained == [] and len(refusals) == 1 and refusals[0]["slot"] == 1, (drained, refusals)
+durable = json.loads(env["state_path"].read_text())
 assert durable["pending_actions"]["1"]["idempotency_key"] == action["idempotency_key"], (
-    "a crash during the provider call left no durable claim to replay")
-# And on the CALLER'S object after the earlier failed apply: a pop that moved
-# ahead of the apply would erase the replay obligation from the very object a
-# later refusal handler saves, silently wedging the slot instead of replaying.
-assert state["pending_actions"]["1"]["idempotency_key"] == action["idempotency_key"], (
-    "a failed apply left the caller's object without its slot's durable claim")
-controller.provider_call = lambda environment, operation, payload: {
-    "result": {"idempotency_key": action["idempotency_key"],
-               "worker": {"slot": 1, "resources": moved}}
-}
+    "a refused replay dropped the claim")
+assert any("provider mutation result" in str(entry.get("note", "")) or entry
+           for entry in durable["cleanup_refusals"])
 
-# The object the caller still holds, not the file. execute_action does not save
-# after a failed apply, so nothing reaches disk on this path either way; what
-# differs is that the in-place apply leaves the caller holding a worker record
-# carrying resources its create never got, and the very next thing a caller
-# does with that object may be to save it.
-assert state["workers"]["1"]["phase"] == "creating", state["workers"]["1"]["phase"]
-assert not state["workers"]["1"]["resources"], (
-    "execute_action left the caller holding the adopted resource set of a refused create"
-)
-assert state["queue"][WORKER["queue_key"]]["status"] == "queued", (
-    "execute_action left the caller holding a queue entry a refused create had assigned"
-)
+# With an honest provider result, the drain applies and clears the claim.
+controller._provider_call_raw = _stub(good)
+drained, refusals = controller.drain_pending(env, strict=False)
+assert drained == ["1"] and refusals == [], (drained, refusals)
+durable = json.loads(env["state_path"].read_text())
+assert durable["pending_actions"] == {}, "a successful apply left its claim behind"
+assert durable["workers"]["1"]["resources"], "the applied create adopted nothing"
 
-# The other call site. A restart replays whatever claim survived, and the
-# existing restart coverage only exercises the path where the replay succeeds,
-# where an in-place apply is indistinguishable from a transactional one.
+# Applying an action whose durable claim is GONE refuses on the fresh load:
+# without this, a caller that lost a race with the drain (or with an operator
+# abandon) would apply the same mutation's effects a second time.
 with controller.controller_lock(env):
-    replayed = controller.load_state(env)
-    replayed["workers"]["1"] = copy.deepcopy(WORKER)
-    replayed["queue"][WORKER["queue_key"]] = {"status": "queued", "slot": None}
-    # A real minted claim: verify_state re-derives the idempotency key from
-    # the stored bytes at save, so the fake used before this schema would
-    # make the document unsaveable and the unit vacuous.
-    mint_worker = dict(copy.deepcopy(WORKER), sku="sku", sku_family="fam",
-                       cloud_generation=1, cloud_instance_id=None, reservation_usd=1.0)
-    replay_action = controller.make_action(
-        {"deployment_generation": env["deployment_generation"], "owner": env["owner"]},
-        "create", worker=mint_worker,
-        item=replayed["queue"][WORKER["queue_key"]])
-    replayed["pending_actions"]["1"] = replay_action
-    controller.save_state(env, replayed)
-    raised = None
+    stale_apply = None
     try:
-        controller.replay_pending(env, replayed)
+        controller.apply_pending(env, action, {"idempotency_key": action["idempotency_key"],
+                                               "worker": {"slot": 1, "resources": good}})
     except controller.LifecycleError as error:
-        raised = error
-assert raised is not None, "replay_pending accepted a moved identity"
-assert not replayed["workers"]["1"]["resources"], (
-    "replay_pending left the caller holding the adopted resource set of a refused create"
-)
+        stale_apply = error
+assert stale_apply is not None and "no longer this action" in str(stale_apply), stale_apply
+
+# abandon-claim's under-lease re-read: a claim a concurrent drain applied
+# between abandon's pre-check and its lease must refuse WITHOUT re-sending
+# the mutation. The load sequence is substituted (present at the pre-check,
+# gone under the lease); the raw provider boundary asserts no call happens.
+import types as _types
+real_load = controller.load_state
+with controller.controller_lock(env):
+    seeded = real_load(env)
+    seeded["workers"]["1"] = copy.deepcopy(WORKER)
+    seeded["pending_actions"]["1"] = copy.deepcopy(action)
+    controller.save_state(env, seeded)
+loads = {"count": 0}
+def sequenced_load(environment):
+    loads["count"] += 1
+    state = real_load(environment)
+    if loads["count"] >= 2:
+        state["pending_actions"].pop("1", None)
+    return state
+def never_mutate(environment, operation, payload):
+    raise AssertionError("abandon re-sent a mutation after its claim was applied elsewhere")
+controller.load_state = sequenced_load
+controller._provider_call_raw = never_mutate
+raced = None
+try:
+    controller.command_abandon_claim(env, _types.SimpleNamespace(
+        slot="1", idempotency_key=action["idempotency_key"],
+        confirm_abandon=True, confirm_subscription=env["subscription"]))
+except controller.LifecycleError as error:
+    raced = error
+finally:
+    controller.load_state = real_load
+assert raced is not None and "changed while abandoning" in str(raced), raced
+with controller.controller_lock(env):
+    cleanup = real_load(env)
+    cleanup["pending_actions"].pop("1", None)
+    controller.save_state(env, cleanup)
 PY
 
   # An apply whose effects reach outside the slot it names is refused rather
@@ -2325,11 +2441,14 @@ with module.controller_lock(env):
         action = module.next_reconcile_action(env, state, inventory)
         state["pending_actions"][str(action["slot"])] = action
         module.save_state(env, state)
-        # The provider completed, but the controller process is modeled as
-        # dying before it durably applied the response.
-        module.provider_call(env, "mutate", action)
         actions.append(action)
 assert sorted(str(a["slot"]) for a in actions) == ["1", "2"]
+for action in actions:
+    # The provider completed, but the controller process is modeled as dying
+    # before it durably applied the response. Submission goes through the only
+    # legal mutate path: a live lease on the exact slot.
+    with module.slot_lease(env, action["slot"]) as lease:
+        module.provider_mutate(env, action, lease)
 
 with module.controller_lock(env):
     restarted = module.load_state(env)
@@ -2338,9 +2457,12 @@ with module.controller_lock(env):
     for action in actions:
         held = restarted["pending_actions"][str(action["slot"])]
         assert held["idempotency_key"] == action["idempotency_key"]
-    assert module.replay_pending(env, restarted) is True
-    assert restarted["pending_actions"] == {}
-    assert len(restarted["workers"]) == 2
+drained, refusals = module.drain_pending(env)
+assert sorted(drained) == ["1", "2"] and refusals == [], (drained, refusals)
+with module.controller_lock(env):
+    drained_state = module.load_state(env)
+    assert drained_state["pending_actions"] == {}
+    assert len(drained_state["workers"]) == 2
 fixture = json.loads(Path(os.environ["FIXTURE_STATE"]).read_text())
 for action in actions:
     matching = [call for call in fixture["calls"] if call["key"] == action["idempotency_key"]]
@@ -2790,7 +2912,7 @@ result = subprocess.run([wrapper, "status", "--json"], env=env, text=True,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 assert result.returncode == 0, result.stderr
 status = json.loads(result.stdout)
-assert status["pending_mutations"] == [{"slot": 1, "type": "create"}], status["pending_mutations"]
+assert status["pending_mutations"] == [{"slot": 1, "type": "create", "lease_held": False}], status["pending_mutations"]
 
 # A saving command makes the migration durable.
 result = subprocess.run([
@@ -2957,6 +3079,300 @@ PY
 }
 
 
+
+concurrent_mutations_do_not_serialize() {
+  local tmp provider fixture home envfile
+  fm_test_tmproot_into tmp fm-worker-concurrent
+  provider="$tmp/provider.py"
+  fixture="$tmp/provider-state.json"
+  home="$tmp/home"
+  mkdir -p "$home" "$tmp/barrier"
+  mkfifo "$tmp/barrier/release"
+  write_fixture_provider "$provider"
+  envfile="$tmp/env"
+  cat >"$envfile" <<EOF
+FM_HOME=$home
+FM_AZURE_SUBSCRIPTION_ID=$SUB
+FM_AZURE_DEPLOYMENT_GENERATION=dep-one
+FM_AZURE_OWNER_TAG=owner
+FM_AZURE_NAMING_PREFIX=fmtest
+FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0
+FM_WORKER_PROVIDER_COMMAND=python3 $provider
+FIXTURE_STATE=$fixture
+FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS=1
+FIXTURE_BARRIER_DIR=$tmp/barrier
+FIXTURE_BARRIER_TYPES=create
+EOF
+
+  FM_LIFECYCLE_CONTROLLER="$CONTROLLER" \
+  python3 - "$WRAPPER" "$envfile" "$fixture" "$tmp/barrier" <<'PY' || fail "two provider mutations did not run concurrently"
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+wrapper, envfile, fixture_path, barrier = sys.argv[1:]
+env = os.environ.copy()
+env["FM_LIFECYCLE_CONTROLLER"] = os.environ.get("FM_LIFECYCLE_CONTROLLER", "")
+for line in Path(envfile).read_text().splitlines():
+    key, value = line.split("=", 1)
+    env[key] = value
+foreground = dict(env)
+foreground.pop("FIXTURE_BARRIER_DIR", None)
+
+def run(*args, check=True, environment=None):
+    result = subprocess.run([wrapper] + list(args), env=environment or foreground,
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and result.returncode != 0:
+        raise AssertionError("{} failed: {}".format(args, result.stderr))
+    return result
+
+def binding(number):
+    return format(number, "064x")
+
+def request(number):
+    run(
+        "request", "--task", "task-{}".format(number), "--task-generation", "gen-{}".format(number),
+        "--home-binding", binding(1000 + number), "--account-binding", binding(2000 + number),
+        "--worktree-binding", binding(3000 + number), "--repository-binding", binding(4000 + number),
+        "--repository-generation", "repo-{}".format(number), "--owner-kind", "primary", "--eligible",
+    )
+
+def controller_state():
+    return json.loads((Path(env["FM_HOME"]) / "state/azure-workers/controller.json").read_text())
+
+def wait_for_arrivals(count, deadline_seconds):
+    # A failure DETECTOR only, never an assertion of timing.
+    arrived = Path(barrier) / "arrived"
+    deadline = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline:
+        if arrived.exists() and len(list(arrived.iterdir())) >= count:
+            return True
+        time.sleep(0.05)
+    return False
+
+request(1)
+request(2)
+
+# Two reconciles, each due to claim one create and park inside the provider.
+children = [
+    subprocess.Popen(
+        [wrapper, "reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]],
+        env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    for _ in range(2)
+]
+try:
+    # Load-bearing: under the old fleet-lock discipline the second caller
+    # blocks at LOCK_EX before it ever reaches the provider, so a second
+    # arrival is structurally unsatisfiable there.
+    assert wait_for_arrivals(2, 60), "second mutation never reached the provider while the first was parked"
+
+    state = controller_state()
+    pending = state["pending_actions"]
+    assert sorted(pending) == ["1", "2"], pending
+    generations = {entry["bindings"]["assignment_generation"] for entry in pending.values()}
+    assert len(generations) == 2, generations
+    assert sorted(state["workers"]) == ["1", "2"], sorted(state["workers"])
+    assert state["pending_action"] == "superseded-by-pending-actions"
+
+    # Readers and unrelated mutations proceed while both are parked.
+    status = json.loads(run("status", "--json").stdout)
+    held = {entry["slot"]: entry["lease_held"] for entry in status["pending_mutations"]}
+    assert held == {1: True, 2: True}, held
+    dry = run("reconcile", "--json")
+    assert json.loads(dry.stdout)["status"]["queue_depth"] >= 2
+    request(9)
+    run("withdraw", "--task", "task-9", "--task-generation", "gen-9", "--confirm-withdraw",
+        "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+
+    # The lease itself, against a LIVE cross-process holder: the parked child
+    # owns slot 1's lease, so a second taker must refuse with SlotBusy at
+    # once. This is the only behavioral pin the LOCK_NB discipline has; a
+    # blocking lease here deadlocks the fleet-lock/lease cycle the design
+    # rules out, so the probe runs in a bounded subprocess.
+    probe = subprocess.run(
+        [sys.executable, "-c", (
+            "import importlib.util, sys\n"
+            "spec = importlib.util.spec_from_file_location('c', sys.argv[1])\n"
+            "m = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(m)\n"
+            "env = m.environment()\n"
+            "try:\n"
+            "    with m.slot_lease(env, 1):\n"
+            "        print('ACQUIRED')\n"
+            "except m.SlotBusy as exc:\n"
+            "    print('BUSY:', exc)\n"
+        ), os.environ.get("FM_LIFECYCLE_CONTROLLER", "")],
+        env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+    assert probe.returncode == 0, probe.stderr
+    assert "BUSY:" in probe.stdout and "owned by a live process" in probe.stdout, (
+        "a live holder did not refuse a second lease taker immediately", probe.stdout, probe.stderr)
+
+    # A steer at a PARKED slot refuses without a third provider call: the
+    # queue entry is honestly still `assigning` while the create is in
+    # flight, so the earliest gate fires. (The claimed-slot refusal itself,
+    # "still has an unapplied ... action", is pinned at command level by the
+    # end-to-end skew scenario.)
+    arrivals_before = len(list((Path(barrier) / "arrived").iterdir()))
+    blocked = run("steer", "--task", "task-1", "--task-generation", "gen-1",
+                  "--assignment-generation", state["workers"]["1"]["assignment_generation"],
+                  "--request-digest", "a" * 64, "--confirm-steer",
+                  "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"], check=False)
+    assert blocked.returncode != 0 and "one exact assigned task generation" in blocked.stderr, blocked.stderr
+    assert len(list((Path(barrier) / "arrived").iterdir())) == arrivals_before
+finally:
+    with open(Path(barrier) / "release", "w") as gate:
+        gate.write("xx")
+    outcomes = [child.wait(timeout=120) for child in children]
+
+assert outcomes == [0, 0], [child.stderr.read() for child in children]
+state = controller_state()
+fixture = json.loads(Path(fixture_path).read_text())
+assert state["pending_actions"] == {}
+assert len(fixture["workers"]) == 2 and len(fixture["seen"]) == 2
+create_calls = [entry for entry in fixture["calls"] if entry["type"] == "create"]
+per_key = {}
+for entry in create_calls:
+    per_key[entry["key"]] = per_key.get(entry["key"], 0) + 1
+assert sorted(per_key.values()) == [1, 1], per_key
+assert state["revision"] > 2
+
+# Positive control: the same harness with ONE child must FAIL the two-arrival
+# wait, or the wait proves nothing about concurrency.
+for stale in (Path(barrier) / "arrived").iterdir():
+    stale.unlink()
+request(3)
+lone = subprocess.Popen(
+    [wrapper, "reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]],
+    env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+try:
+    assert not wait_for_arrivals(2, 5), "one child produced two arrivals; the detector is broken"
+finally:
+    with open(Path(barrier) / "release", "w") as gate:
+        gate.write("x")
+    assert lone.wait(timeout=120) == 0, lone.stderr.read()
+PY
+  pass "two slots' provider mutations run concurrently while readers and unrelated mutations proceed"
+}
+
+wedged_slot_does_not_stop_the_fleet() {
+  local tmp provider fixture home envfile
+  fm_test_tmproot_into tmp fm-worker-wedged
+  provider="$tmp/provider.py"
+  fixture="$tmp/provider-state.json"
+  home="$tmp/home"
+  mkdir -p "$home"
+  write_fixture_provider "$provider"
+  envfile="$tmp/env"
+  cat >"$envfile" <<EOF
+FM_HOME=$home
+FM_AZURE_SUBSCRIPTION_ID=$SUB
+FM_AZURE_DEPLOYMENT_GENERATION=dep-one
+FM_AZURE_OWNER_TAG=owner
+FM_AZURE_NAMING_PREFIX=fmtest
+FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0
+FM_WORKER_PROVIDER_COMMAND=python3 $provider
+FIXTURE_STATE=$fixture
+FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS=1
+EOF
+
+  python3 - "$CONTROLLER" "$WRAPPER" "$envfile" "$fixture" <<'PY' || fail "a wedged slot stopped the fleet from converging"
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+controller_path, wrapper, envfile, fixture_path = sys.argv[1:]
+env = os.environ.copy()
+for line in Path(envfile).read_text().splitlines():
+    key, value = line.split("=", 1)
+    env[key] = value
+
+spec = importlib.util.spec_from_file_location("controller", controller_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+for key, value in ((k, v) for k, v in env.items() if k.startswith(("FM", "FIXTURE"))):
+    os.environ[key] = value
+menv = module.environment()
+
+def run(*args, check=True):
+    result = subprocess.run([wrapper] + list(args), env=env, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and result.returncode != 0:
+        raise AssertionError("{} failed: {}".format(args, result.stderr))
+    return result
+
+def binding(number):
+    return format(number, "064x")
+
+# A claim whose replay is guaranteed to refuse: a create naming a slot with no
+# durable worker record. apply_action_result raises on the absent owner, so
+# the drain records replay-refused and the claim stays.
+worker9 = {
+    "slot": 9, "sku": "sku", "sku_family": "fam", "cloud_generation": 1,
+    "cloud_instance_id": None, "reservation_usd": 1.0, "resources": {},
+    "bindings": {"task": "wedged", "task_generation": "gen-w"},
+}
+wedged = module.make_action(
+    {"deployment_generation": menv["deployment_generation"], "owner": menv["owner"]},
+    "create", worker=worker9, item={"task": "wedged", "task_generation": "gen-w"})
+with module.controller_lock(menv):
+    state = module.load_state(menv)
+    state["pending_actions"]["9"] = wedged
+    module.save_state(menv, state)
+
+run("request", "--task", "task-1", "--task-generation", "gen-1",
+    "--home-binding", binding(1001), "--account-binding", binding(2001),
+    "--worktree-binding", binding(3001), "--repository-binding", binding(4001),
+    "--repository-generation", "repo-1", "--owner-kind", "primary", "--eligible")
+result = run("reconcile", "--apply", "--json", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+output = json.loads(result.stdout)
+kinds = [action["type"] for action in output["actions"]]
+assert "create" in kinds, kinds
+assert "replay-refused" in kinds, kinds
+refused = [action for action in output["actions"] if action["type"] == "replay-refused"]
+assert refused[0]["slot"] == 9, refused
+
+state = json.loads((Path(env["FM_HOME"]) / "state/azure-workers/controller.json").read_text())
+assert "9" in state["pending_actions"], "the wedged claim was silently dropped"
+assert "1" in state["workers"], "the fleet did not converge past the wedge"
+assert state["queue"]["task-1@gen-1"]["status"] == "assigned"
+
+# The planner must never plan a mutation for a claimed slot: a released
+# worker's destruction sequence waits while a claim owns the slot, because
+# the durable record mid-mutation is deliberately not yet the truth.
+with module.controller_lock(menv):
+    held = module.load_state(menv)
+    worker1 = held["workers"]["1"]
+    worker1["release_proof"] = {"schema": "fm.worker-release/v2", "proof_digest": "a" * 64}
+    worker1["released_at"] = module.iso_utc()
+    claim1 = module.make_action(
+        {"deployment_generation": menv["deployment_generation"], "owner": menv["owner"]},
+        "steer", worker=worker1, request_digest="b" * 64)
+    held["pending_actions"]["1"] = claim1
+    module.save_state(menv, held)
+plan = json.loads(run("reconcile", "--json").stdout)
+planned_slots = [entry.get("slot") for entry in plan["actions"] if entry["type"] not in ("admission-refused", "replay-refused")]
+assert 1 not in planned_slots, (
+    "the planner proposed a mutation for a slot an unapplied claim owns", plan["actions"])
+
+# strict drain RAISES on the wedged claim instead of recording and moving on:
+# resume depends on exactly this to refuse resuming over unapplied state.
+strict_raised = None
+try:
+    module.drain_pending(menv, slot="9", strict=True)
+except module.LifecycleError as exc:
+    strict_raised = exc
+assert strict_raised is not None, "a strict drain swallowed a wedged claim's refusal"
+PY
+  pass "a wedged slot's claim is reported and retained while the rest of the fleet converges"
+}
+
+
 static_contract
 classification_and_admission_matrix
 azure_provider_refusal_matrix
@@ -2973,5 +3389,7 @@ surrender_refuses_when_ordinary_authority_passes
 surrender_refusal_matrix
 legacy_scalar_migration
 state_fence_and_revision_cas
+concurrent_mutations_do_not_serialize
+wedged_slot_does_not_stop_the_fleet
 
 echo "# fm-worker-lifecycle.test.sh: all assertions passed"

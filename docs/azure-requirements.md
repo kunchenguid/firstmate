@@ -324,9 +324,12 @@ Acceptance: a measured review completes in 20 to 30 minutes, with the breakdown 
 
 Status: NOT DONE.
 
-The durable state now holds per-slot `pending_actions` with a load fence and a revision CAS
-(C2's second change), but every provider mutation still serializes behind the fleet lock.
-That lock is the remaining direct blocker on this requirement.
+All three C2 changes are landed: the transactional apply, the per-slot `pending_actions` map
+with its load fence and revision CAS, and the lock discipline that runs every provider mutation
+outside the fleet lock under a non-blocking per-slot lease, with the drain after convergence and
+`abandon-claim` as the evidence-preserving exit from a deterministically refused claim.
+What remains for DONE is the acceptance itself: many crewmates, no-mistakes runs, and
+crosschecks demonstrated running in parallel against live capacity without contention.
 
 The lock is the other half, and the harder one: `controller_lock` is held across provider calls
 and for an execute's whole guest run, and the code's own note records that fixing only the lock was
