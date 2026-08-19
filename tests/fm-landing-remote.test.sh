@@ -48,6 +48,10 @@ make_fork_fixture() {
   git -C "$dir/parent-pub" push --quiet origin main
 
   git -C "$clone" fetch --quiet origin
+  # A second local branch tracking origin, named neither main nor master: the
+  # fleet already runs projects whose default branch is something else, and
+  # every branch that tracked origin must still track origin after the remap.
+  git -C "$clone" branch --quiet --track trunk origin/main
   printf '%s\n' "$dir|$ours|$parent|$clone"
 }
 
@@ -124,7 +128,7 @@ EOF
 }
 
 test_apply_makes_careless_branch_and_default_repo_land_on_ours() {
-  local rec dir ours parent clone fakebin log origin out rc branch_head local_main worker
+  local rec dir ours parent clone fakebin log origin out rc branch_head local_main worker tracked_branch
   rec=$(make_fork_fixture with-apply)
   IFS='|' read -r dir ours parent clone <<EOF
 $rec
@@ -165,6 +169,13 @@ EOF
   [ ! -e "$worker/upstream.txt" ] \
     || fail "careless branch imported the unreviewed parent tree"
 
+  # `git remote rename origin upstream` repoints every branch that tracked
+  # origin at the parent, so a plain `git pull` on them would pull upstream in.
+  for tracked_branch in main trunk; do
+    [ "$(git -C "$clone" config --get "branch.${tracked_branch}.remote")" = origin ] \
+      || fail "branch $tracked_branch now pulls from $(git -C "$clone" config --get "branch.${tracked_branch}.remote"), not origin"
+  done
+
   assert_grep "repo set-default origin" "$log" \
     "apply did not point gh at origin, so gh pr create would still default elsewhere"
   assert_grep "--yes init" "$log" \
@@ -186,6 +197,18 @@ EOF
   expect_code 0 "$rc" "apply should be idempotent once origin already lands on ours"
   [ "$(git -C "$clone" remote get-url origin)" = "file://$ours" ] \
     || fail "idempotent apply moved origin off the landing remote"
+
+  # Reachability and refetch belong to the remap. An origin that is already
+  # correct must still apply with the remote unreachable, or a network outage
+  # turns a no-op into a failure on a correctly configured primary.
+  mv "$ours" "$ours.away"
+  PATH="$fakebin:$PATH" "$LANDING" apply \
+    --ours "file://$ours" \
+    --upstream "file://$parent" \
+    --repo "$clone" > "$dir/apply3.out" 2>"$dir/apply3.err"
+  rc=$?
+  mv "$ours.away" "$ours"
+  expect_code 0 "$rc" "apply should stay a no-op with the landing remote unreachable (got: $(cat "$dir/apply3.err"))"
 
   pass "apply makes careless branch creation and default-repo targeting land on ours"
 }
@@ -260,12 +283,14 @@ EOF
   pass "apply refetches origin so tracking refs stop naming the parent"
 }
 
-# On the set-url path the remap moves no refs, so a fetch that cannot run leaves
-# refs/remotes/origin/* holding the parent's tips while origin's URL and the git
-# and gh defaults all say ours. verify compares only the URL, so that split
-# state would read as correctly configured. apply must fail instead.
-test_apply_fails_loudly_when_the_new_origin_cannot_be_fetched() {
-  local rec dir ours parent clone fakebin log out rc parent_main
+# An unreachable or mistyped --ours must refuse before anything is written.
+# When it refused after the rewrite, origin held the unreachable URL while its
+# tracking refs still held the parent's tips, verify (which compares only the
+# URL) called that correctly configured, and the corrected re-run hit "neither
+# --ours nor --upstream; refusing to guess" and could no longer converge.
+test_failed_preflight_leaves_the_remote_unchanged_and_re_appliable() {
+  local rec dir ours parent clone fakebin log out rc
+  local before_origin before_upstream parent_main
   rec=$(make_fork_fixture unreachable-origin)
   IFS='|' read -r dir ours parent clone <<EOF
 $rec
@@ -273,6 +298,8 @@ EOF
   git -C "$clone" remote add upstream "file://$parent"
   git -C "$clone" fetch --quiet upstream
   git -C "$clone" remote remove fork
+  before_origin=$(git -C "$clone" remote get-url origin)
+  before_upstream=$(git -C "$clone" remote get-url upstream)
   parent_main=$(git -C "$clone" rev-parse refs/remotes/origin/main)
   fakebin=$(fm_fakebin "$dir/fake")
   log="$dir/stub.log"
@@ -286,19 +313,73 @@ EOF
     --repo "$clone" 2>&1)
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "apply reported success after it could not fetch the new origin"
-  assert_contains "$out" "could not fetch the new origin" \
-    "apply did not name the failed refetch as the reason"
+  [ "$rc" -ne 0 ] || fail "apply reported success with an unreachable landing remote"
+  assert_contains "$out" "nothing was changed" \
+    "apply did not tell the operator the checkout was left untouched"
+  [ "$(git -C "$clone" remote get-url origin)" = "$before_origin" ] \
+    || fail "refused apply still rewrote origin to the unreachable URL"
+  [ "$(git -C "$clone" remote get-url upstream)" = "$before_upstream" ] \
+    || fail "refused apply still rewrote upstream"
   [ "$(git -C "$clone" rev-parse refs/remotes/origin/main)" = "$parent_main" ] \
-    || fail "fixture assumption broken: origin/main moved despite the failed fetch"
+    || fail "refused apply moved origin's tracking refs"
   [ -z "$(git -C "$clone" config --get checkout.defaultRemote || true)" ] \
-    || fail "apply set checkout.defaultRemote while origin's refs still name the parent"
-  [ -z "$(git -C "$clone" config --get remote.pushDefault || true)" ] \
-    || fail "apply set remote.pushDefault while origin's refs still name the parent"
+    || fail "refused apply still set checkout.defaultRemote"
   if grep -q 'repo set-default' "$log"; then
-    fail "apply pointed gh at origin while origin's refs still name the parent"
+    fail "refused apply still pointed gh at origin"
   fi
-  pass "apply fails loudly when the new origin cannot be fetched"
+
+  # The point of leaving it unchanged: the corrected run still converges.
+  PATH="$fakebin:$PATH" "$LANDING" apply \
+    --ours "file://$ours" \
+    --upstream "file://$parent" \
+    --repo "$clone" > "$dir/apply2.out" 2>"$dir/apply2.err"
+  rc=$?
+  expect_code 0 "$rc" "the corrected re-run should apply cleanly after a refused apply"
+  [ "$(git -C "$clone" remote get-url origin)" = "file://$ours" ] \
+    || fail "the corrected re-run did not land origin on the landing remote"
+  [ "$(git -C "$clone" rev-parse refs/remotes/origin/main)" != "$parent_main" ] \
+    || fail "the corrected re-run left origin's tracking refs on the parent tip"
+  pass "a refused apply leaves the remotes unchanged and the corrected re-run still applies"
+}
+
+# gh ranks upstream above origin when no default repo is recorded, so an apply
+# that could not set the gh default has not made a flagless gh pr create land on
+# ours. Exiting 0 over that is the defect this change exists to remove.
+test_apply_fails_when_the_gh_default_cannot_be_set() {
+  local rec dir ours parent clone fakebin log out rc
+  rec=$(make_fork_fixture gh-default-fails)
+  IFS='|' read -r dir ours parent clone <<EOF
+$rec
+EOF
+  fakebin=$(fm_fakebin "$dir/fake")
+  log="$dir/stub.log"
+  : > "$log"
+  install_careless_stubs "$fakebin" "$log"
+  cat > "$fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$log'
+case "\$1 \$2" in
+  "repo set-default") exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" "$LANDING" apply \
+    --ours "file://$ours" \
+    --upstream "file://$parent" \
+    --repo "$clone" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "apply reported success while gh had no default repository"
+  assert_contains "$out" "gh pr create" \
+    "apply did not name the consequence a missing gh default has"
+  assert_contains "$out" "third-party parent" \
+    "apply did not say where a flagless PR would still land"
+  [ "$(git -C "$clone" remote get-url origin)" = "file://$ours" ] \
+    || fail "the git half of the remap did not land, so the re-run advice is wrong"
+  pass "apply fails when the gh default cannot be set, and names the consequence"
 }
 
 test_apply_refuses_an_unrelated_origin() {
@@ -321,7 +402,8 @@ EOF
 test_careless_path_without_apply_names_parent
 test_apply_makes_careless_branch_and_default_repo_land_on_ours
 test_apply_with_existing_upstream_refreshes_tracking_refs
-test_apply_fails_loudly_when_the_new_origin_cannot_be_fetched
+test_failed_preflight_leaves_the_remote_unchanged_and_re_appliable
+test_apply_fails_when_the_gh_default_cannot_be_set
 test_apply_refuses_a_linked_worktree
 test_apply_refuses_an_unrelated_origin
 
