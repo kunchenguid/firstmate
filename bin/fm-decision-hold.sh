@@ -78,6 +78,10 @@
 # be blocked by the hold. It writes the captain decision and routed identities into
 # the hold body, clears those dependency edges, and only then marks the hold Done.
 # A failure before the final step leaves the captain hold open.
+# A routed task counts wherever it durably lives, so a retry whose resolution is
+# already recorded is not defeated by a routed task that was completed and pruned
+# after that record cleared its edge; a routed task in neither tier is still
+# refused, and only a still-live one is unblocked.
 #
 # `answer` is the answer-time closure path, the hold ledger's counterpart to
 # `fm-send.sh --resolve-key`: it exists so the act that carries the captain's
@@ -329,6 +333,21 @@ record_show() {  # <id>
   task_show "$1" || archived_show "$1"
 }
 
+# What an archived record durably is, worded once so no path invents its own
+# account of the two states an archived identity can be in. The remedy differs
+# per path, so each caller supplies the remedy its own path has; an empty remedy
+# prints the state alone.
+archived_state_reason() {  # <id> <show-output> <resolved-remedy> <unresolved-remedy>
+  local id=$1 show=$2 resolved_remedy=$3 unresolved_remedy=$4
+  if show_is_durably_resolved "$show"; then
+    printf 'captain decision %s is already durably resolved and archived in %s%s' \
+      "$id" "$ARCHIVE" "${resolved_remedy:+; $resolved_remedy}"
+  else
+    printf 'captain hold %s was closed outside fm-decision-hold and archived in %s without a recorded captain decision, so nothing was decided%s' \
+      "$id" "$ARCHIVE" "${unresolved_remedy:+; $unresolved_remedy}"
+  fi
+}
+
 # The precise reason a live lookup of hold <id> found nothing, so an archived
 # record is never reported as merely absent.
 absent_hold_reason() {  # <id>
@@ -336,11 +355,8 @@ absent_hold_reason() {  # <id>
   show=$(archived_show "$id") || archived_rc=$?
   case "$archived_rc" in
     0)
-      if show_is_durably_resolved "$show"; then
-        printf 'captain decision %s is already durably resolved and archived in %s' "$id" "$ARCHIVE"
-      else
-        printf 'captain hold %s was closed outside fm-decision-hold and archived in %s without a recorded captain decision; repair reaches only live records in %s/data/backlog.md' "$id" "$ARCHIVE" "$FM_HOME"
-      fi
+      archived_state_reason "$id" "$show" '' \
+        "repair reaches only live records in $FM_HOME/data/backlog.md"
       ;;
     1) printf 'captain hold %s is absent from %s/data/backlog.md and %s' "$id" "$FM_HOME" "$ARCHIVE" ;;
     *) printf 'captain hold %s is not in %s/data/backlog.md and %s could not be read' "$id" "$FM_HOME" "$ARCHIVE" ;;
@@ -581,9 +597,11 @@ command_hold() {
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
   else
     archived_rc=0
-    archived_show "$id" >/dev/null || archived_rc=$?
+    show=$(archived_show "$id") || archived_rc=$?
     case "$archived_rc" in
-      0) fail "captain decision $id is closed and archived in $ARCHIVE; use a new decision key for a new decision" ;;
+      0) fail "$(archived_state_reason "$id" "$show" \
+           'use a new decision key for a new decision' \
+           "the completion gate keeps refusing this origin, and discarding it without that decision needs explicit captain discard authority through the teardown --force path")" ;;
       1) : ;;
       *) fail "cannot read $ARCHIVE to check whether $id is an archived decision" ;;
     esac
@@ -713,7 +731,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' body='' routed='' routed_csv='' live_routed='' dep dep_rc=0 show blocked state hold_show hold_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -749,8 +767,22 @@ command_resolve() {
       ;;
   esac
 
+  # A routed task the recorded resolution already names can have been closed and
+  # pruned into the archive since the attempt that recorded it, so this durability
+  # read consults both tiers. Only a live task can still carry the dependency edge
+  # this close clears, so the tiers are read separately and the live ids are kept.
   for dep in $routed; do
-    show=$(task_show "$dep") || fail "routed task $dep does not exist in the active home"
+    dep_rc=0
+    if show=$(task_show "$dep"); then
+      live_routed="${live_routed}${live_routed:+ }$dep"
+    else
+      show=$(archived_show "$dep") || dep_rc=$?
+      case "$dep_rc" in
+        0) : ;;
+        1) fail "routed task $dep does not exist in the active home" ;;
+        *) fail "cannot read $ARCHIVE while checking routed task $dep" ;;
+      esac
+    fi
     state=$(show_field "$show" state)
     [ "$state" != "done" ] || [ "$resolution_recorded" = 1 ] \
       || fail "routed task $dep is already done"
@@ -767,7 +799,9 @@ command_resolve() {
   body=$(resolution_body routed "$routed_csv" $routed)
   tasks_axi update "$id" --body "$body" >/dev/null \
     || fail "could not record the captain decision on $id"
-  for dep in $routed; do
+  # A routed task pruned after an earlier attempt already cleared and recorded its
+  # edge has nothing left to release, so only the still-live ones are routed here.
+  for dep in $live_routed; do
     show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
     if list_has_key "$(normalized_blocked_by "$show")" "$id"; then
       tasks_axi unblock "$dep" --by "$id" >/dev/null \

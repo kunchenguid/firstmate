@@ -1427,6 +1427,115 @@ test_resolved_decisions_survive_done_pruning_before_the_completion_gate() {
   pass "resolved decisions survive ordinary Done pruning for the completion gate"
 }
 
+# The routed close path can fail transiently after it has already recorded the
+# captain decision and cleared the routing edge, and by the time it is retried its
+# routed work can itself have been completed and pruned into the archive. Once the
+# resolution body is recorded no other path can close the hold, so a routed task
+# that is gone from the live backlog but durably present in the archive must not
+# strand the origin. The absent-routed-task and drift guards must survive that.
+test_resolve_retry_survives_a_routed_task_pruned_after_routing() {
+  local home id hold dep archive pad show
+  home=$(make_home routed-dep-pruned)
+  archive="$home/data/done-archive.md"
+  assert_grep "done_keep = 10" "$home/.tasks.toml" \
+    "the routed-retry regression must run at the tracked done_keep, never a raised one"
+  id=sample-routed-prune-review
+  dep=sample-routed-prune-work
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample routed pruning" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the routed-prune origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample routed prune review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" route \
+    --title "Choose the sample routed option" --reason "captain routed choice pending" --repo sample) \
+    || fail "could not register the routed-prune hold"
+  run_decisions "$home" complete "$id" route >/dev/null \
+    || fail "completion failed while the routed-prune hold was still active"
+  tasks_in "$home" add "$dep" "Apply the sample routed option" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not route work behind the routed-prune hold"
+  printf 'Use the sample routed option.\n' > "$home/routed-decision.txt"
+
+  # The transient failure from the incident: the decision is recorded and the
+  # routing edge is cleared, and only the final close of the hold fails.
+  cat > "$home/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = done ] && [ "\${2:-}" = "$hold" ] && [ ! -f "\$FM_HOME/close-failed-once" ]; then
+  : > "\$FM_HOME/close-failed-once"
+  exit 1
+fi
+exec "\${REAL_TASKS_AXI:?}" "\$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  if run_decisions "$home" resolve "$id" route --decision-file "$home/routed-decision.txt" \
+    --routed-to "$dep" > "$home/transient.out" 2> "$home/transient.err"; then
+    fail "resolve reported success although the close of the captain hold failed"
+  fi
+  rm -f "$home/fakebin/tasks-axi"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: queued" "the failed close still closed the hold"
+  assert_contains "$show" "held: yes" "the failed close released the captain hold"
+  assert_contains "$show" "Resolution recorded by fm-decision-hold" \
+    "the failed close lost the durable resolution record it had already written"
+  show=$(tasks_in "$home" show "$dep" --full)
+  assert_contains "$show" "blocked: no" "the failed close left the routing edge in place"
+
+  # The routed work is completed and then pruned out of the live backlog by later
+  # closes, exactly as ordinary Done retention does it.
+  tasks_in "$home" "done" "$dep" >/dev/null || fail "could not complete the routed work"
+  for pad in 01 02 03 04 05 06 07 08 09 10; do
+    tasks_in "$home" add "sample-prune-pad-$pad" "Sample pad $pad" --kind ship --repo sample >/dev/null \
+      || fail "could not create pad task $pad"
+    tasks_in "$home" "done" "sample-prune-pad-$pad" >/dev/null || fail "could not close pad task $pad"
+  done
+  if tasks_in "$home" show "$dep" --full >/dev/null 2>&1; then
+    fail "ordinary Done pruning did not evict the completed routed work from the live backlog"
+  fi
+  assert_grep "- [x] $dep -" "$archive" "the completed routed work must be archived, never deleted"
+
+  printf 'Use a different sample routed option.\n' > "$home/drifted-routed-decision.txt"
+  if run_decisions "$home" resolve "$id" route --decision-file "$home/drifted-routed-decision.txt" \
+    --routed-to "$dep" > "$home/drifted-retry.out" 2> "$home/drifted-retry.err"; then
+    fail "the retry accepted a different captain decision once its routed work was archived"
+  fi
+  assert_grep "different captain decision" "$home/drifted-retry.err" \
+    "a drifted decision retry must still be refused for that reason"
+  if run_decisions "$home" resolve "$id" route --decision-file "$home/routed-decision.txt" \
+    --routed-to "$dep" --routed-to sample-prune-pad-10 \
+    > "$home/drifted-routes.out" 2> "$home/drifted-routes.err"; then
+    fail "the retry accepted a different routed task set once its routed work was archived"
+  fi
+  assert_grep "different routed work" "$home/drifted-routes.err" \
+    "a drifted routed set must still be refused for that reason"
+
+  run_decisions "$home" resolve "$id" route --decision-file "$home/routed-decision.txt" \
+    --routed-to "$dep" > "$home/retry.out" 2> "$home/retry.err" \
+    || fail "the exact resolve retry failed after its routed work was pruned: $(cat "$home/retry.err")"
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "the successful retry did not close the captain hold"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "verification failed after a retry whose routed work was archived"
+
+  # A routed task in neither tier is still refused, and the refusal still leaves
+  # its own hold open.
+  run_decisions "$home" hold "$id" ghost \
+    --title "Choose the sample ghost option" --reason "captain ghost choice pending" --repo sample >/dev/null \
+    || fail "could not register the absent-routed-task control hold"
+  run_decisions "$home" complete "$id" route ghost >/dev/null \
+    || fail "completion failed for the absent-routed-task control"
+  if run_decisions "$home" resolve "$id" ghost --decision-file "$home/routed-decision.txt" \
+    --routed-to sample-never-created-work > "$home/ghost.out" 2> "$home/ghost.err"; then
+    fail "resolve routed a decision to work that is in neither the live backlog nor the archive"
+  fi
+  assert_grep "does not exist in the active home" "$home/ghost.err" \
+    "a routed task in neither tier must still be refused as absent"
+  show=$(tasks_in "$home" show "$id-decision-ghost" --full)
+  assert_contains "$show" "state: queued" "the refused absent-routed-task resolve closed its hold"
+  assert_contains "$show" "held: yes" "the refused absent-routed-task resolve released its hold"
+  pass "a resolve retry survives routed work that Done pruning archived after routing"
+}
+
 # Reading the archive must not weaken the gate. A hold closed outside the script
 # and then pruned still has no recorded captain decision, so verification and
 # teardown keep refusing, no close path can invent the answer, repair reaches only
@@ -1494,6 +1603,14 @@ test_archived_out_of_band_close_still_blocks_the_gate() {
     > "$home/gap-hold.out" 2> "$home/gap-hold.err"; then
     fail "an archived closed identity was reopened as a fresh captain hold"
   fi
+  assert_grep "closed outside fm-decision-hold" "$home/gap-hold.err" \
+    "the refusal must name the out-of-band close that archived this identity"
+  assert_grep "nothing was decided" "$home/gap-hold.err" \
+    "the refusal must say no captain decision was ever recorded for this identity"
+  assert_grep "teardown --force" "$home/gap-hold.err" \
+    "the refusal must name the discard authority that is its actual remedy"
+  assert_no_grep "new decision key" "$home/gap-hold.err" \
+    "an unresolved archived identity must not be sent to a new decision key it cannot clear"
   after=$(shasum -a 256 "$archive" | awk '{print $1}')
   [ "$before" = "$after" ] || fail "a refused path wrote the done archive"
   assert_no_grep "Resolution recorded by fm-decision-hold" "$home/data/backlog.md" \
@@ -1718,6 +1835,7 @@ test_any_origin_binding_closes_across_origins
 test_answer_preserves_every_unrouted_close_guard
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_resolved_decisions_survive_done_pruning_before_the_completion_gate
+test_resolve_retry_survives_a_routed_task_pruned_after_routing
 test_archived_out_of_band_close_still_blocks_the_gate
 test_archived_decision_verifies_under_a_relative_tmpdir
 test_unrecognized_archive_heading_never_reads_as_an_absent_decision
