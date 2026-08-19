@@ -24,11 +24,10 @@
 # test asserts on submitted CONTENT, not pane appearance. It ALSO registers
 # itself as a real herdr agent via `herdr pane report-agent` and reports an
 # idle/working/idle cycle around each submission, because
-# fm_backend_herdr_send_text_submit's confirmation is native agent-state
-# (agent get), not composer content, since the 2026-07-07 incident fix
-# (docs/herdr-backend.md "Native agent-state submit confirmation") - a pane
-# that only draws composer text without being a registered agent would read
-# agent_not_found forever and never confirm a submission.
+# fm_backend_herdr_send_text_submit first confirms through native agent state
+# (agent get), as documented in docs/herdr-backend.md "Current transport
+# behavior". A pane without an agent registration would read agent_not_found
+# and could not exercise that confirmation path.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -143,9 +142,9 @@ EOF
 # one side-bordered row is a complete composer box. ALSO registers itself as a
 # real herdr agent via `herdr pane report-agent` and reports idle/working
 # transitions around each
-# submission: fm_backend_herdr_send_text_submit's confirmation is now native
-# agent-state (agent get), not composer content (docs/herdr-backend.md
-# "Native agent-state submit confirmation"), so a synthetic pane that only
+# submission: fm_backend_herdr_send_text_submit first confirms through native
+# agent state (agent get), as documented in docs/herdr-backend.md "Current
+# transport behavior", so a synthetic pane that only
 # draws composer TEXT but is never registered as an agent would report
 # agent_not_found forever - every confirmation attempt would read 'unknown',
 # never 'empty', and the daemon would treat every injection as unconfirmed and

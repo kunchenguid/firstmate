@@ -3377,7 +3377,7 @@ test_composer_state_codex_non_faint_same_text_is_pending() {
 # --- wait_for_working: the native agent-state poll-and-classify primitive ---
 # Direct unit coverage for fm_backend_herdr_wait_for_working, the helper
 # fm_backend_herdr_send_text_submit now uses instead of composer scraping
-# (docs/herdr-backend.md "Native agent-state submit confirmation").
+# (docs/herdr-backend.md "Current transport behavior").
 
 test_wait_for_working_returns_busy_on_first_poll() {
   local dir log resp fb out calls
