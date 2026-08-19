@@ -31,6 +31,10 @@ VERSIONED_CLAUDE="$CLAUDE_VERSION_DIR/2.1.220"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-bin")
 ln -s /bin/bash "$FAKEBIN/claude"
 NAMED_CLAUDE="$FAKEBIN/claude"
+# A second, DIFFERENT verified harness name, so a case can ask the same question
+# from a session that is not the harness whose marker is in the environment.
+ln -s /bin/bash "$FAKEBIN/codex"
+NAMED_CODEX="$FAKEBIN/codex"
 
 # --- unit layer: identity behind a deterministic process table ---------------
 
@@ -484,17 +488,8 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 # own live session can never decide a verdict here. Each case also asserts the
 # signals it drove APART, so a case whose fixture stopped diverging fails
 # instead of passing on an accident.
-COHORT_SIGNAL_VARS=$FM_TEST_SESSION_SIGNAL_VARS
-
-COHORT_ENV_ARGV=()
-cohort_env_argv() {
-  local v
-  COHORT_ENV_ARGV=(env)
-  for v in $COHORT_SIGNAL_VARS; do
-    COHORT_ENV_ARGV+=(-u "$v")
-  done
-}
-cohort_env_argv
+fm_test_clear_signals_argv
+COHORT_ENV_ARGV=("${FM_TEST_CLEAR_SIGNALS_ARGV[@]}")
 
 COHORT_PIDS=()
 COHORT_TMUX_SOCKET="fm-session-lock-cohort-$$"
@@ -566,12 +561,17 @@ set -u
   printf 'container_holder=%s\n' "$(fm_session_container_of_pid "$FM_FIX_HOLDER" 2>/dev/null || printf NONE)"
   printf 'tty_self=%s\n' "$(fm_session_tty_of_pid "$$" 2>/dev/null || printf NONE)"
   printf 'tty_holder=%s\n' "$(fm_session_tty_of_pid "$FM_FIX_HOLDER" 2>/dev/null || printf NONE)"
-  printf 'launcher_self=%s\n' "$(fm_session_launcher_pid "$$" 2>/dev/null || printf NONE)"
+  printf 'launcher_self=%s\n' "$(fm_session_launcher_pid "$$" claude 2>/dev/null || printf NONE)"
+  printf 'kind_self=%s\n' "$(fm_harness_ancestry_pids 2>/dev/null | while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    printf '%s ' "$(fm_harness_pid_kind "$m" 2>/dev/null || printf NONE)"
+  done)"
+  printf 'kind_holder=%s\n' "$(fm_harness_pid_kind "$FM_FIX_HOLDER" 2>/dev/null || printf NONE)"
   printf 'launcher_ancestry=%s\n' "$(fm_harness_ancestry_pids 2>/dev/null | while IFS= read -r m; do
     [ -n "$m" ] || continue
-    printf '%s ' "$(fm_session_launcher_pid "$m" 2>/dev/null || printf NONE)"
+    printf '%s ' "$(fm_session_launcher_pid "$m" claude 2>/dev/null || printf NONE)"
   done)"
-  printf 'launcher_holder=%s\n' "$(fm_session_launcher_pid "$FM_FIX_HOLDER" 2>/dev/null || printf NONE)"
+  printf 'launcher_holder=%s\n' "$(fm_session_launcher_pid "$FM_FIX_HOLDER" claude 2>/dev/null || printf NONE)"
   if fm_session_lock_owned_by_self "$FM_FIX/state"; then printf 'owned=yes\n'; else printf 'owned=no\n'; fi
   if fm_session_lock_holder_competes "$FM_FIX_HOLDER"; then printf 'competes=yes\n'; else printf 'competes=no\n'; fi
 } > "$FM_FIX/${FM_FIX_OUT:-check}.out" 2> "$FM_FIX/${FM_FIX_OUT:-check}.err"
@@ -758,6 +758,95 @@ SH
   pass "session-lock: a session still owns its home once the lock names the session it started"
 }
 
+# A launch marker is an ordinary environment variable, so a harness the captain
+# starts from inside a Claude session inherits CLAUDE_PID naming that session.
+# Believing it would hand a live Claude captain's home to a genuinely separate
+# codex session, which is the one thing the lock exists to refuse, so a marker row
+# is consulted only when the asking session and the holder are both the harness it
+# was verified for.
+#
+# The two cases below run the SAME fixture and differ only in which harness asks,
+# so neither can pass by never reaching the marker path: the codex asker must be
+# refused, and the claude asker must still converge.
+cross_harness_fixture() {  # <dir> <asker-bin>
+  local dir=$1 asker_bin=$2 holder
+  make_cohort_fixture "$dir"
+  # The asker runs the check and then the REAL acquisition as its own children, so
+  # the ancestry walk starts below it exactly as a hook's does. It is started from
+  # this suite, whose shell is not a harness, so its harness ancestry is itself
+  # alone - the shape the cross-harness ask actually has.
+  cat > "$dir/asker.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$$" > "$FM_FIX/asker-pid"
+bash "$FM_FIX/check.sh"
+FM_HOME="$FM_FIX" "$FM_FIX_ROOT/bin/fm-lock.sh" > "$FM_FIX/lock.out" 2>&1
+printf '%s\n' "$?" > "$FM_FIX/lock.rc"
+SH
+  chmod +x "$dir/asker.sh"
+  start_cohort_holder "$dir" HERDR_ENV=1 HERDR_PANE_ID=fixture-pane
+  holder=$COHORT_HOLDER_PID
+  printf '%s\n' "$holder" > "$dir/state/.lock"
+  "${COHORT_ENV_ARGV[@]}" FM_FIX="$dir" FM_FIX_LIB="$LIB" FM_FIX_HOLDER="$holder" \
+    FM_FIX_ROOT="$ROOT" CLAUDE_PID="$holder" HERDR_ENV=1 HERDR_PANE_ID=fixture-pane \
+    "$asker_bin" "$dir/asker.sh"
+  printf '%s\n' "$holder"
+}
+
+test_a_different_harness_never_believes_an_inherited_launch_marker() {
+  local dir holder asker
+  dir="$TMP_ROOT/cohort-cross-harness"
+  holder=$(cross_harness_fixture "$dir" "$NAMED_CODEX")
+  asker=$(tr -d '[:space:]' < "$dir/asker-pid")
+
+  # Divergence: the marker IS present and DOES name the holder, and co-location
+  # holds, so only the harness scoping can be producing the refusal.
+  [ "$(cohort_field "$dir" launcher_self)" = "$holder" ] || fail \
+    "the fixture did not carry an inherited marker naming the holder, so its refusal proves nothing"$'\n'"$(cohort_report "$dir")"
+  [ "$(cohort_field "$dir" container_self)" = "$(cohort_field "$dir" container_holder)" ] || fail \
+    "the fixture lost the co-location this case AND-s the relationship with"$'\n'"$(cohort_report "$dir")"
+  [ "$(cohort_field "$dir" kind_holder)" = claude ] || fail \
+    "the fixture holder did not resolve as a claude harness"$'\n'"$(cohort_report "$dir")"
+  [ "$(printf '%s' "$(cohort_field "$dir" kind_self)" | tr -d '[:space:]')" = codex ] || fail \
+    "the asking session did not resolve as codex alone, so this fixture no longer reproduces a cross-harness ask"$'\n'"$(cohort_report "$dir")"
+
+  [ "$(cohort_field "$dir" owned)" = no ] || fail \
+    "a codex session accepted a live claude session's lock as its own"$'\n'"$(cohort_report "$dir")"
+  [ "$(cohort_field "$dir" competes)" = yes ] || fail \
+    "a live claude holder was not treated as a competing session by a codex asker"$'\n'"$(cohort_report "$dir")"
+  [ "$(tr -d '[:space:]' < "$dir/lock.rc")" = 1 ] || fail \
+    "acquisition did not refuse: rc=$(cat "$dir/lock.rc") out=$(cat "$dir/lock.out")"
+  assert_contains "$(cat "$dir/lock.out")" "another live firstmate session holds the lock" \
+    "acquisition refused for some reason other than the competing live session"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$holder" ] || fail \
+    "acquisition wrote the codex pid over a live claude holder: got $(cat "$dir/state/.lock"), holder $holder, asker $asker"
+  pass "session-lock: a different harness never believes a launch marker it merely inherited"
+}
+
+test_the_same_harness_still_converges_on_the_identical_fixture() {
+  local dir holder asker
+  dir="$TMP_ROOT/cohort-same-harness"
+  holder=$(cross_harness_fixture "$dir" "$NAMED_CLAUDE")
+  asker=$(tr -d '[:space:]' < "$dir/asker-pid")
+
+  [ "$(cohort_field "$dir" launcher_self)" = "$holder" ] || fail \
+    "the fixture did not carry the marker this case rests on"$'\n'"$(cohort_report "$dir")"
+  [ "$(printf '%s' "$(cohort_field "$dir" kind_self)" | tr -d '[:space:]')" = claude ] || fail \
+    "the asking session did not resolve as claude, so this case does not diverge from the one above"$'\n'"$(cohort_report "$dir")"
+
+  [ "$(cohort_field "$dir" owned)" = yes ] || fail \
+    "the same-harness cohort stopped recognizing its own holder, which is the authorized fix for the original defect"$'\n'"$(cohort_report "$dir")"
+  [ "$(cohort_field "$dir" competes)" = no ] || fail \
+    "the same-harness cohort treated its own holder as a competitor"$'\n'"$(cohort_report "$dir")"
+  [ "$(tr -d '[:space:]' < "$dir/lock.rc")" = 0 ] || fail \
+    "acquisition failed for a same-harness cohort: $(cat "$dir/lock.out")"
+  assert_contains "$(cat "$dir/lock.out")" "converged onto this session's own holder pid $holder" \
+    "acquisition did not name the holder it converged onto"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$asker" ] || fail \
+    "acquisition did not converge the lock onto the acquiring session: expected $asker, got $(cat "$dir/state/.lock")"
+  pass "session-lock: the same harness still converges on the identical fixture"
+}
+
 # The property the lock exists for. Same pane, same terminal, same everything a
 # co-location signal can see - and no launch relationship, so it is a second
 # agent started by hand in the captain's seat and must still be refused.
@@ -815,6 +904,17 @@ lib_probe() {  # <expression>
   "${COHORT_ENV_ARGV[@]}" bash -c ". \"\$0\"; $1" "$LIB"
 }
 
+# The same, asked from a harness-named process, so this session has a resolvable
+# harness ancestry. The marker path requires one on the asking side - ownership is
+# a claim only a harness session can make - so a case that drives the marker path
+# has to ask from a harness rather than from a bare shell, whose ancestry depends
+# on whether the developer happens to be running the suite inside a live session.
+harness_probe() {  # <expression>
+  "${COHORT_ENV_ARGV[@]}" "$NAMED_CLAUDE" -c ". \"\$0\"
+$1
+exit \$?" "$LIB"
+}
+
 cohort_tmux() {
   tmux -L "$COHORT_TMUX_SOCKET" "$@"
 }
@@ -854,7 +954,7 @@ test_liveness_is_decided_before_any_recorded_cohort_signal() {
 cohort_probe_recorded_identity() {  # <proc-root> <pid>
   local root=$1 pid=$2
   mkdir -p "$root/$pid"
-  lib_probe "
+  harness_probe "
     HERDR_ENV=1
     HERDR_PANE_ID=fixture-pane
     FM_PROC_ROOT_OVERRIDE='$root'
@@ -935,6 +1035,11 @@ SH
   pass "session-lock: the controlling terminal carries co-location with the containers driven apart"
 }
 
+# Ask the REAL bin/fm-lock.sh what it reports about a home's recorded holder.
+lock_status() {  # <dir>
+  "${COHORT_ENV_ARGV[@]}" FM_HOME="$1" "$ROOT/bin/fm-lock.sh" status 2>&1
+}
+
 wait_for_state() {  # <pid> <T|running> <what>
   local pid=$1 want=$2 what=$3 i=0 state
   while [ "$i" -lt 200 ]; do
@@ -973,6 +1078,15 @@ test_suspended_holder_releases_and_resumes() {
     || fail "a stopped harness stopped being reported as alive, which is a separate fact from holding"
   lib_probe "fm_harness_pid_suspended $holder" \
     || fail "a durably stopped harness was not recognized as suspended"
+
+  # The decision is required to be observable, and status is the other half of
+  # that surface: an operator diagnosing a wedged home must not be told a durably
+  # stopped holder is simply live.
+  printf '%s\n' "$holder" > "$dir/state/.lock"
+  assert_contains "$(lock_status "$dir")" SUSPENDED \
+    "fm-lock.sh status did not report a durably stopped holder as suspended"
+  assert_contains "$(lock_status "$dir")" reclaimable \
+    "fm-lock.sh status did not report a suspended holder as reclaimable"
   if lib_probe "fm_session_lock_holder_competes $holder"; then
     fail "a suspended harness still blocked acquisition, which is the lockout this decision removes"
   fi
@@ -982,6 +1096,8 @@ test_suspended_holder_releases_and_resumes() {
   if lib_probe "fm_harness_pid_suspended $holder"; then
     fail "a resumed harness was still classified as suspended"
   fi
+  assert_contains "$(lock_status "$dir")" "held by live harness pid $holder" \
+    "fm-lock.sh status did not go back to reporting a resumed holder as live"
   lib_probe "fm_session_lock_holder_competes $holder" \
     || fail "a resumed holder did not go back to being a competitor"
   pass "session-lock: a suspended holder stops holding and holds again once it resumes"
@@ -1104,6 +1220,8 @@ test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
 test_rehosted_session_owns_the_lock_it_cannot_reach
 test_launching_session_owns_a_lock_naming_the_session_it_started
+test_a_different_harness_never_believes_an_inherited_launch_marker
+test_the_same_harness_still_converges_on_the_identical_fixture
 test_colocated_session_without_a_launch_relationship_is_refused
 test_related_session_in_another_container_is_refused
 test_liveness_is_decided_before_any_recorded_cohort_signal

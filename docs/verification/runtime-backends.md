@@ -235,9 +235,10 @@ The marker names the session pid, every child inherits it, and it matches the pi
 A later `export` does not rewrite `/proc/<pid>/environ`, so the value a process was started with survives its own reassignment, which is what carries the relationship across a reparented tree.
 Claude is the only adapter with a verified marker at this date.
 codex, opencode, pi, pi-signed, grok, kimi, and cursor have none, so on those harnesses session-lock ownership is decided by process ancestry alone and a session rehosted outside its own process tree still refuses its own home.
-That is the behavior they had before this record existed rather than a regression, because a missing marker removes an accept path and never a refusal.
-Adding a row is a verification task: observe the variable in a real child of a real session of that harness, then refresh this table.
-The guard above reports the marker it actually observed per harness, and reports `no descendant of a bare launch carried a launch marker` when a prompt-free launch started no child to read.
+That is the behavior they had before this record existed rather than a regression, and `FM_SESSION_LAUNCH_MARKERS` in `bin/fm-session-lock-lib.sh` owns the reason that is safe: each row is scoped to the harness it was verified for, so a marker a different harness merely inherited from a session it was started inside is never believed.
+Adding a row is a verification task: observe the variable in a real child of a real session of that harness, then refresh this table with that harness in the row.
+The guard above reports the marker it actually observed per harness, scoped the same way, and reports `no descendant of a bare launch carried a launch marker verified for <harness>` when a prompt-free launch started no child to read or the harness has no row.
+It also records the harness kind each installed release reports and refuses a pass where two installed harnesses report the same kind, because that scoping is only as good as telling the two apart; the kind column below is unobserved until the guard is next run.
 
 Suspension is confirmed over several samples, and this run also recorded a kernel behavior worth keeping: on this WSL2 build `SIGSTOP` does not stop a pty **session leader** at all, while it stops an ordinary child normally.
 

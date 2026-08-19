@@ -102,6 +102,23 @@ fm_harness_basename_name() {  # <path>
   return 1
 }
 
+# Print the first verified harness name that appears anywhere in string $1, or
+# return 1.
+#
+# This NAMES a match one of the rules above already made; it never decides one.
+# The name is what scopes FM_SESSION_LAUNCH_MARKERS below to the harness whose
+# marker was actually verified, so a looser rule that matched cannot lend its
+# verdict to a different harness's marker.
+fm_harness_name_in() {  # <string>
+  local text=$1 name
+  for name in "${FM_HARNESS_NAMES[@]}"; do
+    case "$text" in
+      *"$name"*) printf '%s' "$name"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -117,18 +134,28 @@ fm_harness_basename_name() {  # <path>
 #      the interpreter by exact basename only, and refused outright when that
 #      token is a flag.
 #   5. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
+#
+# FM_HARNESS_KIND names WHICH harness matched, alongside the FM_HARNESS_IS_CLAUDE
+# flag the ancestry walk needs. Both are globals every call clobbers, so a caller
+# that needs the kind of a particular pid must capture it at the point of the
+# match: fm_harness_pid_kind below is that capture, and reading the global after
+# any other matcher call has run in between reads the wrong process's kind.
 FM_HARNESS_IS_CLAUDE=0
+FM_HARNESS_KIND=
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name script
   FM_HARNESS_IS_CLAUDE=0
+  FM_HARNESS_KIND=
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    FM_HARNESS_KIND=$(fm_harness_name_in "$base" || true)
     return 0
   fi
   argv0=${args%% *}
   if name=$(fm_harness_path_name "$comm") || name=$(fm_harness_path_name "$argv0"); then
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    FM_HARNESS_KIND=$name
     return 0
   fi
   # Bare interpreter (e.g. node, python) that reports its OWN name as the exec
@@ -152,6 +179,7 @@ fm_harness_process_matches() {  # <comm> <args>
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+        FM_HARNESS_KIND=$(fm_harness_name_in "$args" || true)
         return 0
       fi
       ;;
@@ -190,6 +218,7 @@ fm_harness_process_matches() {  # <comm> <args>
         */*)
           if name=$(fm_harness_basename_name "$script"); then
             case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+            FM_HARNESS_KIND=$name
             return 0
           fi
           ;;
@@ -200,8 +229,27 @@ fm_harness_process_matches() {  # <comm> <args>
   # in the command path or argv[0]. Without this a Cursor primary can never
   # locate its own harness in the ancestry, so every session start refuses the
   # fleet lock as read-only and the park can never arm.
-  fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
+  if fm_cursor_process_matches "$comm" "$args" "$argv0"; then
+    FM_HARNESS_KIND=cursor
+    return 0
+  fi
   return 1
+}
+
+# Print the verified harness name pid $1 is running as, or return 1 when it is
+# not a live harness. Always call it through a command substitution, which is the
+# capture the FM_HARNESS_KIND note above requires.
+fm_harness_pid_kind() {  # <pid>
+  local pid=$1 comm args
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  fm_harness_process_matches "$comm" "$args" || return 1
+  [ -n "$FM_HARNESS_KIND" ] || return 1
+  printf '%s\n' "$FM_HARNESS_KIND"
 }
 
 # Walk the current process ancestry (up to 16 hops) and print this session's
@@ -377,42 +425,70 @@ fm_session_tty_of_pid() {  # <pid>
 # loses: it is written at exec time, so it survives the child being reparented,
 # rehosted under a fresh pty, or orphaned to init.
 #
-# SCOPE LIMIT, stated because it is easy to assume away: this table has exactly
-# ONE entry, so the cohort proof below can only ever fire for Claude. codex,
-# opencode, pi, pi-signed, grok, kimi, and cursor have no verified marker, so on
-# those harnesses fm_session_lock_owned_by_self is decided by ancestry alone and
-# a session the harness rehosted outside its own process tree still refuses its
-# own home and degrades that session start to read-only. That is the unfixed
-# half of the defect for those adapters, not a fixed one.
+# Each row is "<harness> <var>": the harness that was VERIFIED to export it, and
+# the variable. The harness column is load-bearing, not documentation. A marker
+# variable is an ordinary environment variable, so every descendant of a session
+# inherits it, including a different harness the captain started from inside that
+# session. Scoping each row to its own harness is what stops that inherited value
+# being read as a launch relationship between two genuinely separate sessions.
 #
-# Why leaving it that way is safe rather than merely incomplete: a missing marker
-# removes an ACCEPT path and never a refusal, so a marker-less harness lands
-# exactly on the behavior it had before this mechanism existed. The alternative
-# is worse in both directions. A guessed variable name that no harness sets is
-# indistinguishable from no entry, so it buys nothing while reading as coverage;
-# a guessed name a harness does set for some other purpose would be believed,
-# and a launch marker is one half of the proof that keeps a genuinely separate
-# concurrent session out of this home.
+# SCOPE LIMIT, stated because it is easy to assume away: this table has exactly
+# ONE row, so the cohort proof below can only ever fire when BOTH sides of the
+# pair are Claude. codex, opencode, pi, pi-signed, grok, kimi, and cursor have no
+# verified marker, so on those harnesses fm_session_lock_owned_by_self is decided
+# by ancestry alone and a session the harness rehosted outside its own process
+# tree still refuses its own home and degrades that session start to read-only.
+# That is the unfixed half of the defect for those adapters, not a fixed one.
+#
+# Why leaving it that way is safe rather than merely incomplete: a row is
+# consulted only when the asking session and the holder are both the harness that
+# row was verified for, so a marker a different harness merely inherited is never
+# believed, and a harness with no row of its own is decided by ancestry alone. The
+# alternative is worse in both directions. A guessed variable name that no harness
+# sets is indistinguishable from no row, so it buys nothing while reading as
+# coverage; a guessed name a harness does set for some other purpose would be
+# believed, and a launch marker is one half of the proof that keeps a genuinely
+# separate concurrent session out of this home.
 #
 # Extending it is therefore a verification task, not an editing one: observe the
-# variable in a real child of a real session of that harness, add the row, and
-# refresh the per-harness record in docs/verification/runtime-backends.md, whose
-# opt-in guard reports the marker it actually observed for every installed
-# harness. Do not add a row from documentation or inference.
-FM_SESSION_LAUNCH_MARKERS='CLAUDE_PID'
+# variable in a real child of a real session of that harness, add the row with
+# that harness in the first column, and refresh the per-harness record in
+# docs/verification/runtime-backends.md, whose opt-in guard reports the marker it
+# actually observed. Do not add a row from documentation or inference.
+FM_SESSION_LAUNCH_MARKERS='claude CLAUDE_PID'
 
-# Print the harness session pid recorded in pid $1's inherited environment, or
-# return 1 when no verified marker is present.
-fm_session_launcher_pid() {  # <pid>
-  local pid=$1 var val
-  for var in $FM_SESSION_LAUNCH_MARKERS; do
+# True when the table has a row for harness $1. Asking this first keeps the
+# cohort proof from resolving any process kind it will not end up using.
+fm_session_launch_marker_exists() {  # <harness>
+  local want=$1 harness var
+  [ -n "$want" ] || return 1
+  while read -r harness var; do
+    [ -n "$var" ] || continue
+    [ "$harness" = "$want" ] && return 0
+  done <<EOF
+$FM_SESSION_LAUNCH_MARKERS
+EOF
+  return 1
+}
+
+# Print the harness session pid recorded in pid $1's inherited environment by a
+# row belonging to harness $2, or return 1. A row for any other harness is not
+# consulted, however present its variable happens to be in that environment.
+fm_session_launcher_pid() {  # <pid> <harness>
+  local pid=$1 want=$2 harness var val
+  [ -n "$want" ] || return 1
+  while read -r harness var; do
+    [ -n "$var" ] || continue
+    [ "$harness" = "$want" ] || continue
     val=$(fm_session_pid_env "$pid" "$var") || continue
     case "$val" in
       ''|*[!0-9]*) continue ;;
     esac
     printf '%s\n' "$val"
     return 0
-  done
+  done <<EOF
+$FM_SESSION_LAUNCH_MARKERS
+EOF
   return 1
 }
 
@@ -423,11 +499,16 @@ fm_session_launcher_pid() {  # <pid>
 # is load-bearing on its own and the absence of either falls back to the
 # ancestry verdict rather than opening ownership up:
 #
-#   1. Relationship, satisfied by EITHER direction of one launch pair. Forward:
-#      some process in this session - this one, or a member of its harness
-#      ancestry - carries a launch marker naming the holder as the harness
-#      session that started it. Reverse: the holder's own exec-time launch marker
-#      names this process or a member of this session's harness ancestry. Both
+#   1. Relationship, satisfied by EITHER direction of one launch pair, and only
+#      between two sessions of the SAME harness: the marker row consulted is the
+#      one belonging to the holder's own harness, and it is consulted only when
+#      that harness also appears in this session's harness ancestry, because a
+#      marker variable is inherited by every descendant including a different
+#      harness the captain started from inside that session. Forward: some
+#      process in this session - this one, or a member of its harness ancestry -
+#      carries that marker naming the holder as the harness session that started
+#      it. Reverse: the holder's own exec-time marker names this process or a
+#      member of this session's harness ancestry. Both
 #      directions are required because acquisition converges the lock onto the
 #      acquiring session's own pid, so either member of a launcher/launched pair
 #      can end up recorded as the holder while the other one asks; testing only
@@ -454,8 +535,8 @@ fm_session_launcher_pid() {  # <pid>
 # recorded identity of the holder is consulted in either direction.
 FM_SESSION_COHORT_EVIDENCE=
 fm_session_same_cohort() {  # <pid> [<ancestry-pids>] [<holder-alive-verified>]
-  local pid=$1 pids=${2-} verified=${3:-0} mine theirs member launcher
-  local related=0 relation='' located=''
+  local pid=$1 pids=${2-} verified=${3:-0} mine theirs member launcher kind
+  local related=0 relation='' located='' same_kind=0
   FM_SESSION_COHORT_EVIDENCE=
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
@@ -466,18 +547,44 @@ fm_session_same_cohort() {  # <pid> [<ancestry-pids>] [<holder-alive-verified>]
     fm_harness_pid_alive "$pid" || return 1
   fi
 
-  launcher=$(fm_session_launcher_pid "$$" 2>/dev/null || true)
+  # The harness kind of BOTH sides has to be settled before any marker is read,
+  # so this session's ancestry is resolved first even on the call path that did
+  # not pass it in. An asking side with no resolvable harness ancestry gets no
+  # marker path at all: ownership stays a claim only a harness session can make,
+  # never one an ordinary script sharing the captain's terminal can make.
+  if [ -z "$pids" ]; then
+    pids=$(fm_harness_ancestry_pids 2>/dev/null || true)
+  fi
+  [ -n "$pids" ] || return 1
+
+  # The holder's kind comes from the holder itself, captured at its own match.
+  # This session's kind comes from its harness ANCESTRY rather than from the pid
+  # whose environment is read, because that pid is an ordinary shell which merely
+  # inherited the marker. Requiring the row's harness on both sides is what stops
+  # a marker one harness exported from being believed by another that inherited
+  # it, which would let a second, genuinely separate session take this home.
+  kind=$(fm_harness_pid_kind "$pid" 2>/dev/null || true)
+  fm_session_launch_marker_exists "$kind" || return 1
+  while IFS= read -r member; do
+    [ -n "$member" ] || continue
+    if [ "$(fm_harness_pid_kind "$member" 2>/dev/null || true)" = "$kind" ]; then
+      same_kind=1
+      break
+    fi
+  done <<EOF
+$pids
+EOF
+  [ "$same_kind" -eq 1 ] || return 1
+
+  launcher=$(fm_session_launcher_pid "$$" "$kind" 2>/dev/null || true)
   if [ "$launcher" = "$pid" ]; then
     related=1
     relation="launched this session"
   fi
-  if [ "$related" -eq 0 ] && [ -z "$pids" ]; then
-    pids=$(fm_harness_ancestry_pids 2>/dev/null || true)
-  fi
   if [ "$related" -eq 0 ]; then
     while IFS= read -r member; do
       [ -n "$member" ] || continue
-      launcher=$(fm_session_launcher_pid "$member" 2>/dev/null || true)
+      launcher=$(fm_session_launcher_pid "$member" "$kind" 2>/dev/null || true)
       if [ "$launcher" = "$pid" ]; then
         related=1
         relation="launched this session"
@@ -488,7 +595,7 @@ $pids
 EOF
   fi
   if [ "$related" -eq 0 ]; then
-    launcher=$(fm_session_launcher_pid "$pid" 2>/dev/null || true)
+    launcher=$(fm_session_launcher_pid "$pid" "$kind" 2>/dev/null || true)
     if [ -n "$launcher" ]; then
       if [ "$launcher" = "$$" ]; then
         related=1
