@@ -511,6 +511,24 @@ test_arms_for_x_mode_poll_need_without_inflight() {
   pass "auto-arm: X-mode poll need arms the cycle even with no tasks in flight"
 }
 
+# The fleet-auditor outage: a home whose ONLY duty is a trust-registered custom
+# check (bin/fm-check-register.sh) has no state/*.meta record, so before the
+# supervision predicate counted registered checks this hook saw nothing to
+# supervise and exited 0 at every turn end, leaving the home unwatched.
+test_arms_for_registered_check_need_without_inflight() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/check-need")
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/state/audit.check.sh"
+  chmod 0700 "$dir/state/audit.check.sh"
+  FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" audit >/dev/null \
+    || fail "could not register the custom check under test"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a trust-registered custom check must keep the auto-arm active with zero tasks in flight"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm for the registered custom check"
+  pass "auto-arm: a registered custom check arms the cycle even with no tasks in flight"
+}
+
 test_single_flight_admits_exactly_one_owner() {
   local dir rc1 rc2 count
   dir=$(make_primary_dir "$TMP_ROOT/single-flight")
@@ -594,6 +612,7 @@ test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
 test_arms_for_x_mode_poll_need_without_inflight
+test_arms_for_registered_check_need_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
