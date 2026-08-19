@@ -1875,7 +1875,11 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              agent get -> agent_not_found - docs/herdr-backend.md "ID
 #              stability across a server restart"), and what a future
 #              `resume_agents_on_restore = false` restore would produce too
-#              (a plain shell, never an agent).
+#              (a plain shell, never an agent). Also reported for a pane that
+#              IS registered as prime-agent when both probes below positively
+#              confirm the agent is gone (foreground exit 1 AND subtree exit
+#              1), since that harness's registration outlives its own `/quit`;
+#              either probe reading unusable (exit 2) keeps `live`.
 #   live     - `agent get` succeeds and reports a real agent_status (working,
 #              idle, done, or blocked - any registered value). An idle or
 #              blocked agent is still a genuine, still-registered agent, not
@@ -1887,7 +1891,7 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code presence status
+  local session=$1 pane_id=$2 out code presence status agent fg_rc live_rc
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
   if [ "$presence" != present ]; then
     case "$presence" in
@@ -1903,8 +1907,22 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
     return 0
   fi
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  agent=$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)
   case "$status" in
-    working|idle|done|blocked) printf 'live' ;;
+    working|idle|done|blocked)
+      # prime-agent registration survives `/quit`, so native identity alone is
+      # not proof that an agent still occupies this pane.
+      if [ "$agent" = prime-agent ]; then
+        fm_backend_herdr_pane_prime_agent_foreground "$session" "$pane_id"
+        fg_rc=$?
+        if [ "$fg_rc" -eq 1 ]; then
+          fm_backend_herdr_pane_prime_agent_in_subtree "$session" "$pane_id"
+          live_rc=$?
+          [ "$live_rc" -eq 1 ] && { printf 'no-agent'; return 0; }
+        fi
+      fi
+      printf 'live'
+      ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -2607,6 +2625,10 @@ fm_backend_herdr_capture_ansi() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
+# prime-agent uses the shell-style `>` glyph for its composer. This remains
+# untrusted until the foreground and native identity probes both agree.
+FM_BACKEND_HERDR_PRIME_PROMPT_RE=${FM_BACKEND_HERDR_PRIME_PROMPT_RE:-'^>( |$)'}
+
 # --- herdr composer capture and capability primitives -----------------------
 #
 # These functions are the ONLY herdr-specific composer knowledge left: the
@@ -2623,6 +2645,101 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   local out
   out=$(fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null) || return 1
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
+}
+
+# fm_backend_herdr_pane_prime_agent_foreground: 0 only when the pane's LIVE
+# foreground process group actually contains the prime-agent binary right now.
+#
+# This exists because the reporter identity above is not proof of a live agent:
+# verified 2026-08-08 on prime-agent 0.7.1, `/quit` returns the pane to a login
+# shell while Herdr still reports `agent: prime-agent, agent_status: idle`, and
+# the quit TUI's last composer row stays in the capture window. Without this
+# kernel-level check, a shell whose prompt happens to be `> ` would inherit
+# prime-agent's composer shape - exactly the dead-shell injection hazard the
+# shared composer rule exists to prevent.
+#
+# Three outcomes, because the two callers need different fail-safe directions:
+#   0 - the foreground process IS prime-agent (read succeeded).
+#   1 - the read succeeded and prime-agent is NOT in the foreground: this pane
+#       has genuinely returned to a shell.
+#   2 - the read itself is unusable (RPC failure, unexpected shape, missing
+#       field). Never treat this as evidence either way.
+# The composer arm accepts only 0, so an unreadable probe keeps a bare `>` out
+# of the composer set exactly as before. The liveness classifier above demotes
+# only on 1, so an unreadable probe can never make it close a live agent's pane.
+fm_backend_herdr_pane_prime_agent_foreground() {  # <session> <pane-id>
+  local session=$1 pane=$2 info rc=0
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 2
+  printf '%s' "$info" | jq -e --arg pane "$pane" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+    and (.result.process_info.foreground_processes | type) == "array"
+  ' >/dev/null 2>&1 || return 2
+  printf '%s' "$info" | jq -e '
+    .result.process_info.foreground_processes
+    | any(
+        ((.name // "") | split("/") | last) == "prime-agent"
+        or (((.argv0 // .argv[0]) // "") | ltrimstr("-") | split("/") | last) == "prime-agent"
+      )
+  ' >/dev/null 2>&1 || rc=$?
+  case "$rc" in 0) return 0 ;; 1) return 1 ;; *) return 2 ;; esac
+}
+
+# fm_backend_herdr_pane_prime_agent_in_subtree: does the pane still HOST a
+# prime-agent process anywhere below its shell, foreground or not?
+#
+# This is the discriminator the recovery classifier needs and the foreground
+# probe above cannot give it. prime-agent removes itself from the foreground
+# deliberately: Ctrl+Z stops its whole group with SIGTSTP (verified in
+# prime-agent 0.7.1's interactive mode), so a suspended - fully live - agent
+# and a `/quit` pane look identical from the foreground alone. They differ in
+# the process table: the suspended agent is still a stopped child of the pane's
+# shell, while a quit one has exited and left nothing behind.
+#
+# Same three outcomes and the same fail-safe direction as the foreground probe:
+#   0 - a prime-agent process is present in the pane's subtree.
+#   1 - the pane's shell was located in the process table and has no
+#       prime-agent process under it.
+#   2 - unusable: no process-info, no shell pid, no ps, or a process table that
+#       does not even contain the pane's own shell (which is what a pane hosted
+#       on another machine looks like from here).
+fm_backend_herdr_pane_prime_agent_in_subtree() {  # <session> <pane-id>
+  local session=$1 pane=$2 info shell_pid ps_bin rows rc
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 2
+  shell_pid=$(printf '%s' "$info" | jq -er --arg pane "$pane" '
+    select(.result.type == "pane_process_info" and .result.process_info.pane_id == $pane)
+    | .result.process_info.shell_pid
+    | select(type == "number" and . > 1)
+    | floor
+  ' 2>/dev/null) || return 2
+  ps_bin=${FM_HERDR_PS_BIN:-ps}
+  command -v "$ps_bin" >/dev/null 2>&1 || return 2
+  rows=$("$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || return 2
+  [ -n "$rows" ] || return 2
+  printf '%s\n' "$rows" | awk -v root="$shell_pid" '
+    { pid[NR] = $1; ppid[NR] = $2; comm[NR] = $3; n = NR; known[$1] = 1 }
+    END {
+      if (!known[root]) exit 2
+      inpane[root] = 1
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (i = 1; i <= n; i++) {
+          if (!inpane[pid[i]] && inpane[ppid[i]]) { inpane[pid[i]] = 1; changed = 1 }
+        }
+      }
+      for (i = 1; i <= n; i++) {
+        if (!inpane[pid[i]] || pid[i] == root) continue
+        name = comm[i]
+        sub(/^-/, "", name)
+        sub(/.*\//, "", name)
+        if (name == "prime-agent") exit 0
+      }
+      exit 1
+    }
+  '
+  rc=$?
+  case "$rc" in 0|1) return "$rc" ;; *) return 2 ;; esac
 }
 
 # fm_backend_herdr_composer_identity: the native agent identity/state probe
@@ -2642,7 +2759,7 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
-  local target=$1 cap caps verdict identity
+  local target=$1 cap caps verdict identity plain line trimmed prime_row=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
@@ -2651,6 +2768,22 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
   else
     printf 'unknown'
     return 0
+  fi
+  # Only ask Herdr for the extra process fact when the capture contains the
+  # shell-style glyph that could be prime-agent's composer.
+  plain=$(printf '%s\n' "$cap" | fm_composer_strip_ansi)
+  while IFS= read -r line; do
+    trimmed=$line
+    fm_composer_normalize_trim_var trimmed
+    if printf '%s' "$trimmed" | grep -qE "$FM_BACKEND_HERDR_PRIME_PROMPT_RE"; then
+      prime_row=1
+    fi
+  done <<EOF
+$plain
+EOF
+  if [ "$prime_row" = 1 ] \
+     && fm_backend_herdr_pane_prime_agent_foreground "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"; then
+    caps=$(printf '%s\nprime=1' "$caps")
   fi
   verdict=$(fm_composer_classify_screen "$caps" "$cap")
   if [ "$verdict" = need-identity ]; then

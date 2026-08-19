@@ -33,8 +33,11 @@
 #               composer. Without it, the bottom-most shape wins.
 #   identity=1  a native agent identity/state probe exists (herdr `agent get`;
 #               the tmux pi foreground-process probe). Identity is what makes
-#               Pi's blank separated composer provable; with identity=0 that
-#               shape stays `unknown`.
+#               Pi's blank separated composer and prime-agent's shell-style
+#               composer provable; with identity=0 those shapes stay `unknown`.
+#   prime=1     the adapter has independently proven that the live foreground
+#               process is prime-agent. This is an additional capability fact,
+#               never inferred from rendered text or native identity.
 #   rows=<n>    the capture's bounded row count (informational).
 #
 # THE STRICT BLANK-ROW RULE (captain decision blank-row-injection-posture,
@@ -67,6 +70,10 @@
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
+#   prime      - prime-agent: a bare `>` row, admitted only when the adapter's
+#                kernel-level foreground-process capability says prime-agent
+#                and native identity also reports prime-agent. The shell-style
+#                glyph is otherwise always the dead-shell shape.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -1065,7 +1072,13 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi
-  if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
+  if [ "${FM_COMPOSER_CAP_PRIME:-0}" = 1 ] \
+     && [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
+    generic=$FM_COMPOSER_SCAN_SHELL_ROW
+    FM_COMPOSER_SELECTED_KIND=prime
+    FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_SHELL_ROW
+    FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_SHELL_ROW
+  elif [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi
@@ -1183,14 +1196,47 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
+# _fm_composer_prime_verdict: prime-agent's `>` row is a genuine composer
+# only after both the adapter's foreground capability and native identity have
+# proved the pane. Agent status is deliberately not consulted: a working pane
+# still needs its typed text read when submit confirmation falls back here.
+_fm_composer_prime_verdict() {  # <screen> <styled> <has-identity> <identity>
+  local screen=$1 styled=$2 has_identity=$3 identity=$4 agent raw content plain
+  if [ "$has_identity" != 1 ]; then
+    printf 'unknown'
+    return 0
+  fi
+  if [ -z "$identity" ]; then
+    printf 'need-identity'
+    return 0
+  fi
+  if [ "$identity" = probe-absent ]; then
+    printf 'unknown'
+    return 0
+  fi
+  agent=${identity%%$'\t'*}
+  if [ "$agent" != prime-agent ]; then
+    printf 'unknown'
+    return 0
+  fi
+  raw=$(_fm_composer_screen_row "$FM_COMPOSER_SELECTED_FIRST" "$screen")
+  content=$(_fm_composer_row_content "$raw" "$styled")
+  plain=$(_fm_composer_row_content "$raw" 0)
+  fm_composer_classify_content 1 "$content" \
+    "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive \
+    "$plain" 1 "$styled"
+}
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 kv plain
+  FM_COMPOSER_CAP_PRIME=0
   while IFS= read -r kv; do
     case "$kv" in
       styled=1) styled=1 ;;
       cursor=1) cursor=1 ;;
       identity=1) has_identity=1 ;;
+      prime=1) FM_COMPOSER_CAP_PRIME=1 ;;
     esac
   done <<EOF
 $caps
@@ -1265,6 +1311,9 @@ EOF
   case "$FM_COMPOSER_SELECTED_KIND" in
     pi)
       _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+      ;;
+    prime)
+      _fm_composer_prime_verdict "$screen" "$styled" "$has_identity" "$identity"
       ;;
     box)
       _fm_composer_classify_rows "$screen" "$styled" "$FM_COMPOSER_SELECTED_AMBIG" \
