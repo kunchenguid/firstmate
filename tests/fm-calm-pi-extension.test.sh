@@ -2237,10 +2237,13 @@ TS
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/reload'
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-  # The reload banner is transient and can repaint faster than a poll catches it, so
-  # accept the settled final text without depending on ever observing the banner.
-  wait_for_geometry_text "$snapshot" "CALM_GEOMETRY_FINAL" \
-    || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
+  # The in-progress "Reloading ... files..." banner is transient and CALM_GEOMETRY_FINAL
+  # is already on-screen, so neither is a barrier. The past-tense completion banner is
+  # absent before /reload and persists in the transcript once the reload finishes, so
+  # it is a real positive synchronization signal; keystrokes sent during the reload are
+  # dropped by Pi's input teardown, so a probe command cannot serve as the marker.
+  wait_for_geometry_text "$snapshot" "Reloaded keybindings, extensions, skills, prompts, themes, and context files" \
+    || fail "Pi Calm hidden-block geometry E2E never rendered the /reload completion banner"
   sleep "$GEOMETRY_RELOAD_SETTLE_SECONDS"
   capture_geometry_viewport "$snapshot"
   assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
