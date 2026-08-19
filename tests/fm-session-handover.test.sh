@@ -84,6 +84,12 @@ stop_payload() {
   printf '{"session_id":"%s","stop_hook_active":false,"transcript_path":"%s"}' "${2:-sess-1}" "$1"
 }
 
+# A trailing synthetic entry, the shape Claude Code writes when a turn ends
+# abnormally: assistant, main chain, model "<synthetic>", all four usage fields 0.
+synthetic_zero_line() {
+  printf '{"type":"assistant","isSidechain":false,"message":{"model":"<synthetic>","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}\n'
+}
+
 run_pulse() {
   local home=$1 payload=$2
   shift 2
@@ -178,6 +184,24 @@ test_pulse_rearms_after_falling_back_below() {
   out=$(run_pulse "$home" "$(stop_payload "$over")")
   assert_contains "$out" "handover due" "falling back below the threshold must re-arm the report"
   pass "fm-session-pulse: re-arms after the session falls back below the threshold"
+}
+
+# fm-session-pulse-false-zero: a turn that ends abnormally leaves a trailing
+# synthetic all-zero-usage entry as the transcript's last countable assistant
+# entry. That must not read as an empty session and wipe a handover already due.
+test_pulse_does_not_wipe_handover_due_on_a_trailing_synthetic_zero() {
+  local home transcript due
+  home=$(make_home "$TMP_ROOT/pulse-false-zero")
+  transcript="$home/t.jsonl"
+  due="$home/state/.handover-due"
+  write_transcript "$transcript" 300010
+  run_pulse "$home" "$(stop_payload "$transcript")" >/dev/null
+  assert_present "$due" "a turn over the threshold must set the handover-due marker"
+  synthetic_zero_line >> "$transcript"
+  run_pulse "$home" "$(stop_payload "$transcript")" >/dev/null
+  assert_present "$due" \
+    "a trailing synthetic zero-usage entry must not wipe a handover already due"
+  pass "fm-session-pulse: a trailing synthetic zero-usage entry does not wipe a due handover"
 }
 
 test_pulse_threshold_is_a_flat_250000() {
@@ -737,6 +761,7 @@ run_all() {
   test_pulse_is_registered_as_a_stop_hook
   test_pulse_reports_once_over_threshold_and_never_blocks
   test_pulse_rearms_after_falling_back_below
+  test_pulse_does_not_wipe_handover_due_on_a_trailing_synthetic_zero
   test_pulse_threshold_is_a_flat_250000
   test_pulse_excludes_subagent_turns
   test_pulse_is_silent_in_a_crewmate_worktree

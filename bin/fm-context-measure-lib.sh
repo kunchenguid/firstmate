@@ -52,6 +52,13 @@ fm_context_payload_transcript() {
 # jq -R with fromjson? drops malformed or truncated lines instead of aborting, so
 # a partially written transcript degrades to "measure what parsed" rather than to
 # an error.
+#
+# Rule 3 (matching bin/fm-context-budget.sh's own inline guard): Claude Code
+# writes a synthetic all-zero-usage assistant entry whenever a turn ends
+# abnormally. A real session never measures 0, so a 0 usage total is a missing
+# measurement, not a valid reading - candidates with total 0 are excluded before
+# the LAST/dedupe step, so a trailing synthetic entry cannot mask the last real
+# total or be reported as a false 0.
 fm_context_measure_transcript() {
   local transcript=$1 total
   [ -n "$transcript" ] || return 1
@@ -64,7 +71,8 @@ fm_context_measure_transcript() {
     [ .[]
       | select((.isSidechain != true)
         and (.type == "assistant")
-        and ((.message.usage | type) == "object")) ]
+        and ((.message.usage | type) == "object")
+        and ((.message.usage | usage_total) > 0)) ]
     | if length == 0 then empty
       else
         # LAST, never max: compaction resets the running total.

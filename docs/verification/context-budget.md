@@ -463,37 +463,27 @@ A review of this branch asked it to source `bin/fm-context-measure-lib.sh` and d
 
 **That was declined by standing decision, twice, and this record exists so the refusal reads as reasoned rather than skipped.**
 The adoption is not refused in principle - one owner is the agreed end state - but a straight swap today would delete working behavior.
-Four ways the lib is behind this implementation, the fourth found by that same review:
+
+A review of this branch also found a gap that made the lib's own caller wrong rather than merely differing: the lib did not drop a synthetic zero-usage entry the way this guard's rule 3 does.
+One transcript of a 300,010-token turn followed by the synthetic zero-usage entry Claude Code writes when a turn ends abnormally used to measure:
+
+```
+lib   -> 0        (exit status 0, so a caller read it as a real measurement)
+guard -> 300010
+```
+
+That was reachable in `bin/fm-session-pulse.sh`, which measures through the lib: a `0` is below its 250,000 threshold, so it took the under-threshold branch and removed the once-per-session `state/.handover-due` marker, wiping a handover that was already due whenever a turn ended abnormally.
+That defect in the sibling hook, not in this guard, is tracked as `fm-session-pulse-false-zero` and is now fixed: the lib excludes a zero-total candidate from the pool before choosing the last entry, matching this guard's rule 3, so this same transcript now measures `300010` in the lib too.
+
+Three ways the lib is still behind this implementation remain open, tracked as `fm-context-measure-lib-adoption`:
 
 | Behavior | This guard | `fm-context-measure-lib.sh` |
 | --- | --- | --- |
 | Memory over a huge transcript | One streaming pass, constant memory | Slurps with `jq -s` |
 | Compaction-boundary tally | Returned alongside the total, and `record_predates_a_compaction` needs it for genuine-reset detection | Absent, and cannot supply it |
 | Multi-block turns | Takes the last usage entry | Dedupes by `requestId` |
-| Rule 3, synthetic zero-usage entries | Dropped, so the last *positive* total is reported | **Not dropped** |
 
-The fourth row is the one that matters most, because it makes the lib's own caller wrong rather than merely differing.
-One transcript of a 300,010-token turn followed by the synthetic zero-usage entry Claude Code writes when a turn ends abnormally:
-
-```
-lib   -> 0        (exit status 0, so a caller reads it as a real measurement)
-guard -> 300010
-```
-
-The consequence is reachable in `bin/fm-session-pulse.sh`, which measures through the lib.
-A `0` is below its 250,000 threshold, so it takes the under-threshold branch and removes the once-per-session `state/.handover-due` marker.
-Reproduced end to end in a scratch primary home, one session, appending only the synthetic entry between turns:
-
-```
-turn 1, 300010 tokens over the threshold -> state/.handover-due created
-turn 2, synthetic zero entry appended    -> state/.handover-due WIPED
-```
-
-So an interrupted or errored turn makes that session forget a handover was due.
-That is a defect in the sibling hook rather than in this guard, it is not repaired by this branch, and it is tracked as `fm-session-pulse-false-zero`.
-
-Adopting the lib as it stands would import the same false zero into this guard, which is exactly what rule 3 exists to reject.
-The agreed end state is the reverse move: put this streaming implementation, with rule 3 and the compaction tally, into the lib and have both callers adopt it.
+The agreed end state is still the reverse move: put this streaming implementation, with the compaction tally, into the lib and have both callers adopt it.
 That changes behavior for the other caller, so it carries its own tests and its own review, tracked as `fm-context-measure-lib-adoption`.
 
 ## Native knobs remain unusable

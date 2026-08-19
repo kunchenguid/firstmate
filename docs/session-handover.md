@@ -24,7 +24,7 @@ Falling back below it - after a handover, or after the harness compacts - re-arm
 No turn-end hook payload carries a token count, so the number comes from the transcript the payload points at.
 `bin/fm-context-measure-lib.sh` is the single owner of that measurement and of two rules every caller keeps: read `transcript_path` from the payload rather than deriving it from `$HOME`, and never write a second formula.
 
-The total is `input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens` on the last non-sidechain `assistant` entry, with three correctness rules: dedupe a multi-block turn by `requestId`, take the last entry rather than the maximum (compaction resets the running total), and exclude sidechains so a subagent's context never counts against the primary.
+The total is `input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens` on the last non-sidechain `assistant` entry, with four correctness rules: dedupe a multi-block turn by `requestId`, take the last entry rather than the maximum (compaction resets the running total), exclude sidechains so a subagent's context never counts against the primary, and ignore a synthetic all-zero-usage entry - the shape Claude Code writes whenever a turn ends abnormally - so an interrupted turn is never misread as a reset to zero.
 
 Per-harness support is `claude` only.
 No other verified adapter's turn-end payload carries a transcript pointer, so the pulse requires `--claude` and is inert otherwise.
