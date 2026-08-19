@@ -329,6 +329,7 @@ classify_pr_json() { # <repo> <pr-json-object>
       | ($text | test("(^|[^[:alnum:]])(please|must|should|need|needs|required|require|could you|can you|would you|can we|could we|kindly)([[:space:]]+[^[:space:]]+){0,3}[[:space:]]+" + work_action + "([^[:alnum:]]|$)"))
         or ($text | test("(^|[.?!][[:space:]]+)(could|can|would)([[:space:]]+[^[:space:]?!.]+){0,6}[[:space:]]+" + work_action + "([^[:alnum:]]|$)"))
         or ($text | test("(^|[.?!][[:space:]]+)(could|can|would)[[:space:]]+(you|we|this|that|it)[[:space:]]+(make|keep|turn|render)[[:space:]]+(this|that|it|the[[:space:]]+[^[:space:]?!.]+)[[:space:]]+(simpler|clearer|safer|faster|smaller|cleaner)([?!.]|$)"))
+        or ($text | test("(^|[.?!][[:space:]]+)(consider|suggest|recommend)([[:space:]]+[^[:space:]?!.]+){0,3}[[:space:]]+" + work_action + "([^[:alnum:]]|$)"))
         or (($text | test("^" + imperative_work_action + "[[:space:]]+")) and (neutral_feedback | not))
         or ($text | test("(^|[^[:alnum:]])(changes?|updates?|fixes?|re-?review)([[:space:]]+(are|is|were|be))?[[:space:]]+(needed|required|requested)([^[:alnum:]]|$)"));
     def reviewer_request:

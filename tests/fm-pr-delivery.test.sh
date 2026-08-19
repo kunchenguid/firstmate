@@ -329,6 +329,23 @@ test_imperative_pr_comment_holds() {
   pass "imperative PR comments block delivery"
 }
 
+test_recommendation_pr_comment_holds() {
+  local home fixture out
+  home=$(make_world recommendationcomment)
+  fixture="$TMP_ROOT/fix-recommendationcomment"
+  setup_project "$home" "$fixture"
+  write_open "$fixture" acme/alpha '[{"number":26,"url":"https://github.com/acme/alpha/pull/26","headRefName":"fm/comment26","headRefOid":"xxx","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/alpha 26 '{"number":26,"url":"https://github.com/acme/alpha/pull/26","headRefName":"fm/comment26","headRefOid":"xxx","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"Consider using the shared helper here.","createdAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  fm_write_meta "$home/state/comment26.meta" \
+    'window=fm-comment26' "worktree=$home/projects/comment26" 'project=alpha' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  [ -z "$out" ] || fail "recommendation PR comment requesting code work should hold delivery"
+  run_delivery "$home" "$fixture" show | grep -Fq 'review-issue' \
+    || fail "recommendation PR comment did not produce a review-issue hold"
+  pass "recommendation PR comments block delivery"
+}
+
 test_closed_snapshot_holds_delivery() {
   local home fixture out
   home=$(make_world closedsnapshot)
@@ -711,6 +728,7 @@ test_optional_review_silence
 test_comment_review_then_clearance
 test_pr_comment_then_clearance
 test_imperative_pr_comment_holds
+test_recommendation_pr_comment_holds
 test_closed_snapshot_holds_delivery
 test_review_thread_revalidation
 test_check_evidence_requires_success
