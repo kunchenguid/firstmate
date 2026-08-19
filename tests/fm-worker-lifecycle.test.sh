@@ -1879,6 +1879,286 @@ PY
   pass "account authority proves the exact home through the real sourceable helper"
 }
 
+partial_apply_never_persists() {
+  # The worker record is built from the controller's own expected_tags, and it
+  # is proved real by a VALID apply succeeding against it before anything is
+  # corrupted: a fixture the production function rejects would fail there
+  # rather than silently make the later assertion vacuous.
+  python3 - "$CONTROLLER" <<'PY' \
+    || fail "a failed apply left its partial effects on the durable record"
+import copy
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("controller", sys.argv[1])
+controller = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(controller)
+
+WORKER = {
+    "slot": 1,
+    "queue_key": "one@spawn:aaaaaaaaaaaaaaaa",
+    "assignment_generation": "asg-00000001",
+    "deployment_generation": "dep-one",
+    "owner": "owner",
+    "phase": "creating",
+    "resources": {},
+    "bindings": {
+        "home_binding": "h" * 64,
+        "task": "one",
+        "task_generation": "spawn:aaaaaaaaaaaaaaaa",
+        "assignment_generation": "asg-00000001",
+        "account_binding": "a" * 64,
+        "worktree_binding": "w" * 64,
+        "repository_binding": "r" * 64,
+        "repository_generation": "c" * 40,
+    },
+}
+TAGS = controller.expected_tags(WORKER)
+CLOUD = {
+    "slot": 1,
+    "resources": {
+        kind: {
+            "id": "/subscriptions/s/resourceGroups/g/providers/x/{}".format(kind),
+            "immutable_id": "imm-{}".format(kind),
+            "tags": dict(TAGS),
+        }
+        for kind in controller.REQUIRED_RESOURCE_KINDS
+    },
+}
+
+
+def document():
+    return {
+        "workers": {"1": copy.deepcopy(WORKER)},
+        "queue": {WORKER["queue_key"]: {"status": "queued", "slot": None}},
+        "executions": {},
+        "completed_worker_seconds": 0.0,
+        "capacity_reservations": {},
+        "next_assignment": 2,
+        "pending_action": None,
+    }
+
+
+action = {"type": "create", "slot": 1, "idempotency_key": "k", "request_digest": "d"}
+
+# The fixture is real enough for the production function: a valid apply lands.
+proof = document()
+controller.apply_result_transactionally(
+    {}, proof, action, {"idempotency_key": "k", "worker": copy.deepcopy(CLOUD)}
+)
+assert proof["workers"]["1"]["phase"] == "assigned", proof["workers"]["1"]["phase"]
+assert proof["queue"][WORKER["queue_key"]]["status"] == "assigned"
+
+# The guard at its call site, not only as a function. Deleting the
+# assert_scoped call from apply_result_transactionally leaves every other
+# assertion in this file green, which is exactly the hole this closes: the
+# guard is the whole reason the change exists.
+original_apply = controller.apply_action_result
+
+
+def reaches_outside(env, document_, action_, result_):
+    original_apply(env, document_, action_, result_)
+    document_["capacity_reservations"]["rogue"] = 1
+
+
+controller.apply_action_result = reaches_outside
+scoped = document()
+raised = None
+try:
+    controller.apply_result_transactionally(
+        {}, scoped, action, {"idempotency_key": "k", "worker": copy.deepcopy(CLOUD)}
+    )
+except controller.LifecycleError as error:
+    raised = error
+finally:
+    controller.apply_action_result = original_apply
+assert raised is not None, "apply_result_transactionally committed an out-of-scope apply"
+# Refused for the right reason, not merely refused.
+assert "capacity_reservations" in str(raised), str(raised)
+assert scoped == document(), "an out-of-scope apply reached the caller's record"
+
+# Now the same apply with every resource identity moved. adopt_cloud_resources
+# writes the whole resource set onto the record and only then refuses it, so
+# that write is the partial effect under test.
+moved = copy.deepcopy(CLOUD)
+for kind in moved["resources"]:
+    moved["resources"][kind]["tags"]["worker-slot"] = "99"
+result = {"idempotency_key": "k", "worker": moved}
+
+transactional = document()
+raised = None
+try:
+    controller.apply_result_transactionally({}, transactional, action, result)
+except controller.LifecycleError as error:
+    raised = error
+assert raised is not None, "a moved identity was accepted"
+assert transactional == document(), "a failed apply changed the durable record"
+
+# The in-place apply this replaces does leave those effects behind, which is
+# what makes the assertion above a difference rather than a restatement.
+loose = document()
+try:
+    controller.apply_action_result({}, loose, action, result)
+except controller.LifecycleError:
+    pass
+assert loose != document(), "the in-place apply did not partially apply, so this proves nothing"
+assert loose["workers"]["1"]["resources"], "the partial effect was not the adopted resource set"
+PY
+
+  # The production call site, not just the function it should call. Asserting
+  # the property of apply_result_transactionally alone left execute_action free
+  # to go back to the in-place apply with the suite still green.
+  local tmp home envfile
+  fm_test_tmproot_into tmp fm-worker-callsite
+  home="$tmp/home"
+  mkdir -p "$home"
+  envfile="$tmp/env"
+  cat >"$envfile" <<EOF
+FM_HOME=$home
+FM_AZURE_SUBSCRIPTION_ID=$SUB
+FM_AZURE_DEPLOYMENT_GENERATION=dep-one
+FM_AZURE_OWNER_TAG=owner
+FM_AZURE_NAMING_PREFIX=fmtest
+FM_WORKER_PROVIDER_COMMAND=/bin/false
+EOF
+  python3 - "$CONTROLLER" "$envfile" <<'PY' \
+    || fail "execute_action persisted a partially applied worker record"
+import copy
+import importlib.util
+import json
+import os
+import sys
+
+spec = importlib.util.spec_from_file_location("controller", sys.argv[1])
+controller = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(controller)
+
+for line in open(sys.argv[2]):
+    if "=" in line:
+        name, value = line.strip().split("=", 1)
+        os.environ[name] = value
+env = controller.environment()
+
+WORKER = {
+    "slot": 1, "queue_key": "one@spawn:aaaaaaaaaaaaaaaa",
+    "assignment_generation": "asg-00000001", "deployment_generation": "dep-one",
+    "owner": "owner", "phase": "creating", "resources": {},
+    "bindings": {
+        "home_binding": "h" * 64, "task": "one",
+        "task_generation": "spawn:aaaaaaaaaaaaaaaa",
+        "assignment_generation": "asg-00000001", "account_binding": "a" * 64,
+        "worktree_binding": "w" * 64, "repository_binding": "r" * 64,
+        "repository_generation": "c" * 40,
+    },
+}
+TAGS = controller.expected_tags(WORKER)
+moved = {
+    kind: {
+        "id": "/subscriptions/s/resourceGroups/g/providers/x/{}".format(kind),
+        "immutable_id": "imm-{}".format(kind),
+        "tags": {**TAGS, "worker-slot": "99"},
+    }
+    for kind in controller.REQUIRED_RESOURCE_KINDS
+}
+action = {"type": "create", "slot": 1, "idempotency_key": "k", "request_digest": "d"}
+
+# The provider is the only thing stubbed; execute_action itself is the real one.
+controller.provider_call = lambda environment, operation, payload: {
+    "result": {"idempotency_key": "k", "worker": {"slot": 1, "resources": moved}}
+}
+
+with controller.controller_lock(env):
+    state = controller.load_state(env)
+    state["workers"]["1"] = copy.deepcopy(WORKER)
+    state["queue"][WORKER["queue_key"]] = {"status": "queued", "slot": None}
+    controller.save_state(env, state)
+    raised = None
+    try:
+        controller.execute_action(env, state, action)
+    except controller.LifecycleError as error:
+        raised = error
+assert raised is not None, "execute_action accepted a moved identity"
+
+# The object the caller still holds, not the file. execute_action does not save
+# after a failed apply, so nothing reaches disk on this path either way; what
+# differs is that the in-place apply leaves the caller holding a worker record
+# carrying resources its create never got, and the very next thing a caller
+# does with that object may be to save it.
+assert state["workers"]["1"]["phase"] == "creating", state["workers"]["1"]["phase"]
+assert not state["workers"]["1"]["resources"], (
+    "execute_action left the caller holding the adopted resource set of a refused create"
+)
+assert state["queue"][WORKER["queue_key"]]["status"] == "queued", (
+    "execute_action left the caller holding a queue entry a refused create had assigned"
+)
+
+# The other call site. A restart replays whatever claim survived, and the
+# existing restart coverage only exercises the path where the replay succeeds,
+# where an in-place apply is indistinguishable from a transactional one.
+with controller.controller_lock(env):
+    replayed = controller.load_state(env)
+    replayed["workers"]["1"] = copy.deepcopy(WORKER)
+    replayed["queue"][WORKER["queue_key"]] = {"status": "queued", "slot": None}
+    replayed["pending_action"] = action
+    controller.save_state(env, replayed)
+    raised = None
+    try:
+        controller.replay_pending(env, replayed)
+    except controller.LifecycleError as error:
+        raised = error
+assert raised is not None, "replay_pending accepted a moved identity"
+assert not replayed["workers"]["1"]["resources"], (
+    "replay_pending left the caller holding the adopted resource set of a refused create"
+)
+PY
+
+  # An apply whose effects reach outside the slot it names is refused rather
+  # than committed, which is the property that will let two slots mutate at
+  # once.
+  python3 - "$CONTROLLER" <<'PY' || fail "an out-of-scope apply was committed"
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("controller", sys.argv[1])
+controller = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(controller)
+
+before = {"workers": {"1": {"slot": 1}, "2": {"slot": 2}}, "queue": {}, "executions": {},
+          "completed_worker_seconds": 0.0, "capacity_reservations": {}, "next_assignment": 3}
+for changed, why in (
+    ({"workers": {"1": {"slot": 1}, "2": {"slot": 2, "phase": "x"}}}, "another slot's worker"),
+    ({"queue": {"other": {}}}, "a queue entry the slot does not own"),
+    ({"capacity_reservations": {"r": 1}}, "capacity reservations"),
+    ({"next_assignment": 9}, "the fleet assignment counter"),
+    ({"executions": {"elsewhere": {}}}, "an execution it did not request"),
+):
+    after = dict(before)
+    after.update(changed)
+    try:
+        controller.assert_scoped(before, after, slot="1", queue_key=None, request_digest=None)
+    except controller.LifecycleError:
+        continue
+    raise AssertionError("an apply that changed {} was accepted".format(why))
+
+# The compartment it DOES own is allowed, or this would refuse every real apply.
+allowed = dict(before)
+allowed.update({
+    "workers": {"1": {"slot": 1, "phase": "assigned"}, "2": {"slot": 2}},
+    "queue": {"mine": {"status": "assigned"}},
+    "executions": {"d": {}},
+    "completed_worker_seconds": 12.0,
+})
+controller.assert_scoped(before, allowed, slot="1", queue_key="mine", request_digest="d")
+
+# And a reset removes the worker outright, which the allowlist must permit.
+removed = dict(before)
+removed.update({"workers": {"2": {"slot": 2}}})
+controller.assert_scoped(before, removed, slot="1", queue_key=None, request_digest=None)
+PY
+
+  pass "a provider mutation that fails partway leaves the durable record untouched, and one that reaches outside its slot is refused"
+}
+
 restart_idempotency() {
   local tmp provider fixture home
   fm_test_tmproot_into tmp fm-worker-restart
@@ -1948,5 +2228,6 @@ shared_shape_cli
 landing_authority_refresh
 account_authority_real_helper
 restart_idempotency
+partial_apply_never_persists
 
 echo "# fm-worker-lifecycle.test.sh: all assertions passed"

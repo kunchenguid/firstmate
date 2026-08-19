@@ -13,6 +13,7 @@ See docs/azure-workers.md and `bin/fm-worker-lifecycle.sh help`.
 
 import argparse
 import contextlib
+import copy
 import datetime as dt
 import fcntl
 import hashlib
@@ -1086,6 +1087,101 @@ def record_refusal(state, worker, note):
         worker["last_classification"] = "retained-for-investigation"
 
 
+# One provider mutation touches exactly one slot's compartment, and this is
+# the whole of it. Enumerated from every assignment, `pop` and `setdefault` in
+# `apply_action_result`: the worker record itself (which `reset` removes), the
+# one queue entry that worker owns 1:1, the execution record keyed by the
+# action's request digest, and the fleet's completed-seconds accumulator.
+APPLY_SCOPE = ("workers", "queue", "executions", "completed_worker_seconds")
+
+# Coarse on purpose: it is per container, not per action type, so it permits
+# writes no individual type makes (an `executions` entry from a `create`, say).
+# A per-type contract would be tighter and would also have to change every time
+# a type does, which is how an allowlist becomes a wedge on the money path.
+
+# Not part of the apply's business, and not comparable either. `make_action`
+# aliases live state into the action it mints (`action["request"]` IS the queue
+# entry), and `copy.deepcopy` preserves that sharing, so applying into the copy
+# also changes the copy's own record of the pending action while the original's
+# stays put. Excluding the key is what makes the comparison meaningful; copying
+# BOTH sides does not, because the apply writes only into the copy.
+#
+# It excludes the whole subtree rather than the aliased part, so an apply that
+# rebound `state["pending_action"]` outright would go unseen. That is safe only
+# because both call sites set it themselves immediately afterwards.
+CALLER_OWNED_KEYS = ("pending_action",)
+
+
+def assert_scoped(before, after, *, slot, queue_key, request_digest):
+    """Refuse an apply whose effects reach outside one slot's compartment.
+
+    The allowlist is the contract that lets two mutations for different slots
+    be in flight at once. Checking it here rather than trusting a future edit
+    is what keeps that true: a new assignment in `apply_action_result` that
+    reaches another slot, or the queue, or capacity, fails on its first run
+    instead of quietly corrupting a fleet whose other members are mid-flight.
+    """
+
+    for key in set(before) | set(after):
+        if key in APPLY_SCOPE or key in CALLER_OWNED_KEYS:
+            continue
+        if before.get(key) != after.get(key):
+            raise LifecycleError(
+                "provider mutation result touched {} outside its slot; the pending "
+                "action stays durable and will replay until this is resolved".format(key)
+            )
+    for container, allowed in (
+        ("workers", {slot}),
+        ("queue", {queue_key} if queue_key is not None else set()),
+        ("executions", {request_digest} if request_digest is not None else set()),
+    ):
+        first = before.get(container) or {}
+        second = after.get(container) or {}
+        for key in set(first) | set(second):
+            if key in allowed:
+                continue
+            if first.get(key) != second.get(key):
+                raise LifecycleError(
+                    "provider mutation result changed {}[{}], which its slot does "
+                    "not own; the pending action stays durable and will replay "
+                    "until this is resolved".format(container, key)
+                )
+
+
+def apply_result_transactionally(env, state, action, result):
+    """Apply into a copy, prove the diff, then commit it in place.
+
+    A raise from `apply_action_result` used to leave the passed state object
+    partly mutated: `adopt_cloud_resources` writes the worker's resources
+    before the queue owner is looked up, so a create whose queue entry
+    disappeared left the adopted resource identities behind. That image was
+    never saved on the raising path, but nothing structural stopped it from
+    being saved by a later handler, and a partly-applied worker is precisely
+    the record a `reset` would then act on for a VM that still exists.
+
+    Applying into a copy makes that image unreachable rather than unlikely,
+    and the caller's dict identity is preserved because callers hold it.
+    """
+
+    before = state
+    working = copy.deepcopy(state)
+    slot = str(action.get("slot", ""))
+    # Read before the apply: `reset` removes the worker record, so its queue
+    # owner is not derivable afterwards.
+    worker = before.get("workers", {}).get(slot) or {}
+    queue_key = worker.get("queue_key")
+    apply_action_result(env, working, action, result)
+    assert_scoped(
+        before,
+        working,
+        slot=slot,
+        queue_key=queue_key,
+        request_digest=action.get("request_digest"),
+    )
+    state.clear()
+    state.update(working)
+
+
 def execute_action(env, state, action):
     state["pending_action"] = action
     save_state(env, state)
@@ -1093,7 +1189,7 @@ def execute_action(env, state, action):
     result = response.get("result")
     if not isinstance(result, dict) or result.get("idempotency_key") != action["idempotency_key"]:
         raise LifecycleError("provider mutation result is not bound to the exact idempotency key")
-    apply_action_result(env, state, action, result)
+    apply_result_transactionally(env, state, action, result)
     state["pending_action"] = None
     save_state(env, state)
 
@@ -1208,7 +1304,7 @@ def replay_pending(env, state):
     result = response.get("result")
     if not isinstance(result, dict) or result.get("idempotency_key") != action.get("idempotency_key"):
         raise LifecycleError("replayed provider mutation is not idempotently bound")
-    apply_action_result(env, state, action, result)
+    apply_result_transactionally(env, state, action, result)
     state["pending_action"] = None
     save_state(env, state)
     return True
