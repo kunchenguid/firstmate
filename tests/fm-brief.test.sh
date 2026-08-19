@@ -402,6 +402,9 @@ test_pr_description_bar_and_coderabbit_gate() {
   id="brief-cr-localonly"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
+  assert_present "$brief" "local-only brief was not scaffolded"
+  assert_grep "ready in branch" "$brief" \
+    "local-only brief missing its own done-state report line"
   assert_no_grep "roughly 3-6 short bullets of what changed" "$brief" \
     "local-only brief must not carry the PR-description bar (it never opens a PR)"
   assert_no_grep "CodeRabbit" "$brief" \
@@ -410,6 +413,8 @@ test_pr_description_bar_and_coderabbit_gate() {
   id="brief-cr-scout"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
   assert_no_grep "CodeRabbit" "$brief" "scout brief must be unchanged by the CodeRabbit gate work"
   assert_no_grep "roughly 3-6 short bullets of what changed" "$brief" \
     "scout brief must be unchanged by the PR-description bar work"
