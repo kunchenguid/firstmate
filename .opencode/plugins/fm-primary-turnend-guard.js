@@ -51,7 +51,7 @@ async function letWatchArmRun(sessionID, client) {
   const coordinator = globalThis[COORDINATOR_KEY];
   if (!coordinator?.ensureArmed) return false;
   const status = await coordinator.ensureArmed(sessionID, client);
-  return status === "armed" || status === "wake" || status === "failed";
+  return status === "armed" || status === "wake";
 }
 
 export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => {
