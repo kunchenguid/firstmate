@@ -14,11 +14,15 @@ import {
   assertManualRebindSafe,
   claimNextOutbound,
   claimTransportOwner,
+  cleanupFeishuMedia,
+  completeFeishuMediaDownload,
   configuredSessionMatches,
   convergeConfiguredSession,
   disablePairing,
+  failFeishuMediaDownload,
   failOutboundAttempt,
   publicStatusSummary,
+  pendingFeishuMedia,
   publishFeishuInbound,
   readActiveBinding,
   readPairing,
@@ -50,6 +54,7 @@ let stopping = false;
 let sdkClient = null;
 let wsClient = null;
 let outboundDrainTask = null;
+let mediaDrainTask = null;
 
 function positiveInteger(value, fallback) {
   const number = Number(value);
@@ -181,12 +186,17 @@ function normalizeSdkEvent(data, expectedAppId) {
   const sender = data.sender && typeof data.sender === "object" ? data.sender : {};
   const senderId = sender.sender_id && typeof sender.sender_id === "object" ? sender.sender_id.open_id : undefined;
   const message = data.message && typeof data.message === "object" ? data.message : {};
+  let parsed;
+  if (typeof message.content === "string") {
+    try { parsed = JSON.parse(message.content); } catch {}
+  }
   let content = "";
-  if (message.message_type === "text" && typeof message.content === "string") {
-    try {
-      const parsed = JSON.parse(message.content);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.text === "string") content = parsed.text;
-    } catch {}
+  if (message.message_type === "text" && parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.text === "string") {
+    content = parsed.text;
+  } else if (message.message_type === "image" && parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.image_key === "string") {
+    content = [{ type: "image", resource_key: parsed.image_key }];
+  } else if (message.message_type === "post") {
+    content = normalizeSdkPostContent(parsed);
   }
   return {
     type: "im.message.receive_v1",
@@ -198,12 +208,39 @@ function normalizeSdkEvent(data, expectedAppId) {
     chat_type: message.chat_type,
     message_type: message.message_type,
     content,
+    content_size_bytes: typeof message.content === "string" ? Buffer.byteLength(message.content, "utf8") : null,
     reply_to: message.parent_id ?? null,
     root_id: message.root_id ?? null,
     thread_id: message.thread_id ?? null,
     create_time: message.create_time,
     update_time: message.update_time ?? null,
   };
+}
+
+function normalizeSdkPostContent(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+  const body = parsed.zh_cn && typeof parsed.zh_cn === "object" && !Array.isArray(parsed.zh_cn) ? parsed.zh_cn : parsed;
+  if (!Array.isArray(body.content)) return [];
+  const parts = [];
+  const appendText = (text) => {
+    if (typeof text !== "string") throw new Error("unsupported Feishu post element");
+    const previous = parts.at(-1);
+    if (previous?.type === "text") previous.text += text;
+    else parts.push({ type: "text", text });
+  };
+  if (typeof body.title === "string" && body.title.length > 0) appendText(`${body.title}\n`);
+  for (let paragraphIndex = 0; paragraphIndex < body.content.length; paragraphIndex += 1) {
+    const paragraph = body.content[paragraphIndex];
+    if (!Array.isArray(paragraph)) throw new Error("unsupported Feishu post structure");
+    if (paragraphIndex > 0) appendText("\n");
+    for (const element of paragraph) {
+      if (!element || typeof element !== "object" || Array.isArray(element)) throw new Error("unsupported Feishu post element");
+      if (element.tag === "text") appendText(element.text);
+      else if (element.tag === "img" && typeof element.image_key === "string") parts.push({ type: "image", resource_key: element.image_key });
+      else parts.push({ type: "unsupported", media_type: typeof element.tag === "string" ? element.tag : "unknown" });
+    }
+  }
+  return parts;
 }
 
 function sdkErrorType(error, fallback = "sdk-error") {
@@ -233,6 +270,96 @@ function sdkFailureIsAmbiguous(error) {
 function sdkFailureIsAuthentication(error) {
   const status = Number(error?.response?.status);
   return status === 401 || status === 403;
+}
+
+function headerValue(headers, name) {
+  if (!headers || typeof headers !== "object") return "";
+  const value = headers[name] ?? headers[name.toLowerCase()] ?? headers[name.toUpperCase()];
+  const text = Array.isArray(value) ? value[0] : value;
+  return typeof text === "string" ? text.split(";", 1)[0].trim().toLowerCase() : "";
+}
+
+function imageMime(bytes) {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "image/png";
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 6 && (bytes.subarray(0, 6).toString("ascii") === "GIF87a" || bytes.subarray(0, 6).toString("ascii") === "GIF89a")) return "image/gif";
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  return "";
+}
+
+async function boundedResourceBytes(response, maxBytes) {
+  if (!response || typeof response.getReadableStream !== "function") throw new Error("sdk-media-response-malformed");
+  const stream = response.getReadableStream();
+  if (!stream || typeof stream[Symbol.asyncIterator] !== "function") throw new Error("sdk-media-stream-malformed");
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of stream) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    length += bytes.length;
+    if (length > maxBytes) {
+      stream.destroy?.();
+      throw new Error("media-object-overlength");
+    }
+    chunks.push(bytes);
+  }
+  if (length === 0) throw new Error("media-empty-response");
+  return Buffer.concat(chunks, length);
+}
+
+async function downloadOneMedia(client, claim, binding, ownerFence) {
+  assertOwnerAndBinding(binding, ownerFence);
+  const maxBytes = positiveInteger(process.env.FM_FEISHU_MAX_INBOUND_MEDIA_BYTES, 10 * 1024 * 1024);
+  let response;
+  try {
+    response = await client.im.v1.messageResource.get({
+      params: { type: claim.resource_type },
+      path: { message_id: claim.message_id, file_key: claim.resource_key },
+    }, { timeout: COMMAND_TIMEOUT_MS });
+    const responseMimeType = headerValue(response.headers, "content-type");
+    const bytes = await boundedResourceBytes(response, maxBytes);
+    const actualMimeType = imageMime(bytes);
+    if (!actualMimeType) throw new Error("media-signature-unsupported");
+    completeFeishuMediaDownload(HOME, claim, bytes, {
+      declaredResourceType: claim.resource_type,
+      responseMimeType,
+      actualMimeType,
+    }, {
+      ownerNonce: ownerFence.ownerNonce,
+      bindingId: binding.binding_id,
+      bindingGeneration: binding.generation,
+      sessionId: binding.session_id,
+    }, { maxMediaBytes: maxBytes });
+    assertOwnerAndBinding(binding, ownerFence);
+  } catch (error) {
+    const kind = error?.message === "Feishu media content type mismatch"
+      ? "media-content-type-mismatch"
+      : error?.message === "Feishu media message exceeded its byte limit"
+        ? "media-message-overlength"
+      : typeof error?.message === "string" && /^media-[a-z0-9-]+$/.test(error.message)
+        ? error.message
+        : sdkErrorType(error, "media-download-failed");
+    const terminal = new Set(["media-object-overlength", "media-message-overlength", "media-empty-response", "media-signature-unsupported", "media-content-type-mismatch"]).has(kind) || /^sdk-http-4(?!29)/.test(kind);
+    failFeishuMediaDownload(HOME, claim, kind, { ownerNonce: ownerFence.ownerNonce }, { terminal });
+    recordTransportDiagnostic(HOME, "inbound-media-failure", kind);
+    if (sdkFailureIsAuthentication(error)) throw new Error("inbound media SDK authentication failed");
+  }
+}
+
+async function drainInboundMedia(client, binding, ownerFence) {
+  cleanupFeishuMedia(HOME);
+  const claims = pendingFeishuMedia(HOME, {
+    ownerNonce: ownerFence.ownerNonce,
+    bindingId: binding.binding_id,
+    bindingGeneration: binding.generation,
+    sessionId: binding.session_id,
+  });
+  for (const claim of claims) await downloadOneMedia(client, claim, binding, ownerFence);
+}
+
+function drainInboundMediaSingleFlight(client, binding, ownerFence) {
+  if (mediaDrainTask) return mediaDrainTask;
+  mediaDrainTask = drainInboundMedia(client, binding, ownerFence).finally(() => { mediaDrainTask = null; });
+  return mediaDrainTask;
 }
 
 function renderMarkdownPost(markdown) {
@@ -370,6 +497,7 @@ async function runTransport({ once = false, daemon = false } = {}) {
         readySettled = true;
         ready.resolve();
       }
+      await drainInboundMediaSingleFlight(sdkClient, initial.binding, ownerFence);
       await drainOutboundSingleFlight(sdkClient, initial.binding, ownerFence);
     })().catch(fail).finally(() => { verificationTask = null; });
     return verificationTask;
@@ -413,6 +541,7 @@ async function runTransport({ once = false, daemon = false } = {}) {
             },
           });
           assertOwnerAndBinding(initial.binding, ownerFence);
+          await drainInboundMediaSingleFlight(sdkClient, initial.binding, ownerFence);
         } catch (error) {
           try { recordTransportDiagnostic(HOME, "sdk-event-refused", sdkErrorType(error, "sdk-event-handoff-failed")); } catch {}
           fail(error);
@@ -446,6 +575,7 @@ async function runTransport({ once = false, daemon = false } = {}) {
     });
     await Promise.race([ready.promise, fatalFailure(), readyTimeout]);
     senderTimer = setInterval(() => {
+      void drainInboundMediaSingleFlight(sdkClient, initial.binding, ownerFence).catch(fail);
       void drainOutboundSingleFlight(sdkClient, initial.binding, ownerFence).catch(fail);
     }, OUTBOX_POLL_MS);
     senderTimer.unref();

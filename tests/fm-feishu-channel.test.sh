@@ -47,26 +47,31 @@ node --input-type=module <<'JS'
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   assertManualRebindSafe,
   bindSession,
   claimNextOutbound,
   claimTransportOwner,
+  completeFeishuMediaDownload,
+  cleanupFeishuMedia,
   convergeConfiguredSession,
   createPairing,
   deterministicChunks,
+  failFeishuMediaDownload,
   failOutboundAttempt,
   findInboundByDeliveryRef,
   ingressCounts,
   IDEMPOTENCY_WINDOW_MS,
   offerFeishuIngress,
+  pendingFeishuMedia,
   pathsForHome,
   pendingFeishuIngress,
   persistAssistantOutboundIntent,
   publishFeishuInbound,
   receiptOutbound,
+  reconcileFeishuIngress,
   renderFeishuPostMarkdown,
   registerAssistantOutbound,
   repairOutboundState,
@@ -271,6 +276,88 @@ assert(!pi.sends[0].content.includes("ou_captain1234") && !pi.sends[0].content.i
 assert(renderFeishuSourceBadge(pi.sends[0].content, "user").includes("Feishu - authorized P2P"));
 assert.equal(ingressCounts(home).queued, 1, "native Pi submission was not recorded without a custom scheduler ACK");
 
+const PNG_BYTES = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+const mediaFence = { ownerNonce: transportNonce, bindingId: binding.binding_id, bindingGeneration: binding.generation, sessionId };
+const image = publishFeishuInbound(home, remote({
+  event_id: "evt_image_a",
+  message_id: "om_imageA1234",
+  message_type: "image",
+  content: [{ type: "image", resource_key: "img_v2_fixture_a" }],
+}));
+assert.equal(image.status, "published", "authorized image-only message was not durably accepted");
+assert.equal(pendingFeishuIngress(home, { sessionId, bindingId: binding.binding_id, bindingGeneration: binding.generation }).some(({ event }) => event.delivery_ref === image.deliveryRef), false, "undownloaded image reached the Pi offer queue");
+let mediaClaims = pendingFeishuMedia(home, mediaFence);
+assert.equal(mediaClaims.length, 1, "accepted image did not produce one official-resource download claim");
+assert.equal(pendingFeishuMedia(home, mediaFence).length, 0, "live media download claim duplicated before its stale boundary");
+completeFeishuMediaDownload(home, mediaClaims[0], PNG_BYTES, { declaredResourceType: "image", responseMimeType: "image/png", actualMimeType: "image/png" }, mediaFence);
+const mediaPath = join(pathsForHome(home).inboundMedia, `${sha(mediaClaims[0].media_id)}.json`);
+const cachePath = join(pathsForHome(home).inboundMediaCache, `${sha(mediaClaims[0].media_id)}.bin`);
+assert.equal(lstatSync(mediaPath).mode & 0o777, 0o600, "durable media envelope is not owner-only");
+assert.equal(lstatSync(cachePath).mode & 0o777, 0o600, "durable media bytes are not owner-only");
+for (let attempt = 0; attempt < 30 && pi.sends.length < 3; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 100));
+const imageSend = pi.sends.find(({ content }) => Array.isArray(content) && content.some((part) => part.type === "image"));
+assert.ok(imageSend, "ready image did not cross the real extension boundary as Pi ImageContent");
+assert.equal(imageSend.options?.deliverAs, "steer");
+assert.deepEqual(imageSend.content.map((part) => part.type), ["text", "image"]);
+assert.equal(imageSend.content[1].mimeType, "image/png");
+assert.equal(Buffer.from(imageSend.content[1].data, "base64").compare(PNG_BYTES), 0, "Pi image bytes changed after durable download");
+assert(!JSON.stringify(imageSend).includes("img_v2_fixture_a") && !JSON.stringify(imageSend).includes(cachePath), "resource key or private cache path leaked into Pi input");
+session.entries.push({ type: "message", id: "10000001", parentId: session.entries.at(-1)?.id ?? null, timestamp: "2026-08-12T00:00:00.100Z", message: { role: "user", content: imageSend.content } });
+await emit(pi, "message_start", { message: session.entries.at(-1).message }, session.ctx);
+const mediaToolResults = await emit(pi, "tool_call", { toolName: "bash", toolCallId: "media-origin-tool", input: { command: "printf normal" } }, session.ctx);
+assert(mediaToolResults.every((result) => result?.block !== true), "media-originated prompt diverged from Pi's normal protected-tool confirmation/effect fence");
+
+const ordered = publishFeishuInbound(home, remote({
+  event_id: "evt_post_media",
+  message_id: "om_postMedia1234",
+  message_type: "post",
+  content: [
+    { type: "text", text: "before" },
+    { type: "image", resource_key: "img_v2_fixture_b" },
+    { type: "text", text: "between" },
+    { type: "image", resource_key: "img_v2_fixture_c" },
+    { type: "text", text: "after" },
+  ],
+}));
+mediaClaims = pendingFeishuMedia(home, mediaFence).filter((claim) => claim.delivery_ref === ordered.deliveryRef);
+assert.equal(mediaClaims.length, 2, "ordered post did not claim both images");
+for (const claim of mediaClaims) completeFeishuMediaDownload(home, claim, PNG_BYTES, { declaredResourceType: "image", responseMimeType: "image/png", actualMimeType: "image/png" }, mediaFence);
+for (let attempt = 0; attempt < 30 && !pi.sends.some(({ content }) => Array.isArray(content) && content.filter((part) => part.type === "image").length === 2); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 100));
+const orderedSend = pi.sends.find(({ content }) => Array.isArray(content) && content.filter((part) => part.type === "image").length === 2);
+assert.deepEqual(orderedSend.content.map((part) => part.type), ["text", "text", "image", "text", "image", "text"], "text/image order changed at Pi delivery");
+assert.deepEqual(orderedSend.content.filter((part) => part.type === "text").slice(1).map((part) => part.text.trim()), ["before", "between", "after"]);
+session.entries.push({ type: "message", id: "10000002", parentId: session.entries.at(-1)?.id ?? null, timestamp: "2026-08-12T00:00:00.200Z", message: { role: "user", content: orderedSend.content } });
+await emit(pi, "message_start", { message: session.entries.at(-1).message }, session.ctx);
+assert.equal(publishFeishuInbound(home, remote({ event_id: "evt_image_replay", message_id: "om_imageA1234", message_type: "image", content: [{ type: "image", resource_key: "img_v2_substitute" }] })).status, "duplicate", "message replay substituted media bytes");
+assert.equal(publishFeishuInbound(home, remote({ event_id: "evt_too_many", message_id: "om_tooMany1234", message_type: "post", content: Array.from({ length: 9 }, (_, index) => ({ type: "image", resource_key: `img_v2_${index}xxxx` })) })).reason, "attachment-count-limit");
+assert.equal(publishFeishuInbound(home, remote({ event_id: "evt_bad_key", message_id: "om_badKey1234", message_type: "image", content: [{ type: "image", resource_key: "../../escape" }] })).reason, "malformed-content");
+assert.equal(publishFeishuInbound(home, remote({ event_id: "evt_unsupported", message_id: "om_unsupported1234", message_type: "post", content: [{ type: "unsupported", media_type: "file" }], content_size_bytes: 42 })).reason, "unsupported-content");
+
+const mismatch = publishFeishuInbound(home, remote({ event_id: "evt_mismatch", message_id: "om_mismatch1234", message_type: "image", content: [{ type: "image", resource_key: "img_v2_mismatch" }] }));
+let mismatchClaim = pendingFeishuMedia(home, mediaFence).find((claim) => claim.delivery_ref === mismatch.deliveryRef);
+assert.throws(() => completeFeishuMediaDownload(home, mismatchClaim, PNG_BYTES, { declaredResourceType: "image", responseMimeType: "image/jpeg", actualMimeType: "image/png" }, mediaFence), /content type mismatch/);
+assert.equal(failFeishuMediaDownload(home, mismatchClaim, "media-content-type-mismatch", mediaFence, { terminal: true }), true);
+assert.equal(findInboundByDeliveryRef(home, mismatch.deliveryRef).delivery_ref, mismatch.deliveryRef, "failed media lost durable input identity");
+const partial = publishFeishuInbound(home, remote({ event_id: "evt_partial", message_id: "om_partial1234", message_type: "image", content: [{ type: "image", resource_key: "img_v2_partial" }] }));
+let partialClaim = pendingFeishuMedia(home, mediaFence).find((claim) => claim.delivery_ref === partial.deliveryRef);
+assert.throws(() => completeFeishuMediaDownload(home, partialClaim, PNG_BYTES.subarray(0, 4), { declaredResourceType: "image", responseMimeType: "image/png", actualMimeType: "image/png" }, mediaFence, { maxMediaBytes: 3 }), /byte limit/);
+assert.equal(failFeishuMediaDownload(home, partialClaim, "media-partial-response", mediaFence), true);
+const recoveredClaim = pendingFeishuMedia(home, mediaFence).find((claim) => claim.delivery_ref === partial.deliveryRef);
+assert.equal(recoveredClaim.attempts, partialClaim.attempts + 1, "retryable partial download did not preserve crash-safe identity");
+completeFeishuMediaDownload(home, recoveredClaim, PNG_BYTES, { declaredResourceType: "image", responseMimeType: "image/png", actualMimeType: "image/png" }, mediaFence);
+assert.throws(() => completeFeishuMediaDownload(home, partialClaim, Buffer.from("substitute"), { declaredResourceType: "image", responseMimeType: "image/png", actualMimeType: "image/png" }, mediaFence), /claim changed/, "stale claim substituted downloaded bytes");
+
+const cachedImage = readFileSync(cachePath);
+unlinkSync(cachePath);
+symlinkSync("/tmp", cachePath);
+assert.throws(() => encodeFeishuIngress(findInboundByDeliveryRef(home, image.deliveryRef)), /unsafe Feishu state file/, "media cache symlink escaped the private root");
+unlinkSync(cachePath);
+writeFileSync(cachePath, cachedImage, { mode: 0o600 });
+const cleanup = cleanupFeishuMedia(home, { retentionMs: 1, nowMs: Date.now() + 100000 });
+assert(cleanup.removedRecords >= 1, "expired terminal image did not retire its private envelope");
+assert(cleanup.removedBytes >= PNG_BYTES.length && cleanup.removedBytes <= 3 * PNG_BYTES.length, "expired terminal media retired an unexpected byte volume");
+assert(!existsSync(mediaPath) && !existsSync(cachePath), "expired delivered media remained in the private cache");
+
 const stateBeforeNative = JSON.stringify(ingressCounts(home));
 pi.sendUserMessage("\u2063FIRSTMATE_OP: v1 watcher: native follow-up", { deliverAs: "followUp" });
 assert.equal(JSON.stringify(ingressCounts(home)), stateBeforeNative, "ordinary Firstmate input entered Feishu durable ingress state");
@@ -430,7 +517,7 @@ const resumed = context(sessionId, sessionFile, sessionCwd, session.entries);
 await emit(resumedPi, "session_start", { reason: "resume" }, resumed.ctx);
 await new Promise((resolve) => setTimeout(resolve, 320));
 assert(!resumedPi.sends.some((send) => parseFeishuMarker(send.content)?.deliveryRef === first.deliveryRef), "persisted Feishu input was resubmitted after exact session resume");
-assert.equal(ingressCounts(home).delivered, 1, "session marker did not reconcile prior native-queue submission");
+assert.equal(ingressCounts(home).delivered, 3, "session markers did not reconcile prior native-queue submissions");
 assert.equal(claimNextOutbound(home), undefined, "persisted Assistant entries were mirrored again after exact session resume");
 await emit(resumedPi, "session_shutdown", {}, resumed.ctx);
 
@@ -1002,6 +1089,7 @@ exit 91
 SH
 chmod +x "$FAKE_BIN/lark-cli"
 cat > "$MOCK_SDK" <<'JS'
+import { Readable } from "node:stream";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 
 const logPath = process.env.FM_FAKE_SDK_LOG;
@@ -1014,6 +1102,7 @@ const actions = () => {
   const path = process.env.FM_FAKE_SDK_EVENTS;
   return path && existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : [];
 };
+const pngBytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
 export const Domain = { Feishu: "https://open.feishu.cn" };
 export const LoggerLevel = { error: "error" };
@@ -1078,6 +1167,12 @@ export class Client {
         create: async (payload) => send("create", payload),
         reply: async (payload) => send("reply", payload),
       },
+      messageResource: { get: async ({ params, path }) => {
+        log({ type: "resource-get", resourceType: params.type, messageIdHash: path.message_id.length, fileKeyHash: path.file_key.length });
+        const mode = path.file_key.includes("mismatch") ? "mismatch" : path.file_key.includes("partial") ? "partial" : "ok";
+        const bytes = mode === "partial" ? pngBytes.subarray(0, 4) : pngBytes;
+        return { headers: { "content-type": mode === "mismatch" ? "image/jpeg" : "image/png" }, getReadableStream: () => Readable.from([bytes]) };
+      } },
     } };
   }
 }
@@ -1413,6 +1508,8 @@ cat > "$SDK_EVENTS" <<JSON
   {"kind":"event","data":{"event_id":"evt_sdk_other","app_id":"$APP_ID","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkA1234","create_time":"12","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"text","content":"{\\"text\\":\\"duplicate message id\\"}"}}},
   {"kind":"reconnect"},
   {"kind":"event","data":{"event_id":"evt_sdk_b","app_id":"$APP_ID","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkB1234","create_time":"20","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"text","content":"{\\"text\\":\\"sdk event B\\"}"}}},
+  {"kind":"event","data":{"event_id":"evt_sdk_image","app_id":"$APP_ID","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkImage1234","create_time":"20","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"image","content":"{\\"image_key\\":\\"img_v2_sdk_fixture\\"}"}}},
+  {"kind":"event","data":{"event_id":"evt_sdk_bad_media_user","app_id":"$APP_ID","sender":{"sender_id":{"open_id":"ou_other1234"},"sender_type":"user"},"message":{"message_id":"om_sdkBadImage1234","create_time":"20","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"image","content":"{\\"image_key\\":\\"img_v2_must_not_fetch\\"}"}}},
   {"kind":"event","data":{"event_id":"evt_sdk_bad_user","app_id":"$APP_ID","sender":{"sender_id":{"open_id":"ou_other1234"},"sender_type":"user"},"message":{"message_id":"om_sdkBadUser1234","create_time":"21","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"text","content":"{\\"text\\":\\"reject me\\"}"}}},
   {"kind":"event","data":{"event_id":"evt_sdk_bad_chat","app_id":"$APP_ID","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkBadChat1234","create_time":"22","chat_id":"oc_other1234","chat_type":"group","message_type":"text","content":"{\\"text\\":\\"reject me too\\"}"}}}
 ]
@@ -1437,16 +1534,20 @@ env PATH="$FAKE_BIN:$PATH" "${COMMON_SDK_ENV[@]}" FM_FAKE_SDK_SEND_MODE=ambiguou
 
 [ ! -e "$LARK_SENTINEL" ] || fail "direct SDK transport retained a lark-cli runtime path"
 [ ! -e "$TOUCH_SENTINEL" ] || fail "SDK transport evaluated Assistant text as shell input"
-[ "$(find "$TRANSPORT_HOME/state/feishu/inbox" -type f -name '*.json' | wc -l | tr -d ' ')" -eq 2 ] \
-  || fail "SDK replay and event/message dedupe did not converge to two accepted messages"
+[ "$(find "$TRANSPORT_HOME/state/feishu/inbox" -type f -name '*.json' | wc -l | tr -d ' ')" -eq 3 ] \
+  || fail "SDK replay and event/message dedupe did not converge to three accepted messages"
 FM_HOME="$TRANSPORT_HOME" node --input-type=module <<'JS'
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 const dir = join(process.env.FM_HOME, "state", "feishu", "inbox");
 const events = readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(dir, name), "utf8"))).sort((a, b) => a.ingress_seq - b.ingress_seq);
-assert.deepEqual(events.map((event) => event.message_id), ["om_sdkA1234", "om_sdkB1234"]);
+assert.deepEqual(events.map((event) => event.message_id), ["om_sdkA1234", "om_sdkB1234", "om_sdkImage1234"]);
 assert(events.every((event) => event.transport === "feishu-sdk-long-connection"));
+const image = events.at(-1);
+assert.equal(image.message_type, "image");
+assert.deepEqual(image.content.map((part) => part.type), ["image"]);
+assert(!JSON.stringify(image).includes("img_v2_sdk_fixture"), "raw Feishu resource key leaked into the durable event envelope");
 JS
 if ! FM_HOME="$TRANSPORT_HOME" node --input-type=module - "$SDK_LOG" "$APP_SECRET" <<'JS'
 import { readFileSync, readdirSync } from "node:fs";
@@ -1462,6 +1563,8 @@ if (sends.some((row) => row.kind !== "create" || row.receiveId !== "oc_chat1234"
 if (sends.some((row) => row.markdown !== outbox.chunks[0].chunk || Object.keys(row.post).join(",") !== "zh_cn" || row.post.zh_cn?.title !== "" || row.post.zh_cn?.content?.length !== 1 || row.post.zh_cn.content[0]?.length !== 1 || row.post.zh_cn.content[0][0]?.tag !== "md")) process.exit(1);
 if (!sends.every((row) => row.markdown.includes("| Form | State |") && row.markdown.includes("> quote line one") && row.markdown.includes("2. [x] task") && row.markdown.includes("[full link](https://example.test/kept?x=1&y=two)") && row.markdown.includes("`inline *code*`") && row.markdown.includes("`$x^2$`") && row.markdown.includes("`<captain@example.test>`") && row.markdown.includes("`![image](img_v2_fixture)`") && row.markdown.includes("`<at id=all></at>`") && row.markdown.includes("```markdown\nSetext source") && row.markdown.includes("```html\n<details>") && row.markdown.includes("```sh"))) process.exit(1);
 if (!rows.some((row) => row.type === "ws-start") || !rows.some((row) => row.type === "client" && row.hasSecret === true) || rows.some((row) => JSON.stringify(row).includes(secret))) process.exit(1);
+const resources = rows.filter((row) => row.type === "resource-get");
+if (resources.length !== 1 || resources[0].resourceType !== "image" || rows.some((row) => JSON.stringify(row).includes("img_v2_sdk_fixture") || JSON.stringify(row).includes("img_v2_must_not_fetch"))) process.exit(1);
 JS
 then
   fail "SDK post Markdown encoding, canonical bound-chat message.create, stable UUID, or credential-redaction evidence was wrong"

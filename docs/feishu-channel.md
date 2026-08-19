@@ -8,11 +8,13 @@ The network side uses the official `@larksuiteoapi/node-sdk` long-connection cli
 ## Supported scope
 
 The MVP allows one exact Feishu user in one exact P2P chat.
-Inbound supports plain text only.
+Inbound supports plain text, standalone images, and ordered rich-text messages whose elements are limited to text and images.
+Images are delivered to the exact bound Pi session as Pi-native image content, never as prompt placeholders, Markdown links, data URLs, signed URLs, or private file paths.
 Outbound mirrors every finalized non-empty Assistant text persisted after the binding boundary as Feishu post rich text containing one Markdown element, regardless of whether Feishu, native TUI, watcher, turn-end, or another normal Pi source caused the turn.
 The exact fixed responses `Captain, shipshape.`, `Captain，shipshape.`, and `船长，处理中。` stay local and are never pushed.
 Mirroring adds no model classification, summarization, semantic rewrite, or second model call beyond the deterministic carrier-safety renderer described in the outbound contract.
-Group chats, inbound cards, card interactions, attachments, webhooks, multi-home routing, remote slash commands, and attachment downloads are unsupported.
+Group chats, inbound cards, card interactions, non-image attachments, audio/video/files/stickers, webhooks, multi-home routing, and remote slash commands are unsupported.
+An unsupported rich-media input is quarantined with only its deterministic type and encoded-size metadata and produces a private local refusal outcome instead of being dropped or flattened.
 Slash-like Feishu text is ordinary user content and cannot invoke a Pi slash command or prompt template.
 
 Feishu and native TUI input use the same normal Pi tool path.
@@ -28,7 +30,7 @@ The channel remains inert when `config/feishu.env` is absent or explicitly disab
 Create a self-built Feishu app through the Feishu developer console outside Firstmate.
 Enable bot capability and subscribe to `im.message.receive_v1` using the developer console's long-connection mode.
 Do not configure a webhook URL, public endpoint, reverse proxy, or tunnel.
-Grant only the app-identity scopes required by the developer console for P2P message reception, `im.v1.chat.get`, and bot message creation.
+Grant only the app-identity scopes required by the developer console for P2P message reception, `im.v1.chat.get`, message-resource download, and bot message creation.
 
 ## Local configuration
 
@@ -95,7 +97,7 @@ Automatic startup invokes `bin/fm-feishu-transport.sh` for configuration validat
 `bin/fm-feishu-transport.sh status` prints a body-free and identifier-free health summary.
 
 The transport creates one SDK `WSClient` and one `EventDispatcher` for `im.message.receive_v1`.
-It uses one SDK `Client` for P2P chat verification and canonical outbound post `message.create` calls to the bound chat.
+It uses one SDK `Client` for P2P chat verification, inbound `messageResource.get` downloads, and canonical outbound post `message.create` calls to the bound chat.
 It verifies the configured app ID against the derived paired fingerprint and verifies `chat_mode=p2p` before changing a configured binding, before starting the long connection, and after reconnect.
 A current owner and binding generation must still match before any outbound claim or inbound publication.
 A second transport owner for the same Firstmate home is refused.
@@ -103,7 +105,11 @@ The official SDK owns app-token acquisition, refresh, long-connection authentica
 
 The SDK event callback performs only bounded validation and private durable publication.
 It does not wait for Pi, execute a model, execute a tool, or send an outbound response.
-An accepted callback validates the authenticated app identity when present, sender type and open ID, exact chat and P2P mode, text message shape, body size, active binding, and capacity before durable handoff.
+An accepted callback validates the authenticated app identity when present, sender type and open ID, exact chat and P2P mode, message shape, body size, active binding, and capacity before durable handoff.
+Only after the authorization fence passes can the transport claim an image resource.
+It calls the official SDK resource API with the immutable message and resource identities, streams at most 10 MiB per image and 20 MiB per logical message, permits at most eight images, and requires the response MIME and actual PNG/JPEG/GIF/WebP signature to agree.
+The private cache uses generated names, atomic owner-only writes, a SHA-256 byte binding, and no user-controlled path component.
+Download pending, downloading, ready, retryable failure, terminal refusal, Pi offer, and persisted delivery remain distinct durable states.
 Unauthorized, malformed, unsupported, duplicate, overlength, or resource-pressure events never reach Pi.
 A durability failure throws from the callback so the SDK can report failure to Feishu rather than acknowledging memory-only receipt.
 
@@ -116,13 +122,15 @@ The channel does not claim source-to-disk exactly-once delivery or recovery of a
 ## Pi native queue boundary
 
 Native TUI input is never intercepted, transformed, durably copied, acknowledged, or reinjected by the Feishu extension.
-Local images remain entirely Pi-owned.
+Local TUI images remain entirely Pi-owned.
 Watcher and turn-end operational prompts call Pi's supported `sendUserMessage(..., { deliverAs: "followUp" })` path directly.
 They do not enter Feishu state.
 
 An accepted Feishu event remains pending until the exact bound live Pi session and current transport identity are available.
 Transient contention from a live Feishu state-lock owner leaves accepted events pending, and the existing bridge pump retries with bounded backoff after contention clears without restarting Pi or the transport or adding another scheduler.
-The bridge records one owner-fenced submission attempt and calls `sendUserMessage` with Pi's native `steer` mode.
+The bridge rereads cached bytes through their private generated path, verifies the durable length and SHA-256 binding, records one owner-fenced submission attempt, and calls `sendUserMessage` with Pi's native `steer` mode.
+Text-only input retains the established string call.
+Image-only and ordered text-plus-image input use Pi's official `TextContent | ImageContent` array with `{ type: "image", data, mimeType }`; the ordered parts remain one logical Pi input and image-only input contains the actual image without invented prose.
 While Pi is busy, each accepted Feishu message is delivered after the current Assistant turn finishes its tool calls and before the next model call.
 While Pi is idle, the same call starts a normal turn immediately.
 It submits every pending event once to Pi and does not wait for one event to finish before offering the next one to Pi's own queue.
@@ -174,10 +182,11 @@ An ambiguous request-without-response retries the same post payload and UUID onl
 ## Private state and diagnostics
 
 Pairing and binding records live under `data/feishu/`.
-Durable accepted events, ledgers, pending indexes, Assistant-registration intents, outbox records, attempts, receipts, quarantine records, alerts, owner identity, and health live under `state/feishu/`.
+Durable accepted events, ledgers, pending indexes, media envelopes and cache bytes, Assistant-registration intents, outbox records, attempts, receipts, quarantine records, alerts, owner identity, and health live under `state/feishu/`.
 Directories are mode `0700` and files are mode `0600`.
 Raw identity is never used as a filename.
-Symlinks, hardlinks, partial files, malformed schemas, cross-record mismatches, and cross-home paths are rejected.
+Symlinks, hardlinks, partial files, malformed schemas, cross-record mismatches, byte substitution, traversal attempts, and cross-home paths are rejected.
+Delivered or terminally refused media is removed after a bounded 24-hour retention window; pending and offered work is retained for recovery.
 A live lock owner is distinguishable from stale dead-owner reclamation, a fresh dead owner still inside the stale-owner grace period, and malformed or unsafe lock state; only live-owner contention is retried by the active ingress pump.
 
 Healthy normal startup prints no Feishu status or success line.
@@ -190,8 +199,9 @@ A missing SDK dependency reports its existing optional-feature prerequisite with
 
 The focused regression uses a local mock of the official SDK constructor, long-connection callbacks, reconnect callbacks, P2P chat API, and message APIs.
 It performs no real authentication, network connection, app configuration, event consumption, Pi-session mutation, or Feishu send.
-It proves absent and disabled inertness, strict data parsing, ownership and permission refusal, symlink refusal, silent idempotent activation, session replacement, owner replacement, transport recovery, durable disable, credential rejection and redaction, native TUI non-interception, direct operational follow-up delivery, native Feishu steer submission, exact session and generation fencing, all-origin finalized Assistant mirroring, pre-binding-history exclusion, exact routine-response exclusion and historical-record neutralization, restart deduplication, non-Assistant exclusion, manual rebind stale-session replacement, already-current idempotence, Feishu-origin refusal, pending or uncertain delivery refusal, deterministic post rendering, supported-structure preservation, unsupported-source literal preservation, table, quote, and list-aware chunking and refusal, exact post locale and `md` element encoding, canonical bound-chat `message.create`, replay deduplication, app/chat refusal, stable outbound UUIDs, definite failure without carrier fallback, ambiguous retry handling, single-flight serialization, owner-verified stop, and absence of the former command transport path.
+It proves absent and disabled inertness, strict data parsing, ownership and permission refusal, symlink refusal, silent idempotent activation, session replacement, owner replacement, transport recovery, durable disable, credential rejection and redaction, native TUI non-interception, direct operational follow-up delivery, native Feishu steer submission, native image content, ordered text plus multiple images, image-only input, media byte binding and private modes, download replay and retry, size/count/MIME/signature refusal, path containment and expiry, exact session and generation fencing, all-origin finalized Assistant mirroring, pre-binding-history exclusion, exact routine-response exclusion and historical-record neutralization, restart deduplication, non-Assistant exclusion, manual rebind stale-session replacement, already-current idempotence, Feishu-origin refusal, pending or uncertain delivery refusal, deterministic post rendering, supported-structure preservation, unsupported-source literal preservation, table, quote, and list-aware chunking and refusal, exact post locale and `md` element encoding, canonical bound-chat `message.create`, replay deduplication, app/chat refusal, stable outbound UUIDs, definite failure without carrier fallback, ambiguous retry handling, single-flight serialization, owner-verified stop, and absence of the former command transport path.
 
 That mock does not prove a real app's scopes, developer-console long-connection selection, tenant policy, or production network reachability.
-A future live integration check requires explicit operator authorization and disposable app credentials.
+A post-PR live integration check requires the captain to send one image and one ordered text-plus-image message through the already configured P2P channel, then verify that the exact current Pi can inspect both images.
+It must not rebind the channel, replace credentials, or start a second transport.
 The current dated maintainer evidence is in [Feishu channel verification](verification/feishu-channel.md).

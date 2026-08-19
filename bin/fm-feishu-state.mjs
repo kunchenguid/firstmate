@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 
 export const PAIRING_SCHEMA = "fm-feishu-pairing.v2";
 export const BINDING_SCHEMA = "fm-feishu-binding.v2";
-export const INBOUND_SCHEMA = "fm-feishu-inbound.v1";
+export const INBOUND_SCHEMA = "fm-feishu-inbound.v2";
 export const INBOUND_LEDGER_SCHEMA = "fm-feishu-inbound-ledger.v2";
 export const OUTBOUND_SCHEMA = "fm-feishu-assistant-outbound.v2";
 export const OUTBOUND_LEDGER_SCHEMA = "fm-feishu-outbound-ledger.v1";
@@ -38,6 +38,10 @@ export const OUTBOUND_RECEIPT_SCHEMA = "fm-feishu-outbound-receipt.v1";
 export const OUTBOUND_INTENT_SCHEMA = "fm-feishu-outbound-registration-intent.v2";
 export const TRANSPORT_HEALTH_SCHEMA = "fm-feishu-transport-health.v2";
 export const DEFAULT_MAX_INBOUND_BYTES = 64 * 1024;
+export const DEFAULT_MAX_INBOUND_MEDIA_BYTES = 10 * 1024 * 1024;
+export const DEFAULT_MAX_INBOUND_MESSAGE_MEDIA_BYTES = 20 * 1024 * 1024;
+export const DEFAULT_MAX_INBOUND_ATTACHMENTS = 8;
+export const DEFAULT_INBOUND_MEDIA_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_MAX_OUTBOUND_CHUNK_BYTES = 20 * 1024;
 export const DEFAULT_MAX_OUTBOUND_BYTES = 1024 * 1024;
 export const DEFAULT_MAX_PENDING_INBOUND = 10000;
@@ -49,6 +53,10 @@ const LOCK_STALE_MS = 30000;
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 60000;
 const MODULE_FILE = fileURLToPath(import.meta.url);
+const LEGACY_INBOUND_SCHEMA = "fm-feishu-inbound.v1";
+const INBOUND_MEDIA_SCHEMA = "fm-feishu-inbound-media.v1";
+const SUPPORTED_INBOUND_TYPES = ["text", "image", "post"];
+const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 export class FeishuStateLockContentionError extends Error {
   constructor(lockName) {
@@ -138,7 +146,8 @@ function atomicWrite(path, bytes, mode = 0o600) {
   let fd;
   try {
     fd = openSync(temp, "wx", mode);
-    writeFileSync(fd, bytes, { encoding: "utf8" });
+    if (Buffer.isBuffer(bytes) || bytes instanceof Uint8Array) writeFileSync(fd, bytes);
+    else writeFileSync(fd, bytes, { encoding: "utf8" });
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
@@ -262,6 +271,8 @@ export function pathsForHome(home) {
     inboundPendingCount: join(stateRoot, "inbound-pending-count"),
     inboundDeliveryMap: join(stateRoot, "inbound-delivery-map"),
     inboundPublications: join(stateRoot, "inbound-publications"),
+    inboundMedia: join(stateRoot, "inbound-media"),
+    inboundMediaCache: join(stateRoot, "inbound-media-cache"),
     outbox: join(stateRoot, "outbox"),
     outboundLedger: join(stateRoot, "outbound-ledger"),
     outboundReceipts: join(stateRoot, "outbound-receipts"),
@@ -292,6 +303,8 @@ export function ensurePrivateLayout(home) {
     paths.inboundPending,
     paths.inboundDeliveryMap,
     paths.inboundPublications,
+    paths.inboundMedia,
+    paths.inboundMediaCache,
     paths.outbox,
     paths.outboundLedger,
     paths.outboundReceipts,
@@ -362,7 +375,7 @@ function requireIso(value, label, { nullable = false } = {}) {
 }
 
 function validateInboundEvent(event) {
-  if (event.schema !== INBOUND_SCHEMA || event.source !== "feishu") throw new Error("invalid Feishu inbound event schema or source");
+  if (!new Set([LEGACY_INBOUND_SCHEMA, INBOUND_SCHEMA]).has(event.schema) || event.source !== "feishu") throw new Error("invalid Feishu inbound event schema or source");
   requireString(event.message_id, "inbound message id", MESSAGE_ID);
   if (!Array.isArray(event.event_ids) || event.event_ids.some((id) => typeof id !== "string" || id.length === 0 || Buffer.byteLength(id, "utf8") > 512)) throw new Error("invalid Feishu inbound event ids");
   requireString(event.transport, "inbound transport", /^[A-Za-z0-9._-]+$/, 128);
@@ -373,8 +386,31 @@ function validateInboundEvent(event) {
   requireNullableString(event.reply_to, "inbound reply", MESSAGE_ID);
   requireNullableString(event.root_id, "inbound root id", /^(?:om_|omt_)[A-Za-z0-9_-]{4,128}$/);
   requireNullableString(event.thread_id, "inbound thread id", /^(?:om_|omt_)[A-Za-z0-9_-]{4,128}$/);
-  if (event.message_type !== "text") throw new Error("invalid Feishu inbound message type");
-  if (typeof event.text !== "string" || event.text.trim().length === 0 || Buffer.from(event.text, "utf8").toString("utf8") !== event.text) throw new Error("invalid Feishu inbound text");
+  if (event.schema === LEGACY_INBOUND_SCHEMA) {
+    if (event.message_type !== "text") throw new Error("invalid legacy Feishu inbound message type");
+    if (typeof event.text !== "string" || event.text.trim().length === 0 || Buffer.from(event.text, "utf8").toString("utf8") !== event.text) throw new Error("invalid Feishu inbound text");
+  } else {
+    if (!SUPPORTED_INBOUND_TYPES.includes(event.message_type)) throw new Error("invalid Feishu inbound message type");
+    if (!Array.isArray(event.content) || event.content.length === 0 || event.content.length > DEFAULT_MAX_INBOUND_ATTACHMENTS * 2 + 1) throw new Error("invalid Feishu inbound content");
+    let imageCount = 0;
+    let meaningful = false;
+    for (const part of event.content) {
+      if (!part || typeof part !== "object" || Array.isArray(part)) throw new Error("invalid Feishu inbound content part");
+      if (part.type === "text") {
+        if (typeof part.text !== "string" || Buffer.from(part.text, "utf8").toString("utf8") !== part.text) throw new Error("invalid Feishu inbound text part");
+        meaningful ||= part.text.trim().length > 0;
+      } else if (part.type === "image") {
+        requireString(part.media_id, "inbound media id", /^media_[a-f0-9]{24}$/);
+        imageCount += 1;
+        meaningful = true;
+      } else {
+        throw new Error("unsupported Feishu inbound content part");
+      }
+    }
+    if (!meaningful || imageCount > DEFAULT_MAX_INBOUND_ATTACHMENTS || (event.message_type === "text" && imageCount !== 0) || (event.message_type === "image" && (imageCount !== 1 || event.content.length !== 1))) {
+      throw new Error("invalid Feishu inbound content shape");
+    }
+  }
   requireSafeInteger(event.create_time_ms, "inbound create time");
   if (event.update_time_ms !== undefined && event.update_time_ms !== null) requireSafeInteger(event.update_time_ms, "inbound update time");
   requireIso(event.received_at, "inbound received time");
@@ -386,6 +422,37 @@ function validateInboundEvent(event) {
   requireSafeInteger(event.ingress_seq, "inbound sequence", { min: 1 });
   requireString(event.delivery_ref, "inbound delivery ref", DELIVERY_REF);
   return event;
+}
+
+function validateInboundMedia(record) {
+  if (record.schema !== INBOUND_MEDIA_SCHEMA) throw new Error("invalid Feishu inbound media schema");
+  requireString(record.media_id, "inbound media id", /^media_[a-f0-9]{24}$/);
+  requireString(record.message_id, "inbound media message id", MESSAGE_ID);
+  requireString(record.delivery_ref, "inbound media delivery ref", DELIVERY_REF);
+  requireSafeInteger(record.part_index, "inbound media part index");
+  if (record.resource_type !== "image") throw new Error("invalid Feishu inbound media resource type");
+  requireString(record.resource_key, "inbound media resource key", /^[A-Za-z0-9._-]{4,512}$/);
+  requireString(record.resource_key_hash, "inbound media resource key hash", RECORD_HASH);
+  if (record.resource_key_hash !== `sha256:${sha(record.resource_key)}`) throw new Error("Feishu inbound media resource key hash mismatch");
+  if (!new Set(["pending", "downloading", "ready", "failed"]).has(record.state)) throw new Error("invalid Feishu inbound media state");
+  requireSafeInteger(record.attempts, "inbound media attempts");
+  requireNullableString(record.owner_nonce ?? null, "inbound media owner nonce", /^[a-f0-9]{24,128}$/);
+  requireNullableString(record.mime_type ?? null, "inbound media MIME type", /^image\/[a-z0-9.+-]+$/, 128);
+  if (record.byte_length !== null) requireSafeInteger(record.byte_length, "inbound media byte length", { min: 1 });
+  requireNullableString(record.byte_hash ?? null, "inbound media byte hash", RECORD_HASH);
+  requireNullableString(record.cache_filename ?? null, "inbound media cache filename", /^[a-f0-9]{64}\.bin$/);
+  if (record.last_error_kind !== null && !/^[a-z0-9-]{1,80}$/.test(record.last_error_kind)) throw new Error("invalid Feishu inbound media error kind");
+  requireIso(record.created_at, "inbound media creation time");
+  if (record.download_started_at !== null) requireIso(record.download_started_at, "inbound media download start time");
+  if (record.ready_at !== null) requireIso(record.ready_at, "inbound media ready time");
+  if (record.failed_at !== null) requireIso(record.failed_at, "inbound media failure time");
+  const readyFields = [record.mime_type, record.byte_length, record.byte_hash, record.cache_filename, record.ready_at];
+  if (record.state === "ready" && readyFields.some((value) => value === null)) throw new Error("ready Feishu inbound media lacks byte evidence");
+  if (record.state !== "ready" && readyFields.some((value) => value !== null)) throw new Error("non-ready Feishu inbound media has stale byte evidence");
+  if (record.state === "downloading" && (record.owner_nonce === null || record.download_started_at === null)) throw new Error("downloading Feishu media lacks owner evidence");
+  if (record.state !== "downloading" && record.owner_nonce !== null) throw new Error("non-downloading Feishu media has stale owner evidence");
+  if (record.state === "failed" && (record.failed_at === null || record.last_error_kind === null)) throw new Error("failed Feishu media lacks terminal evidence");
+  return record;
 }
 
 function validateInboundLedger(ledger) {
@@ -504,6 +571,9 @@ function validateRecordAtPath(path, record) {
   } else if (parent === "inbound-ledger") {
     validateInboundLedger(record);
     if (path.split(/[\\/]/).pop() !== inboundFilename(record.message_id)) throw new Error("Feishu inbound ledger filename identity mismatch");
+  } else if (parent === "inbound-media") {
+    validateInboundMedia(record);
+    if (path.split(/[\\/]/).pop() !== `${sha(record.media_id)}.json`) throw new Error("Feishu inbound media filename identity mismatch");
   } else if (parent === "outbox") {
     validateOutbound(record);
     if (path.split(/[\\/]/).pop() !== `${sha(record.event_id)}.json`) throw new Error("Feishu outbox filename identity mismatch");
@@ -518,9 +588,10 @@ function validateRecordAtPath(path, record) {
     validateOutboundIntent(record);
     if (path.split(/[\\/]/).pop() !== `${sha(record.intent_id)}.json`) throw new Error("Feishu outbound intent filename identity mismatch");
   } else if (parent === "inbound-publications") {
-    if (record.schema !== "fm-feishu-inbound-publication.v1" || !record.event || !record.ledger) throw new Error("invalid Feishu inbound publication intent");
+    if (record.schema !== "fm-feishu-inbound-publication.v1" || !record.event || !record.ledger || (record.media !== undefined && !Array.isArray(record.media))) throw new Error("invalid Feishu inbound publication intent");
     validateInboundEvent(record.event);
     validateInboundLedger(record.ledger);
+    for (const media of record.media ?? []) validateInboundMedia(media);
     if (record.event.message_id !== record.ledger.message_id || record.event.delivery_ref !== record.ledger.delivery_ref || record.event.ingress_seq !== record.ledger.ingress_seq) throw new Error("Feishu inbound publication identity mismatch");
     requireIso(record.created_at, "inbound publication time");
     if (path.split(/[\\/]/).pop() !== inboundFilename(record.event.message_id)) throw new Error("Feishu inbound publication filename mismatch");
@@ -607,7 +678,8 @@ function validatePairingRecord(pairing) {
   if (!Array.isArray(pairing.allowed_chats) || pairing.allowed_chats.length !== 1) throw new Error("invalid Feishu pairing chat allowlist");
   requireString(pairing.allowed_users[0], "pairing allowed user", /^ou_[A-Za-z0-9_-]{4,128}$/);
   requireString(pairing.allowed_chats[0], "pairing allowed chat", /^oc_[A-Za-z0-9_-]{4,128}$/);
-  if (pairing.chat_policy !== "p2p-only" || JSON.stringify(pairing.inbound_types) !== JSON.stringify(["text"])) {
+  const inboundPolicy = JSON.stringify(pairing.inbound_types);
+  if (pairing.chat_policy !== "p2p-only" || !new Set([JSON.stringify(["text"]), JSON.stringify(SUPPORTED_INBOUND_TYPES)]).has(inboundPolicy)) {
     throw new Error("invalid Feishu pairing policy");
   }
   if (pairing.managed_by !== undefined && !new Set(["local-tui", "local-config"]).has(pairing.managed_by)) {
@@ -673,7 +745,7 @@ export function createPairing(home, input) {
       allowed_users: [requireString(input.allowedUser, "allowed user open_id", /^ou_[A-Za-z0-9_-]{4,128}$/)],
       allowed_chats: [requireString(input.allowedChat, "allowed P2P chat_id", /^oc_[A-Za-z0-9_-]{4,128}$/)],
       chat_policy: "p2p-only",
-      inbound_types: ["text"],
+      inbound_types: [...SUPPORTED_INBOUND_TYPES],
       managed_by: "local-tui",
       created_at: prior?.created_at ?? nowIso(),
       updated_at: nowIso(),
@@ -686,7 +758,10 @@ export function createPairing(home, input) {
         prior.allowed_users[0] === pairing.allowed_users[0] &&
         prior.allowed_chats[0] === pairing.allowed_chats[0];
       if (!unchanged) throw new Error("disable the active Feishu binding before changing its pairing identity");
-      return prior;
+      if (JSON.stringify(prior.inbound_types) === JSON.stringify(SUPPORTED_INBOUND_TYPES)) return prior;
+      const upgraded = { ...prior, inbound_types: [...SUPPORTED_INBOUND_TYPES], updated_at: nowIso() };
+      atomicJson(paths.pairing, upgraded);
+      return upgraded;
     }
     atomicJson(paths.pairing, pairing);
     return pairing;
@@ -838,7 +913,12 @@ export function convergeConfiguredSession(home, input, session, options = {}) {
       priorBinding.session_cwd_realpath === identity.cwd &&
       priorBinding.session_header_id === identity.headerId &&
       priorBinding.session_header_cwd_realpath === identity.headerCwd;
-    if (bindingMatches) return { changed: false, pairing: priorPairing, binding: priorBinding };
+    if (bindingMatches) {
+      if (JSON.stringify(priorPairing.inbound_types) === JSON.stringify(SUPPORTED_INBOUND_TYPES)) return { changed: false, pairing: priorPairing, binding: priorBinding };
+      const upgradedPairing = { ...priorPairing, inbound_types: [...SUPPORTED_INBOUND_TYPES], updated_at: nowIso() };
+      atomicJson(paths.pairing, upgradedPairing);
+      return { changed: true, pairing: upgradedPairing, binding: priorBinding };
+    }
     for (const name of safeJsonNames(paths.inboundPending)) {
       const ledger = requireSchema(readJson(join(paths.inboundLedger, name)), INBOUND_LEDGER_SCHEMA, "inbound ledger");
       if (ledger.state === "offered") throw new Error("cannot replace a configured Feishu binding while a message belongs to the prior Pi native queue");
@@ -854,7 +934,7 @@ export function convergeConfiguredSession(home, input, session, options = {}) {
       allowed_users: [desired.allowedUser],
       allowed_chats: [desired.allowedChat],
       chat_policy: "p2p-only",
-      inbound_types: ["text"],
+      inbound_types: [...SUPPORTED_INBOUND_TYPES],
       managed_by: "local-config",
       created_at: priorPairing?.created_at ?? nowIso(),
       updated_at: nowIso(),
@@ -923,7 +1003,7 @@ function retargetPendingIngressLocked(paths, binding) {
     const path = join(paths.inboundLedger, name);
     const ledger = requireSchema(readJson(path), INBOUND_LEDGER_SCHEMA, "inbound ledger");
     if (ledger.state !== "pending") continue;
-    requireSchema(readJson(join(paths.inbox, name)), INBOUND_SCHEMA, "inbound event");
+    validateInboundEvent(readJson(join(paths.inbox, name)));
     atomicJson(path, {
       ...ledger,
       original_binding_id: ledger.original_binding_id ?? ledger.binding_id,
@@ -1031,12 +1111,22 @@ function inboundFilename(messageId) {
   return `${sha(messageId)}.json`;
 }
 
-function expectedAuthorizationSnapshot(pairing) {
+function mediaRecordPath(paths, mediaId) {
+  requireString(mediaId, "inbound media id", /^media_[a-f0-9]{24}$/);
+  return join(paths.inboundMedia, `${sha(mediaId)}.json`);
+}
+
+function readInboundMedia(paths, mediaId) {
+  const record = readJson(mediaRecordPath(paths, mediaId), { optional: true });
+  return record ? validateInboundMedia(record) : undefined;
+}
+
+function expectedAuthorizationSnapshot(pairing, inboundTypes = pairing.inbound_types) {
   return `sha256:${sha(JSON.stringify({
     app: pairing.app_id_fingerprint,
     user: pairing.allowed_users,
     chat: pairing.allowed_chats,
-    type: pairing.inbound_types,
+    type: inboundTypes,
     disabled_at: pairing.disabled_at,
   }))}`;
 }
@@ -1053,7 +1143,8 @@ function assertInboundPair(paths, name, event, ledger, { pairing, binding } = {}
     throw new Error("Feishu inbound event and ledger binding do not match");
   }
   if (pairing && event.source === "feishu") {
-    if (event.sender_id !== pairing.allowed_users[0] || event.chat_id !== pairing.allowed_chats[0] || event.message_type !== "text" || event.authorization_snapshot !== expectedAuthorizationSnapshot(pairing)) {
+    const snapshotTypes = event.schema === LEGACY_INBOUND_SCHEMA ? ["text"] : pairing.inbound_types;
+    if (event.sender_id !== pairing.allowed_users[0] || event.chat_id !== pairing.allowed_chats[0] || !pairing.inbound_types.includes(event.message_type) || event.authorization_snapshot !== expectedAuthorizationSnapshot(pairing, snapshotTypes)) {
       throw new Error("Feishu inbound authorization snapshot no longer matches its immutable event");
     }
   }
@@ -1098,6 +1189,19 @@ function completeInboundPublicationLocked(paths, name, publication) {
   const existingLedger = readJson(ledgerPath, { optional: true });
   if (existingLedger && JSON.stringify(existingLedger) !== JSON.stringify(publication.ledger)) throw new Error("conflicting Feishu inbound ledger publication");
   if (!existingLedger) atomicJson(ledgerPath, publication.ledger);
+  for (const media of publication.media ?? []) {
+    const mediaPath = join(paths.inboundMedia, `${sha(media.media_id)}.json`);
+    const existingMedia = readJson(mediaPath, { optional: true });
+    if (existingMedia && (
+      existingMedia.media_id !== media.media_id ||
+      existingMedia.message_id !== media.message_id ||
+      existingMedia.delivery_ref !== media.delivery_ref ||
+      existingMedia.part_index !== media.part_index ||
+      existingMedia.resource_type !== media.resource_type ||
+      existingMedia.resource_key_hash !== media.resource_key_hash
+    )) throw new Error("conflicting immutable Feishu inbound media publication");
+    if (!existingMedia) atomicJson(mediaPath, media);
+  }
   writeInboundDeliveryMap(paths, publication.event);
   for (const eventId of publication.event.event_ids) recordInboundEventId(paths, eventId, publication.event.message_id, publication.event.delivery_ref);
   writeInboundPendingIndex(paths, name, publication.ledger);
@@ -1105,7 +1209,7 @@ function completeInboundPublicationLocked(paths, name, publication) {
   removeIndexedFile(join(paths.inboundPublications, name));
 }
 
-function publishInboundRecordsLocked(paths, event, ledger) {
+function publishInboundRecordsLocked(paths, event, ledger, media = []) {
   validateInboundEvent(event);
   validateInboundLedger(ledger);
   const name = inboundFilename(event.message_id);
@@ -1113,6 +1217,7 @@ function publishInboundRecordsLocked(paths, event, ledger) {
     schema: "fm-feishu-inbound-publication.v1",
     event,
     ledger,
+    media,
     created_at: nowIso(),
   };
   const path = join(paths.inboundPublications, name);
@@ -1157,6 +1262,56 @@ function normalizeContent(content) {
   return content;
 }
 
+function normalizedInboundParts(raw, messageType, options) {
+  if (messageType === "text") {
+    const text = normalizeContent(raw.content ?? raw.text);
+    if (text.trim().length === 0) throw new Error("empty-content");
+    const maxBytes = positiveInteger(options.maxInboundBytes ?? process.env.FM_FEISHU_MAX_INBOUND_BYTES, DEFAULT_MAX_INBOUND_BYTES);
+    if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error("overlength");
+    return [{ type: "text", text }];
+  }
+  if (!Array.isArray(raw.content) || raw.content.length === 0) throw new Error("malformed-content");
+  const maxAttachments = Math.min(positiveInteger(options.maxInboundAttachments ?? process.env.FM_FEISHU_MAX_INBOUND_ATTACHMENTS, DEFAULT_MAX_INBOUND_ATTACHMENTS), DEFAULT_MAX_INBOUND_ATTACHMENTS);
+  const parts = [];
+  let attachmentCount = 0;
+  let textBytes = 0;
+  let unsupportedType = null;
+  for (const part of raw.content) {
+    if (!part || typeof part !== "object" || Array.isArray(part)) throw new Error("malformed-content");
+    if (part.type === "text") {
+      const text = normalizeContent(part.text);
+      textBytes += Buffer.byteLength(text, "utf8");
+      if (text.length > 0) {
+        const prior = parts.at(-1);
+        if (prior?.type === "text") prior.text += text;
+        else parts.push({ type: "text", text });
+      }
+      continue;
+    }
+    if (part.type === "image") {
+      attachmentCount += 1;
+      const resourceKey = requireString(part.resource_key, "inbound image resource key", /^[A-Za-z0-9._-]{4,512}$/);
+      parts.push({ type: "image", resourceKey });
+      continue;
+    }
+    if (part.type === "unsupported") {
+      unsupportedType ??= typeof part.media_type === "string" && /^[a-z0-9._-]{1,80}$/.test(part.media_type) ? part.media_type : "unknown";
+      continue;
+    }
+    throw new Error("unsupported-content");
+  }
+  const maxBytes = positiveInteger(options.maxInboundBytes ?? process.env.FM_FEISHU_MAX_INBOUND_BYTES, DEFAULT_MAX_INBOUND_BYTES);
+  if (textBytes > maxBytes) throw new Error("overlength");
+  if (attachmentCount > maxAttachments) throw new Error("attachment-count-limit");
+  if (unsupportedType !== null) {
+    const error = new Error("unsupported-content");
+    error.unsupportedType = unsupportedType;
+    throw error;
+  }
+  if (parts.length === 0 || attachmentCount === 0 || (messageType === "image" && (parts.length !== 1 || attachmentCount !== 1))) throw new Error("malformed-content");
+  return parts;
+}
+
 export function publishFeishuInbound(home, raw, options = {}) {
   const paths = ensurePrivateLayout(home);
   const pairingRaw = readJson(paths.pairing, { optional: true });
@@ -1165,13 +1320,14 @@ export function publishFeishuInbound(home, raw, options = {}) {
   const binding = bindingRaw ? validateBindingRecord(bindingRaw) : undefined;
   assertConfigurationIdentity(paths, pairing, binding);
   const audit = {
-    event_id: typeof raw?.event_id === "string" ? raw.event_id : null,
+    event_id_hash: typeof raw?.event_id === "string" ? sha(raw.event_id) : null,
     message_id_hash: typeof raw?.message_id === "string" ? sha(raw.message_id) : null,
     sender_id_hash: typeof raw?.sender_id === "string" ? sha(raw.sender_id) : null,
     chat_id_hash: typeof raw?.chat_id === "string" ? sha(raw.chat_id) : null,
     sender_type: raw?.sender_type ?? null,
     chat_type: raw?.chat_type ?? null,
     message_type: raw?.message_type ?? raw?.msg_type ?? null,
+    content_size_bytes: Number.isSafeInteger(raw?.content_size_bytes) && raw.content_size_bytes >= 0 ? raw.content_size_bytes : null,
   };
   if (!pairingIsActive(pairing) || !binding || binding.schema !== BINDING_SCHEMA || binding.status !== "active") {
     quarantine(paths, "inactive-binding", audit.message_id_hash ?? randomUUID(), audit);
@@ -1201,19 +1357,22 @@ export function publishFeishuInbound(home, raw, options = {}) {
   else if (!pairing.allowed_users.includes(senderId)) reject = "unauthorized-user";
   else if (chatType !== "p2p" || !pairing.allowed_chats.includes(chatId) || chatId !== binding.chat_id) reject = "unauthorized-chat";
   else if (!pairing.inbound_types.includes(messageType)) reject = "unsupported-type";
-  let content = "";
+  let contentParts = [];
   if (!reject) {
     try {
-      content = normalizeContent(raw.content ?? raw.text);
-      if (content.trim().length === 0) reject = "empty-content";
-      const maxBytes = positiveInteger(options.maxInboundBytes ?? process.env.FM_FEISHU_MAX_INBOUND_BYTES, DEFAULT_MAX_INBOUND_BYTES);
-      if (Buffer.byteLength(content, "utf8") > maxBytes) reject = "overlength";
-    } catch {
-      reject = "malformed-content";
+      contentParts = normalizedInboundParts(raw, messageType, options);
+    } catch (error) {
+      reject = new Set(["empty-content", "overlength", "unsupported-content", "attachment-count-limit"]).has(error?.message)
+        ? error.message
+        : "malformed-content";
+      if (error?.unsupportedType) audit.unsupported_media_type = error.unsupportedType;
     }
   }
   if (reject) {
     quarantine(paths, reject, messageId, { ...audit, message_id_hash: sha(messageId) });
+    if (reject === "unsupported-type" || reject === "unsupported-content") {
+      createLocalAlert(paths, "inbound-unsupported-input", stableId("in_", messageId, 24), "Feishu input used a rich-media type that this Pi channel cannot represent safely and was not delivered.");
+    }
     return { status: "quarantined", reason: reject, messageIdHash: sha(messageId) };
   }
   return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => {
@@ -1250,6 +1409,34 @@ export function publishFeishuInbound(home, raw, options = {}) {
     const ingressSeq = nextSequence(paths);
     const deliveryRef = stableId("in_", `${currentPairing.home_id}\0${messageId}`, 24);
     const replyTo = typeof raw.reply_to === "string" && /^om_[A-Za-z0-9_-]{4,128}$/.test(raw.reply_to) ? raw.reply_to : null;
+    const media = [];
+    const durableContent = contentParts.map((part, partIndex) => {
+      if (part.type === "text") return part;
+      const mediaId = stableId("media_", `${deliveryRef}\0${partIndex}\0${sha(part.resourceKey)}`, 24);
+      media.push({
+        schema: INBOUND_MEDIA_SCHEMA,
+        media_id: mediaId,
+        message_id: messageId,
+        delivery_ref: deliveryRef,
+        part_index: partIndex,
+        resource_type: "image",
+        resource_key: part.resourceKey,
+        resource_key_hash: `sha256:${sha(part.resourceKey)}`,
+        state: "pending",
+        attempts: 0,
+        owner_nonce: null,
+        mime_type: null,
+        byte_length: null,
+        byte_hash: null,
+        cache_filename: null,
+        last_error_kind: null,
+        created_at: nowIso(),
+        download_started_at: null,
+        ready_at: null,
+        failed_at: null,
+      });
+      return { type: "image", media_id: mediaId };
+    });
     const event = {
       schema: INBOUND_SCHEMA,
       source: "feishu",
@@ -1264,7 +1451,7 @@ export function publishFeishuInbound(home, raw, options = {}) {
       root_id: typeof raw.root_id === "string" ? raw.root_id : null,
       thread_id: typeof raw.thread_id === "string" ? raw.thread_id : null,
       message_type: messageType,
-      text: content,
+      content: durableContent,
       create_time_ms: Number(raw.create_time ?? raw.create_time_ms ?? 0) || 0,
       update_time_ms: Number(raw.update_time ?? 0) || null,
       received_at: nowIso(),
@@ -1290,9 +1477,203 @@ export function publishFeishuInbound(home, raw, options = {}) {
       last_error: null,
       created_at: nowIso(),
     };
-    publishInboundRecordsLocked(paths, event, ledger);
+    publishInboundRecordsLocked(paths, event, ledger, media);
     return { status: "published", ingressSeq, deliveryRef, messageIdHash: sha(messageId) };
   }));
+}
+
+export function pendingFeishuMedia(home, ownerFence, options = {}) {
+  const paths = ensurePrivateLayout(home);
+  return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => {
+    const binding = readJson(paths.activeBinding, { optional: true });
+    if (!binding || binding.status !== "active" || binding.binding_id !== ownerFence.bindingId || binding.generation !== ownerFence.bindingGeneration || binding.session_id !== ownerFence.sessionId) {
+      throw new Error("Feishu media download binding fence mismatch");
+    }
+    const claims = [];
+    const ownerNonce = requireString(ownerFence.ownerNonce, "Feishu media owner nonce", /^[a-f0-9]{24,128}$/);
+    const staleMs = positiveInteger(options.downloadStaleMs ?? process.env.FM_FEISHU_MEDIA_DOWNLOAD_STALE_MS, 5 * 60 * 1000);
+    for (const name of safeJsonNames(paths.inboundMedia)) {
+      const path = join(paths.inboundMedia, name);
+      const media = validateInboundMedia(readJson(path));
+      if (media.state === "ready" || media.state === "failed") continue;
+      if (media.state === "downloading" && Date.now() - Date.parse(media.download_started_at) < staleMs) continue;
+      const inboundName = inboundFilename(media.message_id);
+      const event = readJson(join(paths.inbox, inboundName), { optional: true });
+      const ledger = readJson(join(paths.inboundLedger, inboundName), { optional: true });
+      if (!event || !ledger || event.delivery_ref !== media.delivery_ref || !new Set(["pending", "offered"]).has(ledger.state) || ledger.binding_id !== binding.binding_id || ledger.binding_generation !== binding.generation || ledger.target_session_id !== binding.session_id) continue;
+      assertInboundPair(paths, inboundName, event, ledger, { binding });
+      const claimed = {
+        ...media,
+        state: "downloading",
+        attempts: media.attempts + 1,
+        owner_nonce: ownerNonce,
+        last_error_kind: null,
+        download_started_at: nowIso(),
+        failed_at: null,
+      };
+      atomicJson(path, claimed);
+      claims.push(claimed);
+    }
+    return claims.sort((a, b) => a.message_id.localeCompare(b.message_id) || a.part_index - b.part_index);
+  }));
+}
+
+export function completeFeishuMediaDownload(home, claim, bytes, evidence, ownerFence, options = {}) {
+  const paths = ensurePrivateLayout(home);
+  return withConfigurationLocks(paths, () => withLock(paths, "inbound-state", () => {
+    const binding = readJson(paths.activeBinding, { optional: true });
+    if (!binding || binding.status !== "active" || binding.binding_id !== ownerFence.bindingId || binding.generation !== ownerFence.bindingGeneration || binding.session_id !== ownerFence.sessionId) {
+      throw new Error("Feishu media completion binding fence mismatch");
+    }
+    const current = readInboundMedia(paths, claim.media_id);
+    if (!current || current.state !== "downloading" || current.owner_nonce !== ownerFence.ownerNonce || current.attempts !== claim.attempts || current.resource_key_hash !== claim.resource_key_hash) {
+      throw new Error("Feishu media download claim changed before completion");
+    }
+    if (!(bytes instanceof Uint8Array) || bytes.length === 0) throw new Error("empty Feishu media download");
+    const mediaBytes = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const maxObjectBytes = Math.min(positiveInteger(options.maxMediaBytes ?? process.env.FM_FEISHU_MAX_INBOUND_MEDIA_BYTES, DEFAULT_MAX_INBOUND_MEDIA_BYTES), DEFAULT_MAX_INBOUND_MEDIA_BYTES);
+    if (mediaBytes.length > maxObjectBytes) throw new Error("Feishu media object exceeded its byte limit");
+    if (evidence.declaredResourceType !== current.resource_type) throw new Error("Feishu media declared resource type mismatch");
+    const responseMime = requireString(evidence.responseMimeType, "response Feishu media MIME type", /^image\/[a-z0-9.+-]+$/, 128).toLowerCase();
+    const actualMime = requireString(evidence.actualMimeType, "actual Feishu media MIME type", /^image\/[a-z0-9.+-]+$/, 128).toLowerCase();
+    if (!SUPPORTED_IMAGE_MIME_TYPES.has(responseMime) || responseMime !== actualMime) throw new Error("Feishu media content type mismatch");
+    const byteHash = `sha256:${createHash("sha256").update(mediaBytes).digest("hex")}`;
+    const cacheFilename = `${sha(current.media_id)}.bin`;
+    const maxMessageBytes = Math.min(positiveInteger(options.maxMessageMediaBytes ?? process.env.FM_FEISHU_MAX_INBOUND_MESSAGE_MEDIA_BYTES, DEFAULT_MAX_INBOUND_MESSAGE_MEDIA_BYTES), DEFAULT_MAX_INBOUND_MESSAGE_MEDIA_BYTES);
+    let messageBytes = mediaBytes.length;
+    for (const name of safeJsonNames(paths.inboundMedia)) {
+      const media = validateInboundMedia(readJson(join(paths.inboundMedia, name)));
+      if (media.media_id !== current.media_id && media.delivery_ref === current.delivery_ref && media.state === "ready") messageBytes += media.byte_length;
+    }
+    if (messageBytes > maxMessageBytes) throw new Error("Feishu media message exceeded its byte limit");
+    const cachePath = join(paths.inboundMediaCache, cacheFilename);
+    if (existsSync(cachePath)) {
+      safeFile(cachePath);
+      const cached = readFileSync(cachePath);
+      if (cached.length !== mediaBytes.length || `sha256:${createHash("sha256").update(cached).digest("hex")}` !== byteHash) throw new Error("conflicting Feishu media cache bytes");
+    } else {
+      atomicWrite(cachePath, mediaBytes);
+    }
+    const ready = {
+      ...current,
+      state: "ready",
+      owner_nonce: null,
+      mime_type: actualMime,
+      byte_length: mediaBytes.length,
+      byte_hash: byteHash,
+      cache_filename: cacheFilename,
+      last_error_kind: null,
+      download_started_at: null,
+      ready_at: nowIso(),
+      failed_at: null,
+    };
+    atomicJson(mediaRecordPath(paths, current.media_id), ready);
+    return { mediaId: ready.media_id, byteHash, byteLength: mediaBytes.length, mimeType: actualMime };
+  }));
+}
+
+export function failFeishuMediaDownload(home, claim, errorKind, ownerFence, { terminal = false } = {}) {
+  const paths = ensurePrivateLayout(home);
+  return withLock(paths, "inbound-state", () => {
+    const current = readInboundMedia(paths, claim.media_id);
+    if (!current || current.state !== "downloading" || current.owner_nonce !== ownerFence.ownerNonce || current.attempts !== claim.attempts) return false;
+    const kind = requireString(errorKind, "Feishu media error kind", /^[a-z0-9-]+$/, 80);
+    atomicJson(mediaRecordPath(paths, current.media_id), {
+      ...current,
+      state: terminal ? "failed" : "pending",
+      owner_nonce: null,
+      last_error_kind: kind,
+      download_started_at: null,
+      failed_at: terminal ? nowIso() : null,
+    });
+    if (terminal) {
+      const name = inboundFilename(current.message_id);
+      const ledgerPath = join(paths.inboundLedger, name);
+      const ledger = readJson(ledgerPath, { optional: true });
+      if (ledger && new Set(["pending", "offered"]).has(ledger.state)) {
+        atomicJson(ledgerPath, {
+          ...ledger,
+          state: "superseded",
+          offered_at: null,
+          superseded_at: nowIso(),
+          last_error: `media-${kind}`,
+        });
+        removeInboundPendingIndex(paths, name);
+        syncInboundPendingCount(paths);
+        createLocalAlert(paths, "inbound-media-refused", ledger.delivery_ref, "Feishu rich-media input was refused before Pi delivery; inspect the private media state for the non-sensitive failure category.");
+      }
+    }
+    return true;
+  });
+}
+
+function readyMediaForEvent(paths, event) {
+  const result = new Map();
+  let totalBytes = 0;
+  for (const part of event.content ?? []) {
+    if (part.type !== "image") continue;
+    const media = readInboundMedia(paths, part.media_id);
+    if (!media || media.message_id !== event.message_id || media.delivery_ref !== event.delivery_ref || media.state !== "ready") return undefined;
+    const cachePath = join(paths.inboundMediaCache, media.cache_filename);
+    safeFile(cachePath);
+    const bytes = readFileSync(cachePath);
+    const byteHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    if (bytes.length !== media.byte_length || byteHash !== media.byte_hash) throw new Error("Feishu media cache no longer matches durable byte evidence");
+    totalBytes += bytes.length;
+    if (totalBytes > DEFAULT_MAX_INBOUND_MESSAGE_MEDIA_BYTES) throw new Error("Feishu media message exceeded its byte limit");
+    result.set(part.media_id, { data: bytes.toString("base64"), mimeType: media.mime_type });
+  }
+  return result;
+}
+
+export function loadFeishuIngressContent(home, event) {
+  const paths = ensurePrivateLayout(home);
+  validateInboundEvent(event);
+  if (event.schema === LEGACY_INBOUND_SCHEMA) return [{ type: "text", text: event.text }];
+  const media = readyMediaForEvent(paths, event);
+  if (!media) return undefined;
+  return event.content.map((part) => part.type === "text" ? { type: "text", text: part.text } : { type: "image", ...media.get(part.media_id) });
+}
+
+export function cleanupFeishuMedia(home, options = {}) {
+  const paths = ensurePrivateLayout(home);
+  return withLock(paths, "inbound-state", () => {
+    const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
+    const retentionMs = Math.max(1, Number.isSafeInteger(options.retentionMs) && options.retentionMs > 0
+      ? options.retentionMs
+      : positiveInteger(process.env.FM_FEISHU_MEDIA_RETENTION_MS, DEFAULT_INBOUND_MEDIA_RETENTION_MS));
+    const removable = [];
+    const retainedCacheNames = new Set();
+    for (const name of safeJsonNames(paths.inboundMedia)) {
+      const path = join(paths.inboundMedia, name);
+      const media = validateInboundMedia(readJson(path));
+      const ledger = readJson(join(paths.inboundLedger, inboundFilename(media.message_id)), { optional: true });
+      const terminalAt = ledger?.state === "delivered" ? ledger.delivered_at : ledger?.state === "superseded" ? ledger.superseded_at : null;
+      if (!terminalAt || nowMs - Date.parse(terminalAt) < retentionMs) {
+        if (media.cache_filename) retainedCacheNames.add(media.cache_filename);
+        continue;
+      }
+      removable.push({ name, path, media });
+    }
+    let removedRecords = 0;
+    let removedBytes = 0;
+    for (const item of removable) {
+      if (item.media.cache_filename && !retainedCacheNames.has(item.media.cache_filename)) {
+        const cachePath = join(paths.inboundMediaCache, item.media.cache_filename);
+        if (existsSync(cachePath)) {
+          safeFile(cachePath);
+          const stat = lstatSync(cachePath);
+          removedBytes += stat.size;
+          unlinkSync(cachePath);
+          fsyncDirectory(paths.inboundMediaCache);
+        }
+      }
+      unlinkSync(item.path);
+      fsyncDirectory(paths.inboundMedia);
+      removedRecords += 1;
+    }
+    return { removedRecords, removedBytes };
+  });
 }
 
 function deliveryEventForLedger(event, ledger) {
@@ -1310,7 +1691,7 @@ function repairInboundLedgersLocked(paths) {
   const validDeliveryMaps = new Set();
   for (const name of safeJsonNames(paths.inbox)) {
     const ledgerPath = join(paths.inboundLedger, name);
-    const event = requireSchema(readJson(join(paths.inbox, name)), INBOUND_SCHEMA, "inbound event");
+    const event = validateInboundEvent(readJson(join(paths.inbox, name)));
     validDeliveryMaps.add(`${sha(event.delivery_ref)}.json`);
     writeInboundDeliveryMap(paths, event);
     for (const eventId of event.event_ids) recordInboundEventId(paths, eventId, event.message_id, event.delivery_ref);
@@ -1335,7 +1716,7 @@ function repairInboundLedgersLocked(paths) {
   const indexed = new Set(safeJsonNames(paths.inboundPending));
   for (const name of safeJsonNames(paths.inboundLedger)) {
     const ledger = requireSchema(readJson(join(paths.inboundLedger, name)), INBOUND_LEDGER_SCHEMA, "inbound ledger");
-    const event = requireSchema(readJson(join(paths.inbox, name)), INBOUND_SCHEMA, "inbound event");
+    const event = validateInboundEvent(readJson(join(paths.inbox, name)));
     assertInboundPair(paths, name, event, ledger);
     if (new Set(["pending", "offered"]).has(ledger.state)) {
       writeInboundPendingIndex(paths, name, ledger);
@@ -1376,6 +1757,7 @@ export function pendingFeishuIngress(home, fence) {
       if (ledger.state !== "pending" || ledger.target_session_id !== fence.sessionId || ledger.binding_id !== fence.bindingId || ledger.binding_generation !== fence.bindingGeneration) continue;
       const event = readJson(join(paths.inbox, name));
       assertInboundPair(paths, name, event, ledger, { pairing, binding });
+      if (!readyMediaForEvent(paths, event)) continue;
       pending.push({ filename: name, event: deliveryEventForLedger(event, ledger), ledger });
     }
     return pending.sort((a, b) => a.ledger.ingress_seq - b.ledger.ingress_seq || a.filename.localeCompare(b.filename));
