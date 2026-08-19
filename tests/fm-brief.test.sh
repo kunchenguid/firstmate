@@ -251,8 +251,10 @@ test_completion_contract_covers_every_variant() {
       "$kind brief lets a worker hand work back outside a defined gate"
     assert_grep "The final \`done:\` gate under Definition of done is the whole-task completion claim: every stated requirement met." "$brief" \
       "$kind brief does not define the final done gate as whole-task completion"
-    assert_grep "Work still partial for the gate you are claiming is \`blocked:\` or \`needs-decision:\`, never \`done:\`; describing the gap candidly does not make it \`done:\`." "$brief" \
-      "$kind brief permits candid partial work to claim done for the gate it is claiming"
+    assert_grep "Work still partial for the gate you are claiming is never \`done:\`: use the fitting non-done state from the status protocol above (\`blocked:\` or \`needs-decision:\` when you need help or a decision above your authority, \`paused:\` for a declared external wait, \`failed:\` when it cannot be finished). Describing the gap candidly does not make it \`done:\`." "$brief" \
+      "$kind brief permits candid partial work to claim done, or contradicts its own status protocol"
+    assert_no_grep "{PAUSED_VERB}" "$brief" \
+      "$kind brief leaked the unsubstituted pause-verb placeholder"
     assert_grep "Before any \`done:\`, re-read the task, confirm every requirement that gate covers, verify the requested deliverable exists where requested and survives teardown, and re-run the applicable project checks with their real exit status." "$brief" \
       "$kind brief missing the mandatory completion self-check"
     assert_grep "State anything not done and why; if a required item that gate covers is missing, do not append \`done:\`." "$brief" \
@@ -283,8 +285,10 @@ test_mode_defined_gates_survive_the_completion_contract() {
     "no-mistakes brief does not mark the CI-green done as its final gate"
   assert_grep "An earlier gate defined there claims only what that gate itself defines." "$brief" \
     "no-mistakes brief does not scope an intermediate gate to what that gate defines"
-  assert_no_grep "Candid partial-work reporting" "$brief" \
-    "no-mistakes brief bans partial work unconditionally, contradicting its intermediate handoff gate"
+  assert_grep "append \`done: {summary}\` to the status file and stop" "$brief" \
+    "no-mistakes brief no longer instructs its implementation-ready handoff done line"
+  assert_grep "append \`done: PR {url} checks green\` and stop" "$brief" \
+    "no-mistakes brief no longer instructs its final CI-green done line"
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" gates-secondmate --secondmate --no-projects 2>&1); status=$?
   expect_code 0 "$status" "fm-brief.sh gates-secondmate --secondmate should exit 0 (got: $out)"
@@ -743,6 +747,11 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_no_grep '`paused: {why}`' "$brief" \
       "$kind brief still instructs the default paused status"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep '`awaiting:` for a declared external wait' "$brief" \
+      "$kind brief completion contract did not route a declared external wait to the configured pause verb"
+    assert_no_grep '{PAUSED_VERB}' "$brief" \
+      "$kind brief leaked the unsubstituted pause-verb placeholder"
     assert_grep 'a blocker or wait clears' "$brief" \
       "$kind brief did not require durable resolution when a blocker clears"
     assert_grep 'even when the answer is what started that work' "$brief" \

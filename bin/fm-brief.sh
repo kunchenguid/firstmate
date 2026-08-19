@@ -49,6 +49,11 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Every scaffold ends with the shared completion contract: keep working until the
+# assigned task is delivered, hand back only at a gate defined under Definition of
+# done, never claim "done:" for work still partial for the gate being claimed (use
+# the fitting non-done state instead), and pass a re-read, deliverable, and
+# project-checks self-check before any "done:".
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -183,11 +188,12 @@ Keep working until every part of the assigned task is delivered.
 A turn ending, a natural pause, or one completed sub-part is not a checkpoint to await instruction.
 Hand work back only at a gate defined under Definition of done, a genuine blocker, or a decision genuinely above your authority.
 The final `done:` gate under Definition of done is the whole-task completion claim: every stated requirement met. An earlier gate defined there claims only what that gate itself defines.
-Work still partial for the gate you are claiming is `blocked:` or `needs-decision:`, never `done:`; describing the gap candidly does not make it `done:`.
+Work still partial for the gate you are claiming is never `done:`: use the fitting non-done state from the status protocol above (`blocked:` or `needs-decision:` when you need help or a decision above your authority, `{PAUSED_VERB}:` for a declared external wait, `failed:` when it cannot be finished). Describing the gap candidly does not make it `done:`.
 Before any `done:`, re-read the task, confirm every requirement that gate covers, verify the requested deliverable exists where requested and survives teardown, and re-run the applicable project checks with their real exit status.
 State anything not done and why; if a required item that gate covers is missing, do not append `done:`.
 EOF
 COMPLETION_CONTRACT=${COMPLETION_CONTRACT%$'\n'}
+COMPLETION_CONTRACT=${COMPLETION_CONTRACT//\{PAUSED_VERB\}/$PAUSED_VERB}
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
