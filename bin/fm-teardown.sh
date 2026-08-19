@@ -10,9 +10,23 @@
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# already present in the up-to-date default branch, or every commit on no remote is
+# present by patch id in - and still present in the current content of - the
+# up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
+# The three proofs are independent and additive, and each refuses when inconclusive:
+#   - pr_is_merged        forge API, GitHub only today
+#   - content_in_default  pure git, survives squash, inconclusive on a merge conflict
+#   - patches_in_default  pure git, forge-agnostic, rescues the conflicting-advance
+#                         case above; the only patch-id proof available on Bitbucket
+#                         Cloud, which publishes no PR head ref to fetch. A patch id
+#                         match is not enough on a whole branch - the unpushed stack
+#                         must also roll back out of the default branch's tree,
+#                         newest commit first, so a landed-then-reverted change
+#                         refuses. FM_LANDED_PATCH_SCAN_LIMIT (default 1000; 0 or a
+#                         non-numeric value means unbounded) bounds how far back the
+#                         default branch is scanned
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -596,6 +610,14 @@ elif [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
   PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
 fi
 
+# How many of the default branch's most recent commits the patch-id landed-work
+# proof will hash. Bounds teardown's cost on a long-lived branch off a busy default
+# branch; see unpushed_patches_are_in_ref for why truncation is a safe direction.
+# A non-numeric override, and 0, both mean "unbounded": they are the two natural
+# spellings of "no limit" and must not behave oppositely (0 as a real limit would
+# empty the range and silently disable the proof).
+LANDED_PATCH_SCAN_LIMIT=${FM_LANDED_PATCH_SCAN_LIMIT:-1000}
+
 default_branch() {
   local ref branch
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
@@ -770,10 +792,18 @@ pr_number_from_branch() {
   printf '%s' "$n"
 }
 
+# Extract a PR number from a recorded pr= target. Accepts a bare number and both
+# forge URL grammars: GitHub's /pull/<n> and Bitbucket's /pull-requests/<n>.
+# /pull/ is NOT a substring of /pull-requests/, so a single GitHub-shaped match
+# silently failed on every Bitbucket URL.
 pr_number_from_target() {
   local target=$1 n
   case "$target" in
     '' ) return 1 ;;
+    *"/pull-requests/"*)
+      n=${target##*/pull-requests/}
+      n=${n%%[!0-9]*}
+      ;;
     *"/pull/"*)
       n=${target##*/pull/}
       n=${n%%[!0-9]*}
@@ -787,11 +817,26 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
+# True only when origin is a forge PROVEN to publish no refs/pull/<n>/head - today
+# just Bitbucket Cloud, which has no PR ref namespace at all (refs/pull-requests/
+# is a Bitbucket Server feature). Deliberately a deny-list, not a github.com
+# allow-list: an unrecognized host (GitHub Enterprise, a mirror) keeps attempting
+# the fetch, so this change only ever removes a fetch that could not have worked.
+origin_publishes_no_github_pr_refs() {
+  local url
+  url=$(git -C "$WT" remote get-url origin 2>/dev/null) || return 1
+  case "$url" in
+    *bitbucket.org[:/]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 ensure_commit_object() {
   local target=$1 commit=$2 n
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  origin_publishes_no_github_pr_refs && return 1
   git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
@@ -800,32 +845,123 @@ patch_id_for_commit() {
   local commit=$1
   git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
     | git patch-id --stable 2>/dev/null \
-    | awk 'NR == 1 { print $1 }'
+    | awk 'NR == 1 && $1 ~ /^[0-9a-f]+$/ && $1 !~ /^0+$/ { print $1 }'
 }
 
-unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
-  pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
-      | while IFS= read -r commit; do
-          patch_id_for_commit "$commit"
-        done \
-      | sed '/^$/d' \
-      | sort -u
-  ) || return 1
-  [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
-  [ -n "$unpushed" ] || return 1
+# Every patch id in <base>..<ref>, hashed in ONE pass: `git log -p` streams the
+# whole range into a single `git patch-id`, which emits one line per commit that
+# has a diff. Commits with no diff of their own (merges, empty commits) emit
+# nothing and so contribute no id - they can never make an unpushed commit match.
+# <limit>, when non-empty, caps how many of the range's most recent commits are read.
+patch_ids_in_range() {
+  local base=$1 ref=$2 limit=$3
+  if [ -n "$limit" ]; then
+    git -C "$WT" log -p --no-ext-diff --format='commit %H' --max-count="$limit" "$base..$ref" -- 2>/dev/null
+  else
+    git -C "$WT" log -p --no-ext-diff --format='commit %H' "$base..$ref" -- 2>/dev/null
+  fi \
+    | git patch-id --stable 2>/dev/null \
+    | awk '$1 ~ /^[0-9a-f]+$/ && $1 !~ /^0+$/ { print $1 }' \
+    | sort -u
+}
+
+# A throwaway index holding <ref>'s tree, for the rollback walk below. Echoes its
+# path; the caller removes it. Never touches the real worktree or its index - every
+# git call that reads or writes it is pointed at it through GIT_INDEX_FILE.
+rollback_index_for_ref() {
+  local ref=$1 index
+  index=$(mktemp "${TMPDIR:-/tmp}/fm-teardown-index.XXXXXX") || return 1
+  rm -f -- "$index"
+  if ! GIT_INDEX_FILE="$index" git -C "$WT" read-tree "$ref^{tree}" >/dev/null 2>&1; then
+    rm -f -- "$index"
+    return 1
+  fi
+  printf '%s\n' "$index"
+}
+
+# Roll <commit> back out of <index>, which starts at the landed ref's tree and is
+# walked newest-first, so by the time this is reached the commit's own descendants
+# have already been undone and the index holds exactly the intermediate state that
+# commit produced. Reverse-applying therefore succeeds only while that commit's change
+# is genuinely still present in the landed ref - a change that was applied and later
+# reverted cannot roll back. Persisting each application (no --check) is what makes a
+# replayed multi-commit stack verifiable: each commit is tested against its own
+# predecessor state, not the ref's final tree.
+# The diff is streamed straight into git apply; round-tripping it through a shell
+# variable would strip the trailing newlines that binary payloads and blank final
+# hunk lines depend on. An empty diff (a merge, an empty commit) is no valid patch,
+# so git apply fails and the caller refuses.
+# The check stays per-commit and per-file, far narrower than content_in_default's
+# whole-branch 3-way merge, so it still answers when that merge is inconclusive.
+rollback_commit_from_index() {
+  local commit=$1 index=$2
+  git -C "$WT" show --no-ext-diff --binary --format=%n "$commit" 2>/dev/null \
+    | GIT_INDEX_FILE="$index" git -C "$WT" apply --cached --reverse - >/dev/null 2>&1
+}
+
+# The unpushed-commit walk: newest-first, each commit's patch id must be in
+# <landed_patch_ids>, and - when <index> is non-empty - its change must also still
+# roll back out of that index. Returns non-zero on the FIRST failure of either test,
+# so a partly-landed stack never gets further evaluation.
+unpushed_commits_are_accounted_for() {
+  local landed_patch_ids=$1 unpushed=$2 index=$3 commit patch_id
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
     patch_id=$(patch_id_for_commit "$commit") || return 1
     [ -n "$patch_id" ] || return 1
-    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
+    printf '%s\n' "$landed_patch_ids" | grep -qxF "$patch_id" || return 1
+    if [ -n "$index" ]; then
+      rollback_commit_from_index "$commit" "$index" || return 1
+    fi
   done <<EOF
 $unpushed
 EOF
+}
+
+# Forge-agnostic core of the patch-id proof: is every commit the worktree holds
+# that lives on no remote also present, by patch id, in <landed_ref>'s history
+# since its merge-base with HEAD? <landed_ref> is any ref that provably holds
+# landed work - a fetched GitHub PR head, or the up-to-date default branch on any
+# forge. The default-branch source is what makes this usable on Bitbucket Cloud,
+# which publishes no PR head ref to fetch.
+# Every inconclusive outcome returns non-zero so the caller refuses: no HEAD, no
+# merge-base, an empty comparison range, an unreadable patch id, or any single
+# unpushed commit whose patch id is absent from the range.
+# <limit>, when non-empty and greater than zero, caps how many of the range's most
+# recent commits are hashed. A PR head range is naturally small and passes no limit;
+# a default-branch range is not. Truncation can only lose a match, never invent one,
+# so the bound errs toward refusing.
+# <require_present>, when "yes", additionally requires each matching unpushed commit's
+# change to still be present in <landed_ref>'s current content, proved by rolling the
+# whole unpushed stack back out of one shared throwaway index seeded from that ref's
+# tree (see rollback_commit_from_index). A patch id alone proves only that the diff was
+# once applied; on a whole default branch that is not enough, because the change may
+# since have been reverted, and hard-resetting the worktree would then destroy the only
+# copy. A rollback that cannot be completed for any reason - an unbuildable index, a
+# conflict, a corrupt or empty patch, a failed git call - is a refusal, never a pass.
+unpushed_patches_are_in_ref() {
+  local landed_ref=$1 limit=${2:-} require_present=${3:-no} current base landed_patch_ids unpushed index='' rc=0
+  case "$limit" in
+    ''|*[!0-9]*) limit= ;;
+    *) [ "$limit" -gt 0 ] || limit= ;;
+  esac
+  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
+  base=$(git -C "$WT" merge-base "$current" "$landed_ref" 2>/dev/null) || return 1
+  landed_patch_ids=$(patch_ids_in_range "$base" "$landed_ref" "$limit") || return 1
+  [ -n "$landed_patch_ids" ] || return 1
+  # --topo-order, not git log's commit-date default: the rollback walk below needs a
+  # child undone before its parent, and committer dates can be skewed (rebase
+  # --committer-date-is-author-date, git am, clock drift across worktrees).
+  unpushed=$(git -C "$WT" log --topo-order --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  [ -n "$unpushed" ] || return 1
+  if [ "$require_present" = yes ]; then
+    index=$(rollback_index_for_ref "$landed_ref") || return 1
+  fi
+  unpushed_commits_are_accounted_for "$landed_patch_ids" "$unpushed" "$index" || rc=1
+  if [ -n "$index" ]; then
+    rm -f -- "$index"
+  fi
+  return "$rc"
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
@@ -853,7 +989,24 @@ pr_is_merged() {
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
-  unpushed_patches_are_in_pr_head "$head"
+  unpushed_patches_are_in_ref "$head"
+}
+
+# Resolve an up-to-date ref for the project's default branch, fetching from origin
+# when there is one so a stale remote-tracking ref cannot decide the outcome.
+# Echoes the ref name; returns non-zero when it cannot be resolved, so every
+# caller treats an unresolvable default branch as inconclusive.
+default_ref_up_to_date() {
+  local name
+  name=$(default_branch) || return 1
+  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    printf '%s\n' "refs/remotes/origin/$name"
+  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+    printf '%s\n' "refs/heads/$name"
+  else
+    return 1
+  fi
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
@@ -864,16 +1017,8 @@ pr_is_merged() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
-    ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
-    ref="refs/heads/$name"
-  else
-    return 1
-  fi
+  local ref default_tree merged_tree
+  ref=$(default_ref_up_to_date) || return 1
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
@@ -881,15 +1026,37 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
+# The patch-id proof, taking its comparison range from the up-to-date default
+# branch instead of a PR head ref. Needs no forge API and no PR ref namespace, so
+# it is the only patch-id proof available on Bitbucket Cloud, and it is also the
+# one that still works on GitHub when no PR is recorded or `gh` is unavailable.
+# It rescues the case content_in_default cannot decide: the branch's commits were
+# replayed onto the default branch, but the default branch has since advanced in a
+# way that conflicts with the branch, making the 3-way merge inconclusive.
+# Unlike the PR-head range - which is only ever the commits being merged - a whole
+# default branch also contains the commits that UNDID things, so a patch id match on
+# its own would accept work that landed and was then reverted. Each match must
+# therefore also still be present in the default branch's current content.
+# Returns non-zero whenever the default branch cannot be resolved or any unpushed
+# commit is missing from it, so an inconclusive result still refuses.
+patches_in_default() {
+  local ref
+  ref=$(default_ref_up_to_date) || return 1
+  unpushed_patches_are_in_ref "$ref" "$LANDED_PATCH_SCAN_LIMIT" yes
+}
+
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# default branch (fallback, which also covers the no-PR and gh-error paths), OR
+# every unpushed commit is present by patch id in the default branch. False only
+# for genuinely unlanded work. Each proof is independent and additive: order only
+# decides which one answers first, never whether unlanded work can pass.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
-  content_in_default
+  content_in_default && return 0
+  patches_in_default
 }
 
 backlog_refresh_reminder() {
