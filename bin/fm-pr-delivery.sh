@@ -318,6 +318,8 @@ classify_pr_json() { # <repo> <pr-json-object>
       ((.body // "") | gsub("^\\s+|\\s+$"; "") | ascii_downcase);
     def benign_comment:
       text | test("^(lgtm|looks good( to me)?|approved|thanks|fyi|resolved|fixed|addressed)[.![:space:]]*$");
+    def resolution_comment:
+      text | test("^(resolved|fixed|addressed)([.![:space:]]|$)");
     def reviewer_request:
       (.state == "CHANGES_REQUESTED")
       or (.state == "COMMENTED" and (text | length > 0) and (benign_comment | not));
@@ -343,7 +345,7 @@ classify_pr_json() { # <repo> <pr-json-object>
           | ($comments | map(select(.author == $author)) | sort_by(.createdAt // "")) as $history
           | ($history | map(select(comment_request)) | last) as $request
           | select($request != null)
-          | select(([$history[] | select(benign_comment and ((.createdAt // "") > ($request.createdAt // "")))] | length) == 0)
+          | select(([$history[] | select(resolution_comment and ((.createdAt // "") > ($request.createdAt // "")))] | length) == 0)
           | select(([$reviews[] | select(.author == $author and .state == "APPROVED" and ((.submittedAt // "") > ($request.createdAt // "")))] | length) == 0)
         ] | length;
     def check_pending:

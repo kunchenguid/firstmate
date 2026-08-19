@@ -294,6 +294,11 @@ test_pr_comment_then_clearance() {
   [ -z "$out" ] || fail "ordinary PR comment requesting a change should hold delivery"
   run_delivery "$home" "$fixture" show | grep -Fq 'review-issue' \
     || fail "ordinary PR comment did not produce a review-issue hold"
+  write_view "$fixture" acme/alpha 22 '{"number":22,"url":"https://github.com/acme/alpha/pull/22","headRefName":"fm/comment22","headRefOid":"ttt","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"Please update validation.","createdAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}},{"body":"FYI.","createdAt":"2026-08-19T00:00:30Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  [ -z "$out" ] || fail "benign PR-comment follow-up must not clear a reviewer request"
+  run_delivery "$home" "$fixture" show | grep -Fq 'review-issue' \
+    || fail "benign PR-comment follow-up removed the reviewer request hold"
   write_view "$fixture" acme/alpha 22 '{"number":22,"url":"https://github.com/acme/alpha/pull/22","headRefName":"fm/comment22","headRefOid":"ttt","baseRefName":"main","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[{"state":"APPROVED","body":"","submittedAt":"2026-08-19T00:01:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"Please update validation.","createdAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
