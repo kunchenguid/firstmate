@@ -67,176 +67,204 @@
 # boundary, and summary selector. That input-oriented trace includes implicit
 # omission paths that a syntax search for `continue` cannot find.
 #
-# Every verdict below carries both the observation it rests on and its falsifier.
-# A falsifier states the exact condition that would make the direction unsafe;
-# it is not a claim that a command name alone proves the needed property.
+# Every verdict below carries both the observation it rests on and a concrete
+# falsifier: a case that could satisfy the named check while still violating the
+# property that check is meant to establish. Restating the check as "a non-X"
+# is not evidence that the check establishes the broader property.
 #
 # Sweep entry and global ownership inputs:
 # - `bin/fm-next-cache-sweep.sh: startup -> BASH_SOURCE, FM_* overrides, cd,
 #   readable library predicates, and source`. Checked: every failed directory
 #   command substitution is tested, both library paths must pass `-r`, and a
-#   nonzero source status exits 2 before deletion authority exists. Falsifier:
-#   any failed resolution or library load reaches argument processing with exit 0.
+#   nonzero source status exits before target construction. Falsifier: an
+#   override whose parent cannot be searched, or a readable library whose source
+#   command returns nonzero, reaches target construction with deletion authority.
 # - `bin/fm-next-cache-sweep.sh: argument loops -> "$@"`. Checked: the option
 #   case accepts only `--dry-run`, rejects every other dash-prefixed value with
-#   exit 2, and retains non-options verbatim for the project-root proof. Converted
-#   wrong verdict: repository reachability alone was insufficient; every retained
-#   path must now physically equal its `--show-toplevel`. Falsifier: an explicit
-#   subdirectory reaches pool lookup or weakens the clone-exclusion comparison.
+#   exit 2, and retains non-options verbatim. Falsifier: `--unknown` is retained
+#   as a project, or `-- /path` loses the literal project path before validation.
+# - `bin/fm-next-cache-sweep.sh: target construction -> PROJECT_ARGS,
+#   sweep_project_directories, and TARGETS`. Checked: today both sources become
+#   indistinguishable plain paths. Wrong verdict found here: a valid explicit
+#   project therefore inherits the deletion authority intended only for default
+#   discovery. Required: every target carries its origin-derived authority and
+#   only a positively `reclaim`-eligible target may reach removal. Falsifier: an
+#   explicit primary-clone argument with one available clean pool copy removes
+#   that copy instead of recording a report-only terminal verdict.
 # - `bin/fm-next-cache-sweep.sh: command preflight -> command -v treehouse and
 #   python3`. Checked: absence exits 2, while every later invocation separately
-#   checks the command's status. Falsifier: a missing command falls through, or a
-#   found command's later nonzero status is normalized to usable output.
+#   checks the command's status. Falsifier: a treehouse shim is found, emits valid
+#   `available` JSON, then exits 1, yet its row reaches candidate planning.
 # - `bin/fm-next-cache-sweep.sh: sweep_task_record_state_dirs ->
 #   sweep_resolve_directory "$STATE"`. Checked: physical resolution requires a
 #   searchable directory and failure propagates through the checked loader to
-#   `sweep_die`. Falsifier: an absent or unresolvable primary state directory
-#   contributes an empty ownership set.
+#   `sweep_die`. Falsifier: `$STATE` is a dangling symlink and the sweep proceeds
+#   with an empty primary task-record set.
 # - `bin/fm-next-cache-sweep.sh: sweep_task_record_state_dirs ->
 #   sweep_read_text_file "$DATA/secondmates.md"`. Checked: the reader requires a
 #   regular non-symlink, stages a complete byte-for-byte read, rejects NUL, and
 #   propagates failure globally; the absent, unreadable, and NUL tests exercise
-#   those branches. Falsifier: any registry read failure yields empty registry
-#   text and task enumeration continues.
+#   those branches. Falsifier: the registry yields one complete local record and
+#   then an I/O error, but that partial prefix is accepted as the full registry.
 # - `bin/fm-next-cache-sweep.sh: sweep_task_record_state_dirs -> registry line
 #   loop and secondmate_registry_parse_line`. Checked: every registry record is
 #   defined by the shared parser's `- ` prefix; such a line must parse, local
 #   homes must be absolute and physically resolvable, and remote records are
 #   excluded by their explicit placement flag because they cannot own this host's
-#   pool. Falsifier: a parser-recognized local record can be ignored, or a remote
-#   record can name a worktree in this machine's pool.
+#   pool. Falsifier: a syntactically valid local record with `home: ../mate` is
+#   treated as an absent home and contributes no task records.
 # - `bin/fm-next-cache-sweep.sh: sweep_load_task_worktrees -> state directory
 #   predicates and sweep_task_meta_files`. Checked: `-d`, `-r`, and `-x` precede
 #   a Python `os.scandir` whose exceptions and unsafe names are nonzero, and every
-#   nonzero status aborts the global loader. Falsifier: a missing, unreadable, or
-#   partially scanned state directory is represented as containing no metadata.
+#   nonzero status aborts the global loader. Falsifier: a state directory lists
+#   one `.meta` entry, then enumeration fails on another entry, but the first-only
+#   list is accepted as complete.
 # - `bin/fm-next-cache-sweep.sh: sweep_load_task_worktrees ->
 #   sweep_read_text_file "$meta" and metadata field loop`. Checked: the same
 #   complete reader rejects NUL, and one shell pass rejects duplicate, missing,
 #   non-absolute, or invalid-placement fields before appending a worktree. This
-#   replaced unchecked `sed` substitutions. Falsifier: any failed metadata read
-#   or parse omits its owner while enumeration still succeeds.
+#   replaced unchecked `sed` substitutions. Falsifier: metadata contains two
+#   `worktree=` fields, the second naming the candidate, and last-value parsing
+#   silently omits or replaces that owner.
 # - `bin/fm-next-cache-sweep.sh: sweep_path_identity -> cd, uname, and stat -L`.
 #   Checked: `cd && pwd -P` resolves the referent, `stat -L` follows a final
 #   symlink on both probed platforms, and empty or non-numeric device/inode output
 #   is rejected; identity-failure and symlink tests exercise the boundary.
-#   Falsifier: a broken/unresolved referent or malformed stat answer is treated as
-#   a distinct, usable identity.
+#   Falsifier: a final symlink to a recorded worktree is compared by the link's
+#   own inode, or a broken final symlink is accepted as a distinct candidate.
 # - `bin/fm-next-cache-sweep.sh: sweep_task_owns -> recorded paths and identities`.
-#   Checked: `grep` status 0 is an exact match, 1 is the only accepted no-match,
-#   and every other status is undetermined; resolved device/inode equality catches
-#   alternate spellings. Falsifier: a comparison error or unresolved extant path
-#   is accepted as proof that no task owns the candidate.
+#   Checked: shell equality catches the exact spelling and resolved device/inode
+#   equality catches symlinked prefixes and case aliases. Falsifier: metadata
+#   names `/alias/pool/1` while the pool names `/real/pool/1`, both resolve to the
+#   same directory, and the candidate is classified unowned.
 #
 # Project discovery, pool, and candidate inputs:
 # - `bin/fm-next-cache-sweep.sh: sweep_project_directories -> os.scandir and
 #   entry.is_dir`. Checked: Python stages the complete immediate directory set,
 #   rejects unsafe paths, and turns enumeration or entry-type exceptions into a
 #   checked nonzero status; the unreadable-Git discovery test then preserves each
-#   announced project for project-scoped refusal. Falsifier: a directory-entry
-#   failure silently removes a project from the requested target set.
+#   announced project for project-scoped refusal. Falsifier: `entry.is_dir()`
+#   raises for one project while another is readable, and only the readable one
+#   reaches the target list and clean summary.
 # - `bin/fm-next-cache-sweep.sh: sweep_project -> sweep_resolve_directory and Git
 #   project queries`. Checked: physical entry and `git rev-parse --show-toplevel`
-#   must both succeed, the answer must be safe and physically resolvable, and its
-#   physical path must equal the resolved argument before pool lookup. This
-#   converts the wrong `--git-dir` verdict observed from `bin/`. Falsifier: any
-#   non-root argument supplies the project identity used by candidate provenance.
+#   must succeed and the physical top level must equal the argument. Wrong verdict
+#   found here: root equality proves a worktree root, not the primary clone.
+#   Required: `--absolute-git-dir` and absolute `--git-common-dir` must resolve to
+#   the same directory before a target can anchor provenance. Falsifier: an
+#   explicit linked-worktree root passes top-level equality, then a pool row naming
+#   the primary clone passes the distinct-project comparison and reaches removal.
 # - `bin/fm-next-cache-sweep.sh: sweep_pool_entries -> mktemp, treehouse status
 #   --json, staged-file read, JSON decode, and temp removal`. Checked: treehouse's
 #   status is captured before parsing, the file is decoded strictly as UTF-8 JSON,
 #   and staging, parse, top-level-shape, or cleanup failure returns nonzero before
-#   a plan exists. Falsifier: a failed or partial pool lookup supplies any
-#   candidate or is summarized as an empty pool.
+#   a plan exists. Falsifier: treehouse writes a complete first row and exits 1
+#   before its second row, but the first row is planned as a complete pool.
+# - `bin/fm-next-cache-sweep.sh: sweep_pool_entries -> JSON object decoding`.
+#   Checked: today `json.loads` silently keeps the last duplicate key. Wrong
+#   verdict found here: syntactically decoded JSON is not necessarily unambiguous
+#   lease evidence. Required: reject duplicate keys at every object before any row
+#   is emitted. Falsifier: one entry contains `"status":"in-use"` followed by
+#   `"status":"available"`, and last-value decoding authorizes deletion.
 # - `bin/fm-next-cache-sweep.sh: sweep_pool_entries -> status and path fields`.
 #   Checked: Python requires both fields to be nonempty strings, the path to be
 #   absolute, and rejects NUL, tab, CR, and LF before emitting tab-delimited rows;
-#   malformed-field and NUL tests exercise the boundary. Falsifier: shell capture
-#   can normalize an unvalidated field into `available` or a different path.
+#   malformed-field and NUL tests exercise the boundary. Falsifier: JSON status
+#   `avail\u0000able` crosses command substitution as `available` and reaches the
+#   exact-status check.
 # - `bin/fm-next-cache-sweep.sh: sweep_project_plan -> pool directory predicate,
 #   sweep_path_identity, and duplicate identity scan`. Checked: `-d` is required,
 #   physical device/inode identity is mandatory, and repeated identity produces
 #   an undetermined assessment. The complete pool listing is counted before any
-#   assessment begins. Falsifier: an absent/unresolvable path or alias duplicate
-#   authorizes deletion, or an early exit can hide a later announced candidate.
+#   assessment begins. Falsifier: two different pool strings resolve to the same
+#   inode and are each applied, or a nonexistent first path prevents a valid later
+#   path from receiving a terminal verdict.
 # - `bin/fm-next-cache-sweep.sh: sweep_pool_worktree_provenance -> candidate root,
 #   project worktree registry, and project-clone exclusion`. Checked: candidate
 #   `--show-toplevel` must physically equal the candidate, the candidate identity
 #   must appear exactly once in `git worktree list --porcelain -z`, and it must
-#   differ from the supplied project identity. The supplied identity is now first
-#   proven to be the project root, converting the earlier wrong evidence chain.
-#   Falsifier: either root proof can be bypassed, or the linked-worktree registry
-#   can be incomplete while verification succeeds.
+#   differ from the supplied project identity. Wrong evidence chain: the supplied
+#   identity was proven only to be a root; the primary-clone proof above is also
+#   required. Falsifier: the pool names a child of a live registered worktree and
+#   Git reachability is mistaken for root identity, or a linked project argument
+#   makes the actual primary clone look like a distinct registered candidate.
 # - `bin/fm-next-cache-sweep.sh: sweep_unowned_reason -> pool status`. Checked:
 #   only byte-exact `available` proceeds, `in-use` records ownership, and every
-#   other value records undetermined. Falsifier: any unknown or malformed status
-#   reaches clean-tree inspection as though availability were proven.
+#   other value records undetermined. Falsifier: `available ` or `AVAILABLE`
+#   reaches clean-tree inspection as if it were byte-exact `available`.
 # - `bin/fm-next-cache-sweep.sh: sweep_unowned_reason -> git status --porcelain
 #   and git stash list`. Checked: each command substitution is status-checked,
 #   nonempty status or stash output records ownership, and failure records
-#   undetermined. Falsifier: Git failure or returned work is classified free.
+#   undetermined. Falsifier: `git status` prints an empty-looking result then exits
+#   1, or `git stash list` prints a stash then exits 1, and the copy is classified
+#   free from the captured text alone.
 # - `bin/fm-next-cache-sweep.sh: sweep_project_plan -> fm_next_cache_inspect and
 #   FM_NEXT_CACHE_* outputs`. Checked: the inspection status is checked before
 #   size and plan values are consumed, so failed discovery, eligibility, or
 #   measurement produces an undetermined assessment. Every candidate is assessed
-#   before project refusal is applied. Falsifier: incomplete inspection supplies
-#   a zero-size/free row or prevents a later announced path receiving an assessment.
+#   before project refusal is applied. Falsifier: `find` reports one `.next` then
+#   exits 1 and that partial measurement becomes a free row, or the failure stops
+#   a later announced pool path from being assessed.
 #
 # Shared build-output discovery and removal inputs:
 # - `bin/fm-next-cache-lib.sh: fm_next_cache_size_kb -> du -sk`. Checked: only a
 #   zero-status command with leading decimal digits followed by a separator is
 #   emitted; failure and malformed output are nonzero, as the size-failure test
-#   observes. Falsifier: failed or malformed measurement becomes numeric zero.
+#   observes. Falsifier: `du` prints `0\t/path` then exits 1 and the directory is
+#   reported as measured empty.
 # - `bin/fm-next-cache-lib.sh: fm_next_cache_parent_is_next_app -> next.config.*
 #   and package.json predicates plus grep`. Checked: a regular config is positive,
 #   absent files or grep status 1 are negative, and every other grep status is
 #   undetermined. A negative cannot authorize deletion because callers require
-#   positive app evidence. Falsifier: an inspection error returns the same status
-#   as a proven app and lets the directory qualify.
+#   positive app evidence. Falsifier: package.json cannot be read and grep exits 2,
+#   but that status is returned as the same zero used for a matched `"next"` key.
 # - `bin/fm-next-cache-lib.sh: fm_next_cache_is_build_output -> path existence,
 #   directory and symlink predicates, physical resolution, containment, git
 #   check-ignore, and app-root result`. Checked: only a real nonsymlink directory
 #   physically below the supplied root with check-ignore status 0 and app status
-#   0 qualifies; proven negatives return 1 and failures return 2. Falsifier: any
-#   unresolved, external, symlinked, unignored, or unproven-app path returns 0.
+#   0 qualifies; proven negatives return 1 and failures return 2. Falsifier: an
+#   ignored `.next` symlink points outside the worktree, or `git check-ignore`
+#   exits 128, and the candidate still returns the qualifying status 0.
 # - `bin/fm-next-cache-lib.sh: fm_next_cache_inspect -> worktree cd and git
 #   rev-parse --git-dir`. Checked: entry and Git failure set a named inspection
 #   error and return nonzero; `--git-dir` is needed here only to prove a repository
 #   is reachable because the sweep separately proves candidate-root provenance
-#   and teardown supplies its task worktree. Falsifier: this library answer is
-#   itself used to prove that an arbitrary caller path is a worktree root.
+#   and teardown supplies its task worktree. Falsifier: a caller passes a repository
+#   child directory, `--git-dir` succeeds there, and that answer alone grants the
+#   caller authority to remove the child's build output.
 # - `bin/fm-next-cache-lib.sh: fm_next_cache_inspect -> mktemp, find -print0,
 #   NUL-delimited read, and temp removal`. Checked: the complete `find` status is
 #   captured before parsing, documented `-print0` records are path-validated, and
 #   any staging, walk, eligibility, measurement, or cleanup failure clears the
-#   accumulated plan and returns nonzero. Falsifier: a successful `find -print0`
-#   violates its NUL-record contract, or any checked nonzero path leaves a partial
-#   plan usable by report or reclaim.
+#   accumulated plan and returns nonzero. Falsifier: `find` emits one complete NUL
+#   record then exits 1, yet that partial plan remains usable by report or reclaim.
 # - `bin/fm-next-cache-lib.sh: fm_next_cache_report and fm_next_cache_reclaim ->
 #   plan rows and fm_next_cache_human_kb`. Checked: only inspect-generated numeric
 #   size/path rows reach formatting, and repeated inspection or numeric validation
-#   failure returns nonzero to the sweep. Falsifier: malformed plan data prints a
-#   success or contributes a total.
+#   failure returns nonzero to the sweep. Falsifier: an internally corrupted plan
+#   row contains `bogus\t/path` and still prints success or contributes bytes.
 # - `bin/fm-next-cache-lib.sh: fm_next_cache_reclaim -> rm -rf and post-removal
 #   existence predicates`. Checked: bytes are added only after `rm` status 0 and
 #   both `-e` and `-L` confirm absence; otherwise the exact path is reported and
-#   status is nonzero. Falsifier: a remaining directory or link contributes
-#   reclaimed bytes or a successful outcome.
+#   status is nonzero. Falsifier: `rm` returns 0 while a dangling symlink remains
+#   at the path, and its measured bytes are counted as reclaimed.
 #
 # Outcome and summary inputs:
 # - `bin/fm-next-cache-sweep.sh: sweep_apply_project_plan -> report or reclaim
-#   status and FM_NEXT_CACHE_TOTAL_KB`. Checked: both dry-run and removal statuses
-#   are captured and routed through the one terminal-verdict recorder; failed
-#   paths become named `failed` verdicts and only ledger-recorded measured work
-#   contributes totals. Falsifier: an apply result changes a summary counter
-#   without first appending exactly one candidate verdict.
+#   status, target authority, and FM_NEXT_CACHE_TOTAL_KB`. Checked: today dry-run
+#   and removal statuses are captured, but target origin is already lost. Required:
+#   exact per-target `reclaim` eligibility chooses removal; explicit and missing
+#   eligibility choose reporting and a distinct terminal verdict. Falsifier: an
+#   explicit target's free candidate calls `fm_next_cache_reclaim`, or its report
+#   is recorded and summarized as reclaimed.
 # - `bin/fm-next-cache-sweep.sh: sweep_project_plan, sweep_project, project loop,
 #   and final summary -> announced candidates and final verdicts`. Checked: project
 #   plans remain atomic, the complete pool list announces indexed candidates
-#   before assessment, and one ledger records `reclaimed`, `skipped-as-owned`,
-#   `undetermined`, `refused`, or `failed`. Per-project reconciliation proves each
-#   index occurs once; run reconciliation gates every clean summary. This converts
-#   the wrong early-return verdict. Falsifier: an announced index has zero or two
-#   terminal records, or any summary counter changes outside the ledger recorder.
+#   before assessment, and one ledger records each terminal outcome. Per-project
+#   reconciliation proves each index occurs once; run reconciliation gates every
+#   clean summary. Falsifier: a three-row pool has an invalid first row and valid
+#   later rows, but either later index has no verdict, or a discarded row still
+#   increments the clean inspected count outside the ledger.
 set -u
 
 case "${BASH_SOURCE[0]}" in
