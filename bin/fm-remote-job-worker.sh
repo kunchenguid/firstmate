@@ -485,7 +485,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   WORKER_ACTIVE_JOB=
   [ "$timed_out" -eq 0 ] || return 124
   [ "$heartbeat_failed" -eq 0 ] || return 125
-  [ "$WORKER_PREEMPTED" -eq 0 ] || return 75
+  [ "$WORKER_PREEMPTED" -eq 0 ] || return "$FM_REMOTE_JOB_PREEMPTED_EXIT"
   return "$rc"
 }
 
