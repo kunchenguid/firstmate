@@ -79,10 +79,10 @@
 #   any failed resolution or library load reaches argument processing with exit 0.
 # - `bin/fm-next-cache-sweep.sh: argument loops -> "$@"`. Checked: the option
 #   case accepts only `--dry-run`, rejects every other dash-prefixed value with
-#   exit 2, and retains non-options verbatim. Re-derived wrong verdict: retention
-#   plus later `git rev-parse --git-dir` proves only that a repository is reachable,
-#   not that an explicit path is its root. Falsifier: an explicit subdirectory is
-#   accepted as the project clone and weakens the clone-exclusion comparison.
+#   exit 2, and retains non-options verbatim for the project-root proof. Converted
+#   wrong verdict: repository reachability alone was insufficient; every retained
+#   path must now physically equal its `--show-toplevel`. Falsifier: an explicit
+#   subdirectory reaches pool lookup or weakens the clone-exclusion comparison.
 # - `bin/fm-next-cache-sweep.sh: command preflight -> command -v treehouse and
 #   python3`. Checked: absence exits 2, while every later invocation separately
 #   checks the command's status. Falsifier: a missing command falls through, or a
@@ -136,12 +136,11 @@
 #   announced project for project-scoped refusal. Falsifier: a directory-entry
 #   failure silently removes a project from the requested target set.
 # - `bin/fm-next-cache-sweep.sh: sweep_project -> sweep_resolve_directory and Git
-#   project queries`. Checked: physical entry and `git rev-parse --git-dir` errors
-#   already refuse the project. Re-derived wrong verdict: `--git-dir` succeeds in
-#   a repository child, as observed from `bin/`, so it does not prove that the
-#   resolved argument equals `git rev-parse --show-toplevel`. Falsifier: the
-#   project clone can be returned by the pool while the comparison anchor remains
-#   an explicit child path.
+#   project queries`. Checked: physical entry and `git rev-parse --show-toplevel`
+#   must both succeed, the answer must be safe and physically resolvable, and its
+#   physical path must equal the resolved argument before pool lookup. This
+#   converts the wrong `--git-dir` verdict observed from `bin/`. Falsifier: any
+#   non-root argument supplies the project identity used by candidate provenance.
 # - `bin/fm-next-cache-sweep.sh: sweep_pool_entries -> mktemp, treehouse status
 #   --json, staged-file read, JSON decode, and temp removal`. Checked: treehouse's
 #   status is captured before parsing, the file is decoded strictly as UTF-8 JSON,
@@ -155,17 +154,18 @@
 #   can normalize an unvalidated field into `available` or a different path.
 # - `bin/fm-next-cache-sweep.sh: sweep_project_plan -> pool directory predicate,
 #   sweep_path_identity, and duplicate identity scan`. Checked: `-d` is required,
-#   physical device/inode identity is mandatory, and repeated identity refuses
-#   the atomic project. Falsifier: an absent/unresolvable path or alias duplicate
-#   authorizes deletion, or refusal leaves any announced path without a verdict.
+#   physical device/inode identity is mandatory, and repeated identity produces
+#   an undetermined assessment. The complete pool listing is counted before any
+#   assessment begins. Falsifier: an absent/unresolvable path or alias duplicate
+#   authorizes deletion, or an early exit can hide a later announced candidate.
 # - `bin/fm-next-cache-sweep.sh: sweep_pool_worktree_provenance -> candidate root,
 #   project worktree registry, and project-clone exclusion`. Checked: candidate
 #   `--show-toplevel` must physically equal the candidate, the candidate identity
 #   must appear exactly once in `git worktree list --porcelain -z`, and it must
-#   differ from the supplied project identity. Re-derived wrong evidence chain:
-#   these predicates exclude the clone only when the supplied project is itself
-#   proven to be the project root. Falsifier: an explicit project child makes the
-#   actual clone identity differ from the comparison anchor and pass provenance.
+#   differ from the supplied project identity. The supplied identity is now first
+#   proven to be the project root, converting the earlier wrong evidence chain.
+#   Falsifier: either root proof can be bypassed, or the linked-worktree registry
+#   can be incomplete while verification succeeds.
 # - `bin/fm-next-cache-sweep.sh: sweep_unowned_reason -> pool status`. Checked:
 #   only byte-exact `available` proceeds, `in-use` records ownership, and every
 #   other value records undetermined. Falsifier: any unknown or malformed status
@@ -177,9 +177,9 @@
 # - `bin/fm-next-cache-sweep.sh: sweep_project_plan -> fm_next_cache_inspect and
 #   FM_NEXT_CACHE_* outputs`. Checked: the inspection status is checked before
 #   size and plan values are consumed, so failed discovery, eligibility, or
-#   measurement refuses application. Falsifier: incomplete inspection supplies a
-#   zero-size or free row, or an early refusal prevents later pool paths receiving
-#   final verdicts; the latter is the reporting defect being converted.
+#   measurement produces an undetermined assessment. Every candidate is assessed
+#   before project refusal is applied. Falsifier: incomplete inspection supplies
+#   a zero-size/free row or prevents a later announced path receiving an assessment.
 #
 # Shared build-output discovery and removal inputs:
 # - `bin/fm-next-cache-lib.sh: fm_next_cache_size_kb -> du -sk`. Checked: only a
@@ -225,18 +225,18 @@
 # Outcome and summary inputs:
 # - `bin/fm-next-cache-sweep.sh: sweep_apply_project_plan -> report or reclaim
 #   status and FM_NEXT_CACHE_TOTAL_KB`. Checked: both dry-run and removal statuses
-#   are captured, failed paths increment the failure outcome, and only successful
-#   measured work contributes bytes. Falsifier: an apply failure has no named
-#   final outcome or permits a complete summary.
+#   are captured and routed through the one terminal-verdict recorder; failed
+#   paths become named `failed` verdicts and only ledger-recorded measured work
+#   contributes totals. Falsifier: an apply result changes a summary counter
+#   without first appending exactly one candidate verdict.
 # - `bin/fm-next-cache-sweep.sh: sweep_project_plan, sweep_project, project loop,
 #   and final summary -> announced candidates and final verdicts`. Checked: project
-#   plans are atomic and only completed projects currently enter run totals.
-#   Re-derived wrong verdict: `sweep_project_plan` returns on its first failed
-#   candidate, so later paths from the already complete pool listing have no
-#   verdict at all. Falsifier: announced-candidate count can differ from final-
-#   verdict count while the omission is not reported. The required conversion is
-#   a single candidate ledger, exactly one terminal verdict per announced path,
-#   and reconciliation before any clean summary is reachable.
+#   plans remain atomic, the complete pool list announces indexed candidates
+#   before assessment, and one ledger records `reclaimed`, `skipped-as-owned`,
+#   `undetermined`, `refused`, or `failed`. Per-project reconciliation proves each
+#   index occurs once; run reconciliation gates every clean summary. This converts
+#   the wrong early-return verdict. Falsifier: an announced index has zero or two
+#   terminal records, or any summary counter changes outside the ledger recorder.
 set -u
 
 case "${BASH_SOURCE[0]}" in
@@ -784,82 +784,264 @@ sweep_unowned_reason() {  # <status> <worktree>
 }
 
 SWEEP_PROJECT_PLAN=
-SWEEP_PROJECT_INSPECTED=0
+SWEEP_PROJECT_ANNOUNCED=0
+SWEEP_PROJECT_ASSESSED=0
+SWEEP_PROJECT_VERDICTS=0
+SWEEP_PROJECT_VERDICT_IDS=
+
+sweep_add_project_assessment() {  # <candidate-id> <action> <reason> <kb> <worktree>
+  local candidate_id=$1 action=$2 reason=$3 kb=$4 wt=$5 record
+  case "$candidate_id" in ''|*[!0-9]*) return 1 ;; esac
+  case "$action" in owned|free|undetermined) ;; *) return 1 ;; esac
+  case "$kb" in -) ;; ''|*[!0-9]*) return 1 ;; esac
+  case "$reason$wt" in *$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
+  record="$candidate_id"$'\t'"$action"$'\t'"$reason"$'\t'"$kb"$'\t'"$wt"
+  if [ -n "$SWEEP_PROJECT_PLAN" ]; then
+    SWEEP_PROJECT_PLAN="$SWEEP_PROJECT_PLAN"$'\n'"$record"
+  else
+    SWEEP_PROJECT_PLAN=$record
+  fi
+  SWEEP_PROJECT_ASSESSED=$(( SWEEP_PROJECT_ASSESSED + 1 ))
+}
+
+sweep_record_candidate_verdict() {  # <project> <candidate-id> <verdict> <reason> <kb> <worktree>
+  local project=$1 candidate_id=$2 verdict=$3 reason=$4 kb=$5 wt=$6
+  local recorded_id record human
+  case "$candidate_id" in ''|*[!0-9]*) return 1 ;; esac
+  case "$verdict" in
+    reclaimed|skipped-as-owned|undetermined|refused|failed) ;;
+    *) return 1 ;;
+  esac
+  case "$kb" in -) ;; ''|*[!0-9]*) return 1 ;; esac
+  case "$project$reason$wt" in *$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
+  if [ "$verdict" = skipped-as-owned ] && [ "$kb" -gt 0 ]; then
+    human=$(fm_next_cache_human_kb "$kb") || return 1
+  fi
+  if [ -n "$SWEEP_PROJECT_VERDICT_IDS" ]; then
+    while IFS= read -r recorded_id; do
+      [ "$recorded_id" = "$candidate_id" ] && return 1
+    done <<EOT
+$SWEEP_PROJECT_VERDICT_IDS
+EOT
+    SWEEP_PROJECT_VERDICT_IDS="$SWEEP_PROJECT_VERDICT_IDS"$'\n'"$candidate_id"
+  else
+    SWEEP_PROJECT_VERDICT_IDS=$candidate_id
+  fi
+  record="$project"$'\t'"$candidate_id"$'\t'"$verdict"$'\t'"$reason"$'\t'"$kb"$'\t'"$wt"
+  if [ -n "$CANDIDATE_LEDGER" ]; then
+    CANDIDATE_LEDGER="$CANDIDATE_LEDGER"$'\n'"$record"
+  else
+    CANDIDATE_LEDGER=$record
+  fi
+  SWEEP_PROJECT_VERDICTS=$(( SWEEP_PROJECT_VERDICTS + 1 ))
+  CANDIDATE_VERDICTS=$(( CANDIDATE_VERDICTS + 1 ))
+  case "$verdict" in
+    reclaimed) ;;
+    skipped-as-owned)
+      if [ "$kb" -gt 0 ]; then
+        printf 'sweep: skipped-as-owned %s (%s), holding %s\n' \
+          "$wt" "$reason" "$human"
+      fi
+      ;;
+    undetermined)
+      printf 'sweep: undetermined %s (%s)\n' "$wt" "$reason" >&2
+      ;;
+    refused)
+      printf 'sweep: refused %s (%s)\n' "$wt" "$reason" >&2
+      ;;
+    failed)
+      printf 'sweep: failed %s (%s)\n' "$wt" "$reason" >&2
+      ;;
+  esac
+}
+
+sweep_summarize_candidate_ledger() {
+  local project candidate_id verdict reason kb wt rows=0
+  TOTAL_KB=0
+  RECLAIMED=0
+  SKIPPED=0
+  INSPECTED=0
+  FAILED=0
+  if [ -n "$CANDIDATE_LEDGER" ]; then
+    while IFS=$'\t' read -r project candidate_id verdict reason kb wt; do
+      case "$project$reason$wt" in *$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
+      case "$candidate_id" in ''|*[!0-9]*) return 1 ;; esac
+      case "$kb" in -) ;; ''|*[!0-9]*) return 1 ;; esac
+      rows=$(( rows + 1 ))
+      case "$verdict" in
+        reclaimed)
+          [ "$kb" = - ] && return 1
+          INSPECTED=$(( INSPECTED + 1 ))
+          if [ "$kb" -gt 0 ]; then
+            TOTAL_KB=$(( TOTAL_KB + kb ))
+            RECLAIMED=$(( RECLAIMED + 1 ))
+          fi
+          ;;
+        skipped-as-owned)
+          [ "$kb" = - ] && return 1
+          INSPECTED=$(( INSPECTED + 1 ))
+          [ "$kb" -gt 0 ] && SKIPPED=$(( SKIPPED + 1 ))
+          ;;
+        undetermined|refused)
+          ;;
+        failed)
+          [ "$kb" = - ] && return 1
+          INSPECTED=$(( INSPECTED + 1 ))
+          FAILED=$(( FAILED + 1 ))
+          if [ "$kb" -gt 0 ]; then
+            TOTAL_KB=$(( TOTAL_KB + kb ))
+            RECLAIMED=$(( RECLAIMED + 1 ))
+          fi
+          ;;
+        *) return 1 ;;
+      esac
+    done <<EOT
+$CANDIDATE_LEDGER
+EOT
+  fi
+  [ "$rows" -eq "$CANDIDATE_VERDICTS" ]
+}
+
+sweep_reconcile_project_verdicts() {  # <project>
+  local project=$1 expected recorded matches
+  if [ "$SWEEP_PROJECT_VERDICTS" -ne "$SWEEP_PROJECT_ANNOUNCED" ]; then
+    sweep_incomplete "candidate verdict reconciliation failed for $project ($SWEEP_PROJECT_ANNOUNCED announced, $SWEEP_PROJECT_VERDICTS recorded)"
+    return
+  fi
+  expected=1
+  while [ "$expected" -le "$SWEEP_PROJECT_ANNOUNCED" ]; do
+    matches=0
+    if [ -n "$SWEEP_PROJECT_VERDICT_IDS" ]; then
+      while IFS= read -r recorded; do
+        [ "$recorded" = "$expected" ] && matches=$(( matches + 1 ))
+      done <<EOT
+$SWEEP_PROJECT_VERDICT_IDS
+EOT
+    fi
+    if [ "$matches" -ne 1 ]; then
+      sweep_incomplete "candidate verdict reconciliation failed for $project (candidate $expected has $matches verdicts)"
+      return
+    fi
+    expected=$(( expected + 1 ))
+  done
+}
+
 sweep_project_plan() {  # <project> <entries>
-  local project=$1 entries=$2 status wt record pool_identity recorded_identity
-  local inspected=0
+  local project=$1 entries=$2 status wt pool_identity recorded_identity
+  local candidate_id=0 action reason kb duplicate record_error=0 project_refused=0
   local pool_identities=
   SWEEP_PROJECT_PLAN=
-  SWEEP_PROJECT_INSPECTED=0
+  SWEEP_PROJECT_ANNOUNCED=0
+  SWEEP_PROJECT_ASSESSED=0
+  SWEEP_PROJECT_VERDICTS=0
+  SWEEP_PROJECT_VERDICT_IDS=
   while IFS=$'\t' read -r status wt; do
     if [ -n "$status$wt" ]; then
-      if [ -z "$status" ] || [ -z "$wt" ]; then
-        sweep_incomplete "pool entry did not yield a complete status and path"
-        return
-      fi
-      if [ ! -d "$wt" ]; then
-        sweep_incomplete "pool worktree is not an inspectable directory: $wt"
-        return
-      fi
-      if ! pool_identity=$(sweep_path_identity "$wt"); then
-        sweep_incomplete "pool worktree identity cannot be established: $wt"
-        return
-      fi
-      if ! sweep_pool_worktree_provenance "$project" "$wt"; then
-        sweep_incomplete "$wt pool provenance could not be established ($SWEEP_POOL_PROVENANCE_REASON)"
-        return
-      fi
-      if [ -n "$pool_identities" ]; then
-        while IFS= read -r recorded_identity; do
-          if [ "$recorded_identity" = "$pool_identity" ]; then
-            sweep_incomplete "pool entries name a duplicate filesystem copy: $wt"
-            return
-          fi
-        done <<EOT
-$pool_identities
-EOT
-        pool_identities="$pool_identities"$'\n'"$pool_identity"
-      else
-        pool_identities=$pool_identity
-      fi
-      sweep_unowned_reason "$status" "$wt"
-      if [ "$SWEEP_OWNER_CLASS" = undetermined ]; then
-        sweep_incomplete "$wt could not be assessed ($SWEEP_OWNER_REASON)"
-        return
-      fi
-      if ! fm_next_cache_inspect "$wt"; then
-        sweep_incomplete "$wt build output could not be inspected ($FM_NEXT_CACHE_INSPECTION_ERROR)"
-        return
-      fi
-      inspected=$(( inspected + 1 ))
-      if [ "$SWEEP_OWNER_CLASS" = owned ]; then
-        record="owned"$'\t'"$SWEEP_OWNER_REASON"$'\t'"$FM_NEXT_CACHE_TOTAL_KB"$'\t'"$wt"
-      else
-        record="free"$'\t'"-"$'\t'"$FM_NEXT_CACHE_TOTAL_KB"$'\t'"$wt"
-      fi
-      if [ -n "$SWEEP_PROJECT_PLAN" ]; then
-        SWEEP_PROJECT_PLAN="$SWEEP_PROJECT_PLAN"$'\n'"$record"
-      else
-        SWEEP_PROJECT_PLAN=$record
-      fi
+      SWEEP_PROJECT_ANNOUNCED=$(( SWEEP_PROJECT_ANNOUNCED + 1 ))
+      CANDIDATE_ANNOUNCED=$(( CANDIDATE_ANNOUNCED + 1 ))
     fi
   done <<EOT
 $entries
 EOT
-  SWEEP_PROJECT_INSPECTED=$inspected
+  while IFS=$'\t' read -r status wt; do
+    if [ -n "$status$wt" ]; then
+      candidate_id=$(( candidate_id + 1 ))
+      action=undetermined
+      reason=
+      kb=-
+      if [ -z "$status" ] || [ -z "$wt" ]; then
+        reason="pool entry did not yield a complete status and path"
+      elif [ ! -d "$wt" ]; then
+        reason="pool worktree is not an inspectable directory"
+      elif ! pool_identity=$(sweep_path_identity "$wt"); then
+        reason="pool worktree identity cannot be established"
+      elif ! sweep_pool_worktree_provenance "$project" "$wt"; then
+        reason="pool provenance could not be established: $SWEEP_POOL_PROVENANCE_REASON"
+      else
+        duplicate=0
+        if [ -n "$pool_identities" ]; then
+          while IFS= read -r recorded_identity; do
+            [ "$recorded_identity" = "$pool_identity" ] && duplicate=1
+          done <<EOT
+$pool_identities
+EOT
+        fi
+        if [ "$duplicate" -eq 1 ]; then
+          reason="pool entries name a duplicate filesystem copy"
+        else
+          if [ -n "$pool_identities" ]; then
+            pool_identities="$pool_identities"$'\n'"$pool_identity"
+          else
+            pool_identities=$pool_identity
+          fi
+          sweep_unowned_reason "$status" "$wt"
+          if [ "$SWEEP_OWNER_CLASS" = undetermined ]; then
+            reason=$SWEEP_OWNER_REASON
+          elif ! fm_next_cache_inspect "$wt"; then
+            reason="build output could not be inspected: $FM_NEXT_CACHE_INSPECTION_ERROR"
+          else
+            kb=$FM_NEXT_CACHE_TOTAL_KB
+            if [ "$SWEEP_OWNER_CLASS" = owned ]; then
+              action=owned
+              reason=$SWEEP_OWNER_REASON
+            else
+              action=free
+              reason=-
+            fi
+          fi
+        fi
+      fi
+      if ! sweep_add_project_assessment \
+        "$candidate_id" "$action" "$reason" "$kb" "$wt"; then
+        record_error=1
+      fi
+      [ "$action" = undetermined ] && project_refused=1
+    fi
+  done <<EOT
+$entries
+EOT
+  if [ "$record_error" -ne 0 ] \
+    || [ "$SWEEP_PROJECT_ASSESSED" -ne "$SWEEP_PROJECT_ANNOUNCED" ]; then
+    sweep_incomplete "candidate assessment reconciliation failed for $project ($SWEEP_PROJECT_ANNOUNCED announced, $SWEEP_PROJECT_ASSESSED assessed)"
+    return
+  fi
+  if [ "$project_refused" -eq 1 ]; then
+    while IFS=$'\t' read -r candidate_id action reason kb wt; do
+      if [ -n "$candidate_id" ]; then
+        if [ "$action" = undetermined ]; then
+          sweep_record_candidate_verdict \
+            "$project" "$candidate_id" undetermined "$reason" "$kb" "$wt" \
+            || record_error=1
+        else
+          sweep_record_candidate_verdict \
+            "$project" "$candidate_id" refused \
+            "another pool candidate made project preflight incomplete" "$kb" "$wt" \
+            || record_error=1
+        fi
+      fi
+    done <<EOT
+$SWEEP_PROJECT_PLAN
+EOT
+    if [ "$record_error" -ne 0 ]; then
+      sweep_incomplete "candidate verdict could not be recorded for $project"
+      return
+    fi
+    sweep_reconcile_project_verdicts "$project" || return 1
+    sweep_incomplete "one or more announced pool candidates could not be fully assessed for $project"
+    return
+  fi
 }
 
-sweep_apply_project_plan() {  # <plan>
-  local plan=$1 action reason planned_kb wt apply_status
-  while IFS=$'\t' read -r action reason planned_kb wt; do
-    if [ -n "$action" ]; then
+sweep_apply_project_plan() {  # <project> <plan>
+  local project=$1 plan=$2 candidate_id action reason planned_kb wt apply_status
+  local record_error=0
+  while IFS=$'\t' read -r candidate_id action reason planned_kb wt; do
+    if [ -n "$candidate_id" ]; then
       if [ "$action" = owned ]; then
-        if [ "$planned_kb" -gt 0 ]; then
-          printf 'sweep: skipped %s (%s), holding %s\n' \
-            "$wt" "$reason" "$(fm_next_cache_human_kb "$planned_kb")"
-          SKIPPED=$(( SKIPPED + 1 ))
-        fi
-      else
+        sweep_record_candidate_verdict \
+          "$project" "$candidate_id" skipped-as-owned "$reason" "$planned_kb" "$wt" \
+          || record_error=1
+      elif [ "$action" = free ]; then
         apply_status=0
         if [ "$DRY_RUN" = 1 ]; then
           fm_next_cache_report "$wt" "sweep" || apply_status=$?
@@ -867,30 +1049,54 @@ sweep_apply_project_plan() {  # <plan>
           fm_next_cache_reclaim "$wt" "sweep" || apply_status=$?
         fi
         if [ "$apply_status" -ne 0 ]; then
-          RC=1
-          FAILED=$(( FAILED + 1 ))
+          sweep_record_candidate_verdict \
+            "$project" "$candidate_id" failed \
+            "build output could not be processed" "$FM_NEXT_CACHE_TOTAL_KB" "$wt" \
+            || record_error=1
+        else
+          sweep_record_candidate_verdict \
+            "$project" "$candidate_id" reclaimed - "$FM_NEXT_CACHE_TOTAL_KB" "$wt" \
+            || record_error=1
         fi
-        if [ "$FM_NEXT_CACHE_TOTAL_KB" -gt 0 ]; then
-          TOTAL_KB=$(( TOTAL_KB + FM_NEXT_CACHE_TOTAL_KB ))
-          RECLAIMED=$(( RECLAIMED + 1 ))
-        fi
+      else
+        sweep_record_candidate_verdict \
+          "$project" "$candidate_id" failed "candidate plan is invalid" 0 "$wt" \
+          || record_error=1
       fi
     fi
   done <<EOT
 $plan
 EOT
+  [ "$record_error" -eq 0 ]
 }
 
 sweep_project() {  # <project>
-  local project=$1 project_real entries
-  SWEEP_PROJECT_INSPECTED=0
+  local project=$1 project_real project_top project_top_real entries
+  SWEEP_PROJECT_ANNOUNCED=0
+  SWEEP_PROJECT_ASSESSED=0
+  SWEEP_PROJECT_VERDICTS=0
+  SWEEP_PROJECT_VERDICT_IDS=
   SWEEP_PROJECT_COMPLETE=0
   if ! project_real=$(sweep_resolve_directory "$project"); then
     sweep_incomplete "cannot enter project: $project"
     return
   fi
-  if ! git -C "$project_real" rev-parse --git-dir >/dev/null 2>&1; then
+  if ! project_top=$(git -C "$project_real" rev-parse --show-toplevel 2>/dev/null); then
     sweep_incomplete "cannot inspect project Git metadata: $project_real"
+    return
+  fi
+  case "$project_top" in
+    ''|*$'\t'*|*$'\r'*|*$'\n'*)
+      sweep_incomplete "project root is malformed for: $project_real"
+      return
+      ;;
+  esac
+  if ! project_top_real=$(sweep_resolve_directory "$project_top"); then
+    sweep_incomplete "cannot resolve project root for: $project_real"
+    return
+  fi
+  if [ "$project_top_real" != "$project_real" ]; then
+    sweep_incomplete "project path is not a project root: $project_real"
     return
   fi
   if ! entries=$(sweep_pool_entries "$project_real"); then
@@ -900,7 +1106,12 @@ sweep_project() {  # <project>
   if ! sweep_project_plan "$project_real" "$entries"; then
     return 1
   fi
-  sweep_apply_project_plan "$SWEEP_PROJECT_PLAN"
+  if ! sweep_apply_project_plan "$project_real" "$SWEEP_PROJECT_PLAN"; then
+    sweep_reconcile_project_verdicts "$project_real" || true
+    sweep_incomplete "candidate verdict could not be recorded for $project_real"
+    return
+  fi
+  sweep_reconcile_project_verdicts "$project_real" || return 1
   SWEEP_PROJECT_COMPLETE=1
 }
 
@@ -930,6 +1141,9 @@ INCOMPLETE=0
 INSPECTED=0
 FAILED=0
 COMPLETE_PROJECTS=0
+CANDIDATE_LEDGER=
+CANDIDATE_ANNOUNCED=0
+CANDIDATE_VERDICTS=0
 for project in "${TARGETS[@]}"; do
   sweep_project "$project"
   project_status=$?
@@ -937,13 +1151,26 @@ for project in "${TARGETS[@]}"; do
     RC=1
     INCOMPLETE=$(( INCOMPLETE + 1 ))
   elif [ "$SWEEP_PROJECT_COMPLETE" -eq 1 ]; then
-    INSPECTED=$(( INSPECTED + SWEEP_PROJECT_INSPECTED ))
     COMPLETE_PROJECTS=$(( COMPLETE_PROJECTS + 1 ))
   else
     RC=1
     INCOMPLETE=$(( INCOMPLETE + 1 ))
   fi
 done
+
+LEDGER_INCOMPLETE=0
+if ! sweep_summarize_candidate_ledger; then
+  printf 'sweep: incomplete candidate verdict ledger: malformed terminal record\n' >&2
+  RC=1
+  LEDGER_INCOMPLETE=1
+fi
+if [ "$CANDIDATE_VERDICTS" -ne "$CANDIDATE_ANNOUNCED" ]; then
+  printf 'sweep: incomplete candidate verdict ledger: %d announced, %d recorded\n' \
+    "$CANDIDATE_ANNOUNCED" "$CANDIDATE_VERDICTS" >&2
+  RC=1
+  LEDGER_INCOMPLETE=1
+fi
+if [ "$FAILED" -gt 0 ]; then RC=1; fi
 
 sweep_copies() {  # <count>
   if [ "$1" -eq 1 ]; then printf '1 copy\n'; else printf '%d copies\n' "$1"; fi
@@ -957,6 +1184,9 @@ INCOMPLETE_NOTE=
 if [ "$INCOMPLETE" -gt 0 ]; then
   INCOMPLETE_NOTE="; $(sweep_projects "$INCOMPLETE") could not be inspected"
 fi
+if [ "$LEDGER_INCOMPLETE" -ne 0 ]; then
+  INCOMPLETE_NOTE="$INCOMPLETE_NOTE; candidate verdicts were incomplete ($CANDIDATE_ANNOUNCED announced, $CANDIDATE_VERDICTS recorded)"
+fi
 
 FAILED_NOTE=
 if [ "$FAILED" -gt 0 ]; then
@@ -965,6 +1195,7 @@ fi
 
 RUN_COMPLETE=0
 if [ "$INCOMPLETE" -eq 0 ] && [ "$FAILED" -eq 0 ] \
+  && [ "$LEDGER_INCOMPLETE" -eq 0 ] \
   && [ "$COMPLETE_PROJECTS" -eq "${#TARGETS[@]}" ]; then
   RUN_COMPLETE=1
 fi

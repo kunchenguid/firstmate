@@ -940,6 +940,107 @@ SH
   pass "the project clone cannot masquerade as a pooled worktree"
 }
 
+test_sweep_refuses_explicit_project_subdirectory() {
+  local case_dir clone child out rc
+  case_dir=$(make_case explicit-project-subdirectory)
+  clone="$case_dir/projects/app"
+  add_next_app "$clone" packages/frontend
+  child="$clone/packages/frontend"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '[{"status":"available","path":"%s"}]\n' "$FM_FAKE_PROJECT_CLONE"
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(FM_FAKE_PROJECT_CLONE="$clone" run_sweep "$case_dir" "$child" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "explicit-project-subdirectory: an explicit child is not a project clone root"
+  assert_present "$child/.next" \
+    "explicit-project-subdirectory: a child argument must not weaken clone exclusion"
+  assert_contains "$out" "$child" \
+    "explicit-project-subdirectory: the rejected project argument must be named"
+  assert_contains "$out" "project root" \
+    "explicit-project-subdirectory: the missing root proof must be reported"
+  pass "an explicit project subdirectory cannot anchor clone provenance"
+}
+
+test_sweep_refusal_records_later_candidate_verdicts() {
+  local case_dir wt1 wt2 invalid out rc
+  case_dir=$(make_case later-candidate-verdicts)
+  wt1=$(add_pool_worktree "$case_dir" 1)
+  wt2=$(add_pool_worktree "$case_dir" 2)
+  add_next_app "$wt1" packages/one
+  add_next_app "$wt2" packages/two
+  invalid="$case_dir/pool/not-a-directory"
+  printf 'not a directory\n' > "$invalid"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '[{"status":"available","path":"%s/not-a-directory"},' "$FM_FAKE_POOL_DIR"
+printf '{"status":"available","path":"%s/1"},' "$FM_FAKE_POOL_DIR"
+printf '{"status":"available","path":"%s/2"}]\n' "$FM_FAKE_POOL_DIR"
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "later-candidate-verdicts: one uninspectable candidate must refuse the project"
+  assert_present "$wt1/packages/one/.next" \
+    "later-candidate-verdicts: atomic refusal must preserve the first later copy"
+  assert_present "$wt2/packages/two/.next" \
+    "later-candidate-verdicts: atomic refusal must preserve the second later copy"
+  assert_contains "$out" "sweep: undetermined $invalid" \
+    "later-candidate-verdicts: the failing candidate needs a terminal verdict"
+  assert_contains "$out" "sweep: refused $wt1" \
+    "later-candidate-verdicts: the first later candidate needs a terminal verdict"
+  assert_contains "$out" "sweep: refused $wt2" \
+    "later-candidate-verdicts: the second later candidate needs a terminal verdict"
+  pass "project refusal records a verdict for every later candidate"
+}
+
+test_sweep_reconciles_every_announced_candidate() {
+  local case_dir wt1 wt2 invalid out rc verdict_count
+  case_dir=$(make_case candidate-ledger-reconciliation)
+  wt1=$(add_pool_worktree "$case_dir" 1)
+  wt2=$(add_pool_worktree "$case_dir" 2)
+  add_next_app "$wt1" packages/one
+  add_next_app "$wt2" packages/two
+  invalid="$case_dir/pool/not-a-directory"
+  printf 'not a directory\n' > "$invalid"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '[{"status":"available","path":"%s/1"},' "$FM_FAKE_POOL_DIR"
+printf '{"status":"available","path":"%s/not-a-directory"},' "$FM_FAKE_POOL_DIR"
+printf '{"status":"available","path":"%s/2"}]\n' "$FM_FAKE_POOL_DIR"
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "candidate-ledger-reconciliation: an incomplete candidate must refuse the project"
+  verdict_count=$(printf '%s\n' "$out" \
+    | grep -Ec '^sweep: (reclaimed|skipped-as-owned|undetermined|refused|failed) ' || true)
+  [ "$verdict_count" -eq 3 ] \
+    || fail "candidate-ledger-reconciliation: expected 3 terminal verdicts, got $verdict_count"$'\n'"$out"
+  assert_contains "$out" "sweep: refused $wt1" \
+    "candidate-ledger-reconciliation: a discarded earlier plan row needs a verdict"
+  assert_contains "$out" "sweep: undetermined $invalid" \
+    "candidate-ledger-reconciliation: the incomplete candidate needs a verdict"
+  assert_contains "$out" "sweep: refused $wt2" \
+    "candidate-ledger-reconciliation: an unprocessed later candidate needs a verdict"
+  assert_not_contains "$out" "nothing to reclaim" \
+    "candidate-ledger-reconciliation: an unreconciled run cannot claim completeness"
+  pass "the candidate ledger reconciles every announced pool path"
+}
+
 test_sweep_reports_incomplete_project_count() {
   local case_dir out rc
   case_dir=$(make_case incomplete-summary)
@@ -1664,6 +1765,9 @@ run_next_cache_test test_sweep_refuses_pathless_pool_entry_atomically
 run_next_cache_test test_sweep_refuses_nondirectory_pool_entry_atomically
 run_next_cache_test test_sweep_refuses_pool_entry_for_live_copy_child
 run_next_cache_test test_sweep_refuses_pool_entry_for_project_clone
+run_next_cache_test test_sweep_refuses_explicit_project_subdirectory
+run_next_cache_test test_sweep_refusal_records_later_candidate_verdicts
+run_next_cache_test test_sweep_reconciles_every_announced_candidate
 run_next_cache_test test_sweep_reports_incomplete_project_count
 run_next_cache_test test_sweep_refuses_without_treehouse
 run_next_cache_test test_sweep_refuses_uninspectable_worktree_project
