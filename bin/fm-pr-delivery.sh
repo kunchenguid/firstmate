@@ -36,6 +36,7 @@ FINGERPRINT_DIR="$DELIVERY_DIR/fingerprints"
 DELIVERED_DIR="$DELIVERY_DIR/delivered"
 ACCELERATE_DIR="$DELIVERY_DIR/accelerate"
 MERGED_DIR="$DELIVERY_DIR/merged"
+PR_CURSOR_DIR="$DELIVERY_DIR/pr-cursors"
 GH_BIN="${GH_BIN:-gh}"
 PROJECT_MODE_BIN="${FM_PROJECT_MODE_BIN:-$SCRIPT_DIR/fm-project-mode.sh}"
 
@@ -135,7 +136,7 @@ refuse_secondmate() {
 }
 
 ensure_dirs() {
-  mkdir -p "$DELIVERY_DIR" "$FINGERPRINT_DIR" "$DELIVERED_DIR" "$ACCELERATE_DIR" "$MERGED_DIR" || return 1
+  mkdir -p "$DELIVERY_DIR" "$FINGERPRINT_DIR" "$DELIVERED_DIR" "$ACCELERATE_DIR" "$MERGED_DIR" "$PR_CURSOR_DIR" || return 1
   [ ! -L "$DELIVERY_DIR" ] || return 1
 }
 
@@ -193,23 +194,20 @@ project_repo_slug() { # <project>
 }
 
 build_task_index() {
-  local meta id pr project yolo
+  local meta id pr project
   TASK_BY_PR=''
   TASK_PROJECT=''
-  TASK_YOLO=''
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
     valid_id "$id" || continue
     [ "$(meta_field "$meta" kind)" = secondmate ] && continue
-    yolo=$(meta_field "$meta" yolo)
     pr=$(meta_field "$meta" pr)
     project=$(meta_field "$meta" project)
     if [ -n "$pr" ]; then
       TASK_BY_PR="${TASK_BY_PR}${pr}"$'\t'"$id"$'\n'
     fi
     TASK_PROJECT="${TASK_PROJECT}${id}"$'\t'"$project"$'\n'
-    TASK_YOLO="${TASK_YOLO}${id}=${yolo:-off}"$'\n'
   done
 }
 
@@ -274,24 +272,10 @@ match_task() { # <headRefName> <url> <project>
   return 1
 }
 
-task_yolo() { # <task-id>
-  local task=$1 line
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    case "$line" in
-      "$task="*) printf '%s\n' "${line#*=}"; return 0 ;;
-    esac
-  done <<EOF
-${TASK_YOLO:-}
-EOF
-  printf 'off\n'
-}
-
 task_hold_reason() { # <task-id>
-  local task=$1 status yolo open line verb key note lower
+  local task=$1 status open line verb key note lower
   status="$STATE/$task.status"
   [ -f "$status" ] || return 1
-  yolo=$(task_yolo "$task")
   open=$(status_open_decisions "$status" 2>/dev/null || true)
   if [ -z "$open" ]; then
     return 1
@@ -310,7 +294,7 @@ task_hold_reason() { # <task-id>
         return 0
         ;;
     esac
-    if [ "$verb" = needs-decision ] && [ "$yolo" != on ]; then
+    if [ "$verb" = needs-decision ]; then
       printf 'authority-hold\t%s\n' "$(clean_field "$note")"
       return 0
     fi
@@ -330,6 +314,8 @@ classify_pr_json() { # <repo> <pr-json-object>
   printf '%s' "$pr_json" | jq -r --arg repo "$repo" '
     def unresolved_threads:
       ((.reviewThreads.nodes // []) | map(select(.isResolved == false)) | length);
+    def review_comments:
+      ((.reviews // []) | map(select(.state == "COMMENTED" and ((.body // "") | length > 0))) | length);
     {
       repo: $repo,
       number: (.number | tostring),
@@ -340,23 +326,30 @@ classify_pr_json() { # <repo> <pr-json-object>
       mergeable: (.mergeable // "UNKNOWN"),
       checks: (
         (.statusCheckRollup // []) as $c
-        | if ($c | length) == 0 then "none"
+        | if .checksTruncated then "incomplete"
+          elif ($c | length) == 0 then "none"
           elif any($c[]; ((.conclusion // .state // "") | ascii_upcase) as $s
             | ($s == "FAILURE" or $s == "ERROR" or $s == "TIMED_OUT" or $s == "CANCELLED" or $s == "ACTION_REQUIRED")) then "failing"
           elif any($c[]; ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS")) then "pending"
           else "passing" end),
-      unresolved: unresolved_threads
+      unresolved: unresolved_threads,
+      review_comments: review_comments,
+      reviews_truncated: (.reviewsTruncated // false)
     }'
 }
 
 reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_detail
   local classified=$1 task=${2:-}
-  local checks review mergeable unresolved hold
+  local checks review mergeable unresolved review_comments reviews_truncated hold
   checks=$(printf '%s' "$classified" | jq -r '.checks')
   review=$(printf '%s' "$classified" | jq -r '.review')
   mergeable=$(printf '%s' "$classified" | jq -r '.mergeable')
   unresolved=$(printf '%s' "$classified" | jq -r '.unresolved')
+  review_comments=$(printf '%s' "$classified" | jq -r '.review_comments')
+  reviews_truncated=$(printf '%s' "$classified" | jq -r '.reviews_truncated')
   case "$checks" in
+    none) REASON_CODE=checks-missing; REASON_DETAIL='no successful checks reported'; return 0 ;;
+    incomplete) REASON_CODE=checks-incomplete; REASON_DETAIL='check evidence is truncated'; return 0 ;;
     pending) REASON_CODE=checks-pending; REASON_DETAIL='checks still running'; return 0 ;;
     failing) REASON_CODE=checks-failing; REASON_DETAIL='one or more checks failed'; return 0 ;;
   esac
@@ -365,9 +358,10 @@ reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_d
     REASON_DETAIL="merge state is $mergeable"
     return 0
   fi
-  if [ "$review" = CHANGES_REQUESTED ] || [ "$unresolved" -gt 0 ]; then
+  if [ "$review" = CHANGES_REQUESTED ] || [ "$unresolved" -gt 0 ] \
+    || [ "$review_comments" -gt 0 ] || [ "$reviews_truncated" = true ]; then
     REASON_CODE=review-issue
-    REASON_DETAIL='review changes or unresolved threads'
+    REASON_DETAIL='review changes, comments, or unresolved threads'
     return 0
   fi
   if [ -z "$task" ]; then
@@ -410,6 +404,23 @@ merged_notice_path() { # <repo> <number>
   printf '%s/%s-%s.noticed\n' "$MERGED_DIR" "$(repo_state_key "$1")" "$2"
 }
 
+pr_cursor_path() { # <repo>
+  printf '%s/%s.cursor\n' "$PR_CURSOR_DIR" "$(repo_state_key "$1")"
+}
+
+read_pr_cursor() { # <repo>
+  local cursor
+  cursor=$(read_fingerprint "$(pr_cursor_path "$1")" 2>/dev/null || true)
+  case "$cursor" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$cursor"
+}
+
+write_pr_cursor() { # <repo> <number>
+  write_fingerprint "$(pr_cursor_path "$1")" "$2"
+}
+
 read_fingerprint() { # <path>
   local path=$1
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
@@ -425,10 +436,17 @@ write_fingerprint() { # <path> <value>
 }
 
 gh_fetch_open_prs() { # <repo>
-  local repo=$1
-  fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    "$GH_BIN" pr list --repo "$repo" --state open --limit 50 \
-    --json number,url,headRefName,headRefOid,baseRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null
+  local repo=$1 owner name pages
+  owner=${repo%%/*}
+  name=${repo#*/}
+  [ -n "$owner" ] && [ -n "$name" ] && [ "$owner" != "$name" ] || return 1
+  pages=$(fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+    "$GH_BIN" api graphql --paginate \
+    -f owner="$owner" -f name="$name" \
+    -f query='query($owner: String!, $name: String!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequests(first: 100, after: $endCursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { number } pageInfo { hasNextPage endCursor } } } }' \
+    2>/dev/null) || return 1
+  printf '%s\n' "$pages" | jq -sec \
+    '[.[].data.repository.pullRequests.nodes[]?] | unique_by(.number)'
 }
 
 gh_fetch_pr_view() { # <repo> <number>
@@ -455,7 +473,7 @@ gh_fetch_pr_snapshot() { # <repo> <number>
   pages=$(fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     "$GH_BIN" api graphql --paginate \
     -f owner="$owner" -f name="$name" -F number="$number" \
-    -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number url headRefName headRefOid baseRefName reviewDecision mergeable state commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { ... on CheckRun { conclusion status } ... on StatusContext { state } } } } } } } reviewThreads(first: 100, after: $endCursor) { nodes { isResolved } pageInfo { hasNextPage endCursor } } } } }' \
+    -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number url headRefName headRefOid baseRefName reviewDecision mergeable state commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { ... on CheckRun { conclusion status } ... on StatusContext { state } } pageInfo { hasNextPage } } } } } } reviews(last: 100) { nodes { state body } pageInfo { hasPreviousPage } } reviewThreads(first: 100, after: $endCursor) { nodes { isResolved } pageInfo { hasNextPage endCursor } } } } }' \
     2>/dev/null) || return 1
   printf '%s\n' "$pages" | jq -sec '
     def evidence:
@@ -467,7 +485,10 @@ gh_fetch_pr_snapshot() { # <repo> <number>
             (.commits.nodes[-1].commit.statusCheckRollup.contexts.nodes[]? | {
               conclusion, status, state
             })
-          ]
+          ],
+          checksTruncated: (.commits.nodes[-1].commit.statusCheckRollup.contexts.pageInfo.hasNextPage // false),
+          reviews: [(.reviews.nodes[]? | {state, body})],
+          reviewsTruncated: (.reviews.pageInfo.hasPreviousPage // false)
         };
     [ .[] | evidence ] as $evidence
     | ($evidence[0]) as $first
@@ -488,15 +509,22 @@ gh_fetch_merged_state() { # <repo> <number>
 
 QUEUE_ROWS=''
 
+load_blocked_queue() {
+  QUEUE_ROWS=
+  [ -f "$QUEUE_FILE" ] && [ ! -L "$QUEUE_FILE" ] || return 0
+  QUEUE_ROWS=$(awk 'NR > 1 { print }' "$QUEUE_FILE")
+  [ -z "$QUEUE_ROWS" ] || QUEUE_ROWS="${QUEUE_ROWS}"$'\n'
+}
+
 queue_add_row() { # <repo> <num> <url> <task> <reason> <detail>
-  local row
+  local row key
   row=$(printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(clean_field "$1")" "$(clean_field "$2")" "$(clean_field "$3")" \
     "$(clean_field "$4")" "$(clean_field "$5")" "$(clean_field "$6")")
-  case "$QUEUE_ROWS" in
-    *"$row"*) ;;
-    *) QUEUE_ROWS="${QUEUE_ROWS}${row}" ;;
-  esac
+  key="$(clean_field "$1")"$'\t'"$(clean_field "$2")"
+  QUEUE_ROWS=$(printf '%s' "$QUEUE_ROWS" | awk -F '\t' -v key="$key" '$1 "\t" $2 != key { print }')
+  [ -z "$QUEUE_ROWS" ] || QUEUE_ROWS="${QUEUE_ROWS}"$'\n'
+  QUEUE_ROWS="${QUEUE_ROWS}${row}"
 }
 
 write_blocked_queue() {
@@ -591,23 +619,41 @@ commit_actionable_state() {
 }
 
 scan_repo() { # <project> <repo> <deadline>
-  local project=$1 repo=$2 deadline=$3 safe num fp url task
-  local list_json pr_json
+  local project=$1 repo=$2 deadline=$3 safe num fp url task cursor
+  local list_json pr_json start=0 i offset count
+  local -a numbers
   OPEN_PR_NUMS=
   list_json=$(gh_fetch_open_prs "$repo") || return 0
   [ -n "$list_json" ] || list_json='[]'
-  while IFS= read -r num; do
+  mapfile -t numbers < <(printf '%s' "$list_json" | jq -r '.[].number | tostring')
+  count=${#numbers[@]}
+  cursor=$(read_pr_cursor "$repo" 2>/dev/null || true)
+  if [ -n "$cursor" ]; then
+    for ((i = 0; i < count; i++)); do
+      if [ "${numbers[$i]}" = "$cursor" ]; then
+        start=$(((i + 1) % count))
+        break
+      fi
+    done
+  fi
+  for ((offset = 0; offset < count; offset++)); do
+    i=$(((start + offset) % count))
+    num=${numbers[$i]}
     [ -n "$num" ] || continue
     [ "$(date +%s)" -lt "$deadline" ] || return 3
-    pr_json=$(gh_fetch_pr_view "$repo" "$num") || continue
+    pr_json=$(gh_fetch_pr_view "$repo" "$num") || {
+      write_pr_cursor "$repo" "$num" || return 1
+      continue
+    }
     process_pr_record "$repo" "$project" "$pr_json" "$deadline" || {
       case "$?" in
         3) return 3 ;;
         *) return 1 ;;
       esac
     }
+    write_pr_cursor "$repo" "$num" || return 1
     [ -z "${ACTIONABLE:-}" ] || return 0
-  done < <(printf '%s' "$list_json" | jq -r '.[].number | tostring')
+  done
   safe=$(repo_state_key "$repo")
   for fp in "$FINGERPRINT_DIR"/"$safe"-*.fp; do
     [ -e "$fp" ] || continue
@@ -675,7 +721,7 @@ scan() {
   PENDING_RETIRE_REPO=
   PENDING_RETIRE_NUMBER=
   PENDING_RETIRE_URL=
-  QUEUE_ROWS=
+  load_blocked_queue
   command -v jq >/dev/null 2>&1 || { printf 'fm-pr-delivery: jq not found\n' >&2; return 1; }
   command -v "$GH_BIN" >/dev/null 2>&1 || return 0
   refuse_secondmate || return $?
