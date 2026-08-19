@@ -50,8 +50,35 @@ wait_for_text() {
   return 1
 }
 
+# A candidate on PATH is not evidence of a usable browser: Ubuntu ships a
+# /usr/bin/chromium-browser snap shim that exists but cannot render headless
+# ("xdg-settings: not found"), which turned the documented no-browser skip into
+# a hard failure on the shared CI runner. Only a candidate that provably dumps
+# a DOM counts as found.
+chrome_renders() {
+  local chrome=$1 probe_dom="$TMP_ROOT/chrome-probe.dom" probe_pid probe_wait=0
+  rm -f "$probe_dom"
+  "$chrome" \
+    --headless=new \
+    --disable-gpu \
+    --no-sandbox \
+    --user-data-dir="$TMP_ROOT/chrome-probe-profile" \
+    --virtual-time-budget=1000 \
+    --dump-dom \
+    about:blank >"$probe_dom" 2>/dev/null &
+  probe_pid=$!
+  while kill -0 "$probe_pid" 2>/dev/null && [ "$probe_wait" -lt 100 ]; do
+    grep -Fq '</html>' "$probe_dom" 2>/dev/null && break
+    sleep 0.1
+    probe_wait=$((probe_wait + 1))
+  done
+  kill "$probe_pid" 2>/dev/null || true
+  wait "$probe_pid" 2>/dev/null || true
+  grep -Fq '</html>' "$probe_dom" 2>/dev/null
+}
+
 find_chrome() {
-  local candidate
+  local candidate resolved
   if [ -n "${FM_CHROME_BIN:-}" ] && [ -x "$FM_CHROME_BIN" ]; then
     printf '%s\n' "$FM_CHROME_BIN"
     return 0
@@ -63,10 +90,10 @@ find_chrome() {
     chromium-browser \
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   do
-    if command -v "$candidate" >/dev/null 2>&1; then
-      command -v "$candidate"
-      return 0
-    fi
+    resolved=$(command -v "$candidate") || continue
+    chrome_renders "$resolved" || continue
+    printf '%s\n' "$resolved"
+    return 0
   done
   return 1
 }
