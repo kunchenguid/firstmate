@@ -314,16 +314,38 @@ classify_pr_json() { # <repo> <pr-json-object>
   printf '%s' "$pr_json" | jq -r --arg repo "$repo" '
     def unresolved_threads:
       ((.reviewThreads.nodes // []) | map(select(.isResolved == false)) | length);
-    def latest_reviews:
-      [(.reviews // [])[]? | {author: (.author // ""), state, body, submittedAt}]
-      | sort_by(.submittedAt // "")
-      | group_by(.author)
-      | map(last);
+    def text:
+      ((.body // "") | gsub("^\\s+|\\s+$"; "") | ascii_downcase);
     def benign_comment:
-      ((.body // "") | gsub("^\\s+|\\s+$"; "") | ascii_downcase)
-      | test("^(lgtm|looks good( to me)?|approved|thanks|fyi)[.![:space:]]*$");
-    def review_comments:
-      (latest_reviews | map(select(.state == "COMMENTED" and ((.body // "") | length > 0) and (benign_comment | not))) | length);
+      text | test("^(lgtm|looks good( to me)?|approved|thanks|fyi|resolved|fixed|addressed)[.![:space:]]*$");
+    def reviewer_request:
+      (.state == "CHANGES_REQUESTED")
+      or (.state == "COMMENTED" and (text | length > 0) and (benign_comment | not));
+    def review_requests:
+      (.reviews // []) as $reviews
+      | [$reviews[]? | .author] | unique as $authors
+      | [
+          $authors[] as $author
+          | ($reviews | map(select(.author == $author)) | sort_by(.submittedAt // "")) as $history
+          | ($history | map(select(reviewer_request)) | last) as $request
+          | select($request != null)
+          | select(([$history[] | select(.state == "APPROVED" and ((.submittedAt // "") > ($request.submittedAt // "")))] | length) == 0)
+        ] | length;
+    def comment_request:
+      (text | length > 0) and (benign_comment | not);
+    def conversation_requests:
+      .prAuthor as $pr_author
+      | (.reviews // []) as $reviews
+      | (.comments // []) as $comments
+      | [$comments[]? | select(.author != "" and .author != $pr_author) | .author] | unique as $authors
+      | [
+          $authors[] as $author
+          | ($comments | map(select(.author == $author)) | sort_by(.createdAt // "")) as $history
+          | ($history | map(select(comment_request)) | last) as $request
+          | select($request != null)
+          | select(([$history[] | select(benign_comment and ((.createdAt // "") > ($request.createdAt // "")))] | length) == 0)
+          | select(([$reviews[] | select(.author == $author and .state == "APPROVED" and ((.submittedAt // "") > ($request.createdAt // "")))] | length) == 0)
+        ] | length;
     def check_pending:
       ((.status // "") | ascii_upcase) as $status
       | ((.state // "") | ascii_upcase) as $state
@@ -336,6 +358,7 @@ classify_pr_json() { # <repo> <pr-json-object>
         or ($conclusion == "" and $state == "SUCCESS"));
     {
       repo: $repo,
+      prAuthor: (.prAuthor // ""),
       number: (.number | tostring),
       url: (.url // "-"),
       head: (.headRefOid // ""),
@@ -351,20 +374,24 @@ classify_pr_json() { # <repo> <pr-json-object>
           elif all($c[]; check_green) then "passing"
           else "failing" end),
       unresolved: unresolved_threads,
-      review_comments: review_comments,
-      reviews_truncated: (.reviewsTruncated // false)
+      review_requests: review_requests,
+      conversation_requests: conversation_requests,
+      reviews_truncated: (.reviewsTruncated // false),
+      comments_truncated: (.commentsTruncated // false)
     }'
 }
 
 reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_detail
   local classified=$1 task=${2:-}
-  local checks review mergeable unresolved review_comments reviews_truncated hold
+  local checks review mergeable unresolved review_requests conversation_requests reviews_truncated comments_truncated hold
   checks=$(printf '%s' "$classified" | jq -r '.checks')
   review=$(printf '%s' "$classified" | jq -r '.review')
   mergeable=$(printf '%s' "$classified" | jq -r '.mergeable')
   unresolved=$(printf '%s' "$classified" | jq -r '.unresolved')
-  review_comments=$(printf '%s' "$classified" | jq -r '.review_comments')
+  review_requests=$(printf '%s' "$classified" | jq -r '.review_requests')
+  conversation_requests=$(printf '%s' "$classified" | jq -r '.conversation_requests')
   reviews_truncated=$(printf '%s' "$classified" | jq -r '.reviews_truncated')
+  comments_truncated=$(printf '%s' "$classified" | jq -r '.comments_truncated')
   case "$checks" in
     none) REASON_CODE=checks-missing; REASON_DETAIL='no successful checks reported'; return 0 ;;
     incomplete) REASON_CODE=checks-incomplete; REASON_DETAIL='check evidence is truncated'; return 0 ;;
@@ -377,9 +404,10 @@ reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_d
     return 0
   fi
   if [ "$review" = CHANGES_REQUESTED ] || [ "$unresolved" -gt 0 ] \
-    || [ "$review_comments" -gt 0 ] || [ "$reviews_truncated" = true ]; then
+    || [ "$review_requests" -gt 0 ] || [ "$conversation_requests" -gt 0 ] \
+    || [ "$reviews_truncated" = true ] || [ "$comments_truncated" = true ]; then
     REASON_CODE=review-issue
-    REASON_DETAIL='review changes, comments, or unresolved threads'
+    REASON_DETAIL='review requests, comments, or unresolved threads'
     return 0
   fi
   if [ -z "$task" ]; then
@@ -484,6 +512,14 @@ gh_fetch_pr_view() { # <repo> <number>
 }
 
 gh_fetch_pr_snapshot() { # <repo> <number>
+  local repo=$1 number=$2 first second
+  first=$(gh_fetch_pr_snapshot_once "$repo" "$number") || return 1
+  second=$(gh_fetch_pr_snapshot_once "$repo" "$number") || return 1
+  [ "$first" = "$second" ] || return 1
+  printf '%s\n' "$second"
+}
+
+gh_fetch_pr_snapshot_once() { # <repo> <number>
   local repo=$1 number=$2 owner name pages
   owner=${repo%%/*}
   name=${repo#*/}
@@ -491,7 +527,7 @@ gh_fetch_pr_snapshot() { # <repo> <number>
   pages=$(fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     "$GH_BIN" api graphql --paginate \
     -f owner="$owner" -f name="$name" -F number="$number" \
-    -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number url headRefName headRefOid baseRefName reviewDecision mergeable state commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { ... on CheckRun { conclusion status } ... on StatusContext { state } } pageInfo { hasNextPage } } } } } } reviews(last: 100) { nodes { state body submittedAt author { login } } pageInfo { hasPreviousPage } } reviewThreads(first: 100, after: $endCursor) { nodes { isResolved } pageInfo { hasNextPage endCursor } } } } }' \
+    -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number url headRefName headRefOid baseRefName reviewDecision mergeable state author { login } commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { ... on CheckRun { conclusion status } ... on StatusContext { state } } pageInfo { hasNextPage } } } } } } reviews(last: 100) { nodes { state body submittedAt author { login } } pageInfo { hasPreviousPage } } comments(last: 100) { nodes { body createdAt author { login } } pageInfo { hasPreviousPage } } reviewThreads(first: 100, after: $endCursor) { nodes { id isResolved } pageInfo { hasNextPage endCursor } } } } }' \
     2>/dev/null) || return 1
   printf '%s\n' "$pages" | jq -sec '
     def evidence:
@@ -499,6 +535,7 @@ gh_fetch_pr_snapshot() { # <repo> <number>
       | {
           number, url, headRefName, headRefOid, baseRefName, reviewDecision,
           mergeable, state,
+          prAuthor: (.author.login // ""),
           statusCheckRollup: [
             (.commits.nodes[-1].commit.statusCheckRollup.contexts.nodes[]? | {
               conclusion, status, state
@@ -506,7 +543,9 @@ gh_fetch_pr_snapshot() { # <repo> <number>
           ],
           checksTruncated: (.commits.nodes[-1].commit.statusCheckRollup.contexts.pageInfo.hasNextPage // false),
           reviews: [(.reviews.nodes[]? | {author: (.author.login // ""), state, body, submittedAt})],
-          reviewsTruncated: (.reviews.pageInfo.hasPreviousPage // false)
+          reviewsTruncated: (.reviews.pageInfo.hasPreviousPage // false),
+          comments: [(.comments.nodes[]? | {author: (.author.login // ""), body, createdAt})],
+          commentsTruncated: (.comments.pageInfo.hasPreviousPage // false)
         };
     [ .[] | evidence ] as $evidence
     | ($evidence[0]) as $first
@@ -514,7 +553,7 @@ gh_fetch_pr_snapshot() { # <repo> <number>
     | select(($evidence | all(. == $first)))
     | $first + {
         reviewThreads: {
-          nodes: [.[].data.repository.pullRequest.reviewThreads.nodes[]?]
+          nodes: ([.[].data.repository.pullRequest.reviewThreads.nodes[]?] | sort_by(.id))
         }
       }'
 }
