@@ -246,6 +246,25 @@ Pi's real separated composer still reaches `empty`, which is the shape the enclo
 The two refusals are environment and vendor state, not classifier drift, and both reproduce identically on the unchanged classifier: Codex parked on the untrusted-worktree trust dialog, which the guard correctly treats as an unreadable composer, and Kimi 1.44.0 no longer draws the bordered `│ > │` box this matrix records, drawing a titled `── input ──` rule above its input rows and a plain rule below instead - a shape the catalogue does not yet carry.
 Rerun this guard from a trusted checkout, and refresh Kimi's entry once its current shape is taught to the catalogue.
 
+A readable composer is not the same guarantee as a delivered escalation, so the delivery path itself is pinned end to end against real Herdr by `tests/fm-composer-statusbar-herdr-e2e.test.sh` (`real-herdr-gated`), which draws the same 13-row status bar under a bare agent-glyph composer in an isolated `fm-herdr-lab.sh` session:
+
+```sh
+FM_COMPOSER_STATUSBAR_E2E=1 tests/fm-composer-statusbar-herdr-e2e.test.sh
+```
+
+Measured on 2026-08-19 with herdr 0.7.5, running the identical scenario against the classifier before and after the fix:
+
+| observation | before | after |
+| --- | --- | --- |
+| composer verdict on the idle pane | `unknown` | `empty` |
+| away-mode escalation delivered within 30 s | no | yes |
+| daemon deferrals recording an unreadable composer | 14 | 0 |
+| max-defer wedge alarm raised | yes | no |
+| `fm-send` exit status for a steer that did reach the pane | 1 | 0 |
+
+The `fm-send` row needs a mid-turn pane to be meaningful: Herdr confirms a submit from native agent-state whenever the pre-Enter baseline is legibly idle and falls back to reading the composer only when it is not, so the guard reports the pane working before steering it.
+The same run also asserts that real typed text under that status bar still reads `pending`, that the away daemon holds its escalation back rather than typing over it, and that the held escalation arrives as its own submission once the pane goes idle.
+
 ## Herdr
 
 The compatibility floor is protocol 14.
