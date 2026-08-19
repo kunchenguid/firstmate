@@ -139,11 +139,33 @@ test_discovery_without_secondmate() {
   write_view "$fixture" acme/alpha 7 '{"number":7,"url":"https://github.com/acme/alpha/pull/7","headRefName":"fm/ship7","headRefOid":"aaa","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/ship7.meta" \
     'window=fm-ship7' "worktree=$home/projects/ship7" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/7'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
     || fail "discovery did not find merge-eligible PR from registry+gh alone"
   pass "discovery without secondmate status"
+}
+
+test_unrecorded_branch_cannot_impersonate_task() {
+  local home fixture out
+  home=$(make_world impersonation)
+  fixture="$TMP_ROOT/fix-impersonation"
+  setup_project "$home" "$fixture"
+  write_open "$fixture" acme/alpha '[{"number":8,"url":"https://github.com/acme/alpha/pull/8","headRefName":"fm/ship7","headRefOid":"attacker","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/alpha 8 '{"number":8,"url":"https://github.com/acme/alpha/pull/8","headRefName":"fm/ship7","headRefOid":"attacker","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  fm_write_meta "$home/state/ship7.meta" \
+    'window=fm-ship7' "worktree=$home/projects/ship7" 'project=alpha' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/7'
+
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  [ -z "$out" ] || fail "unrecorded matching branch became merge-eligible"
+  run_delivery "$home" "$fixture" show | grep -Fq $'acme/alpha\t8\t' \
+    || fail "unrecorded matching branch was not retained in the blocked queue"
+  run_delivery "$home" "$fixture" show | grep -Fq 'no-task' \
+    || fail "unrecorded matching branch did not require recorded PR identity"
+  pass "unrecorded branches cannot impersonate delivery tasks"
 }
 
 test_review_issue_then_clearance() {
@@ -155,7 +177,8 @@ test_review_issue_then_clearance() {
   write_view "$fixture" acme/alpha 3 '{"number":3,"url":"https://github.com/acme/alpha/pull/3","headRefName":"fm/review3","headRefOid":"bbb","baseRefName":"main","reviewDecision":"CHANGES_REQUESTED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[{"isResolved":false}]},"state":"OPEN"}'
   fm_write_meta "$home/state/review3.meta" \
     'window=fm-review3' "worktree=$home/projects/review3" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/3'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   [ -z "$out" ] || fail "review-issue PR should not be actionable yet"
   run_delivery "$home" "$fixture" show | grep -Fq 'review-issue' \
@@ -179,7 +202,8 @@ test_migration_hold_clears() {
   write_view "$fixture" acme/alpha 4 '{"number":4,"url":"https://github.com/acme/alpha/pull/4","headRefName":"fm/mig4","headRefOid":"ddd","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/mig4.meta" \
     'window=fm-mig4' "worktree=$home/projects/mig4" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/4'
   printf 'needs-decision [key=migration-gate]: await migration evidence\n' > "$home/state/mig4.status"
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   [ -z "$out" ] || fail "migration hold should block merge"
@@ -201,7 +225,8 @@ test_base_branch_race() {
   write_view "$fixture" acme/alpha 5 '{"number":5,"url":"https://github.com/acme/alpha/pull/5","headRefName":"fm/base5","headRefOid":"eee","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/base5.meta" \
     'window=fm-base5' "worktree=$home/projects/base5" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/5'
   run_delivery "$home" "$fixture" _scan-locked 1 >/dev/null
   write_view "$fixture" acme/alpha 5 '{"number":5,"url":"https://github.com/acme/alpha/pull/5","headRefName":"fm/base5","headRefOid":"eee","baseRefName":"release","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   write_open "$fixture" acme/alpha '[{"number":5,"url":"https://github.com/acme/alpha/pull/5","headRefName":"fm/base5","headRefOid":"eee","baseRefName":"release","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
@@ -240,7 +265,8 @@ test_optional_review_silence() {
   write_view "$fixture" acme/alpha 6 '{"number":6,"url":"https://github.com/acme/alpha/pull/6","headRefName":"fm/opt6","headRefOid":"fff","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[{"state":"COMMENTED","body":"I verified this on staging.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"FYI.","createdAt":"2026-08-19T00:00:01Z","author":{"login":"reviewer"}},{"body":"I verified this on staging.","createdAt":"2026-08-19T00:00:02Z","author":{"login":"reviewer"}},{"body":"Can this be merged?","createdAt":"2026-08-19T00:00:03Z","author":{"login":"reviewer"}},{"body":"Can we ship this?","createdAt":"2026-08-19T00:00:04Z","author":{"login":"reviewer"}},{"body":"API response looks good.","createdAt":"2026-08-19T00:00:05Z","author":{"login":"reviewer"}},{"body":"Test suite looks good.","createdAt":"2026-08-19T00:00:06Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/opt6.meta" \
     'window=fm-opt6' "worktree=$home/projects/opt6" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/6'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
     || fail "neutral review comments should not block eligibility"
@@ -256,7 +282,8 @@ test_comment_review_then_clearance() {
   write_view "$fixture" acme/alpha 17 '{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"COMMENTED","body":"Can we make this simpler?","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/comment17.meta" \
     'window=fm-comment17' "worktree=$home/projects/comment17" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/17'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   [ -z "$out" ] || fail "commented review requesting a change should hold delivery"
   run_delivery "$home" "$fixture" show | grep -Fq 'review-issue' \
@@ -282,7 +309,8 @@ test_pr_comment_then_clearance() {
   write_view "$fixture" acme/alpha 22 '{"number":22,"url":"https://github.com/acme/alpha/pull/22","headRefName":"fm/comment22","headRefOid":"ttt","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"Can this use the shared helper here?","createdAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/comment22.meta" \
     'window=fm-comment22' "worktree=$home/projects/comment22" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/22'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   [ -z "$out" ] || fail "ordinary PR comment requesting a change should hold delivery"
   run_delivery "$home" "$fixture" show | grep -Fq 'review-issue' \
@@ -308,7 +336,8 @@ test_imperative_pr_comment_holds() {
   write_view "$fixture" acme/alpha 25 '{"number":25,"url":"https://github.com/acme/alpha/pull/25","headRefName":"fm/comment25","headRefOid":"www","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"Please use the shared helper here.","createdAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/comment25.meta" \
     'window=fm-comment25' "worktree=$home/projects/comment25" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/25'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   [ -z "$out" ] || fail "imperative PR comment requesting code work should hold delivery"
   run_delivery "$home" "$fixture" show | grep -Fq 'review-issue' \
@@ -410,7 +439,8 @@ test_generic_authority_hold_ignores_yolo() {
   write_view "$fixture" acme/alpha 19 '{"number":19,"url":"https://github.com/acme/alpha/pull/19","headRefName":"fm/authority19","headRefOid":"sss","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/authority19.meta" \
     'window=fm-authority19' "worktree=$home/projects/authority19" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/19'
   printf 'needs-decision [key=security-review]: await security approval\n' > "$home/state/authority19.status"
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   [ -z "$out" ] || fail "generic authority decision should hold even with yolo"
@@ -434,7 +464,8 @@ test_open_pr_inventory_paginates() {
   write_view "$fixture" acme/alpha 51 '{"number":51,"url":"https://github.com/acme/alpha/pull/51","headRefName":"fm/page51","headRefOid":"head-51","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/page51.meta" \
     'window=fm-page51' "worktree=$home/projects/page51" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/51'
   key=$(printf '%s' acme/alpha | shasum -a 256 | awk '{print substr($1, 1, 32)}')
   mkdir -p "$home/state/pr-delivery/pr-cursors"
   printf '49\n' > "$home/state/pr-delivery/pr-cursors/$key.cursor"
@@ -511,7 +542,8 @@ EOF
     || fail "cross-project branch was not held as unlinked"
   fm_write_meta "$home/state/shared16.meta" \
     'window=fm-shared16' "worktree=$home/projects/shared16" "project=$home/projects/beta" \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/beta/pull/16'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
     || fail "same-project task did not become eligible"
@@ -537,7 +569,8 @@ EOF
   write_open "$fixture" acme/gamma '[]'
   fm_write_meta "$home/state/cursor15.meta" \
     'window=fm-cursor15' "worktree=$home/projects/cursor15" 'project=beta' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/beta/pull/15'
   mkdir -p "$home/state/pr-delivery"
   printf 'epoch=1\ncursor=alpha\n' > "$home/state/pr-delivery/.scan-marker"
   printf '1.2\n' > "$fixture/delay/acme__beta"
@@ -560,7 +593,8 @@ test_accelerate_marker() {
   write_view "$fixture" acme/alpha 9 '{"number":9,"url":"https://github.com/acme/alpha/pull/9","headRefName":"fm/accel9","headRefOid":"hhh","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/accel9.meta" \
     'window=fm-accel9' "worktree=$home/projects/accel9" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/9'
   run_delivery "$home" "$fixture" _scan-locked 1 >/dev/null
   out=$(run_delivery "$home" "$fixture" _scan-locked 0)
   [ -z "$out" ] || fail "repeat scan without change should be silent"
@@ -612,7 +646,8 @@ test_wake_failure_remains_retryable() {
   write_view "$fixture" acme/alpha 12 '{"number":12,"url":"https://github.com/acme/alpha/pull/12","headRefName":"fm/wake12","headRefOid":"kkk","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/wake12.meta" \
     'window=fm-wake12' "worktree=$home/projects/wake12" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/12'
   run_delivery "$home" "$fixture" accelerate 'https://github.com/acme/alpha/pull/12'
   marker=$(find "$home/state/pr-delivery/accelerate" -type f -name '*.marker' -print -quit)
   mkdir "$home/state/wake-target"
@@ -640,7 +675,8 @@ test_post_wake_commit_failure_preserves_observation() {
   write_view "$fixture" acme/alpha 10 '{"number":10,"url":"https://github.com/acme/alpha/pull/10","headRefName":"fm/wake10","headRefOid":"jjj","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/wake10.meta" \
     'window=fm-wake10' "worktree=$home/projects/wake10" 'project=alpha' \
-    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on' \
+    'pr=https://github.com/acme/alpha/pull/10'
   : > "$fixture/fail-delivered-write"
   set +e
   run_delivery "$home" "$fixture" _scan-locked 1 \
@@ -656,6 +692,7 @@ test_post_wake_commit_failure_preserves_observation() {
 }
 
 test_discovery_without_secondmate
+test_unrecorded_branch_cannot_impersonate_task
 test_review_issue_then_clearance
 test_migration_hold_clears
 test_base_branch_race

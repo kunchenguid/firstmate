@@ -227,18 +227,6 @@ EOF
   return 1
 }
 
-task_for_head() { # <headRefName> <project>
-  local head=$1 project=$2 id
-  case "$head" in
-    fm/*)
-      id=${head#fm/}
-      valid_id "$id" && task_matches_project "$id" "$project" \
-        && { printf '%s\n' "$id"; return 0; }
-      ;;
-  esac
-  return 1
-}
-
 task_for_pr_url() { # <url> <project>
   local url=$1 project=$2 line task
   while IFS= read -r line; do
@@ -258,12 +246,8 @@ EOF
   return 1
 }
 
-match_task() { # <headRefName> <url> <project>
-  local head=$1 url=$2 project=$3 task
-  if task=$(task_for_head "$head" "$project"); then
-    printf '%s\n' "$task"
-    return 0
-  fi
+match_task() { # <url> <project>
+  local url=$1 project=$2 task
   if task=$(task_for_pr_url "$url" "$project"); then
     printf '%s\n' "$task"
     return 0
@@ -443,7 +427,7 @@ reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_d
   fi
   if [ -z "$task" ]; then
     REASON_CODE='no-task'
-    REASON_DETAIL='no fm/<id> branch or pr= meta match'
+    REASON_DETAIL='no recorded pr= meta match'
     return 0
   fi
   if hold=$(task_hold_reason "$task"); then
@@ -645,7 +629,7 @@ process_pr_record() { # <repo> <project> <pr-json> <deadline> -> sets ACTIONABLE
   num=$(printf '%s' "$classified" | jq -r '.number')
   url=$(printf '%s' "$classified" | jq -r '.url')
   head=$(printf '%s' "$classified" | jq -r '.head')
-  task=$(match_task "$(printf '%s' "$pr_json" | jq -r '.headRefName // ""')" "$url" "$project" 2>/dev/null || true)
+  task=$(match_task "$url" "$project" 2>/dev/null || true)
   reason_for_pr "$classified" "$task"
   if [ "$REASON_CODE" = eligible ]; then
     queue_remove_row "$repo" "$num"
