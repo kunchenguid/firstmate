@@ -317,16 +317,19 @@ classify_pr_json() { # <repo> <pr-json-object>
     def text:
       ((.body // "") | gsub("^\\s+|\\s+$"; "") | ascii_downcase);
     def resolution_comment:
-      text | test("^(resolved|fixed|addressed)([.![:space:]]|$)");
+      text | test("^(resolved|fixed|addressed|this is now resolved|the concern has been addressed)([.![:space:]]|$)");
     def work_action:
       "(fix|fixing|update|updating|change|changing|revise|revising|address|addressing|rework|reworking|re-review|rereview|add|adding|remove|removing|test|testing|cover|covering|validate|validating|use|using|refactor|refactoring|implement|implementing|replace|replacing|move|moving|rename|renaming|extract|extracting|simplify|simplifying|split|splitting|combine|combining|document|documenting|handle|handling|guard|guarding|check|checking|assert|asserting|wire|wiring|configure|configuring|helper|function|method|class|module|api|schema|query)";
     def imperative_work_action:
       "(fix|update|change|revise|address|rework|re-review|rereview|add|remove|test|cover|validate|use|refactor|implement|replace|move|rename|extract|simplify|split|combine|document|handle|guard|check|assert|wire|configure)";
+    def neutral_feedback:
+      text | test("(^|[[:space:]])(looks?|seems?|feels?|sounds?)[[:space:]]+(good|great|fine|ready|correct|ok)([.![:space:]]|$)");
     def change_request:
       text as $text
       | ($text | test("(^|[^[:alnum:]])(please|must|should|need|needs|required|require|could you|can you|would you|can we|could we|kindly)([[:space:]]+[^[:space:]]+){0,3}[[:space:]]+" + work_action + "([^[:alnum:]]|$)"))
         or ($text | test("(^|[.?!][[:space:]]+)(could|can|would)([[:space:]]+[^[:space:]?!.]+){0,6}[[:space:]]+" + work_action + "([^[:alnum:]]|$)"))
-        or ($text | test("^" + imperative_work_action + "[[:space:]]+"))
+        or ($text | test("(^|[.?!][[:space:]]+)(could|can|would)[[:space:]]+(you|we|this|that|it)[[:space:]]+(make|keep|turn|render)[[:space:]]+(this|that|it|the[[:space:]]+[^[:space:]?!.]+)[[:space:]]+(simpler|clearer|safer|faster|smaller|cleaner)([?!.]|$)"))
+        or (($text | test("^" + imperative_work_action + "[[:space:]]+")) and (neutral_feedback | not))
         or ($text | test("(^|[^[:alnum:]])(changes?|updates?|fixes?|re-?review)([[:space:]]+(are|is|were|be))?[[:space:]]+(needed|required|requested)([^[:alnum:]]|$)"));
     def reviewer_request:
       (.state == "CHANGES_REQUESTED")
