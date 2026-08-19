@@ -221,7 +221,7 @@ test_ship_modes_generate_clean_briefs() {
 # partially completed task.  Every worker-facing variant must carry the same
 # concise autonomy, completion, and self-check contract.
 test_completion_contract_covers_every_variant() {
-  local home id brief kind mode
+  local home id brief kind mode status out
   home="$TMP_ROOT/completion-contract-home"
   mkdir -p "$home/data"
 
@@ -229,32 +229,68 @@ test_completion_contract_covers_every_variant() {
     id="brief-completion-$kind"
     case "$kind" in
       scout)
-        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+        out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout 2>&1); status=$?
         ;;
       secondmate)
-        FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle routed work.' \
-          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle routed work.' \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects 2>&1); status=$?
         ;;
       *)
         mode=$kind
-        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+        out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" 2>&1); status=$?
         ;;
     esac
+    expect_code 0 "$status" "fm-brief.sh $id ($kind) should scaffold successfully (got: $out)"
     brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
     assert_grep "Keep working until every part of the assigned task is delivered." "$brief" \
       "$kind brief missing the whole-task autonomy contract"
     assert_grep "A turn ending, a natural pause, or one completed sub-part is not a checkpoint to await instruction." "$brief" \
       "$kind brief lets a worker stop at a natural pause"
-    assert_grep "\`done:\` means every stated requirement is met." "$brief" \
-      "$kind brief does not define done as whole-task completion"
+    assert_grep "Hand work back only at a gate defined under Definition of done, a genuine blocker, or a decision genuinely above your authority." "$brief" \
+      "$kind brief lets a worker hand work back outside a defined gate"
+    assert_grep "The final \`done:\` gate under Definition of done is the whole-task completion claim: every stated requirement met." "$brief" \
+      "$kind brief does not define the final done gate as whole-task completion"
     assert_grep "Candid partial-work reporting is \`blocked:\` or \`needs-decision:\`, never \`done:\`." "$brief" \
       "$kind brief permits candid partial work to claim done"
-    assert_grep "Before \`done:\`, re-read the task, confirm every requirement, verify the requested deliverable exists where requested and survives teardown, and re-run the applicable project gate with its real exit status." "$brief" \
+    assert_grep "Before any \`done:\`, re-read the task, confirm every requirement that gate covers, verify the requested deliverable exists where requested and survives teardown, and re-run the applicable project checks with their real exit status." "$brief" \
       "$kind brief missing the mandatory completion self-check"
-    assert_grep "State anything not done and why; if a required item is missing, do not append \`done:\`." "$brief" \
+    assert_grep "State anything not done and why; if a required item that gate covers is missing, do not append \`done:\`." "$brief" \
       "$kind brief does not make missing required work nonterminal"
+    assert_no_grep "EOF" "$brief" "$kind: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: completion contract covers ship, scout, and charter variants"
+}
+
+# The contract must not override a delivery mode's own multi-gate protocol. The
+# no-mistakes mode hands off to firstmate at an implementation-ready `done:`
+# before the PR and green CI exist, and the persistent secondmate returns to
+# idle after routed work instead of exiting - both must survive the contract.
+test_mode_defined_gates_survive_the_completion_contract() {
+  local home brief status out
+  home="$TMP_ROOT/mode-gates-home"
+  mkdir -p "$home/data"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" gates-nomistakes some-proj --mode no-mistakes 2>&1); status=$?
+  expect_code 0 "$status" "fm-brief.sh gates-nomistakes --mode no-mistakes should exit 0 (got: $out)"
+  brief="$home/data/gates-nomistakes/brief.md"
+  assert_present "$brief" "no-mistakes gate brief was not scaffolded"
+  assert_grep "This mode has two gates under this section: an implementation-ready handoff, then the final whole-task gate once CI is green." "$brief" \
+    "no-mistakes brief does not declare its two done gates"
+  assert_grep "That first \`done:\` is this mode's defined handoff gate, not the whole-task claim" "$brief" \
+    "no-mistakes brief lets the contract suppress its implementation-ready handoff"
+  assert_grep "That is this mode's final gate and its whole-task completion claim." "$brief" \
+    "no-mistakes brief does not mark the CI-green done as its final gate"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" gates-secondmate --secondmate --no-projects 2>&1); status=$?
+  expect_code 0 "$status" "fm-brief.sh gates-secondmate --secondmate should exit 0 (got: $out)"
+  brief="$home/data/gates-secondmate/brief.md"
+  assert_present "$brief" "secondmate gate brief was not scaffolded"
+  assert_grep "passing it returns you to the idle state below and never ends your session" "$brief" \
+    "secondmate charter lets a completed routed task end the persistent session"
+  assert_grep "You are persistent by default. Do not exit just because your queue is empty." "$brief" \
+    "secondmate charter lost its persistence rule"
+  pass "fm-brief.sh: mode-defined done gates and secondmate persistence survive the contract"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -757,6 +793,7 @@ test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_completion_contract_covers_every_variant
+test_mode_defined_gates_survive_the_completion_contract
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply

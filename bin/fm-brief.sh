@@ -181,11 +181,11 @@ STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 IFS= read -r -d '' COMPLETION_CONTRACT <<'EOF' || true
 Keep working until every part of the assigned task is delivered.
 A turn ending, a natural pause, or one completed sub-part is not a checkpoint to await instruction.
-Stop only for genuine completion, a genuine blocker, or a decision genuinely above your authority.
-`done:` means every stated requirement is met.
+Hand work back only at a gate defined under Definition of done, a genuine blocker, or a decision genuinely above your authority.
+The final `done:` gate under Definition of done is the whole-task completion claim: every stated requirement met. An earlier gate defined there claims only what that gate itself defines.
 Candid partial-work reporting is `blocked:` or `needs-decision:`, never `done:`.
-Before `done:`, re-read the task, confirm every requirement, verify the requested deliverable exists where requested and survives teardown, and re-run the applicable project gate with its real exit status.
-State anything not done and why; if a required item is missing, do not append `done:`.
+Before any `done:`, re-read the task, confirm every requirement that gate covers, verify the requested deliverable exists where requested and survives teardown, and re-run the applicable project checks with their real exit status.
+State anything not done and why; if a required item that gate covers is missing, do not append `done:`.
 EOF
 COMPLETION_CONTRACT=${COMPLETION_CONTRACT%$'\n'}
 
@@ -263,6 +263,7 @@ Routine internal supervision, heartbeats, retries, and crewmate churn stay insid
 # Definition of done
 $COMPLETION_CONTRACT
 
+For routed work, that gate is the correlated status line you return through the escalation path above: passing it returns you to the idle state below and never ends your session.
 You are persistent by default. Do not exit just because your queue is empty.
 On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
 When you have no assigned or in-flight work after that reconciliation, go idle and wait silently for the main firstmate to route you a task.
@@ -399,8 +400,10 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
+This mode has two gates under this section: an implementation-ready handoff, then the final whole-task gate once CI is green.
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+That first \`done:\` is this mode's defined handoff gate, not the whole-task claim: it asserts every stated requirement is implemented and committed here, with validation, the PR, and green CI still ahead of you.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
@@ -414,7 +417,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. That is this mode's final gate and its whole-task completion claim. You are finished.
 EOF
     ;;
 esac
