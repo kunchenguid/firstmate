@@ -396,13 +396,14 @@ classify_pr_json() { # <repo> <pr-json-object>
       review_requests: review_requests,
       conversation_requests: conversation_requests,
       reviews_truncated: (.reviewsTruncated // false),
-      comments_truncated: (.commentsTruncated // false)
+      comments_truncated: (.commentsTruncated // false),
+      evidence_changed: (.evidenceChanged // false)
     }'
 }
 
 reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_detail
   local classified=$1 task=${2:-}
-  local state checks review mergeable unresolved review_requests conversation_requests reviews_truncated comments_truncated hold
+  local state checks review mergeable unresolved review_requests conversation_requests reviews_truncated comments_truncated evidence_changed hold
   state=$(printf '%s' "$classified" | jq -r '.state')
   checks=$(printf '%s' "$classified" | jq -r '.checks')
   review=$(printf '%s' "$classified" | jq -r '.review')
@@ -412,6 +413,7 @@ reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_d
   conversation_requests=$(printf '%s' "$classified" | jq -r '.conversation_requests')
   reviews_truncated=$(printf '%s' "$classified" | jq -r '.reviews_truncated')
   comments_truncated=$(printf '%s' "$classified" | jq -r '.comments_truncated')
+  evidence_changed=$(printf '%s' "$classified" | jq -r '.evidence_changed')
   if [ "$state" != OPEN ]; then
     REASON_CODE=not-open
     REASON_DETAIL="snapshot state is $state"
@@ -433,6 +435,11 @@ reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_d
     || [ "$reviews_truncated" = true ] || [ "$comments_truncated" = true ]; then
     REASON_CODE=review-issue
     REASON_DETAIL='review requests, comments, or unresolved threads'
+    return 0
+  fi
+  if [ "$evidence_changed" = true ]; then
+    REASON_CODE=evidence-changing
+    REASON_DETAIL='PR evidence changed during capture; defer to next cycle'
     return 0
   fi
   if [ -z "$task" ]; then
@@ -540,7 +547,19 @@ gh_fetch_pr_snapshot() { # <repo> <number>
   local repo=$1 number=$2 first second
   first=$(gh_fetch_pr_snapshot_once "$repo" "$number") || return 1
   second=$(gh_fetch_pr_snapshot_once "$repo" "$number") || return 1
-  [ "$first" = "$second" ] || return 1
+  if [ "$first" != "$second" ]; then
+    printf '%s\n%s\n' "$first" "$second" | jq -sc '
+      .[0] as $first | .[1] as $second
+      | $first + {
+          evidenceChanged: true,
+          reviewThreads: {
+            nodes: ([$first.reviewThreads.nodes[]?, $second.reviewThreads.nodes[]?]
+              | group_by(.id)
+              | map({id: .[0].id, isResolved: all(.[]; .isResolved)}))
+          }
+        }'
+    return 0
+  fi
   printf '%s\n' "$second"
 }
 
