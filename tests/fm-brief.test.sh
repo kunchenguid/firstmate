@@ -247,8 +247,8 @@ test_completion_contract_covers_every_variant() {
       "$kind brief missing the whole-task autonomy contract"
     assert_grep "A turn ending, a natural pause, or one completed sub-part is not a checkpoint to await instruction." "$brief" \
       "$kind brief lets a worker stop at a natural pause"
-    assert_grep "Hand work back only at a gate defined under Definition of done, a genuine blocker, or a decision genuinely above your authority." "$brief" \
-      "$kind brief lets a worker hand work back outside a defined gate"
+    assert_grep "Hand work back only at a gate defined under Definition of done or a state the status protocol above defines: a genuine blocker, a decision genuinely above your authority, a declared external wait, or a failure." "$brief" \
+      "$kind brief lets a worker hand work back outside a defined gate, or drops a state its status protocol defines"
     assert_grep "The final \`done:\` gate under Definition of done is the whole-task completion claim: every stated requirement met." "$brief" \
       "$kind brief does not define the final done gate as whole-task completion"
     assert_grep "Work still partial for the gate you are claiming is never \`done:\`: use the fitting non-done state from the status protocol above (\`blocked:\` or \`needs-decision:\` when you need help or a decision above your authority, \`paused:\` for a declared external wait, \`failed:\` when it cannot be finished). Describing the gap candidly does not make it \`done:\`." "$brief" \
