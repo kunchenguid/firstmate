@@ -143,26 +143,6 @@ worker_recover_quarantine() { # <account-home>
   rm -f -- "$WORKER_LOCK/quarantine"
 }
 
-# Every lock file is published by renaming a mktemp staging file created inside
-# the lock directory, so an owner killed between those two steps leaves that
-# staging file behind. An ordinary stop reaches that window: its group TERM runs
-# the child's shutdown, which disarms its own handler first, and the supervisor's
-# handler then sends that same child a second TERM that now kills it outright. A
-# SIGKILL escalation or a lost machine leaves the same residue. Reclaiming a
-# provably dead and stale owner therefore has to clear it too: without this the
-# rmdir below fails forever, no replacement worker can ever take ownership, and
-# every later ensure reports a worker that never became ready. An unfinished
-# staging file never guarded anything - a published `quarantine` marker is
-# handled before this and is never reached here.
-worker_clear_abandoned_lock_staging() {
-  local staged
-  for staged in "$WORKER_LOCK"/.pid.* "$WORKER_LOCK"/.start.* "$WORKER_LOCK"/.command.* \
-    "$WORKER_LOCK"/.quarantine.*; do
-    [ -e "$staged" ] || [ -L "$staged" ] || continue
-    rm -f -- "$staged" || return 1
-  done
-}
-
 worker_acquire_lock() {
   local account_home=$1 attempt=0
   while [ "$attempt" -lt 150 ]; do
@@ -184,7 +164,6 @@ worker_acquire_lock() {
     fi
     [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] || return 1
     rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" || return 1
-    worker_clear_abandoned_lock_staging || return 1
     rmdir "$WORKER_LOCK" || return 1
   done
   return 1
