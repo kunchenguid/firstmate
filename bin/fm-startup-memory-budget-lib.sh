@@ -15,6 +15,8 @@ FM_STARTUP_MEMORY_BUDGET_VALUE=""
 FM_STARTUP_MEMORY_MEASURE_BYTES=""
 FM_STARTUP_MEMORY_MEASURE_TOKENS=""
 FM_STARTUP_MEMORY_MEASURE_PRESENCE=""
+# Bounded symlink walk depth; the kernel refuses deeper chains anyway.
+FM_STARTUP_MEMORY_SYMLINK_MAX_HOPS="40"
 
 fm_startup_memory_budget_fail() {
   FM_STARTUP_MEMORY_BUDGET_ERROR=$1
@@ -160,10 +162,43 @@ fm_startup_memory_estimated_tokens_for_bytes() {
   printf '%s\n' "$tokens"
 }
 
+# fm_startup_memory_symlink_resolves <path>
+# Succeeds when <path> is not a symlink, or when its symlink chain terminates
+# within FM_STARTUP_MEMORY_SYMLINK_MAX_HOPS hops.  A cyclic chain never
+# terminates, so the walk is bounded and returns a refusal instead of hanging
+# or leaking a kernel loop error out of a later read.  The bound matches the
+# depth the kernel itself refuses, so no chain a session could actually read is
+# rejected here.
+fm_startup_memory_symlink_resolves() {
+  local current=$1 hops=0 target dir
+  while [ -L "$current" ]; do
+    hops=$((hops + 1))
+    if [ "$hops" -gt "$FM_STARTUP_MEMORY_SYMLINK_MAX_HOPS" ]; then
+      return 1
+    fi
+    target=$(readlink "$current" 2>/dev/null) || return 1
+    case "$target" in
+      /*) current=$target ;;
+      *)
+        case "$current" in
+          */*) dir=${current%/*} ;;
+          *) dir=. ;;
+        esac
+        current="$dir/$target"
+        ;;
+    esac
+  done
+  return 0
+}
+
 # fm_startup_memory_measure_file <path>
-# Prints "<bytes> <estimated-tokens> <present|absent>".  Memory files must be
-# ordinary files when present so a measurement never follows a symlink or reads
-# a special file.
+# Prints "<bytes> <estimated-tokens> <present|absent>".  A session loads what a
+# memory path actually resolves to, so a symlink to an ordinary file is
+# measured through the link rather than refused: refusing it left a home whose
+# memory is injected anyway with no budget accounting at all.  Reading a
+# special file is still refused, because [ -f ] follows the link and holds only
+# for a regular target, and a broken or cyclic link is a named error rather
+# than a silent zero.
 fm_startup_memory_measure_file() {
   local path=$1 bytes tokens
   FM_STARTUP_MEMORY_MEASURE_BYTES=""
@@ -176,7 +211,17 @@ fm_startup_memory_measure_file() {
     printf '0 0 absent\n'
     return 0
   fi
-  if [ -L "$path" ] || [ ! -f "$path" ]; then
+  if [ -L "$path" ]; then
+    if ! fm_startup_memory_symlink_resolves "$path"; then
+      fm_startup_memory_budget_fail "memory file symlink does not resolve, its chain loops or exceeds $FM_STARTUP_MEMORY_SYMLINK_MAX_HOPS hops: $path"
+      return 1
+    fi
+    if [ ! -e "$path" ]; then
+      fm_startup_memory_budget_fail "memory file is a broken symlink: $path"
+      return 1
+    fi
+  fi
+  if [ ! -f "$path" ]; then
     fm_startup_memory_budget_fail "memory file is not an ordinary regular file: $path"
     return 1
   fi
