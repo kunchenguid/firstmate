@@ -244,7 +244,7 @@ sys.stdout.buffer.write(body)
 }
 
 cmd_send() {
-  local selector=${1-} message=${2:--} lock rc=0 staged=
+  local selector=${1-} message=${2:--} lock send_rc=0 staged=
   validate_selector "$selector"
   if [ "$message" = - ]; then
     staged=$(private_tempfile "${TMPDIR:-/tmp}/fm-signal-input.XXXXXX") || die "cannot create private Signal message"
@@ -256,8 +256,8 @@ cmd_send() {
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock Signal lifecycle"
     trap 'cmd_arm_locked "$selector" >/dev/null 2>&1 || printf "error: could not restore Signal receive source: %s\n" "$selector" >&2; rm -f "$staged"; fm_lock_release "$lock"' EXIT
-    cmd_send_locked "$selector" "$message" || rc=$?
-    return "$rc"
+    cmd_send_locked "$selector" "$message" || send_rc=$?
+    return "$send_rc"
   )
 }
 
