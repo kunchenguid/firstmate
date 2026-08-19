@@ -9,6 +9,8 @@ When this session owns supervision and away mode is not active:
    On that wake, run `bin/fm-wake-drain.sh` first and handle it.
    Do not run `bin/fm-watch-arm.sh` after an ordinary wake; the next turn end parks again automatically when supervision is still needed.
    Do not invent a wake from an attach-status line alone; drain and act only on real wake records, the drain's `OPEN DECISIONS` entries, or a real watcher reason line.
+
+When `state/.t3-primary-binding` is active, this Desktop stop-hook park stands down and T3 primary continuity is owned by `bin/fm-t3-primary-park.sh` instead; follow [`t3.md`](t3.md) and [`../t3-primary-supervision.md`](../t3-primary-supervision.md).
 4. The captain keeps control while the hook is parked.
    A message typed into a parked Cursor pane is accepted and runs its turn immediately, but the older park remains the recorded owner until that turn ends and the next `stop` hook claims the baton.
    An actionable watcher close in that window can still be delivered by the older park as one follow-up.
