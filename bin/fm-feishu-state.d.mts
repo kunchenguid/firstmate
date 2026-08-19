@@ -183,10 +183,11 @@ export interface InboundMediaClaim {
   resource_key_hash: string;
   state: "downloading";
   attempts: number;
+  next_attempt_at_ms?: number | null;
 }
 export function pendingFeishuMedia(home: string, fence: { ownerNonce: string; bindingId: string; bindingGeneration: number; sessionId: string }, options?: { downloadStaleMs?: number }): InboundMediaClaim[];
 export function completeFeishuMediaDownload(home: string, claim: InboundMediaClaim, bytes: Uint8Array, evidence: { declaredResourceType: "image"; responseMimeType: string; actualMimeType: string }, fence: { ownerNonce: string; bindingId: string; bindingGeneration: number; sessionId: string }, options?: { maxMediaBytes?: number; maxMessageMediaBytes?: number }): { mediaId: string; byteHash: string; byteLength: number; mimeType: string };
-export function failFeishuMediaDownload(home: string, claim: InboundMediaClaim, errorKind: string, fence: { ownerNonce: string }, options?: { terminal?: boolean }): boolean;
+export function failFeishuMediaDownload(home: string, claim: InboundMediaClaim, errorKind: string, fence: { ownerNonce: string }, options?: { terminal?: boolean; retryAfterMs?: number; nowMs?: number }): boolean;
 export function loadFeishuIngressContent(home: string, event: InboundEvent): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> | undefined;
 export function cleanupFeishuMedia(home: string, options?: { nowMs?: number; retentionMs?: number }): { removedRecords: number; removedBytes: number };
 export function repairInboundLedgers(home: string): number;

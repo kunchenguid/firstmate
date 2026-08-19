@@ -196,7 +196,11 @@ function normalizeSdkEvent(data, expectedAppId) {
   } else if (message.message_type === "image" && parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.image_key === "string") {
     content = [{ type: "image", resource_key: parsed.image_key }];
   } else if (message.message_type === "post") {
-    content = normalizeSdkPostContent(parsed);
+    try {
+      content = normalizeSdkPostContent(parsed);
+    } catch {
+      content = "";
+    }
   }
   return {
     type: "im.message.receive_v1",
@@ -217,10 +221,21 @@ function normalizeSdkEvent(data, expectedAppId) {
   };
 }
 
+function postLocaleBody(parsed) {
+  if (Array.isArray(parsed.content)) return parsed;
+  const keys = Object.keys(parsed).sort();
+  const ordered = keys.includes("zh_cn") ? ["zh_cn", ...keys.filter((key) => key !== "zh_cn")] : keys;
+  for (const key of ordered) {
+    const value = parsed[key];
+    if (value && typeof value === "object" && !Array.isArray(value) && Array.isArray(value.content)) return value;
+  }
+  return null;
+}
+
 function normalizeSdkPostContent(parsed) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
-  const body = parsed.zh_cn && typeof parsed.zh_cn === "object" && !Array.isArray(parsed.zh_cn) ? parsed.zh_cn : parsed;
-  if (!Array.isArray(body.content)) return [];
+  const body = postLocaleBody(parsed);
+  if (!body) return [];
   const parts = [];
   const appendText = (text) => {
     if (typeof text !== "string") throw new Error("unsupported Feishu post element");
@@ -339,7 +354,7 @@ async function downloadOneMedia(client, claim, binding, ownerFence) {
         ? error.message
         : sdkErrorType(error, "media-download-failed");
     const terminal = new Set(["media-object-overlength", "media-message-overlength", "media-empty-response", "media-signature-unsupported", "media-content-type-mismatch"]).has(kind) || /^sdk-http-4(?!29)/.test(kind);
-    failFeishuMediaDownload(HOME, claim, kind, { ownerNonce: ownerFence.ownerNonce }, { terminal });
+    failFeishuMediaDownload(HOME, claim, kind, { ownerNonce: ownerFence.ownerNonce }, { terminal, retryAfterMs: retryAfterMilliseconds(error) });
     recordTransportDiagnostic(HOME, "inbound-media-failure", kind);
     if (sdkFailureIsAuthentication(error)) throw new Error("inbound media SDK authentication failed");
   }

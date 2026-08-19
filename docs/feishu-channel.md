@@ -109,7 +109,9 @@ An accepted callback validates the authenticated app identity when present, send
 Only after the authorization fence passes can the transport claim an image resource.
 It calls the official SDK resource API with the immutable message and resource identities, streams at most 10 MiB per image and 20 MiB per logical message, permits at most eight images, and requires the response MIME and actual PNG/JPEG/GIF/WebP signature to agree.
 The private cache uses generated names, atomic owner-only writes, a SHA-256 byte binding, and no user-controlled path component.
+Rich-text bodies are read from one well-formed locale, preferring `zh_cn`, and a structurally malformed post quarantines with non-sensitive metadata instead of failing the transport.
 Download pending, downloading, ready, retryable failure, terminal refusal, Pi offer, and persisted delivery remain distinct durable states.
+A retryable download waits on a bounded durable schedule that honors a server `Retry-After` when present and uses bounded exponential delays otherwise, and later accepted inputs hold behind the oldest not-ready media input in local commit order until it becomes ready or is terminally refused.
 Unauthorized, malformed, unsupported, duplicate, overlength, or resource-pressure events never reach Pi.
 A durability failure throws from the callback so the SDK can report failure to Feishu rather than acknowledging memory-only receipt.
 

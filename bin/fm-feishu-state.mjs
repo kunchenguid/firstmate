@@ -436,6 +436,7 @@ function validateInboundMedia(record) {
   if (record.resource_key_hash !== `sha256:${sha(record.resource_key)}`) throw new Error("Feishu inbound media resource key hash mismatch");
   if (!new Set(["pending", "downloading", "ready", "failed"]).has(record.state)) throw new Error("invalid Feishu inbound media state");
   requireSafeInteger(record.attempts, "inbound media attempts");
+  if (record.next_attempt_at_ms != null) requireSafeInteger(record.next_attempt_at_ms, "inbound media next attempt time");
   requireNullableString(record.owner_nonce ?? null, "inbound media owner nonce", /^[a-f0-9]{24,128}$/);
   requireNullableString(record.mime_type ?? null, "inbound media MIME type", /^image\/[a-z0-9.+-]+$/, 128);
   if (record.byte_length !== null) requireSafeInteger(record.byte_length, "inbound media byte length", { min: 1 });
@@ -1424,6 +1425,7 @@ export function publishFeishuInbound(home, raw, options = {}) {
         resource_key_hash: `sha256:${sha(part.resourceKey)}`,
         state: "pending",
         attempts: 0,
+        next_attempt_at_ms: null,
         owner_nonce: null,
         mime_type: null,
         byte_length: null,
@@ -1496,6 +1498,7 @@ export function pendingFeishuMedia(home, ownerFence, options = {}) {
       const path = join(paths.inboundMedia, name);
       const media = validateInboundMedia(readJson(path));
       if (media.state === "ready" || media.state === "failed") continue;
+      if (media.state === "pending" && media.next_attempt_at_ms != null && media.next_attempt_at_ms > Date.now()) continue;
       if (media.state === "downloading" && Date.now() - Date.parse(media.download_started_at) < staleMs) continue;
       const inboundName = inboundFilename(media.message_id);
       const event = readJson(join(paths.inbox, inboundName), { optional: true });
@@ -1508,6 +1511,7 @@ export function pendingFeishuMedia(home, ownerFence, options = {}) {
         attempts: media.attempts + 1,
         owner_nonce: ownerNonce,
         last_error_kind: null,
+        next_attempt_at_ms: null,
         download_started_at: nowIso(),
         failed_at: null,
       };
@@ -1563,6 +1567,7 @@ export function completeFeishuMediaDownload(home, claim, bytes, evidence, ownerF
       byte_hash: byteHash,
       cache_filename: cacheFilename,
       last_error_kind: null,
+      next_attempt_at_ms: null,
       download_started_at: null,
       ready_at: nowIso(),
       failed_at: null,
@@ -1572,17 +1577,31 @@ export function completeFeishuMediaDownload(home, claim, bytes, evidence, ownerF
   }));
 }
 
-export function failFeishuMediaDownload(home, claim, errorKind, ownerFence, { terminal = false } = {}) {
+export function failFeishuMediaDownload(home, claim, errorKind, ownerFence, { terminal = false, retryAfterMs, nowMs } = {}) {
   const paths = ensurePrivateLayout(home);
+  const now = Number.isSafeInteger(nowMs) ? nowMs : Date.now();
   return withLock(paths, "inbound-state", () => {
     const current = readInboundMedia(paths, claim.media_id);
     if (!current || current.state !== "downloading" || current.owner_nonce !== ownerFence.ownerNonce || current.attempts !== claim.attempts) return false;
     const kind = requireString(errorKind, "Feishu media error kind", /^[a-z0-9-]+$/, 80);
+    let nextAttemptAtMs = null;
+    if (!terminal) {
+      let delay;
+      if (retryAfterMs !== undefined) {
+        delay = Number(retryAfterMs);
+        if (!Number.isSafeInteger(delay) || delay < 0) throw new Error("invalid Feishu Retry-After delay");
+        delay = Math.min(RETRY_MAX_MS, delay);
+      } else {
+        delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(10, current.attempts - 1));
+      }
+      nextAttemptAtMs = now + delay;
+    }
     atomicJson(mediaRecordPath(paths, current.media_id), {
       ...current,
       state: terminal ? "failed" : "pending",
       owner_nonce: null,
       last_error_kind: kind,
+      next_attempt_at_ms: nextAttemptAtMs,
       download_started_at: null,
       failed_at: terminal ? nowIso() : null,
     });
@@ -1752,15 +1771,20 @@ export function pendingFeishuIngress(home, fence) {
     assertConfigurationIdentity(paths, pairing, binding);
     if (!pairingIsActive(pairing) || !binding || binding.status !== "active" || binding.session_id !== fence.sessionId || binding.binding_id !== fence.bindingId || binding.generation !== fence.bindingGeneration) return [];
     const pending = [];
+    const candidates = [];
     for (const name of safeJsonNames(paths.inboundPending)) {
       const ledger = readJson(join(paths.inboundLedger, name));
       if (ledger.state !== "pending" || ledger.target_session_id !== fence.sessionId || ledger.binding_id !== fence.bindingId || ledger.binding_generation !== fence.bindingGeneration) continue;
       const event = readJson(join(paths.inbox, name));
       assertInboundPair(paths, name, event, ledger, { pairing, binding });
-      if (!readyMediaForEvent(paths, event)) continue;
-      pending.push({ filename: name, event: deliveryEventForLedger(event, ledger), ledger });
+      candidates.push({ name, event, ledger });
     }
-    return pending.sort((a, b) => a.ledger.ingress_seq - b.ledger.ingress_seq || a.filename.localeCompare(b.filename));
+    candidates.sort((a, b) => a.ledger.ingress_seq - b.ledger.ingress_seq || a.name.localeCompare(b.name));
+    for (const candidate of candidates) {
+      if (!readyMediaForEvent(paths, candidate.event)) break;
+      pending.push({ filename: candidate.name, event: deliveryEventForLedger(candidate.event, candidate.ledger), ledger: candidate.ledger });
+    }
+    return pending;
   }));
 }
 

@@ -341,11 +341,76 @@ assert.equal(findInboundByDeliveryRef(home, mismatch.deliveryRef).delivery_ref, 
 const partial = publishFeishuInbound(home, remote({ event_id: "evt_partial", message_id: "om_partial1234", message_type: "image", content: [{ type: "image", resource_key: "img_v2_partial" }] }));
 let partialClaim = pendingFeishuMedia(home, mediaFence).find((claim) => claim.delivery_ref === partial.deliveryRef);
 assert.throws(() => completeFeishuMediaDownload(home, partialClaim, PNG_BYTES.subarray(0, 4), { declaredResourceType: "image", responseMimeType: "image/png", actualMimeType: "image/png" }, mediaFence, { maxMediaBytes: 3 }), /byte limit/);
-assert.equal(failFeishuMediaDownload(home, partialClaim, "media-partial-response", mediaFence), true);
+assert.equal(failFeishuMediaDownload(home, partialClaim, "media-partial-response", mediaFence, { retryAfterMs: 0 }), true);
 const recoveredClaim = pendingFeishuMedia(home, mediaFence).find((claim) => claim.delivery_ref === partial.deliveryRef);
 assert.equal(recoveredClaim.attempts, partialClaim.attempts + 1, "retryable partial download did not preserve crash-safe identity");
 completeFeishuMediaDownload(home, recoveredClaim, PNG_BYTES, { declaredResourceType: "image", responseMimeType: "image/png", actualMimeType: "image/png" }, mediaFence);
 assert.throws(() => completeFeishuMediaDownload(home, partialClaim, Buffer.from("substitute"), { declaredResourceType: "image", responseMimeType: "image/png", actualMimeType: "image/png" }, mediaFence), /claim changed/, "stale claim substituted downloaded bytes");
+
+const ingressFence = { sessionId, bindingId: binding.binding_id, bindingGeneration: binding.generation };
+const fifoImage = publishFeishuInbound(home, remote({
+  event_id: "evt_fifo_image",
+  message_id: "om_fifoImg12345",
+  message_type: "image",
+  content: [{ type: "image", resource_key: "img_v2_fifo_head" }],
+}));
+const fifoFollower = publishFeishuInbound(home, remote({ event_id: "evt_fifo_text", message_id: "om_fifoText1234", content: "follower behind media" }));
+assert(!pendingFeishuIngress(home, ingressFence).some(({ event }) => event.delivery_ref === fifoFollower.deliveryRef), "later ordinary text overtook an older not-ready media event");
+const fifoClaim = pendingFeishuMedia(home, mediaFence).find((claim) => claim.delivery_ref === fifoImage.deliveryRef);
+assert.ok(fifoClaim, "held media head image was not claimable");
+completeFeishuMediaDownload(home, fifoClaim, PNG_BYTES, { declaredResourceType: "image", responseMimeType: "image/png", actualMimeType: "image/png" }, mediaFence);
+for (let attempt = 0; attempt < 30 && !pi.sends.some(({ content }) => typeof content === "string" && content.endsWith("follower behind media")); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 100));
+const followerSendIndex = pi.sends.findIndex(({ content }) => typeof content === "string" && content.endsWith("follower behind media"));
+assert(followerSendIndex > 0, "strict ingress FIFO never released the held follower text");
+assert(followerSendIndex > pi.sends.map(({ content }) => Array.isArray(content) && content.some((part) => part.type === "image")).lastIndexOf(true), "Pi delivery reordered the released FIFO pair");
+
+const backoffImage = publishFeishuInbound(home, remote({
+  event_id: "evt_backoff_media",
+  message_id: "om_backoffImg123",
+  message_type: "image",
+  content: [{ type: "image", resource_key: "img_v2_backoff_one" }],
+}));
+const backoffClaim = pendingFeishuMedia(home, mediaFence).find((claim) => claim.delivery_ref === backoffImage.deliveryRef);
+assert.ok(backoffClaim, "first-attempt retriable image was not claimable");
+assert.equal(failFeishuMediaDownload(home, backoffClaim, "sdk-http-500", mediaFence), true);
+assert(!pendingFeishuMedia(home, mediaFence).some((claim) => claim.delivery_ref === backoffImage.deliveryRef), "retriable media failure was re-claimed inside its bounded backoff window");
+const backoffRecord = JSON.parse(readFileSync(join(pathsForHome(home).inboundMedia, `${sha(backoffClaim.media_id)}.json`), "utf8"));
+assert(backoffRecord.next_attempt_at_ms > Date.now() && backoffRecord.next_attempt_at_ms <= Date.now() + 60000, "retriable media failure did not schedule a bounded durable retry");
+await new Promise((resolve) => setTimeout(resolve, 1050));
+const backoffRetryClaim = pendingFeishuMedia(home, mediaFence).find((claim) => claim.delivery_ref === backoffImage.deliveryRef);
+assert.ok(backoffRetryClaim, "scheduled media retry never became claimable");
+assert.equal(backoffRetryClaim.attempts, backoffClaim.attempts + 1, "scheduled media retry lost durable attempt identity");
+assert.equal(backoffRetryClaim.media_id, backoffClaim.media_id, "scheduled media retry changed durable media identity");
+assert.equal(failFeishuMediaDownload(home, backoffRetryClaim, "sdk-http-429", mediaFence, { retryAfterMs: 200 }), true);
+const retryAfterFailAt = Date.now();
+const retryAfterRecord = JSON.parse(readFileSync(join(pathsForHome(home).inboundMedia, `${sha(backoffClaim.media_id)}.json`), "utf8"));
+assert(retryAfterRecord.next_attempt_at_ms > retryAfterFailAt - 50 && retryAfterRecord.next_attempt_at_ms <= retryAfterFailAt + 200, "server Retry-After did not replace the exponential media retry schedule");
+await new Promise((resolve) => setTimeout(resolve, 400));
+const backoffFinalClaim = pendingFeishuMedia(home, mediaFence).find((claim) => claim.delivery_ref === backoffImage.deliveryRef);
+assert.ok(backoffFinalClaim, "honored Retry-After window never released the media retry");
+completeFeishuMediaDownload(home, backoffFinalClaim, PNG_BYTES, { declaredResourceType: "image", responseMimeType: "image/png", actualMimeType: "image/png" }, mediaFence);
+
+const cappedPost = publishFeishuInbound(home, remote({
+  event_id: "evt_capped_pair",
+  message_id: "om_cappedTwo123",
+  message_type: "post",
+  content: [
+    { type: "text", text: "capped pair" },
+    { type: "image", resource_key: "img_v2_capped_aa" },
+    { type: "image", resource_key: "img_v2_capped_bb" },
+  ],
+}));
+const afterCapped = publishFeishuInbound(home, remote({ event_id: "evt_after_capped", message_id: "om_afterCapped12", content: "released after terminal supersede" }));
+const cappedClaims = pendingFeishuMedia(home, mediaFence).filter((claim) => claim.delivery_ref === cappedPost.deliveryRef).sort((a, b) => a.part_index - b.part_index);
+assert.equal(cappedClaims.length, 2, "capped pair post did not claim both images");
+assert.equal(failFeishuMediaDownload(home, cappedClaims[0], "sdk-http-429", mediaFence, { retryAfterMs: 999999999 }), true);
+const cappedRecord = JSON.parse(readFileSync(join(pathsForHome(home).inboundMedia, `${sha(cappedClaims[0].media_id)}.json`), "utf8"));
+assert(cappedRecord.next_attempt_at_ms > Date.now() + 59000 && cappedRecord.next_attempt_at_ms <= Date.now() + 60000, "server Retry-After exceeded the bounded media retry ceiling");
+assert(!pendingFeishuIngress(home, ingressFence).some(({ event }) => event.delivery_ref === afterCapped.deliveryRef), "later text overtook a not-ready capped media head");
+assert.equal(failFeishuMediaDownload(home, cappedClaims[1], "media-signature-unsupported", mediaFence, { terminal: true }), true);
+for (let attempt = 0; attempt < 30 && !pi.sends.some(({ content }) => typeof content === "string" && content.endsWith("released after terminal supersede")); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 100));
+assert(pi.sends.some(({ content }) => typeof content === "string" && content.endsWith("released after terminal supersede")), "terminally superseded media never released strict ingress FIFO");
+assert(!pi.sends.some(({ content }) => typeof content === "string" && content.includes("capped pair")), "terminally refused media message reached Pi input");
 
 const cachedImage = readFileSync(cachePath);
 unlinkSync(cachePath);
@@ -1169,6 +1234,18 @@ export class Client {
       },
       messageResource: { get: async ({ params, path }) => {
         log({ type: "resource-get", resourceType: params.type, messageIdHash: path.message_id.length, fileKeyHash: path.file_key.length });
+        const resourceMark = process.env.FM_FAKE_SDK_RESOURCE_MARK;
+        if (path.file_key.includes("flaky") && resourceMark && !existsSync(resourceMark)) {
+          writeFileSync(resourceMark, "flaky\n");
+          const error = new Error("flaky resource fixture");
+          error.response = { status: 500, data: { code: 1000 } };
+          throw error;
+        }
+        if (path.file_key.includes("limited")) {
+          const error = new Error("rate limited resource fixture");
+          error.response = { status: 429, headers: { "retry-after": "3" }, data: { code: 99991400 } };
+          throw error;
+        }
         const mode = path.file_key.includes("mismatch") ? "mismatch" : path.file_key.includes("partial") ? "partial" : "ok";
         const bytes = mode === "partial" ? pngBytes.subarray(0, 4) : pngBytes;
         return { headers: { "content-type": mode === "mismatch" ? "image/jpeg" : "image/png" }, getReadableStream: () => Readable.from([bytes]) };
@@ -1606,6 +1683,62 @@ env PATH="$FAKE_BIN:$PATH" "${COMMON_SDK_ENV[@]}" FM_FAKE_SDK_SEND_MODE=rate-lim
   node bin/fm-feishu-transport.mjs run --once
 node -e 'const fs=require("fs");const sends=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n/).filter(Boolean).map(JSON.parse).filter(r=>r.type==="send");if(sends.length!==2||sends[1].at-sends[0].at<900||new Set(sends.map(r=>r.uuid)).size!==1||sends.some(r=>r.msgType!=="post"))process.exit(1)' "$SDK_LOG" \
   || fail "SDK Retry-After mapping shortened the delay, changed UUID, or fell back from Markdown"
+
+SDK_MEDIA_EVENTS="$TMP_ROOT/mock-sdk-media-events.json"
+SDK_RESOURCE_MARK="$TMP_ROOT/mock-sdk-resource-mark"
+cat > "$SDK_MEDIA_EVENTS" <<'JSON'
+[
+  {"kind":"event","data":{"event_id":"evt_sdk_post_bad","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkBadPost12","create_time":"30","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"zh_cn\":{\"title\":\"bad\",\"content\":[[{\"tag\":\"text\",\"text\":\"ok\"}],\"not-a-paragraph\"]}}"}}},
+  {"kind":"event","data":{"event_id":"evt_sdk_post_en","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkEnPost1234","create_time":"31","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"post","content":"{\"en_us\":{\"title\":\"english\",\"content\":[[{\"tag\":\"text\",\"text\":\"english body\"},{\"tag\":\"img\",\"image_key\":\"img_v2_sdk_fixture\"}]]}}"}}},
+  {"kind":"event","data":{"event_id":"evt_sdk_after_bad","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkAfterBad12","create_time":"32","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"text","content":"{\"text\":\"survived malformed post\"}"}}},
+  {"kind":"event","data":{"event_id":"evt_sdk_retry_img","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdkRetryImg12","create_time":"33","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"image","content":"{\"image_key\":\"img_v2_flaky_retry\"}"}}},
+  {"kind":"event","data":{"event_id":"evt_sdk_429_img","app_id":"cli_0123456789abcdef","sender":{"sender_id":{"open_id":"ou_captain1234"},"sender_type":"user"},"message":{"message_id":"om_sdk429Img1234","create_time":"34","chat_id":"oc_chat1234","chat_type":"p2p","message_type":"image","content":"{\"image_key\":\"img_v2_limited_429\"}"}}}
+]
+JSON
+rm -f "$SDK_RESOURCE_MARK" "$SDK_SEND_MARK"
+MEDIA_SDK_ENV=(
+  "FM_HOME=$TRANSPORT_HOME"
+  "FM_FEISHU_SDK_MODULE=$MOCK_SDK"
+  "FM_FEISHU_SDK_TEST_MODE=1"
+  "FM_FAKE_SDK_LOG=$SDK_LOG"
+  "FM_FAKE_SDK_EVENTS=$SDK_MEDIA_EVENTS"
+  "FM_FAKE_SDK_RESOURCE_MARK=$SDK_RESOURCE_MARK"
+  "FM_FAKE_SDK_CHAT_ID=oc_chat1234"
+  "FM_FEISHU_ONCE_SETTLE_MS=20"
+)
+env PATH="$FAKE_BIN:$PATH" "${MEDIA_SDK_ENV[@]}" node bin/fm-feishu-transport.mjs run --once
+sleep 1.1
+env PATH="$FAKE_BIN:$PATH" "${MEDIA_SDK_ENV[@]}" node bin/fm-feishu-transport.mjs run --once
+FM_HOME="$TRANSPORT_HOME" node --input-type=module <<'JS'
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+const sha = (value) => createHash("sha256").update(String(value)).digest("hex");
+const stateRoot = join(process.env.FM_HOME, "state", "feishu");
+const inbox = readdirSync(join(stateRoot, "inbox")).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(stateRoot, "inbox", name), "utf8")));
+const enPost = inbox.find((event) => event.message_id === "om_sdkEnPost1234");
+assert.ok(enPost, "well-formed en_us post was not accepted");
+assert.deepEqual(enPost.content.map((part) => part.type), ["text", "image"], "en_us post text/image order was lost");
+assert.ok(inbox.some((event) => event.message_id === "om_sdkAfterBad12"), "text after a malformed post was not accepted");
+const quarantine = readdirSync(join(stateRoot, "quarantine", "malformed-content")).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(stateRoot, "quarantine", "malformed-content", name), "utf8")));
+const badPost = quarantine.find((record) => record.data?.message_id_hash === sha("om_sdkBadPost12"));
+assert.ok(badPost, "malformed post structure was not quarantined");
+assert.equal(badPost.kind, "malformed-content");
+assert.equal(badPost.data.message_type, "post");
+assert.ok(Number.isSafeInteger(badPost.data.content_size_bytes) && badPost.data.content_size_bytes > 0, "malformed post quarantine lost non-sensitive size metadata");
+const media = readdirSync(join(stateRoot, "inbound-media")).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(stateRoot, "inbound-media", name), "utf8")));
+const retryMedia = media.find((record) => record.message_id === "om_sdkRetryImg12");
+assert.ok(retryMedia, "flaky retry image never produced a durable media record");
+assert.equal(retryMedia.state, "ready", "bounded media retry never completed after its backoff");
+assert.equal(retryMedia.attempts, 2, "flaky media retry did not preserve exact durable attempt identity");
+const limitedMedia = media.find((record) => record.message_id === "om_sdk429Img1234");
+assert.ok(limitedMedia, "rate-limited image never produced a durable media record");
+assert.equal(limitedMedia.state, "pending");
+assert.equal(limitedMedia.attempts, 1, "media download hammered the rate-limited resource inside its Retry-After window");
+assert.equal(limitedMedia.last_error_kind, "sdk-http-429");
+assert(limitedMedia.next_attempt_at_ms > Date.now(), "rate-limited media lost its durable Retry-After schedule");
+JS
 
 rm -f "$SDK_SEND_MARK" "$SDK_OVERLAP" "$SDK_SEND_LOCK"
 : > "$SDK_LOG"
