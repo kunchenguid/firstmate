@@ -18,8 +18,8 @@
 # binary untouched.
 #
 # The "supervisor pane" is a tiny deterministic bash loop (not a real harness
-# binary): it draws a bordered composer row ("│ > <buf> │") that exercises the
-# bordered branch of fm_backend_herdr_composer_state, and logs every submitted
+# binary): it draws the verified bare-agent composer shape (`❯ <buf>`) and
+# logs every submitted
 # line (hex + text + injection/user classification) - the same technique
 # tests/fm-afk-inject-e2e.test.sh uses for its tmux supervisor pane, so this
 # test asserts on submitted CONTENT, not pane appearance. It ALSO registers
@@ -151,11 +151,21 @@ EOF
 # documented integration-protocol primitive for a non-built-in-harness process
 # to report its own agent state, verified empirically against real herdr 0.7.1
 # in an isolated session.
+#
+# The loop takes an optional SHAPE argument. `bare` (the default) is the
+# agent-glyph fixture described above. `claude` redraws the shape real claude
+# presents through herdr: a labelled upper rule, a bare `❯` prompt padded with
+# U+00A0, a bare lower rule, and a multi-row statusline under it. That shape is
+# what wedged away-mode delivery overnight, and it exercises two code paths the
+# bare fixture cannot reach - the invisible-padding normalization in
+# bin/fm-composer-lib.sh and the identity gate on the lone-trailing-rule
+# staleness rule in bin/backends/herdr.sh.
 LOOP_SCRIPT="$STATE_DIR/supervisor-loop.sh"
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
 MARK=$'\xE2\x81\xA3'
 LOG="$1"
+SHAPE="${2:-bare}"
 AGENT_SOURCE=fm-test-supervisor
 AGENT_LABEL=fm-test-supervisor
 report_agent_state() {  # <idle|working>
@@ -166,15 +176,19 @@ OLD_STTY=$(stty -g 2>/dev/null || true)
 cleanup() {
   [ -z "$OLD_STTY" ] || stty "$OLD_STTY" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+# INT/TERM must actually END the loop, not just run cleanup and resume reading:
+# a scenario that switches composer shape sends C-c and then starts the next
+# fixture, and a loop that survived would swallow that command as composer input
+# and leave the previous shape on screen.
+trap cleanup EXIT
+trap 'cleanup; exit 0' INT TERM
 report_agent_state idle
 
 _buf=
 # redraw: keep the composer visually pinned to ONE terminal row regardless of
-# _buf's length - a realistic bordered single-line composer horizontally
+# _buf's length - a realistic single-line composer horizontally
 # scrolls to show the tail near the cursor rather than letting the terminal
-# hard-wrap a too-long line across multiple rows (which would break the
-# structural border-row classifier's one-row assumption: a batched escalation
+# hard-wrap a too-long line across multiple rows (a batched escalation
 # digest easily exceeds a narrow pane's column width). A hardcoded width
 # (not `tput cols`) is used deliberately: verified empirically against a real
 # herdr pane launched this same way that `tput cols` inside this script's own
@@ -182,15 +196,33 @@ _buf=
 # a separate interactively-typed `tput cols`), so trusting it here silently
 # let content overflow the real width and wrap across two rows. 40 is
 # comfortably under every real pane width observed on this machine.
-redraw() {
-  local avail=40 shown tail_n
+_shown() {
+  local avail=40 tail_n
   if [ "${#_buf}" -gt "$avail" ]; then
     tail_n=$((avail - 3))
-    shown="...${_buf: -$tail_n}"
+    printf '...%s' "${_buf: -$tail_n}"
   else
-    shown="$_buf"
+    printf '%s' "$_buf"
   fi
-  printf '\r\033[K❯ %s' "$shown"
+}
+redraw_bare() { printf '\r\033[K❯ %s' "$(_shown)"; }
+# The claude shape occupies five rows and is rewritten in place: print the block,
+# then walk the cursor back to its first row. The screen was cleared once before
+# the first redraw, so nothing sits below the statusline that a later capture
+# could mistake for a more recent composer.
+redraw_claude() {
+  printf '\r\033[K──────────────── fm-lab-supervisor ──\n'
+  printf '\033[K\342\235\257\302\240%s\n' "$(_shown)"
+  printf '\033[K────────────────────────────────────\n'
+  printf '\033[K  ctx 17%%  ·  wk 25%% 3d01h Fri\n'
+  printf '\033[K  auto mode on · 1 shell · ← for agents'
+  printf '\033[4A\r'
+}
+redraw() {
+  case "$SHAPE" in
+    claude) redraw_claude ;;
+    *) redraw_bare ;;
+  esac
 }
 submit_line() {
   local _line=$_buf _c _hex
@@ -202,8 +234,13 @@ submit_line() {
   _hex=$(printf '%s' "$_line" | od -An -tx1 | tr -d ' \n')
   printf '%s\t%s\t%s\n' "$_hex" "$_line" "$_c" >> "$LOG"
   _buf=
-  printf '\r\033[K\n'
-  redraw
+  # The bare fixture scrolls a fresh composer row after each submit; the
+  # claude block is a fixed five-row region rewritten where it stands, so
+  # advancing a row there would walk it down the screen instead.
+  case "$SHAPE" in
+    claude) redraw ;;
+    *) printf '\r\033[K\n'; redraw ;;
+  esac
   # Report a real idle->working->idle cycle around the submission, exactly
   # like a real harness's agent_status - this is the signal
   # fm_backend_herdr_send_text_submit now confirms against. The 0.6s "working"
@@ -214,6 +251,7 @@ submit_line() {
   report_agent_state idle
 }
 
+[ "$SHAPE" != claude ] || printf '\033[2J\033[H'
 redraw
 while IFS= read -r -n 1 _ch; do
   if [ -z "$_ch" ]; then
@@ -523,10 +561,121 @@ test_scenario_d_max_defer() {
   pass "real herdr Scenario D: a persistently pending composer raises the max-defer wedge alarm, preserves the buffer, and never crashes the daemon"
 }
 
+# --- Scenario E: claude's own rule-framed, NBSP-padded composer --------------
+# The overnight wedge shape, end to end. An idle claude composer reads as the
+# bare `❯` glyph padded with U+00A0, framed by a labelled upper rule and a bare
+# lower rule, with a tall statusline below it. Both defects that shape triggered
+# refuse injection - the lower rule read as staleness (`unknown`), and the
+# padding read as unsent text (`pending`) - so a buffered escalation never left
+# the daemon. This asserts the escalation is actually SUBMITTED against that
+# exact fixture, and that real typed text there still defers.
+
+restart_supervisor_loop() {  # <shape>
+  fm_backend_herdr_send_key "$SUPERVISOR_TARGET" C-c >/dev/null 2>&1 || true
+  sleep 1
+  fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_FILE' '$1'" \
+    || fail "could not restart the supervisor loop in shape '$1'"
+  sleep 1.5
+}
+
+# A shape switch that silently failed would leave the previous fixture on screen
+# and quietly turn the scenario into a duplicate of the bare ones, so assert
+# the bytes under test are really there: the bare glyph plus U+00A0, and a lower
+# rule with no matching upper rule above it.
+assert_claude_shape_on_screen() {
+  local cap
+  # The ANSI capture, because that is the one the classifier reads first; herdr's
+  # plain read normalizes a trailing U+00A0 away, so it cannot see the padding at
+  # all.
+  cap=$(fm_backend_herdr_capture_ansi "$SUPERVISOR_TARGET" 20 \
+    | fm_composer_strip_ansi | tr -d '\r') \
+    || fail "Scenario E: could not capture the supervisor pane"
+  if ! printf '%s' "$cap" | grep -q $'\342\235\257\302\240'; then
+    printf '%s' "$cap" | od -c | sed 's/^/    /' >&2
+    fail "Scenario E: the pane is not showing a U+00A0-padded '❯' composer; the shape switch did not take"
+  fi
+  printf '%s' "$cap" | grep -qE '^────+$' \
+    || fail "Scenario E: the pane is not showing claude's bare lower rule; the shape switch did not take"
+  if printf '%s' "$cap" | grep -q '^❯ '; then
+    fail "Scenario E: the bare fixture is still on screen; the shape switch did not take"
+  fi
+}
+
+test_scenario_e_claude_shape() {
+  reset_state
+  restart_supervisor_loop claude
+  assert_claude_shape_on_screen
+
+  local verdict
+  verdict=$(PATH="$HERDR_SHIM_DIR:$PATH" fm_backend_herdr_composer_state "$SUPERVISOR_TARGET")
+  [ "$verdict" = empty ] \
+    || fail "Scenario E: an idle rule-framed claude composer read '$verdict', not empty"
+
+  afk_enter "$STATE_DIR"
+  start_daemon
+  echo "done: PR https://example.test/pr/500" > "$STATE_DIR/fake-c1.status"
+  sleep 8
+
+  grep -q 'Supervisor escalate' "$LOG_FILE" \
+    || fail "Scenario E: the escalation was never delivered into claude's own composer shape"
+  local marker_count
+  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
+  [ "$marker_count" -eq 1 ] \
+    || fail "Scenario E: expected exactly 1 U+2063 marker, got $marker_count"
+  [ ! -s "$STATE_DIR/.subsuper-inject-wedged" ] \
+    || fail "Scenario E: delivery succeeded but the wedge alarm fired anyway"
+
+  # Real typed text in that same shape must still defer.
+  reset_state
+  local defer_log_start=0
+  [ ! -f "$STATE_DIR/.supervise-daemon.log" ] || defer_log_start=$(wc -l < "$STATE_DIR/.supervise-daemon.log")
+  fm_backend_herdr_send_literal "$SUPERVISOR_TARGET" "human draft text"
+  sleep 0.5
+  verdict=$(PATH="$HERDR_SHIM_DIR:$PATH" fm_backend_herdr_composer_state "$SUPERVISOR_TARGET")
+  [ "$verdict" = pending ] \
+    || fail "Scenario E: typed text in a rule-framed claude composer read '$verdict', not pending"
+  echo "needs-decision: pick A or B" > "$STATE_DIR/fake-c1.status"
+  # Wait for the daemon to actually REACH an injection decision instead of
+  # assuming a fixed sleep is enough: the mid-scenario reset_state removes state
+  # under a running watcher, which ends that watcher cleanly and costs a 5s
+  # restart backoff before the next escalation cycle. A fixed sleep shorter than
+  # the backoff reads as "no deferral recorded" no matter how the pane classifies.
+  local deferred=0 waited=0
+  while [ "$waited" -lt 30 ]; do
+    if tail -n +"$((defer_log_start + 1))" "$STATE_DIR/.supervise-daemon.log" 2>/dev/null \
+      | grep -q 'inject deferred: supervisor composer not confirmed-empty'; then
+      deferred=1
+      break
+    fi
+    grep -q 'Supervisor escalate' "$LOG_FILE" && break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if grep -q 'Supervisor escalate' "$LOG_FILE"; then
+    fail "Scenario E: the daemon injected over a claude composer that held human text"
+  fi
+  # Absence of a delivery line alone would also pass if the mid-run reset_state
+  # had knocked the daemon out of escalating at all, so require the positive
+  # deferral record and a live daemon behind it.
+  kill -0 "$DAEMON_PID" 2>/dev/null \
+    || fail "Scenario E: the daemon died instead of deferring over the human's typed text"
+  if [ "$deferred" -ne 1 ]; then
+    tail -n +"$((defer_log_start + 1))" "$STATE_DIR/.supervise-daemon.log" 2>/dev/null | sed 's/^/    /' >&2
+    fail "Scenario E: the daemon never recorded a composer deferral, so the absent delivery proves nothing"
+  fi
+  fm_backend_herdr_send_key "$SUPERVISOR_TARGET" Enter
+  sleep 0.5
+
+  stop_daemon
+  restart_supervisor_loop bare
+  pass "real herdr Scenario E: claude's rule-framed NBSP-padded composer accepts an escalation when idle and defers when a human is typing"
+}
+
 test_scenario_a
 test_scenario_b
 test_scenario_c
 test_scenario_d_max_defer
+test_scenario_e_claude_shape
 
 echo "all real-herdr afk injection e2e tests passed"
 

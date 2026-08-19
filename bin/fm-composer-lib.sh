@@ -1029,6 +1029,7 @@ _fm_composer_select_cursorless() {
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
   FM_COMPOSER_SELECTED_AMBIG=0
+  FM_COMPOSER_NEEDS_LONE_RULE_IDENTITY=0
   if [ "$FM_COMPOSER_SCAN_BOX_BOTTOM" -ge 0 ]; then
     generic=$FM_COMPOSER_SCAN_BOX_BOTTOM
     FM_COMPOSER_SELECTED_KIND=box
@@ -1062,8 +1063,18 @@ _fm_composer_select_cursorless() {
   fi
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
      && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
-    FM_COMPOSER_SELECTED_KIND=
-    return 1
+    if [ "${FM_COMPOSER_CAP_IDENTITY:-0}" = 1 ] && [ "$generic" -ge 0 ]; then
+      # Claude frames its idle composer with a labelled upper rule and a bare
+      # lower rule. Pi uses that same lower rule as a separator whose opening
+      # rule can sit above the capture window, so defer this one ambiguity to
+      # native identity rather than rejecting Claude outright.
+      FM_COMPOSER_NEEDS_LONE_RULE_IDENTITY=1
+    elif [ "$FM_COMPOSER_SELECTED_KIND" != bare ]; then
+      # With no identity probe available the bare agent glyph is its own
+      # container proof, the same rule the pi-pair overlap already applies.
+      FM_COMPOSER_SELECTED_KIND=
+      return 1
+    fi
   fi
   if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
@@ -1186,11 +1197,12 @@ EOF
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 kv plain
+  FM_COMPOSER_CAP_IDENTITY=0
   while IFS= read -r kv; do
     case "$kv" in
       styled=1) styled=1 ;;
       cursor=1) cursor=1 ;;
-      identity=1) has_identity=1 ;;
+      identity=1) has_identity=1; FM_COMPOSER_CAP_IDENTITY=1 ;;
     esac
   done <<EOF
 $caps
@@ -1261,6 +1273,38 @@ EOF
   if ! _fm_composer_select_cursorless "$plain"; then
     printf 'unknown'
     return 0
+  fi
+  if [ "$FM_COMPOSER_NEEDS_LONE_RULE_IDENTITY" = 1 ]; then
+    local lone_agent lone_status
+    if [ "$has_identity" != 1 ]; then
+      printf 'unknown'
+      return 0
+    fi
+    if [ -z "$identity" ]; then
+      printf 'need-identity'
+      return 0
+    fi
+    case "$identity" in
+      probe-absent|*$'\n'*|*$'\r'*|*$'\t'*$'\t'*)
+        printf 'unknown'
+        return 0
+        ;;
+      *$'\t'*) ;;
+      *)
+        printf 'unknown'
+        return 0
+        ;;
+    esac
+    lone_agent=${identity%%$'\t'*}
+    lone_status=${identity#*$'\t'}
+    if [ -z "$lone_agent" ] || [ -z "$lone_status" ]; then
+      printf 'unknown'
+      return 0
+    fi
+    if [ "$lone_agent" = pi ]; then
+      printf 'unknown'
+      return 0
+    fi
   fi
   case "$FM_COMPOSER_SELECTED_KIND" in
     pi)

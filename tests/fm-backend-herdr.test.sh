@@ -3134,6 +3134,71 @@ test_composer_state_pi_separator_requires_safe_native_identity() {
   pass "fm_backend_herdr_composer_state: Pi separators never authorize working, non-Pi, unreadable, or over-tall targets"
 }
 
+# A lone trailing horizontal rule is Pi evidence only on a Pi pane. claude frames
+# its own live composer between two rules and labels the upper one
+# ("─── name ──"), so the upper rule is not a bare separator and the capture ends
+# in exactly the incomplete-pair shape above. Reading that as staleness discarded
+# a live idle claude composer and returned unknown on every poll, which deferred
+# every away-mode escalation overnight. The fixture is the recorded shape of that
+# pane, NBSP padding and tall statusline included.
+herdr_claude_rule_framed_capture() {  # -> the recorded claude composer screen
+  local composer_text=${1-}
+  printf '  \xe2\x8e\xbf  Tip: Use /theme to change the color theme\n'
+  printf '\n'
+  printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 expose-demo-system-entry \xe2\x94\x80\xe2\x94\x80\n'
+  printf '\xe2\x9d\xaf\xc2\xa0%s\n' "$composer_text"
+  printf '\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n'
+  printf '  eduard@valhalla:~/p  \xe2\x8e\x87 main  \xe2\x97\x86 Opus 5 \xc2\xb7 high\n'
+  printf '  ctx 17%%  \xc2\xb7  5h 93%% 4h37m  \xc2\xb7  wk 25%% 3d01h Fri\n'
+  printf '  \xe2\x8f\xb5\xe2\x8f\xb5 auto mode on \xc2\xb7 1 shell \xc2\xb7 \xe2\x86\x90 for agents\n'
+}
+
+test_composer_state_claude_rule_framed_idle_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-rule-framed"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_claude_rule_framed_capture > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"done"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle rule-framed claude composer should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: a claude composer framed by its own rules reads empty, not unknown"
+}
+
+test_composer_state_claude_rule_framed_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-rule-framed-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_claude_rule_framed_capture 'half typed answer' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"done"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "unsent text in a rule-framed claude composer should read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: unsent text in a rule-framed claude composer stays pending"
+}
+
+test_composer_state_lone_rule_requires_valid_non_pi_identity() {
+  local dir log resp fb out case_id
+  for case_id in pi unreadable agent-not-found empty-agent missing-status malformed; do
+    dir="$TMP_ROOT/composer-lone-rule-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    herdr_claude_rule_framed_capture > "$resp/1.out"
+    case "$case_id" in
+      pi) printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
+      unreadable) printf '1\n' > "$resp/2.exit" ;;
+      agent-not-found) printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/2.out" ;;
+      empty-agent) printf '{"result":{"agent":{"agent":"","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
+      missing-status) printf '{"result":{"agent":{"agent":"claude"}}}\n' > "$resp/2.out" ;;
+      malformed) printf 'not-json\n' > "$resp/2.out" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+    [ "$out" = unknown ] \
+      || fail "a lone trailing rule on a '$case_id' target must stay unknown, got '$out'"
+  done
+  pass "fm_backend_herdr_composer_state: a lone trailing rule requires a valid non-Pi identity"
+}
+
 # --- composer_state: unbordered (bare) composer rows -------------------------
 # Regression coverage for the away-mode redelivery-loop incident
 # (docs/herdr-backend.md "Incident (2026-07-07)"): real claude and codex
@@ -4438,6 +4503,9 @@ test_composer_state_pi_separator_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
+test_composer_state_claude_rule_framed_idle_is_empty
+test_composer_state_claude_rule_framed_real_text_is_pending
+test_composer_state_lone_rule_requires_valid_non_pi_identity
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins

@@ -2622,7 +2622,15 @@ fm_backend_herdr_capture_ansi() {  # <target> <lines>
 fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   local out
   out=$(fm_backend_herdr_cli "$1" agent get "$2" 2>/dev/null) || return 1
-  printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
+  printf '%s' "$out" | jq -er '
+    .result.agent as $identity
+    | select(($identity | type) == "object")
+    | select(($identity.agent | type) == "string")
+    | select(($identity.agent_status | type) == "string")
+    | select(($identity.agent | length) > 0 and ($identity.agent_status | length) > 0)
+    | [$identity.agent, $identity.agent_status]
+    | @tsv
+  ' 2>/dev/null
 }
 
 # fm_backend_herdr_composer_identity: the native agent identity/state probe

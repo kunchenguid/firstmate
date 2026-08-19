@@ -528,6 +528,13 @@ Real captures verified these active distinctions:
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
 - A bare shell prompt has no safe agent-composer container and is unknown.
 
+Two further per-harness distinctions were verified on 2026-08-04 from real captures of a live idle Claude pane on Herdr:
+
+- An idle Claude composer renders as the bare agent glyph followed by U+00A0 NO-BREAK SPACE, which is not in `[[:space:]]` in any glibc locale, so the shared classifier normalizes it and reads empty instead of pending.
+- A lone trailing separator rule no longer invalidates a recognized composer row on its own. On Herdr the verdict is gated on the native pane identity, so only a Pi pane's separator invalidates a match and an unreadable identity still yields unknown. On backends with no identity probe the bare agent glyph remains the container proof and every other candidate shape stays unknown.
+
+Scenario E of `tests/fm-afk-inject-herdr-e2e.test.sh` is the real-Herdr regression for both, driving a fixture that draws Claude's rule-framed, NBSP-padded composer.
+
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:
 
