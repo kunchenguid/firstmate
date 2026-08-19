@@ -60,7 +60,23 @@ That is what turns a swallowed signal from a lane-wide multi-hour hang into a re
 | A script that stops making progress is terminated at the per-script budget and reported by name with `exit=124`. | `tests/fm-test-run.test.sh::test_lane_times_out_a_hung_script_and_names_it` |
 | Replacing the shared pipe with a private file and a follower keeps every byte of stdout and stderr, in order. | `tests/fm-test-run.test.sh::test_lane_output_is_complete_and_ordered_without_a_shared_pipe` |
 | A process a test registers is reaped even when the test fails before its own reap runs. | `tests/fm-test-run.test.sh::test_test_helper_reaps_processes_a_failing_script_left_running` |
+| A process a test registers is reaped even when it is not one of the test shell's own jobs. | `tests/fm-test-run.test.sh::test_test_helper_reaps_a_registered_process_it_does_not_own_as_a_job` |
+| A lane interrupted by `SIGINT` or `SIGTERM` reaps the script and the output follower it started, and releases its own stdout. | `tests/fm-test-run.test.sh::test_interrupted_lane_releases_its_output_and_reaps_the_running_script` |
 | Sampling a freshly backgrounded process waits for `execve` to publish the exec'd image. | `tests/fm-watcher-lock.test.sh::test_pid_identity_sampling_waits_for_execve` |
+
+## Why the lane traps its own interrupt
+
+Replacing the shared pipe with a private file and a follower moves the pipe-holding role from a leaked test descendant to a process the lane starts itself.
+A lane that is interrupted rather than allowed to finish must therefore stop that follower, or the same silent indefinite hang returns with the lane's own child in place of the orphan.
+Bash makes this worse than it looks: a shell without job control starts every asynchronous job with `SIGINT` ignored, so the follower survives the `SIGINT` that ends the lane and keeps the lane's stdout open forever, and the lane's `EXIT` trap has by then deleted the flag file the follower waits for.
+
+Two things close that path.
+The lane traps `INT` and `TERM`, reaps the follower and the in-flight script by the PIDs it recorded, and only then removes its temp root.
+The follower also returns as soon as the file it is copying no longer exists, because the flag it waits for lives beside that file and can never arrive once the lane that owns both is gone.
+
+The in-flight script's exit status travels through a file rather than a command substitution for the same reason.
+Bash defers every pending trap until the current foreground command returns, and a command substitution is a foreground command, so capturing the status that way left the lane deaf to both signals for as long as a script ran.
+Measured on 2026-08-20, Linux 6.6.87.2-microsoft-standard-WSL2, GNU bash 5.2.21: with the status captured by substitution, a `SIGTERM` sent one second into a ten-second child ran the trap only at ten seconds; with the status written to a file, the lane blocks only in short sleeps and in `wait`, and the trap runs immediately.
 
 ## Measured before and after
 

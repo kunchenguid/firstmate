@@ -182,6 +182,11 @@ esac
 # exit before ps reports, and an empty answer there silently disables reaping
 # exactly when the script that leaked was quick.
 LANE_GROUP_REAPING=0
+# What the lane must reap when it is interrupted rather than allowed to finish.
+# The in-flight script runs inside a command substitution, so its PID cannot
+# reach this shell through a variable; it is published as a file instead.
+LANE_FOLLOWER_PID=
+LANE_INFLIGHT_DIR=
 probe_group_reaping() {
   local pid probe_pgid
   set -m
@@ -255,6 +260,10 @@ stream_growing_file() {  # <file> <stop-flag>
   while :; do
     stopped=0
     [ -e "$stop" ] && stopped=1
+    # The flag lives beside the file. If the file itself is gone the lane that
+    # owns both is gone too, so no flag can ever arrive and there is nothing
+    # left to flush: return instead of holding the lane's stdout open forever.
+    [ -e "$file" ] || return 0
     size=$(wc -c <"$file" 2>/dev/null | tr -d '[:space:]')
     case "$size" in
       '' | *[!0-9]*) size=0 ;;
@@ -284,14 +293,25 @@ kill_pid_hard() {  # <pid>
 }
 
 # Run one test script contained: own group, private output file, budget, reap.
-# Echoes the exit status; 124 marks the budget kill, matching timeout(1).
-run_script_contained() {  # <script> <output-file>
-  local script=$1 out=$2 pid pgid rc timed_out=0
+# Writes the exit status to <status-file>; 124 marks the budget kill, matching
+# timeout(1). The status goes to a file rather than to stdout on purpose: a
+# command substitution is a foreground command, and bash defers every pending
+# trap until a foreground command returns, so capturing the status that way would
+# make the lane deaf to SIGINT and SIGTERM for as long as a script runs. Here the
+# lane only ever blocks in short sleeps and in `wait`, both of which let a signal
+# through immediately.
+run_script_contained() {  # <script> <output-file> <status-file>
+  local script=$1 out=$2 status=$3 pid pgid rc timed_out=0 inflight
   set -m
   bash "$script" >"$out" 2>&1 &
   pid=$!
   set +m
   pgid=$(script_process_group "$pid") || pgid=
+  inflight=
+  if [ -n "$LANE_INFLIGHT_DIR" ] && [ -d "$LANE_INFLIGHT_DIR" ]; then
+    inflight="$LANE_INFLIGHT_DIR/$BASHPID"
+    printf '%s %s\n' "$pid" "$pgid" >"$inflight" 2>/dev/null || inflight=
+  fi
   if ! wait_pid_within_budget "$pid" "$SCRIPT_TIMEOUT"; then
     timed_out=1
     printf 'not ok - %s exceeded the per-script budget of %ss and was terminated\n' \
@@ -317,7 +337,8 @@ run_script_contained() {  # <script> <output-file>
       [ "$rc" -ne 0 ] || rc=1
     fi
   fi
-  printf '%s\n' "$rc"
+  [ -z "$inflight" ] || rm -f "$inflight"
+  printf '%s\n' "$rc" >"$status"
 }
 
 # Primary family for one tests/*.test.sh basename. Unmapped scripts are
@@ -1658,8 +1679,45 @@ fi
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
+LANE_INFLIGHT_DIR="$RUN_TMP/inflight"
+mkdir -p "$LANE_INFLIGHT_DIR"
 : >"$RECORDS"
+
+# An interrupted lane reaps what it started before it goes. Without this the
+# lane dies on the signal while its output follower - which bash makes immune to
+# SIGINT, because this shell runs without job control - keeps the lane's stdout
+# pipe open forever, so whatever reads the lane never sees EOF. That is the same
+# silent indefinite hang a leaked test descendant used to cause.
+# shellcheck disable=SC2329 # Registered by the INT and TERM traps below.
+lane_abort() {  # <signal-name> <exit-code>
+  local sig=$1 code=$2 entry pid pgid worker
+  trap - INT TERM EXIT
+  log "interrupted by SIG$sig, reaping what this lane started"
+  if [ -n "$LANE_FOLLOWER_PID" ]; then
+    kill_pid_hard "$LANE_FOLLOWER_PID"
+    LANE_FOLLOWER_PID=
+  fi
+  for worker in "${WORKER_PIDS[@]+"${WORKER_PIDS[@]}"}"; do
+    [ -n "$worker" ] || continue
+    kill_pid_hard "$worker"
+  done
+  if [ -n "$LANE_INFLIGHT_DIR" ] && [ -d "$LANE_INFLIGHT_DIR" ]; then
+    for entry in "$LANE_INFLIGHT_DIR"/*; do
+      [ -f "$entry" ] || continue
+      pid=
+      pgid=
+      read -r pid pgid <"$entry" || true
+      [ -z "$pid" ] || kill_pid_hard "$pid"
+      [ -z "$pgid" ] || reap_process_group "$pgid" || true
+    done
+  fi
+  rm -rf "$RUN_TMP"
+  exit "$code"
+}
+
 trap 'rm -rf "$RUN_TMP"' EXIT
+trap 'lane_abort INT 130' INT
+trap 'lane_abort TERM 143' TERM
 
 RUN_STARTED_ISO=$(now_iso)
 RUN_STARTED_MS=$(now_ms)
@@ -1736,13 +1794,14 @@ record_script_result() {
 
 run_one_serial() {
   local script=$1
-  local base family expected out stop follower begin_iso begin_ms end_ms end_iso duration rc
+  local base family expected out stop status follower begin_iso begin_ms end_ms end_iso duration rc
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
   out="$RUN_TMP/out.$TOTAL"
   stop="$RUN_TMP/stop.$TOTAL"
-  rm -f "$stop"
+  status="$RUN_TMP/status.$TOTAL"
+  rm -f "$stop" "$status"
   : >"$out"
   begin_iso=$(now_iso)
   begin_ms=$(now_ms)
@@ -1756,9 +1815,12 @@ run_one_serial() {
   # hold that file, never the lane's stdout.
   stream_growing_file "$out" "$stop" &
   follower=$!
-  rc=$(run_script_contained "$script" "$out")
+  LANE_FOLLOWER_PID=$follower
+  run_script_contained "$script" "$out" "$status"
+  rc=$(cat "$status" 2>/dev/null || true)
   : >"$stop"
   wait "$follower" 2>/dev/null
+  LANE_FOLLOWER_PID=
   rm -f "$stop"
   set -e
   : "${rc:=1}"
@@ -1871,7 +1933,9 @@ else
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
-      rc=$(run_script_contained "$script" "$work/output")
+      run_script_contained "$script" "$work/output" "$work/status"
+      rc=$(cat "$work/status" 2>/dev/null || true)
+      : "${rc:=1}"
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))
       if [ "$duration" -lt 0 ]; then

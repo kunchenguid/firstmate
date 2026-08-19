@@ -246,12 +246,16 @@ fm_test_reap_pid() {  # <pid>
   return "$rc"
 }
 
-# Reap every registered PID that is still one of this shell's own live jobs.
+# Reap every registered PID this shell can still prove belongs to it: one of its
+# own live jobs, or a live descendant in the current process table.
 #
-# Job-table membership is the PID-recycling guard: bash drops a job as soon as
-# it reaps it, so a PID the kernel later hands to an unrelated process is not in
-# the table and is never signalled. It also costs nothing, unlike recording each
-# PID's identity at registration.
+# Both memberships are PID-recycling guards. Bash drops a job as soon as it reaps
+# it, so a PID the kernel later hands to an unrelated process is not in the job
+# table; and a PID that is a descendant of this shell right now is this shell's
+# process whatever it was before. Descendants matter because a test may register
+# a process a helper started for it - a watcher armed by bin/fm-watch-arm.sh is a
+# grandchild, never a job of the test shell - and the job table alone would drop
+# it with no diagnostic.
 #
 # `jobs` must run in THIS shell. A command or process substitution runs it in a
 # subshell with no copy of the job table, which would report every job gone and
@@ -264,6 +268,7 @@ fm_test_reap_tracked_pids() {
   : > "$live"
   jobs -rp >> "$live" 2>/dev/null || true
   jobs -sp >> "$live" 2>/dev/null || true
+  fm_test_descendant_pids "$$" >> "$live" 2>/dev/null || true
   while IFS= read -r pid; do
     case "$pid" in
       '' | *[!0-9]*) continue ;;

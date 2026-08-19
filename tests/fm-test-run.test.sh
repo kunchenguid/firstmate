@@ -835,6 +835,130 @@ SH
   pass "a script's full stdout and stderr reach the lane in order"
 }
 
+wait_for_path() {  # <path> <ticks>
+  local path=$1 limit=$2 i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$path" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# One signal, delivered to the lane PID alone, which is the harder delivery: the
+# script and the output follower sit in other process groups, so only the lane's
+# own handler can release the pipe its reader is blocked on.
+assert_interrupted_lane_releases_its_output() {  # <signal>
+  local sig=$1 tmp fifo lane reader script_pid
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-signal.XXXXXX")
+  fifo="$tmp/lane.stdout"
+  mkfifo "$fifo" || { rm -rf "$tmp"; fail "could not create the lane fifo"; }
+  cat >"$tmp/slow.test.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$\$" >"$tmp/script.pid"
+echo "ok - the script is running"
+sleep 600
+SH
+  chmod +x "$tmp/slow.test.sh"
+
+  # Job control here is what gives the lane the signal dispositions it has when a
+  # person or a supervisor runs it. Without it bash starts an asynchronous job
+  # with SIGINT ignored, and a signal the lane can never receive proves nothing.
+  set -m
+  "$RUNNER" --script-timeout 600 "$tmp/slow.test.sh" >"$fifo" 2>"$tmp/err" &
+  lane=$!
+  cat "$fifo" >"$tmp/out" &
+  reader=$!
+  set +m
+
+  interrupted_lane_cleanup() {
+    kill -KILL "$lane" 2>/dev/null || true
+    kill -KILL "$reader" 2>/dev/null || true
+    [ -z "${script_pid:-}" ] || kill -KILL "$script_pid" 2>/dev/null || true
+    rm -rf "$tmp"
+  }
+
+  if ! wait_for_path "$tmp/script.pid" 600; then
+    interrupted_lane_cleanup
+    fail "the lane never started the fixture script"
+  fi
+  script_pid=$(cat "$tmp/script.pid" 2>/dev/null || true)
+  [ -n "$script_pid" ] || { interrupted_lane_cleanup; fail "the fixture recorded no pid"; }
+
+  kill -"$sig" "$lane" 2>/dev/null || true
+
+  # The whole point: whoever reads the lane's stdout must see EOF. A surviving
+  # follower holds that pipe open and wedges the reader indefinitely.
+  if ! wait_pid_gone "$reader" 300; then
+    interrupted_lane_cleanup
+    fail "SIG$sig left the lane's stdout pipe open, so its reader never saw EOF"
+  fi
+  if ! wait_pid_gone "$lane" 300; then
+    interrupted_lane_cleanup
+    fail "the lane itself outlived SIG$sig"
+  fi
+  if ! wait_pid_gone "$script_pid" 300; then
+    interrupted_lane_cleanup
+    fail "SIG$sig left the running script (pid $script_pid) behind"
+  fi
+  rm -rf "$tmp"
+}
+
+test_interrupted_lane_releases_its_output_and_reaps_the_running_script() {
+  local sig
+  for sig in TERM INT; do
+    assert_interrupted_lane_releases_its_output "$sig"
+  done
+  pass "an interrupted lane reaps its follower and its script, and frees its stdout"
+}
+
+test_test_helper_reaps_a_registered_process_it_does_not_own_as_a_job() {
+  local tmp holder_file kid_file holder kid rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-grandchild.XXXXXX")
+  holder_file="$tmp/holder.pid"
+  kid_file="$tmp/kid.pid"
+  # The registered process is a grandchild of the test shell, started by a helper
+  # that stays alive - the shape of a watcher armed by another script. It is never
+  # a job of the test shell, so only the descendant graph can find it.
+  cat >"$tmp/failing.test.sh" <<SH
+#!/usr/bin/env bash
+set -u
+. "$ROOT/tests/lib.sh"
+bash -c 'bash -c "trap \"\" TERM HUP; exec sleep 600" & printf "%s\n" "\$!" >"\$1"; wait' _ "$kid_file" &
+printf '%s\n' "\$!" >"$holder_file"
+kid=
+i=0
+while [ "\$i" -lt 300 ]; do
+  kid=\$(cat "$kid_file" 2>/dev/null || true)
+  [ -n "\$kid" ] && break
+  sleep 0.1
+  i=\$((i + 1))
+done
+[ -n "\$kid" ] || fail "the helper never reported its child"
+fm_test_track_pid "\$kid"
+fail "deliberate failure before this test reaps the process it registered"
+SH
+  chmod +x "$tmp/failing.test.sh"
+
+  rc=0
+  bash "$tmp/failing.test.sh" >"$tmp/out" 2>&1 || rc=$?
+  holder=$(cat "$holder_file" 2>/dev/null || true)
+  kid=$(cat "$kid_file" 2>/dev/null || true)
+  grandchild_cleanup() {
+    [ -z "$holder" ] || kill -KILL "$holder" 2>/dev/null || true
+    [ -z "$kid" ] || kill -KILL "$kid" 2>/dev/null || true
+    rm -rf "$tmp"
+  }
+  [ "$rc" -ne 0 ] || { grandchild_cleanup; fail "the failing fixture should exit non-zero"; }
+  [ -n "$kid" ] || { grandchild_cleanup; fail "fixture recorded no registered pid"; }
+  if ! wait_pid_gone "$kid" 200; then
+    grandchild_cleanup
+    fail "registered pid $kid outlived the test that registered it"
+  fi
+  grandchild_cleanup
+  pass "a registered process that is not one of the test shell's jobs is still reaped"
+}
+
 test_test_helper_reaps_processes_a_failing_script_left_running() {
   local tmp pid_file leaked rc
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-helper-reap.XXXXXX")
@@ -891,3 +1015,5 @@ test_lane_reaps_a_leaked_child_and_keeps_going
 test_lane_times_out_a_hung_script_and_names_it
 test_lane_output_is_complete_and_ordered_without_a_shared_pipe
 test_test_helper_reaps_processes_a_failing_script_left_running
+test_test_helper_reaps_a_registered_process_it_does_not_own_as_a_job
+test_interrupted_lane_releases_its_output_and_reaps_the_running_script
