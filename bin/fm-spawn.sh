@@ -2735,8 +2735,10 @@ if [ "$BACKEND" = herdr ]; then
   # The Space is reported only on a fresh spawn, where HERDR_PROJECTED records
   # what this spawn actually did: 1 means a projected space holding exactly
   # this one task, which carries the task's own role, and 0 means the shared
-  # per-home container, which is a home and says so. A relaunch replaces only
-  # the pane, so it re-badges the worker above and skips the Space report;
+  # per-home container, which is a home and says so. A relaunch adopts the
+  # recorded endpoint rather than creating one, so it re-badges the worker
+  # above to refresh facts that can change while the endpoint stays the same
+  # (docs/herdr-backend.md "Sidebar legibility") and skips the Space report;
   # that is lossless because reported tokens persist per key until overwritten
   # (docs/verification/runtime-backends.md "Sidebar legibility metadata").
   if [ "$RELAUNCH" -ne 1 ]; then

@@ -103,7 +103,10 @@ Reporting never renames a workspace, never renames a tab, and never touches any 
 Every report is best-effort: a refused or unsupported call is absorbed, because a sidebar row is never a reason to fail a spawn.
 
 Reporting happens at spawn time only, and no path retitles a worker that is already running.
-An existing fleet therefore converges as its tasks turn over, and a relaunch re-badges only the worker pane, whose replacement carries no metadata yet.
+An existing fleet therefore converges as its tasks turn over, and a relaunch re-badges only the worker pane.
+A relaunch adopts the recorded endpoint rather than creating one, so that same pane keeps the metadata it already carries; the re-report is a refresh that picks up facts which can change between spawns while the endpoint stays the same.
+The concrete case is promotion: `bin/fm-promote.sh` flips a task from scout to ship in place on the same endpoint without going through the spawn path, so the badge still reads scout until a later relaunch re-reads that kind and re-badges the pane as crew.
+Promotion alone therefore does not update the sidebar, and the refresh is not a guarantee that a badge is continuously current.
 A relaunch leaves the Space's existing tokens untouched, which is lossless because reported tokens persist per key until overwritten, so the Space keeps the role and scope its original spawn reported.
 
 `tests/fm-backend-herdr.test.sh` covers the role vocabulary, the reported argv, omission of unknown facts, independence of the name and the tokens, absorption of a refusal, the stable home-Space scope, and the guarantee that reporting emits no rename, label, create, or close.
