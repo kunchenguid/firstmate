@@ -1,6 +1,6 @@
 ---
 name: epic-handoff
-description: Promote a reviewed, captain-signed epic into the home backlog, then guide the ordered next steps it deliberately does not do. Wraps bin/fm-umbrella-promote.sh, which validates the epic and every story's frontmatter, moves the epic into the home's plans, and seeds each story into the backlog with ids and tags derived from the frontmatter so nothing orphans. Use after /epic-review passes and the captain signs epic.md. Fifth skill in the epic pipeline; guides toward dispatch and /epic-ship.
+description: Promote a reviewed, captain-signed epic into the home backlog, then guide the ordered next steps it deliberately does not do. Wraps bin/fm-umbrella-promote.sh, which validates the epic and every story's frontmatter, makes the epic canonical in the home's plans (leaving a back-symlink in the umbrella so design continues), and seeds each story into the backlog with ids and tags derived from the frontmatter so nothing orphans. Use after /epic-review passes and the captain signs epic.md. Fifth skill in the epic pipeline; guides toward dispatch and /epic-ship.
 user-invocable: true
 ---
 
@@ -29,7 +29,7 @@ It:
 
 1. Locates the designed epic under the umbrella.
 2. Validates the epic slug and repos, and every story's `id:` / `epic:` / `repo:` / `pr_base:`, and that every involved repo is registered - writing nothing if any check fails.
-3. Moves the epic directory into the home's plans, where dispatch reads it.
+3. Makes the epic canonical in the home's plans (where dispatch reads it) and leaves a back-symlink in the umbrella pointing to it, so the captain keeps designing the epic in the lab with edits writing through to the real files - one source of truth, no separate "materialize on done" step.
 4. Seeds each story into the backlog, deriving the backlog id and `[<epic>]` tag from the story frontmatter so they match the story files by construction - the reason standard frontmatter matters.
 5. Stops at the sign-off gate and prints the remaining steps.
 
@@ -44,7 +44,7 @@ After a successful promote, the ordered next steps stay human- and firstmate-own
    Defer to `fm-epic-branch.sh --help` for its exact contract.
 3. firstmate dispatches the queued stories - each branches from `epic/<slug>` and ships as a reviewed PR into it.
 4. Once the epic is complete, ship it with `/epic-ship`.
-5. Tear down the umbrella lab, which keeps `DESIGN.md` and discards the scratch worktrees.
+5. Tear down the umbrella lab, which keeps `DESIGN.md` and discards the scratch worktrees; the epic stays canonical in the home's plans regardless.
 
 Never auto-sign, auto-branch, or auto-dispatch - name the steps and let the captain and firstmate drive them.
 

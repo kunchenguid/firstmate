@@ -72,7 +72,7 @@ test_promote_moves_and_seeds() {
   expect_code 0 "$RC" "promote failed on a clean fixture"
 
   assert_present "$home/data/plans/ep/epic.md" "epic dir not moved into data/plans/"
-  assert_absent "$home/umbrellas/u/plans/ep" "epic dir left behind in the umbrella"
+  [ -L "$home/umbrellas/u/plans/ep" ] || fail "umbrella epic copy is not a back-symlink"
   assert_grep "ep" "$home/umbrellas/u/.promoted" "promote marker not written"
 
   # Every story seeded with its REAL id and the epic's tag, matching by construction.
@@ -86,6 +86,61 @@ test_promote_moves_and_seeds() {
   # Never auto-signs / auto-dispatches.
   assert_not_contains "$OUT" "signed_off: added" "must not claim to have signed"
   pass "promote moves the epic dir and seeds stories with frontmatter-derived id+tag"
+}
+
+# --- back-symlink: canonical epic in the home, symlink in the umbrella --------
+# The umbrella must keep a back-symlink to the canonical epic so design continues
+# in the lab, with ONE source of truth and no scanner double-count.
+test_backsymlink_canonical_and_single_count() {
+  local home; home=$(make_home backlink)
+  run "$home" u
+  expect_code 0 "$RC" "promote failed"
+
+  local canon="$home/data/plans/ep" link="$home/umbrellas/u/plans/ep"
+
+  # (1) canonical epic is a REAL directory in the home.
+  { [ -d "$canon" ] && [ ! -L "$canon" ]; } || fail "data/plans/ep is not a real directory"
+
+  # (2) the umbrella copy is a symlink resolving to the canonical dir.
+  [ -L "$link" ] || fail "umbrella epic copy is not a symlink"
+  [ "$(cd "$link" && pwd -P)" = "$(cd "$canon" && pwd -P)" ] \
+    || fail "umbrella symlink does not resolve to data/plans/ep"
+
+  # (3) editing THROUGH the symlink writes to the real file.
+  printf 'edited via umbrella\n' >> "$link/epic.md"
+  assert_grep "edited via umbrella" "$canon/epic.md" "edit through the symlink did not reach the canonical file"
+
+  # (4) no double-count: even a scan that FOLLOWS the symlink resolves every
+  #     epic.md to ONE canonical path (dedupe by realpath).
+  local uniq
+  uniq=$(find -L "$home" -name epic.md -type f 2>/dev/null \
+    | while read -r f; do (cd "$(dirname "$f")" && pwd -P); done | sort -u | wc -l | tr -d ' ')
+  [ "$uniq" = "1" ] || fail "epic counted $uniq times (double-count via the umbrella symlink)"
+
+  # (5) re-run is idempotent: no error, symlink intact and still on target.
+  run "$home" u
+  expect_code 0 "$RC" "idempotent re-run refused"
+  [ -L "$link" ] || fail "re-run destroyed the back-symlink"
+  [ "$(cd "$link" && pwd -P)" = "$(cd "$canon" && pwd -P)" ] || fail "re-run broke the symlink target"
+  pass "epic is canonical in the home, back-symlinked in the umbrella, editable through it, and counted once"
+}
+
+# --- heal: an older plain-mv promote (no back-symlink) is repaired on re-run --
+test_rerun_heals_missing_backsymlink() {
+  local home; home=$(make_home heal)
+  # Simulate a promote done by the OLD script: epic moved, marker written, but
+  # NO back-symlink left in the umbrella.
+  mkdir -p "$home/data/plans"
+  mv "$home/umbrellas/u/plans/ep" "$home/data/plans/ep"
+  printf 'ep\n' > "$home/umbrellas/u/.promoted"
+  [ -e "$home/umbrellas/u/plans/ep" ] && fail "fixture already has a back-symlink"
+
+  run "$home" u
+  expect_code 0 "$RC" "reconcile re-run failed"
+  [ -L "$home/umbrellas/u/plans/ep" ] || fail "re-run did not heal the missing back-symlink"
+  [ "$(cd "$home/umbrellas/u/plans/ep" && pwd -P)" = "$(cd "$home/data/plans/ep" && pwd -P)" ] \
+    || fail "healed symlink points at the wrong target"
+  pass "a re-run heals an older plain-mv promote by creating the back-symlink"
 }
 
 # --- idempotent re-run: clean no-op ------------------------------------------
@@ -198,6 +253,8 @@ test_locate_errors() {
 }
 
 test_promote_moves_and_seeds
+test_backsymlink_canonical_and_single_count
+test_rerun_heals_missing_backsymlink
 test_rerun_is_noop
 test_partial_resume
 test_refuses_case_mismatch_seed

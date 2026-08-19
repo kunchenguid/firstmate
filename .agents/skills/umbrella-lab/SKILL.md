@@ -59,7 +59,8 @@ Parallel-on-different-harness never means autonomous design crews: architecture 
 ## From a designed epic to queued backlog work
 
 When the umbrella's design produces a delegable epic - a `plans/<epic-dir>/epic.md` plus `stories/*.md` (the harness-agnostic standard) - promote it with `bin/fm-umbrella-promote.sh <umbrella-id>`, run with `FM_HOME` set to this home.
-It moves the epic dir into `data/plans/` and seeds every story into the backlog, deriving each backlog id and `[<epic>]` tag from the story frontmatter so they match the story files by construction.
+It makes `data/plans/<epic-dir>` the canonical epic and leaves a back-symlink in the umbrella (`umbrellas/<id>/plans/<epic-dir>`) pointing to it, so you keep designing the epic in the lab while firstmate dispatches from `data/plans` - one source of truth, no duplicate, and no separate "materialize on done" step.
+It also seeds every story into the backlog, deriving each backlog id and `[<epic>]` tag from the story frontmatter so they match the story files by construction.
 That construction is the whole point: a hand-seed whose ids or tags drift from the story files (`lh-01`/`[lh]` against story files `LH-01`/`aimica-learning-hub`) leaves orphan tasks and a doubled epic in the dashboard, which is exactly what two home firstmates did by hand.
 The helper is idempotent and fail-closed - all validation runs before any write, a re-run is a safe no-op, and a mismatched prior seed is refused rather than duplicated - and it STOPS at the sign-off gate: it never signs the epic, cuts a branch, or dispatches.
 Those remain human/firstmate steps, and the helper prints them: review `DESIGN.md` and sign `epic.md`, `bin/fm-epic-branch.sh create <slug> <repo>` per involved repo, dispatch the queued stories, then tear down the umbrella.
