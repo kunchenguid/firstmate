@@ -335,10 +335,18 @@ fm_backend_required_tool_available() {  # <backend> <tool>
 # fm_meta_get: the LAST value of `key=` in <meta-file>, or empty (never
 # errors) if the file or key is absent. Mirrors the ad hoc `grep '^key=' |
 # tail -1 | cut -d= -f2-` snippet every fm-*.sh script used to repeat inline.
+# Implemented as a single awk pass (one subprocess) instead of the previous
+# grep | tail | cut pipeline (three subprocesses): this is one of the
+# hottest helpers in the codebase, called from every fm-*.sh script that
+# reads task metadata, so cutting two forks per call adds up across a
+# session with many tasks/hooks.
 fm_meta_get() {  # <meta-file> <key>
   local meta=$1 key=$2
   [ -f "$meta" ] || return 0
-  grep "^$key=" "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  awk -v key="$key" '
+    $0 ~ "^" key "=" { line = $0 }
+    END { if (line != "") { sub("^" key "=", "", line); print line } }
+  ' "$meta" 2>/dev/null || true
 }
 
 # fm_backend_of_meta: the backend recorded in <meta-file>, defaulting to
