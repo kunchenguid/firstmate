@@ -2798,6 +2798,13 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   while :; do
     if fm_backend_herdr_send_key "$target" Enter; then
       enter_sent=1
+    elif [ "$enter_sent" -eq 0 ]; then
+      i=$((i + 1))
+      if [ "$i" -ge "$retries" ]; then
+        printf 'send-failed'
+        return 0
+      fi
+      continue
     fi
     if [ "$baseline" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
