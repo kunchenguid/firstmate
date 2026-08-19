@@ -37,6 +37,7 @@ This preference is local to each Firstmate home and is not part of secondmate in
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
 Done pruning only ever moves closed records into that archive, and the decision-hold completion gate reads resolved captain decisions from it, so `done_keep` never needs raising for that gate (see [`docs/decision-hold-lifecycle.md`](decision-hold-lifecycle.md)).
+That gate reads the tracked archive path directly rather than re-resolving this config, so pointing `archive` elsewhere makes it report pruned decisions as absent and keep refusing teardown.
 When the default backend is selected and compatible `tasks-axi` is on `PATH`, firstmate uses its verbs for routine backlog mutations.
 Secondmate handoffs are separate and unconditional: `fm-backlog-handoff.sh` keeps only its own fleet-level validation and always delegates the item move to `tasks-axi mv`, the single owner of the backlog format.
 It moves in-scope `## Queued` items only and refuses `## In flight` and historical `## Done` records, which stay with their home for pruning or archiving.
