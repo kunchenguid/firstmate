@@ -1510,7 +1510,7 @@ SH
     FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_numeric_file "$state/.stale-since-$key" 100; then
     reap "$pid"
     fail "current run-step behind unknown liveness surfaced instead of reclaiming the pane: $(cat "$out")"
   fi
