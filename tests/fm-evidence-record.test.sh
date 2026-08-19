@@ -14,8 +14,9 @@
 #   (g) an unsafe task id never constructs a path
 #   (h) fm-pr-check.sh's own metadata rewrite preserves the record
 #   (i) re-recording while a merge poll is armed keeps that poll's metadata valid
-#   (j) the keys a relaunch appends after pr= keep that armed poll valid too,
-#       while an unknown key appearing there still invalidates the record
+#   (j) any well-formed key a later writer appends after pr= keeps that armed
+#       poll valid, including one this parser has never seen, while a line that
+#       is not a record line at all still invalidates the record
 #   (k) an interrupted write leaves no temp file, no held lock, and no partial
 #       record behind
 set -u
@@ -244,10 +245,13 @@ test_record_survives_pr_metadata_rewrite() {
 # The evidence keys are not the only ones a legitimate writer appends after pr=.
 # Relaunching a crewmate to address review comments rewrites the same record:
 # bin/fm-spawn.sh strips and re-appends traceparent= at the end when trace
-# context is on, and appends control_relaunch_tx= after the preserved pr= line.
-# The watcher revalidates the armed poll against that metadata, so an armed
-# merge poll has to survive both without the record becoming invalid.
-test_relaunch_appended_keys_keep_the_armed_poll_valid() {
+# context is on, and appends control_relaunch_tx= after the preserved pr= line,
+# and bin/fm-decision-hold.sh appends its review record there too. Enumerating
+# those keys was wrong three times running, so the parse tolerates any
+# well-formed key=value line instead. The key below is deliberately one no
+# writer emits and the parser has never seen: this assertion is the regression
+# the tolerant shape exists for, and it fails against an allowlist.
+test_unrecognised_appended_keys_keep_the_armed_poll_valid() {
   local case_dir meta
   case_dir=$(make_case relaunch-keys)
   meta="$case_dir/state/task-e1.meta"
@@ -265,14 +269,48 @@ test_relaunch_appended_keys_keep_the_armed_poll_valid() {
   printf 'control_relaunch_tx=tx-2026-08-19-1\n' >> "$meta"
   poll_artifacts_valid "$case_dir" \
     || fail "relaunch-keys: a control relaunch transaction invalidated the armed merge poll"
+  printf 'decisions_reviewed=1\ndecision_keys=stale-evidence\n' >> "$meta"
+  poll_artifacts_valid "$case_dir" \
+    || fail "relaunch-keys: a decision-hold review record invalidated the armed merge poll"
 
-  # The allowlist stays an allowlist: an unknown key after pr= is still refused,
-  # which is what catches a line injected through a forge-supplied value.
-  printf 'window=unexpected\n' >> "$meta"
-  if poll_artifacts_valid "$case_dir"; then
-    fail "relaunch-keys: an unknown key after pr= was accepted"
-  fi
-  pass "the keys a relaunch appends after pr= keep an armed merge poll valid, and unknown ones still do not"
+  # The fourth appender this parser has never been taught about. Nothing writes
+  # this key; that is the point. A future writer must not silently become a
+  # refused merge on valid work.
+  printf 'some_future_writer_key=whatever it records\n' >> "$meta"
+  poll_artifacts_valid "$case_dir" \
+    || fail "relaunch-keys: a key the parser has never seen invalidated the armed merge poll"
+  pass "a key the parser has never seen keeps an armed merge poll valid"
+}
+
+# Tolerating an unknown key must not become tolerating an unparsable record.
+# These are the shapes a value carrying an embedded newline injects, and they
+# are what the positional check after pr= still exists to catch.
+test_malformed_lines_after_pr_still_invalidate_the_record() {
+  local case_dir meta base
+
+  for base in bare-fragment empty-line no-key leading-space second-pr; do
+    case_dir=$(make_case "malformed-$base")
+    meta="$case_dir/state/task-e1.meta"
+    run_record "$case_dir" task-e1 "$SHA_A" 'full suite 4208 pass' > /dev/null \
+      || fail "malformed-$base: record failed"
+    arm_merge_poll "$case_dir" "$SHA_A" https://github.com/example/repo/pull/12 \
+      || fail "malformed-$base: arming the merge poll failed"
+    poll_artifacts_valid "$case_dir" \
+      || fail "malformed-$base: the freshly armed merge poll was already invalid"
+
+    case "$base" in
+      bare-fragment) printf 'https://github.com/attacker/repo/pull/99\n' >> "$meta" ;;
+      empty-line)    printf '\n' >> "$meta" ;;
+      no-key)        printf '=orphaned value\n' >> "$meta" ;;
+      leading-space) printf ' window=indented\n' >> "$meta" ;;
+      second-pr)     printf 'pr=https://github.com/attacker/repo/pull/99\n' >> "$meta" ;;
+    esac
+
+    if poll_artifacts_valid "$case_dir"; then
+      fail "malformed-$base: a malformed line after pr= was accepted"
+    fi
+  done
+  pass "a fragment, an empty line, a keyless line, an indented line, and a second pr= after pr= all still invalidate the record"
 }
 
 # bin/fm-pr-check.sh, the other writer of this record, cleans up its temp file
@@ -337,5 +375,6 @@ test_refuses_malformed_commit
 test_refuses_multiline_note
 test_refuses_missing_and_unsafe_tasks
 test_record_survives_pr_metadata_rewrite
-test_relaunch_appended_keys_keep_the_armed_poll_valid
+test_unrecognised_appended_keys_keep_the_armed_poll_valid
+test_malformed_lines_after_pr_still_invalidate_the_record
 test_interrupted_write_leaves_no_temp_or_held_lock

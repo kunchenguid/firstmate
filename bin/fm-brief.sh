@@ -54,6 +54,11 @@
 # on through bin/fm-evidence-record.sh, and bin/fm-pr-merge.sh refuses to merge
 # unless that commit is still the PR head. local-only and scout scaffolds omit it
 # because neither reaches that merge path.
+# That section must stay ABOVE every line that tells the worker it is finished,
+# and each finishing line must name recording as part of its own condition. A
+# worker reads the definition of done in order and stops at the first line that
+# says it may; an evidence section placed after that line is unreachable in the
+# ordinary case, which is exactly how the merge guard's own input went missing.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -384,11 +389,12 @@ case "$MODE" in
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+The task is complete only when committed on your branch AND the commit your reported verification was measured on is recorded.
 
 $EVIDENCE_SECTION
+
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, record the commit your reported verification was measured on as above, then append \`done: PR {url}\` to the status file and stop.
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
   local-only)
@@ -411,7 +417,10 @@ EOF
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
+The task is complete only when committed on your branch AND the commit your reported verification was measured on is recorded.
+
+$EVIDENCE_SECTION
+
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
@@ -426,9 +435,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
-
-$EVIDENCE_SECTION
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), re-record the commit your reported verification was measured on as above - the pipeline has almost certainly committed since you last measured - and only then append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
     ;;
 esac

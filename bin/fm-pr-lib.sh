@@ -379,6 +379,32 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# fm_pr_meta_key_line <line>: true when a metadata line is a well-formed
+# `key=value` record line, where the key is a bare identifier. Every metadata
+# key firstmate writes has that shape, so the test admits a key this parser has
+# never seen while still rejecting a line that is not a record line at all.
+fm_pr_meta_key_line() {
+  local LC_ALL=C
+  [[ "${1-}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]
+}
+
+# What this parse tolerates after pr=, and what it still refuses.
+#
+# Tolerated: any well-formed `key=value` line whose key this parser does not
+# recognise. Enumerating the permitted keys was tried and was wrong three times
+# running - the evidence recorder, bin/fm-spawn.sh's traceparent and relaunch
+# transaction, and bin/fm-decision-hold.sh's review record each append after
+# pr=, and nothing stops a fourth writer appearing. Every such writer was a
+# latent refusal of a merge on valid work, found only when a correct merge was
+# wrongly blocked. Position in the record carries no meaning for keys this
+# function does not read, so an unrecognised key is not evidence of corruption.
+#
+# Still refused, loudly: a line that is not a record line at all (no `key=`
+# prefix, an empty line, or a fragment left by a truncated write), a second pr=
+# line, a pr= whose URL does not parse, and a pr_head= that is not a commit.
+# Those are the shapes a value carrying an embedded newline would inject, and
+# they remain the reason this positional check exists. Do not relax this into
+# accepting any line: the `key=value` shape is the whole remaining guard.
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=
@@ -409,22 +435,10 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
-      # A re-measurement recorded after the merge poll was armed rewrites the
-      # evidence lines to the end of the record, so they legitimately appear
-      # after pr=. Their own validity is enforced by fm_pr_evidence_read, which
-      # refuses the merge on a malformed record rather than passing it here.
-      evidence_head=*|evidence_note=*)
-        ;;
-      # bin/fm-spawn.sh appends both of these after pr= as well:
-      # spawn_record_traceparent strips the old traceparent= line and appends
-      # the new one at the end of the record, and control_relaunch_tx= is
-      # emitted after preserve_relaunch_meta has already re-emitted pr=.
-      traceparent=*|control_relaunch_tx=*)
-        ;;
       *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
+        if [ "$seen_pr" -eq 1 ] && ! fm_pr_meta_key_line "$line"; then
+          post_pr_invalid=1
+        fi
         ;;
     esac
   done < "$file"

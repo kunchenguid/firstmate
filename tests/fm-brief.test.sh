@@ -354,6 +354,25 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# assert_evidence_precedes_every_finish <brief> <label>: the evidence section
+# must appear before every line that permits the worker to stop, and each such
+# line must itself require the recording.
+assert_evidence_precedes_every_finish() {
+  local brief=$1 label=$2 section_line finish_line
+  section_line=$(grep -n '^## Record the commit your evidence was measured on$' "$brief" | head -1 | cut -d: -f1)
+  [ -n "$section_line" ] || fail "$label: no evidence section to order"
+  # A finishing line is one that permits a SUCCESSFUL stop: it appends a `done:`
+  # state. Abort and escalation paths (blocked, needs-decision, failed) also stop
+  # the worker but never reach a merge, so they impose no ordering.
+  while IFS=: read -r finish_line _; do
+    [ -n "$finish_line" ] || continue
+    [ "$section_line" -lt "$finish_line" ] \
+      || fail "$label: the finishing line at $finish_line comes before the evidence section at $section_line - a worker reading in order stops there and never reaches it"
+  done < <(grep -n 'append `done:' "$brief")
+  grep -q 'record the commit your reported verification was measured on as above' "$brief" \
+    || fail "$label: the finishing line must make recording part of its own condition, not an appendix"
+}
+
 # The evidence-recording contract is what makes bin/fm-pr-merge.sh's refusal
 # reachable: only the worker knows which commit its figures came from. It belongs
 # to the two PR-based modes and to neither of the paths that never reach a PR
@@ -379,6 +398,14 @@ test_pr_modes_require_recording_the_measured_commit() {
       "$id: brief must require re-recording, which is what a final-head instruction cannot win"
     assert_grep "The merge refuses when the recorded commit is not the pull request's head" "$brief" \
       "$id: brief must state the consequence that makes the record load-bearing"
+
+    # The ordering is the contract, not a nicety. A worker reads the definition
+    # of done in order and stops at the first line that says it may; an evidence
+    # section below that line is unreachable in the ordinary case, which is how
+    # the merge guard's own input went missing in the first place. Assert the
+    # section precedes EVERY finishing line, and that each finishing line names
+    # recording as part of its own condition rather than leaving it an appendix.
+    assert_evidence_precedes_every_finish "$brief" "$id"
   done
 
   for id in brief-evidence-local brief-evidence-scout; do
