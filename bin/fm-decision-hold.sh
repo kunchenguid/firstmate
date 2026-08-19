@@ -249,17 +249,32 @@ task_show_archived() {  # <id>
 
 # The durable record wherever it now lives. Read-only callers use this; anything
 # that goes on to mutate must still resolve its target through task_show.
+# tasks-axi prints its NOT_FOUND block on stdout, so the live miss is captured and
+# dropped here: an archived hit must yield the archived record alone, and a total
+# miss nothing at all, rather than leaving the noise for a caller to tolerate.
 task_show_durable() {  # <id>
-  task_show "$1" || task_show_archived "$1"
+  local show
+  if show=$(task_show "$1"); then
+    printf '%s\n' "$show"
+    return 0
+  fi
+  task_show_archived "$1"
 }
 
 # The one absence message, which distinguishes an identity this home has never
-# held from one retention has moved beyond tasks-axi's reach.
+# held from one retention has moved beyond tasks-axi's reach - and both of those
+# from an archive this home could not read, which proves nothing either way.
 absent_decision_message() {  # <hold-id> <noun>
-  local id=$1 noun=$2
-  if task_show_archived "$id" >/dev/null 2>&1; then
+  local id=$1 noun=$2 status=0
+  task_show_archived "$id" >/dev/null 2>&1 || status=$?
+  if [ "$status" -eq 0 ]; then
     printf '%s %s was archived by backlog retention into %s, which tasks-axi cannot rewrite' \
       "$noun" "$id" "$(fm_tasks_axi_archive_path "$FM_HOME")"
+    return 0
+  fi
+  if [ "$status" -ne 1 ]; then
+    printf '%s %s is absent from %s, and the done archive %s could not be read, so this home cannot tell whether retention already filed it' \
+      "$noun" "$id" "$(fm_tasks_axi_backlog_path "$FM_HOME")" "$(fm_tasks_axi_archive_path "$FM_HOME")"
     return 0
   fi
   printf '%s %s is absent from %s and its done archive' \
@@ -311,6 +326,20 @@ origin_open_decisions() {  # <origin-id>
     esac
   fi
   printf '%s' "$open"
+}
+
+# Whether <origin>'s status log still carries an open structured decision for
+# <key>, which keeps the origin refused exactly as a recorded inventory key does.
+origin_has_open_decision() {  # <origin-id> <decision-key>
+  local origin=$1 key=$2 open open_key _verb _summary
+  open=$(origin_open_decisions "$origin")
+  [ -n "$open" ] || return 1
+  while IFS=$'\t' read -r open_key _verb _summary; do
+    [ "$open_key" = "$key" ] && return 0
+  done <<EOF
+$open
+EOF
+  return 1
 }
 
 body_has_resolution_record() {  # <hold-body>
@@ -483,9 +512,13 @@ command_hold() {
     # An archived row always renders done, so a close that never recorded the
     # captain's answer must not be reported as a decision the captain resolved.
     if [ "$archived" = 1 ] && [ "$state" = "done" ] && ! body_has_resolution_record "$existing_body"; then
+      # verify refuses this origin for either reason, so the consequence is stated
+      # whenever one of them holds and omitted when neither does.
       inventoried=''
       if list_has_key "$(meta_value "$STATE/$origin.meta" decision_keys)" "$key"; then
         inventoried=", and $key stays in the recorded decision inventory of $origin, so verify keeps refusing this origin"
+      elif origin_has_open_decision "$origin" "$key"; then
+        inventoried=", and $origin still carries an open structured decision for $key, so verify keeps refusing this origin"
       fi
       fail "captain decision $id was closed with no recorded captain answer and then archived by backlog \
 retention into $(fm_tasks_axi_archive_path "$FM_HOME"), which tasks-axi cannot rewrite; neither repair \

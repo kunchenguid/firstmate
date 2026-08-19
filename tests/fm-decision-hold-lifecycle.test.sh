@@ -923,6 +923,8 @@ test_archived_unanswered_hold_outside_the_inventory_states_no_false_consequence(
     "the refusal did not report that backlog retention had archived the record"
   assert_no_grep "recorded decision inventory" "$home/uninventoried-hold.err" \
     "the refusal claimed an inventory consequence for a key this origin never recorded"
+  assert_no_grep "so verify keeps refusing this origin" "$home/uninventoried-hold.err" \
+    "the refusal claimed a consequence for a key that neither the inventory nor the status log keeps alive"
   assert_no_grep "$hold" "$home/data/backlog.md" \
     "the refused hold recreated a live backlog row for the archived decision"
 
@@ -933,6 +935,169 @@ test_archived_unanswered_hold_outside_the_inventory_states_no_false_consequence(
   run_decisions "$home" verify "$id" >/dev/null \
     || fail "verification refused an origin whose archived decision was never inventoried"
   pass "an uninventoried archived decision is refused without a false inventory consequence"
+}
+
+# The durable read consults the active backlog first, and tasks-axi reports that
+# live miss on stdout. An archived hit must therefore yield the archived record
+# alone: every verdict the script reaches about a retained decision has to be
+# decided by that record, with no live-miss diagnostic mixed into it.
+test_archived_record_alone_drives_the_durable_read() {
+  local home id hold out err
+  home=$(make_home archived-durable-read)
+  id=sample-durable-read-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample durable read" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the durable-read origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample durable read\n\nOne captain choice was raised.\n' \
+    > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample) \
+    || fail "could not register the durable-read hold"
+  printf 'Place the sample control on the left.\n' > "$home/placement-decision.txt"
+  run_decisions "$home" answer "$id" placement --decision-file "$home/placement-decision.txt" >/dev/null \
+    || fail "could not record the captain answer on the placement decision"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  assert_no_grep "$hold" "$home/data/backlog.md" \
+    "retention did not remove the answered decision from the active backlog"
+
+  # `repair` reaches its idempotent branch only by parsing the resolution block of
+  # the record the durable read returned, so its verdict comes from that record.
+  out=$(run_decisions "$home" repair "$id" placement \
+    --decision-file "$home/placement-decision.txt" 2> "$home/durable-repair.err") \
+    || fail "repair refused an archived record carrying the captain's own answer: $(cat "$home/durable-repair.err")"
+  assert_contains "$out" "repaired: $hold" "repair did not attest the archived captain decision"
+  assert_not_contains "$out" "NOT_FOUND" "the live-backlog miss reached the operator through repair"
+  err=$(cat "$home/durable-repair.err")
+  assert_not_contains "$err" "NOT_FOUND" "the live-backlog miss reached the operator through repair"
+  assert_not_contains "$err" "not found in this backlog" \
+    "the live-backlog miss reached the operator through repair"
+
+  # And the verdict really is read off that record rather than from its mere
+  # presence: a captain decision the archived record does not carry is rejected.
+  printf 'Place the sample control on the right instead.\n' > "$home/drifted-placement.txt"
+  if run_decisions "$home" repair "$id" placement --decision-file "$home/drifted-placement.txt" \
+    > "$home/drifted-repair.out" 2> "$home/drifted-repair.err"; then
+    fail "repair accepted a captain decision the archived record does not carry"
+  fi
+  assert_grep "records a different captain decision" "$home/drifted-repair.err" \
+    "repair did not compare the supplied decision against the archived record"
+  pass "an archived hit drives the durable read with no live-miss diagnostic in it"
+}
+
+# An archive this home could not read proves nothing about what it holds. The gate
+# stays shut either way, but it must say the archive was unreadable instead of
+# claiming the captain decision is absent from a file it never managed to open.
+test_unreadable_archive_is_reported_as_unreadable_rather_than_absence() {
+  local home id hold archive rc=0
+  home=$(make_home unreadable-archive)
+  id=sample-unreadable-archive-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample unreadable archive" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the unreadable-archive origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample unreadable archive\n\nOne captain choice was raised.\n' \
+    > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample) \
+    || fail "could not register the unreadable-archive hold"
+  run_decisions "$home" complete "$id" placement >/dev/null \
+    || fail "completion failed before the captain answer was recorded"
+  printf 'Place the sample control on the left.\n' > "$home/placement-decision.txt"
+  run_decisions "$home" answer "$id" placement --decision-file "$home/placement-decision.txt" >/dev/null \
+    || fail "could not record the captain answer on the placement decision"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  assert_no_grep "$hold" "$home/data/backlog.md" \
+    "retention did not remove the answered decision from the active backlog"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "the gate refused an answered decision while its archive was readable"
+
+  archive="$home/data/done-archive.md"
+  chmod 000 "$archive" || fail "could not take read permission off the archive"
+  if [ -r "$archive" ]; then
+    # A user who can read a mode-000 file cannot stage this fixture at all.
+    chmod 644 "$archive"
+    pass "skipped: this user reads the archive regardless of its mode"
+    return 0
+  fi
+  run_decisions "$home" verify "$id" > "$home/unreadable-verify.out" 2> "$home/unreadable-verify.err" || rc=$?
+  chmod 644 "$archive"
+  expect_code 1 "$rc" "an unreadable archive changed how the gate refuses"
+  assert_grep "could not be read" "$home/unreadable-verify.err" \
+    "the gate did not report that the done archive could not be read"
+  assert_no_grep "and its done archive" "$home/unreadable-verify.err" \
+    "the gate claimed the captain decision was absent from an archive it never read"
+  assert_grep "$archive" "$home/unreadable-verify.err" \
+    "the gate did not name the archive it could not read"
+
+  # The archive was never the problem with the record itself: once it is readable
+  # again the same decision satisfies the same gate, so the refusal was about the
+  # read and the message that named it was the accurate one.
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "the gate kept refusing an answered decision after its archive became readable again"
+  pass "an unreadable archive is reported as unreadable rather than as absence"
+}
+
+# The recorded inventory is not the only thing that keeps an origin refused: an
+# open structured decision in its status log does too. The consequence the refusal
+# states must follow from whichever one actually holds.
+test_archived_unanswered_hold_states_the_open_structured_decision_consequence() {
+  local home id hold
+  home=$(make_home archived-open-status)
+  id=sample-open-status-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample open status decision" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the open-status origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample open status review\n\nOne captain choice was raised.\n' \
+    > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample) \
+    || fail "could not register the open-status hold"
+  # Reviewed with an empty inventory, exactly as a surface with nothing to settle
+  # records it, so the key is never entered into the origin's recorded inventory.
+  run_decisions "$home" complete "$id" --none >/dev/null \
+    || fail "completion refused an origin with no inventoried decision"
+  assert_no_grep "decision_keys=placement" "$home/state/$id.meta" \
+    "the fixture must reach the re-hold with this key outside the recorded inventory"
+
+  # A later review pass raises the decision in the status log, and the hold is
+  # then closed out of band and archived with no captain answer on it.
+  printf 'needs-decision [key=placement]: choose the sample placement\n' > "$home/state/$id.status"
+  tasks_in "$home" "done" "$hold" --keep 0 >/dev/null \
+    || fail "could not reproduce an out-of-band close followed by retention"
+  assert_no_grep "Resolution recorded by fm-decision-hold" "$home/data/done-archive.md" \
+    "the unanswered fixture must carry no captain answer"
+
+  # The consequence really holds: the open status decision alone shuts the gate.
+  if run_decisions "$home" verify "$id" > "$home/open-status-verify.out" 2> "$home/open-status-verify.err"; then
+    fail "the gate passed an origin carrying an open structured decision with no durable answer"
+  fi
+
+  if run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample \
+    > "$home/open-status-hold.out" 2> "$home/open-status-hold.err"; then
+    fail "re-holding an archived decision with no recorded captain answer was accepted"
+  fi
+  assert_grep "closed with no recorded captain answer" "$home/open-status-hold.err" \
+    "the refusal did not report that the decision was closed with no captain answer"
+  assert_grep "still carries an open structured decision for placement" "$home/open-status-hold.err" \
+    "the refusal omitted the consequence of the open structured decision that keeps this origin refused"
+  assert_grep "so verify keeps refusing this origin" "$home/open-status-hold.err" \
+    "the refusal named the open structured decision without stating what it costs"
+  assert_no_grep "recorded decision inventory" "$home/open-status-hold.err" \
+    "the refusal claimed an inventory consequence for a key this origin never recorded"
+  assert_no_grep "$hold" "$home/data/backlog.md" \
+    "the refused hold recreated a live backlog row for the archived decision"
+  pass "an open structured decision carries its own stated consequence in the refusal"
 }
 
 # The unrouted close paths must not become a way past the gate. An unanswered
@@ -1490,3 +1655,6 @@ test_chat_channel_feeds_the_same_keyed_answer_intake
 test_archived_answer_still_satisfies_the_completion_gate
 test_archived_decision_without_an_answer_still_fails_the_gate
 test_archived_unanswered_hold_outside_the_inventory_states_no_false_consequence
+test_archived_record_alone_drives_the_durable_read
+test_unreadable_archive_is_reported_as_unreadable_rather_than_absence
+test_archived_unanswered_hold_states_the_open_structured_decision_consequence

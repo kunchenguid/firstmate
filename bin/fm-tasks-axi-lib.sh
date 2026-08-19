@@ -230,31 +230,44 @@ fm_tasks_axi_archive_path() {  # <home>
 }
 
 # `tasks-axi show <id> --full` for a row retention has already archived, rendered
-# by tasks-axi itself against a private throwaway copy. Nonzero, with no output,
-# whenever <home> has no readable archived record for that id.
+# by tasks-axi itself against a private throwaway copy. Nonzero with no output
+# whenever <home> has no archived record for that id, and the two failures are
+# kept apart: 1 means the archive was read and does not hold that id, 2 means the
+# archive could not be read at all, so absence was never established. A caller
+# that turns this into a message must never report 2 as proof of absence.
 fm_tasks_axi_archive_show() {  # <home> <id>
   local home=$1 id=$2 archive dir view output status=0
   case "$id" in
     ''|-*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
-  command -v tasks-axi >/dev/null 2>&1 || return 1
+  command -v tasks-axi >/dev/null 2>&1 || return 2
   archive=$(fm_tasks_axi_archive_path "$home")
-  [ -n "$archive" ] && [ -f "$archive" ] || return 1
-  dir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-tasks-archive.XXXXXX") || return 1
+  [ -n "$archive" ] || return 2
+  [ -f "$archive" ] || return 1
+  dir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-tasks-archive.XXXXXX") || return 2
   view="$dir/archived-backlog.md"
   # The copy lives in its own directory so tasks-axi's default archive path for
   # it can never resolve back onto the real archive, and the read runs from that
   # directory so no project config joins in.
   if sed 's/^## Archived /## Done archived /' "$archive" > "$view" 2>/dev/null; then
-    output=$(cd "$dir" && tasks-axi show "$id" --full --file "$view" 2>/dev/null) || status=1
+    output=$(cd "$dir" && tasks-axi show "$id" --full --file "$view" 2>/dev/null) || status=3
   else
-    status=1
+    status=2
   fi
   rm -rf -- "$dir"
+  [ "$status" -ne 2 ] || return 2
   # A miss prints nothing at all: tasks-axi reports NOT_FOUND on stdout, and that
   # text names the throwaway copy, so it must never reach a caller as a record.
-  # The identity line every rendered record carries is what tells the two apart.
-  [ "$status" -eq 0 ] || return 1
+  # That same NOT_FOUND code is what marks a read that did search the archive, so
+  # any other tasks-axi failure is an unread archive rather than an absent row.
+  if [ "$status" -ne 0 ]; then
+    case $'\n'"$output" in
+      *$'\n'"code: NOT_FOUND"*) return 1 ;;
+      *) return 2 ;;
+    esac
+  fi
+  # The identity line every rendered record carries is what tells a record apart
+  # from anything else a successful read could have produced.
   case $'\n'"$output" in
     *$'\n'"  id: $id"$'\n'*|*$'\n'"  id: $id") printf '%s\n' "$output" ;;
     *) return 1 ;;
