@@ -799,8 +799,44 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# A home whose backlog outgrows the platform's single-argv cap must still get a
+# complete snapshot. The canonical JSON is what bearings and the classifier
+# consume, and the failure this guards is total rather than degraded: once the
+# encoded backlog crosses the cap, every jq call handed the whole document
+# through argv dies with E2BIG and the command produces nothing at all.
+test_oversized_backlog_survives_argv_cap() {
+  local home limit expected encoded out summary
+  limit=$(fm_argv_string_limit) || {
+    echo "skip: this platform accepts a 256 KiB argv string; the cap cannot be crossed cheaply here"
+    return 0
+  }
+  home=$(make_home oversized-backlog)
+  fm_write_oversized_backlog "$home/data/backlog.md" $((limit * 2 / 5))
+  expected=$(grep -c '^- \[ \] queued-' "$home/data/backlog.md")
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot must survive a backlog whose encoding passes the ${limit}-byte argv cap"
+  encoded=$(printf '%s' "$out" | jq -c '.backlog' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$encoded" -gt "$limit" ] \
+    || fail "fixture went vacuous: encoded backlog is $encoded bytes, not past the $limit-byte cap"
+  printf '%s' "$out" | jq -e --argjson n "$expected" '
+    .schema == "fm-fleet-snapshot.v1"
+      and .backlog.present == true
+      and (.backlog.records | length) == $n
+      and ([.backlog.records[] | select(.structured)] | length) == $n
+      and .main_inventory.valid == true
+      and .main_inventory.unstructured_current_count == 0
+  ' >/dev/null || fail "oversized-backlog snapshot lost records or inventory validity"
+  summary=$(FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "the secondmate home summary must survive the same oversized backlog"
+  printf '%s' "$summary" | jq -e --argjson n "$expected" '
+    .schema == "fm-secondmate-home-summary.v1" and (.queued | length) > 0 and (.counts.queued) == $n
+  ' >/dev/null || fail "oversized-backlog home summary is not the documented contract: $summary"
+  pass "a backlog past the platform argv cap still yields a complete snapshot and home summary"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_oversized_backlog_survives_argv_cap
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
 test_event_hints_follow_reconciled_current_state

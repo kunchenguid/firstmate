@@ -260,6 +260,56 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# --- platform argv limits ---------------------------------------------------
+#
+# execve refuses an argv string past a per-platform cap, so any command that
+# hands a whole JSON document to a child through --argjson dies with E2BIG once
+# that document outgrows the cap. Linux caps a SINGLE argv string at
+# MAX_ARG_STRLEN (128 KiB) independently of the far larger total ARG_MAX; other
+# platforms bound the total instead. Tests that must build an over-the-cap
+# document probe the running platform rather than pinning a constant, because a
+# pinned constant is exactly how such a test goes quietly vacuous.
+
+# fm_argv_string_limit [ceiling]: print this platform's single-argv cap in
+# bytes, resolved to within 4 KiB by bisecting real execs. A string of the
+# printed size is refused; anything comfortably under it is accepted. Prints
+# nothing and returns 1 when the platform accepts <ceiling> bytes (default
+# 262144), which means a caller cannot build an over-the-cap fixture cheaply
+# here and should skip rather than assert nothing.
+fm_argv_string_limit() {
+  local ceiling=${1:-262144} lo=0 hi mid s
+  printf -v s '%*s' "$ceiling" ''
+  if /usr/bin/env true "$s" 2>/dev/null; then
+    return 1
+  fi
+  hi=$ceiling
+  while [ $((hi - lo)) -gt 4096 ]; do
+    mid=$(((lo + hi) / 2))
+    printf -v s '%*s' "$mid" ''
+    if /usr/bin/env true "$s" 2>/dev/null; then lo=$mid; else hi=$mid; fi
+  done
+  printf '%s\n' "$hi"
+}
+
+# fm_write_oversized_backlog <file> <markdown-bytes>: write a canonical backlog
+# whose Queued section holds enough structured rows to reach roughly the
+# requested markdown size. The snapshot's JSON encoding of that backlog is
+# several times larger again, which is the document the argv cap applies to;
+# callers assert the encoded size themselves so the fixture cannot go vacuous.
+fm_write_oversized_backlog() {
+  local file=$1 target=$2 i=1 written=0 line
+  {
+    printf '## In flight\n\n## Queued\n'
+    while [ "$written" -lt "$target" ]; do
+      line=$(printf -- '- [ ] queued-%05d - Queued item %s carrying a long enough title that the encoded backlog outgrows the platform argv cap (repo: alpha) (kind: ship)' "$i" "$i")
+      printf '%s\n' "$line"
+      written=$((written + ${#line} + 1))
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$file"
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_contains <haystack> <needle> <msg>

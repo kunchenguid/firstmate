@@ -216,6 +216,31 @@ EOF
 
 # This is the Domain Alpha failure shape exactly: the structured home says Phase 7 is Done
 # and no child is active, so the stale parent event must never become Underway.
+# /bearings is the captain-facing command over the canonical snapshot, so a
+# backlog whose encoding passes the platform's single-argv cap must still
+# produce a projection. Before the fix this was not a smaller report: the
+# snapshot aborted with E2BIG and bearings returned nothing at all.
+test_oversized_backlog_still_renders_bearings() {
+  local home fakebin limit expected toon json
+  limit=$(fm_argv_string_limit) || {
+    echo "skip: this platform accepts a 256 KiB argv string; the cap cannot be crossed cheaply here"
+    return 0
+  }
+  home=$(make_home oversized-backlog)
+  fakebin=$(make_fakebin "$home")
+  fm_write_oversized_backlog "$home/data/backlog.md" $((limit * 2 / 5))
+  expected=$(grep -c '^- \[ \] queued-' "$home/data/backlog.md")
+  toon=$(run "$home" "$fakebin") \
+    || fail "bearings must survive a backlog whose encoding passes the ${limit}-byte argv cap"
+  assert_contains "$toon" "schema: fm-bearings.v1" "oversized-backlog bearings lost its schema line"
+  json=$(run "$home" "$fakebin" --json --all-queued) \
+    || fail "bearings --json must survive the same oversized backlog"
+  printf '%s' "$json" | jq -e --argjson n "$expected" '
+    .schema == "fm-bearings.v1" and (.gates | length) == $n
+  ' >/dev/null || fail "oversized-backlog bearings dropped queued work: $(printf '%s' "$json" | head -c 400)"
+  pass "bearings still renders when the backlog passes the platform argv cap"
+}
+
 test_domain_alpha_stale_parent_event_does_not_become_current_work() {
   local home mate fakebin json canonical
   home=$(make_home domain-alpha-parent)
@@ -1940,6 +1965,7 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+test_oversized_backlog_still_renders_bearings
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
