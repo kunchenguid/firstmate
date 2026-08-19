@@ -605,6 +605,22 @@ test_accelerate_marker() {
   pass "accelerate marker speeds eval but scan still discovers without it"
 }
 
+test_blocked_accelerate_marker_is_consumed() {
+  local home fixture marker
+  home=$(make_world accelblocked)
+  fixture="$TMP_ROOT/fix-accelblocked"
+  setup_project "$home" "$fixture"
+  write_open "$fixture" acme/alpha '[{"number":28,"url":"https://github.com/acme/alpha/pull/28","headRefName":"other/28","headRefOid":"blocked","baseRefName":"main","reviewDecision":"","mergeable":"CONFLICTING","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/alpha 28 '{"number":28,"url":"https://github.com/acme/alpha/pull/28","headRefName":"other/28","headRefOid":"blocked","baseRefName":"main","reviewDecision":"","mergeable":"CONFLICTING","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  run_delivery "$home" "$fixture" _scan-locked 1 >/dev/null
+  run_delivery "$home" "$fixture" accelerate 'https://github.com/acme/alpha/pull/28'
+  marker=$(find "$home/state/pr-delivery/accelerate" -type f -name '*.marker' -print -quit)
+  [ -n "$marker" ] || fail "accelerate did not create a marker"
+  run_delivery "$home" "$fixture" _scan-locked 0 >/dev/null
+  [ ! -e "$marker" ] || fail "completed blocked scan did not consume the marker"
+  pass "completed blocked scans consume acceleration markers"
+}
+
 test_show_blocked_queue() {
   local home fixture
   home=$(make_world showq)
@@ -712,6 +728,7 @@ test_repository_state_keys_do_not_alias
 test_task_authority_stays_with_its_project
 test_deadline_retries_incomplete_repository
 test_accelerate_marker
+test_blocked_accelerate_marker_is_consumed
 test_show_blocked_queue
 test_secondmate_refuses_scan
 test_wake_failure_remains_retryable

@@ -662,6 +662,14 @@ commit_actionable_state() {
   fi
 }
 
+consume_accelerate_markers() {
+  local marker
+  for marker in "$ACCELERATE_DIR"/*.marker; do
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    rm -f "$marker" || return 1
+  done
+}
+
 scan_repo() { # <project> <repo> <deadline>
   local project=$1 repo=$2 deadline=$3 cursor
   local list_json pr_json start=0 i offset count
@@ -756,7 +764,7 @@ scan() {
   if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_PR_DELIVERY_SECS" ]; then
     accelerated=0
     for _accel in "$ACCELERATE_DIR"/*; do
-      [ -f "$_accel" ] || continue
+      [ -f "$_accel" ] && [ ! -L "$_accel" ] || continue
       accelerated=1
       break
     done
@@ -779,6 +787,8 @@ scan() {
     fm_wake_append check pr-delivery "$ACTIONABLE" || return 1
     commit_actionable_state || return 1
     printf '%s\n' "$ACTIONABLE"
+  elif [ "$rc" -eq 0 ]; then
+    consume_accelerate_markers || return 1
   fi
 }
 
