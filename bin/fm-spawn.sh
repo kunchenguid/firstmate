@@ -161,6 +161,20 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+#   For a positional-prompt harness, the launch command reads __BRIEF__ whole
+#   (`$(fm-operational-input.sh encode launch-brief < __BRIEF__)`), so a
+#   relaunch's launch text is exactly whatever bin/fm-control.sh left on disk
+#   at that path - the progress note it records is PREPENDED to the brief
+#   there, never appended, so the composed text a fresh incarnation reads is
+#   note, blank line, then the full original brief, the same order a fresh
+#   spawn's brief would carry after its own note line. kimi is a pointer
+#   harness instead: its launch text is one literal sentence pointing at
+#   __BRIEF__ rather than that file's content, so on a relaunch with a
+#   recorded note this script reads it back from
+#   FM_CONTROL_RELAUNCH_NOTE_FILE and leads the pointer sentence with
+#   it, collapsed to one line first (an embedded newline sent via a literal
+#   composer keystroke is unsafe - see the newline-collapse comment at its use
+#   site) so the note precedes rather than replaces the pointer.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -2194,6 +2208,26 @@ kimi_spawn_fail() {  # <detail>
   echo "error: $1; inspect window $T" >&2
 }
 
+# kimi_relaunch_note_prefix: the relaunch progress note, collapsed to one
+# line, to lead kimi's pointer sentence. kimi's launch text is submitted as
+# literal composer keystrokes (fm_backend_send_text_submit -> tmux send-keys
+# -l), not evaluated as a shell command line the way a positional-prompt
+# harness's `$(... < __BRIEF__)` is, so an embedded newline in the payload is
+# an unverified raw keystroke a TUI composer may treat as its own Enter -
+# exactly the risk bin/fm-supervise-daemon.sh's away-mode injector already
+# collapses newlines to avoid. Only trusted from FM_CONTROL_RELAUNCH_TX's
+# own parent (SPAWN_CONTROL_PARENT): an unrelated caller's env cannot lead
+# this launch's pointer.
+kimi_relaunch_note_prefix() {
+  local note_file=${FM_CONTROL_RELAUNCH_NOTE_FILE:-} note
+  [ "$RELAUNCH" -eq 1 ] || return 0
+  [ "$SPAWN_CONTROL_PARENT" = 1 ] || return 0
+  case "$KIND" in ship|scout) ;; *) return 0 ;; esac
+  [ -n "$note_file" ] && [ -s "$note_file" ] || return 0
+  note=$(cat "$note_file") || return 0
+  printf '%s\n\n' "${note//$'\n'/ - }"
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -2818,7 +2852,7 @@ if [ "$HARNESS" = kimi ]; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
-  KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  KIMI_POINTER="$(kimi_relaunch_note_prefix)Read the brief at $BRIEF_REAL and follow it exactly."
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}

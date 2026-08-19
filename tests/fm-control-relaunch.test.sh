@@ -378,8 +378,8 @@ test_disabled_relaunch_clears_prior_trace_context() {
   pass "fm-control relaunch: disabling tracing clears metadata and pane context"
 }
 
-test_relaunch_appends_the_progress_note_to_the_instructions() {
-  local dir out rc brief
+test_relaunch_precedes_the_instructions_with_the_progress_note() {
+  local dir out rc brief composed
   dir=$(new_case note rl2)
   add_ship_task "$dir" rl2 claude
   out=$(run_control "$dir" rl2 relaunch --note "reproduced the crash in parser.go"); rc=$?
@@ -390,7 +390,23 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
   assert_grep "reproduced the crash in parser.go" "$brief" "the note text should reach the replacement"
   assert_grep "reproduced the crash in parser.go" "$dir/home/state/rl2.control-relaunch.note" \
     "the note should also be preserved beside the transaction record"
-  pass "fm-control relaunch: the progress note lands in the instructions the replacement reads"
+  # The brief itself must read note-first: a worker skimming from the top sees
+  # why it was relaunched before it ever reaches the original instructions,
+  # instead of the note trailing on as an easy-to-miss postscript.
+  [ "$(grep -n "reproduced the crash in parser.go" "$brief" | head -1 | cut -d: -f1)" -lt \
+    "$(grep -n "^Do the thing\.$" "$brief" | head -1 | cut -d: -f1)" ] \
+    || fail "the note must precede the original instructions, not follow them"
+  # The composed launch text a fresh incarnation actually reads is exactly
+  # this file run through the same encoder every positional-prompt harness's
+  # launch command applies to __BRIEF__ - reproduce that here rather than
+  # re-asserting file bytes, so this pins the real launch contract.
+  composed=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$brief" \
+    | "$ROOT/bin/fm-operational-input.sh" body)
+  case "$composed" in
+    *"reproduced the crash in parser.go"*"Do the thing."*) ;;
+    *) fail "the composed launch text did not carry the note followed by the full brief: $composed" ;;
+  esac
+  pass "fm-control relaunch: the progress note precedes the instructions the replacement reads"
 }
 
 test_relaunch_requires_a_note_for_a_ship_task() {
@@ -1316,7 +1332,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
-test_relaunch_appends_the_progress_note_to_the_instructions
+test_relaunch_precedes_the_instructions_with_the_progress_note
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
