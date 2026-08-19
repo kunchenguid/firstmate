@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, FORGE_CREDENTIAL, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -26,6 +26,18 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `BACKEND_INVALID: <name> (known: <names>)` - the resolved runtime backend has no verified dependency or lifecycle contract, so do not dispatch work until the invalid `FM_BACKEND` or `config/backend` value is corrected to one of the listed backends.
 - `NEEDS_GH_AUTH` - ask the captain to run `! gh auth login` (interactive; you cannot run it for them).
   This probe now arrives from the deferred network stage, so it is also how an unreachable network shows up: `gh` cannot validate its token offline and reports the same failure. Confirm reachability before asking the captain to re-authenticate a credential that may be fine.
+- `FORGE_CREDENTIAL: <forge>: <reason>` - this home tracks a repository on a forge whose credential firstmate holds itself, and that credential cannot be used, so merge detection and build results for every repository on that forge are unavailable until it is fixed.
+  The reason names the failing requirement only, never a credential value, and never quote a credential back to the captain or ask them to paste one into chat.
+  An absent or empty entry means the captain must create or re-cache it; a rejected credential means it was revoked, expired, or was created without the read scopes firstmate needs; a store read that did not answer in time means the stored item is raising a confirmation dialog no unattended session can answer, so it must be re-cached to allow an unattended read; a store that refused the read instead of reporting the entry missing means that same item is present but unreadable unattended, so it takes the same re-cache and never a hunt for a missing entry.
+  "cannot see <forge> repository <repo>" means the credential authenticated and the forge then refused to admit that repository exists, which does NOT say whose fault it is.
+  Scope refusal would have arrived as its own HTTP 403 line, so the live possibilities are a credential bound to the wrong account, a credential that has lost access to that specific private repository, or a repository that was renamed or moved.
+  Check those in that order: confirm which account the keychain entry belongs to, then confirm the captain still has access to the named repository, then confirm the repository still lives at the path the clone's origin remote gives.
+  "no credential store on this platform" is news, not a fault: this machine has no login keychain to read, that forge's merge and build checks are simply unavailable here, and there is nothing for the captain to retry.
+  Both of those two are reported once per home and then stay silent, so report each plainly and move on, and do not treat a later silence as the problem having been fixed.
+  The not-visible record is kept per probed repository, so a line naming a different repository later is fresh news reported in its own right rather than a repeat, while the no-store record is per forge because it names no repository.
+  A lock-refused session reports them without recording them, so the same line arriving again in the session that holds the lock is the expected handover, not a regression.
+  `bin/fm-forge-credential.sh`'s header owns the entry names, the required scopes, and the exit-code contract - read it before advising the captain, and tell them the consequence and the action rather than the diagnostic label.
+  Firstmate cannot create or store the credential itself, so this always ends in a captain action; work that does not touch that forge continues normally.
 - `NETWORK_CHECKS: <what did not complete>; rerun <command>` - the deferred network stage itself could not finish, so the checks it names are simply unknown, not failed.
   Rerun the printed command; it is idempotent and re-derives every finding.
   A `hit the ...s bound` line means one of those checks is slow or unreachable - most often a remote secondmate host - and the stage stopped rather than letting it wedge; a `lock was no longer held` line means the session that asked for the sweeps no longer owns them, so leave them to the session that does.
