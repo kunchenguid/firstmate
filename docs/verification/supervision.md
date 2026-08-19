@@ -515,7 +515,7 @@ The integration review covered every supported primary harness and runtime backe
 | Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Cursor primaries | The retirement and cooperative shutdown path sits above harness-specific busy, composer, and submit classification, so all keep their existing type-once and Enter-only transport behavior; pi-signed shares Pi's integration. |
 | Muse | Not applicable because Muse is supported only for workers and scouts, not as a primary. |
 | tmux supervisor backend | Uses the same daemon retirement path and unchanged tmux submit core; portable batching, dedupe, pending, and catch-up tests passed. A live tmux injection rerun was unavailable because tmux was not installed on this host. |
-| Herdr supervisor backend | Uses the shared retirement path plus the new per-call hard deadline; the guarded live run above covered confirmed, unconfirmed, pre-retirement TERM, post-retirement TERM, repeated scans, and buffer cleanup. |
+| Herdr supervisor backend | Uses the shared retirement path plus the new per-supervisor-transport-call hard deadline; worker reads keep their existing timeout behavior, and the guarded live run above covered confirmed, unconfirmed, pre-retirement TERM, post-retirement TERM, repeated scans, and buffer cleanup. |
 | Zellij, Orca, and cmux supervisor backends | Not applicable because daemon startup still refuses these supervisor backends before injection; their task-status production and catch-all classification do not use a backend-specific retirement path. |
 
 [`docs/herdr-backend.md`](../herdr-backend.md#away-mode-supervisor-support) owns the current mechanism, and [runtime backend verification](runtime-backends.md#away-mode-transport) owns the Herdr transport evidence.

@@ -71,14 +71,11 @@ cleanup_all() {
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
-if [ "$EXTERNAL_LAB" -eq 1 ]; then
-  fm_herdr_lab_refuse_if_default "$SESSION" || fail "externally provisioned Herdr lab is absent or unsafe"
-  fm_herdr_lab_cli "$SESSION" status --json 2>/dev/null \
-    | jq -e '.server.running == true' >/dev/null 2>&1 \
-    || fail "externally provisioned Herdr lab is not running"
-else
+if [ "$EXTERNAL_LAB" -eq 0 ]; then
   fm_herdr_lab_provision "$SESSION" || fail "could not provision isolated Herdr lab session"
 fi
+fm_herdr_lab_require_running_owned "$SESSION" \
+  || fail "Herdr lab is not affirmatively running with helper provenance"
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
 # shellcheck source=/dev/null

@@ -1898,6 +1898,40 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
 }
 
+test_herdr_timeout_is_scoped_to_supervisor_transport() {
+  local dir state log
+  dir=$(make_supercase herdr-timeout-scope)
+  state="$dir/state"
+  log="$dir/timeout-scope.log"
+  afk_enter "$state"
+  (
+    unset FM_BACKEND_HERDR_CLI_TIMEOUT_SECS
+    fm_backend_target_exists() { printf 'target %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"; return 0; }
+    pane_is_busy() { printf 'busy %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"; return 1; }
+    fm_backend_composer_state() { printf 'composer %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"; printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'submit %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"; printf 'empty'; }
+    FM_AFK_HERDR_CLI_TIMEOUT_SECS=7 FM_SUPERVISOR_BACKEND=herdr \
+      FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
+      || fail "scoped-timeout inject_msg failed"
+    task_window_backend() { printf 'herdr'; }
+    task_window_harness() { printf 'claude'; }
+    window_to_task() { printf 'worker'; }
+    fm_backend_capture() {
+      printf 'worker %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"
+      printf 'idle\n'
+    }
+    fm_busy_classify() { printf 'idle\n'; }
+    stale_window_is_busy "lab:worker" "$state" || [ "$?" -eq 1 ] \
+      || fail "worker timeout-scope probe returned unreadable"
+  ) || fail "Herdr timeout-scope subshell failed"
+  [ "$(sed -n '1p' "$log")" = "target 7" ] || fail "target probe missed the supervisor timeout"
+  [ "$(sed -n '2p' "$log")" = "busy 7" ] || fail "busy probe missed the supervisor timeout"
+  [ "$(sed -n '3p' "$log")" = "composer 7" ] || fail "composer probe missed the supervisor timeout"
+  [ "$(sed -n '4p' "$log")" = "submit 7" ] || fail "submit probe missed the supervisor timeout"
+  [ "$(sed -n '5p' "$log")" = "worker unset" ] || fail "supervisor timeout leaked into a worker read"
+  pass "Herdr timeout applies to supervisor transport without changing worker reads"
+}
+
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
 # must NEVER type an escalation into a dead-shell pane. A bare shell prompt
 # classifies `unknown` (not `pending`), and inject_msg now defers on anything
@@ -2037,5 +2071,6 @@ test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
+test_herdr_timeout_is_scoped_to_supervisor_transport
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state

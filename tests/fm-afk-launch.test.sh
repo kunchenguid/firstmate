@@ -857,16 +857,12 @@ e2e_herdr() {
     [ "$external_lab" -eq 1 ] || herdr_safe_stop_and_delete "$SESSION" >/dev/null 2>&1 || true
     rm -rf "$home_tmp" 2>/dev/null || true
   }
-  if [ "$external_lab" -eq 1 ]; then
-    fm_herdr_lab_refuse_if_default "$SESSION" \
-      || { fail "herdr e2e: externally provisioned lab is absent or unsafe"; return 0; }
-    fm_herdr_lab_cli "$SESSION" status --json 2>/dev/null \
-      | jq -e '.server.running == true' >/dev/null 2>&1 \
-      || { fail "herdr e2e: externally provisioned lab is not running"; return 0; }
-  else
+  if [ "$external_lab" -eq 0 ]; then
     fm_herdr_lab_provision "$SESSION" \
       || { fail "herdr e2e: could not provision isolated lab session"; return 0; }
   fi
+  fm_herdr_lab_require_running_owned "$SESSION" \
+    || { fail "herdr e2e: lab is not affirmatively running with helper provenance"; return 0; }
   fm_backend_source herdr || { E2E_HERDR_CLEANUP; fail "herdr e2e: fm_backend_source herdr failed"; return 0; }
 
   out=$(fm_backend_herdr_cli "$SESSION" workspace create --cwd "$ROOT" --label captain --no-focus 2>/dev/null)

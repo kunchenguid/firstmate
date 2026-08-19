@@ -135,8 +135,8 @@
 #          FM_INJECT_CONFIRM_SLEEP  seconds between daemon submit checks
 #                                   (default 0.5)
 #          FM_AFK_HERDR_CLI_TIMEOUT_SECS positive whole-second hard bound for
-#                                   each Herdr CLI call made by this daemon
-#                                   (default 2). Invalid or zero
+#                                   each Herdr supervisor transport call made by
+#                                   this daemon (default 2). Invalid or zero
 #                                   values use the default so SIGTERM cannot wait
 #                                   forever behind a wedged transport call.
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
@@ -589,14 +589,29 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
+fm_daemon_supervisor_transport() {  # <backend> <function> [arguments...]
+  local backend=$1 timeout FM_BACKEND_HERDR_CLI_TIMEOUT_SECS
+  shift
+  if [ "$backend" != herdr ]; then
+    "$@"
+    return
+  fi
+  timeout=${FM_AFK_HERDR_CLI_TIMEOUT_SECS:-$AFK_HERDR_CLI_TIMEOUT_SECS_DEFAULT}
+  case "$timeout" in
+    ''|*[!0-9]*|0) timeout=$AFK_HERDR_CLI_TIMEOUT_SECS_DEFAULT ;;
+  esac
+  FM_BACKEND_HERDR_CLI_TIMEOUT_SECS=$timeout
+  "$@"
+}
+
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness
   harness=$(fm_daemon_primary_harness)
-  native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
+  native=$(fm_daemon_supervisor_transport "$backend" fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$native" in
     busy) return 0 ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
+  tail40=$(fm_daemon_supervisor_transport "$backend" fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
     | fm_busy_lines_match "$harness"
 }
@@ -606,7 +621,7 @@ pane_is_busy() {  # <target> [backend]
 # directly and applies the same positive-proof boundary.
 pane_input_pending() {  # <target> [backend]
   local target=$1 backend=${2:-tmux}
-  [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" != empty ]
+  [ "$(fm_daemon_supervisor_transport "$backend" fm_backend_composer_state "$backend" "$target" 2>/dev/null)" != empty ]
 }
 
 task_window_backend() {  # <window> <state>
@@ -1159,9 +1174,9 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
-  fm_backend_target_exists "$backend" "$target" || return 1
+  fm_daemon_supervisor_transport "$backend" fm_backend_target_exists "$backend" "$target" || return 1
   # (3) Busy-guard: never inject into an in-use supervisor pane.
-  if pane_is_busy "$target" "$backend"; then
+  if fm_daemon_supervisor_transport "$backend" pane_is_busy "$target" "$backend"; then
     log "inject deferred: supervisor pane busy (agent mid-turn)"
     return 1
   fi
@@ -1174,7 +1189,7 @@ inject_msg() {  # <message> [state]
   #      target - typing the escalation into a shell could execute it - so defer
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
-  composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  composer=$(fm_daemon_supervisor_transport "$backend" fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
@@ -1188,7 +1203,7 @@ inject_msg() {  # <message> [state]
   # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
-  verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
+  verdict=$(fm_daemon_supervisor_transport "$backend" fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi
@@ -1400,7 +1415,7 @@ fm_super_main() {
   # into FM_SUPERVISOR_BACKEND makes inject_msg/pane_is_busy/pane_input_pending
   # (which read that env var) dispatch through the right backend without an
   # extra global thread-through.
-  local discovered_backend backend_source FM_BACKEND_HERDR_CLI_TIMEOUT_SECS
+  local discovered_backend backend_source
   backend_source="FM_SUPERVISOR_BACKEND"
   if [ -z "${FM_SUPERVISOR_BACKEND:-}" ]; then
     if [ -n "${TMUX_PANE:-}" ]; then
@@ -1427,13 +1442,6 @@ fm_super_main() {
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
   fi
-  if [ "$BACKEND" = herdr ]; then
-    FM_BACKEND_HERDR_CLI_TIMEOUT_SECS=${FM_AFK_HERDR_CLI_TIMEOUT_SECS:-$AFK_HERDR_CLI_TIMEOUT_SECS_DEFAULT}
-    case "$FM_BACKEND_HERDR_CLI_TIMEOUT_SECS" in
-      ''|*[!0-9]*|0) FM_BACKEND_HERDR_CLI_TIMEOUT_SECS=$AFK_HERDR_CLI_TIMEOUT_SECS_DEFAULT ;;
-    esac
-  fi
-
   # --- auto-discover the supervisor target (the pane running firstmate) -----
   # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
   # the pane that launched the daemon, normally firstmate's own) >
@@ -1464,7 +1472,7 @@ fm_super_main() {
   # probe, so a herdr supervisor pane is checked via the herdr adapter; for
   # backend=tmux this runs the exact same `tmux display-message -p -t "$TARGET"
   # '#{pane_id}'` call as before.
-  if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
+  if ! fm_daemon_supervisor_transport "$BACKEND" fm_backend_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
     fm_lock_release "$LOCK" 2>/dev/null || true
@@ -1573,7 +1581,7 @@ fm_super_main() {
     CUR_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-watch.XXXXXX") || { log "error: mktemp failed; retrying in 5s"; sleep 5; return 1; }
     case $- in *m*) monitor_was_on=1 ;; esac
     set -m 2>/dev/null || { rm -f "$CUR_TMP"; CUR_TMP=""; log "error: watcher process-group isolation unavailable; retrying in 5s"; sleep 5; return 1; }
-    env -u FM_BACKEND_HERDR_CLI_TIMEOUT_SECS "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
+    env "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
     WATCHER_PID=$!
     [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
   }
@@ -1587,7 +1595,7 @@ fm_super_main() {
     # has nowhere to go, and firstmate itself is the consumer of escalations.
     # Catch-up signals persist in state/*.status and flow on the next run, so
     # this delays rather than loses work.
-    if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
+    if ! fm_daemon_supervisor_transport "$BACKEND" fm_backend_target_exists "$BACKEND" "$TARGET"; then
       log "warn: supervisor target '$TARGET' gone; backing off ${INJECT_FAIL_SLEEP}s, will retry"
       # Flush is pointless with no pane; preserve any buffered escalations.
       sleep "$INJECT_FAIL_SLEEP"
