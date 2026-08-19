@@ -117,6 +117,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/arxiv-niche-expert/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/ask-user-authority/SKILL.md",
       "audience": "agent-runtime"
     },
