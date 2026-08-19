@@ -139,16 +139,18 @@ sys.stdout.buffer.write(body_bytes)
 }
 
 cmd_source() {
-  local selector=${1-} group account
+  local selector=${1-} group account rc
   validate_selector "$selector"
-  group=$(group_id "$selector")
-  account=$(account_number)
+  group=$(group_id "$selector") || exit 1
+  account=$(account_number) || exit 1
   while :; do
     if signal-cli -a "$account" receive -t -1 --max-messages 1 \
       --ignore-attachments --ignore-stories --ignore-avatars --ignore-stickers 2>/dev/null \
       | emit_message "$selector" "$group"; then
       return 0
     fi
+    rc=("${PIPESTATUS[@]}")
+    [ "${rc[0]}" -eq 0 ] || sleep 1
   done
 }
 
@@ -193,10 +195,10 @@ cmd_retire() {
 cmd_send_locked() {
   local selector=$1 message=${2:--} group label account raw prefixed
   [ "$message" = - ] || { [ -f "$message" ] && [ ! -L "$message" ] || die "message file is not a regular file"; }
-  group=$(group_id "$selector")
-  label=$(display_label "$selector")
+  group=$(group_id "$selector") || exit 1
+  label=$(display_label "$selector") || exit 1
   cmd_retire_locked "$selector" >/dev/null || die "could not retire Signal receive source"
-  account=$(account_number)
+  account=$(account_number) || exit 1
   raw=$(mktemp "${TMPDIR:-/tmp}/fm-signal-raw.XXXXXX") || die "cannot create private Signal message"
   chmod 600 "$raw" || { rm -f "$raw"; die "cannot protect private Signal message"; }
   if [ "$message" = - ]; then
@@ -205,8 +207,8 @@ cmd_send_locked() {
     cp "$message" "$raw" || { rm -f "$raw"; die "cannot stage Signal message"; }
   fi
   [ -s "$raw" ] || { rm -f "$raw"; die "Signal message is empty"; }
-  prefixed=$(mktemp "${TMPDIR:-/tmp}/fm-signal-message.XXXXXX") || die "cannot create private Signal message"
-  chmod 600 "$prefixed" || { rm -f "$prefixed"; die "cannot protect private Signal message"; }
+  prefixed=$(mktemp "${TMPDIR:-/tmp}/fm-signal-message.XXXXXX") || { rm -f "$raw"; die "cannot create private Signal message"; }
+  chmod 600 "$prefixed" || { rm -f "$raw" "$prefixed"; die "cannot protect private Signal message"; }
   SIGNAL_DISPLAY_LABEL="$label" FM_SIGNAL_RAW="$raw" python3 -c '
 import os
 import sys
@@ -218,7 +220,7 @@ prefix = label + b":"
 if not body.startswith(prefix):
     body = label + b": " + body
 sys.stdout.buffer.write(body)
-' >"$prefixed" || die "cannot prefix Signal message"
+' >"$prefixed" || { rm -f "$raw" "$prefixed"; die "cannot prefix Signal message"; }
   rm -f "$raw"
   # shellcheck disable=SC2016
   if ! fm_run_timed "$SEND_TIMEOUT" bash -c \
