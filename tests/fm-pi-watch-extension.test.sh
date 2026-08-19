@@ -1338,7 +1338,16 @@ const hooks = await mod.FmPrimaryWatchArm({
 const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
 await hooks.event(event);
-await new Promise((resolve) => setTimeout(resolve, 120));
+// The idle hook fires its arm attempt without awaiting it, and that attempt walks
+// the process ancestry with one ps spawn per level. Settle it through the
+// coordinator (which joins the in-flight launch) instead of sleeping a fixed
+// interval: under a deep test-harness process tree the walk outlives a short
+// sleep, and the second idle event would then join the stale read-only launch.
+const unowned = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (unowned !== "read-only") {
+  console.error(`expected read-only while another pid owns the lock, got ${unowned}`);
+  process.exit(1);
+}
 if (existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm ran without owning the session lock");
   process.exit(1);
