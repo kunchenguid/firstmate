@@ -21,8 +21,11 @@
 #   (i) a recorded evidence commit equal to the live head merges unchanged
 #   (j) a recorded evidence commit behind the live head is refused, naming both
 #   (k) no recorded evidence commit is refused, naming how to record one
-#   (l) an unconfirmable live head is refused rather than merged unverified
-#   (m) the refuse -> re-measure -> merge round trip works after a poll is armed
+#   (l) a live head gh could not answer for is refused rather than merged
+#       unverified, pointing at GitHub access
+#   (m) a missing plain gh is refused by its own cause, naming the binary the
+#       guard needs rather than an auth check that cannot diagnose it
+#   (n) the refuse -> re-measure -> merge round trip works after a poll is armed
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -129,12 +132,25 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# PATH with every directory that provides an executable `gh` removed, so a case
+# can stand in for a host that has gh-axi but no plain GitHub CLI without
+# guessing where gh is installed.
+path_without_gh() {
+  local dir out=
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    [ -x "$dir/gh" ] && continue
+    out="${out:+$out:}$dir"
+  done < <(printf '%s\n' "$PATH" | tr ':' '\n')
+  printf '%s\n' "$out"
+}
+
 run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
-  PATH="$case_dir/fakebin:$PATH" \
+  PATH="$case_dir/fakebin:${FM_TEST_BASE_PATH:-$PATH}" \
     "$PR_MERGE" "$@"
   rc=$?
   if [ "${case_dir##*/}" = unsafe-url-segment ] && [ "$rc" -eq 2 ]; then
@@ -465,9 +481,56 @@ test_unconfirmable_head_refuses() {
   expect_code 1 "$rc" "evidence-head-unavailable: fm-pr-merge should refuse when the head cannot be confirmed"
   assert_grep 'pull request head could not be confirmed' "$case_dir/stderr" \
     "evidence-head-unavailable: the refusal did not explain the unconfirmable head"
+  assert_grep 'gh is installed but did not answer' "$case_dir/stderr" \
+    "evidence-head-unavailable: the refusal did not distinguish an installed gh that could not answer"
+  assert_grep "the recorded evidence commit for task task-x1 is $EVIDENCE_LIVE_HEAD" "$case_dir/stderr" \
+    "evidence-head-unavailable: the refusal did not name the recorded evidence commit"
+  assert_grep 'gh auth status' "$case_dir/stderr" \
+    "evidence-head-unavailable: the refusal did not point at GitHub access"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
     "evidence-head-unavailable: gh-axi pr merge was invoked without a confirmed head"
   pass "fm-pr-merge refuses rather than merging against a head it could not confirm"
+}
+
+# A host with gh-axi but no plain gh cannot read a pull request head at all, so
+# it is blocked by design. It has to be blocked by its own cause: an auth check
+# diagnoses nothing when the binary is simply absent.
+test_missing_gh_cli_refuses_by_its_own_cause() {
+  local case_dir rc
+  local FM_TEST_BASE_PATH
+  case_dir=$(make_case evidence-gh-missing)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$EVIDENCE_LIVE_HEAD"
+  record_evidence "$case_dir" "$EVIDENCE_LIVE_HEAD" 'full suite pass'
+  rm -f "$case_dir/fakebin/gh"
+  FM_TEST_BASE_PATH=$(path_without_gh)
+  if PATH="$case_dir/fakebin:$FM_TEST_BASE_PATH" command -v gh > /dev/null 2>&1; then
+    fail "evidence-gh-missing: the sandbox PATH still provides gh"
+  fi
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/119 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "evidence-gh-missing: fm-pr-merge should refuse when gh is not on PATH"
+  assert_grep 'GitHub CLI (gh), which is not on PATH' "$case_dir/stderr" \
+    "evidence-gh-missing: the refusal did not name the missing binary"
+  assert_grep 'fix: install the GitHub CLI (gh)' "$case_dir/stderr" \
+    "evidence-gh-missing: the refusal did not name the one step that fixes it"
+  assert_no_grep 'gh auth status' "$case_dir/stderr" \
+    "evidence-gh-missing: the refusal pointed at an auth check that cannot diagnose a missing binary"
+  assert_grep "the recorded evidence commit for task task-x1 is $EVIDENCE_LIVE_HEAD" "$case_dir/stderr" \
+    "evidence-gh-missing: the refusal did not name the recorded evidence commit"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "evidence-gh-missing: gh-axi pr merge was invoked with no way to read the head"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/119' "$case_dir/state/task-x1.meta" \
+    "evidence-gh-missing: a refused merge still recorded PR metadata"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "evidence-gh-missing: a refused merge still armed a merge poll"
+  pass "fm-pr-merge refuses a missing GitHub CLI by name instead of pointing at an auth check"
 }
 
 test_records_pr_and_head_before_merging
@@ -528,4 +591,5 @@ test_matching_evidence_commit_merges
 test_stale_evidence_commit_refuses_naming_both
 test_absent_evidence_record_refuses_actionably
 test_unconfirmable_head_refuses
+test_missing_gh_cli_refuses_by_its_own_cause
 test_re_measured_evidence_merges_after_the_poll_is_armed

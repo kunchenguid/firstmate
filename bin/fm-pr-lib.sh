@@ -222,6 +222,9 @@ fm_pr_head_valid() {
 # presented as the merging head's result.
 FM_PR_EVIDENCE_HEAD=
 FM_PR_EVIDENCE_NOTE=
+FM_PR_EVIDENCE_TMP=
+FM_PR_EVIDENCE_LOCK=
+FM_PR_EVIDENCE_LOCK_HELD=0
 
 # fm_pr_evidence_note_valid <note>: a note is one printable line, bounded, so it
 # can never split the key=value record it is stored in.
@@ -252,12 +255,27 @@ fm_pr_evidence_read() {
   FM_PR_EVIDENCE_NOTE=$note
 }
 
+# fm_pr_evidence_cleanup: remove any in-progress evidence temp and release the
+# per-task metadata lock if this process still holds it. Callers install it as
+# their EXIT trap, so an interrupted write leaves neither a stray temp file in
+# the state directory nor a lock another process has to reclaim through
+# stale-owner recovery. Releasing is idempotent: the held flag is cleared here,
+# so the normal path and the trap together release exactly once.
+fm_pr_evidence_cleanup() {
+  [ -z "$FM_PR_EVIDENCE_TMP" ] || rm -f -- "$FM_PR_EVIDENCE_TMP"
+  FM_PR_EVIDENCE_TMP=
+  if [ "$FM_PR_EVIDENCE_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$FM_PR_EVIDENCE_LOCK" || true
+    FM_PR_EVIDENCE_LOCK_HELD=0
+  fi
+}
+
 # fm_pr_evidence_write <meta> <sha> [note]: atomically replace the task's
 # evidence record, preserving every other metadata line, and re-read the result
 # so a partially written record can never be reported as recorded. Requires
 # bin/fm-wake-lib.sh for the shared per-task metadata lock.
 fm_pr_evidence_write() {
-  local meta=$1 head=$2 note=${3-} dir base tmp lock rc=0
+  local meta=$1 head=$2 note=${3-} dir base rc=0
   fm_pr_head_valid "$head" || return 1
   fm_pr_evidence_note_valid "$note" || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -265,24 +283,25 @@ fm_pr_evidence_write() {
   dir=${meta%/*}
   base=${meta##*/}
   [ "$dir" != "$meta" ] || dir=.
-  lock=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$lock"
-  tmp=$(mktemp "$dir/.${base}.fm-evidence.XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  FM_PR_EVIDENCE_LOCK=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$FM_PR_EVIDENCE_LOCK"
+  FM_PR_EVIDENCE_LOCK_HELD=1
+  FM_PR_EVIDENCE_TMP=$(mktemp "$dir/.${base}.fm-evidence.XXXXXX") \
+    || { fm_pr_evidence_cleanup; return 1; }
   while :; do
     [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(fm_pr_file_link_count "$meta")" = 1 ] || { rc=1; break; }
     fm_pr_regular_destination_or_absent "$meta" || { rc=1; break; }
-    { grep -vE '^evidence_head=|^evidence_note=' "$meta" || true; } > "$tmp" || { rc=1; break; }
-    printf 'evidence_head=%s\n' "$head" >> "$tmp" || { rc=1; break; }
+    { grep -vE '^evidence_head=|^evidence_note=' "$meta" || true; } > "$FM_PR_EVIDENCE_TMP" || { rc=1; break; }
+    printf 'evidence_head=%s\n' "$head" >> "$FM_PR_EVIDENCE_TMP" || { rc=1; break; }
     if [ -n "$note" ]; then
-      printf 'evidence_note=%s\n' "$note" >> "$tmp" || { rc=1; break; }
+      printf 'evidence_note=%s\n' "$note" >> "$FM_PR_EVIDENCE_TMP" || { rc=1; break; }
     fi
-    chmod 0600 "$tmp" || { rc=1; break; }
-    mv -f -- "$tmp" "$meta" || { rc=1; break; }
-    tmp=
+    chmod 0600 "$FM_PR_EVIDENCE_TMP" || { rc=1; break; }
+    mv -f -- "$FM_PR_EVIDENCE_TMP" "$meta" || { rc=1; break; }
+    FM_PR_EVIDENCE_TMP=
     break
   done
-  [ -z "$tmp" ] || rm -f -- "$tmp"
-  fm_lock_release "$lock"
+  fm_pr_evidence_cleanup
   [ "$rc" = 0 ] || return 1
   fm_pr_evidence_read "$meta" || return 1
   [ "$FM_PR_EVIDENCE_HEAD" = "$head" ] && [ "$FM_PR_EVIDENCE_NOTE" = "$note" ]
@@ -397,6 +416,12 @@ fm_pr_metadata_identity_parse() {
       # after pr=. Their own validity is enforced by fm_pr_evidence_read, which
       # refuses the merge on a malformed record rather than passing it here.
       evidence_head=*|evidence_note=*)
+        ;;
+      # bin/fm-spawn.sh appends both of these after pr= as well:
+      # spawn_record_traceparent strips the old traceparent= line and appends
+      # the new one at the end of the record, and control_relaunch_tx= is
+      # emitted after preserve_relaunch_meta has already re-emitted pr=.
+      traceparent=*|control_relaunch_tx=*)
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1

@@ -45,6 +45,13 @@ esac
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
+# An interrupted write must leave the state directory exactly as it found it:
+# no half-written temp beside the metadata, and no per-task lock another
+# process would have to reclaim through stale-owner recovery. This mirrors
+# bin/fm-pr-check.sh, the other writer of this same record.
+trap fm_pr_evidence_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
   echo "error: invalid evidence record request" >&2
   echo "usage: fm-evidence-record.sh <task-id> <commit-sha> [one-line note]" >&2

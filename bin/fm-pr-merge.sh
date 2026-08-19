@@ -15,6 +15,12 @@
 # into a description of an earlier commit; this guard is what makes that
 # staleness stop a merge instead of depending on a manual comparison.
 #
+# Reading that live head requires the plain GitHub CLI (gh) on PATH, which this
+# path therefore depends on in addition to gh-axi: gh-axi cannot report a head
+# commit at all, so a host with only gh-axi is blocked from merging here. The
+# refusal names the missing binary, because the alternative to blocking is
+# merging unverified, which is the exact failure this guard exists to prevent.
+#
 # An absent record refuses too, rather than warning and merging. A guard that
 # passes when nothing was recorded is defeatable by simply never recording, and
 # nothing distinguishes "no claim was made" from "the claim was lost". The
@@ -107,14 +113,20 @@ fi
 # The live head is read here rather than taken from a recorded pr_head=, so the
 # comparison is always against what would actually merge.
 LIVE_HEAD=
-if command -v gh >/dev/null 2>&1; then
-  if REMOTE_HEAD=$(gh pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --json headRefOid -q .headRefOid 2>/dev/null); then
-    LIVE_HEAD=$(printf '%s' "$REMOTE_HEAD" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-  fi
+if ! command -v gh >/dev/null 2>&1; then
+  echo "error: refusing to merge $URL: the merge guard reads the pull request head with the GitHub CLI (gh), which is not on PATH" >&2
+  echo "  the recorded evidence commit for task $ID is $EVIDENCE_HEAD" >&2
+  echo "  without the live head there is nothing to compare it against, so the merge stops here" >&2
+  echo "  fix: install the GitHub CLI (gh), then merge again" >&2
+  exit 1
+fi
+if REMOTE_HEAD=$(gh pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --json headRefOid -q .headRefOid 2>/dev/null); then
+  LIVE_HEAD=$(printf '%s' "$REMOTE_HEAD" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
 fi
 if ! fm_pr_head_valid "$LIVE_HEAD"; then
   echo "error: refusing to merge $URL: the pull request head could not be confirmed" >&2
   echo "  the recorded evidence commit for task $ID is $EVIDENCE_HEAD" >&2
+  echo "  gh is installed but did not answer with a commit for this pull request" >&2
   echo "  without the live head there is nothing to compare it against, so the merge stops here" >&2
   echo "  fix: restore GitHub access (gh auth status), then merge again" >&2
   exit 1
