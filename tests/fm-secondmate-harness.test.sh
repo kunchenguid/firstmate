@@ -799,6 +799,34 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
 }
 
+# An older Claude secondmate home whose guarded sync could not fast-forward has
+# no bin/fm-primary.sh yet. Spawn must preserve the longstanding recovery
+# boundary: warn once and launch its existing plain Claude path instead of
+# turning an already-reported sync skip into a command-not-found failure.
+test_spawn_unsynced_claude_home_falls_back_to_plain_launch() {
+  local w sm launchlog launch out status
+  w="$TMP_ROOT/spawn-unsynced-fallback"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  rm -f "$sm/bin/fm-primary.sh"
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "unsynced-home fallback spawn should succeed"$'\n'"$out"
+  assert_contains "$out" "lacks bin/fm-primary.sh after guarded sync" \
+    "fallback spawn did not report the missing context-refresh wrapper"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "claude --dangerously-skip-permissions" \
+    "unsynced home did not launch its existing plain Claude path"
+  assert_contains "$launch" "encode launch-brief" \
+    "plain-Claude fallback lost the initial launch charter"
+  assert_not_contains "$launch" "fm-primary.sh" \
+    "unsynced home was launched through a wrapper it does not have"
+  pass "C4b spawn: an unsynced Claude home lacking fm-primary.sh keeps its plain launch with one warning"
+}
+
 # Precedence: an explicit per-spawn --model overrides the file's model token.
 test_spawn_explicit_model_overrides_secondmate_harness_token() {
   local w sm meta launchlog launch
@@ -2547,6 +2575,7 @@ test_spawn_explicit_backend_precedence_over_env_and_inherited_config
 test_spawn_bare_harness_no_model_effort_flag
 test_spawn_secondmate_harness_model_token
 test_spawn_secondmate_harness_model_and_effort_tokens
+test_spawn_unsynced_claude_home_falls_back_to_plain_launch
 test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens

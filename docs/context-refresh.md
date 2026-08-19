@@ -50,6 +50,7 @@ bin/fm-primary.sh
 ```
 
 Claude secondmates launched through `bin/fm-spawn.sh` use the same wrapper automatically.
+An older secondmate home whose guarded sync could not fast-forward may still lack the wrapper; spawn then warns once and keeps that home's existing plain-Claude launch, so automatic refresh becomes available only after a normal sync.
 
 ## Why the other successor shapes are not primary
 
@@ -81,5 +82,6 @@ Adding an adapter later requires a verified turn-boundary context measurement, o
 ## Verification
 
 `tests/fm-context-restart.test.sh` covers exact threshold accounting, malformed transcript and usage rejection, concurrent one-directive publication, and wrapper lock transfer over portable real processes.
+`tests/fm-secondmate-harness.test.sh` covers the unsynced-home plain-Claude launch fallback.
 `FM_CONTEXT_RESTART_CLAUDE_LIVE_E2E=1 tests/fm-context-restart-claude-live-e2e.test.sh` verifies the installed Claude Stop payload and transcript usage end to end while a high threshold keeps the live turn inert.
 [`verification/supervision.md`](verification/supervision.md#claude-context-refresh) records the current versioned live result.
