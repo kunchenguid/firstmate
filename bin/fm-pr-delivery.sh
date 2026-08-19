@@ -314,8 +314,26 @@ classify_pr_json() { # <repo> <pr-json-object>
   printf '%s' "$pr_json" | jq -r --arg repo "$repo" '
     def unresolved_threads:
       ((.reviewThreads.nodes // []) | map(select(.isResolved == false)) | length);
+    def latest_reviews:
+      [(.reviews // [])[]? | {author: (.author // ""), state, body, submittedAt}]
+      | sort_by(.submittedAt // "")
+      | group_by(.author)
+      | map(last);
+    def benign_comment:
+      ((.body // "") | gsub("^\\s+|\\s+$"; "") | ascii_downcase)
+      | test("^(lgtm|looks good( to me)?|approved|thanks|fyi)[.![:space:]]*$");
     def review_comments:
-      ((.reviews // []) | map(select(.state == "COMMENTED" and ((.body // "") | length > 0))) | length);
+      (latest_reviews | map(select(.state == "COMMENTED" and ((.body // "") | length > 0) and (benign_comment | not))) | length);
+    def check_pending:
+      ((.status // "") | ascii_upcase) as $status
+      | ((.state // "") | ascii_upcase) as $state
+      | (($status != "" and $status != "COMPLETED")
+        or ($status == "" and ($state == "PENDING" or $state == "EXPECTED")));
+    def check_green:
+      ((.conclusion // "") | ascii_upcase) as $conclusion
+      | ((.state // "") | ascii_upcase) as $state
+      | ($conclusion == "SUCCESS" or $conclusion == "NEUTRAL" or $conclusion == "SKIPPED"
+        or ($conclusion == "" and $state == "SUCCESS"));
     {
       repo: $repo,
       number: (.number | tostring),
@@ -328,10 +346,10 @@ classify_pr_json() { # <repo> <pr-json-object>
         (.statusCheckRollup // []) as $c
         | if .checksTruncated then "incomplete"
           elif ($c | length) == 0 then "none"
-          elif any($c[]; ((.conclusion // .state // "") | ascii_upcase) as $s
-            | ($s == "FAILURE" or $s == "ERROR" or $s == "TIMED_OUT" or $s == "CANCELLED" or $s == "ACTION_REQUIRED")) then "failing"
-          elif any($c[]; ((.status // "") != "COMPLETED") and ((.state // "") != "SUCCESS")) then "pending"
-          else "passing" end),
+          elif any($c[]; (check_green or check_pending) | not) then "failing"
+          elif any($c[]; check_pending) then "pending"
+          elif all($c[]; check_green) then "passing"
+          else "failing" end),
       unresolved: unresolved_threads,
       review_comments: review_comments,
       reviews_truncated: (.reviewsTruncated // false)
@@ -473,7 +491,7 @@ gh_fetch_pr_snapshot() { # <repo> <number>
   pages=$(fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     "$GH_BIN" api graphql --paginate \
     -f owner="$owner" -f name="$name" -F number="$number" \
-    -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number url headRefName headRefOid baseRefName reviewDecision mergeable state commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { ... on CheckRun { conclusion status } ... on StatusContext { state } } pageInfo { hasNextPage } } } } } } reviews(last: 100) { nodes { state body } pageInfo { hasPreviousPage } } reviewThreads(first: 100, after: $endCursor) { nodes { isResolved } pageInfo { hasNextPage endCursor } } } } }' \
+    -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number url headRefName headRefOid baseRefName reviewDecision mergeable state commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { ... on CheckRun { conclusion status } ... on StatusContext { state } } pageInfo { hasNextPage } } } } } } reviews(last: 100) { nodes { state body submittedAt author { login } } pageInfo { hasPreviousPage } } reviewThreads(first: 100, after: $endCursor) { nodes { isResolved } pageInfo { hasNextPage endCursor } } } } }' \
     2>/dev/null) || return 1
   printf '%s\n' "$pages" | jq -sec '
     def evidence:
@@ -487,7 +505,7 @@ gh_fetch_pr_snapshot() { # <repo> <number>
             })
           ],
           checksTruncated: (.commits.nodes[-1].commit.statusCheckRollup.contexts.pageInfo.hasNextPage // false),
-          reviews: [(.reviews.nodes[]? | {state, body})],
+          reviews: [(.reviews.nodes[]? | {author: (.author.login // ""), state, body, submittedAt})],
           reviewsTruncated: (.reviews.pageInfo.hasPreviousPage // false)
         };
     [ .[] | evidence ] as $evidence

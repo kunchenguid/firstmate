@@ -242,7 +242,7 @@ test_optional_review_silence() {
   fixture="$TMP_ROOT/fix-optional"
   setup_project "$home" "$fixture"
   write_open "$fixture" acme/alpha '[{"number":6,"url":"https://github.com/acme/alpha/pull/6","headRefName":"fm/opt6","headRefOid":"fff","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
-  write_view "$fixture" acme/alpha 6 '{"number":6,"url":"https://github.com/acme/alpha/pull/6","headRefName":"fm/opt6","headRefOid":"fff","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_view "$fixture" acme/alpha 6 '{"number":6,"url":"https://github.com/acme/alpha/pull/6","headRefName":"fm/opt6","headRefOid":"fff","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"COMMENTED","body":"Looks good to me.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/opt6.meta" \
     'window=fm-opt6' "worktree=$home/projects/opt6" 'project=alpha' \
     'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
@@ -258,7 +258,7 @@ test_comment_review_then_clearance() {
   fixture="$TMP_ROOT/fix-commentreview"
   setup_project "$home" "$fixture"
   write_open "$fixture" acme/alpha '[{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
-  write_view "$fixture" acme/alpha 17 '{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"COMMENTED","body":"Please update the validation."}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_view "$fixture" acme/alpha 17 '{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"COMMENTED","body":"Please update the validation.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/comment17.meta" \
     'window=fm-comment17' "worktree=$home/projects/comment17" 'project=alpha' \
     'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
@@ -266,7 +266,7 @@ test_comment_review_then_clearance() {
   [ -z "$out" ] || fail "commented review requesting a change should hold delivery"
   run_delivery "$home" "$fixture" show | grep -Fq 'review-issue' \
     || fail "commented review did not produce a review-issue hold"
-  write_view "$fixture" acme/alpha 17 '{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"APPROVED","body":""}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_view "$fixture" acme/alpha 17 '{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"COMMENTED","body":"Please update the validation.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}},{"state":"APPROVED","body":"","submittedAt":"2026-08-19T00:01:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
     || fail "cleared commented review did not become eligible"
@@ -292,6 +292,11 @@ test_check_evidence_requires_success() {
   [ -z "$out" ] || fail "truncated check evidence should not become eligible"
   run_delivery "$home" "$fixture" show | grep -Fq 'checks-incomplete' \
     || fail "truncated check evidence did not produce an explicit hold"
+  write_view "$fixture" acme/alpha 18 '{"number":18,"url":"https://github.com/acme/alpha/pull/18","headRefName":"fm/check18","headRefOid":"rrr","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"STALE","status":"COMPLETED"},{"conclusion":"STARTUP_FAILURE","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  [ -z "$out" ] || fail "non-green check conclusions should not become eligible"
+  run_delivery "$home" "$fixture" show | grep -Fq 'checks-failing' \
+    || fail "non-green check conclusions did not produce a failing hold"
   pass "check evidence requires complete success"
 }
 
