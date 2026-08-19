@@ -934,6 +934,74 @@ test_replace_generation_failure_preserves_live_brief() {
   pass "fm-brief.sh: generation failure preserves the live brief"
 }
 
+test_replace_rejects_non_regular_live_briefs() {
+  local home outside id brief out status
+  home="$TMP_ROOT/rescaffold-non-regular-home"
+  outside="$TMP_ROOT/rescaffold-non-regular-outside"
+  mkdir -p "$home/data" "$outside"
+  printf 'outside sentinel\n' > "$outside/brief.md"
+
+  id="brief-replace-symlink"
+  mkdir -p "$home/data/$id"
+  brief="$home/data/$id/brief.md"
+  ln -s "$outside" "$brief"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --replace 2>&1); status=$?
+  expect_code 1 "$status" "--replace must reject a symlinked live brief"
+  assert_contains "$out" "must be a regular file" \
+    "symlinked brief refusal did not name the required file type"
+  [ -L "$brief" ] || fail "symlinked brief refusal replaced the live path"
+  [ "$(cat "$outside/brief.md")" = "outside sentinel" ] \
+    || fail "symlinked brief replacement changed the target directory"
+  assert_absent "$home/data/$id/brief.superseded-1.md" \
+    "symlinked brief refusal created an archive"
+
+  id="brief-replace-directory"
+  mkdir -p "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --replace 2>&1); status=$?
+  expect_code 1 "$status" "--replace must reject a directory at the live brief path"
+  assert_contains "$out" "must be a regular file" \
+    "directory brief refusal did not name the required file type"
+  [ -d "$home/data/$id/brief.md" ] || fail "directory brief refusal replaced the live path"
+  assert_absent "$home/data/$id/brief.superseded-1.md" \
+    "directory brief refusal created an archive"
+
+  pass "fm-brief.sh: --replace rejects non-regular live briefs"
+}
+
+test_replace_does_not_follow_a_swapped_destination() {
+  local home outside shim real_cp id brief out status
+  home="$TMP_ROOT/rescaffold-no-follow-home"
+  outside="$TMP_ROOT/rescaffold-no-follow-outside"
+  shim="$TMP_ROOT/rescaffold-no-follow-bin"
+  mkdir -p "$home/data" "$outside" "$shim"
+  printf 'outside sentinel\n' > "$outside/brief.md"
+  real_cp=$(command -v cp)
+  id="brief-replace-no-follow"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  printf '%s\n' \
+    '#!/bin/sh' \
+    '"$FM_TEST_REAL_CP" "$@" || exit $?' \
+    'rm -f -- "$FM_TEST_BRIEF"' \
+    'ln -s "$FM_TEST_OUTSIDE" "$FM_TEST_BRIEF"' > "$shim/cp"
+  chmod +x "$shim/cp"
+
+  out=$(FM_TEST_REAL_CP="$real_cp" FM_TEST_BRIEF="$brief" FM_TEST_OUTSIDE="$outside" \
+    PATH="$shim:$PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --replace 2>&1); status=$?
+  expect_code 0 "$status" "--replace must publish without following a destination swapped to a symlink (got: $out)"
+  [ ! -L "$brief" ] || fail "publication left the swapped destination symlink in place"
+  assert_grep "Delivery contract: mode=direct-PR" "$brief" \
+    "publication did not replace the swapped destination path"
+  [ "$(cat "$outside/brief.md")" = "outside sentinel" ] \
+    || fail "publication followed the swapped symlink into its target directory"
+  assert_grep "Delivery contract: mode=no-mistakes" \
+    "$home/data/$id/brief.superseded-1.md" \
+    "publication lost the archived live brief"
+
+  pass "fm-brief.sh: publication never follows the destination"
+}
+
 # --replace applies to every scaffold kind, so no kind is left with hand-editing
 # as its only regeneration path.
 test_replace_applies_to_every_scaffold_kind() {
@@ -1045,6 +1113,8 @@ test_rescaffold_refuses_by_default_and_changes_nothing
 test_replace_regenerates_in_place_and_archives_the_superseded_brief
 test_replace_validates_before_archiving
 test_replace_generation_failure_preserves_live_brief
+test_replace_rejects_non_regular_live_briefs
+test_replace_does_not_follow_a_swapped_destination
 test_replace_applies_to_every_scaffold_kind
 test_generated_briefs_carry_each_section_once
 test_scout_and_secondmate_load_decision_hold_policy

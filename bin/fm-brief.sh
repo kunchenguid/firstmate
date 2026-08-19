@@ -213,6 +213,10 @@ BRIEF="$DATA/$ID/brief.md"
 # supported path, and it archives the superseded brief instead of destroying the
 # filled-in task text that made hand-editing look safer than regenerating.
 if [ -e "$BRIEF" ] || [ -L "$BRIEF" ]; then
+  if [ -L "$BRIEF" ] || [ ! -f "$BRIEF" ]; then
+    echo "error: existing brief must be a regular file, not a symlink or other file type: $BRIEF" >&2
+    exit 1
+  fi
   if [ "$REPLACE" -eq 0 ]; then
     echo "error: $BRIEF already exists; pass --replace to regenerate it (the superseded brief is archived, never appended to)" >&2
     exit 1
@@ -224,19 +228,32 @@ fi
 mkdir -p "$DATA/$ID"
 STAGE_DIR=$(mktemp -d "$DATA/$ID/.brief-stage.XXXXXX")
 STAGED="$STAGE_DIR/brief.md"
+ARCHIVE_STAGED=
 
 cleanup_staged_brief() {
   [ -z "${STAGED:-}" ] || rm -f -- "$STAGED"
+  [ -z "${ARCHIVE_STAGED:-}" ] || rm -f -- "$ARCHIVE_STAGED"
   [ -z "${STAGE_DIR:-}" ] || rmdir "$STAGE_DIR" 2>/dev/null || true
 }
 trap cleanup_staged_brief EXIT
 
+replace_staged_brief() {
+  case "${OSTYPE:-}" in
+    darwin*) mv -fh -- "$1" "$2" ;;
+    linux*) mv -fT -- "$1" "$2" ;;
+    *) echo "error: unsupported platform for no-follow brief replacement: ${OSTYPE:-unknown}" >&2; return 1 ;;
+  esac
+}
+
 publish_brief() {
   local detail=$1
   if [ -n "$ARCHIVED" ]; then
-    cp -pP -- "$BRIEF" "$ARCHIVED"
+    ARCHIVE_STAGED="$STAGE_DIR/brief.superseded.md"
+    cp -p -- "$BRIEF" "$ARCHIVE_STAGED"
+    replace_staged_brief "$ARCHIVE_STAGED" "$ARCHIVED"
+    ARCHIVE_STAGED=
   fi
-  mv -f -- "$STAGED" "$BRIEF"
+  replace_staged_brief "$STAGED" "$BRIEF"
   STAGED=
   rmdir "$STAGE_DIR"
   STAGE_DIR=

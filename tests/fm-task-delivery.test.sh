@@ -151,48 +151,107 @@ EOF
 # unregistered project resolves to the same no-mistakes standing default
 # (AGENTS.md section 7), so a downgrade there is announced too. A conditional
 # policy is excluded because both of its legs are legitimate classifications.
-# A brief that carries the same top-level section twice was appended to rather
-# than regenerated. The worker would follow whichever copy it read last, and the
-# mode check above reads only the FIRST delivery contract line, so a second block
-# carrying a different mode would launch unnoticed. Every spawn kind refuses it.
-test_spawn_refuses_a_brief_with_duplicated_sections() {
-  local rec home proj fakebin out status
+# A second full scaffold leaves several repeated sections whose competing rules
+# have no precedence marker. The mode check above reads only the FIRST delivery
+# contract line, so an appended block carrying a different mode would otherwise
+# launch unnoticed.
+test_spawn_refuses_an_appended_scaffold_signature() {
+  local rec home proj fakebin brief out status
   rec=$(make_home duplicated)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
-  # Exactly the shape hand-appending produced: a second full contract block,
-  # here even recording a different delivery mode than the first.
-  write_brief "$home" delivery-duplicated-d1 no-mistakes
-  {
-    printf '\n# Setup\nRe-scaffolded instructions.\n'
-    printf '\n# Rules\n1. Never push to the default branch.\n'
-    printf '\n# Definition of done\nDelivery contract: mode=direct-PR\n'
-  } >> "$home/data/delivery-duplicated-d1/brief.md"
+  mkdir -p "$home/data/delivery-duplicated-d1"
+  brief="$home/data/delivery-duplicated-d1/brief.md"
+  cat > "$brief" <<'EOF'
+You are a crewmate.
+
+# Task
+Original task.
+
+# Setup
+Original setup.
+
+# Rules
+Original rules.
+
+# Project memory
+Original memory contract.
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+
+# Setup
+Re-scaffolded setup.
+
+# Rules
+Re-scaffolded rules.
+
+# Project memory
+Re-scaffolded memory contract.
+
+# Definition of done
+Delivery contract: mode=direct-PR
+EOF
 
   out=$(run_spawn "$home" "$fakebin" delivery-duplicated-d1 "$proj" claude --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a brief with duplicated sections should exit non-zero"
   assert_contains "$out" "repeats these sections" "the refusal did not say what is wrong with the brief"
+  assert_contains "$out" "# Setup" "the refusal did not list the repeated setup section"
+  assert_contains "$out" "# Rules" "the refusal did not list the repeated rules section"
+  assert_contains "$out" "# Project memory" "the refusal did not list the repeated project-memory section"
   assert_contains "$out" "# Definition of done" "the refusal did not list the repeated section"
   assert_contains "$out" "--replace" "the refusal did not name the supported regeneration path"
   assert_absent "$home/state/delivery-duplicated-d1.meta" "a duplicated-brief spawn wrote task metadata"
+  pass "fm-spawn: an appended scaffold signature is refused"
+}
 
-  # The guard is not ship-only: a scout brief is appended to the same way.
-  write_brief "$home" scout-duplicated-d2
-  printf '\n# Definition of done\nWrite your findings to the report.\n' \
-    >> "$home/data/scout-duplicated-d2/brief.md"
-  out=$(run_spawn "$home" "$fakebin" scout-duplicated-d2 "$proj" claude --scout)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a duplicated scout brief should exit non-zero"
-  assert_contains "$out" "repeats these sections" "the scout refusal did not explain the duplication"
+test_spawn_accepts_legitimate_repeated_task_headings() {
+  local rec home proj fakebin brief marker suffix out
+  rec=$(make_home legitimate-headings)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  mkdir -p "$home/data/delivery-task-heading-d2"
+  brief="$home/data/delivery-task-heading-d2/brief.md"
+  cat > "$brief" <<'EOF'
+You are a crewmate.
 
-  # A single-copy brief is untouched by the guard and only fails later, at the
-  # refusing tmux, so the check cannot be passing vacuously.
-  write_brief "$home" delivery-single-d3 no-mistakes
-  out=$(run_spawn "$home" "$fakebin" delivery-single-d3 "$proj" claude --mode no-mistakes --yolo off)
-  assert_not_contains "$out" "repeats these sections" "a well-formed brief was refused as duplicated"
-  pass "fm-spawn: a brief carrying the same section twice is refused, never launched"
+# Task
+Explain a setup procedure.
+
+# Setup
+This heading belongs to the task body.
+
+# Setup
+This heading belongs to the scaffold.
+
+# Rules
+Scaffold rules.
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+EOF
+  out=$(run_spawn "$home" "$fakebin" delivery-task-heading-d2 "$proj" claude --mode no-mistakes --yolo off)
+  assert_not_contains "$out" "repeats these sections" \
+    "one task-body heading matching a scaffold heading was falsely refused"
+
+  for marker in '```' '~~~'; do
+    case "$marker" in '```') suffix=backticks ;; *) suffix=tildes ;; esac
+    mkdir -p "$home/data/delivery-fenced-$suffix-d3"
+    brief="$home/data/delivery-fenced-$suffix-d3/brief.md"
+    {
+      printf 'You are a crewmate.\n\n# Task\n'
+      printf '%smarkdown\n# Setup\nExample setup.\n# Rules\nExample rules.\n%s\n' "$marker" "$marker"
+      printf '\n# Setup\nScaffold setup.\n\n# Rules\nScaffold rules.\n'
+      printf '\n# Definition of done\nDelivery contract: mode=no-mistakes\n'
+    } > "$brief"
+    out=$(run_spawn "$home" "$fakebin" "delivery-fenced-$suffix-d3" "$proj" claude --mode no-mistakes --yolo off)
+    assert_not_contains "$out" "repeats these sections" \
+      "$marker fenced scaffold-looking headings were falsely refused"
+  done
+  pass "fm-spawn: legitimate task headings clear the scaffold-signature guard"
 }
 
 test_spawn_notices_a_rigor_downgrade_against_the_registry() {
@@ -319,7 +378,8 @@ EOF
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
-test_spawn_refuses_a_brief_with_duplicated_sections
+test_spawn_refuses_an_appended_scaffold_signature
+test_spawn_accepts_legitimate_repeated_task_headings
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
