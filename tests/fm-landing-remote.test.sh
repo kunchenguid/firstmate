@@ -442,7 +442,7 @@ SH
 # leftover `fork` is still there. That is not a no-op, so apply finishes the job
 # rather than reporting a checkout that is only half arranged.
 test_apply_completes_a_partly_arranged_checkout() {
-  local rec dir ours parent clone fakebin log rc
+  local rec dir ours parent clone fakebin log rc ours_tip
   rec=$(make_fork_fixture partly-arranged)
   IFS='|' read -r dir ours parent clone <<EOF
 $rec
@@ -450,6 +450,15 @@ EOF
   git -C "$clone" remote set-url origin "file://$ours"
   git -C "$clone" fetch --quiet --prune origin
   git -C "$clone" branch --quiet --track fork-tracked fork/main
+  # Ours moves on after that fetch, so refs/remotes/origin/main is now stale.
+  # This is the state an interrupted or hand-run remap leaves behind, and a
+  # careless `git checkout -b` from origin/main would start on the old tip.
+  git clone --quiet "$ours" "$dir/ours-pub"
+  printf 'ours-moved-on\n' > "$dir/ours-pub/moved.txt"
+  git -C "$dir/ours-pub" add moved.txt
+  git -C "$dir/ours-pub" commit -qm 'ours moves on after the partial arrangement'
+  git -C "$dir/ours-pub" push --quiet origin main
+  ours_tip=$(git -C "$dir/ours-pub" rev-parse HEAD)
   fakebin=$(fm_fakebin "$dir/fake")
   log="$dir/stub.log"
   : > "$log"
@@ -472,6 +481,8 @@ EOF
     || fail "apply did not set checkout.defaultRemote"
   assert_grep "repo set-default origin" "$log" \
     "apply did not record the gh default while both remotes were present"
+  [ "$(git -C "$clone" rev-parse refs/remotes/origin/main)" = "$ours_tip" ] \
+    || fail "apply left origin/main at $(git -C "$clone" rev-parse refs/remotes/origin/main), not the landing remote's current tip $ours_tip, so a careless branch would still start on a stale base"
   pass "apply completes a partly arranged checkout instead of calling it already correct"
 }
 
@@ -490,6 +501,18 @@ EOF
   assert_contains "$out" "refusing to guess" \
     "apply did not refuse an unrelated origin"
   pass "apply refuses an origin that is neither ours nor the named parent"
+}
+
+# None of these fixtures records a gh default before apply runs, so after a
+# rollback no remote name may carry one. Checking every name matters because a
+# `git remote rename` moves `remote.<name>.gh-resolved` along with the remote.
+assert_no_gh_default_leaked_anywhere() {  # <clone> <what ran>
+  local clone=$1 what=$2 name found
+  for name in origin fork upstream; do
+    found=$(git -C "$clone" config --local --get "remote.$name.gh-resolved" || true)
+    [ -z "$found" ] \
+      || fail "$what left gh's default at '$found' on remote '$name', so a flagless gh pr create would still target it"
+  done
 }
 
 # Make chosen git invocations fail inside apply and let every other one through.
@@ -639,7 +662,143 @@ SH
     "apply did not name the consequence a wrong gh default has"
   [ "$(git -C "$clone" remote get-url origin)" = "file://$parent" ] \
     || fail "the failed apply left origin remapped despite gh's wrong default"
+  # The rollback put origin back on the parent, so a gh default left over from
+  # the failed run would pin gh's PR target to a repository this checkout no
+  # longer names, which is the retargeting the script exists to prevent. The
+  # rollback renames the remotes back, which carries that key with them, so no
+  # name may keep it.
+  assert_no_gh_default_leaked_anywhere "$clone" "the failed apply"
   pass "apply fails when gh records a default repository that is not origin"
+}
+
+# Same leak on a checkout whose origin already names ours: nothing is renamed
+# here, so a gh default written by the failed run stays exactly where gh put it
+# and pins a flagless `gh pr create` to a repository the operator never chose.
+test_a_failed_apply_leaves_no_gh_default_on_an_unrenamed_origin() {
+  local rec dir ours parent clone fakebin log rc
+  rec=$(make_fork_fixture gh-leak-unrenamed)
+  IFS='|' read -r dir ours parent clone <<EOF
+$rec
+EOF
+  git -C "$clone" remote set-url origin "file://$ours"
+  git -C "$clone" fetch --quiet --prune origin
+  fakebin=$(fm_fakebin "$dir/fake")
+  log="$dir/stub.log"
+  : > "$log"
+  install_careless_stubs "$fakebin" "$log"
+  cat > "$fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$log'
+case "\$1 \$2 \${3:-}" in
+  "repo set-default origin"|"repo set-default origin ")
+    git config remote.origin.gh-resolved third-party/firstmate
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+
+  set +e
+  PATH="$fakebin:$PATH" "$LANDING" apply \
+    --ours "file://$ours" \
+    --upstream "file://$parent" \
+    --repo "$clone" > "$dir/apply.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "apply reported success while gh's default was a repository other than origin"
+  assert_no_gh_default_leaked_anywhere "$clone" "the failed apply on an already-ours origin"
+  pass "a failed apply on an unrenamed origin leaves no gh default behind"
+}
+
+# The longest step inside the mutating window is a full-history fetch, which is
+# exactly where an operator hits Ctrl-C or a supervisor sends a term. A run
+# killed there must leave the same checkout a guarded failure leaves, and must
+# not report success.
+test_a_signal_during_the_remap_restores_and_fails() {
+  local rec dir ours parent clone fakebin log out rc sig
+  for sig in INT TERM; do
+    rec=$(make_fork_fixture "signal-$sig")
+    IFS='|' read -r dir ours parent clone <<EOF
+$rec
+EOF
+    fakebin=$(fm_fakebin "$dir/fake")
+    log="$dir/stub.log"
+    : > "$log"
+    install_careless_stubs "$fakebin" "$log"
+    # Stand in for the operator interrupting the refetch: the stub signals the
+    # apply shell that is waiting on it, then blocks so the signal lands while
+    # the fetch is still the foreground command.
+    cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"fetch --prune --quiet origin"*)
+    kill -$sig "\$PPID"
+    sleep 5
+    exit 0
+    ;;
+esac
+exec '$(command -v git)' "\$@"
+SH
+    chmod +x "$fakebin/git"
+
+    set +e
+    out=$(PATH="$fakebin:$PATH" "$LANDING" apply \
+      --ours "file://$ours" \
+      --upstream "file://$parent" \
+      --repo "$clone" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] \
+      || fail "apply exited 0 after SIG$sig interrupted the remap, so a caller would treat the half-applied checkout as done"
+    [ "$(git -C "$clone" remote get-url origin 2>&1)" = "file://$parent" ] \
+      || fail "SIG$sig during the remap left origin as '$(git -C "$clone" remote get-url origin 2>&1)', not the parent it started as"
+    [ "$(git -C "$clone" remote get-url fork 2>&1)" = "file://$ours" ] \
+      || fail "SIG$sig during the remap did not leave the fork remote naming ours"
+    if git -C "$clone" remote get-url upstream >/dev/null 2>&1; then
+      fail "SIG$sig during the remap left the upstream name it created"
+    fi
+    [ -z "$(git -C "$clone" config --local --get checkout.defaultRemote || true)" ] \
+      || fail "SIG$sig during the remap left checkout.defaultRemote behind"
+  done
+  pass "an interrupted remap restores the checkout and still exits non-zero"
+}
+
+# A value the operator set globally was never part of this repository, so
+# capturing it as before-state and writing it back on rollback would add a local
+# key the checkout never had.
+test_restore_does_not_write_global_config_into_the_repo() {
+  local rec dir ours parent clone fakebin log rc
+  rec=$(make_fork_fixture global-config)
+  IFS='|' read -r dir ours parent clone <<EOF
+$rec
+EOF
+  printf '[checkout]\n\tdefaultRemote = somewhere\n[remote]\n\tpushDefault = somewhere\n' \
+    > "$dir/global-gitconfig"
+  fakebin=$(fm_fakebin "$dir/fake")
+  log="$dir/stub.log"
+  : > "$log"
+  install_careless_stubs "$fakebin" "$log"
+  cat > "$fakebin/no-mistakes" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$log'
+exit 1
+SH
+  chmod +x "$fakebin/no-mistakes"
+
+  set +e
+  GIT_CONFIG_GLOBAL="$dir/global-gitconfig" PATH="$fakebin:$PATH" "$LANDING" apply \
+    --ours "file://$ours" \
+    --upstream "file://$parent" \
+    --repo "$clone" > "$dir/apply.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "apply reported success while no-mistakes init failed"
+  [ -z "$(git -C "$clone" config --local --get checkout.defaultRemote || true)" ] \
+    || fail "the rollback wrote the operator's global checkout.defaultRemote into the repository"
+  [ -z "$(git -C "$clone" config --local --get remote.pushDefault || true)" ] \
+    || fail "the rollback wrote the operator's global remote.pushDefault into the repository"
+  pass "a rollback restores local config only and never copies a global value in"
 }
 
 test_careless_path_without_apply_names_parent
@@ -653,5 +812,8 @@ test_apply_refuses_an_unrelated_origin
 test_a_dead_rename_mid_remap_restores_the_checkout
 test_a_failed_restore_is_reported_as_needing_hand_repair
 test_apply_fails_when_gh_records_a_different_default
+test_a_failed_apply_leaves_no_gh_default_on_an_unrenamed_origin
+test_a_signal_during_the_remap_restores_and_fails
+test_restore_does_not_write_global_config_into_the_repo
 
 echo "# all fm-landing-remote tests passed"

@@ -14,8 +14,9 @@
 #   fm-landing-remote.sh verify --ours <url> [--repo <dir>]
 #
 # apply rewrites remotes in the named checkout so `origin` is --ours and
-# `upstream` is --upstream, refetches `origin` so its remote-tracking refs stop
-# holding the previous remote's tips, repoints every local branch that tracked
+# `upstream` is --upstream, refetches `origin` on every path that decides to
+# change something so its remote-tracking refs stop holding the previous
+# remote's tips, repoints every local branch that tracked
 # `origin` or `fork` at `origin`, sets `checkout.defaultRemote` and
 # `remote.pushDefault` to `origin`, points `gh repo set-default` at `origin`
 # when `gh` is on PATH, and re-inits no-mistakes without --fork-url when
@@ -26,10 +27,15 @@
 # refetch, the gh default, the no-mistakes re-init - restores the remotes, the
 # branch tracking, and the git defaults it found, so a failed apply leaves the
 # checkout as it was and can be re-run. The shape of the remap is known before
-# the first write and an exit trap covers the whole mutating window, so an
-# abort part-way through a rename pair still restores. When a restore step
-# itself fails, apply says the remotes were not put back and need hand repair
-# rather than claiming a re-appliable checkout.
+# the first write, and traps on EXIT, HUP, INT and TERM cover the whole
+# mutating window, so an abort part-way through a rename pair - a `set -e`
+# abort, a Ctrl-C, or a `kill` during the refetch - still restores and still
+# exits non-zero. Only an uncatchable SIGKILL can leave the window half
+# written. When a restore step itself fails, apply says the remotes were not
+# put back and need hand repair rather than claiming a re-appliable checkout.
+# The before-state it records is the repository's own local config, never a
+# value inherited from the operator's global config, so restoring cannot add
+# keys the repository did not have.
 # Restoring cannot recreate remote-tracking refs that a fetch replaced or that
 # `git remote remove` deleted, so it refetches the remotes it puts back and
 # leaves those refs holding the landing remote's tips when it cannot reach them.
@@ -121,11 +127,19 @@ git_config_get() {  # <key>
   git -C "$REPO" config --get "$1" 2>/dev/null || true
 }
 
+# The before-state and every key apply itself writes live in the repository's
+# own config. Reading the merged chain instead would let a value the operator
+# set globally be captured here and then written back into this repository by a
+# restore, quietly adding a key the checkout never had.
+git_config_get_local() {  # <key>
+  git -C "$REPO" config --local --get "$1" 2>/dev/null || true
+}
+
 # `gh repo set-default` records its choice locally, in `remote.<name>.gh-resolved`,
 # so whether origin is already gh's default is readable with no network.
 gh_default_is_origin() {
   command -v gh >/dev/null 2>&1 || return 0
-  [ "$(git_config_get remote.origin.gh-resolved)" = base ]
+  [ "$(git_config_get_local remote.origin.gh-resolved)" = base ]
 }
 
 # `git remote rename` rewrites branch.<name>.remote for every branch that
@@ -146,9 +160,14 @@ capture_branch_tracking() {
   return 0
 }
 
-# `fork` and `origin` both named the landing remote before the remap, because
-# apply refuses a fork whose URL is not --ours, so a branch that tracked either
-# one must still track the landing remote under its one surviving name.
+# Fold both old remote names onto the one surviving `origin`. On the rename
+# shapes `origin` named the third-party parent before the remap, so this is not
+# a no-op repair of a preserved relationship: it deliberately retargets the
+# branches that really did track the parent, because a `git pull` that silently
+# takes the parent's tip is the defect this script exists to remove. After the
+# remap the landing remote is the only remote a local branch may track by
+# default, so `fork` and `origin` both resolve to `origin`. Narrowing this to
+# `fork` alone would put the pull leak straight back.
 repoint_landing_branch_tracking() {  # <captured tracking>
   local branch remote merge rc=0
   [ -n "$1" ] || return 0
@@ -245,8 +264,25 @@ restore_pre_apply_remotes() {
   return 0
 }
 
+# `gh repo set-default` records its choice in `remote.<name>.gh-resolved`, and a
+# rename carries that key to the new name, so a failed run can leave its value
+# on any of the three names this script touches - not only on the one gh wrote.
+# Runs after the remotes are back, so each name addresses the remote the
+# checkout started with, and every name is put back to exactly what it held.
+restore_gh_resolved() {  # <remote> <captured value>
+  if [ -n "$2" ]; then
+    git -C "$REPO" config "remote.$1.gh-resolved" "$2" || return 1
+  else
+    git -C "$REPO" config --unset "remote.$1.gh-resolved" 2>/dev/null || true
+  fi
+  return 0
+}
+
 restore_git_default_config() {
   local rc=0
+  restore_gh_resolved origin "$GH_RESOLVED_BEFORE" || rc=1
+  restore_gh_resolved fork "$FORK_GH_RESOLVED_BEFORE" || rc=1
+  restore_gh_resolved upstream "$UPSTREAM_GH_RESOLVED_BEFORE" || rc=1
   if [ -n "$DEFAULT_REMOTE_BEFORE" ]; then
     git -C "$REPO" config checkout.defaultRemote "$DEFAULT_REMOTE_BEFORE" || rc=1
   else
@@ -283,29 +319,43 @@ fail_after_restore() {  # <what failed>
   fail "$1 The remotes, branch tracking, or git defaults this apply rewrote were NOT restored; run fm-landing-remote.sh status and repair them by hand before using this checkout"
 }
 
-# `set -eu` can abort the mutating window at a command no `||` guard covers, and
-# a half-written remap can leave the checkout with no origin at all. The trap is
-# armed after the shape is recorded and before the first write, so any exit from
-# inside that window still restores.
-# Arm the restore before the first write, never after it. Every caller records
-# REMAP_SHAPE first, so the trap knows what to undo even when the very first
-# rename is the thing that fails.
-begin_apply_mutations() {
-  APPLY_IN_FLIGHT=1
-  trap abort_apply_in_flight EXIT
-}
-
-abort_apply_in_flight() {
-  local status=$?
+restore_after_aborted_apply() {  # <what stopped it>
   [ "$APPLY_IN_FLIGHT" = 1 ] || return 0
-  APPLY_IN_FLIGHT=0
-  echo "error: apply stopped part-way through rewriting the remotes of '$REPO' (status $status)" >&2
+  echo "error: apply stopped part-way through rewriting the remotes of '$REPO' ($1)" >&2
   if restore_pre_apply_state; then
     echo "error: the checkout was restored, so re-run apply once the cause is fixed" >&2
   else
     echo "error: the remotes, branch tracking, or git defaults this apply rewrote were NOT restored; run fm-landing-remote.sh status and repair them by hand before using this checkout" >&2
   fi
   return 0
+}
+
+abort_apply_in_flight() {
+  local status=$?
+  restore_after_aborted_apply "status $status"
+  return 0
+}
+
+# A `set -e` abort is not the only way out of the mutating window. The longest
+# step in it is a full-history fetch, which is exactly where an operator hits
+# Ctrl-C or a supervisor sends a term. Bash runs the EXIT trap for those only
+# after the foreground command returns, and a bare SIGINT would otherwise leave
+# the script exiting 0 over a restored checkout, so each signal restores here
+# and then exits non-zero itself.
+abort_apply_on_signal() {  # <signal name>
+  restore_after_aborted_apply "SIG$1"
+  exit 1
+}
+
+# Arm the restore before the first write, never after it. Every caller records
+# REMAP_SHAPE first, so the traps know what to undo even when the very first
+# rename is the thing that fails.
+begin_apply_mutations() {
+  APPLY_IN_FLIGHT=1
+  trap abort_apply_in_flight EXIT
+  trap 'abort_apply_on_signal HUP' HUP
+  trap 'abort_apply_on_signal INT' INT
+  trap 'abort_apply_on_signal TERM' TERM
 }
 
 # gh ranks the remote named `upstream` above `origin` when no default repo is
@@ -408,8 +458,11 @@ cmd_apply() {
   UPSTREAM_BEFORE=$upstream_url
   FORK_BEFORE=$fork_url
   TRACKING_BEFORE=$(capture_branch_tracking)
-  DEFAULT_REMOTE_BEFORE=$(git_config_get checkout.defaultRemote)
-  PUSH_DEFAULT_BEFORE=$(git_config_get remote.pushDefault)
+  DEFAULT_REMOTE_BEFORE=$(git_config_get_local checkout.defaultRemote)
+  PUSH_DEFAULT_BEFORE=$(git_config_get_local remote.pushDefault)
+  GH_RESOLVED_BEFORE=$(git_config_get_local remote.origin.gh-resolved)
+  FORK_GH_RESOLVED_BEFORE=$(git_config_get_local remote.fork.gh-resolved)
+  UPSTREAM_GH_RESOLVED_BEFORE=$(git_config_get_local remote.upstream.gh-resolved)
   REMAP_SHAPE=
 
   if apply_has_nothing_to_change; then
@@ -417,6 +470,8 @@ cmd_apply() {
     cmd_status
     return 0
   fi
+
+  require_landing_remote_reachable
 
   if urls_equal "$origin" "$OURS"; then
     REMAP_SHAPE=tidied-remotes
@@ -430,7 +485,6 @@ cmd_apply() {
         || fail_after_restore "could not remove the leftover fork remote."
     fi
   else
-    require_landing_remote_reachable
     if [ -z "$upstream_url" ]; then
       if [ -n "$fork_url" ]; then
         REMAP_SHAPE=renamed-fork
@@ -457,9 +511,10 @@ cmd_apply() {
           || fail_after_restore "could not remove the leftover fork remote."
       fi
     fi
-    if ! refresh_origin_tracking; then
-      fail_after_restore "could not fetch $OURS after the remap, so origin's tracking refs would still name the previous remote."
-    fi
+  fi
+
+  if ! refresh_origin_tracking; then
+    fail_after_restore "could not fetch $OURS after the remap, so origin's tracking refs would still name the previous remote."
   fi
 
   repoint_landing_branch_tracking "$TRACKING_BEFORE" \
@@ -477,7 +532,7 @@ cmd_apply() {
   fi
 
   APPLY_IN_FLIGHT=0
-  trap - EXIT
+  trap - EXIT HUP INT TERM
 
   if [ "$REMAP_SHAPE" = tidied-remotes ]; then
     echo "landing-remote: origin already points at the landing remote"
@@ -497,6 +552,9 @@ FORK_BEFORE=
 TRACKING_BEFORE=
 DEFAULT_REMOTE_BEFORE=
 PUSH_DEFAULT_BEFORE=
+GH_RESOLVED_BEFORE=
+FORK_GH_RESOLVED_BEFORE=
+UPSTREAM_GH_RESOLVED_BEFORE=
 REMAP_SHAPE=
 APPLY_IN_FLIGHT=0
 while [ $# -gt 0 ]; do
