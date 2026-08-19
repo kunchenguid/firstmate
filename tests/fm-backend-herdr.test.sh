@@ -4312,6 +4312,170 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+
+# --- sidebar legibility: display-only pane/workspace metadata ----------------
+#
+# Herdr's Spaces and Agents sidebar rows are fed by reported display-only
+# metadata. These cases pin two things: that Firstmate reports the role, scope,
+# task, and home a captain needs to tell one entry from another, and - the
+# safety half - that reporting never touches a label, rename, or any other value
+# placement, recovery, or cleanup resolves a worker by.
+
+# sidebar_report_log: run <fn> with the logging fake and echo the command log.
+sidebar_report_log() {  # <dir-name> <fn> <args...>
+  local dir name=$1 log resp fb
+  shift
+  dir="$TMP_ROOT/$name"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; shift; "$@"' "$ROOT" placeholder "$@" >/dev/null 2>&1
+  cat "$log"
+}
+
+test_sidebar_role_maps_every_task_kind() {
+  local out
+  out=$( bash -c '. "$0/bin/backends/herdr.sh"
+    printf "%s %s %s %s\n" \
+      "$(fm_backend_herdr_sidebar_role ship)" \
+      "$(fm_backend_herdr_sidebar_role scout)" \
+      "$(fm_backend_herdr_sidebar_role secondmate)" \
+      "$(fm_backend_herdr_sidebar_role "")"' "$ROOT" )
+  [ "$out" = "crew scout secondmate crew" ] \
+    || fail "task kinds should map to crew/scout/secondmate with an unknown kind reading as crew, got '$out'"
+  pass "fm_backend_herdr_sidebar_role: ship reads as crew, scout and secondmate keep their own role, unknown falls back to crew"
+}
+
+test_sidebar_display_distinguishes_role_and_scope() {
+  local secondmate crew scout
+  secondmate=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_display secondmate trading' "$ROOT" )
+  crew=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_display crew firstmate' "$ROOT" )
+  scout=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_display scout firstmate' "$ROOT" )
+  assert_contains "$secondmate" "secondmate trading" "a secondmate's display name should name its role and domain"
+  assert_contains "$crew" "crew firstmate" "a crewmate's display name should name its role and project"
+  assert_contains "$scout" "scout firstmate" "a scout's display name should name its role and project"
+  [ "$secondmate" != "$crew" ] || fail "a secondmate and a crewmate must not render the same display name"
+  [ "$crew" != "$scout" ] || fail "a crewmate and a scout must not render the same display name"
+  [ "${secondmate#"$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_glyph secondmate' "$ROOT")"}" != "$secondmate" ] \
+    || fail "the display name should carry its role badge as a prefix"
+  pass "fm_backend_herdr_sidebar_display: each role renders a distinct badged name carrying its scope"
+}
+
+test_sidebar_display_omits_an_unknown_scope() {
+  local out
+  out=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_display crew ""' "$ROOT" )
+  assert_contains "$out" "crew" "an unknown scope should still render the role"
+  case "$out" in *"crew "*) fail "an unknown scope should not leave a trailing separator: '$out'" ;; esac
+  pass "fm_backend_herdr_sidebar_display: an unknown scope renders the role alone, with no dangling separator"
+}
+
+test_sidebar_report_pane_reports_role_scope_task_and_home() {
+  local log
+  log=$(sidebar_report_log sidebar-pane fm_backend_herdr_sidebar_report_pane \
+    fmtest w1:p2 crew firstmate herdr-sidebar 2ndmate-trading)
+  assert_contains "$log" $'\x1f''pane'$'\x1f''report-metadata'$'\x1f''w1:p2' \
+    "the report should target the exact pane through pane report-metadata"
+  assert_contains "$log" $'\x1f''--source'$'\x1f''firstmate' \
+    "the report should carry a stable firstmate source id"
+  assert_contains "$log" $'\x1f''--token'$'\x1f''fm_role=crew' "fm_role should be reported"
+  assert_contains "$log" $'\x1f''--token'$'\x1f''fm_scope=firstmate' "fm_scope should be reported"
+  assert_contains "$log" $'\x1f''--token'$'\x1f''fm_task=herdr-sidebar' "fm_task should be reported"
+  assert_contains "$log" $'\x1f''--token'$'\x1f''fm_home=2ndmate-trading' "fm_home should be reported"
+  assert_contains "$log" $'\x1f''--display-agent'$'\x1f' "a display name should be reported"
+  case "$log" in *'--ttl-ms'*) fail "a worker badge must not expire; no --ttl-ms should be sent" ;; esac
+  pass "fm_backend_herdr_sidebar_report_pane: reports role, scope, task, home, and a non-expiring display name"
+}
+
+test_sidebar_report_pane_omits_unknown_facts() {
+  local log
+  log=$(sidebar_report_log sidebar-pane-sparse fm_backend_herdr_sidebar_report_pane \
+    fmtest w1:p2 crew "" "" "")
+  assert_contains "$log" $'\x1f''--token'$'\x1f''fm_role=crew' "a known fact should still be reported"
+  case "$log" in *'fm_scope='*) fail "an unknown scope should be omitted, not reported blank" ;; esac
+  case "$log" in *'fm_task='*) fail "an unknown task should be omitted, not reported blank" ;; esac
+  case "$log" in *'fm_home='*) fail "an unknown home should be omitted, not reported blank" ;; esac
+  pass "fm_backend_herdr_sidebar_report_pane: omits unknown facts instead of reporting empty rows"
+}
+
+test_sidebar_report_never_renames_or_relabels() {
+  local pane_log workspace_log
+  pane_log=$(sidebar_report_log sidebar-no-rename-pane fm_backend_herdr_sidebar_report_pane \
+    fmtest w1:p2 scout firstmate herdr-sidebar firstmate)
+  workspace_log=$(sidebar_report_log sidebar-no-rename-ws fm_backend_herdr_sidebar_report_workspace \
+    fmtest w1 crew firstmate firstmate)
+  local log
+  assert_contains "$pane_log" $'\x1f''report-metadata' "the pane case must actually have reported something to be meaningful"
+  assert_contains "$workspace_log" $'\x1f''report-metadata' "the workspace case must actually have reported something to be meaningful"
+  for log in "$pane_log" "$workspace_log"; do
+    case "$log" in
+      *'rename'*) fail "reporting sidebar metadata must never rename anything: $log" ;;
+      *'--label'*) fail "reporting sidebar metadata must never set a label: $log" ;;
+      *$'\x1f''close'*) fail "reporting sidebar metadata must never close anything: $log" ;;
+      *$'\x1f''create'*) fail "reporting sidebar metadata must never create anything: $log" ;;
+    esac
+  done
+  pass "sidebar reporting: emits only report-metadata, never a rename, label, create, or close"
+}
+
+test_sidebar_report_skips_an_incomplete_identity() {
+  local no_pane no_session no_role
+  no_pane=$(sidebar_report_log sidebar-no-pane fm_backend_herdr_sidebar_report_pane fmtest "" crew p t h)
+  no_session=$(sidebar_report_log sidebar-no-session fm_backend_herdr_sidebar_report_pane "" w1:p2 crew p t h)
+  no_role=$(sidebar_report_log sidebar-no-role fm_backend_herdr_sidebar_report_pane fmtest w1:p2 "" p t h)
+  [ -z "$no_pane" ] || fail "a report with no pane id should make no herdr call, got: $no_pane"
+  [ -z "$no_session" ] || fail "a report with no session should make no herdr call, got: $no_session"
+  [ -z "$no_role" ] || fail "a report with no role should make no herdr call, got: $no_role"
+  pass "sidebar reporting: an incomplete identity reports nothing instead of guessing a target"
+}
+
+test_sidebar_report_survives_a_refused_call() {
+  local dir log resp fb rc
+  dir="$TMP_ROOT/sidebar-refused"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/1.exit"
+  printf '1\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c 'set -e; . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_sidebar_report_pane fmtest w1:p2 crew firstmate task firstmate
+      fm_backend_herdr_sidebar_report_workspace fmtest w1 home firstmate firstmate' "$ROOT" >/dev/null 2>&1
+  rc=$?
+  expect_code 0 "$rc" "a refused sidebar report must not fail the caller"
+  pass "sidebar reporting: a herdr refusal is absorbed so presentation can never fail a spawn"
+}
+
+test_sidebar_report_pane_keeps_the_name_independent_of_the_tokens() {
+  local dir log resp fb display_calls token_calls
+  dir="$TMP_ROOT/sidebar-independent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Refuse the first report the way an older herdr refuses a flag it does not
+  # know, and require the second to be attempted anyway.
+  printf '1\n' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_sidebar_report_pane fmtest w1:p2 crew firstmate task firstmate' "$ROOT" >/dev/null 2>&1
+  display_calls=$(grep -c -- '--display-agent' "$log" || true)
+  token_calls=$(grep -c -- '--token' "$log" || true)
+  [ "$display_calls" = 1 ] || fail "the display name should be reported in exactly one call, got $display_calls"
+  [ "$token_calls" = 1 ] || fail "the tokens should be reported in exactly one separate call, got $token_calls"
+  grep -q -- '--display-agent.*--token' "$log" \
+    && fail "the display name and the tokens must not share one call, so an unsupported token flag cannot take the name down with it"
+  pass "fm_backend_herdr_sidebar_report_pane: the display name and the tokens are reported independently, so a refused half never blocks the other"
+}
+
+test_sidebar_report_workspace_reports_home_and_task_spaces() {
+  local home_log task_log
+  home_log=$(sidebar_report_log sidebar-ws-home fm_backend_herdr_sidebar_report_workspace \
+    fmtest w1 home firstmate firstmate)
+  task_log=$(sidebar_report_log sidebar-ws-task fm_backend_herdr_sidebar_report_workspace \
+    fmtest w2 scout firstmate firstmate)
+  assert_contains "$home_log" $'\x1f''workspace'$'\x1f''report-metadata'$'\x1f''w1' \
+    "the shared per-home space should be reported by its exact id"
+  assert_contains "$home_log" $'\x1f''--token'$'\x1f''fm_role=home' \
+    "the shared per-home space should report itself as a home"
+  assert_contains "$task_log" $'\x1f''--token'$'\x1f''fm_role=scout' \
+    "a projected one-task space should carry that task's own role"
+  pass "fm_backend_herdr_sidebar_report_workspace: a home container and a one-task space report distinct roles"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4323,6 +4487,16 @@ test_workspace_label_secondmate_home_uses_marker_id
 test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
+test_sidebar_role_maps_every_task_kind
+test_sidebar_display_distinguishes_role_and_scope
+test_sidebar_display_omits_an_unknown_scope
+test_sidebar_report_pane_reports_role_scope_task_and_home
+test_sidebar_report_pane_omits_unknown_facts
+test_sidebar_report_never_renames_or_relabels
+test_sidebar_report_skips_an_incomplete_identity
+test_sidebar_report_survives_a_refused_call
+test_sidebar_report_pane_keeps_the_name_independent_of_the_tokens
+test_sidebar_report_workspace_reports_home_and_task_spaces
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_launcher_identity_absent_without_a_herdr_pane
 test_launcher_identity_absent_when_herdr_env_alone_is_set

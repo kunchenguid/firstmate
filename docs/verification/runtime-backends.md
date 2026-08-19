@@ -518,6 +518,52 @@ ok - forced secondmate teardown retains Herdr child identity until exact pane di
 ok - forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed
 ```
 
+### Sidebar legibility metadata
+
+The display-only reporting behind [`herdr-backend.md`](../herdr-backend.md#sidebar-legibility) was measured on 2026-08-18 with Herdr 0.8.0 protocol 19 on macOS aarch64, in a guarded `fm-lab-` session.
+
+```sh
+herdr pane report-metadata <pane> --source firstmate --display-agent 'crew firstmate' --token fm_role=crew
+herdr pane get <pane> | jq -c '{display_agent:.result.pane.display_agent, tokens:.result.pane.tokens}'
+```
+
+```text
+{"display_agent":"crew firstmate","tokens":{"fm_role":"crew"}}
+```
+
+Active facts this evidence establishes:
+
+- Tokens merge across repeated calls and across different `--source` ids, so re-reporting refreshes rather than replaces them, and one integration's tokens never erase another's.
+- The scalar fields `display_agent`, `title`, and `state_labels` are last-writer-wins across sources, and a later call that omits one clears it.
+- Omitting `--ttl-ms` stores a value indefinitely; a value reported with `--ttl-ms 1500` was gone from `pane get` three seconds later, which is why no Firstmate report passes a TTL.
+- Token keys are validated against `^[A-Za-z0-9_-]{1,32}$`; `fm.role` was refused with `invalid_metadata_token`.
+- Emoji and other wide code points round-trip unchanged in both a display name and a token value.
+- Reporting left the tab label and the workspace label byte-identical, and `workspace list` still reported the same `label` while carrying the new `tokens`.
+
+The recommended row configuration in [`herdr-backend.md`](../herdr-backend.md#sidebar-legibility) was validated against the same release, and the validator was proved non-vacuous by an unknown token:
+
+```sh
+HERDR_CONFIG_PATH=<file> herdr config check
+```
+
+```text
+config: ok
+config: issues found
+config parse error: TOML parse error at line 2, column 9
+unknown sidebar token `not_a_real_token`; custom tokens must start with `$`
+```
+
+The active regression that re-measures the label-invariance half against the real binary is:
+
+```sh
+tests/fm-backend-herdr-smoke.test.sh
+```
+
+```text
+ok - real herdr: reported role, scope, and display name land on the live pane and its space
+ok - real herdr: sidebar metadata leaves tab and workspace labels, and label-based discovery, byte-identical
+```
+
 ### Composer and operational input
 
 Real captures verified these active distinctions:

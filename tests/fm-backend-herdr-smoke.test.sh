@@ -349,6 +349,52 @@ assert_contains_local() { case "$1" in *"$2"*) : ;; *) fail "$3"$'\n'"--- got --
 assert_contains_local "$live" "$LABEL2" "list_live did not report the freshly created task tab by label"
 pass "real herdr: list_live discovers a live task tab by fm-<id> label"
 
+# --- sidebar legibility (real herdr display-only metadata) -------------------
+#
+# Herdr's own acceptance of reported metadata, and its promise that reporting is
+# display-only, are facts only the real binary can settle: a fake CLI could only
+# confirm the argv this suite already asserts. Both halves matter - the badge
+# must land, and the labels every placement, recovery, and cleanup path resolves
+# by must come back byte-identical.
+WS_ID2=$(herdr tab list --session "$SESSION" 2>/dev/null \
+  | jq -r --arg t "$_TAB_ID2" '.result.tabs[]? | select(.tab_id == $t) | .workspace_id')
+[ -n "$WS_ID2" ] || fail "could not resolve the task tab's workspace for the sidebar metadata check"
+TAB_LABEL_BEFORE=$(herdr tab list --session "$SESSION" 2>/dev/null \
+  | jq -r --arg t "$_TAB_ID2" '.result.tabs[]? | select(.tab_id == $t) | .label')
+WS_LABEL_BEFORE=$(herdr workspace list --session "$SESSION" 2>/dev/null \
+  | jq -r --arg w "$WS_ID2" '.result.workspaces[]? | select(.workspace_id == $w) | .label')
+
+fm_backend_herdr_sidebar_report_pane "$SESSION" "$PANE_ID2" scout epstein-search "$LABEL2" firstmate
+fm_backend_herdr_sidebar_report_workspace "$SESSION" "$WS_ID2" home epstein-search firstmate
+
+PANE_AFTER=$(herdr pane get "$PANE_ID2" --session "$SESSION" 2>/dev/null)
+DISPLAY_AFTER=$(printf '%s' "$PANE_AFTER" | jq -r '.result.pane.display_agent // empty')
+ROLE_AFTER=$(printf '%s' "$PANE_AFTER" | jq -r '.result.pane.tokens.fm_role // empty')
+SCOPE_AFTER=$(printf '%s' "$PANE_AFTER" | jq -r '.result.pane.tokens.fm_scope // empty')
+[ "$ROLE_AFTER" = scout ] || fail "real herdr did not store the reported fm_role token (got '$ROLE_AFTER')"
+[ "$SCOPE_AFTER" = epstein-search ] || fail "real herdr did not store the reported fm_scope token (got '$SCOPE_AFTER')"
+case "$DISPLAY_AFTER" in
+  *"scout epstein-search"*) : ;;
+  *) fail "real herdr did not store the reported display name (got '$DISPLAY_AFTER')" ;;
+esac
+WS_ROLE_AFTER=$(herdr workspace list --session "$SESSION" 2>/dev/null \
+  | jq -r --arg w "$WS_ID2" '.result.workspaces[]? | select(.workspace_id == $w) | .tokens.fm_role // empty')
+[ "$WS_ROLE_AFTER" = home ] || fail "real herdr did not store the reported workspace fm_role token (got '$WS_ROLE_AFTER')"
+pass "real herdr: reported role, scope, and display name land on the live pane and its space"
+
+TAB_LABEL_AFTER=$(herdr tab list --session "$SESSION" 2>/dev/null \
+  | jq -r --arg t "$_TAB_ID2" '.result.tabs[]? | select(.tab_id == $t) | .label')
+WS_LABEL_AFTER=$(herdr workspace list --session "$SESSION" 2>/dev/null \
+  | jq -r --arg w "$WS_ID2" '.result.workspaces[]? | select(.workspace_id == $w) | .label')
+[ "$TAB_LABEL_AFTER" = "$TAB_LABEL_BEFORE" ] \
+  || fail "sidebar metadata changed the task tab label ('$TAB_LABEL_BEFORE' -> '$TAB_LABEL_AFTER'); endpoint identity must be untouched"
+[ "$WS_LABEL_AFTER" = "$WS_LABEL_BEFORE" ] \
+  || fail "sidebar metadata changed the workspace label ('$WS_LABEL_BEFORE' -> '$WS_LABEL_AFTER'); placement identity must be untouched"
+live_after=$(fm_backend_herdr_list_live "$SESSION")
+assert_contains_local "$live_after" "$LABEL2" \
+  "list_live must still discover the task by its unchanged fm-<id> label after sidebar metadata is reported"
+pass "real herdr: sidebar metadata leaves tab and workspace labels, and label-based discovery, byte-identical"
+
 fm_backend_herdr_kill "$SESSION:$PANE_ID2"
 
 cleanup_all

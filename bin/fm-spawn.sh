@@ -2705,6 +2705,41 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+# Herdr renders its Spaces and Agents sidebar from row templates fed by
+# display-only pane and workspace metadata, so tell it what this worker IS -
+# a persistent secondmate, an ordinary crewmate, or a scout, and the domain or
+# project it belongs to. The adapter owns the reporting contract and every
+# safety boundary (bin/backends/herdr.sh "sidebar legibility"); the facts are
+# resolved here because only the spawn knows the task's kind and project.
+# Reported AFTER the endpoint record is published so a report can never sit
+# between a live pane and its durable identity, and best-effort throughout: a
+# sidebar row is presentation, never a reason to fail a spawn.
+if [ "$BACKEND" = herdr ]; then
+  SIDEBAR_ROLE=$(fm_backend_herdr_sidebar_role "$KIND")
+  # The home whose label this worker's entry belongs under is the secondmate's
+  # own home for a --secondmate launch and this process's own home otherwise -
+  # the same rule the workspace label itself resolves by.
+  SIDEBAR_HOME_DIR=$FM_HOME
+  [ "$KIND" = secondmate ] && SIDEBAR_HOME_DIR=$PROJ_ABS
+  SIDEBAR_HOME_LABEL=$(FM_HOME="$SIDEBAR_HOME_DIR" fm_backend_herdr_workspace_label)
+  # Scope is the fact that separates one entry from another: a secondmate's
+  # domain, or the project a crewmate or scout is working.
+  if [ "$KIND" = secondmate ]; then
+    SIDEBAR_SCOPE=${SIDEBAR_HOME_LABEL#2ndmate-}
+    [ "$SIDEBAR_SCOPE" = "$SIDEBAR_HOME_LABEL" ] && SIDEBAR_SCOPE=$(basename "$PROJ_ABS")
+  else
+    SIDEBAR_SCOPE=$(basename "$PROJ_ABS")
+  fi
+  fm_backend_herdr_sidebar_report_pane "$HERDR_SES" "$HERDR_PANE_ID" \
+    "$SIDEBAR_ROLE" "$SIDEBAR_SCOPE" "$ID" "$SIDEBAR_HOME_LABEL"
+  # A projected space holds exactly this one task, so it carries the task's own
+  # role; the shared per-home container is a home and says so.
+  SIDEBAR_WORKSPACE_ROLE=home
+  [ "${HERDR_PROJECTED:-0}" = 1 ] && SIDEBAR_WORKSPACE_ROLE=$SIDEBAR_ROLE
+  fm_backend_herdr_sidebar_report_workspace "$HERDR_SES" "$HERDR_WORKSPACE_ID" \
+    "$SIDEBAR_WORKSPACE_ROLE" "$SIDEBAR_SCOPE" "$SIDEBAR_HOME_LABEL"
+fi
+
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")

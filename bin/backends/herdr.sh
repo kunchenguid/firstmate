@@ -146,6 +146,12 @@ FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 # projection.
 FM_BACKEND_HERDR_PRESENTATION_CONFIG="herdr-presentation-spaces"
 
+# The reporting source id every display-only sidebar metadata call carries.
+# Herdr namespaces reported metadata by source, so a stable id keeps Firstmate's
+# contribution distinguishable from a captain hook or another integration
+# writing the same pane.
+FM_BACKEND_HERDR_SIDEBAR_SOURCE="firstmate"
+
 # fm_backend_herdr_presentation_preference <config-dir>: the single owner of
 # config/herdr-presentation-spaces parsing. Echoes exactly one of "off", "on"
 # (a deliberate opt-in, honored even below the version floor), or "default"
@@ -647,6 +653,124 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
 # Labels and tokens remain non-authoritative correlators only.
 fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
   printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
+}
+
+# --- sidebar legibility: display-only pane and workspace metadata ------------
+#
+# Herdr renders its Spaces and Agents sidebar lists from configurable row
+# templates whose values are built-in display tokens plus custom `$name` tokens
+# supplied through `pane report-metadata` and `workspace report-metadata`
+# (docs/herdr-backend.md "Sidebar legibility" owns the operator contract).
+# Firstmate reports what only Firstmate knows - whether an entry is a persistent
+# secondmate, an ordinary crewmate, or a scout, and which domain or project it
+# belongs to - so a captain can tell one sidebar entry from another without
+# decoding task ids.
+#
+# This whole group is DISPLAY ONLY and deliberately powerless. Reported metadata
+# never changes a workspace label, a tab label, a pane id, or any other value
+# the endpoint metadata, journal, husk-replacement, list-live, bare-selector, or
+# cleanup paths read, so no naming choice here can move or lose a worker. Every
+# call is best-effort and returns success even when Herdr refuses it: a sidebar
+# that reads less well is never a reason to fail a spawn.
+
+# fm_backend_herdr_sidebar_role <task-kind>: the sidebar role word for a task
+# kind. `ship` is the ordinary crewmate kind and reads as "crew" because that is
+# the captain's own noun for the worker rather than for the delivery shape. An
+# unknown or absent kind is treated as an ordinary crewmate, which is the safe
+# reading for a sidebar label.
+fm_backend_herdr_sidebar_role() {  # <task-kind>
+  case "${1:-}" in
+    secondmate) printf 'secondmate' ;;
+    scout) printf 'scout' ;;
+    *) printf 'crew' ;;
+  esac
+}
+
+# fm_backend_herdr_sidebar_glyph <role>: the fixed role badge reported as the
+# `fm_glyph` token and used as the display-name prefix. Every glyph is an
+# East-Asian-Wide code point so the badge column stays aligned in a narrow
+# sidebar, where Herdr's expanded rows are only 18 to 36 columns wide. The set
+# is a generic role badge, not a per-domain one: a captain who wants different
+# styling colors `$fm_role` in their own Herdr row config, and one who wants no
+# badge at all simply leaves `$fm_glyph` out of their rows.
+fm_backend_herdr_sidebar_glyph() {  # <role>
+  case "${1:-}" in
+    secondmate) printf '⚓' ;;
+    scout) printf '🔭' ;;
+    crew) printf '🔧' ;;
+    home) printf '🏠' ;;
+  esac
+}
+
+# fm_backend_herdr_sidebar_display <role> <scope>: the reported display name,
+# which is what Herdr's built-in `agent` row token shows, so it is the one
+# channel that improves the sidebar under a completely unconfigured Herdr. The
+# role word is kept alongside the badge because a badge alone is not
+# self-explanatory on first sight, and the scope is appended when known.
+fm_backend_herdr_sidebar_display() {  # <role> <scope>
+  local role=${1:-} scope=${2:-} glyph text
+  glyph=$(fm_backend_herdr_sidebar_glyph "$role")
+  text=$role
+  if [ -n "$scope" ]; then
+    text="$role $scope"
+  fi
+  if [ -n "$glyph" ]; then
+    printf '%s %s' "$glyph" "$text"
+    return 0
+  fi
+  printf '%s' "$text"
+}
+
+# fm_backend_herdr_sidebar_report_pane: report one worker pane's display-only
+# identity. No `--ttl-ms` is passed, because an expiring badge would make a
+# long-running worker silently lose its label; tokens merge across calls and
+# across sources, so a re-report after a relaunch simply refreshes them.
+# An empty value is omitted rather than reported blank, so a missing fact shows
+# as an absent row rather than an empty one.
+#
+# The display name and the tokens are reported as two independent calls on
+# purpose. Herdr gained reported display names several releases before it gained
+# custom metadata tokens and the configurable rows that render them, so on the
+# older supported releases the tokens have nothing to render into while the
+# display name is the only channel that can improve the sidebar at all. Bundling
+# them would let one unsupported flag take the useful half down with it.
+fm_backend_herdr_sidebar_report_pane() {  # <session> <pane-id> <role> <scope> <task-id> <home-label>
+  local session=${1:-} pane=${2:-} role=${3:-} scope=${4:-} task=${5:-} home=${6:-} glyph
+  local -a base args
+  [ -n "$session" ] || return 0
+  [ -n "$pane" ] || return 0
+  [ -n "$role" ] || return 0
+  glyph=$(fm_backend_herdr_sidebar_glyph "$role")
+  base=(pane report-metadata "$pane" --source "$FM_BACKEND_HERDR_SIDEBAR_SOURCE")
+  args=("${base[@]}" --display-agent "$(fm_backend_herdr_sidebar_display "$role" "$scope")")
+  fm_backend_herdr_cli "$session" "${args[@]}" >/dev/null 2>&1 || true
+  args=("${base[@]}" --token "fm_role=$role")
+  if [ -n "$glyph" ]; then args+=(--token "fm_glyph=$glyph"); fi
+  if [ -n "$scope" ]; then args+=(--token "fm_scope=$scope"); fi
+  if [ -n "$task" ]; then args+=(--token "fm_task=$task"); fi
+  if [ -n "$home" ]; then args+=(--token "fm_home=$home"); fi
+  fm_backend_herdr_cli "$session" "${args[@]}" >/dev/null 2>&1 || true
+  return 0
+}
+
+# fm_backend_herdr_sidebar_report_workspace: the same display-only report for a
+# Space. The role is `home` for the shared per-home container and the task's own
+# role for a projected one-task space, which is the entry whose label carries an
+# unreadable correlator suffix and gains the most from a legible row.
+fm_backend_herdr_sidebar_report_workspace() {  # <session> <workspace-id> <role> <scope> <home-label>
+  local session=${1:-} workspace=${2:-} role=${3:-} scope=${4:-} home=${5:-} glyph
+  local -a args
+  [ -n "$session" ] || return 0
+  [ -n "$workspace" ] || return 0
+  [ -n "$role" ] || return 0
+  glyph=$(fm_backend_herdr_sidebar_glyph "$role")
+  args=(workspace report-metadata "$workspace" --source "$FM_BACKEND_HERDR_SIDEBAR_SOURCE")
+  args+=(--token "fm_role=$role")
+  if [ -n "$glyph" ]; then args+=(--token "fm_glyph=$glyph"); fi
+  if [ -n "$scope" ]; then args+=(--token "fm_scope=$scope"); fi
+  if [ -n "$home" ]; then args+=(--token "fm_home=$home"); fi
+  fm_backend_herdr_cli "$session" "${args[@]}" >/dev/null 2>&1 || true
+  return 0
 }
 
 # fm_backend_herdr_presentation_session_lock_path: one machine-private lock
