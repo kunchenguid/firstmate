@@ -817,6 +817,42 @@ EOF
   pass "another branch's run is ignored, falls back"
 }
 
+# The shape above still leaves two things coincidental: run_running binds the
+# foreign run's head to THIS worktree's own real HEAD (FM_FAKE_RUN_HEAD is set
+# by make_repo_on_branch), and the runs list still carries a row for the
+# foreign branch. Pin the exact "neighbour run" shape instead: no run of this
+# crew's own anywhere, the daemon's active/most-recent run belongs to a
+# foreign branch with a head that does not resolve in this worktree at all,
+# and the runs list is genuinely empty (no row for any branch, foreign or
+# own). Attribution must still be refused on branch identity alone, and the
+# watcher's progress predicate (crew_is_provably_working) must not treat the
+# foreign run as this crew's progress either - the direct combination behind
+# test_other_branch_run_ignored (foreign run, but a binding head) and
+# test_not_provably_working_when_stopped (foreign run via crew_is_provably_working,
+# but again a binding head), neither of which uses a genuinely foreign head.
+test_foreign_branch_foreign_head_empty_runs_list_ignored() {
+  reset_fakes
+  local d; d=$(new_case foreignheadempty)
+  make_repo_on_branch "$d/wt" fm/feat-gg
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gg.meta" "window=fm:fm-feat-gg" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'done: implemented, ready to validate\n' > "$d/state/feat-gg.status"
+  # Overrides make_repo_on_branch's export: a head that resolves to nothing in
+  # this worktree's history, unlike the crew's own real HEAD.
+  FM_FAKE_RUN_HEAD="f0f0f0f"
+  FM_FAKE_AXI_STATUS="$(run_running fm/foreign-crew)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-gg
+  local out; out=$(run_crew_state "$d" feat-gg)
+  assert_not_contains "$out" "source: run-step" "foreign branch+head+empty runs list not misattributed"
+  assert_contains "$out" "source: status-log" "no own run anywhere -> falls back to status-log"
+  assert_contains "$out" "state: done" "falls back to the log verb"
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-gg \
+    && fail "the watcher's progress check treated a foreign branch's run as this crew's progress"
+  pass "a foreign run with a foreign head and an empty runs list is ignored by both state and the progress check"
+}
+
 # (f) no run for this crew + a busy pane -> working via pane
 test_no_run_busy_pane() {
   reset_fakes
@@ -2189,6 +2225,7 @@ test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
+test_foreign_branch_foreign_head_empty_runs_list_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
