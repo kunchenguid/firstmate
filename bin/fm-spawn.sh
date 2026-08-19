@@ -691,7 +691,7 @@ parse_orca_worktree_result() {
 }
 
 spawn_abort_cleanup() {
-  local status=$? namespace_fault
+  local status=$?
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -719,11 +719,7 @@ spawn_abort_cleanup() {
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
-      if namespace_fault=$(fm_backend_herdr_presentation_lock_namespace_fault); then
-        echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup - $namespace_fault" >&2
-      else
-        echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
-      fi
+      echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup$(fm_backend_herdr_presentation_lock_refusal_suffix)" >&2
       HERDR_PROJECTION_ABORT_CLEANUP=0
     fi
   fi
@@ -1914,11 +1910,7 @@ case "$BACKEND" in
         spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
           # A contended lock clears on its own; an unusable lock namespace never
           # does, so this refusal names which one it hit.
-          if HERDR_NAMESPACE_FAULT=$(fm_backend_herdr_presentation_lock_namespace_fault); then
-            echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume - $HERDR_NAMESPACE_FAULT" >&2
-          else
-            echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
-          fi
+          echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume$(fm_backend_herdr_presentation_lock_refusal_suffix)" >&2
           exit 1
         }
         if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
@@ -2022,11 +2014,7 @@ case "$BACKEND" in
             fi
           fi
         else
-          if HERDR_NAMESPACE_FAULT=$(fm_backend_herdr_presentation_lock_namespace_fault); then
-            echo "warning: herdr presentation focus lock unavailable; using the ordinary flat layout without projection - $HERDR_NAMESPACE_FAULT" >&2
-          else
-            echo "warning: herdr presentation focus lock unavailable; using the ordinary flat layout without projection" >&2
-          fi
+          echo "warning: herdr presentation focus lock unavailable; using the ordinary flat layout without projection$(fm_backend_herdr_presentation_lock_refusal_suffix)" >&2
         fi
       fi
     fi

@@ -1501,16 +1501,18 @@ SH
 # A lock namespace another account owns can never validate here, so retrying is
 # futile: teardown must say that rather than blaming the session, which is what
 # held cleanup open indefinitely and let it later act on a reassigned copy.
-# The account is driven apart with a fake `id -u` rather than a second real
-# account, so the ownership divergence is real without needing privileges.
-install_foreign_uid_fake() {  # <case-dir> <uid>
-  local case_dir=$1 uid=$2
-  cat > "$case_dir/fakebin/id" <<SH
-#!/usr/bin/env bash
-if [ "\${1:-}" = -u ] && [ \$# -eq 1 ]; then printf '%s\n' '$uid'; exit 0; fi
-exec /usr/bin/id "\$@"
-SH
-  chmod +x "$case_dir/fakebin/id"
+# The account is driven apart with an inherited EUID rather than a second real
+# account, so the ownership divergence is real without needing privileges. EUID
+# is readonly in bash, so it is handed to the run through the environment with
+# `env`, which is how a non-bash parent can supply one in the first place.
+run_teardown_as_uid() {  # <case-dir> <uid> [args...]
+  local case_dir=$1 uid=$2; shift 2
+  env "EUID=$uid" \
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
+    PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$TEARDOWN" task-x1 "$@"
 }
 
 test_herdr_teardown_diagnoses_a_foreign_owned_lock_namespace() {
@@ -1521,12 +1523,11 @@ test_herdr_teardown_diagnoses_a_foreign_owned_lock_namespace() {
   log="$case_dir/herdr.log"; : > "$log"
   closed="$case_dir/closed"
   : > "$case_dir/state/task-x1.status"
-  install_foreign_uid_fake "$case_dir" 424246
   owner=$(id -u)
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    run_teardown_as_uid "$case_dir" 424246 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   rmdir "/tmp/firstmate-herdr-presentation-424246" 2>/dev/null || true
   [ "$rc" -ne 0 ] \
     || fail "herdr-foreign-lock-namespace: teardown proceeded without its presentation lock"
@@ -1546,36 +1547,104 @@ test_herdr_teardown_diagnoses_a_foreign_owned_lock_namespace() {
   pass "herdr teardown separates an unusable lock namespace from an unreachable session"
 }
 
+# A namespace this account cannot create is just as permanent as one another
+# account owns, so teardown must not answer it with the retryable wording
+# either. The name is made uncreatable for real by an over-long account id,
+# which needs no read-only /tmp and no privileges.
+test_herdr_teardown_diagnoses_an_uncreatable_lock_namespace() {
+  local case_dir log closed rc long
+  case_dir=$(make_case herdr-uncreatable-lock-namespace)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; : > "$log"
+  closed="$case_dir/closed"
+  : > "$case_dir/state/task-x1.status"
+  long=$(printf '%0300d' 9)
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    run_teardown_as_uid "$case_dir" "$long" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "herdr-uncreatable-lock-namespace: teardown proceeded without its presentation lock"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-uncreatable-lock-namespace: the refusal erased the durable endpoint metadata"
+  [ ! -e "$closed" ] \
+    || fail "herdr-uncreatable-lock-namespace: the refusal still closed the pane unlocked"
+  assert_grep "could not be created" "$case_dir/stderr" \
+    "herdr-uncreatable-lock-namespace: the refusal did not name the creation failure"
+  assert_grep "no later attempt will clear it" "$case_dir/stderr" \
+    "herdr-uncreatable-lock-namespace: the refusal did not say that retrying cannot help"
+  if grep -q "rerun teardown once the session is reachable" "$case_dir/stderr"; then
+    fail "herdr-uncreatable-lock-namespace: the refusal blamed the session instead of the namespace"
+  fi
+  pass "herdr teardown reports an uncreatable lock namespace as permanent rather than retryable"
+}
+
+legacy_lock_namespace_mode() {  # <path>
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    stat -f '%Lp' "$1" 2>/dev/null
+  else
+    stat -c '%a' "$1" 2>/dev/null
+  fi
+}
+
+# Put the old shared namespace back exactly as it was found, so this case never
+# leaves the machine in a state it did not start in.
+restore_legacy_lock_namespace() {  # <created> <original-mode> <path>
+  if [ "$1" = 1 ]; then
+    rmdir "$3" 2>/dev/null || true
+    return 0
+  fi
+  [ -n "$2" ] || return 0
+  chmod "$2" "$3" 2>/dev/null || true
+}
+
+# The acceptance case: the old shared name exists on the machine in a state this
+# account cannot use, and teardown here completes anyway. Ownership cannot be
+# handed to a second account without privileges, so the directory is forced into
+# a state the assertions refused outright - mode 000, which is neither the
+# required 700 nor even inspectable - and the fix is what makes it inert. It is
+# forced rather than only created, because an earlier case in this file may
+# already have left the name behind in a usable state.
 test_herdr_teardown_ignores_another_accounts_lock_namespace() {
-  local case_dir log closed lock foreign
+  local case_dir log closed lock legacy created original_mode
   case_dir=$(make_case herdr-other-account-namespace)
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
   log="$case_dir/herdr.log"; : > "$log"
   closed="$case_dir/closed"
   : > "$case_dir/state/task-x1.status"
-  foreign=/tmp/firstmate-herdr-presentation-424247
-  mkdir -m 700 "$foreign" 2>/dev/null || chmod 700 "$foreign" \
-    || fail "herdr-other-account-namespace: could not stage another account's namespace"
+  legacy=/tmp/firstmate-herdr-presentation
+  created=0
+  original_mode=
+  if mkdir -m 000 "$legacy" 2>/dev/null; then
+    created=1
+  else
+    original_mode=$(legacy_lock_namespace_mode "$legacy")
+    # A name another account already owns cannot be changed here, and that is
+    # the unmodified real condition, so the failure is not an error.
+    chmod 000 "$legacy" 2>/dev/null || true
+  fi
+  [ -d "$legacy" ] || fail "herdr-other-account-namespace: could not stage the legacy shared namespace"
   lock=$(FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" PATH="$case_dir/fakebin:$PATH" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path default' "$ROOT") \
-    || { rmdir "$foreign" 2>/dev/null || true; fail "herdr-other-account-namespace: the presentation lock path did not resolve"; }
+    || { restore_legacy_lock_namespace "$created" "$original_mode" "$legacy"; fail "herdr-other-account-namespace: the presentation lock path did not resolve"; }
   case "$lock" in
-    /tmp/firstmate-herdr-presentation/*)
-      rmdir "$foreign" 2>/dev/null || true
+    "$legacy"/*)
+      restore_legacy_lock_namespace "$created" "$original_mode" "$legacy"
       fail "herdr-other-account-namespace: the lock still uses a namespace name any account can claim: $lock"
       ;;
   esac
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || { rmdir "$foreign" 2>/dev/null || true; fail "herdr-other-account-namespace: teardown failed: $(cat "$case_dir/stderr")"; }
-  rmdir "$foreign" 2>/dev/null || true
+    || { restore_legacy_lock_namespace "$created" "$original_mode" "$legacy"; fail "herdr-other-account-namespace: teardown failed: $(cat "$case_dir/stderr")"; }
+  restore_legacy_lock_namespace "$created" "$original_mode" "$legacy"
   [ -e "$closed" ] || fail "herdr-other-account-namespace: teardown never closed the pane under its lock"
   [ ! -e "$case_dir/state/task-x1.meta" ] \
     || fail "herdr-other-account-namespace: teardown left the durable endpoint metadata behind"
   grep -q "teardown task-x1 complete" "$case_dir/stdout" \
     || fail "herdr-other-account-namespace: teardown did not report completion"
-  pass "herdr teardown completes while another account's presentation lock namespace exists"
+  pass "herdr teardown completes while the old shared presentation lock namespace exists unusable"
 }
 
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
@@ -2684,6 +2753,7 @@ test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_teardown_diagnoses_a_foreign_owned_lock_namespace
+test_herdr_teardown_diagnoses_an_uncreatable_lock_namespace
 test_herdr_teardown_ignores_another_accounts_lock_namespace
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes

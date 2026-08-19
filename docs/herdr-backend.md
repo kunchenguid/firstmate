@@ -106,9 +106,9 @@ An ambiguous response grants no mutation or cleanup authority.
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
 Projected children are placed in one contiguous block immediately after their owning home when the session layout, protocol, socket, `python3`, and machine-private per-session lock are all verifiable.
-That lock lives in a namespace whose name carries the account's own numeric user id, so it is shared by every Firstmate home of one account, and no other account's Firstmate ever creates or uses that name because each account only ever resolves and creates its own uid-suffixed one.
+That lock lives in a namespace whose name carries the account's own numeric user id, read from the shell itself rather than from a command on `PATH` so that two processes of one account always serialize against each other, and it is shared by every Firstmate home of one account because no other account's Firstmate ever creates or uses that name.
 A second local account can still deliberately create that name, and the refusal then names the owning user id and the remedy instead of misdirecting a retry.
-When the namespace exists but cannot be used for any other reason, every refusal that mentions it names the exact fault and the remedy that clears it, and says plainly that rerunning will not clear it, because that fault is permanent while an unreachable session is not.
+When the namespace cannot be used for any other reason, including being absent because it cannot be created at all, every refusal that mentions it names the exact fault and the remedy that clears it, and says plainly that rerunning will not clear it, because that fault is permanent while an unreachable session is not.
 Existing legacy child labels may extend an already adjacent block read-only but are never renamed or migrated.
 A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
 
