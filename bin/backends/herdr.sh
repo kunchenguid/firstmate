@@ -3012,28 +3012,18 @@ fm_backend_herdr_busy_state() {  # <target>
 #             text). Returned the INSTANT it is seen, without waiting out the
 #             rest of the budget.
 #   idle    - the target was legibly read at least once and never reported
-#             "busy" across the whole window - a genuine "not (yet)
-#             submitted" signal, not a read failure. The caller retries
-#             Enter on this verdict.
+#             "busy" across the whole window. This is readable but
+#             inconclusive: native state can remain idle for a landed turn,
+#             so the caller falls through to composer confirmation.
 #   unknown - EVERY poll in the window failed to read the target at all (a
 #             hard I/O failure - pane gone, socket error - not a timing
 #             race). The caller must not keep retrying Enter against a target
 #             it cannot even read.
 #
 # <polls> spread across <budget-seconds> (rather than one check at the end)
-# is what makes this robust against a SLOW transition: a caller now gets
-# several samples across that window instead of a single one, so a transition
-# that lands partway through is not missed just because it had not landed by
-# the FIRST sample.
-# Empirical evidence (docs/herdr-backend.md "Native agent-state submit
-# confirmation"): real claude and codex observed first-working at 90-490ms
-# after Enter, so a several-hundred-ms budget sampled repeatedly reliably
-# catches it. The remaining, inherent gap - a turn so fast it starts AND
-# returns to idle between two samples - is bounded by how tightly <polls> is
-# packed into <budget-seconds>; nothing observed in real testing has come
-# close to that, but it is a residual risk, not a mathematical impossibility
-# (see the doc section for the full characterization and the failure-mode
-# analysis for both directions this must guard).
+# lets the fast path catch a native transition that lands partway through the
+# window. A whole-window idle result remains inconclusive and is resolved by
+# the caller's shared composer fallback.
 # FM_BACKEND_HERDR_SUBMIT_POLLS (default 6): how many samples
 # fm_backend_herdr_send_text_submit spreads across each Enter attempt's
 # confirmation budget. Overridable for tests (a value of 1
