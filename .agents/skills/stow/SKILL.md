@@ -1,6 +1,6 @@
 ---
 name: stow
-description: Sweep the current session for uncaptured durable knowledge, file it to disk, and curate the home's tiered, decaying startup memory before a context reset. Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, or periodically to keep operational memory current.
+description: Sweep the current session for uncaptured durable knowledge, file it to disk, persist the open work records this session knows are unfiled or now wrong, and curate the home's tiered, decaying startup memory before a context reset. Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, or periodically to keep operational memory current.
 user-invocable: true
 metadata:
   internal: true
@@ -10,7 +10,7 @@ metadata:
 
 # stow
 
-Sweep this session for durable knowledge that exists only in conversation, then leave the next session with a compact current operating map rather than an accumulating journal.
+Sweep this session for durable knowledge and open-work record state that exist only in conversation, then leave the next session with a compact current operating map rather than an accumulating journal.
 Memory entries are tiered and decay between passes, and stale material retires to a cold archive instead of being deleted.
 This skill writes only through the existing Firstmate ownership and write boundaries.
 
@@ -207,6 +207,17 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
    A stale unique fact is never deleted, only archived.
    Do not invent another graduation path.
 
+## Open-record persistence
+
+The sweep above preserves knowledge; this one preserves the state of work.
+A reset destroys whatever exists only in this session, and that includes what you have learned about work already under way, not just facts worth remembering.
+So before the reset, make sure the important open work you are holding in context is durably recorded: file what was never filed, and correct what you now know is stale.
+
+Judge for yourself what is important and which record each thing belongs to, and write it through the owner that already governs that record.
+One bound holds: this covers the open work you are actually holding in context, not the records at large.
+It is not a reconciliation of durable records against repository or forge reality, cannot become one on input this volatile, and must never be reported as one.
+Where the right correction is a judgment you cannot make, leave the record alone and raise the question instead of guessing.
+
 ## One-time migration of unmarked entries
 
 Legacy entries carry no markers; an unmarked entry is its file's default tier with unknown age, and unknown age is not guilt.
@@ -227,8 +238,11 @@ Report the outcome in plain captain-facing language with all of these facts:
 - each durable finding filed outside memory and its authoritative owner;
 - each archived entry's reason, each autonomous offload's live destination and actual relief, and, when a pinned candidate was proposed, the `proposed-offload` section with every candidate's fields;
 - every unresolved exception, including a primary-owned shared-file constraint in a secondmate home, and every concrete captain decision opened for an over-budget result;
-- whether the session is safe to reset, only when all durable findings are captured and the post-pass result is within budget with no exception or pending budget decision.
+- each open record this pass filed or corrected, and each one it deliberately left alone with the judgment it is waiting on;
+- whether the session is safe to reset, only when all durable findings are captured, every open record this session held is filed or explicitly left with its reason, and the post-pass result is within budget with no exception or pending budget decision.
 
+State what reset-safe means in the same breath as the claim: nothing this session knew has been lost.
+It is never a claim that the home's durable records are correct, because this pass checks no record the session did not name.
 Do not hide an over-budget result behind a reset-safe claim.
 In a primary home the receipt is written after the cascade below, not instead of it.
 
