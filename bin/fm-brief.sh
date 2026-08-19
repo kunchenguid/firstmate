@@ -183,7 +183,7 @@ Keep working until every part of the assigned task is delivered.
 A turn ending, a natural pause, or one completed sub-part is not a checkpoint to await instruction.
 Hand work back only at a gate defined under Definition of done, a genuine blocker, or a decision genuinely above your authority.
 The final `done:` gate under Definition of done is the whole-task completion claim: every stated requirement met. An earlier gate defined there claims only what that gate itself defines.
-Candid partial-work reporting is `blocked:` or `needs-decision:`, never `done:`.
+Work still partial for the gate you are claiming is `blocked:` or `needs-decision:`, never `done:`; describing the gap candidly does not make it `done:`.
 Before any `done:`, re-read the task, confirm every requirement that gate covers, verify the requested deliverable exists where requested and survives teardown, and re-run the applicable project checks with their real exit status.
 State anything not done and why; if a required item that gate covers is missing, do not append `done:`.
 EOF

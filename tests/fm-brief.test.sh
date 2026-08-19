@@ -251,8 +251,8 @@ test_completion_contract_covers_every_variant() {
       "$kind brief lets a worker hand work back outside a defined gate"
     assert_grep "The final \`done:\` gate under Definition of done is the whole-task completion claim: every stated requirement met." "$brief" \
       "$kind brief does not define the final done gate as whole-task completion"
-    assert_grep "Candid partial-work reporting is \`blocked:\` or \`needs-decision:\`, never \`done:\`." "$brief" \
-      "$kind brief permits candid partial work to claim done"
+    assert_grep "Work still partial for the gate you are claiming is \`blocked:\` or \`needs-decision:\`, never \`done:\`; describing the gap candidly does not make it \`done:\`." "$brief" \
+      "$kind brief permits candid partial work to claim done for the gate it is claiming"
     assert_grep "Before any \`done:\`, re-read the task, confirm every requirement that gate covers, verify the requested deliverable exists where requested and survives teardown, and re-run the applicable project checks with their real exit status." "$brief" \
       "$kind brief missing the mandatory completion self-check"
     assert_grep "State anything not done and why; if a required item that gate covers is missing, do not append \`done:\`." "$brief" \
@@ -281,6 +281,10 @@ test_mode_defined_gates_survive_the_completion_contract() {
     "no-mistakes brief lets the contract suppress its implementation-ready handoff"
   assert_grep "That is this mode's final gate and its whole-task completion claim." "$brief" \
     "no-mistakes brief does not mark the CI-green done as its final gate"
+  assert_grep "An earlier gate defined there claims only what that gate itself defines." "$brief" \
+    "no-mistakes brief does not scope an intermediate gate to what that gate defines"
+  assert_no_grep "Candid partial-work reporting" "$brief" \
+    "no-mistakes brief bans partial work unconditionally, contradicting its intermediate handoff gate"
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" gates-secondmate --secondmate --no-projects 2>&1); status=$?
   expect_code 0 "$status" "fm-brief.sh gates-secondmate --secondmate should exit 0 (got: $out)"
