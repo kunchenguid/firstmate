@@ -2,7 +2,8 @@
 // Dedicated no-Agent Feishu transport.
 //
 // The transport uses the official Feishu Node SDK for one long-connection
-// event client and the SDK's message APIs for durable outbound delivery.
+// event client, the SDK's resource API for authorized inbound image
+// downloads, and the SDK's message APIs for durable outbound delivery.
 // It never starts Pi, imports an Agent SDK, writes a Pi session, evaluates
 // message text, opens a webhook, or invokes an operator command.
 import { spawn, spawnSync } from "node:child_process";

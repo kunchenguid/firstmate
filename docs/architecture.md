@@ -303,9 +303,9 @@ The [Relay configuration reference](configuration.md#promised-public-replies-sta
 ## Feishu current-Pi channel
 
 The optional Feishu channel has three owners and no second Agent authority.
-The dedicated `bin/fm-feishu-transport.mjs` process owns strict local-config credential access, one official Feishu Node SDK long connection, SDK P2P identity verification, SDK bound-chat `message.create`, reconnect health, and no Pi or Agent access.
-`bin/fm-feishu-state.mjs` owns private pairing, exact binding generations and Assistant-history boundaries, accepted Feishu events, native-queue submission evidence, finalized-Assistant registration intents and outbox records, attempts, receipts, quarantine, and local alerts.
-`.pi/extensions/fm-primary-feishu-bridge.ts` and `.pi/extensions/lib/fm-feishu-native-channel.ts` are the only components allowed to offer authorized Feishu text to the current Pi native queue.
+The dedicated `bin/fm-feishu-transport.mjs` process owns strict local-config credential access, one official Feishu Node SDK long connection, SDK P2P identity verification, authorized inbound image downloads, SDK bound-chat `message.create`, reconnect health, and no Pi or Agent access.
+`bin/fm-feishu-state.mjs` owns private pairing, exact binding generations and Assistant-history boundaries, accepted Feishu events and their media envelopes and cache bytes, native-queue submission evidence, finalized-Assistant registration intents and outbox records, attempts, receipts, quarantine, and local alerts.
+`.pi/extensions/fm-primary-feishu-bridge.ts` and `.pi/extensions/lib/fm-feishu-native-channel.ts` are the only components allowed to offer authorized Feishu input, including its native image content, to the current Pi native queue.
 
 The Pi extension sends only the verified current persisted-session identity to a credential-blind lifecycle launcher.
 The dedicated transport process parses `config/feishu.env`, probes app authentication and P2P chat identity before binding mutation, gracefully stops the exact prior owner, converges the pairing and binding generation, and starts exactly one credential-bearing daemon process.

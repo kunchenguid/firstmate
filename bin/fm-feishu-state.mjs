@@ -2,9 +2,10 @@
 // Private durable state owner for the Firstmate Feishu channel.
 //
 // This module contains no network or Agent code.  It owns the pairing and
-// binding schemas, private accepted-event publication, native Pi queue handoff,
-// finalized-Assistant registration intents and outbox records, attempts,
-// receipts, quarantine, transport health, and crash reconciliation.  The Pi extension
+// binding schemas, private accepted-event publication with inbound media
+// envelopes and cache bytes, native Pi queue handoff, finalized-Assistant
+// registration intents and outbox records, attempts, receipts, quarantine,
+// transport health, and crash reconciliation.  The Pi extension
 // and the no-Agent transport import this same owner rather than duplicating
 // those state machines.
 import {
