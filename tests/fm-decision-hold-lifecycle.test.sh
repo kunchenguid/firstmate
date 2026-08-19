@@ -873,6 +873,8 @@ test_archived_decision_without_an_answer_still_fails_the_gate() {
     "the refusal did not report that the decision was closed with no captain answer"
   assert_grep "archived by backlog retention" "$home/archived-hold.err" \
     "the refusal did not report that backlog retention had archived the record"
+  assert_grep "recorded decision inventory of $id" "$home/archived-hold.err" \
+    "the refusal omitted the inventory consequence for a key this origin has recorded"
   assert_no_grep "$hold" "$home/data/backlog.md" \
     "the refused hold recreated a live backlog row for the archived decision"
 
@@ -880,6 +882,57 @@ test_archived_decision_without_an_answer_still_fails_the_gate() {
     fail "a refused repair still satisfied the completion gate"
   fi
   pass "an archived decision with no captain answer keeps the gate shut"
+}
+
+# The same answerless archived identity before `complete` has recorded anything.
+# The refusal must stay, but the consequence it states must be the one that
+# actually follows: a key this origin never inventoried does not shut its gate.
+test_archived_unanswered_hold_outside_the_inventory_states_no_false_consequence() {
+  local home id hold
+  home=$(make_home archived-uninventoried)
+  id=sample-uninventoried-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample uninventoried answer" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the uninventoried origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample uninventoried review\n\nOne captain choice was raised.\n' \
+    > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample) \
+    || fail "could not register the uninventoried hold"
+
+  # Closed outside this script and archived before `complete` ever inventoried it,
+  # which is the normal ordering: holds are raised during the review, not after.
+  tasks_in "$home" "done" "$hold" --keep 0 >/dev/null \
+    || fail "could not reproduce an out-of-band close followed by retention"
+  assert_no_grep "decision_keys=" "$home/state/$id.meta" \
+    "the fixture must reach the re-hold with no recorded decision inventory"
+
+  if run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample \
+    > "$home/uninventoried-hold.out" 2> "$home/uninventoried-hold.err"; then
+    fail "re-holding an archived decision with no recorded captain answer was accepted"
+  fi
+  assert_no_grep "already durably resolved" "$home/uninventoried-hold.err" \
+    "the refusal claimed an unanswered archived decision was durably resolved"
+  assert_grep "closed with no recorded captain answer" "$home/uninventoried-hold.err" \
+    "the refusal did not report that the decision was closed with no captain answer"
+  assert_grep "archived by backlog retention" "$home/uninventoried-hold.err" \
+    "the refusal did not report that backlog retention had archived the record"
+  assert_no_grep "recorded decision inventory" "$home/uninventoried-hold.err" \
+    "the refusal claimed an inventory consequence for a key this origin never recorded"
+  assert_no_grep "$hold" "$home/data/backlog.md" \
+    "the refused hold recreated a live backlog row for the archived decision"
+
+  # And the omitted consequence really is absent: an uninventoried key leaves the
+  # normal completion path open, so claiming otherwise would have been a lie.
+  run_decisions "$home" complete "$id" --none >/dev/null \
+    || fail "completion refused an origin whose archived decision was never inventoried"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "verification refused an origin whose archived decision was never inventoried"
+  pass "an uninventoried archived decision is refused without a false inventory consequence"
 }
 
 # The unrouted close paths must not become a way past the gate. An unanswered
@@ -1436,3 +1489,4 @@ test_answer_preserves_every_unrouted_close_guard
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_archived_answer_still_satisfies_the_completion_gate
 test_archived_decision_without_an_answer_still_fails_the_gate
+test_archived_unanswered_hold_outside_the_inventory_states_no_false_consequence
