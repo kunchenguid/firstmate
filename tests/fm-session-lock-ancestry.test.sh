@@ -138,6 +138,12 @@ SH
 # `MainThread` and no interpreter name at all. Identity then has to come from
 # the script path in argv - and only from there, by exact basename, so a name any
 # node program can present cannot carry a harness verdict on its own.
+#
+# Every case below pins the `MainThread` branch and nothing else. An interpreter
+# that reports its own name (`node`, `python3`) is decided by a separate, looser
+# rule that these negatives say nothing about, and that rule's known looseness is
+# recorded in bin/fm-session-lock-lib.sh and docs/verification/runtime-backends.md
+# as a deferred defect rather than pinned here as a contract.
 test_node_main_thread_identity_comes_only_from_the_script_path() {
   local dir fakebin shape
   dir="$TMP_ROOT/main-thread"

@@ -204,9 +204,14 @@ ok - session-lock identity: codex codex-cli 0.139.0 is identified, refuses an un
 Codex is the harness whose reported name depends on its install method.
 The macOS table above records `codex` for a native 0.146.0 install, while an npm install under nvm runs it as a node script and node renames its own main thread, so `ps -o comm=` reports `MainThread` and no interpreter name at all.
 Identity for that shape comes from the interpreter's script path in argv, taken as the one token immediately after the interpreter and matched by exact basename.
-Whole-path-component matching, which identifies a version-named executable by its install path elsewhere in that file, is too loose for an interpreter's argv, because that argv also carries the values of the interpreter's own flags: it is what let `node --require /opt/hooks/claude/instrument.js /srv/app/server.js` report itself as a harness.
+Whole-path-component matching, which identifies a version-named executable by its install path elsewhere in that file, is too loose for an interpreter's argv, because that argv also carries the values of the interpreter's own flags: under this rule `node --require /opt/hooks/claude/instrument.js /srv/app/server.js` would report itself as a harness on the strength of a preload path.
 Exact basename alone is not enough either, because a flag's value can be named anything at all, `--require=/opt/vendor/claude` included, so the classifier refuses to identify the process at all as soon as that first token is a flag.
 Only the plain `node <script>` shape recorded above is identified, which is deliberate: the alternative is an allowlist of value-taking interpreter flags that would rot silently as vendors add them, so a wrapper-inserted flag makes this evidence unavailable rather than guessed, and a new shape is added here only after it is observed from a real release.
+
+Everything in the two paragraphs above is scoped to the `MainThread` exec name, and a known looser rule remains for an interpreter that reports its OWN name such as `node` or `python3`, which never reaches that branch.
+That rule matches a verified harness name anywhere in the argument string, so `node --require /opt/hooks/claude/instrument.js /srv/app/server.js` and `python3 /srv/app.py --config /etc/claude/x.toml` are both classified as harnesses today, the second of them as Claude.
+The path component has to be exactly a harness name, so an ordinary `~/.claude/...` argument is not matched, which keeps this narrow rather than absent.
+It is pre-existing, it is unchanged by the session-lock identity work recorded here, and closing it is deliberately deferred to its own task with its own real-harness evidence, because that same looseness is currently the only rule that identifies a node-hosted harness whose bin entry is not named after the harness.
 
 The launch marker is the environment variable a harness exports into every process it starts, naming its own session pid.
 It is what lets a session the harness rehosted under its own pty still recognize the lock its process tree can no longer reach, in whichever direction of the launch pair recorded it.

@@ -113,12 +113,10 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     # Reclaiming a dead owner has always been silent and stays that way. The two
     # holders that are alive and still yield are the surprising ones, so name
     # them rather than moving the lock out from under a visible process quietly.
-    # The predicate supplies the whole clause, because converging onto this
-    # session's own holder and taking a home from a suspended one are different
-    # events and only the second one changed hands.
-    if fm_harness_pid_alive "$old"; then
-      YIELDED=$FM_SESSION_HOLDER_YIELD_REASON
-    fi
+    # The predicate supplies the whole clause and leaves it empty for the silent
+    # case, so this is one assignment rather than a second liveness question that
+    # could disagree with the classification that just ran.
+    YIELDED=$FM_SESSION_HOLDER_YIELD_REASON
   fi
 fi
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then

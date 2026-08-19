@@ -73,11 +73,13 @@ fm_harness_path_name() {  # <path>
 # Print the exact harness name when path $1's BASENAME is exactly a verified
 # harness name, or return 1.
 #
-# The strictest of this file's path rules, and the only one used for a bare
-# interpreter's script path. A harness component ANYWHERE in the path is too
-# loose there, because an interpreter's argv also carries the values of its own
-# flags: `--require /opt/hooks/claude/instrument.js` names no harness, and its
-# basename `instrument.js` is what says so.
+# The strictest of this file's path rules, and used by the `MainThread` branch
+# below and nowhere else. A harness component ANYWHERE in the path is too loose
+# THERE, because an interpreter's argv also carries the values of its own flags:
+# inside that branch `--require /opt/hooks/claude/instrument.js` names no harness,
+# and its basename `instrument.js` is what says so. That is a statement about the
+# MainThread branch only; the sibling interpreter branch below is looser still and
+# says so itself.
 #
 # Exact equality is deliberate, and under `MainThread` it is the ONLY evidence
 # there is: the command path is literally `MainThread` and argv[0] is the
@@ -129,7 +131,23 @@ fm_harness_process_matches() {  # <comm> <args>
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
-  # Bare interpreter (e.g. node): match the harness name in its script path.
+  # Bare interpreter (e.g. node, python) that reports its OWN name as the exec
+  # name: match a verified harness name anywhere in the argument string.
+  #
+  # This is the loosest rule in the file, looser than the whole-path-component
+  # rule above and much looser than the exact-basename rule the MainThread branch
+  # below uses, and it does reach shapes that are not harnesses at all:
+  # `node --require /opt/hooks/claude/instrument.js /srv/app/server.js` and
+  # `python3 /srv/app.py --config /etc/claude/x.toml` both classify as a harness
+  # here, the second with FM_HARNESS_IS_CLAUDE=1. A path component must be exactly
+  # a harness name for that to happen, so an ordinary `~/.claude/...` argument
+  # does not, which is what keeps the reachability narrow rather than absent.
+  #
+  # It is PRE-EXISTING and deliberately left alone rather than tightened alongside
+  # the MainThread branch, because the same looseness is currently the only rule
+  # that identifies a node-hosted harness whose bin entry is not named after the
+  # harness - `node /path/to/claude/cli.js` is identified here and nowhere else -
+  # so narrowing it needs its own evidence from a real install, not inference.
   case "$comm" in
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
@@ -152,13 +170,17 @@ fm_harness_process_matches() {  # <comm> <args>
   # values are paths that can be named anything, `/opt/vendor/claude` included.
   #
   # So the branch REFUSES to identify anything as soon as that first token is a
-  # flag, rather than trying to work out where the flags end. That gives up the
-  # inferred `node --enable-source-maps .../bin/codex` shape on purpose: the
-  # alternative is an allowlist of value-taking interpreter flags, which would rot
-  # silently every time a vendor adds one, and silently stale recorded state is
-  # the exact failure this whole mechanism exists to remove. Refusing to guess is
-  # the intended behaviour, and only the plain `node <script>` shape - the one
-  # actually observed from a real codex install - is identified here.
+  # flag, rather than trying to work out where the flags end. That refusal binds
+  # this branch only, which is the branch a `MainThread` exec name reaches; an
+  # interpreter that reports its own name is decided by the looser rule above.
+  #
+  # The refusal gives up the inferred `node --enable-source-maps .../bin/codex`
+  # shape on purpose: the alternative is an allowlist of value-taking interpreter
+  # flags, which would rot silently every time a vendor adds one, and silently
+  # stale recorded state is the exact failure this whole mechanism exists to
+  # remove. Refusing to guess is the intended behaviour, and only the plain
+  # `node <script>` shape - the one actually observed from a real codex install -
+  # is identified here.
   if [ "$base" = MainThread ]; then
     script=${args#* }
     if [ "$script" != "$args" ]; then
@@ -580,13 +602,18 @@ fm_harness_pid_suspended() {  # <pid>
 # because the three cases are not the same event and a caller that prefixed one
 # verb onto all of them would report the cohort case - one session converging its
 # own lock onto its own pid - as a home changing hands.
+#
+# The dead or non-harness case leaves it EMPTY, because reclaiming that holder has
+# always been silent. That keeps one classification deciding both the verdict and
+# whether there is anything to say about it, so a caller cannot ask the liveness
+# question a second time and disagree with this one about a holder that died in
+# between.
 # shellcheck disable=SC2034 # Read by bin/fm-lock.sh to report why it did not yield.
 FM_SESSION_HOLDER_YIELD_REASON=
 fm_session_lock_holder_competes() {  # <pid>
   local pid=$1
   FM_SESSION_HOLDER_YIELD_REASON=
   if ! fm_harness_pid_alive "$pid"; then
-    FM_SESSION_HOLDER_YIELD_REASON="reclaimed a dead or non-harness holder pid $pid"
     return 1
   fi
   if fm_session_same_cohort "$pid" '' 1; then
