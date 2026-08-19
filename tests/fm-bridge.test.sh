@@ -14,10 +14,13 @@ TMP_ROOT=$(fm_test_tmproot fm-bridge)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
-# A fake tmux that reports every target as an existing pane, and a busy footer
-# only for targets matching FAKE_BUSY_RE (so a test can make exactly one crew
-# "working" via its pane and leave the rest idle). A fake no-mistakes with no
-# runs forces crew-state onto the pane / status-log path.
+# A fake tmux that reports every target as an existing pane (the pane-presence
+# check crew-state's fallback path requires), plus a legacy busy footer for
+# targets matching FAKE_BUSY_RE. A fake no-mistakes with no runs forces
+# crew-state onto the pane-presence / semantic busy-state / status-log path.
+# Under the semantic busy-state contract (bin/fm-busy-lib.sh) rendered pane text
+# is no longer a state source, so a "working" crew proves it through its own
+# armed busy-state record (see record_claude_busy), not the capture-pane footer.
 make_fakebin() {  # <dir>
   local fb
   fb=$(fm_fakebin "$1")
@@ -77,6 +80,29 @@ run_bridge() {  # <home> <fakebin> [busy-re]
   NO_COLOR=1 FAKE_BUSY_RE="${3:-}" PATH="$2:$PATH" FM_HOME="$1" "$BRIDGE" --once
 }
 
+# Record a semantic busy turn for a claude crew the way a real adapter would:
+# arm the task's busy-state contract, then apply one busy lifecycle event. This
+# record (bin/fm-busy-lib.sh), not rendered pane text, is what the snapshot's
+# current-state read consults to classify a crew as working / RUNNING.
+record_claude_busy() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+}
+
+# Record a settled (idle) turn for a claude crew the way a real Stop hook would.
+# An idle busy-state verdict is narrower than turn state, so crew-state falls
+# through to the status log for the crew's current state - which is how a crew
+# parked at a gate, done, failed, or paused reports itself, and it keeps the
+# snapshot's keyed open-decision fold from being cleared as "resumed past gate".
+record_claude_idle() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle --gen "$gen" \
+    --source claude-hook --event stop
+}
+
 # --- Acceptance scenario ----------------------------------------------------
 # A running crew, a held backlog item, landed PRs, and nothing needing the captain.
 test_acceptance_bands() {
@@ -104,14 +130,17 @@ EOF
     "window=firstmate:fm-atlas-axi-scout-x7" \
     "worktree=$home/projects/atlassian-axi" \
     "project=$home/projects/atlassian-axi" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=ship" \
     "yolo=off" \
     "pr=https://github.com/emilchristensen/atlassian-axi/pull/1"
   printf 'working: reproducing the issue\n' > "$home/state/atlas-axi-scout-x7.status"
+  # A busy crew proves it through its own semantic busy-state record, not the
+  # rendered pane, so this is what makes it land under RUNNING.
+  record_claude_busy "$home/state" atlas-axi-scout-x7
 
-  out=$(run_bridge "$home" "$fakebin" 'atlas-axi-scout-x7')
+  out=$(run_bridge "$home" "$fakebin")
 
   run_band=$(band "$out" "RUNNING")
   hold_band=$(band "$out" "WAITING / HELD")
@@ -166,15 +195,12 @@ test_needs_you_signals() {
 ## Done
 EOF
 
-  # An OPEN decision must be read from the status log, so the pane stays idle:
-  # a busy pane is treated by the snapshot as "the crew resumed past the gate"
-  # and would clear the open decision.
   for id in decide-api-4a stuck-build-5b merge-ready-6c resolved-7d run-live-8e; do
     fm_write_meta "$home/state/$id.meta" \
       "window=firstmate:fm-$id" \
       "worktree=$home/projects/app" \
       "project=$home/projects/app" \
-      "harness=codex" "kind=ship" "mode=ship" "yolo=off"
+      "harness=claude" "kind=ship" "mode=ship" "yolo=off"
   done
   printf 'pr=https://github.com/emilchristensen/app/pull/12\n' >> "$home/state/merge-ready-6c.meta"
 
@@ -184,7 +210,18 @@ EOF
   printf 'needs-decision [key=fmt]: tabs vs spaces\nresolved [key=fmt]: spaces\n' > "$home/state/resolved-7d.status"
   printf 'working: implementing\n' > "$home/state/run-live-8e.status"
 
-  out=$(run_bridge "$home" "$fakebin" 'run-live-8e')
+  # A crew parked at a gate, blocked, done, or resolved settles its turn (idle),
+  # so crew-state reads its current state from the status log and the snapshot's
+  # keyed open-decision fold survives. A busy crew (run-live-8e) proves it works
+  # through its semantic busy-state record, landing under RUNNING. A busy verdict
+  # is what the snapshot would treat as "resumed past the gate", so it is used
+  # only for the genuinely working crew here.
+  for id in decide-api-4a stuck-build-5b merge-ready-6c resolved-7d; do
+    record_claude_idle "$home/state" "$id"
+  done
+  record_claude_busy "$home/state" run-live-8e
+
+  out=$(run_bridge "$home" "$fakebin")
   needs_band=$(band "$out" "NEEDS YOU")
   run_band=$(band "$out" "RUNNING")
 
@@ -224,12 +261,14 @@ EOF
     "window=firstmate:fm-pr-open-3f" \
     "worktree=$home/projects/app" \
     "project=$home/projects/app" \
-    "harness=codex" "kind=ship" "mode=direct-PR" "yolo=off"
+    "harness=claude" "kind=ship" "mode=direct-PR" "yolo=off"
   printf 'pr=https://github.com/emilchristensen/app/pull/42\n' >> "$home/state/pr-open-3f.meta"
 
-  # A bare direct-PR done status with NO checks-green / ready-for-review wording,
-  # against an idle pane so crew-state reads the status log verbatim.
+  # A bare direct-PR done status with NO checks-green / ready-for-review wording.
+  # The crew has settled its turn (idle), so crew-state reads the status log
+  # verbatim and reports done.
   printf 'done: PR https://github.com/emilchristensen/app/pull/42\n' > "$home/state/pr-open-3f.status"
+  record_claude_idle "$home/state" pr-open-3f
 
   out=$(run_bridge "$home" "$fakebin")
   needs_band=$(band "$out" "NEEDS YOU")
@@ -268,22 +307,22 @@ EOF
     "window=firstmate:fm-scout-done-1b" \
     "worktree=$home/projects/app" \
     "project=$home/projects/app" \
-    "harness=codex" "kind=scout" "mode=ship" "yolo=off"
+    "harness=claude" "kind=scout" "mode=ship" "yolo=off"
   fm_write_meta "$home/state/local-done-2c.meta" \
     "window=firstmate:fm-local-done-2c" \
     "worktree=$home/projects/app" \
     "project=$home/projects/app" \
-    "harness=codex" "kind=ship" "mode=local-only" "yolo=off"
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off"
   fm_write_meta "$home/state/crashed-3d.meta" \
     "window=firstmate:fm-crashed-3d" \
     "worktree=$home/projects/app" \
     "project=$home/projects/app" \
-    "harness=codex" "kind=ship" "mode=ship" "yolo=off"
+    "harness=claude" "kind=ship" "mode=ship" "yolo=off"
   fm_write_meta "$home/state/scout-local-4e.meta" \
     "window=firstmate:fm-scout-local-4e" \
     "worktree=$home/projects/app" \
     "project=$home/projects/app" \
-    "harness=codex" "kind=scout" "mode=local-only" "yolo=off"
+    "harness=claude" "kind=scout" "mode=local-only" "yolo=off"
 
   mkdir -p "$home/data/scout-done-1b"
   printf '# findings\n' > "$home/data/scout-done-1b/report.md"
@@ -292,6 +331,13 @@ EOF
   printf 'done: ready in branch fm/local-done-2c\n' > "$home/state/local-done-2c.status"
   printf 'failed: build exploded\n' > "$home/state/crashed-3d.status"
   printf 'done: findings summarized in chat\n' > "$home/state/scout-local-4e.status"
+
+  # These crews have all finished their turn (done / failed), so each settles
+  # its busy-state record to idle and crew-state reports the terminal state from
+  # the status log, the signal these NEEDS YOU classifications key off.
+  for id in scout-done-1b local-done-2c crashed-3d scout-local-4e; do
+    record_claude_idle "$home/state" "$id"
+  done
 
   out=$(run_bridge "$home" "$fakebin")
   needs_band=$(band "$out" "NEEDS YOU")
@@ -333,8 +379,9 @@ EOF
     "window=firstmate:fm-hold-pause-1a" \
     "worktree=$home/projects/app" \
     "project=$home/projects/app" \
-    "harness=codex" "kind=ship" "mode=ship" "yolo=off"
+    "harness=claude" "kind=ship" "mode=ship" "yolo=off"
   printf 'paused: vendor api down, recheck tomorrow\n' > "$home/state/hold-pause-1a.status"
+  record_claude_idle "$home/state" hold-pause-1a
 
   out=$(run_bridge "$home" "$fakebin")
   hold_band=$(band "$out" "WAITING / HELD")
