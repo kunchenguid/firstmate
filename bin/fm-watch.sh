@@ -426,7 +426,7 @@ pause_declaration_liveness() {  # <window>
 # decides whether it still holds, so a confidently dead agent surfaces for
 # reconciliation while every other liveness read keeps the bounded cadence.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last resurface_file agent_alive line state source
+  local win=$1 task=$2 key last death_surface_file agent_alive line state source
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -435,7 +435,7 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  resurface_file="$STATE/.paused-resurfaced-$key"
+  death_surface_file="$STATE/.paused-rechecked-$key"
   agent_alive=${3:-}
   [ -n "$agent_alive" ] || agent_alive=$(pause_declaration_liveness "$win")
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=
@@ -448,18 +448,18 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ "$agent_alive" = dead ]; then
-    if [ -e "$resurface_file" ] && [ "$(age_of "$resurface_file")" -lt "$PAUSE_RESURFACE_SECS" ]; then
+    if [ "$(cat "$death_surface_file" 2>/dev/null || true)" = surfaced ]; then
       printf 'paused'
     else
-      printf 'none'
+      printf 'dead'
     fi
     return
   fi
   printf 'paused'
 }
 
-surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+surface_nonterminal_stale() {  # <window> <hash> [pause-action]
+  local win=$1 h=$2 pause_action=${3:-} key task last
   key=$(printf '%s' "$win" | tr ':/.' '___')
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
@@ -469,6 +469,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
     date +%s > "$STATE/.paused-resurfaced-$key"
+    [ "$pause_action" != death ] || printf 'surfaced' > "$STATE/.paused-rechecked-$key"
   else
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
   fi
@@ -1069,6 +1070,9 @@ EOF
             handle_paused_stale "$w" "$task" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
             continue
             ;;
+          dead)
+            surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)" death
+            ;;
           *)
             surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
             ;;
@@ -1094,6 +1098,9 @@ EOF
           else
             handle_paused_stale "$w" "$task" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
           fi
+          ;;
+        dead)
+          surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)" death
           ;;
         *)
           surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
@@ -1181,7 +1188,7 @@ EOF
           #   - paused: the crew declared an external wait or a captain hold that
           #     its liveness read does not contradict, so absorb on the long
           #     PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
-          #   - none: no running pipeline, no exact busy verdict, and either no
+          #   - none/dead: no running pipeline, no exact busy verdict, and either no
           #     declared pause or a declared pause whose agent is confidently dead.
           #     Surface immediately so firstmate inspects the inconclusive state
           #     (it may be done via an interactive menu that wrote no done: status,
@@ -1199,6 +1206,9 @@ EOF
               paused)
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
+              dead)
+                surface_nonterminal_stale "$w" "$h" death
+                ;;
               *)
                 surface_nonterminal_stale "$w" "$h"
                 ;;
@@ -1212,6 +1222,7 @@ EOF
                          printf '%s' "$h" > "$sf"
                          wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
+                dead)    surface_nonterminal_stale "$w" "$h" death ;;
                 *)       surface_nonterminal_stale "$w" "$h" ;;
               esac
             else
@@ -1249,10 +1260,10 @@ EOF
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
-        # Same three verdicts as the stale dispatchers above, and they must be routed
+        # Same verdicts as the stale dispatchers above, and they must be routed
         # the same way here. Clearing belongs to `working` alone, where an
         # authoritative run supersedes the declaration and the pane returns to
-        # ordinary wedge tracking. `none` means the declaration is CONTRADICTED by a
+        # ordinary wedge tracking. `dead` means the declaration is CONTRADICTED by a
         # confidently dead agent, so it surfaces: a dead pane that churns every poll
         # never reaches the two-consecutive-hash path, and clearing it here would
         # erase its tracking every poll and never tell firstmate the worker is gone.
@@ -1261,6 +1272,7 @@ EOF
         case "$(pause_state_class "$w" "$task")" in
           paused)  handle_paused_stale "$w" "$task" "$h" ;;
           working) clear_pause_tracking "$w" ;;
+          dead)    surface_nonterminal_stale "$w" "$h" death ;;
           *)       surface_nonterminal_stale "$w" "$h" ;;
         esac
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then

@@ -1383,8 +1383,8 @@ declared_pause_liveness_case() {  # <case-name> <pane-command> absorbed|surfaced
     || { reap "$pid"; fail "declared pause with a $name agent was absorbed instead of surfacing: $(cat "$out")"; }
   wakes=$(queued_stale_wakes "$state" "$window")
   [ "$wakes" -ge 1 ] || fail "declared pause with a $name agent surfaced no stale wake for its window"
-  [ ! -e "$state/.paused-rechecked-$key" ] \
-    || fail "declared pause with a $name agent cached its surfaced verdict in the legacy recheck marker"
+  [ "$(cat "$state/.paused-rechecked-$key" 2>/dev/null || true)" = surfaced ] \
+    || fail "declared pause with a $name agent did not record its death surface"
   ack_stopped_cycle "$state" || fail "could not acknowledge the $name declared-pause surface"
 }
 
@@ -1524,6 +1524,8 @@ test_live_declared_pause_surfaces_once_after_agent_dies() {
     || fail "surfaced dead-agent pause lost its stale hash"
   [ -e "$state/.paused-resurfaced-$key" ] \
     || fail "surfaced dead-agent pause did not record its surface marker"
+  [ "$(cat "$state/.paused-rechecked-$key" 2>/dev/null || true)" = surfaced ] \
+    || fail "surfaced dead-agent pause did not record its death action"
   surface_resurface_mtime=$(file_mtime "$state/.paused-resurfaced-$key") \
     || fail "surfaced dead-agent pause lost its re-surface marker"
   ack_stopped_cycle "$state" || fail "could not acknowledge the dead-agent transition surface"
@@ -1558,6 +1560,8 @@ test_live_declared_pause_surfaces_once_after_agent_dies() {
       || { reap "$pid"; fail "$label liveness lost the stale hash on unchanged round $round"; }
     [ -e "$state/.paused-resurfaced-$key" ] \
       || { reap "$pid"; fail "$label liveness lost the recorded surface on unchanged round $round"; }
+    [ "$(cat "$state/.paused-rechecked-$key" 2>/dev/null || true)" = surfaced ] \
+      || { reap "$pid"; fail "$label liveness lost the death action on unchanged round $round"; }
     reap "$pid"
     ack_stopped_cycle "$state" || fail "could not acknowledge unchanged $label poll $round"
     round=$((round + 1))
@@ -1567,6 +1571,103 @@ test_live_declared_pause_surfaces_once_after_agent_dies() {
   [ "$(file_mtime "$state/.paused-resurfaced-$key")" = "$surface_resurface_mtime" ] \
     || fail "unknown liveness refreshed the surfaced pause throttle marker"
   pass "a live declared pause surfaces once when its dead agent later reads unknown"
+}
+
+test_scheduled_pause_recheck_does_not_throttle_later_death() {
+  local dir state fakebin out capture_file statusf window key pane pane_hash pid wakes
+  local scheduled_mtime death_mtime
+  dir=$(make_case scheduled-pause-recheck-then-death); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  pane='idle, holding for the upstream tool release'
+  printf '%s\n' "$pane" > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  set_mtime $(( $(date +%s) - 500 )) "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "$pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND='' \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "unknown declared pause did not emit its scheduled recheck"
+  [ "$(queued_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "unknown declared pause scheduled recheck did not queue exactly one wake"
+  [ -e "$state/.paused-resurfaced-$key" ] \
+    || fail "unknown declared pause scheduled recheck lost its throttle marker"
+  [ ! -e "$state/.paused-rechecked-$key" ] \
+    || fail "scheduled pause recheck was recorded as a surfaced death"
+  scheduled_mtime=$(file_mtime "$state/.paused-resurfaced-$key") \
+    || fail "scheduled pause recheck lost its throttle timestamp"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the scheduled pause recheck"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND='' \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "fresh scheduled recheck throttle did not keep the unknown wait silent"
+  fi
+  [ "$(queued_stale_wakes "$state" "$window")" -eq 0 ] \
+    || { reap "$pid"; fail "fresh scheduled recheck throttle queued another unknown-wait wake"; }
+  [ ! -e "$state/.paused-rechecked-$key" ] \
+    || { reap "$pid"; fail "silent unknown wait was recorded as a surfaced death"; }
+  [ "$(file_mtime "$state/.paused-resurfaced-$key")" = "$scheduled_mtime" ] \
+    || { reap "$pid"; fail "silent unknown wait refreshed its scheduled recheck throttle"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the silent unknown-wait cycle"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || { reap "$pid"; fail "fresh scheduled recheck throttle hid the later agent death"; }
+  [ "$(queued_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "agent death after a scheduled recheck did not queue exactly one immediate wake"
+  [ "$(cat "$state/.paused-rechecked-$key" 2>/dev/null || true)" = surfaced ] \
+    || fail "agent death surface did not record its single-purpose action fact"
+  death_mtime=$(file_mtime "$state/.paused-resurfaced-$key") \
+    || fail "agent death surface lost its re-surface timestamp"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the immediate agent-death surface"
+
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "already-surfaced agent death repeated its wake"
+  fi
+  wakes=$(queued_stale_wakes "$state" "$window")
+  [ "$wakes" -eq 0 ] \
+    || { reap "$pid"; fail "already-surfaced agent death queued $wakes repeated wakes"; }
+  [ "$(cat "$state/.paused-rechecked-$key" 2>/dev/null || true)" = surfaced ] \
+    || { reap "$pid"; fail "already-surfaced agent death lost its action fact"; }
+  [ "$(file_mtime "$state/.paused-resurfaced-$key")" = "$death_mtime" ] \
+    || { reap "$pid"; fail "already-surfaced agent death refreshed its throttle"; }
+  reap "$pid"
+  pass "a scheduled pause recheck cannot throttle a later death, while a surfaced death stays once-only"
 }
 
 # --- a DECLARED pause on a pane whose content CHANGES every poll ------------
@@ -3003,6 +3104,7 @@ test_declared_pause_liveness_decides_trust
 test_declared_pause_changing_hash_live_to_dead
 test_unknown_declared_pause_rederives_authoritative_state
 test_live_declared_pause_surfaces_once_after_agent_dies
+test_scheduled_pause_recheck_does_not_throttle_later_death
 test_exited_declared_pause_surfaces_once_while_live_pane_holds
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
