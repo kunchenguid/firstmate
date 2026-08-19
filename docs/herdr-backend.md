@@ -80,7 +80,7 @@ Every new crewmate, scout, and second mate is reported once, immediately after i
 | display name | The badge, role word, and scope as one string, for example `⚓ secondmate trading`. |
 | `$fm_role` | `secondmate`, `crew`, or `scout` for a worker, and `home` for a shared per-home Space. |
 | `$fm_glyph` | The fixed wide-glyph role badge, so a narrow sidebar can show the role in one column. |
-| `$fm_scope` | A second mate's domain, or the project a crewmate or scout is working. |
+| `$fm_scope` | A second mate's domain, or the project a crewmate or scout is working; on a Space, the owning home's own domain for the shared per-home container - the second mate's id, or the primary home's label - and the task's own scope for a projected one-task Space. |
 | `$fm_task` | The task id, for a row layout that drops the built-in `tab` token. |
 | `$fm_home` | The owning home's label, `firstmate` or `2ndmate-<id>`. |
 
@@ -104,8 +104,9 @@ Every report is best-effort: a refused or unsupported call is absorbed, because 
 
 Reporting happens at spawn time only, and no path retitles a worker that is already running.
 An existing fleet therefore converges as its tasks turn over, and a relaunch re-reports the same worker because tokens merge rather than accumulate.
+A projected task's Space keeps the task's own role and scope across a relaunch, because the report reads projectedness from the presentation journal, which outlives the spawn that created it.
 
-`tests/fm-backend-herdr.test.sh` covers the role vocabulary, the reported argv, omission of unknown facts, independence of the name and the tokens, absorption of a refusal, and the guarantee that reporting emits no rename, label, create, or close.
+`tests/fm-backend-herdr.test.sh` covers the role vocabulary, the reported argv, omission of unknown facts, independence of the name and the tokens, absorption of a refusal, the journal-derived Space role that survives a relaunch, the stable home-Space scope, and the guarantee that reporting emits no rename, label, create, or close.
 `tests/fm-backend-herdr-smoke.test.sh` proves against the real binary that the reported values land on a live pane and Space and that both labels, and label-based discovery, come back unchanged.
 
 ## Presentation spaces

@@ -4462,18 +4462,55 @@ test_sidebar_report_pane_keeps_the_name_independent_of_the_tokens() {
 }
 
 test_sidebar_report_workspace_reports_home_and_task_spaces() {
-  local home_log task_log
+  local secondmate_scope primary_scope home_log task_log
+  secondmate_scope=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_home_scope 2ndmate-trading' "$ROOT" )
+  primary_scope=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_home_scope firstmate' "$ROOT" )
+  [ "$secondmate_scope" = trading ] \
+    || fail "a secondmate home space's scope should be the secondmate's own id, got '$secondmate_scope'"
+  [ "$primary_scope" = firstmate ] \
+    || fail "the primary home space's scope should be the primary home's label, got '$primary_scope'"
   home_log=$(sidebar_report_log sidebar-ws-home fm_backend_herdr_sidebar_report_workspace \
-    fmtest w1 home firstmate firstmate)
+    fmtest w1 home "$secondmate_scope" 2ndmate-trading)
   task_log=$(sidebar_report_log sidebar-ws-task fm_backend_herdr_sidebar_report_workspace \
     fmtest w2 scout firstmate firstmate)
   assert_contains "$home_log" $'\x1f''workspace'$'\x1f''report-metadata'$'\x1f''w1' \
     "the shared per-home space should be reported by its exact id"
   assert_contains "$home_log" $'\x1f''--token'$'\x1f''fm_role=home' \
     "the shared per-home space should report itself as a home"
+  assert_contains "$home_log" $'\x1f''--token'$'\x1f''fm_scope=trading' \
+    "the shared per-home space should carry the home's own stable scope, not a task's project"
   assert_contains "$task_log" $'\x1f''--token'$'\x1f''fm_role=scout' \
     "a projected one-task space should carry that task's own role"
-  pass "fm_backend_herdr_sidebar_report_workspace: a home container and a one-task space report distinct roles"
+  pass "fm_backend_herdr_sidebar_report_workspace: a home container reports the home role and its own stable scope, a one-task space its task's role"
+}
+
+test_sidebar_workspace_role_follows_the_presentation_journal() {
+  local state role
+  state="$TMP_ROOT/sidebar-ws-role/state"
+  mkdir -p "$state"
+  role=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_workspace_role "$1" "$2" "$3"' \
+    "$ROOT" "$state" herdr-sidebar crew )
+  [ "$role" = home ] \
+    || fail "a task with no presentation journal lives in the shared per-home space, expected home, got '$role'"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_create "$1" "$2" >/dev/null' \
+    "$ROOT" "$state" herdr-sidebar \
+    || fail "publishing the presentation journal should succeed"
+  # Each call below runs in a fresh process holding no spawn-scoped projection
+  # state, which is exactly a plain relaunch's condition: only the durable
+  # journal can say the task is projected.
+  role=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_workspace_role "$1" "$2" "$3"' \
+    "$ROOT" "$state" herdr-sidebar crew )
+  [ "$role" = crew ] \
+    || fail "a projected task's space carries the task's own role on a relaunch, expected crew, got '$role'"
+  role=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_workspace_role "$1" "$2" "$3"' \
+    "$ROOT" "$state" herdr-sidebar scout )
+  [ "$role" = scout ] \
+    || fail "the journal names projectedness, not the role itself, expected scout, got '$role'"
+  role=$( bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_sidebar_workspace_role "$1" "$2" "$3"' \
+    "$ROOT" "$state" other-task crew )
+  [ "$role" = home ] \
+    || fail "another task's journal must not project this one, expected home, got '$role'"
+  pass "fm_backend_herdr_sidebar_workspace_role: the durable journal, not spawn-local state, names a projected space's role, so a relaunch keeps it"
 }
 
 # shellcheck source=bin/fm-backend.sh
@@ -4497,6 +4534,7 @@ test_sidebar_report_skips_an_incomplete_identity
 test_sidebar_report_survives_a_refused_call
 test_sidebar_report_pane_keeps_the_name_independent_of_the_tokens
 test_sidebar_report_workspace_reports_home_and_task_spaces
+test_sidebar_workspace_role_follows_the_presentation_journal
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_launcher_identity_absent_without_a_herdr_pane
 test_launcher_identity_absent_when_herdr_env_alone_is_set

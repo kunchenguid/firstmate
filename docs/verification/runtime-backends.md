@@ -534,7 +534,9 @@ herdr pane get <pane> | jq -c '{display_agent:.result.pane.display_agent, tokens
 Active facts this evidence establishes:
 
 - Tokens merge across repeated calls and across different `--source` ids, so re-reporting refreshes rather than replaces them, and one integration's tokens never erase another's.
-- The scalar fields `display_agent`, `title`, and `state_labels` are last-writer-wins across sources, and a later call that omits one clears it.
+- A report that sets at least one of the scalar fields `display_agent`, `title`, or `state_labels` replaces the stored scalar set and clears the scalar fields it omits: a call passing only `--display-agent` cleared a previously reported title and state labels, while the tokens set by the earlier call survived.
+- A report that sets no scalar field at all leaves the existing scalars untouched, which is why the token-only second call in `fm_backend_herdr_sidebar_report_pane` does not clear the display name the first call just set, and the real-binary smoke assertion proves it.
+- For the scalar fields the most recent report wins regardless of `--source` id, measured with a second source overwriting `display_agent`.
 - Omitting `--ttl-ms` stores a value indefinitely; a value reported with `--ttl-ms 1500` was gone from `pane get` three seconds later, which is why no Firstmate report passes a TTL.
 - Token keys are validated against `^[A-Za-z0-9_-]{1,32}$`; `fm.role` was refused with `invalid_metadata_token`.
 - Emoji and other wide code points round-trip unchanged in both a display name and a token value.

@@ -2733,11 +2733,18 @@ if [ "$BACKEND" = herdr ]; then
   fm_backend_herdr_sidebar_report_pane "$HERDR_SES" "$HERDR_PANE_ID" \
     "$SIDEBAR_ROLE" "$SIDEBAR_SCOPE" "$ID" "$SIDEBAR_HOME_LABEL"
   # A projected space holds exactly this one task, so it carries the task's own
-  # role; the shared per-home container is a home and says so.
-  SIDEBAR_WORKSPACE_ROLE=home
-  [ "${HERDR_PROJECTED:-0}" = 1 ] && SIDEBAR_WORKSPACE_ROLE=$SIDEBAR_ROLE
+  # role; the shared per-home container is a home and says so. Projectedness is
+  # read from the durable presentation journal, not from any spawn-scoped flag,
+  # so a plain --relaunch re-reports the projected space's own role too.
+  SIDEBAR_WORKSPACE_ROLE=$(fm_backend_herdr_sidebar_workspace_role "$STATE" "$ID" "$SIDEBAR_ROLE")
+  # A shared per-home space's scope is the home's own domain, never any one
+  # task's project, so it stays stable as tasks spawn into it; a projected
+  # one-task space keeps its task's own scope.
+  SIDEBAR_WORKSPACE_SCOPE=$SIDEBAR_SCOPE
+  [ "$SIDEBAR_WORKSPACE_ROLE" = home ] \
+    && SIDEBAR_WORKSPACE_SCOPE=$(fm_backend_herdr_sidebar_home_scope "$SIDEBAR_HOME_LABEL")
   fm_backend_herdr_sidebar_report_workspace "$HERDR_SES" "$HERDR_WORKSPACE_ID" \
-    "$SIDEBAR_WORKSPACE_ROLE" "$SIDEBAR_SCOPE" "$SIDEBAR_HOME_LABEL"
+    "$SIDEBAR_WORKSPACE_ROLE" "$SIDEBAR_WORKSPACE_SCOPE" "$SIDEBAR_HOME_LABEL"
 fi
 
 sq_brief=$(shell_quote "$BRIEF")
