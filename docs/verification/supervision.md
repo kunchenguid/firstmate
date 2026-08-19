@@ -518,7 +518,7 @@ The integration review covered every supported primary harness and runtime backe
 | Herdr supervisor backend | Uses the shared retirement path plus the new per-call hard deadline; the guarded live run above covered confirmed, unconfirmed, pre-retirement TERM, post-retirement TERM, repeated scans, and buffer cleanup. |
 | Zellij, Orca, and cmux supervisor backends | Not applicable because daemon startup still refuses these supervisor backends before injection; their task-status production and catch-all classification do not use a backend-specific retirement path. |
 
-`docs/architecture.md` owns the current retirement contract, and [runtime backend verification](runtime-backends.md#away-mode-transport) owns the Herdr transport evidence.
+[`docs/herdr-backend.md`](../herdr-backend.md#away-mode-supervisor-support) owns the current mechanism, and [runtime backend verification](runtime-backends.md#away-mode-transport) owns the Herdr transport evidence.
 
 ## Wedge-alarm channels
 

@@ -221,7 +221,7 @@ Treat `state/.subsuper-escalations`, its `.since` sidecar, and `state/.subsuper-
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present while any active delivery settles and clears it last.
 A confirmed delivery retires through its original flush, while an unconfirmed buffer remains available to the return catch-up rather than being submitted again during cleanup.
-`docs/architecture.md` owns the delivery-retirement state boundary, `docs/herdr-backend.md` "Away-mode supervisor support" owns the current backend mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
+`docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
 
 ## Reliability properties
 
