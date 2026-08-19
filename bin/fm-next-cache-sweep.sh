@@ -9,8 +9,8 @@
 #
 # Usage: fm-next-cache-sweep.sh [--dry-run] [<project-dir>...]
 #   --dry-run   report what would be reclaimed and remove nothing.
-#   <project-dir>...  sweep these project clones' pools instead of every clone
-#                     under $FM_HOME/projects.
+#   <project-dir>...  inspect and report these project clones' pools without
+#                     deleting; default discovery retains reclamation authority.
 #
 # WHAT IT TOUCHES. Only pooled task copies, and only the Next.js build output
 # inside them - bin/fm-next-cache-lib.sh's header owns that discovery rule and
@@ -84,13 +84,13 @@
 #   exit 2, and retains non-options verbatim. Falsifier: `--unknown` is retained
 #   as a project, or `-- /path` loses the literal project path before validation.
 # - `bin/fm-next-cache-sweep.sh: target construction -> PROJECT_ARGS,
-#   sweep_project_directories, and TARGETS`. Checked: today both sources become
-#   indistinguishable plain paths. Wrong verdict found here: a valid explicit
-#   project therefore inherits the deletion authority intended only for default
-#   discovery. Required: every target carries its origin-derived authority and
-#   only a positively `reclaim`-eligible target may reach removal. Falsifier: an
-#   explicit primary-clone argument with one available clean pool copy removes
-#   that copy instead of recording a report-only terminal verdict.
+#   sweep_project_directories, and TARGETS`. Checked: each target record carries
+#   `report-only` for explicit paths or `reclaim` only for default discovery;
+#   a record with missing authority also reports instead of deleting.
+#   Converted wrong verdict: plain target paths had erased the origin needed to
+#   withhold deletion. Falsifier: an explicit primary-clone argument with one
+#   available clean pool copy removes that copy instead of recording a report-only
+#   terminal verdict.
 # - `bin/fm-next-cache-sweep.sh: command preflight -> command -v treehouse and
 #   python3`. Checked: absence exits 2, while every later invocation separately
 #   checks the command's status. Falsifier: a treehouse shim is found, emits valid
@@ -148,12 +148,12 @@
 #   reaches the target list and clean summary.
 # - `bin/fm-next-cache-sweep.sh: sweep_project -> sweep_resolve_directory and Git
 #   project queries`. Checked: physical entry and `git rev-parse --show-toplevel`
-#   must succeed and the physical top level must equal the argument. Wrong verdict
-#   found here: root equality proves a worktree root, not the primary clone.
-#   Required: `--absolute-git-dir` and absolute `--git-common-dir` must resolve to
-#   the same directory before a target can anchor provenance. Falsifier: an
-#   explicit linked-worktree root passes top-level equality, then a pool row naming
-#   the primary clone passes the distinct-project comparison and reaches removal.
+#   must succeed and the physical top level must equal the argument; resolved
+#   `--absolute-git-dir` and absolute `--git-common-dir` must also be identical.
+#   Converted wrong verdict: root equality had proven a worktree root, not the
+#   primary clone. Falsifier: an explicit linked-worktree root passes top-level
+#   equality, then a pool row naming the primary clone passes the distinct-project
+#   comparison and reaches removal.
 # - `bin/fm-next-cache-sweep.sh: sweep_pool_entries -> mktemp, treehouse status
 #   --json, staged-file read, JSON decode, and temp removal`. Checked: treehouse's
 #   status is captured before parsing, the file is decoded strictly as UTF-8 JSON,
@@ -161,11 +161,11 @@
 #   a plan exists. Falsifier: treehouse writes a complete first row and exits 1
 #   before its second row, but the first row is planned as a complete pool.
 # - `bin/fm-next-cache-sweep.sh: sweep_pool_entries -> JSON object decoding`.
-#   Checked: today `json.loads` silently keeps the last duplicate key. Wrong
-#   verdict found here: syntactically decoded JSON is not necessarily unambiguous
-#   lease evidence. Required: reject duplicate keys at every object before any row
-#   is emitted. Falsifier: one entry contains `"status":"in-use"` followed by
-#   `"status":"available"`, and last-value decoding authorizes deletion.
+#   Checked: an object-pairs hook now rejects every repeated key before a decoded
+#   object or candidate row exists. Converted wrong verdict: syntactically decoded
+#   JSON had not guaranteed unambiguous lease evidence. Falsifier: one entry
+#   contains `"status":"in-use"` followed by `"status":"available"`, and
+#   last-value decoding authorizes deletion.
 # - `bin/fm-next-cache-sweep.sh: sweep_pool_entries -> status and path fields`.
 #   Checked: Python requires both fields to be nonempty strings, the path to be
 #   absolute, and rejects NUL, tab, CR, and LF before emitting tab-delimited rows;
@@ -184,10 +184,11 @@
 #   `--show-toplevel` must physically equal the candidate, the candidate identity
 #   must appear exactly once in `git worktree list --porcelain -z`, and it must
 #   differ from the supplied project identity. Wrong evidence chain: the supplied
-#   identity was proven only to be a root; the primary-clone proof above is also
-#   required. Falsifier: the pool names a child of a live registered worktree and
-#   Git reachability is mistaken for root identity, or a linked project argument
-#   makes the actual primary clone look like a distinct registered candidate.
+#   identity was previously proven only to be a root; it now passes the independent
+#   primary-clone proof above first. Falsifier: the pool names a child of a live
+#   registered worktree and Git reachability is mistaken for root identity, or a
+#   linked project argument makes the actual primary clone look like a distinct
+#   registered candidate.
 # - `bin/fm-next-cache-sweep.sh: sweep_unowned_reason -> pool status`. Checked:
 #   only byte-exact `available` proceeds, `in-use` records ownership, and every
 #   other value records undetermined. Falsifier: `available ` or `AVAILABLE`
@@ -251,12 +252,12 @@
 #
 # Outcome and summary inputs:
 # - `bin/fm-next-cache-sweep.sh: sweep_apply_project_plan -> report or reclaim
-#   status, target authority, and FM_NEXT_CACHE_TOTAL_KB`. Checked: today dry-run
-#   and removal statuses are captured, but target origin is already lost. Required:
-#   exact per-target `reclaim` eligibility chooses removal; explicit and missing
-#   eligibility choose reporting and a distinct terminal verdict. Falsifier: an
-#   explicit target's free candidate calls `fm_next_cache_reclaim`, or its report
-#   is recorded and summarized as reclaimed.
+#   status, target authority, and FM_NEXT_CACHE_TOTAL_KB`. Checked: exact per-target
+#   `reclaim` eligibility chooses removal; explicit and missing eligibility choose
+#   reporting and a distinct terminal verdict. Converted wrong verdict: apply had
+#   received a plain path after target origin was lost. Falsifier: an explicit
+#   target's free candidate calls `fm_next_cache_reclaim`, or its report is recorded
+#   and summarized as reclaimed.
 # - `bin/fm-next-cache-sweep.sh: sweep_project_plan, sweep_project, project loop,
 #   and final summary -> announced candidates and final verdicts`. Checked: project
 #   plans remain atomic, the complete pool list announces indexed candidates
@@ -309,6 +310,7 @@ Usage: fm-next-cache-sweep.sh [--dry-run] [<project-dir>...]
 
 Reclaim Next.js build output from pooled task copies that nobody is using.
 With no project directory, sweeps every project clone under $FM_HOME/projects.
+Explicit project directories are inspected and reported without deleting.
 
   --dry-run   report what would be reclaimed and remove nothing.
 
@@ -360,6 +362,21 @@ sweep_path_identity() {  # <path>
   [ "$device:$inode" = "$identity" ] || return 1
   case "$device$inode" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\n' "$identity"
+}
+
+sweep_project_is_primary_worktree() {  # <path>
+  local project=$1 git_dir common_dir git_dir_real common_dir_real
+  git_dir=$(git -C "$project" rev-parse --absolute-git-dir 2>/dev/null) \
+    || return 1
+  common_dir=$(git -C "$project" \
+    rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    || return 1
+  case "$git_dir$common_dir" in
+    *$'\t'*|*$'\r'*|*$'\n'*) return 1 ;;
+  esac
+  git_dir_real=$(sweep_resolve_directory "$git_dir") || return 1
+  common_dir_real=$(sweep_resolve_directory "$common_dir") || return 1
+  [ "$git_dir_real" = "$common_dir_real" ]
 }
 
 sweep_read_text_file() {  # <path>
@@ -632,6 +649,14 @@ sweep_pool_entries() {  # <project-dir>
   python3 - "$tmp" <<'PY' || parse_status=$?
 import json, sys
 
+def unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError()
+        value[key] = item
+    return value
+
 # Anything this cannot read as a list of pool entries exits non-zero, so the
 # caller reports the project as unreadable and sweeps none of its copies. An
 # unparseable pool is not an empty pool, and it is certainly not a pool of
@@ -640,7 +665,7 @@ try:
     raw = open(sys.argv[1], "rb").read()
     if b"\0" in raw:
         raise ValueError()
-    pool = json.loads(raw.decode("utf-8"))
+    pool = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
 except (OSError, UnicodeError, ValueError):
     sys.exit(1)
 if not isinstance(pool, list):
@@ -837,14 +862,18 @@ sweep_record_candidate_verdict() {  # <project> <candidate-id> <verdict> <reason
   local recorded_id record human
   case "$candidate_id" in ''|*[!0-9]*) return 1 ;; esac
   case "$verdict" in
-    reclaimed|skipped-as-owned|undetermined|refused|failed) ;;
+    reclaimed|reported|skipped-as-owned|undetermined|refused|failed) ;;
     *) return 1 ;;
   esac
   case "$kb" in -) ;; ''|*[!0-9]*) return 1 ;; esac
   case "$project$reason$wt" in *$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
-  if [ "$verdict" = skipped-as-owned ] && [ "$kb" -gt 0 ]; then
-    human=$(fm_next_cache_human_kb "$kb") || return 1
-  fi
+  case "$verdict" in
+    reported|skipped-as-owned)
+      if [ "$kb" -gt 0 ]; then
+        human=$(fm_next_cache_human_kb "$kb") || return 1
+      fi
+      ;;
+  esac
   if [ -n "$SWEEP_PROJECT_VERDICT_IDS" ]; then
     while IFS= read -r recorded_id; do
       [ "$recorded_id" = "$candidate_id" ] && return 1
@@ -865,6 +894,15 @@ EOT
   CANDIDATE_VERDICTS=$(( CANDIDATE_VERDICTS + 1 ))
   case "$verdict" in
     reclaimed) ;;
+    reported)
+      if [ "$kb" -gt 0 ]; then
+        printf 'sweep: report-only %s (%s), holding %s\n' \
+          "$wt" "$reason" "$human"
+      else
+        printf 'sweep: report-only %s (%s), no Next.js build output\n' \
+          "$wt" "$reason"
+      fi
+      ;;
     skipped-as-owned)
       if [ "$kb" -gt 0 ]; then
         printf 'sweep: skipped-as-owned %s (%s), holding %s\n' \
@@ -887,6 +925,9 @@ sweep_summarize_candidate_ledger() {
   local project candidate_id verdict reason kb wt rows=0
   TOTAL_KB=0
   RECLAIMED=0
+  REPORTED=0
+  REPORTED_KB=0
+  REPORT_ONLY_INSPECTED=0
   SKIPPED=0
   INSPECTED=0
   FAILED=0
@@ -903,6 +944,15 @@ sweep_summarize_candidate_ledger() {
           if [ "$kb" -gt 0 ]; then
             TOTAL_KB=$(( TOTAL_KB + kb ))
             RECLAIMED=$(( RECLAIMED + 1 ))
+          fi
+          ;;
+        reported)
+          [ "$kb" = - ] && return 1
+          INSPECTED=$(( INSPECTED + 1 ))
+          REPORT_ONLY_INSPECTED=$(( REPORT_ONLY_INSPECTED + 1 ))
+          if [ "$kb" -gt 0 ]; then
+            REPORTED_KB=$(( REPORTED_KB + kb ))
+            REPORTED=$(( REPORTED + 1 ))
           fi
           ;;
         skipped-as-owned)
@@ -1060,12 +1110,34 @@ EOT
   fi
 }
 
-sweep_apply_project_plan() {  # <project> <plan>
-  local project=$1 plan=$2 candidate_id action reason planned_kb wt apply_status
-  local record_error=0
+sweep_apply_project_plan() {  # <project> <plan> <authority>
+  local project=$1 plan=$2 authority=$3 candidate_id action reason planned_kb wt
+  local apply_status report_reason record_error=0
   while IFS=$'\t' read -r candidate_id action reason planned_kb wt; do
     if [ -n "$candidate_id" ]; then
-      if [ "$action" = owned ]; then
+      if [ "$authority" != reclaim ]; then
+        apply_status=0
+        fm_next_cache_report "$wt" "sweep" || apply_status=$?
+        if [ "$authority" = report-only ]; then
+          report_reason="operator-supplied project is report-only"
+        else
+          report_reason="target has no deletion eligibility"
+        fi
+        if [ "$action" = owned ]; then
+          report_reason="$report_reason; $reason"
+        fi
+        if [ "$apply_status" -ne 0 ]; then
+          sweep_record_candidate_verdict \
+            "$project" "$candidate_id" failed \
+            "report-only build output could not be processed" 0 "$wt" \
+            || record_error=1
+        else
+          sweep_record_candidate_verdict \
+            "$project" "$candidate_id" reported \
+            "$report_reason" "$FM_NEXT_CACHE_TOTAL_KB" "$wt" \
+            || record_error=1
+        fi
+      elif [ "$action" = owned ]; then
         sweep_record_candidate_verdict \
           "$project" "$candidate_id" skipped-as-owned "$reason" "$planned_kb" "$wt" \
           || record_error=1
@@ -1098,8 +1170,8 @@ EOT
   [ "$record_error" -eq 0 ]
 }
 
-sweep_project() {  # <project>
-  local project=$1 project_real project_top project_top_real entries
+sweep_project() {  # <project> <authority>
+  local project=$1 authority=${2:-} project_real project_top project_top_real entries
   SWEEP_PROJECT_ANNOUNCED=0
   SWEEP_PROJECT_ASSESSED=0
   SWEEP_PROJECT_VERDICTS=0
@@ -1127,6 +1199,10 @@ sweep_project() {  # <project>
     sweep_incomplete "project path is not a project root: $project_real"
     return
   fi
+  if ! sweep_project_is_primary_worktree "$project_real"; then
+    sweep_incomplete "project path is not the primary project clone: $project_real"
+    return
+  fi
   if ! entries=$(sweep_pool_entries "$project_real"); then
     sweep_incomplete "cannot read the worktree pool for $project_real"
     return
@@ -1134,7 +1210,8 @@ sweep_project() {  # <project>
   if ! sweep_project_plan "$project_real" "$entries"; then
     return 1
   fi
-  if ! sweep_apply_project_plan "$project_real" "$SWEEP_PROJECT_PLAN"; then
+  if ! sweep_apply_project_plan \
+    "$project_real" "$SWEEP_PROJECT_PLAN" "$authority"; then
     sweep_reconcile_project_verdicts "$project_real" || true
     sweep_incomplete "candidate verdict could not be recorded for $project_real"
     return
@@ -1143,15 +1220,24 @@ sweep_project() {  # <project>
   SWEEP_PROJECT_COMPLETE=1
 }
 
+TARGETS=()
+sweep_add_target() {  # <path> [<origin>]
+  local path=$1 origin=${2:-} authority=report-only
+  case "$path" in *$'\t'*|*$'\r'*|*$'\n'*) sweep_die "unsafe project target" ;; esac
+  [ "$origin" = default-discovery ] && authority=reclaim
+  TARGETS+=("$authority"$'\t'"$path")
+}
+
 if [ "${#PROJECT_ARGS[@]}" -gt 0 ]; then
-  TARGETS=("${PROJECT_ARGS[@]}")
+  for project in "${PROJECT_ARGS[@]}"; do
+    sweep_add_target "$project" explicit
+  done
 else
-  TARGETS=()
   if ! project_dirs=$(sweep_project_directories "$PROJECTS"); then
     sweep_die "cannot enumerate project clones under $PROJECTS"
   fi
   while IFS= read -r dir; do
-    [ -n "$dir" ] && TARGETS+=("$dir")
+    [ -n "$dir" ] && sweep_add_target "$dir" default-discovery
   done <<EOT
 $project_dirs
 EOT
@@ -1169,21 +1255,38 @@ INCOMPLETE=0
 INSPECTED=0
 FAILED=0
 COMPLETE_PROJECTS=0
+REPORT_ONLY_PROJECTS=0
 CANDIDATE_LEDGER=
 CANDIDATE_ANNOUNCED=0
 CANDIDATE_VERDICTS=0
-for project in "${TARGETS[@]}"; do
-  sweep_project "$project"
+target_index=0
+while [ "$target_index" -lt "${#TARGETS[@]}" ]; do
+  target=${TARGETS[$target_index]}
+  case "$target" in
+    *$'\t'*)
+      authority=${target%%$'\t'*}
+      project=${target#*$'\t'}
+      ;;
+    *)
+      authority=
+      project=$target
+      ;;
+  esac
+  sweep_project "$project" "$authority"
   project_status=$?
   if [ "$project_status" -ne 0 ]; then
     RC=1
     INCOMPLETE=$(( INCOMPLETE + 1 ))
   elif [ "$SWEEP_PROJECT_COMPLETE" -eq 1 ]; then
     COMPLETE_PROJECTS=$(( COMPLETE_PROJECTS + 1 ))
+    if [ "$authority" != reclaim ]; then
+      REPORT_ONLY_PROJECTS=$(( REPORT_ONLY_PROJECTS + 1 ))
+    fi
   else
     RC=1
     INCOMPLETE=$(( INCOMPLETE + 1 ))
   fi
+  target_index=$(( target_index + 1 ))
 done
 
 LEDGER_INCOMPLETE=0
@@ -1221,6 +1324,15 @@ if [ "$FAILED" -gt 0 ]; then
   FAILED_NOTE="; $(sweep_copies "$FAILED") could not be processed"
 fi
 
+REPORT_ONLY_NOTE=
+if [ "$REPORTED" -gt 0 ]; then
+  REPORT_ONLY_NOTE="; report-only inspection found $(fm_next_cache_human_kb "$REPORTED_KB") in $(sweep_copies "$REPORTED")"
+elif [ "$REPORT_ONLY_INSPECTED" -gt 0 ]; then
+  REPORT_ONLY_NOTE="; report-only inspection completed for $(sweep_copies "$REPORT_ONLY_INSPECTED")"
+elif [ "$REPORT_ONLY_PROJECTS" -gt 0 ]; then
+  REPORT_ONLY_NOTE="; report-only inspection completed for $(sweep_projects "$REPORT_ONLY_PROJECTS")"
+fi
+
 RUN_COMPLETE=0
 if [ "$INCOMPLETE" -eq 0 ] && [ "$FAILED" -eq 0 ] \
   && [ "$LEDGER_INCOMPLETE" -eq 0 ] \
@@ -1230,18 +1342,30 @@ fi
 
 if [ "$RUN_COMPLETE" -eq 0 ]; then
   if [ "$DRY_RUN" = 1 ] && [ "$RECLAIMED" -gt 0 ]; then
-    printf 'sweep: would reclaim %s from %s, but inspection was incomplete%s%s\n' \
+    printf 'sweep: would reclaim %s from %s, but inspection was incomplete%s%s%s\n' \
       "$(fm_next_cache_human_kb "$TOTAL_KB")" "$(sweep_copies "$RECLAIMED")" \
-      "$FAILED_NOTE" "$INCOMPLETE_NOTE"
+      "$FAILED_NOTE" "$INCOMPLETE_NOTE" "$REPORT_ONLY_NOTE"
   elif [ "$RECLAIMED" -gt 0 ]; then
-    printf 'sweep: reclaimed %s from %s, but processing was incomplete%s%s\n' \
+    printf 'sweep: reclaimed %s from %s, but processing was incomplete%s%s%s\n' \
       "$(fm_next_cache_human_kb "$TOTAL_KB")" "$(sweep_copies "$RECLAIMED")" \
-      "$FAILED_NOTE" "$INCOMPLETE_NOTE"
+      "$FAILED_NOTE" "$INCOMPLETE_NOTE" "$REPORT_ONLY_NOTE"
   else
-    printf 'sweep: reclamation incomplete%s%s\n' "$FAILED_NOTE" "$INCOMPLETE_NOTE"
+    printf 'sweep: reclamation incomplete%s%s%s\n' \
+      "$FAILED_NOTE" "$INCOMPLETE_NOTE" "$REPORT_ONLY_NOTE"
   fi
 elif [ "$RECLAIMED" -eq 0 ]; then
-  if [ "$SKIPPED" -gt 0 ]; then
+  if [ "$REPORT_ONLY_PROJECTS" -gt 0 ]; then
+    if [ "$REPORTED" -gt 0 ]; then
+      printf 'sweep: report-only inspection found %s in %s; nothing was reclaimed\n' \
+        "$(fm_next_cache_human_kb "$REPORTED_KB")" "$(sweep_copies "$REPORTED")"
+    elif [ "$REPORT_ONLY_INSPECTED" -gt 0 ]; then
+      printf 'sweep: report-only inspection found no Next.js build output in %s; nothing was reclaimed\n' \
+        "$(sweep_copies "$REPORT_ONLY_INSPECTED")"
+    else
+      printf 'sweep: report-only inspection complete; %s contained no copies; nothing was reclaimed\n' \
+        "$(sweep_projects "$REPORT_ONLY_PROJECTS")"
+    fi
+  elif [ "$SKIPPED" -gt 0 ]; then
     printf 'sweep: nothing to reclaim; %s were skipped as owned (listed above)%s\n' \
       "$(sweep_copies "$SKIPPED")" "$INCOMPLETE_NOTE"
   elif [ "$INSPECTED" -eq 0 ]; then
@@ -1251,13 +1375,13 @@ elif [ "$RECLAIMED" -eq 0 ]; then
     printf 'sweep: nothing to reclaim; no idle copy holds Next.js build output\n'
   fi
 elif [ "$DRY_RUN" = 1 ]; then
-  printf 'sweep: would reclaim %s from %s%s%s\n' \
+  printf 'sweep: would reclaim %s from %s%s%s%s\n' \
     "$(fm_next_cache_human_kb "$TOTAL_KB")" "$(sweep_copies "$RECLAIMED")" \
-    "$FAILED_NOTE" "$INCOMPLETE_NOTE"
+    "$FAILED_NOTE" "$INCOMPLETE_NOTE" "$REPORT_ONLY_NOTE"
 else
-  printf 'sweep: reclaimed %s from %s%s%s\n' \
+  printf 'sweep: reclaimed %s from %s%s%s%s\n' \
     "$(fm_next_cache_human_kb "$TOTAL_KB")" "$(sweep_copies "$RECLAIMED")" \
-    "$FAILED_NOTE" "$INCOMPLETE_NOTE"
+    "$FAILED_NOTE" "$INCOMPLETE_NOTE" "$REPORT_ONLY_NOTE"
 fi
 
 exit "$RC"

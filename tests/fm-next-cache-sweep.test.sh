@@ -161,6 +161,31 @@ test_sweep_reclaims_available_copy() {
   pass "sweep reclaims Next.js build output from an available, unowned copy"
 }
 
+test_sweep_reports_explicit_project_without_deleting() {
+  local case_dir wt project out rc
+  case_dir=$(make_case explicit-project-report-only)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  project="$case_dir/projects/app"
+
+  set +e
+  out=$(run_sweep "$case_dir" "$project" 2>&1); rc=$?
+  set -e
+
+  expect_code 0 "$rc" "explicit-project-report-only: inspection should succeed"
+  assert_present "$wt/packages/frontend/.next" \
+    "explicit-project-report-only: an operator-supplied target must not delete"
+  assert_contains "$out" "$wt/packages/frontend/.next" \
+    "explicit-project-report-only: the discovered build output must be reported"
+  assert_contains "$out" "report-only" \
+    "explicit-project-report-only: output must distinguish the non-deleting path"
+  assert_not_contains "$out" "sweep: reclaimed" \
+    "explicit-project-report-only: reported bytes must not count as reclaimed"
+  pass "an explicit project target is inspected without deletion authority"
+}
+
 test_sweep_reports_nothing_found() {
   local case_dir out
   case_dir=$(make_case empty)
@@ -811,6 +836,30 @@ SH
   pass "a NUL-bearing pool field cannot forge availability"
 }
 
+test_sweep_refuses_duplicate_pool_fields() {
+  local case_dir wt out rc
+  case_dir=$(make_case duplicate-pool-fields)
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '[{"status":"in-use","status":"available","path":"%s/1"}]\n' \
+  "$FM_FAKE_POOL_DIR"
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "duplicate-pool-fields: ambiguous lease evidence must refuse"
+  assert_present "$wt/packages/frontend/.next" \
+    "duplicate-pool-fields: last-value parsing must not forge availability"
+  assert_contains "$out" "worktree pool" \
+    "duplicate-pool-fields: the ambiguous pool must be reported"
+  pass "duplicate pool fields cannot forge availability"
+}
+
 test_sweep_refuses_conflicting_alias_pool_entries() {
   local case_dir wt alias out rc
   case_dir=$(make_case conflicting-alias-pool-entries)
@@ -940,6 +989,35 @@ SH
   pass "the project clone cannot masquerade as a pooled worktree"
 }
 
+test_sweep_refuses_discovered_linked_worktree_as_project_clone() {
+  local case_dir primary linked out rc
+  case_dir=$(make_case discovered-linked-project)
+  primary="$case_dir/primary"
+  linked="$case_dir/projects/app"
+  mv "$linked" "$primary"
+  git -C "$primary" worktree add -q -b fm/discovered-linked-project "$linked" main
+  add_next_app "$primary" packages/frontend
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '[{"status":"available","path":"%s"}]\n' "$FM_FAKE_PRIMARY_PROJECT"
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(FM_FAKE_PRIMARY_PROJECT="$primary" run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" \
+    "discovered-linked-project: a deleting target must be the primary clone"
+  assert_present "$primary/packages/frontend/.next" \
+    "discovered-linked-project: the primary clone must never become a pool candidate"
+  assert_contains "$out" "$linked" \
+    "discovered-linked-project: the rejected discovered target must be named"
+  assert_contains "$out" "primary" \
+    "discovered-linked-project: the failed clone-identity proof must be reported"
+  pass "default discovery rejects a linked worktree as the project clone"
+}
+
 test_sweep_refuses_explicit_project_subdirectory() {
   local case_dir clone child out rc
   case_dir=$(make_case explicit-project-subdirectory)
@@ -1027,7 +1105,7 @@ SH
   expect_code 1 "$rc" \
     "candidate-ledger-reconciliation: an incomplete candidate must refuse the project"
   verdict_count=$(printf '%s\n' "$out" \
-    | grep -Ec '^sweep: (reclaimed|skipped-as-owned|undetermined|refused|failed) ' || true)
+    | grep -Ec '^sweep: (reclaimed|report-only|skipped-as-owned|undetermined|refused|failed) ' || true)
   [ "$verdict_count" -eq 3 ] \
     || fail "candidate-ledger-reconciliation: expected 3 terminal verdicts, got $verdict_count"$'\n'"$out"
   assert_contains "$out" "sweep: refused $wt1" \
@@ -1732,6 +1810,7 @@ run_next_cache_test() {
 }
 
 run_next_cache_test test_sweep_reclaims_available_copy
+run_next_cache_test test_sweep_reports_explicit_project_without_deleting
 run_next_cache_test test_sweep_reports_nothing_found
 run_next_cache_test test_sweep_dry_run_removes_nothing
 run_next_cache_test test_sweep_skips_in_use_copy
@@ -1760,11 +1839,13 @@ run_next_cache_test test_sweep_refuses_empty_candidate_identity
 run_next_cache_test test_sweep_refuses_nul_task_metadata
 run_next_cache_test test_sweep_refuses_nul_secondmate_registry
 run_next_cache_test test_sweep_refuses_nul_pool_status
+run_next_cache_test test_sweep_refuses_duplicate_pool_fields
 run_next_cache_test test_sweep_refuses_conflicting_alias_pool_entries
 run_next_cache_test test_sweep_refuses_pathless_pool_entry_atomically
 run_next_cache_test test_sweep_refuses_nondirectory_pool_entry_atomically
 run_next_cache_test test_sweep_refuses_pool_entry_for_live_copy_child
 run_next_cache_test test_sweep_refuses_pool_entry_for_project_clone
+run_next_cache_test test_sweep_refuses_discovered_linked_worktree_as_project_clone
 run_next_cache_test test_sweep_refuses_explicit_project_subdirectory
 run_next_cache_test test_sweep_refusal_records_later_candidate_verdicts
 run_next_cache_test test_sweep_reconciles_every_announced_candidate
