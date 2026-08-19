@@ -25,8 +25,6 @@
 # group; the perl fallback does it explicitly with setpgrp plus a negative pid,
 # and the bash fallback uses monitor mode to give the bounded child its own
 # process group before signaling its negative pid.
-set -u
-
 fm_timeout_mechanism() {
   if [ "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" = bash ]; then
     printf 'bash\n'

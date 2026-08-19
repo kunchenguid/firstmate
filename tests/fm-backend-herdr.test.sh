@@ -27,9 +27,8 @@ export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 FM_BACKEND_HERDR_TEST_FIXTURE_PIDS="$TMP_ROOT/.fixture-pids"
 : > "$FM_BACKEND_HERDR_TEST_FIXTURE_PIDS"
 
-# Several pane-death fixtures deliberately launch long-lived shell processes
-# and then exercise paths that must refuse to signal them. Reap any survivors
-# before exit so they cannot retain the test runner's output pipe for 300s.
+# Several pane-death fixtures deliberately launch long-lived shell processes.
+# Reap any exact recorded survivors before exit.
 fm_backend_herdr_test_record_fixture_pid() {
   printf '%s\n' "$1" >> "$FM_BACKEND_HERDR_TEST_FIXTURE_PIDS"
 }
@@ -48,7 +47,7 @@ fm_backend_herdr_test_stop_fixture_pid() {
 }
 
 fm_backend_herdr_test_cleanup() {
-  local pid pgid
+  local pid
   while IFS= read -r pid; do
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     kill -TERM "$pid" 2>/dev/null || true
@@ -57,19 +56,6 @@ fm_backend_herdr_test_cleanup() {
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     wait "$pid" 2>/dev/null || true
   done < "$FM_BACKEND_HERDR_TEST_FIXTURE_PIDS"
-  # A fixture whose shell was deliberately signaled can leave its `sleep 300`
-  # child reparented before EXIT. Limit this fallback to exact sleep fixtures
-  # in this test invocation's own process group and signal the PIDs one by one.
-  pgid=$(ps -p "$$" -o pgid= 2>/dev/null | tr -d '[:space:]')
-  case "$pgid" in
-    ''|*[!0-9]*|0|1) ;;
-    *)
-      for pid in $(ps -Ao pid=,pgid=,command= 2>/dev/null \
-        | awk -v pgid="$pgid" '$2 == pgid && $3 == "sleep" && $4 == "300" && NF == 4 { print $1 }'); do
-        kill -TERM "$pid" 2>/dev/null || true
-      done
-      ;;
-  esac
   fm_test_cleanup
 }
 trap fm_backend_herdr_test_cleanup EXIT

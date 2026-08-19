@@ -135,8 +135,8 @@
 #          FM_INJECT_CONFIRM_SLEEP  seconds between daemon submit checks
 #                                   (default 0.5)
 #          FM_AFK_HERDR_CLI_TIMEOUT_SECS positive whole-second hard bound for
-#                                   each Herdr supervisor transport call made by
-#                                   this daemon (default 2). Invalid or zero
+#                                   Herdr supervisor target existence, composer
+#                                   state, and submit calls (default 2). Invalid or zero
 #                                   values use the default so SIGTERM cannot wait
 #                                   forever behind a wedged transport call.
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
