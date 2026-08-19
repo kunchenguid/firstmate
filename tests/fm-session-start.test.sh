@@ -736,6 +736,109 @@ EOF
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 
+# --- curated memory: compiled and capped, or the whole-file fallback --------
+
+test_context_digest_compiles_curated_memory_when_the_layout_exists() {
+  local rec root home fakebin out
+  rec=$(new_world memory-compiled)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf '%s\n' '- healthlog [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
+  printf 'CAPTAIN-STANDING-TEXT\n' > "$home/data/captain.md"
+  printf 'OLD-WHOLE-FILE-LEARNINGS\n' > "$home/data/learnings.md"
+  mkdir -p "$home/data/memory/notes"
+  printf 'COMPILED-CORE-TEXT\n' > "$home/data/memory/core.md"
+  {
+    printf -- '---\n'
+    printf 'title: A matched claim about healthlog\n'
+    printf 'triggers: healthlog\n'
+    printf 'updated: 2026-08-18\n'
+    printf -- '---\n\nMATCHED-NOTE-BODY\n'
+  } > "$home/data/memory/notes/matched.md"
+  {
+    printf -- '---\n'
+    printf 'title: An unmatched claim about penguins\n'
+    printf 'triggers: penguin\n'
+    printf 'updated: 2026-08-01\n'
+    printf -- '---\n\nUNMATCHED-NOTE-BODY\n'
+  } > "$home/data/memory/notes/unmatched.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" 'curated memory (compiled, capped' \
+    'the context digest did not label the compiled memory section'
+  assert_contains "$out" 'COMPILED-CORE-TEXT' 'the compiled core was not injected'
+  assert_contains "$out" 'MATCHED-NOTE-BODY' 'a note matching live work was not injected'
+  assert_contains "$out" 'An unmatched claim about penguins' \
+    'the catalog did not list every note that exists'
+  assert_not_contains "$out" 'UNMATCHED-NOTE-BODY' \
+    'a note matching nothing in this fleet was injected anyway'
+  assert_not_contains "$out" 'OLD-WHOLE-FILE-LEARNINGS' \
+    'data/learnings.md was still dumped whole alongside the compiled bundle'
+  assert_not_contains "$out" 'CAPTAIN-STANDING-TEXT' \
+    'data/captain.md was dumped whole even though data/memory/core.md exists'
+  assert_contains "$out" 'MEMORY_ACCOUNTING:' 'the digest did not carry the memory accounting line'
+  assert_contains "$out" 'SELECTED AND CAPPED' \
+    'the read-once contract did not tell the session that memory is capped'
+  pass 'the context digest injects the compiled, capped memory bundle instead of whole files'
+}
+
+test_context_digest_keeps_whole_files_when_no_memory_layout_exists() {
+  local rec root home fakebin out
+  rec=$(new_world memory-fallback)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf 'CAPTAIN-STANDING-TEXT\n' > "$home/data/captain.md"
+  printf 'OLD-WHOLE-FILE-LEARNINGS\n' > "$home/data/learnings.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" 'CAPTAIN-STANDING-TEXT' \
+    'a home with no data/memory/ lost its captain preferences'
+  assert_contains "$out" 'OLD-WHOLE-FILE-LEARNINGS' \
+    'a home with no data/memory/ lost its learnings'
+  assert_not_contains "$out" 'curated memory (compiled, capped' \
+    'the compiled section appeared for a home that has no data/memory/'
+  pass 'a home without data/memory/ keeps the whole-file memory print'
+}
+
+test_context_digest_falls_back_when_the_compiler_cannot_run() {
+  local rec root home fakebin out
+  rec=$(new_world memory-compile-failure)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf 'CAPTAIN-STANDING-TEXT\n' > "$home/data/captain.md"
+  printf 'OLD-WHOLE-FILE-LEARNINGS\n' > "$home/data/learnings.md"
+  mkdir -p "$home/data/memory/notes"
+  printf 'COMPILED-CORE-TEXT\n' > "$home/data/memory/core.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'COMPILED-CORE-TEXT' 'the first run did not compile at all'
+
+  # A budget the compiler must refuse: a session that cannot cap memory must
+  # still start with the memory it has rather than with none.
+  printf 'not-a-number\n' > "$home/config/startup-memory-budget"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'MEMORY_COMPILE_FAILED:' 'a failed compile was silent'
+  assert_contains "$out" 'value must be one positive decimal integer' \
+    'the compile failure did not name the concrete cause'
+  assert_contains "$out" 'CAPTAIN-STANDING-TEXT' 'the fallback lost captain preferences'
+  assert_contains "$out" 'OLD-WHOLE-FILE-LEARNINGS' 'the fallback lost learnings'
+  pass 'a compile failure names its cause and falls back to the whole-file print'
+}
+
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
@@ -947,7 +1050,11 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
-  rm -f "$fakebin/node"
+  # gh-axi rather than a system tool: a fixture that removes `node` from the
+  # fake bin proves nothing on a host that also ships /usr/bin/node, because the
+  # base PATH still satisfies `command -v`. Only a tool that cannot be anywhere
+  # but the fake bin makes this assertion mean the same thing everywhere.
+  rm -f "$fakebin/gh-axi"
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
@@ -986,7 +1093,7 @@ EOF
   assert_contains "$out" "Captain memory that may be truncated away safely." \
     "the ordering fixture did not actually print a memory file"
 
-  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: node' | head -1 | cut -d: -f1)
+  missing_line=$(printf '%s\n' "$out" | grep -n 'MISSING: gh-axi' | head -1 | cut -d: -f1)
   [ -n "$missing_line" ] || fail "MISSING diagnostic did not appear at all"
   [ "$missing_line" -lt "$fleet_line" ] || fail "actionable MISSING diagnostic was buried after the bulk fleet-state digest"
 
@@ -1351,7 +1458,9 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  rm -f "$fakebin/node"
+  # gh-axi rather than node: only a tool that cannot exist outside the fake bin
+  # is reliably missing on every host (see test_output_ordering_diagnostics_lead).
+  rm -f "$fakebin/gh-axi"
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
@@ -1361,7 +1470,7 @@ EOF
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
   # fm-bootstrap.sh's own exact MISSING-tool line format.
-  assert_contains "$out" "MISSING: node (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
+  assert_contains "$out" "MISSING: gh-axi (install:" "fm-bootstrap.sh's real detect line did not appear verbatim"
   # fm-wake-drain.sh's real drained record (raw tab-separated queue line).
   assert_contains "$out" "$(printf 'signal\ttask-z.status\tneeds-decision: pick a library')" "fm-wake-drain.sh's real drained record did not appear"
   assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
@@ -2398,6 +2507,9 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_context_digest_compiles_curated_memory_when_the_layout_exists
+test_context_digest_keeps_whole_files_when_no_memory_layout_exists
+test_context_digest_falls_back_when_the_compiler_cannot_run
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock

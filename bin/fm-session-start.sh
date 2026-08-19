@@ -5,7 +5,7 @@
 # producing ONE ordered digest, so a session starts in one or two turns
 # instead of the six-plus separate reads the old docs required: run
 # fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
-# data/captain.md, data/captain-shared.md, data/learnings.md, then run
+# the curated-memory files, then run
 # fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, every state/*.meta,
 # and every state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
@@ -49,9 +49,12 @@
 #                       read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
-#   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
-#                       data/captain-shared.md, data/learnings.md: read-only,
-#                       always safe, always runs.
+#   8. context digest - data/projects.md, data/secondmates.md, the compiled and
+#                       capped curated-memory bundle (bin/fm-memory-compile.sh,
+#                       or data/captain.md plus data/learnings.md whole when
+#                       data/memory/ does not exist yet), and
+#                       data/captain-shared.md: read-only, always safe, always
+#                       runs.
 #   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -760,11 +763,15 @@ section "READ-ONCE CONTRACT"
 cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
-data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+data/projects.md, data/secondmates.md, data/captain-shared.md, and the curated
+memory for this session.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
+Curated memory is SELECTED AND CAPPED, not dumped: the bundle carries a core, a
+catalog of every note that exists, and the notes whose triggers matched this
+fleet's live work. Reading one more note BY ITS CATALOG PATH when its title
+matches what this turn needs is expected and is not a re-read.
 
 Go to a source directly only when:
   - this digest flagged it ABSENT (then rebuild or create it per AGENTS.md),
@@ -875,16 +882,41 @@ fi
 
 # --- 8. context digest -----------------------------------------------------
 # Last of the bulk sections deliberately: curated memory is stable session to
-# session, already governed by config/startup-memory-budget, and recoverable
-# with one targeted read, so it is the cheapest thing for a truncated tail to
-# take (see this file's ORDERING note).
+# session, capped by bin/fm-memory-compile.sh against config/startup-memory-budget,
+# and recoverable with one targeted read, so it is the cheapest thing for a
+# truncated tail to take (see this file's ORDERING note).
 stage context
 section "CONTEXT"
 print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-print_file_or_absent "$DATA/captain.md" "data/captain.md"
+
+# Curated memory goes through bin/fm-memory-compile.sh once data/memory/ exists,
+# because that is the only path with a cap on it: it selects a core, a catalog
+# of every note, and the trigger-matched notes that fit, and it refuses to print
+# more than config/startup-memory-budget allows. A home that has not built the
+# layout yet keeps the old whole-file print, and so does a session where the
+# compiler could not run - a startup that cannot compile memory must still start
+# with the memory it has, not with none.
+MEMORY_COMPILED=0
+if [ -d "$DATA/memory" ]; then
+  MEMORY_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-session-start-memory.XXXXXX" 2>/dev/null || true)
+  if [ -n "$MEMORY_TMP" ]; then
+    if "$SCRIPT_DIR/fm-memory-compile.sh" compile >"$MEMORY_TMP" 2>"$MEMORY_TMP.err"; then
+      subsection "curated memory (compiled, capped - bin/fm-memory-compile.sh)"
+      cat "$MEMORY_TMP"
+      MEMORY_COMPILED=1
+    else
+      printf '\nMEMORY_COMPILE_FAILED: %s\n' "$(tr '\n' ' ' < "$MEMORY_TMP.err")"
+      printf 'Falling back to the uncapped whole-file memory print below.\n'
+    fi
+    rm -f "$MEMORY_TMP" "$MEMORY_TMP.err"
+  fi
+fi
+if [ "$MEMORY_COMPILED" -eq 0 ]; then
+  print_file_or_absent "$DATA/captain.md" "data/captain.md"
+  print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+fi
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
-print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step
