@@ -568,6 +568,7 @@ Launch: `agy --dangerously-skip-permissions --add-dir <absolute-task-worktree> -
 | Composer | `separated`: a `>` SHELL glyph row between two `─` rules, with a model/ctx/quota footer OUTSIDE the pair. No idle placeholder or ghost text in any observed state. |
 | Resume | `agy --conversation <id>` (printed on exit) or `agy -c`/`--continue` for the most recent. `--continue` takes NO id argument. |
 | Effort | `--effort low\|medium\|high` exists and is deliberately never emitted; see below. |
+| Feedback survey | `showFeedbackSurvey` in `~/.gemini/antigravity-cli/settings.json` controls the interactive feedback prompt that reads stdin. Set to `false` by `fm_agy_suppress_feedback_survey` (bin/fm-agy-lib.sh) on every agy spawn; without it, the prompt blocks autonomous workers indefinitely. No CLI flag or env var suppresses it. |
 
 **Detection ordering is the reverse of Cursor's, and that is deliberate.**
 `ANTIGRAVITY_AGENT` is exported by the Antigravity IDE's own terminal into EVERY process it starts, not just agy's children, so a claude, codex, or pi worker started from that terminal carries it too.

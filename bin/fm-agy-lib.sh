@@ -56,6 +56,45 @@ fm_agy_auth_dir() {
   printf '%s/fm-turn-end.d' "$(fm_agy_plugin_dir)"
 }
 
+# fm_agy_settings_path: the agy CLI app-data settings file. FM_AGY_SETTINGS
+# exists so tests can exercise the suppression against a scratch root.
+fm_agy_settings_path() {
+  printf '%s' "${FM_AGY_SETTINGS:-${HOME:-}/.gemini/antigravity-cli/settings.json}"
+}
+
+# fm_agy_suppress_feedback_survey: ensure showFeedbackSurvey is false in agy's
+# settings.json. The feedback survey is an interactive stdin prompt
+# ("[1] Good [2] Fine [3] Bad [0] Skip") that blocks autonomous workers
+# indefinitely because nothing answers it. Setting showFeedbackSurvey to false
+# in the settings file suppresses it permanently.
+#
+# The settings file may be a nix home-manager symlink into the read-only store.
+# In that case this function replaces the symlink with a real file so the
+# setting persists until the next home-manager activation, which is the same
+# write semantics agy itself uses (atomic temp + rename). If jq is absent the
+# function is a no-op: the survey is an annoyance, not a safety hazard, so
+# failing open is correct.
+fm_agy_suppress_feedback_survey() {
+  local settings
+  settings=$(fm_agy_settings_path)
+  [ -e "$settings" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+
+  # Fast path: already suppressed.
+  if jq -e '.showFeedbackSurvey == false' "$settings" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local tmp new_content
+  new_content=$(jq '.showFeedbackSurvey = false' "$settings" 2>/dev/null) || return 0
+  tmp="${settings}.fm-tmp.$$"
+  if printf '%s\n' "$new_content" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$settings" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+  else
+    rm -f "$tmp" 2>/dev/null
+  fi
+}
+
 # fm_agy_pointer_path: the per-task worktree pointer naming a registry entry.
 # Gitignored through the worktree's own git info/exclude by bin/fm-spawn.sh,
 # exactly like grok's and Kimi's.

@@ -1322,6 +1322,12 @@ case "$HARNESS" in
         fi
       fi
     fi
+    # Suppress the interactive feedback survey ("How's the CLI experience so
+    # far? [1] Good [2] Fine [3] Bad [0] Skip") that blocks autonomous workers
+    # indefinitely. The survey reads stdin, so a pane with no human to answer
+    # it stalls silently until a supervision cycle catches the wedge. Setting
+    # showFeedbackSurvey=false in agy's settings.json disables it permanently.
+    fm_agy_suppress_feedback_survey
     ;;
   cursor)
     # `cursor` is not the CLI name, and the legacy alias `agent` is far too
