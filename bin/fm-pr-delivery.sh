@@ -318,11 +318,13 @@ classify_pr_json() { # <repo> <pr-json-object>
       ((.body // "") | gsub("^\\s+|\\s+$"; "") | ascii_downcase);
     def resolution_comment:
       text | test("^(resolved|fixed|addressed)([.![:space:]]|$)");
+    def work_action:
+      "(fix|fixing|update|updating|change|changing|revise|revising|address|addressing|rework|reworking|re-review|rereview|add|adding|remove|removing|test|testing|cover|covering|validate|validating|use|using|refactor|refactoring|implement|implementing|replace|replacing|move|moving|rename|renaming|extract|extracting|simplify|simplifying|split|splitting|combine|combining|document|documenting|handle|handling|guard|guarding|check|checking|assert|asserting|wire|wiring|configure|configuring|helper|function|method|class|module|api|schema|query)";
     def change_request:
       text as $text
-      | ($text | test("(^|[^[:alnum:]])(please|must|should|need|needs|required|require|could you|can you|would you|can we|could we|kindly)([[:space:]]+[^[:space:]]+){0,3}[[:space:]]+(fix|fixing|update|updating|change|changing|revise|revising|address|addressing|rework|reworking|re-review|rereview|add|adding|remove|removing|test|testing|cover|covering|validate|validating)([^[:alnum:]]|$)"))
-        or ($text | test("(^|[.?!][[:space:]]+)(could|can|would)([[:space:]]+[^[:space:]?!.]+){0,6}[[:space:]]+(fix|fixing|update|updating|change|changing|revise|revising|address|addressing|rework|reworking|re-review|rereview|add|adding|remove|removing|test|testing|cover|covering|validate|validating|use|using|refactor|refactoring|implement|implementing|replace|replacing|move|moving|rename|renaming|extract|extracting|simplify|simplifying|split|splitting|combine|combining|document|documenting|handle|handling|guard|guarding|check|checking|assert|asserting|wire|wiring|configure|configuring|helper|function|method|class|module|api|schema|query)([^[:alnum:]]|$)"))
-        or ($text | test("^(fix|update|change|revise|address|rework|re-review|rereview|add|remove|test|cover|validate)([[:space:]]|[.!:]|$)"))
+      | ($text | test("(^|[^[:alnum:]])(please|must|should|need|needs|required|require|could you|can you|would you|can we|could we|kindly)([[:space:]]+[^[:space:]]+){0,3}[[:space:]]+" + work_action + "([^[:alnum:]]|$)"))
+        or ($text | test("(^|[.?!][[:space:]]+)(could|can|would)([[:space:]]+[^[:space:]?!.]+){0,6}[[:space:]]+" + work_action + "([^[:alnum:]]|$)"))
+        or ($text | test("^" + work_action + "([[:space:]]|[.!:]|$)"))
         or ($text | test("(^|[^[:alnum:]])(changes?|updates?|fixes?|re-?review)([[:space:]]+(are|is|were|be))?[[:space:]]+(needed|required|requested)([^[:alnum:]]|$)"));
     def reviewer_request:
       (.state == "CHANGES_REQUESTED")
