@@ -128,6 +128,42 @@ run_decisions() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$@"
 }
 
+# The same invocation as run_decisions, from a chosen working directory and with
+# a chosen TMPDIR, so a caller whose TMPDIR is relative to its own cwd is
+# reproduced exactly as the script would meet it.
+run_decisions_in() {  # <cwd> <tmpdir> <home> <command args...>
+  local cwd=$1 tmpdir=$2 home=$3
+  shift 3
+  (cd "$cwd" && PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    TMPDIR="$tmpdir" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-decision-hold.sh" "$@")
+}
+
+# An origin whose single captain decision is answered and then archived out of the
+# live backlog, which is the state every archived-read case starts from. The
+# resulting hold identity is <origin-id>-decision-<decision-key>.
+archive_one_resolved_decision() {  # <home> <origin-id> <decision-key>
+  local home=$1 id=$2 key=$3 hold="$2-decision-$3"
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate a sample archive read" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the archive-read origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample archive read\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  [ "$(run_decisions "$home" hold "$id" "$key" \
+    --title "Choose the sample archive option" --reason "captain archive choice pending" --repo sample)" \
+    = "$hold" ] || fail "could not register the archive-read hold as $hold"
+  run_decisions "$home" complete "$id" "$key" >/dev/null || fail "completion failed before the close"
+  printf 'Use the sample archive option.\n' > "$home/archive-decision.txt"
+  run_decisions "$home" answer "$id" "$key" --decision-file "$home/archive-decision.txt" >/dev/null \
+    || fail "could not answer the archive-read decision"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "could not archive the resolved decision"
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "the resolved decision was not archived out of the live backlog"
+  fi
+}
+
 write_origin_meta() {  # <home> <id> [kind]
   local home=$1 id=$2 kind=${3:-scout}
   fm_write_meta "$home/state/$id.meta" \
@@ -1465,6 +1501,104 @@ test_archived_out_of_band_close_still_blocks_the_gate() {
   pass "an archived record without a recorded captain decision still blocks the gate"
 }
 
+# The archive view is staged under TMPDIR by the caller's process and then read by
+# tasks-axi, which runs from FM_HOME. A relative TMPDIR therefore names two
+# different directories across that move, and the read used to come back empty and
+# be reported as an absent decision. An archived resolved decision must verify
+# whatever TMPDIR the caller exports, from whatever directory the caller runs in.
+test_archived_decision_verifies_under_a_relative_tmpdir() {
+  local home id hold cwd leaked
+  home=$(make_home relative-tmpdir)
+  id=sample-relative-tmpdir-review
+  hold="$id-decision-choice"
+  archive_one_resolved_decision "$home" "$id" choice
+  cwd="$TMP_ROOT/relative-tmpdir-cwd"
+  mkdir -p "$cwd/view-tmp"
+
+  run_decisions_in "$cwd" ./view-tmp "$home" verify "$id" > "$home/rel-verify.out" 2> "$home/rel-verify.err" \
+    || fail "an archived resolved decision failed to verify under a relative TMPDIR: $(cat "$home/rel-verify.err")"
+  [ ! -s "$home/rel-verify.err" ] \
+    || fail "verifying under a relative TMPDIR printed diagnostics: $(cat "$home/rel-verify.err")"
+  run_decisions_in "$cwd" ./view-tmp "$home" answer "$id" choice \
+    --decision-file "$home/archive-decision.txt" >/dev/null 2> "$home/rel-answer.err" \
+    || fail "an exact retry against an archived record failed under a relative TMPDIR: $(cat "$home/rel-answer.err")"
+  if run_decisions_in "$cwd" ./view-tmp "$home" hold "$id" choice \
+    --title "Choose the sample archive option" --reason "captain archive choice pending" --repo sample \
+    > "$home/rel-hold.out" 2> "$home/rel-hold.err"; then
+    fail "a relative TMPDIR let an archived resolved identity be reopened as a fresh hold"
+  fi
+  assert_grep "new decision key" "$home/rel-hold.err" \
+    "reopening an archived identity must still point at a new decision key under a relative TMPDIR"
+  assert_no_grep "- [ ] $hold -" "$home/data/backlog.md" \
+    "a refused reopen created a duplicate live identity"
+
+  leaked=$(find "$cwd/view-tmp" -name 'fm-decision-archive.*' | wc -l | tr -d ' ')
+  [ "$leaked" = 0 ] || fail "the archive view leaked $leaked temp files into TMPDIR"
+  run_teardown "$home" "$id" >/dev/null 2> "$home/rel-teardown.err" \
+    || fail "teardown refused a scout whose only decision was answered and archived: $(cat "$home/rel-teardown.err")"
+  pass "an archived resolved decision verifies under a relative TMPDIR"
+}
+
+# The archive is only readable while its dated block headings are the ones this
+# reader rewrites into the Done section they were pruned from. An archive that
+# holds records under some other heading is a read fault, not an empty archive, so
+# it must be reported as one and must never let any path treat the decision as
+# absent - or, worse, as satisfied.
+test_unrecognized_archive_heading_never_reads_as_an_absent_decision() {
+  local home id hold archive before after
+  home=$(make_home unrecognized-archive-heading)
+  archive="$home/data/done-archive.md"
+  id=sample-unrecognized-heading-review
+  hold="$id-decision-choice"
+  archive_one_resolved_decision "$home" "$id" choice
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "the archived fixture did not verify before its heading was mangled"
+
+  # Same bytes, same done task line, one heading this reader does not know.
+  sed 's/^## Archived/## Vaulted/' "$archive" > "$archive.rewritten" \
+    || fail "could not stage the unrecognized archive heading"
+  mv "$archive.rewritten" "$archive" || fail "could not install the unrecognized archive heading"
+  assert_grep "- [x] $hold -" "$archive" "the mangled archive must still hold the done task line"
+  assert_no_grep "## Archived" "$archive" "the mangled archive must carry no recognized block heading"
+  before=$(shasum -a 256 "$archive" | awk '{print $1}')
+
+  if run_decisions "$home" verify "$id" > "$home/unrec-verify.out" 2> "$home/unrec-verify.err"; then
+    fail "verification passed while the done archive could not be read"
+  fi
+  assert_grep "no recognized archive block heading" "$home/unrec-verify.err" \
+    "an unreadable archive must name why it could not be read"
+  assert_grep "cannot read $archive while verifying" "$home/unrec-verify.err" \
+    "an unreadable archive must fail verification as a read fault"
+  assert_no_grep "is absent from" "$home/unrec-verify.err" \
+    "an unreadable archive must never be reported as an absent decision"
+  assert_no_grep "verified:" "$home/unrec-verify.out" \
+    "an unreadable archive must not print a verified inventory"
+
+  if run_teardown "$home" "$id" > "$home/unrec-teardown.out" 2> "$home/unrec-teardown.err"; then
+    fail "teardown proceeded while the done archive could not be read"
+  fi
+  assert_grep "REFUSED" "$home/unrec-teardown.err" "teardown refusal must be explicit"
+  assert_present "$home/state/$id.meta" "refused teardown removed investigation metadata"
+  if run_decisions "$home" repair "$id" choice --decision-file "$home/archive-decision.txt" \
+    > "$home/unrec-repair.out" 2> "$home/unrec-repair.err"; then
+    fail "repair recorded a captain decision while the done archive could not be read"
+  fi
+  assert_grep "cannot read $archive while repairing" "$home/unrec-repair.err" \
+    "repair must report an unreadable archive as a read fault"
+  if run_decisions "$home" hold "$id" choice \
+    --title "Choose the sample archive option" --reason "captain archive choice pending" --repo sample \
+    > "$home/unrec-hold.out" 2> "$home/unrec-hold.err"; then
+    fail "an unreadable archive let a closed identity be reopened as a fresh captain hold"
+  fi
+  assert_grep "cannot read $archive to check" "$home/unrec-hold.err" \
+    "hold must report an unreadable archive as a read fault"
+  after=$(shasum -a 256 "$archive" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "a refused path wrote the done archive"
+  assert_no_grep "Resolution recorded by fm-decision-hold" "$home/data/backlog.md" \
+    "a refused path wrote a resolution record into the live backlog"
+  pass "an unreadable done archive is never read as an absent decision"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -1485,3 +1619,5 @@ test_answer_preserves_every_unrouted_close_guard
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_resolved_decisions_survive_done_pruning_before_the_completion_gate
 test_archived_out_of_band_close_still_blocks_the_gate
+test_archived_decision_verifies_under_a_relative_tmpdir
+test_unrecognized_archive_heading_never_reads_as_an_absent_decision

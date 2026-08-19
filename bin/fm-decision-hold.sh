@@ -57,7 +57,12 @@
 # idempotent while a drifted retry is still refused, and `hold` refuses to reopen
 # an archived identity. An archived record that was closed outside this script
 # still fails `verify`, and `repair` reaches only live records, so raising or
-# overriding `done_keep` is never the way to satisfy the gate.
+# overriding `done_keep` is never the way to satisfy the gate. Every way the
+# archive can exist and yet not be read - no private temp directory for the view,
+# a failed rewrite, a view carrying no recognized archive block heading, or any
+# other tasks-axi read failure - is reported loudly as its own failure and is
+# never reported as an absent record, so a read fault can neither pass the gate
+# nor be mistaken for a decision that was never taken.
 #
 # `resolve`, `answer`, and `decline` close active holds; `repair` attests a hold
 # already closed outside this script. All four paths require a non-empty captain
@@ -258,22 +263,46 @@ task_show() {  # <id>
 # The archived record for <id>, read through tasks-axi's own parser over a
 # private read-only view of the done archive in which each dated `## Archived`
 # block heading is presented as the `## Done` section its records were pruned
-# from; every other byte is the archive's own. Returns 1 when the archive is
-# absent or does not hold the id, and 2 - after naming the problem on stderr -
-# when the archive exists but could not be read, so an unreadable archive is
-# never mistaken for an absent record. The view is a fresh private temp file per
-# lookup so a lookup inside a command substitution can never leak one past this
-# process.
+# from; every other byte is the archive's own. Returns 1 only when the archive
+# holds no record at all - absent or blank - or genuinely does not hold this id.
+# Every way the archive can exist and yet not be read returns 2 after naming the
+# problem on stderr: no private temp directory to stage the view in, a failed
+# rewrite, a view carrying no recognized archive block heading to parse records
+# out of, or any tasks-axi failure that is not a plain NOT_FOUND. An unreadable
+# archive is therefore never mistaken for an absent record. The view path is
+# absolutized before it crosses `tasks_axi`'s `cd` into FM_HOME, which would
+# otherwise resolve a relative path against a different directory, and it is a
+# fresh private temp file per lookup so a lookup inside a command substitution
+# can never leak one past this process.
 archived_show() {  # <id>
-  local id=$1 view rc=0
+  local id=$1 tmpdir view rc=0 content_rc=0
   [ -f "$ARCHIVE" ] || return 1
-  if ! view=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-decision-archive.XXXXXX"); then
+  grep -q '[^[:space:]]' "$ARCHIVE" || content_rc=$?
+  case "$content_rc" in
+    0) : ;;
+    1) return 1 ;;
+    *)
+      printf 'fm-decision-hold: cannot read %s\n' "$ARCHIVE" >&2
+      return 2
+      ;;
+  esac
+  tmpdir=${TMPDIR:-/tmp}
+  if ! tmpdir=$(cd "$tmpdir" 2>/dev/null && pwd -P); then
+    printf 'fm-decision-hold: cannot resolve a private temp directory to stage a read-only view of %s\n' "$ARCHIVE" >&2
+    return 2
+  fi
+  if ! view=$(umask 077; mktemp "$tmpdir/fm-decision-archive.XXXXXX"); then
     printf 'fm-decision-hold: cannot stage a read-only view of %s\n' "$ARCHIVE" >&2
     return 2
   fi
   if ! sed 's/^## Archived\([[:space:]].*\)\{0,1\}$/## Done/' "$ARCHIVE" > "$view"; then
     rm -f -- "$view"
     printf 'fm-decision-hold: cannot read %s\n' "$ARCHIVE" >&2
+    return 2
+  fi
+  if ! grep -q '^## Done' "$view"; then
+    rm -f -- "$view"
+    printf 'fm-decision-hold: %s holds records under no recognized archive block heading, so its records could not be read\n' "$ARCHIVE" >&2
     return 2
   fi
   tasks_axi show "$id" --full --file "$view" 2>/dev/null || rc=$?
@@ -296,16 +325,19 @@ record_show() {  # <id>
 # The precise reason a live lookup of hold <id> found nothing, so an archived
 # record is never reported as merely absent.
 absent_hold_reason() {  # <id>
-  local id=$1 show
-  if show=$(archived_show "$id"); then
-    if [ "$(show_field "$show" state)" = "done" ] && body_has_resolution_record "$(show_field "$show" body)"; then
-      printf 'captain decision %s is already durably resolved and archived in %s' "$id" "$ARCHIVE"
-    else
-      printf 'captain hold %s was closed outside fm-decision-hold and archived in %s without a recorded captain decision; repair reaches only live records in %s/data/backlog.md' "$id" "$ARCHIVE" "$FM_HOME"
-    fi
-    return 0
-  fi
-  printf 'captain hold %s is absent from %s/data/backlog.md and %s' "$id" "$FM_HOME" "$ARCHIVE"
+  local id=$1 show archived_rc=0
+  show=$(archived_show "$id") || archived_rc=$?
+  case "$archived_rc" in
+    0)
+      if show_is_durably_resolved "$show"; then
+        printf 'captain decision %s is already durably resolved and archived in %s' "$id" "$ARCHIVE"
+      else
+        printf 'captain hold %s was closed outside fm-decision-hold and archived in %s without a recorded captain decision; repair reaches only live records in %s/data/backlog.md' "$id" "$ARCHIVE" "$FM_HOME"
+      fi
+      ;;
+    1) printf 'captain hold %s is absent from %s/data/backlog.md and %s' "$id" "$FM_HOME" "$ARCHIVE" ;;
+    *) printf 'captain hold %s is not in %s/data/backlog.md and %s could not be read' "$id" "$FM_HOME" "$ARCHIVE" ;;
+  esac
 }
 
 show_field() {  # <show-output> <field>
@@ -360,6 +392,16 @@ body_has_resolution_record() {  # <hold-body>
     *"Resolution recorded by fm-decision-hold."*"Routed work:"*) return 0 ;;
   esac
   return 1
+}
+
+# The one durably-resolved predicate: a closed captain hold that already carries
+# the resolution record this script writes. Every read that judges resolution
+# calls this, so the live and archived tiers can never disagree about it.
+show_is_durably_resolved() {  # <show-output>
+  local show=$1
+  [ "$(show_field "$show" state)" = "done" ] || return 1
+  [ "$(show_field "$show" kind)" = captain ] || return 1
+  body_has_resolution_record "$(show_field "$show" body)"
 }
 
 resolution_body() {  # <mode> <routed-csv> [routed-task-id...]
@@ -431,14 +473,9 @@ verify_hold_active() {  # <hold-id>
 }
 
 verify_hold_resolved() {  # <hold-id>
-  local id=$1 show state kind body
+  local id=$1 show
   show=$(record_show "$id") || return 1
-  state=$(show_field "$show" state)
-  kind=$(show_field "$show" kind)
-  body=$(show_field "$show" body)
-  [ "$state" = "done" ] || return 1
-  [ "$kind" = captain ] || return 1
-  body_has_resolution_record "$body"
+  show_is_durably_resolved "$show"
 }
 
 # A live record is durable while actively held or once durably resolved. An
@@ -447,17 +484,16 @@ verify_hold_resolved() {  # <hold-id>
 # was never answered through this script fails here exactly as it did before it
 # was pruned.
 verify_hold_durable() {  # <hold-id>
-  local id=$1 show state held kind hold_kind body archived_rc
+  local id=$1 show state held kind hold_kind archived_rc
   if show=$(task_show "$id"); then
     state=$(show_field "$show" state)
     held=$(show_field "$show" held)
     kind=$(show_field "$show" kind)
     hold_kind=$(show_field "$show" hold_kind)
-    body=$(show_field "$show" body)
     if [ "$state" = queued ] && [ "$held" = yes ] && [ "$kind" = captain ] && [ "$hold_kind" = captain ]; then
       return 0
     fi
-    if [ "$state" = "done" ] && [ "$kind" = captain ] && body_has_resolution_record "$body"; then
+    if show_is_durably_resolved "$show"; then
       return 0
     fi
     fail "captain decision $id is neither actively held nor durably resolved"
@@ -466,10 +502,7 @@ verify_hold_durable() {  # <hold-id>
   show=$(archived_show "$id") || archived_rc=$?
   case "$archived_rc" in
     0)
-      state=$(show_field "$show" state)
-      kind=$(show_field "$show" kind)
-      body=$(show_field "$show" body)
-      if [ "$state" = "done" ] && [ "$kind" = captain ] && body_has_resolution_record "$body"; then
+      if show_is_durably_resolved "$show"; then
         return 0
       fi
       fail "captain decision $id is archived in $ARCHIVE without a recorded captain decision"
@@ -1020,7 +1053,7 @@ command_repair() {
     || fail "backlog item $id was never held for the captain; repair records a captain decision only on a captain hold"
   state=$(show_field "$show" state)
   hold_body=$(show_field "$show" body)
-  if [ "$state" = "done" ] && body_has_resolution_record "$hold_body"; then
+  if show_is_durably_resolved "$show"; then
     verify_resolution_identity "$id" "$hold_body" "$DECISION_DIGEST" "$ROUTED_NONE"
     printf 'repaired: %s\n' "$id"
     return 0
