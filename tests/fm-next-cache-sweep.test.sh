@@ -101,6 +101,18 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
+install_stat_failure_stub() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg in "$@"; do last=$arg; done
+if [ "$last" = "${FM_FAKE_STAT_FAIL:-}" ]; then exit 1; fi
+exec "$FM_REAL_STAT" "$@"
+SH
+  chmod +x "$case_dir/fakebin/stat"
+}
+
 run_sweep() {  # <case-dir> [args...]
   local case_dir=$1; shift
   FM_HOME="$case_dir" \
@@ -336,6 +348,224 @@ SH
     "pool-failing: a failed pool lookup must leave every copy alone"
   [ "$rc" -ne 0 ] || fail "pool-failing: a failed pool lookup must not report a clean sweep"
   pass "a failing pool lookup sweeps nothing in that project"
+}
+
+test_sweep_skips_project_when_pool_prints_json_then_fails() {
+  local case_dir wt out rc
+  case_dir=$(make_case pool-json-then-failing)
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '[{"name":"1","status":"available","path":"%s/1"}]\n' "$FM_FAKE_POOL_DIR"
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  assert_present "$wt/packages/frontend/.next" \
+    "pool-json-then-failing: a failed authoritative lookup must leave every copy alone"
+  [ "$rc" -ne 0 ] \
+    || fail "pool-json-then-failing: a failed lookup must not report a clean sweep"
+  assert_contains "$out" "cannot read the worktree pool" \
+    "pool-json-then-failing: the failed lookup must be reported"
+  pass "valid pool JSON cannot mask a failed treehouse lookup"
+}
+
+test_sweep_refuses_unreadable_secondmate_state() {
+  local case_dir wt out rc sub
+  case_dir=$(make_case unreadable-secondmate-state)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  sub="$case_dir/secondmate"
+  mkdir -p "$sub/state"
+  fm_write_meta "$sub/state/task-s1.meta" \
+    "endpoint_task_id=task-s1" "worktree=$wt" "kind=ship" "mode=no-mistakes"
+  printf -- '- helper - Helps. (home: %s; scope: things; projects: app; added 2026-08-18)\n' \
+    "$sub" > "$case_dir/data/secondmates.md"
+  chmod 000 "$sub/state"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+  chmod 700 "$sub/state"
+
+  assert_present "$wt/packages/frontend/.next" \
+    "unreadable-secondmate-state: unbounded task ownership must prevent every deletion"
+  expect_code 2 "$rc" \
+    "unreadable-secondmate-state: an unreadable task-record source must refuse the sweep"
+  assert_contains "$out" "$sub/state" \
+    "unreadable-secondmate-state: the refusal must name the unreadable state directory"
+  pass "an unreadable registered state directory refuses the whole sweep"
+}
+
+test_sweep_refuses_malformed_secondmate_registry() {
+  local case_dir wt out rc
+  case_dir=$(make_case malformed-secondmate-registry)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  printf '%s\n' '- helper - malformed registry entry' > "$case_dir/data/secondmates.md"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  assert_present "$wt/packages/frontend/.next" \
+    "malformed-secondmate-registry: unbounded task ownership must prevent every deletion"
+  expect_code 2 "$rc" \
+    "malformed-secondmate-registry: malformed ownership input must refuse the sweep"
+  assert_contains "$out" "$case_dir/data/secondmates.md" \
+    "malformed-secondmate-registry: the refusal must name the malformed registry"
+  pass "a malformed secondmate record refuses the whole sweep"
+}
+
+test_sweep_allows_absent_secondmate_home() {
+  local case_dir wt out rc absent
+  case_dir=$(make_case absent-secondmate-home)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  absent="$case_dir/absent-secondmate"
+  printf -- '- helper - Helps. (home: %s; scope: things; projects: app; added 2026-08-18)\n' \
+    "$absent" > "$case_dir/data/secondmates.md"
+
+  set +e
+  out=$(run_sweep "$case_dir" 2>&1); rc=$?
+  set -e
+
+  expect_code 0 "$rc" \
+    "absent-secondmate-home: a home absent from this machine contributes no local records"
+  assert_absent "$wt/packages/frontend/.next" \
+    "absent-secondmate-home: a provably absent home must not block a safe reclaim"
+  assert_contains "$out" "$absent" \
+    "absent-secondmate-home: omitting an absent home must be reported explicitly"
+  pass "an absent registered local home is reported and does not block the sweep"
+}
+
+test_sweep_skips_symlink_aliased_task_worktree() {
+  local case_dir wt out alias
+  case_dir=$(make_case symlink-task-alias)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  alias="$case_dir/pool-alias"
+  ln -s "$case_dir/pool" "$alias"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "endpoint_task_id=task-x1" "worktree=$alias/1" \
+    "project=$case_dir/projects/app" "kind=ship" "mode=no-mistakes"
+
+  out=$(run_sweep "$case_dir" 2>&1)
+
+  assert_present "$wt/packages/frontend/.next" \
+    "symlink-task-alias: an aliased task path must protect the same worktree"
+  assert_contains "$out" "still claimed by a task record" \
+    "symlink-task-alias: the filesystem identity match must be reported as owned"
+  pass "task ownership follows filesystem identity through a symlinked prefix"
+}
+
+test_sweep_skips_case_aliased_task_worktree() {
+  local case_dir wt out alias
+  case_dir=$(make_case case-task-alias)
+  install_treehouse_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  if [ ! -d "$case_dir/POOL/1" ]; then
+    pass "SKIP (case-sensitive filesystem): case-aliased task ownership"
+    return 0
+  fi
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  alias="$case_dir/POOL/1"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "endpoint_task_id=task-x1" "worktree=$alias" \
+    "project=$case_dir/projects/app" "kind=ship" "mode=no-mistakes"
+
+  out=$(run_sweep "$case_dir" 2>&1)
+
+  assert_present "$wt/packages/frontend/.next" \
+    "case-task-alias: differently cased spelling must protect the same worktree"
+  assert_contains "$out" "still claimed by a task record" \
+    "case-task-alias: the filesystem identity match must be reported as owned"
+  pass "task ownership follows filesystem identity across case aliases"
+}
+
+test_sweep_skips_when_candidate_identity_is_unreadable() {
+  local case_dir wt out real_stat
+  case_dir=$(make_case candidate-identity-unreadable)
+  install_treehouse_stub "$case_dir"
+  install_stat_failure_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  real_stat=$(command -v stat)
+
+  out=$(FM_REAL_STAT="$real_stat" FM_FAKE_STAT_FAIL="$wt" \
+    run_sweep "$case_dir" 2>&1)
+
+  assert_present "$wt/packages/frontend/.next" \
+    "candidate-identity-unreadable: unresolved candidate identity must prevent deletion"
+  assert_contains "$out" "could not be assessed" \
+    "candidate-identity-unreadable: unresolved ownership must be reported as unknown"
+  pass "an unreadable candidate identity is never treated as unowned"
+}
+
+test_sweep_skips_when_recorded_identity_is_unreadable() {
+  local case_dir wt out alias real_stat
+  case_dir=$(make_case recorded-identity-unreadable)
+  install_treehouse_stub "$case_dir"
+  install_stat_failure_stub "$case_dir"
+  wt=$(add_pool_worktree "$case_dir" 1)
+  add_next_app "$wt" packages/frontend
+  printf '1 available\n' > "$case_dir/pool-status"
+  alias="$case_dir/pool-alias"
+  ln -s "$case_dir/pool" "$alias"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "endpoint_task_id=task-x1" "worktree=$alias/1" \
+    "project=$case_dir/projects/app" "kind=ship" "mode=no-mistakes"
+  real_stat=$(command -v stat)
+
+  out=$(FM_REAL_STAT="$real_stat" FM_FAKE_STAT_FAIL="$alias/1" \
+    run_sweep "$case_dir" 2>&1)
+
+  assert_present "$wt/packages/frontend/.next" \
+    "recorded-identity-unreadable: unresolved recorded identity must prevent deletion"
+  assert_contains "$out" "could not be assessed" \
+    "recorded-identity-unreadable: unresolved ownership must be reported as unknown"
+  pass "an unreadable existing task path is treated as a possible owner"
+}
+
+test_sweep_reports_incomplete_project_count() {
+  local case_dir out rc
+  case_dir=$(make_case incomplete-summary)
+  git clone -q "$case_dir/origin.git" "$case_dir/projects/empty"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "$(basename "$PWD")" = app ]; then exit 1; fi
+printf '[]\n'
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  out=$(run_sweep "$case_dir" \
+    "$case_dir/projects/app" "$case_dir/projects/empty" 2>&1); rc=$?
+  set -e
+
+  expect_code 1 "$rc" "incomplete-summary: a partial sweep must return nonzero"
+  assert_not_contains "$out" "no idle copy holds Next.js build output" \
+    "incomplete-summary: unreadable projects make the absolute empty claim false"
+  assert_contains "$out" "1 project" \
+    "incomplete-summary: the summary must count projects that could not be inspected"
+  assert_contains "$out" "could not be inspected" \
+    "incomplete-summary: the summary must state that the result is incomplete"
+  pass "an incomplete sweep qualifies its summary with the unreadable project count"
 }
 
 test_sweep_refuses_without_treehouse() {
@@ -680,6 +910,15 @@ test_sweep_skips_stashed_copy
 test_sweep_skips_copy_with_unknown_pool_status
 test_sweep_skips_whole_project_when_pool_is_unreadable
 test_sweep_skips_project_when_pool_lookup_fails
+test_sweep_skips_project_when_pool_prints_json_then_fails
+test_sweep_refuses_unreadable_secondmate_state
+test_sweep_refuses_malformed_secondmate_registry
+test_sweep_allows_absent_secondmate_home
+test_sweep_skips_symlink_aliased_task_worktree
+test_sweep_skips_case_aliased_task_worktree
+test_sweep_skips_when_candidate_identity_is_unreadable
+test_sweep_skips_when_recorded_identity_is_unreadable
+test_sweep_reports_incomplete_project_count
 test_sweep_refuses_without_treehouse
 test_sweep_skips_uninspectable_worktree
 test_sweep_skips_when_git_inspection_fails
