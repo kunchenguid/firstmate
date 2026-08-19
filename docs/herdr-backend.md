@@ -206,7 +206,7 @@ The adapter starts and polls a named server before workspace, tab, pane, or agen
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
 The away-mode daemon also gives each adapter-routed supervisor transport call a hard deadline, while ordinary adapter callers retain their existing command lifetime.
-A deadline is an unconfirmed transport result, so the injection buffer remains durable and no message text is retyped.
+A deadline is an unconfirmed transport result, so the injection buffer remains durable and that submit attempt does not retype the message text.
 
 Literal text and Enter are separate operations for ordinary steers.
 Spawn-time fixed commands may use Herdr's atomic run primitive.

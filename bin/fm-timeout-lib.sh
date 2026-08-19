@@ -132,7 +132,13 @@ fm_run_timed() {  # <seconds> <command...>
     timeout) fm_run_external_timeout timeout "$seconds" "$@" ;;
     gtimeout) fm_run_external_timeout gtimeout "$seconds" "$@" ;;
     perl)
-      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+      # Apple Perl can abort before evaluating the program when it inherits a
+      # locale such as C.UTF-8 that this host does not provide. The timeout
+      # runner does no locale-sensitive work, so start it in the portable C
+      # locale, then restore the caller's exact LC_ALL before execing the
+      # bounded command.
+      FM_TIMEOUT_SAVED_LC_ALL_SET=${LC_ALL+x} FM_TIMEOUT_SAVED_LC_ALL=${LC_ALL-} LC_ALL=C \
+        perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { my $had_lc_all = delete $ENV{FM_TIMEOUT_SAVED_LC_ALL_SET}; my $saved_lc_all = delete $ENV{FM_TIMEOUT_SAVED_LC_ALL}; if ($had_lc_all) { $ENV{LC_ALL} = $saved_lc_all } else { delete $ENV{LC_ALL} } setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
         "$seconds" "$@"
       ;;
     bash) fm_run_bash_timeout "$seconds" "$@" ;;
