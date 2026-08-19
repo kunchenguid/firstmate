@@ -78,7 +78,7 @@ Every new crewmate, scout, and second mate is reported once, immediately after i
 | Reported value | Meaning |
 |---|---|
 | display name | The badge, role word, and scope as one string, for example `⚓ secondmate trading`. |
-| `$fm_role` | `secondmate`, `crew`, or `scout` for a worker, and `home` for a shared per-home Space. |
+| `$fm_role` | `secondmate`, `crew`, or `scout` for a worker and for a projected one-task Space, and `home` for a shared per-home Space. |
 | `$fm_glyph` | The fixed wide-glyph role badge, so a narrow sidebar can show the role in one column. |
 | `$fm_scope` | A second mate's domain, or the project a crewmate or scout is working; on a Space, the owning home's own domain for the shared per-home container - the second mate's id, or the primary home's label - and the task's own scope for a projected one-task Space. |
 | `$fm_task` | The task id, for a row layout that drops the built-in `tab` token. |
