@@ -54,6 +54,7 @@
 # those remain that file's contract and are not restated here.
 
 _FM_PF_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PF_LIB_DIR="."
+[ -r "$_FM_PF_LIB_DIR/fm-x-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$_FM_PF_LIB_DIR/fm-x-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-x-lib.sh
 . "$_FM_PF_LIB_DIR/fm-x-lib.sh"
 

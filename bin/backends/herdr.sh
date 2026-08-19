@@ -75,6 +75,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
 # every backend so the decision cannot drift.
+[ -r "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
 
@@ -83,6 +84,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # subscriber (fm_backend_herdr_wait_transition) normalizes every
 # pane.agent_status_changed edge through fm_transition_record and routes it
 # through fm_transition_policy - it never re-encodes the mapping.
+[ -r "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
 
@@ -2863,6 +2865,7 @@ fm_backend_herdr_kill() {  # <target>
   local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE
   local lock_path attempt=0 lock_held=0
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    [ -r "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh" >&2; exit 1; }
     # shellcheck source=bin/fm-wake-lib.sh
     . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
   fi

@@ -41,8 +41,10 @@
 # probe, and the capability descriptor - plus the busy detection and submit
 # cores that consume the shared verdict.
 
+[ -r "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
+[ -r "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 

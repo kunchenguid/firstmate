@@ -9,6 +9,7 @@
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
 # every backend so the decision cannot drift.
+[ -r "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
 

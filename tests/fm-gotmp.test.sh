@@ -58,6 +58,10 @@ make_fake_root() {
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
+  # backends/tmux.sh sources both of these at its top level, so a fake root
+  # without them makes teardown die inside fm_backend_kill.
+  ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
+  ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
@@ -139,6 +143,10 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/backends/tmux.sh" "$fake/bin/backends/tmux.sh"
   ln -s "$ROOT/bin/fm-tmux-lib.sh" "$fake/bin/fm-tmux-lib.sh"
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
+  # backends/tmux.sh sources both of these at its top level, so a fake root
+  # without them makes teardown die inside fm_backend_kill.
+  ln -s "$ROOT/bin/fm-session-lock-lib.sh" "$fake/bin/fm-session-lock-lib.sh"
+  ln -s "$ROOT/bin/fm-cursor-lib.sh" "$fake/bin/fm-cursor-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
@@ -198,6 +206,51 @@ test_teardown_skips_gracefully_when_dir_missing() {
   pass "fm-teardown skips gracefully when tasktmp= points to a nonexistent dir"
 }
 
+# A missing sibling library must fail LOUDLY, never silently.
+#
+# Stock macOS Bash 3.2 terminates the whole script when `.` cannot find its file,
+# and does so with status 0. Teardown therefore used to die partway - after the
+# safety checks, before removing the tasktmp - while reporting success to its
+# caller, which then recorded the task as cleaned up. Bash 5 returns 1 instead,
+# so this only ever bit on the Bash that macOS ships by default. The guard beside
+# each source turns that into a named, non-zero refusal on every Bash.
+test_teardown_refuses_loudly_when_a_library_is_missing() {
+  local id=td-miss-z2
+  local task_tmp="$TMP_ROOT/fm-$id"
+  mkdir -p "$task_tmp/gotmp"
+  local fake err rc
+  fake=$(make_fake_root "$id" "$task_tmp")
+  # Remove a library fm-teardown.sh sources directly at top level. A library
+  # reached through a best-effort call site would refuse just as loudly, but that
+  # site discards stderr, so this one keeps the diagnostic observable.
+  rm -f "$fake/bin/fm-nm-run-lib.sh"
+  err="$fake/refusal.err"
+  rc=0
+  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "teardown reported success with a missing library (silent truncation, rc=$rc)"
+  grep -q "missing required library" "$err" \
+    || fail "teardown did not name the missing library"$'\n'"$(cat "$err")"
+  pass "fm-teardown refuses loudly when a sourced library is missing"
+}
+
+test_zellij_destructive_path_refuses_loudly_when_a_sibling_is_missing() {
+  local fake="$TMP_ROOT/zellij-missing-sibling"
+  local fake_abs err rc=0
+  mkdir -p "$fake/bin/backends"
+  fake_abs=$(cd "$fake" && pwd)
+  err="$fake/refusal.err"
+  ln -s "$ROOT/bin/backends/zellij.sh" "$fake/bin/backends/zellij.sh"
+  FM_HOME="$fake" bash -c ". '$fake/bin/backends/zellij.sh'" 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "zellij adapter reported success with a missing destructive-path sibling (rc=$rc)"
+  grep -Fq "missing required library: $fake_abs/bin/fm-backend-hometag-lib.sh" "$err" \
+    || fail "zellij adapter did not name the missing destructive-path sibling"$'\n'"$(cat "$err")"
+  pass "zellij adapter refuses loudly when a destructive-path sibling is missing"
+}
+
 test_teardown_removes_tasktmp_dir
 test_teardown_skips_gracefully_without_tasktmp
 test_teardown_skips_gracefully_when_dir_missing
+test_teardown_refuses_loudly_when_a_library_is_missing
+test_zellij_destructive_path_refuses_loudly_when_a_sibling_is_missing

@@ -144,28 +144,40 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
+[ -r "$SCRIPT_DIR/fm-tasks-axi-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-tasks-axi-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+[ -r "$SCRIPT_DIR/fm-backend.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-backend.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+[ -r "$SCRIPT_DIR/fm-control-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-control-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+[ -r "$SCRIPT_DIR/fm-lock-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-lock-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+[ -r "$SCRIPT_DIR/fm-classify-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-classify-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+[ -r "$SCRIPT_DIR/fm-gate-refuse-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-gate-refuse-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+[ -r "$SCRIPT_DIR/fm-pr-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-pr-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+[ -r "$SCRIPT_DIR/fm-public-followup-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-public-followup-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
+[ -r "$SCRIPT_DIR/fm-secondmate-registry-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-secondmate-registry-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+[ -r "$SCRIPT_DIR/fm-secondmate-parent-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-secondmate-parent-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+[ -r "$SCRIPT_DIR/fm-wake-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-wake-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+[ -r "$SCRIPT_DIR/fm-nm-run-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-nm-run-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
@@ -174,6 +186,7 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=${2:-}
+[ -r "$SCRIPT_DIR/fm-wake-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-wake-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
@@ -2081,6 +2094,7 @@ teardown_herdr_require_prerequisites() {  # <task-id>
     fi
   done
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    [ -r "$SCRIPT_DIR/fm-wake-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$SCRIPT_DIR/fm-wake-lib.sh" >&2; exit 1; }
     # shellcheck source=bin/fm-wake-lib.sh
     . "$SCRIPT_DIR/fm-wake-lib.sh"
   fi

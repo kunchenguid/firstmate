@@ -18,10 +18,13 @@
 # (bin/fm-supervise-daemon.sh); this adapter sources that file and re-exports
 # its submit core under the backend's naming convention rather than
 # duplicating it, so the two consumers cannot drift apart.
+[ -r "$FM_BACKEND_LIB_DIR/fm-tmux-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$FM_BACKEND_LIB_DIR/fm-tmux-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-tmux-lib.sh"
+[ -r "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
+[ -r "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh"
 
