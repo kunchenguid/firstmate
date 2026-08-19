@@ -263,6 +263,8 @@ Proceed on one confident match while naming the project in plain language; ask o
 Route by the nature of the work against each registered secondmate scope, not by a non-exclusive clone list.
 Keep `local-only` work in the main home.
 Send in-scope work to the fitting secondmate unless it is blocked or the captain explicitly redirects it; do not read the secondmate's chat because marked routed replies return through its status or referenced document.
+Reading, polling, and verifying state inside a registered scope is in-scope work and routes the same way; ownership decides, not size, and being quick to check it yourself is not an exemption.
+An empty secondmate queue is healthy, but firstmate hand-working a scope a registered secondmate owns is a routing failure, never a cue for that secondmate to self-start.
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
