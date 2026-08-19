@@ -87,7 +87,7 @@ lifecycle_lock() {
 }
 
 account_from_output() {
-  awk '/^Number:[[:space:]]*[^[:space:]]+([[:space:]]*)$/ { print $2; exit }' "$1"
+  awk '/^Number:[[:space:]]*[^[:space:]]+/ { print $2; exit }' "$1"
 }
 
 account_number() {
@@ -125,6 +125,7 @@ if "Body:" in text:
     body = text.split("Body:", 1)[1]
     if body.startswith(" "):
         body = body[1:]
+    body = body.split("\nGroup info:", 1)[0]
     if body.endswith("\n"):
         body = body[:-1]
 if message_group != group or not body:
