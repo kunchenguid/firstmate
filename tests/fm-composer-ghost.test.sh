@@ -655,6 +655,44 @@ test_non_bordered_interior_edges_are_pending() {
   pass "fm_tmux_composer_state: interior edge glyphs retain non-bordered fallback"
 }
 
+test_cursor_fallback_never_leaks_the_identity_sentinel() {
+  # The Cursor reclassification re-reads the pane CURSORLESSLY, and that read
+  # is identity-capable, so it can ask for the lazy identity probe exactly as
+  # the cursor-anchored read above it does. `need-identity` is an internal
+  # sentinel that must never leave an adapter: a caller comparing the verdict
+  # to `empty` would defer forever, and one comparing it to `unknown` would
+  # miss a real refusal. Reachable whenever anything below the composer forges
+  # a separator pair - a terminal's own status bar, a footer, two rules.
+  local dir fb capture out nbsp rule
+  dir="$TMP_ROOT/cursor-fallback-sentinel"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  nbsp=$(printf '\302\240')
+  rule='────────────────────────'
+  # A composer with a status bar under it, whose two adjacent rules forge the
+  # separated shape. The cursor is parked below the footer, as Cursor parks it.
+  printf '%s\n→%s\n%s\n  PWD: repo\n  %s\n  %s\n  footer text\n' \
+    "$rule" "$nbsp" "$rule" "$rule" "$rule" > "$capture"
+  # Stub Cursor's process identity: this test is about the verdict domain of
+  # the reclassification branch, not about detecting Cursor.
+  # shellcheck disable=SC2329 # Overrides the sourced library's definition; the
+  # library body under test invokes it.
+  fm_tmux_pane_is_cursor() { return 0; }
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=6 \
+    fm_tmux_composer_state "fakepane")
+  unset -f fm_tmux_pane_is_cursor
+  # shellcheck source=/dev/null
+  . "$LIB"
+  case "$out" in
+    empty|pending|pending-unproven|unknown) ;;
+    *) fail "the Cursor reclassification leaked '$out' out of the adapter" ;;
+  esac
+  # With no identity available the pi rules stay strict, so this defers.
+  [ "$out" = unknown ] \
+    || fail "an unprovable forged pair under a Cursor composer must defer, got '$out'"
+  pass "fm_tmux_composer_state: the Cursor reclassification resolves identity instead of leaking the sentinel"
+}
+
 # --- fm-peek.sh stays escape-free (LLM-facing path) -------------------------
 
 test_peek_output_is_escape_free() {
@@ -713,4 +751,5 @@ test_absent_tmux_identity_keeps_enclosed_bare_verdict
 test_legitimate_empty_routes_remain_empty
 test_non_bordered_composer_uses_compatibility_fallback
 test_non_bordered_interior_edges_are_pending
+test_cursor_fallback_never_leaks_the_identity_sentinel
 test_peek_output_is_escape_free

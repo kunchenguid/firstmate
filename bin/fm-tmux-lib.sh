@@ -161,6 +161,18 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   # harness is untouched.
   if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
+    # The cursorless read is identity-capable too, so it can ask for the same
+    # lazy probe the cursor read above asks for; the sentinel must never leave
+    # this adapter. Reuse an identity already fetched rather than probing twice.
+    if [ "$verdict" = need-identity ]; then
+      if [ -z "${identity:-}" ]; then
+        if ! identity=$(fm_tmux_composer_identity "$target") || [ -z "$identity" ]; then
+          identity=probe-absent
+        fi
+      fi
+      verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '' "$identity")
+      [ "$verdict" != need-identity ] || verdict=unknown
+    fi
   fi
   printf '%s' "$verdict"
 }

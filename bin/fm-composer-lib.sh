@@ -66,7 +66,18 @@
 #                identity reporting an idle/done/blocked pi (herdr `agent
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
-#                strict rule's unidentifiable blank row.
+#                strict rule's unidentifiable blank row. The pair must ENCLOSE
+#                at least one row: two adjacent rules are a divider.
+#
+# SHAPES DRAWN BELOW THE COMPOSER (task fm-composer-odczyt-herdr): the
+# cursorless ranking takes the bottom-most shape, so anything a terminal draws
+# UNDER the input row - an operator's multi-row status bar, a footer, a pair of
+# transcript rules - can outrank the real composer and hide it. `separated` is
+# the shape that forges most easily, being nothing but two rules, and it is
+# also the only shape identity can refute. _fm_composer_cursorless_pi_decides
+# asks whether the pi rules DECIDE the selection and, if they do, spends the
+# lazy identity probe: an agent proven not to be pi drops them, and every other
+# answer keeps them exactly as strict. Nothing else in the ranking relaxes.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -639,7 +650,11 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         FM_COMPOSER_SCAN_PI_PAIR_FOUND=1
         FM_COMPOSER_SCAN_PI_OPEN=$pi_open
         FM_COMPOSER_SCAN_PI_CLOSE=$row
-        if [ "$pi_lines" -le "$pi_max" ]; then
+        # A pair must ENCLOSE at least one row to hold an input row at all:
+        # two adjacent rules are a divider, not a composer, and a zero-height
+        # region trivially satisfies every content check below it, which read
+        # `empty` and authorized injection into a region with nowhere to type.
+        if [ "$pi_lines" -ge 1 ] && [ "$pi_lines" -le "$pi_max" ]; then
           FM_COMPOSER_SCAN_PI_PAIR_VALID=1
         else
           FM_COMPOSER_SCAN_PI_PAIR_VALID=0
@@ -1023,8 +1038,13 @@ _fm_composer_leftbar_floor_row() {  # <trimmed-row>
   [ -z "${blocks//▀/}" ]
 }
 
+# _fm_composer_select_cursorless <plain-screen> [pi-enabled]
+# <pi-enabled> defaults to 1. Passing 0 removes pi's separated-pair candidate
+# and its lone-separator staleness rule from the ranking; only a caller holding
+# positive identity proof that this pane's live agent is NOT pi may do so (see
+# _fm_composer_cursorless_pi_decides).
 _fm_composer_select_cursorless() {
-  local plain=$1 generic=-1 next boundary raw trimmed
+  local plain=$1 pi_enabled=${2:-1} generic=-1 next boundary raw trimmed
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -1052,7 +1072,7 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi
-  if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
+  if [ "$pi_enabled" = 1 ] && [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
      && [ "$FM_COMPOSER_SCAN_PI_CLOSE" -gt "$generic" ] \
      && [ "$generic" -lt "$FM_COMPOSER_SCAN_PI_OPEN" ]; then
     generic=$FM_COMPOSER_SCAN_PI_CLOSE
@@ -1060,7 +1080,7 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_FIRST=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
     FM_COMPOSER_SELECTED_LAST=$((FM_COMPOSER_SCAN_PI_CLOSE - 1))
   fi
-  if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
+  if [ "$pi_enabled" = 1 ] && [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
      && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
     FM_COMPOSER_SELECTED_KIND=
     return 1
@@ -1107,6 +1127,37 @@ _fm_composer_select_cursorless() {
   [ -n "$FM_COMPOSER_SELECTED_KIND" ]
 }
 
+# _fm_composer_cursorless_pi_decides: 0 when pi's separated-pair candidate and
+# its lone-separator staleness rule are what DECIDE the cursorless selection -
+# that is, when suppressing them would select a different shape (or would
+# succeed where the pi rules refuse). Only then is an identity probe worth its
+# cost, so the lazy-probe contract is preserved.
+#
+# WHY THIS EXISTS (task fm-composer-odczyt-herdr, 2026-08-19): pi's shape is a
+# region between two solid `─` rules, which is not self-proving - that is
+# exactly why _fm_composer_pi_verdict demands identity. Anything a terminal
+# draws BELOW the composer can forge it: a fleet operator's own multi-row
+# status bar draws rule-separated rows under claude's input row, the
+# bottom-most-shape rule then ranked that forged pair above the real bare `❯`
+# composer, and every read of every pane on that machine returned `unknown` -
+# 196 consecutive away-mode escalations deferred over 4229 s with the work
+# already finished. Leaves _fm_composer_select_cursorless's ranking alone; it
+# only asks whether the ranking hinged on the one shape identity can refute.
+_fm_composer_cursorless_pi_decides() {  # <plain-screen>
+  local plain=$1 with_pi='' without_pi=''
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" != 1 ] \
+     && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -lt 0 ]; then
+    return 1
+  fi
+  _fm_composer_select_cursorless "$plain" 1 && with_pi=ok
+  with_pi="$with_pi:$FM_COMPOSER_SELECTED_KIND:$FM_COMPOSER_SELECTED_FIRST"
+  with_pi="$with_pi:$FM_COMPOSER_SELECTED_LAST:$FM_COMPOSER_SELECTED_AMBIG"
+  _fm_composer_select_cursorless "$plain" 0 && without_pi=ok
+  without_pi="$without_pi:$FM_COMPOSER_SELECTED_KIND:$FM_COMPOSER_SELECTED_FIRST"
+  without_pi="$without_pi:$FM_COMPOSER_SELECTED_LAST:$FM_COMPOSER_SELECTED_AMBIG"
+  [ "$with_pi" != "$without_pi" ]
+}
+
 fm_composer_extract_selected_content() {  # <caps> <screen>
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0
@@ -1118,7 +1169,7 @@ $caps
 EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" '' 1
-  _fm_composer_select_cursorless "$plain" || return 1
+  _fm_composer_select_cursorless "$plain" 1 || return 1
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
@@ -1258,7 +1309,28 @@ EOF
   # No cursor: the bottom-most shape wins, with the pi-separator staleness
   # rules layered on (a live pi composer pair below the generic candidate
   # proves that candidate stale).
-  if ! _fm_composer_select_cursorless "$plain"; then
+  #
+  # Those pi rules rank a NON-self-proving shape - a region between two solid
+  # rules - above shapes that carry their own container proof, so any status
+  # bar, footer, or transcript rule drawn below the real composer can forge
+  # one and hide the input row. When they are what decides the selection, the
+  # same identity probe that already gates pi's verdict decides whether they
+  # are real: a live agent proven NOT to be pi means this pane has no pi
+  # composer at all, so the forged pair drops out and the input row above it
+  # is found. Nothing else relaxes - an unfetched identity still asks for the
+  # probe, and no identity capability, an absent probe, or a live pi all keep
+  # the pi rules exactly as strict as before.
+  local pi_enabled=1
+  if [ "$has_identity" = 1 ] && _fm_composer_cursorless_pi_decides "$plain"; then
+    if [ -z "$identity" ]; then
+      printf 'need-identity'
+      return 0
+    fi
+    if [ "$identity" != probe-absent ] && [ "${identity%%$'\t'*}" != pi ]; then
+      pi_enabled=0
+    fi
+  fi
+  if ! _fm_composer_select_cursorless "$plain" "$pi_enabled"; then
     printf 'unknown'
     return 0
   fi
@@ -1274,7 +1346,7 @@ EOF
       if [ "$FM_COMPOSER_SELECTED_LAST" -gt "$FM_COMPOSER_SELECTED_FIRST" ]; then
         _fm_composer_classify_bare_wrap "$screen" "$styled" \
           "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
-      elif [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
+      elif [ "$pi_enabled" = 1 ] && [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
          && [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
          && [ "$FM_COMPOSER_SCAN_BARE_ROW" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
         _fm_composer_classify_bare_pi_overlap "$screen" "$styled" "$has_identity" "$identity" \

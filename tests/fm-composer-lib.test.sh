@@ -384,6 +384,133 @@ test_matrix_kimi_bordered_shell_glyph_box() {
   pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired)"
 }
 
+# --- Furniture drawn BELOW the composer -------------------------------------
+#
+# STATUS_BAR_ROWS reproduces a real herdr capture of an idle claude 2.1.235
+# pane on an operator machine whose shell renders a 12-row status bar UNDER
+# claude's input row (task fm-composer-odczyt-herdr, 2026-08-19). Two of those
+# rows are adjacent solid rules, which forge exactly the shape pi's separated
+# composer is made of. Ranking that forged pair as the bottom-most shape hid
+# the real agent-glyph composer above it, so EVERY pane on that machine read
+# `unknown`: 196 consecutive away-mode escalations deferred over 4229 s with
+# the work already finished, and every steer's Enter left unconfirmed.
+STATUS_BAR_RULE='────────────────────────────────────────'
+STATUS_BAR_ROWS=$'  BLAKE OS │ CC: 2.1.235 │ RZESZOW, 18  07:09  14C\n'
+STATUS_BAR_ROWS+=$'  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n'
+STATUS_BAR_ROWS+=$'  PWD: _firstmate\n'
+STATUS_BAR_ROWS+="  $STATUS_BAR_RULE"$'\n'
+STATUS_BAR_ROWS+=$'  CONTEXT: ⛁⛁⛁⛁⛁⛁⛁⛁⛁⛁⛁⛁ 12%\n'
+STATUS_BAR_ROWS+=$'  ········································\n'
+STATUS_BAR_ROWS+="  $STATUS_BAR_RULE"$'\n'
+STATUS_BAR_ROWS+=$'  USE: 5HR: 61% ↻TODAY@0710 │ WEEK: 65% (SUB/API)\n'
+# The two adjacent rules the outage turned on: a divider pair, not a composer.
+STATUS_BAR_ROWS+="  $STATUS_BAR_RULE"$'\n'
+STATUS_BAR_ROWS+="  $STATUS_BAR_RULE"$'\n'
+STATUS_BAR_ROWS+=$'  "There is no next time. It is now or never." -Celestine Chua\n'
+STATUS_BAR_ROWS+=$'  bypass permissions on (shift+tab to cycle) - for agents'
+
+# status_bar_screen <composer-row>: the captured screen with <composer-row>
+# standing where claude drew its input row.
+status_bar_screen() {  # <composer-row>
+  printf '%s\n%s\n%s\n%s\n%s\n%s' \
+    'transcript line' 'more transcript' "$STATUS_BAR_RULE" "$1" "$STATUS_BAR_RULE" \
+    "$STATUS_BAR_ROWS"
+}
+
+test_status_bar_below_composer_does_not_hide_it() {
+  local screen typed claude_working claude_idle pi_idle out
+  screen=$(status_bar_screen "❯$NBSP")
+  typed=$(status_bar_screen "❯ fix the flaky test")
+  claude_working=$(printf 'claude\tworking'); claude_idle=$(printf 'claude\tidle')
+  pi_idle=$(printf 'pi\tidle')
+  # NON-VACUOUSNESS: the forged pair really is what decides this screen, so
+  # the classifier spends the lazy identity probe on it. If this stops being
+  # `need-identity` the fixture no longer reproduces the outage and every
+  # assertion below would pass for the wrong reason.
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen")
+  [ "$out" = need-identity ] \
+    || fail "the forged pair must be what decides this screen (expected need-identity, got '$out')"
+  # THE FIX: a live agent proven NOT to be pi means this pane has no pi
+  # composer, so the forged pair drops out and the real input row is found.
+  assert_screen "idle claude under a status bar" empty "$CAPS_STYLED" "$screen" '' "$claude_working"
+  assert_screen "idle claude under a status bar (idle)" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  # The same defect left every steer's Enter unconfirmed: real typed text
+  # under the status bar read `unknown`, so no retry could ever be earned.
+  assert_screen "typed text under a status bar" pending "$CAPS_STYLED" "$typed" '' "$claude_working"
+  # NOTHING ELSE RELAXES. Each of these read `unknown` before the fix and must
+  # keep reading `unknown`: only POSITIVE identity proof moves the verdict.
+  assert_screen "status bar without an identity probe result" unknown \
+    "$CAPS_STYLED" "$screen" '' probe-absent
+  assert_screen "status bar on an identity-less styled backend" unknown \
+    "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "status bar on a plain backend" unknown "$CAPS_PLAIN" "$screen"
+  # A live pi keeps the pi rules exactly as they were: the pair still outranks
+  # everything above it, and a zero-height pair proves nothing.
+  assert_screen "live pi still owns its separator pair" unknown \
+    "$CAPS_STYLED" "$screen" '' "$pi_idle"
+  pass "matrix: a status bar drawn below the composer no longer hides the input row"
+}
+
+test_status_bar_preserves_the_safety_gates() {
+  # The gates this fix must not buy its verdict with. Each screen carries the
+  # SAME status bar and the SAME proven-non-pi identity that turns the fixture
+  # above into `empty`; every one of them must still refuse.
+  local claude_working out screen
+  claude_working=$(printf 'claude\tworking')
+  # 1. A dead shell below the composer: the agent exited and its prompt row is
+  #    the only live input on the pane. Injecting here types into a shell.
+  screen=$(status_bar_screen "❯$NBSP")$'\n$ '
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$claude_working")
+  [ "$out" != empty ] \
+    || fail "a dead shell below a status-bar composer must never read empty"
+  # 2. A modal dialog drawn over the pane: an unclosed box below the composer
+  #    is a screen that is not the composer's to accept text.
+  screen=$(status_bar_screen "❯$NBSP")$'\n  ╭────────────────╮\n  │ Do you trust   │'
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$claude_working")
+  [ "$out" != empty ] \
+    || fail "an unclosed modal below a status-bar composer must never read empty"
+  # 3. A mid-redraw pane: the composer row itself has not been drawn yet, so
+  #    the only candidate is a blank unidentified row (the strict rule).
+  screen=$(status_bar_screen '')
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$claude_working")
+  [ "$out" != empty ] \
+    || fail "a blank unidentified row under a status bar must never read empty"
+  # 4. An unidentified text row where the composer should be: no container
+  #    proof at all, status bar or not.
+  screen=$(status_bar_screen 'Applying edit to bin/fm-composer-lib.sh')
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$claude_working")
+  [ "$out" != empty ] \
+    || fail "an unidentified row under a status bar must never read empty"
+  # 5. A bare SHELL glyph where the composer should be: the dead-shell rule
+  #    holds under a status bar exactly as it does without one.
+  screen=$(status_bar_screen '$ ')
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$claude_working")
+  [ "$out" != empty ] \
+    || fail "a bare shell glyph under a status bar must never read empty"
+  pass "strict posture: the status-bar fix buys nothing from the injection gates"
+}
+
+test_zero_height_separator_pair_proves_nothing() {
+  # A pi pair that encloses NO row cannot hold an input row, yet every content
+  # check over an empty range trivially succeeded, so an idle pi identity read
+  # it `empty` and authorized injection into a region with nowhere to type.
+  # Any two adjacent rules - a status bar's divider, a transcript rule meeting
+  # a footer rule - forge one.
+  local adjacent real pi_idle
+  pi_idle=$(printf 'pi\tidle')
+  adjacent=$'transcript\n────────────────────────\n────────────────────────\n footer'
+  assert_screen "adjacent rules are a divider, not a composer" unknown \
+    "$CAPS_STYLED" "$adjacent" '' "$pi_idle"
+  assert_screen "adjacent rules on tmux" unknown "$CAPS_TMUX" "$adjacent" 2 "$pi_idle"
+  # NON-VACUOUSNESS: the SAME pair with one row between the rules is pi's real
+  # composer and still reads empty, so the refusal above is about the missing
+  # row and not about the fixture drifting out of the pi shape.
+  real=$'transcript\n────────────────────────\n\n────────────────────────\n footer'
+  assert_screen "one enclosed row is still pi's composer" empty \
+    "$CAPS_STYLED" "$real" '' "$pi_idle"
+  pass "strict posture: a zero-height separator pair is never positive container proof"
+}
+
 test_matrix_claude_inside_zellij_ansi_dump() {
   # Real claude captured through `zellij action dump-screen --ansi`
   # (capability established by the audit): `ESC[m` `❯` U+00A0.
@@ -617,6 +744,9 @@ test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
+test_status_bar_below_composer_does_not_hide_it
+test_status_bar_preserves_the_safety_gates
+test_zero_height_separator_pair_proves_nothing
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies
 test_contiguous_transcript_reanchors_on_live_prompt

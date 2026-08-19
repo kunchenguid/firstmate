@@ -205,6 +205,47 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### Furniture drawn below the composer
+
+The cursorless ranking takes the bottom-most shape, so anything drawn UNDER the input row competes with the real composer.
+This was measured on 2026-08-19 against herdr 0.7.5 and Claude Code 2.1.235 on Linux x86_64, on an operator machine whose shell renders a 12-row status bar below Claude's input row; two of those rows are adjacent solid rules, which forge pi's separated shape.
+Every live pane on that machine, five of five, read `unknown` before the fix and `empty` after it, with no other change to the panes:
+
+```sh
+. bin/fm-backend.sh
+herdr pane list | jq -r '.result.panes[].pane_id' \
+  | while read -r p; do printf '%s %s\n' "$p" "$(fm_backend_composer_state herdr "default:$p")"; done
+```
+
+```text
+before: default:wT:p2 unknown   default:wT:p1F unknown  default:wT:p1G unknown  default:wT:p1H unknown  default:wT:p1J unknown
+after:  default:wT:p2 empty     default:wT:p1F empty    default:wT:p1G empty    default:wT:p1H empty    default:wT:p1J empty
+```
+
+The portable half of this guarantee, including the byte-level status-bar fixture, the five injection gates it must not buy its verdict with, and the zero-height separator pair, is pinned by `tests/fm-composer-lib.test.sh`.
+Rerun the command above on any machine whose terminal draws its own furniture below a harness's input row; a pane reading `unknown` there is this defect, not a busy pane.
+The Cursor-specific cursorless fallback re-reads the same pane through that identity-capable path, so it resolves the identity probe itself rather than returning the classifier's internal request for one; `tests/fm-composer-ghost.test.sh` pins that its verdict is always one of the four public verdicts.
+
+The separated shape now also requires the pair to enclose at least one row, so two adjacent rules cannot prove a composer.
+The live guard was rerun on 2026-08-19 on Linux x86_64 with tmux 3.4 to confirm that tightening against the real shapes, from an UNTRUSTED worktree:
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+```text
+ok - claude (2.1.235 (Claude Code)): real idle composer classifies empty
+not ok - codex (codex-cli 0.141.0): idle composer never classified empty (last verdict: unknown)
+ok - opencode (1.16.2): real idle composer classifies empty
+ok - pi (0.84.1): real idle composer classifies empty
+not ok - kimi (kimi, version 1.44.0): idle composer never classified empty (last verdict: unknown)
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+```
+
+Pi's real separated composer still reaches `empty`, which is the shape the enclosed-row requirement had to preserve.
+The two refusals are environment and vendor state, not classifier drift, and both reproduce identically on the unchanged classifier: Codex parked on the untrusted-worktree trust dialog, which the guard correctly treats as an unreadable composer, and Kimi 1.44.0 no longer draws the bordered `│ > │` box this matrix records, drawing a titled `── input ──` rule above its input rows and a plain rule below instead - a shape the catalogue does not yet carry.
+Rerun this guard from a trusted checkout, and refresh Kimi's entry once its current shape is taught to the catalogue.
+
 ## Herdr
 
 The compatibility floor is protocol 14.
