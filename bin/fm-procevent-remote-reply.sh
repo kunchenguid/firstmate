@@ -56,6 +56,10 @@
 #   - at-most-once append, because a captured generation can be replayed
 #   - control-byte normalization, so content-bearing bytes from another machine
 #     cannot make the parent's status file unsafe to read
+#   - the caught-up watermark this channel publishes for
+#     bin/fm-pending-reply-lib.sh, because a report that exists remotely but has
+#     not been mirrored yet must not be mistaken for a report the mate never
+#     wrote (see WINDOW_CLOSED_EMPTY below)
 # Line framing and size bounding belong to bin/fm-remote-delta-read.sh, which
 # delivers only whole lines and breaks continuity on an over-long one.
 set -u
@@ -235,12 +239,26 @@ cmd_arm() {
   )
 }
 
+# The reader's exit when its wait window closed with no complete new line. That
+# is the one moment this channel can prove it is not behind: the window opened
+# with the remote log matching the committed cursor exactly (any pending bytes
+# would have returned a delta at once), so the parent had read that log through
+# its end at window START. The window start, not its close, is therefore the
+# honest watermark, and bin/fm-pending-reply-lib.sh consumes it so a missing
+# correlated report is judged only against a channel known to have caught up.
+WINDOW_CLOSED_EMPTY=75
+
 cmd_source() {
-  local id=${1:-}
+  local id=${1:-} started rc=0
   validate_id "$id"
   read_cursor "$id"
-  exec "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
-    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null
+  started=$(fm_pending_reply_now)
+  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
+    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
+  if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
+    fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true
+  fi
+  return "$rc"
 }
 
 safe_doc_path() {
@@ -512,6 +530,7 @@ cmd_retire_finalize_locked() {
   fi
   rm -f -- "$(cursor_path "$id")"
   rm -f -- "$CURSOR_DIR/$id".*.ingested
+  rm -f -- "$(fm_pending_reply_remote_channel_watermark_path "$STATE" "$id")"
 }
 
 cmd_retire() {
