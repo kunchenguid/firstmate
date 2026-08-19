@@ -1258,6 +1258,213 @@ SH
   pass "the chat channel feeds the same keyed-answer intake a captured review does"
 }
 
+# The retention incident: closing a hold runs tasks-axi's ordinary Done pruning,
+# so once more than `done_keep` captain decisions had been answered the earliest
+# resolved records left data/backlog.md for the done archive, and closing the
+# scout pruned more. Teardown then refused because the completion gate could no
+# longer find records that still existed, unchanged, in the archive. Raising
+# `done_keep` was the incident's workaround and is not the fix: the gate reads
+# archived resolved records itself, and every close path stays idempotent and
+# reopen-safe against them.
+test_resolved_decisions_survive_done_pruning_before_the_completion_gate() {
+  local home id archive key hold routed_hold before after json err
+  home=$(make_home retention-prune)
+  archive="$home/data/done-archive.md"
+  assert_grep "done_keep = 10" "$home/.tasks.toml" \
+    "the retention regression must run at the tracked done_keep, never a raised one"
+  id=sample-retention-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample retention" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the retention origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample retention review\n\nTwelve captain choices remain.\n' > "$home/data/$id/report.md"
+
+  for key in 01 02 03 04 05 06 07 08 09 10 11 12; do
+    hold=$(run_decisions "$home" hold "$id" "choice-$key" \
+      --title "Choose sample option $key" --reason "captain choice $key pending" --repo sample) \
+      || fail "could not register retention hold choice-$key"
+    [ "$hold" = "$id-decision-choice-$key" ] || fail "retention hold identity drifted: $hold"
+    printf 'Use sample option %s.\n' "$key" > "$home/decision-$key.txt"
+  done
+  run_decisions "$home" complete "$id" \
+    choice-01 choice-02 choice-03 choice-04 choice-05 choice-06 \
+    choice-07 choice-08 choice-09 choice-10 choice-11 choice-12 >/dev/null \
+    || fail "completion failed while every retention hold was still active"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "verification failed while every retention hold was still active"
+
+  # The oldest record is the first one pruning reaches, so make it the routed
+  # close so the routed path's record is proven to survive too.
+  routed_hold="$id-decision-choice-01"
+  tasks_in "$home" add sample-retention-work "Apply sample option 01" \
+    --kind ship --repo sample --blocked-by "$routed_hold" >/dev/null \
+    || fail "could not route work behind the first retention hold"
+  run_decisions "$home" resolve "$id" choice-01 --decision-file "$home/decision-01.txt" \
+    --routed-to sample-retention-work >/dev/null \
+    || fail "could not resolve the routed retention decision"
+  run_decisions "$home" decline "$id" choice-02 --decision-file "$home/decision-02.txt" >/dev/null \
+    || fail "could not decline the second retention decision"
+  for key in 03 04 05 06 07 08 09 10 11 12; do
+    run_decisions "$home" answer "$id" "choice-$key" --decision-file "$home/decision-$key.txt" >/dev/null \
+      || fail "could not answer retention decision choice-$key"
+  done
+
+  # The incident shape: more answered decisions than done_keep, so the earliest
+  # resolved records are already gone from the live backlog and sit in the archive.
+  if tasks_in "$home" show "$routed_hold" --full >/dev/null 2>&1; then
+    fail "ordinary Done pruning did not evict the oldest resolved decision from the live backlog"
+  fi
+  assert_no_grep "$id-decision-choice-02 -" "$home/data/backlog.md" \
+    "the second oldest resolved decision must be pruned by the twelfth close"
+  assert_grep "- [x] $routed_hold -" "$archive" \
+    "the pruned routed decision must be archived, never deleted"
+  assert_grep "Use sample option 01." "$archive" \
+    "the archived routed decision must keep the captain decision it recorded"
+  assert_grep "- [x] $id-decision-choice-02 -" "$archive" \
+    "the pruned declined decision must be archived, never deleted"
+  # Closing the scout itself, as firstmate does when it records completion,
+  # prunes one more.
+  tasks_in "$home" "done" "$id" --report "data/$id/report.md" >/dev/null \
+    || fail "could not close the retention scout in the backlog"
+  assert_grep "- [x] $id-decision-choice-03 -" "$archive" \
+    "closing the scout must prune the third oldest resolved decision into the archive"
+  assert_no_grep "$id-decision-choice-03 -" "$home/data/backlog.md" \
+    "closing the scout must prune the third oldest resolved decision from the live backlog"
+
+  before=$(shasum -a 256 "$archive" | awk '{print $1}')
+  run_decisions "$home" verify "$id" > "$home/pruned-verify.out" 2> "$home/pruned-verify.err" \
+    || fail "the completion gate lost resolved decisions to ordinary Done pruning: $(cat "$home/pruned-verify.err")"
+  run_decisions "$home" complete "$id" choice-01 choice-02 choice-03 >/dev/null \
+    || fail "a later review pass could not re-verify archived resolved decisions"
+
+  # Every close path stays idempotent against an archived record and still
+  # refuses a drifted retry, and an archived identity can never be reopened.
+  run_decisions "$home" resolve "$id" choice-01 --decision-file "$home/decision-01.txt" \
+    --routed-to sample-retention-work >/dev/null \
+    || fail "an exact resolve retry against an archived record was not idempotent"
+  run_decisions "$home" decline "$id" choice-02 --decision-file "$home/decision-02.txt" >/dev/null \
+    || fail "an exact decline retry against an archived record was not idempotent"
+  run_decisions "$home" answer "$id" choice-03 --decision-file "$home/decision-03.txt" >/dev/null \
+    || fail "an exact answer retry against an archived record was not idempotent"
+  run_decisions "$home" repair "$id" choice-03 --decision-file "$home/decision-03.txt" >/dev/null \
+    || fail "repair did not recognize an archived record that already carries its resolution"
+  printf 'Use a different sample option.\n' > "$home/drifted-decision.txt"
+  if run_decisions "$home" answer "$id" choice-03 --decision-file "$home/drifted-decision.txt" \
+    > "$home/archived-drift.out" 2> "$home/archived-drift.err"; then
+    fail "an archived record accepted a different captain decision on retry"
+  fi
+  assert_grep "different captain decision" "$home/archived-drift.err" \
+    "a drifted retry against an archived record must be refused for that reason"
+  if run_decisions "$home" hold "$id" choice-01 \
+    --title "Choose sample option 01" --reason "captain choice 01 pending" --repo sample \
+    > "$home/archived-hold.out" 2> "$home/archived-hold.err"; then
+    fail "an archived resolved identity was reopened as a fresh captain hold"
+  fi
+  assert_grep "new decision key" "$home/archived-hold.err" \
+    "reopening an archived identity must point at a new decision key"
+  assert_no_grep "- [ ] $routed_hold -" "$home/data/backlog.md" \
+    "a refused reopen created a duplicate live identity"
+
+  # An explicit prune of everything is the same durable tier as the implicit one.
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "could not archive the whole Done section"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "the completion gate lost resolved decisions to an explicit prune"
+  after=$(shasum -a 256 "$archive" | awk '{print $1}')
+  [ "$before" != "$after" ] || fail "the explicit prune fixture did not change the archive"
+  before=$after
+  run_teardown "$home" "$id" >/dev/null 2> "$home/pruned-teardown.err" \
+    || fail "teardown refused a scout whose decisions were all answered and archived: $(cat "$home/pruned-teardown.err")"
+  assert_absent "$home/state/$id.meta" "successful teardown left the origin metadata behind"
+  after=$(shasum -a 256 "$archive" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "reading archived decisions rewrote the archive"
+  for key in 01 02 03 04 05 06 07 08 09 10 11 12; do
+    assert_grep "- [x] $id-decision-choice-$key -" "$archive" \
+      "archived decision choice-$key did not survive the whole lifecycle"
+  done
+  json=$(run_bearings "$home") || fail "Bearings failed after archived resolutions"
+  printf '%s' "$json" | jq -e --arg id "$id" '
+    (.decisions_open | any(.id | startswith($id)) | not)
+  ' >/dev/null || fail "an archived resolved decision resurfaced as an open Captain's Call: $json"
+  err=$(cat "$home/pruned-verify.err")
+  [ -z "$err" ] || fail "verification of archived decisions printed diagnostics: $err"
+  pass "resolved decisions survive ordinary Done pruning for the completion gate"
+}
+
+# Reading the archive must not weaken the gate. A hold closed outside the script
+# and then pruned still has no recorded captain decision, so verification and
+# teardown keep refusing, no close path can invent the answer, repair reaches only
+# live records, and nothing ever writes the archive.
+test_archived_out_of_band_close_still_blocks_the_gate() {
+  local home id hold archive pad before after
+  home=$(make_home archived-out-of-band)
+  archive="$home/data/done-archive.md"
+  id=sample-archived-gap-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate an archived sample gap" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the archived-gap origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample archived gap review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" gap \
+    --title "Choose the sample gap" --reason "captain gap choice pending" --repo sample) \
+    || fail "could not register the archived-gap hold"
+  run_decisions "$home" complete "$id" gap >/dev/null || fail "completion failed before the out-of-band close"
+  tasks_in "$home" "done" "$hold" >/dev/null || fail "could not reproduce the direct out-of-band close"
+  for pad in 01 02 03 04 05 06 07 08 09 10; do
+    tasks_in "$home" add "sample-pad-$pad" "Sample pad $pad" --kind ship --repo sample >/dev/null \
+      || fail "could not create pad task $pad"
+    tasks_in "$home" "done" "sample-pad-$pad" >/dev/null || fail "could not close pad task $pad"
+  done
+  if tasks_in "$home" show "$hold" --full >/dev/null 2>&1; then
+    fail "the out-of-band closed hold was not pruned into the archive"
+  fi
+  assert_grep "- [x] $hold -" "$archive" "the out-of-band closed hold must be archived"
+  assert_no_grep "Resolution recorded by fm-decision-hold" "$archive" \
+    "the archived out-of-band close must carry no resolution record"
+  before=$(shasum -a 256 "$archive" | awk '{print $1}')
+
+  if run_decisions "$home" verify "$id" > "$home/gap-verify.out" 2> "$home/gap-verify.err"; then
+    fail "verification accepted an archived captain decision that was never answered"
+  fi
+  assert_grep "without a recorded captain decision" "$home/gap-verify.err" \
+    "verification must say the archived record has no recorded captain decision"
+  if run_teardown "$home" "$id" > "$home/gap-teardown.out" 2> "$home/gap-teardown.err"; then
+    fail "teardown proceeded while an archived captain decision had no recorded answer"
+  fi
+  assert_grep "REFUSED" "$home/gap-teardown.err" "teardown refusal must be explicit"
+  assert_present "$home/state/$id.meta" "refused teardown removed investigation metadata"
+  printf 'An answer recorded after the fact.\n' > "$home/late-decision.txt"
+  if run_decisions "$home" repair "$id" gap --decision-file "$home/late-decision.txt" \
+    > "$home/gap-repair.out" 2> "$home/gap-repair.err"; then
+    fail "repair recorded a captain decision onto an archived record"
+  fi
+  assert_grep "repair reaches only" "$home/gap-repair.err" \
+    "repair must say it cannot reach an archived record"
+  if run_decisions "$home" answer "$id" gap --decision-file "$home/late-decision.txt" \
+    > "$home/gap-answer.out" 2> "$home/gap-answer.err"; then
+    fail "answer closed an archived record that fm-decision-hold never closed"
+  fi
+  if run_decisions "$home" decline "$id" gap --decision-file "$home/late-decision.txt" \
+    > "$home/gap-decline.out" 2> "$home/gap-decline.err"; then
+    fail "decline closed an archived record that fm-decision-hold never closed"
+  fi
+  if run_decisions "$home" resolve "$id" gap --decision-file "$home/late-decision.txt" \
+    --routed-to "sample-pad-01" > "$home/gap-resolve.out" 2> "$home/gap-resolve.err"; then
+    fail "resolve routed work through an archived record that fm-decision-hold never closed"
+  fi
+  if run_decisions "$home" hold "$id" gap \
+    --title "Choose the sample gap" --reason "captain gap choice pending" --repo sample \
+    > "$home/gap-hold.out" 2> "$home/gap-hold.err"; then
+    fail "an archived closed identity was reopened as a fresh captain hold"
+  fi
+  after=$(shasum -a 256 "$archive" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "a refused path wrote the done archive"
+  assert_no_grep "Resolution recorded by fm-decision-hold" "$home/data/backlog.md" \
+    "a refused path wrote a resolution record into the live backlog"
+  pass "an archived record without a recorded captain decision still blocks the gate"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -1276,3 +1483,5 @@ test_unbound_source_closes_no_hold
 test_any_origin_binding_closes_across_origins
 test_answer_preserves_every_unrouted_close_guard
 test_chat_channel_feeds_the_same_keyed_answer_intake
+test_resolved_decisions_survive_done_pruning_before_the_completion_gate
+test_archived_out_of_band_close_still_blocks_the_gate

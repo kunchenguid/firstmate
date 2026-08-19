@@ -31,6 +31,7 @@ Chat already feeds it: `bin/fm-send.sh --resolve-key` answers a decision in whic
 A captured-answer source feeds it too once bound with `bin/fm-decision-hold.sh bind <source-id> <origin-id>`, or with `--any-origin` for a source that carries answers across origins, such as the bearings board; bind before arming the source, and key each structured question by the hold's own decision key, or by its full hold identity under an any-origin binding.
 An unbound source and a question slug that is not a decision key both simply feed nothing: the answer is still captured and firstmate is still woken, and closing falls back to the commands above.
 A hold closed outside this owner leaves no durable answer, so the completion gate keeps failing until `bin/fm-decision-hold.sh repair` records the decision the captain actually gave; neither unrouted path may stand in for an answer the captain has not given.
+A resolved hold that ordinary Done pruning has already archived still satisfies the completion gate, so never raise or override the backlog's `done_keep` to keep the gate passing.
 Resolved findings, recommendations that need no captain choice, and prose that merely sounds decision-like do not create holds.
 Bearings reads the resulting structured state and must never compensate by scraping historical reports, visual-review artifacts, terminal output, chat, or other prose.
 
