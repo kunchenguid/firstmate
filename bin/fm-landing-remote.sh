@@ -16,25 +16,30 @@
 # apply rewrites remotes in the named checkout so `origin` is --ours and
 # `upstream` is --upstream, refetches `origin` so its remote-tracking refs stop
 # holding the previous remote's tips, repoints every local branch that tracked
-# `origin` back at `origin`, sets `checkout.defaultRemote` and
+# `origin` or `fork` at `origin`, sets `checkout.defaultRemote` and
 # `remote.pushDefault` to `origin`, points `gh repo set-default` at `origin`
 # when `gh` is on PATH, and re-inits no-mistakes without --fork-url when
 # `no-mistakes` is on PATH so its PR target follows the new origin.
 # apply has one outcome: it exits 0 only when every one of those steps
-# succeeded. Everything that can refuse runs before anything is written, and a
-# refetch that fails after the rewrite restores the remotes it found, so a
-# failed apply leaves the checkout exactly as it was and can be re-run.
+# succeeded. Everything that can refuse runs before anything is written, and
+# every later failure - the refetch, the gh default, the no-mistakes re-init -
+# restores the remotes, the branch tracking, and the git defaults it found, so
+# a failed apply leaves the checkout as it was and can be re-run.
+# Restoring cannot recreate remote-tracking refs that a fetch replaced or that
+# `git remote remove` deleted, so it refetches the remotes it puts back and
+# leaves those refs holding the landing remote's tips when it cannot reach them.
 # It refuses to run inside a linked worktree: the remotes are shared with the
 # primary checkout, so firstmate applies this on the primary and a worker
 # must not.
-# status prints the current origin, upstream, leftover fork remote, and gh
-# default.
+# status prints the current origin, upstream, leftover fork remote, and the gh
+# default gh recorded locally in `remote.origin.gh-resolved`; it needs no
+# network.
 # verify exits 0 only when origin matches --ours; otherwise it exits 1 and
 # names the remote it actually found.
 #
 # URL comparison is spelling-tolerant for the GitHub https / ssh / trailing
-# .git forms. apply is idempotent when origin is already --ours, and that path
-# needs no network: reachability and refetch belong to the remap only.
+# .git forms. apply is a no-op, and touches the network not at all, once origin,
+# upstream, the git defaults, and the gh default are all in place already.
 set -eu
 
 usage() {
@@ -107,30 +112,65 @@ remote_exists() {
   git -C "$REPO" remote get-url "$1" >/dev/null 2>&1
 }
 
-# `git remote rename origin upstream` rewrites branch.<name>.remote for every
-# local branch that tracked origin, so after the remap those branches pull from
-# the third-party parent. Record them before anything moves and repoint them
-# afterwards. Which branches actually track origin is a fact of the repository,
-# never a main/master guess: the fleet already runs projects whose default
-# branch is neither.
-branches_tracking_origin() {
-  local branch remote
+git_config_get() {  # <key>
+  git -C "$REPO" config --get "$1" 2>/dev/null || true
+}
+
+# `gh repo set-default` records its choice locally, in `remote.<name>.gh-resolved`,
+# so whether origin is already gh's default is readable with no network.
+gh_default_is_origin() {
+  command -v gh >/dev/null 2>&1 || return 0
+  [ "$(git_config_get remote.origin.gh-resolved)" = base ]
+}
+
+# `git remote rename` rewrites branch.<name>.remote for every branch that
+# tracked the renamed remote, and `git remote remove` deletes that branch's
+# `remote` and `merge` keys outright. Capture every branch's tracking pair
+# before the first write: the same record repoints branches at the surviving
+# origin on success and puts them back verbatim on a failed apply. Which
+# branches track what is a fact of the repository, never a main/master guess.
+capture_branch_tracking() {
+  local branch remote merge
   git -C "$REPO" for-each-ref --format='%(refname:short)' refs/heads \
   | while IFS= read -r branch; do
       remote=$(git -C "$REPO" config --get "branch.${branch}.remote" 2>/dev/null || true)
-      if [ "$remote" = origin ]; then
-        printf '%s\n' "$branch"
-      fi
+      [ -n "$remote" ] || continue
+      merge=$(git -C "$REPO" config --get "branch.${branch}.merge" 2>/dev/null || true)
+      printf '%s\t%s\t%s\n' "$branch" "$remote" "$merge"
     done
   return 0
 }
 
-restore_origin_branch_tracking() {  # <newline-separated branch names>
-  local branch
+# `fork` and `origin` both named the landing remote before the remap, because
+# apply refuses a fork whose URL is not --ours, so a branch that tracked either
+# one must still track the landing remote under its one surviving name.
+repoint_landing_branch_tracking() {  # <captured tracking>
+  local branch remote merge
   [ -n "$1" ] || return 0
-  while IFS= read -r branch; do
+  while IFS="$(printf '\t')" read -r branch remote merge; do
     [ -n "$branch" ] || continue
+    case $remote in
+      origin|fork) ;;
+      *) continue ;;
+    esac
     git -C "$REPO" config "branch.${branch}.remote" origin
+    if [ -n "$merge" ]; then
+      git -C "$REPO" config "branch.${branch}.merge" "$merge"
+    fi
+  done <<TRACKED
+$1
+TRACKED
+}
+
+restore_captured_branch_tracking() {  # <captured tracking>
+  local branch remote merge
+  [ -n "$1" ] || return 0
+  while IFS="$(printf '\t')" read -r branch remote merge; do
+    [ -n "$branch" ] || continue
+    git -C "$REPO" config "branch.${branch}.remote" "$remote"
+    if [ -n "$merge" ]; then
+      git -C "$REPO" config "branch.${branch}.merge" "$merge"
+    fi
   done <<TRACKED
 $1
 TRACKED
@@ -153,23 +193,58 @@ refresh_origin_tracking() {
   git -C "$REPO" remote set-head origin --auto >/dev/null 2>&1 || return 1
 }
 
-# Put back exactly what the remap moved, so a refetch that fails after the
-# rewrite is indistinguishable from an apply that never ran.
-undo_remap() {  # <shape> <previous origin url> <previous fork url>
-  case $1 in
+# Put the checkout back the way apply found it. The two rename shapes invert
+# exactly, refs included. The rewrite shapes cannot recreate remote-tracking
+# refs a later fetch replaced or `git remote remove` deleted, so they refetch
+# what they put back and leave those refs holding the landing remote's tips
+# when the network they are being restored because of is still down.
+restore_pre_apply_remotes() {
+  case $REMAP_SHAPE in
     renamed-fork)
-      git -C "$REPO" remote rename origin fork
-      git -C "$REPO" remote rename upstream origin
+      git -C "$REPO" remote rename origin fork || return 1
+      git -C "$REPO" remote rename upstream origin || return 1
       ;;
     added-origin)
-      git -C "$REPO" remote remove origin
-      git -C "$REPO" remote rename upstream origin
+      git -C "$REPO" remote remove origin || return 1
+      git -C "$REPO" remote rename upstream origin || return 1
       ;;
-    reurled-origin)
-      git -C "$REPO" remote set-url origin "$2"
-      [ -z "$3" ] || git -C "$REPO" remote add fork "$3"
+    reurled-origin|tidied-remotes)
+      git -C "$REPO" remote set-url origin "$ORIGIN_BEFORE" || return 1
+      if [ -z "$UPSTREAM_BEFORE" ] && remote_exists upstream; then
+        git -C "$REPO" remote remove upstream || return 1
+      fi
+      if [ -n "$FORK_BEFORE" ] && ! remote_exists fork; then
+        git -C "$REPO" remote add fork "$FORK_BEFORE" || return 1
+        git -C "$REPO" fetch --prune --quiet fork || true
+      fi
+      if [ "$REMAP_SHAPE" = reurled-origin ]; then
+        git -C "$REPO" fetch --prune --quiet origin || true
+      fi
       ;;
   esac
+  return 0
+}
+
+restore_git_default_config() {
+  if [ -n "$DEFAULT_REMOTE_BEFORE" ]; then
+    git -C "$REPO" config checkout.defaultRemote "$DEFAULT_REMOTE_BEFORE"
+  else
+    git -C "$REPO" config --unset checkout.defaultRemote 2>/dev/null || true
+  fi
+  if [ -n "$PUSH_DEFAULT_BEFORE" ]; then
+    git -C "$REPO" config remote.pushDefault "$PUSH_DEFAULT_BEFORE"
+  else
+    git -C "$REPO" config --unset remote.pushDefault 2>/dev/null || true
+  fi
+  return 0
+}
+
+restore_pre_apply_state() {
+  restore_pre_apply_remotes \
+    || echo "warning: could not restore the remotes this apply rewrote; run fm-landing-remote.sh status and repair them by hand" >&2
+  restore_captured_branch_tracking "$TRACKING_BEFORE"
+  restore_git_default_config
+  return 0
 }
 
 # gh ranks the remote named `upstream` above `origin` when no default repo is
@@ -177,19 +252,22 @@ undo_remap() {  # <shape> <previous origin url> <previous fork url>
 # a flagless `gh pr create` to the third-party parent. That is the exact defect
 # this script exists to kill, so a gh that is present but did not take the
 # default is a failed apply, not a warning over a green exit code.
-set_default_git_and_gh() {
+record_gh_default() {
   local recorded
-  git -C "$REPO" config checkout.defaultRemote origin
-  git -C "$REPO" config remote.pushDefault origin
   if ! command -v gh >/dev/null 2>&1; then
     echo "warning: gh is not on PATH; git origin is the landing remote, but gh has no default repo, so run 'gh repo set-default origin' once gh is installed" >&2
     return 0
   fi
-  ( cd "$REPO" && gh repo set-default origin >/dev/null 2>&1 ) \
-    || fail "gh repo set-default origin failed; with no gh default and both origin and upstream present, gh ranks upstream above origin, so a flagless 'gh pr create' can still open the PR on the third-party parent. git's origin is already the landing remote, so re-run apply once gh can record the default"
+  if ! ( cd "$REPO" && gh repo set-default origin >/dev/null 2>&1 ); then
+    echo "warning: gh repo set-default origin exited non-zero" >&2
+    return 1
+  fi
   recorded=$(cd "$REPO" && gh repo set-default --view 2>/dev/null || true)
-  [ -n "$recorded" ] \
-    || fail "gh recorded no default repository; with no gh default and both origin and upstream present, gh ranks upstream above origin, so a flagless 'gh pr create' can still open the PR on the third-party parent. git's origin is already the landing remote, so re-run apply once gh can record the default"
+  if [ -z "$recorded" ]; then
+    echo "warning: gh recorded no default repository" >&2
+    return 1
+  fi
+  return 0
 }
 
 refresh_no_mistakes() {
@@ -197,8 +275,7 @@ refresh_no_mistakes() {
     echo "warning: no-mistakes is not on PATH; after origin points at the landing remote, run: no-mistakes --yes init" >&2
     return 0
   fi
-  ( cd "$REPO" && no-mistakes --yes init ) \
-    || fail "no-mistakes --yes init failed, so its stored PR target still names the previous remote and the pipeline would open PRs there; git's origin is already the landing remote, so re-run apply once init can succeed"
+  ( cd "$REPO" && no-mistakes --yes init ) || return 1
 }
 
 cmd_status() {
@@ -207,10 +284,10 @@ cmd_status() {
   origin=$(remote_url origin)
   upstream=$(remote_url upstream)
   fork_url=$(remote_url fork)
-  gh_default=
-  if command -v gh >/dev/null 2>&1; then
-    gh_default=$(cd "$REPO" && gh repo set-default --view 2>/dev/null || true)
-  fi
+  gh_default=$(git_config_get remote.origin.gh-resolved)
+  case $gh_default in
+    base) gh_default=origin ;;
+  esac
   printf 'origin=%s\n' "${origin:-absent}"
   printf 'upstream=%s\n' "${upstream:-absent}"
   printf 'fork=%s\n' "${fork_url:-absent}"
@@ -231,8 +308,20 @@ cmd_verify() {
   exit 1
 }
 
+# Nothing to change means nothing to run: no reachability probe, no fetch, no
+# gh, no no-mistakes. A correctly remapped primary must apply with the network
+# down, so every network step stays behind a decision to change something.
+apply_has_nothing_to_change() {
+  urls_equal "$ORIGIN_BEFORE" "$OURS" || return 1
+  [ -n "$UPSTREAM_BEFORE" ] || return 1
+  [ -z "$FORK_BEFORE" ] || return 1
+  [ "$DEFAULT_REMOTE_BEFORE" = origin ] || return 1
+  [ "$PUSH_DEFAULT_BEFORE" = origin ] || return 1
+  gh_default_is_origin
+}
+
 cmd_apply() {
-  local origin fork_url upstream_url tracked shape
+  local origin fork_url upstream_url
   [ -n "$OURS" ] || fail "apply requires --ours <url>"
   [ -n "$UPSTREAM" ] || fail "apply requires --upstream <url>"
   if urls_equal "$OURS" "$UPSTREAM"; then
@@ -256,52 +345,70 @@ cmd_apply() {
     fail "origin is $origin, which is neither --ours $OURS nor --upstream $UPSTREAM; refusing to guess"
   fi
 
-  tracked=$(branches_tracking_origin)
+  ORIGIN_BEFORE=$origin
+  UPSTREAM_BEFORE=$upstream_url
+  FORK_BEFORE=$fork_url
+  TRACKING_BEFORE=$(capture_branch_tracking)
+  DEFAULT_REMOTE_BEFORE=$(git_config_get checkout.defaultRemote)
+  PUSH_DEFAULT_BEFORE=$(git_config_get remote.pushDefault)
+  REMAP_SHAPE=
+
+  if apply_has_nothing_to_change; then
+    echo "landing-remote: origin already points at the landing remote"
+    cmd_status
+    return 0
+  fi
 
   if urls_equal "$origin" "$OURS"; then
+    REMAP_SHAPE=tidied-remotes
     if [ -z "$upstream_url" ]; then
       git -C "$REPO" remote add upstream "$UPSTREAM"
     fi
     if [ -n "$fork_url" ]; then
       git -C "$REPO" remote remove fork
     fi
-    restore_origin_branch_tracking "$tracked"
-    set_default_git_and_gh
-    refresh_no_mistakes
-    echo "landing-remote: origin already points at the landing remote"
-    cmd_status
-    return 0
-  fi
-
-  require_landing_remote_reachable
-
-  if [ -z "$upstream_url" ]; then
-    git -C "$REPO" remote rename origin upstream
-    if [ -n "$fork_url" ]; then
-      git -C "$REPO" remote rename fork origin
-      shape=renamed-fork
-    else
-      git -C "$REPO" remote add origin "$OURS"
-      shape=added-origin
-    fi
   else
-    git -C "$REPO" remote set-url origin "$OURS"
-    if [ -n "$fork_url" ]; then
-      git -C "$REPO" remote remove fork
+    require_landing_remote_reachable
+    if [ -z "$upstream_url" ]; then
+      git -C "$REPO" remote rename origin upstream
+      if [ -n "$fork_url" ]; then
+        git -C "$REPO" remote rename fork origin
+        REMAP_SHAPE=renamed-fork
+      else
+        git -C "$REPO" remote add origin "$OURS"
+        REMAP_SHAPE=added-origin
+      fi
+    else
+      git -C "$REPO" remote set-url origin "$OURS"
+      if [ -n "$fork_url" ]; then
+        git -C "$REPO" remote remove fork
+      fi
+      REMAP_SHAPE=reurled-origin
     fi
-    shape=reurled-origin
+    if ! refresh_origin_tracking; then
+      restore_pre_apply_state
+      fail "could not fetch $OURS after the remap, so origin's tracking refs would still name the previous remote; the checkout was restored, so re-run apply once the landing remote is reachable"
+    fi
   fi
 
-  if ! refresh_origin_tracking; then
-    undo_remap "$shape" "$origin" "$fork_url" \
-      || echo "warning: could not restore the remotes this apply rewrote; run fm-landing-remote.sh status and repair them by hand" >&2
-    fail "could not fetch $OURS after the remap, so origin's tracking refs would still name the previous remote; the remotes were restored, so re-run apply once the landing remote is reachable"
+  repoint_landing_branch_tracking "$TRACKING_BEFORE"
+  git -C "$REPO" config checkout.defaultRemote origin
+  git -C "$REPO" config remote.pushDefault origin
+
+  if ! record_gh_default; then
+    restore_pre_apply_state
+    fail "gh did not record origin as its default repository; with no gh default and both origin and upstream present, gh ranks upstream above origin, so a flagless 'gh pr create' can still open the PR on the third-party parent. The checkout was restored, so re-run apply once gh can record the default"
+  fi
+  if ! refresh_no_mistakes; then
+    restore_pre_apply_state
+    fail "no-mistakes --yes init failed, so its stored PR target would still name the previous remote and the pipeline would open PRs there; the checkout was restored, so re-run apply once init can succeed"
   fi
 
-  restore_origin_branch_tracking "$tracked"
-  set_default_git_and_gh
-  refresh_no_mistakes
-  echo "landing-remote: origin now points at the landing remote"
+  if [ "$REMAP_SHAPE" = tidied-remotes ]; then
+    echo "landing-remote: origin already points at the landing remote"
+  else
+    echo "landing-remote: origin now points at the landing remote"
+  fi
   cmd_status
 }
 
@@ -309,6 +416,13 @@ REPO=.
 OURS=
 UPSTREAM=
 CMD=
+ORIGIN_BEFORE=
+UPSTREAM_BEFORE=
+FORK_BEFORE=
+TRACKING_BEFORE=
+DEFAULT_REMOTE_BEFORE=
+PUSH_DEFAULT_BEFORE=
+REMAP_SHAPE=
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help)

@@ -69,6 +69,9 @@ spawn_like_worktree() {  # <clone> <path>
   printf '%s\n' "$default"
 }
 
+# The gh stub records its default the way gh itself does, in the local
+# `remote.<name>.gh-resolved` git config, because apply reads that key to decide
+# whether the gh default is already in place without going near the network.
 install_careless_stubs() {
   local fakebin=$1 log=$2
   cat > "$fakebin/gh" <<SH
@@ -76,6 +79,7 @@ install_careless_stubs() {
 printf '%s\n' "\$*" >> '$log'
 case "\$1 \$2 \${3:-}" in
   "repo set-default origin"|"repo set-default origin ")
+    git config remote.origin.gh-resolved base
     exit 0
     ;;
   "repo set-default --view"|"repo set-default --view ")
@@ -198,9 +202,23 @@ EOF
   [ "$(git -C "$clone" remote get-url origin)" = "file://$ours" ] \
     || fail "idempotent apply moved origin off the landing remote"
 
-  # Reachability and refetch belong to the remap. An origin that is already
-  # correct must still apply with the remote unreachable, or a network outage
-  # turns a no-op into a failure on a correctly configured primary.
+  # Every network step belongs behind a decision to change something. Once the
+  # checkout is already correct, apply must succeed with the landing remote
+  # gone AND with gh and no-mistakes both broken, because it must not call
+  # them at all. Stubs that exit 0 would satisfy a weaker assertion no matter
+  # what the real commands did.
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "gh must not run on a no-op apply" >&2
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+echo "no-mistakes must not run on a no-op apply" >&2
+exit 1
+SH
+  chmod +x "$fakebin/no-mistakes"
   mv "$ours" "$ours.away"
   PATH="$fakebin:$PATH" "$LANDING" apply \
     --ours "file://$ours" \
@@ -208,7 +226,9 @@ EOF
     --repo "$clone" > "$dir/apply3.out" 2>"$dir/apply3.err"
   rc=$?
   mv "$ours.away" "$ours"
-  expect_code 0 "$rc" "apply should stay a no-op with the landing remote unreachable (got: $(cat "$dir/apply3.err"))"
+  expect_code 0 "$rc" "apply should stay an offline no-op once the checkout is already correct (got: $(cat "$dir/apply3.err"))"
+  [ ! -s "$dir/apply3.err" ] \
+    || fail "the no-op apply reached gh or no-mistakes: $(cat "$dir/apply3.err")"
 
   pass "apply makes careless branch creation and default-repo targeting land on ours"
 }
@@ -251,6 +271,11 @@ $rec
 EOF
   git -C "$clone" remote add upstream "file://$parent"
   git -C "$clone" fetch --quiet upstream
+  # This path removes the leftover `fork` remote, and `git remote remove` deletes
+  # branch.<name>.remote and branch.<name>.merge for every branch that tracked
+  # it. fork names our tree, so such a branch must come out tracking origin, not
+  # with no upstream at all.
+  git -C "$clone" branch --quiet --track fork-tracked fork/main
   fakebin=$(fm_fakebin "$dir/fake")
   log="$dir/stub.log"
   : > "$log"
@@ -264,6 +289,10 @@ EOF
   expect_code 0 "$rc" "apply should remap origin when upstream already names the parent"
   [ "$(git -C "$clone" remote get-url origin)" = "file://$ours" ] \
     || fail "origin was not remapped onto the landing remote"
+  [ "$(git -C "$clone" config --get branch.fork-tracked.remote || true)" = origin ] \
+    || fail "the fork-tracking branch lost its upstream, so git pull on it now errors"
+  [ "$(git -C "$clone" config --get branch.fork-tracked.merge || true)" = refs/heads/main ] \
+    || fail "the fork-tracking branch lost the branch it merges from"
 
   origin_main=$(git -C "$clone" rev-parse refs/remotes/origin/main)
   local_main=$(git -C "$clone" rev-parse refs/heads/main)
@@ -347,10 +376,14 @@ EOF
 # ours. Exiting 0 over that is the defect this change exists to remove.
 test_apply_fails_when_the_gh_default_cannot_be_set() {
   local rec dir ours parent clone fakebin log out rc
+  local before_origin before_fork before_track
   rec=$(make_fork_fixture gh-default-fails)
   IFS='|' read -r dir ours parent clone <<EOF
 $rec
 EOF
+  before_origin=$(git -C "$clone" remote get-url origin)
+  before_fork=$(git -C "$clone" remote get-url fork)
+  before_track=$(git -C "$clone" config --get branch.main.remote)
   fakebin=$(fm_fakebin "$dir/fake")
   log="$dir/stub.log"
   : > "$log"
@@ -377,9 +410,69 @@ SH
     "apply did not name the consequence a missing gh default has"
   assert_contains "$out" "third-party parent" \
     "apply did not say where a flagless PR would still land"
+
+  # A half-applied checkout would let the next apply take the already-correct
+  # path and no-op straight over the missing gh default, so the failed apply
+  # puts everything back and the retry redoes the whole thing.
+  [ "$(git -C "$clone" remote get-url origin)" = "$before_origin" ] \
+    || fail "the failed apply left origin remapped, so a retry would no-op over the missing gh default"
+  [ "$(git -C "$clone" remote get-url fork)" = "$before_fork" ] \
+    || fail "the failed apply did not put the fork remote back"
+  if git -C "$clone" remote get-url upstream >/dev/null 2>&1; then
+    fail "the failed apply left the upstream remote it added"
+  fi
+  [ "$(git -C "$clone" config --get branch.main.remote)" = "$before_track" ] \
+    || fail "the failed apply left main's tracking remote rewritten"
+  [ -z "$(git -C "$clone" config --get checkout.defaultRemote || true)" ] \
+    || fail "the failed apply left checkout.defaultRemote behind"
+
+  install_careless_stubs "$fakebin" "$log"
+  PATH="$fakebin:$PATH" "$LANDING" apply \
+    --ours "file://$ours" \
+    --upstream "file://$parent" \
+    --repo "$clone" > "$dir/retry.out" 2>"$dir/retry.err"
+  rc=$?
+  expect_code 0 "$rc" "the retry should apply cleanly once gh can record the default"
   [ "$(git -C "$clone" remote get-url origin)" = "file://$ours" ] \
-    || fail "the git half of the remap did not land, so the re-run advice is wrong"
-  pass "apply fails when the gh default cannot be set, and names the consequence"
+    || fail "the retry did not land origin on the landing remote"
+  pass "apply fails when the gh default cannot be set, restores the checkout, and names the consequence"
+}
+
+# origin already names ours but the parent has no `upstream` name yet and the
+# leftover `fork` is still there. That is not a no-op, so apply finishes the job
+# rather than reporting a checkout that is only half arranged.
+test_apply_completes_a_partly_arranged_checkout() {
+  local rec dir ours parent clone fakebin log rc
+  rec=$(make_fork_fixture partly-arranged)
+  IFS='|' read -r dir ours parent clone <<EOF
+$rec
+EOF
+  git -C "$clone" remote set-url origin "file://$ours"
+  git -C "$clone" fetch --quiet --prune origin
+  git -C "$clone" branch --quiet --track fork-tracked fork/main
+  fakebin=$(fm_fakebin "$dir/fake")
+  log="$dir/stub.log"
+  : > "$log"
+  install_careless_stubs "$fakebin" "$log"
+
+  PATH="$fakebin:$PATH" "$LANDING" apply \
+    --ours "file://$ours" \
+    --upstream "file://$parent" \
+    --repo "$clone" > "$dir/apply.out" 2>"$dir/apply.err"
+  rc=$?
+  expect_code 0 "$rc" "apply should finish a partly arranged checkout (got: $(cat "$dir/apply.err"))"
+  [ "$(git -C "$clone" remote get-url upstream)" = "file://$parent" ] \
+    || fail "apply did not name the parent upstream"
+  if git -C "$clone" remote get-url fork >/dev/null 2>&1; then
+    fail "apply left the leftover fork remote behind"
+  fi
+  [ "$(git -C "$clone" config --get branch.fork-tracked.remote || true)" = origin \
+    ] || fail "removing the leftover fork remote left its branch with no upstream"
+  [ "$(git -C "$clone" config --get checkout.defaultRemote)" = origin ] \
+    || fail "apply did not set checkout.defaultRemote"
+  assert_grep "repo set-default origin" "$log" \
+    "apply did not record the gh default while both remotes were present"
+  pass "apply completes a partly arranged checkout instead of calling it already correct"
 }
 
 test_apply_refuses_an_unrelated_origin() {
@@ -404,6 +497,7 @@ test_apply_makes_careless_branch_and_default_repo_land_on_ours
 test_apply_with_existing_upstream_refreshes_tracking_refs
 test_failed_preflight_leaves_the_remote_unchanged_and_re_appliable
 test_apply_fails_when_the_gh_default_cannot_be_set
+test_apply_completes_a_partly_arranged_checkout
 test_apply_refuses_a_linked_worktree
 test_apply_refuses_an_unrelated_origin
 

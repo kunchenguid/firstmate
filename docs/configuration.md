@@ -31,7 +31,8 @@ A Firstmate checkout that lands work on its own fork, while keeping a third-part
 `bin/fm-landing-remote.sh` is the single owner of that remapping: it runs only on the primary checkout, names the parent `upstream`, sets the `gh` default repo to `origin`, and re-inits no-mistakes without `--fork-url` so the gate opens PRs on the landing remote.
 Its header owns the flags, URL comparison, linked-worktree refusal, and idempotency.
 `apply` has one outcome: it exits 0 only when the remap, the refetch, the branch tracking repair, the `gh` default, and the no-mistakes re-init all succeeded, because a partial remap still sends a flagless `gh pr create` to the parent.
-Every refusal runs before the first write, and a refetch that fails after the rewrite puts the remotes back, so a failed `apply` leaves the checkout as it was and can be re-run.
+Every refusal runs before the first write, and any later failure restores the remotes, the branch tracking, and the git defaults it found, so a failed `apply` leaves the checkout as it was and can be re-run.
+`apply` is a no-op that touches the network not at all once origin, upstream, the git defaults, and the `gh` default are already in place, so a correctly remapped primary still applies cleanly while offline.
 Do not rewrite remotes from a linked worktree; the configuration is shared with the primary.
 
 ## Pi Calm preference (config/calm)
