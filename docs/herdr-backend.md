@@ -279,6 +279,26 @@ There is still one watcher process; the event reader is a bounded child of that 
 
 `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
 
+## No-mistakes attach dashboard
+
+The agent-only `no-mistakes-herdr-dashboard` skill requires the implementation
+crewmate to prepare an unfocused sibling split immediately before it invokes the
+installed no-mistakes skill. `bin/fm-no-mistakes-attach.sh --help` owns the exact
+command and mutation mechanics. Sibling creation reuses the adapter's canonical
+live launcher identity and named-session presentation lock. The sibling waits
+for the same repository, branch, and code identity to expose a nonterminal AXI
+run, then executes native `no-mistakes attach --run <id>`.
+
+The native TUI exposes phases, logs, findings, tests, gates, PR, and CI state;
+its own keyboard navigation remains interactive after the pane is focused. A
+direct captain action in that TUI is authoritative and the sole AXI-driving
+crewmate reconciles it before sending any response of its own. The pipeline
+agent remains headless. Firstmate creates no dashboard journal and performs no
+automatic recreation or retirement; other runtime backends are unchanged.
+
+`tests/fm-no-mistakes-attach.test.sh` covers sibling placement, exact run
+binding, non-Herdr behavior, and the no-second-driver boundary.
+
 ## Away-mode supervisor support
 
 The away daemon supports tmux and Herdr supervisor panes only.
