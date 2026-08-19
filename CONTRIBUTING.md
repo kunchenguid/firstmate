@@ -98,6 +98,7 @@ tmp=$(mktemp -d) && printf 'done: smoke\n' > "$tmp/smoke.status" && FM_STATE_OVE
 Its header and `--help` own the flags, family labels, lanes, and changed-file map; this section only documents the entry points.
 It also runs every script contained, under a per-script wall-clock budget that `--script-timeout` overrides, so a script that stops making progress is terminated and named instead of stalling the lane.
 That containment is a backstop, not the contract: a test that starts a real background process still reaps it, registering the PID with `tests/lib.sh`'s `fm_test_track_pid` so the reap also happens on the path where an assertion fails first.
+That registered reap runs from `fm_test_cleanup`, so a test file that installs its own `EXIT` trap must call `fm_test_cleanup` from inside it, and a PID is only reaped while it is still a job or a live descendant of the test shell.
 Evidence for both, and the regressions that re-check them, live in [`docs/verification/test-lane-safety.md`](docs/verification/test-lane-safety.md).
 `bin/fm-test-isolation-proof.sh` remains the single owner of the Phase 2 concurrent isolation proof and the exact proven candidate set; see `docs/fm-test-isolation-proof.md`.
 Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.

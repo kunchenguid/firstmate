@@ -277,9 +277,13 @@ stream_growing_file() {  # <file> <stop-flag>
   done
 }
 
-# TERM one PID, allow a bounded grace, then KILL. Bash reaps a finished
-# background job in its own SIGCHLD handler, so kill -0 stops succeeding as soon
-# as the job is really gone and this never spins out its grace on a zombie.
+# TERM one PID, allow a bounded grace, then KILL, then confirm it is really
+# gone. Bash reaps a finished background job in its own SIGCHLD handler, so
+# kill -0 stops succeeding as soon as the job is really gone and this never
+# spins out its grace on a zombie. Non-zero when the PID outlived even KILL,
+# which a caller must not follow with an unbounded wait: a process wedged in
+# uninterruptible sleep survives KILL until its I/O returns, and waiting on it
+# is the same silent hang this containment exists to remove.
 kill_pid_hard() {  # <pid>
   local pid=$1 i=0
   kill -0 "$pid" 2>/dev/null || return 0
@@ -290,6 +294,12 @@ kill_pid_hard() {  # <pid>
   done
   kill -0 "$pid" 2>/dev/null || return 0
   kill -KILL "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt "$REAP_GRACE_TICKS" ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  ! kill -0 "$pid" 2>/dev/null
 }
 
 # Run one test script contained: own group, private output file, budget, reap.
@@ -301,7 +311,7 @@ kill_pid_hard() {  # <pid>
 # lane only ever blocks in short sleeps and in `wait`, both of which let a signal
 # through immediately.
 run_script_contained() {  # <script> <output-file> <status-file>
-  local script=$1 out=$2 status=$3 pid pgid rc timed_out=0 inflight
+  local script=$1 out=$2 status=$3 pid pgid rc timed_out=0 unreaped=0 inflight
   set -m
   bash "$script" >"$out" 2>&1 &
   pid=$!
@@ -309,7 +319,7 @@ run_script_contained() {  # <script> <output-file> <status-file>
   pgid=$(script_process_group "$pid") || pgid=
   inflight=
   if [ -n "$LANE_INFLIGHT_DIR" ] && [ -d "$LANE_INFLIGHT_DIR" ]; then
-    inflight="$LANE_INFLIGHT_DIR/$BASHPID"
+    inflight="$LANE_INFLIGHT_DIR/$pid"
     printf '%s %s\n' "$pid" "$pgid" >"$inflight" 2>/dev/null || inflight=
   fi
   if ! wait_pid_within_budget "$pid" "$SCRIPT_TIMEOUT"; then
@@ -317,10 +327,17 @@ run_script_contained() {  # <script> <output-file> <status-file>
     printf 'not ok - %s exceeded the per-script budget of %ss and was terminated\n' \
       "$script" "$SCRIPT_TIMEOUT" >>"$out"
     log "per-script budget of ${SCRIPT_TIMEOUT}s exceeded, terminating: $script"
-    kill_pid_hard "$pid"
+    if ! kill_pid_hard "$pid"; then
+      unreaped=1
+      printf 'not ok - %s survived SIGKILL after its budget and was abandoned\n' \
+        "$script" >>"$out"
+      log "could not reap $script after its budget; moving on without waiting on it"
+    fi
   fi
   rc=0
-  wait "$pid" 2>/dev/null || rc=$?
+  if [ "$unreaped" -eq 0 ]; then
+    wait "$pid" 2>/dev/null || rc=$?
+  fi
   [ "$timed_out" -eq 0 ] || rc=124
   # Anything the script left behind dies here, while its group id still names it
   # and nothing else. A descendant that ignored TERM is escalated, because one
@@ -1694,12 +1711,12 @@ lane_abort() {  # <signal-name> <exit-code>
   trap - INT TERM EXIT
   log "interrupted by SIG$sig, reaping what this lane started"
   if [ -n "$LANE_FOLLOWER_PID" ]; then
-    kill_pid_hard "$LANE_FOLLOWER_PID"
+    kill_pid_hard "$LANE_FOLLOWER_PID" || true
     LANE_FOLLOWER_PID=
   fi
   for worker in "${WORKER_PIDS[@]+"${WORKER_PIDS[@]}"}"; do
     [ -n "$worker" ] || continue
-    kill_pid_hard "$worker"
+    kill_pid_hard "$worker" || true
   done
   if [ -n "$LANE_INFLIGHT_DIR" ] && [ -d "$LANE_INFLIGHT_DIR" ]; then
     for entry in "$LANE_INFLIGHT_DIR"/*; do
@@ -1707,7 +1724,7 @@ lane_abort() {  # <signal-name> <exit-code>
       pid=
       pgid=
       read -r pid pgid <"$entry" || true
-      [ -z "$pid" ] || kill_pid_hard "$pid"
+      [ -z "$pid" ] || kill_pid_hard "$pid" || true
       [ -z "$pgid" ] || reap_process_group "$pgid" || true
     done
   fi

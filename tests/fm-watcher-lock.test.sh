@@ -562,6 +562,7 @@ test_arm_self_eviction_is_loud_without_successor() {
   done
   watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   grep -qF "watcher: started pid=$watcher_pid" "$armout" || fail "arm did not start before self-eviction check"
+  fm_test_track_pid "$watcher_pid"
 
   # A live but identity-mismatched replacement lock makes the owned watcher
   # self-evict normally. With no verified successor, the arm must turn that
@@ -572,6 +573,8 @@ test_arm_self_eviction_is_loud_without_successor() {
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "self-evicted arm did not fail nonzero (status $status)"
   grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" || fail "self-evicted arm omitted the typed cycle-end failure"
   grep -q "reason=unexpected-clean-exit" "$state/.watch-cycle-exits.log" || fail "self-evicted cycle was not classified in the lifecycle ledger"
+  fm_test_reap_pid "$watcher_pid" \
+    || fail "self-evicting watcher pid $watcher_pid outlived the case that started it"
   pass "arm turns clean self-eviction without a successor into a typed failure"
 }
 
@@ -708,8 +711,11 @@ test_arm_starts_and_self_heals() {
     grep -F "watcher: started pid=$lock_pid (beacon fresh)" "$armout" >/dev/null \
       || fail "arm ($row) started line did not name the confirmed live watcher (lock '$lock_pid')"
     kill -0 "$lock_pid" 2>/dev/null || fail "arm ($row) confirmed-started watcher is not actually alive"
-    kill "$armpid" "$lock_pid" 2>/dev/null || true
+    fm_test_track_pid "$lock_pid"
+    kill "$armpid" 2>/dev/null || true
     wait "$armpid" 2>/dev/null || true
+    fm_test_reap_pid "$lock_pid" \
+      || fail "arm ($row) watcher pid $lock_pid outlived the case that started it"
   done
   pass "arm starts cleanly and resurfaces recovery after a dead-pid lock"
 }
@@ -953,6 +959,7 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   done
   watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   grep -qF "watcher: started pid=$watcher_pid" "$armout" || fail "load counterfactual watcher did not start"
+  fm_test_track_pid "$watcher_pid"
 
   kill -STOP "$watcher_pid" 2>/dev/null || fail "could not SIGSTOP watcher"
   touch -t 200001010000 "$state/.last-watcher-beat"
@@ -969,6 +976,8 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "terminated stopped-watcher cycle did not surface nonzero (status $status)"
   grep -Eq 'reason=(nonzero-exit|signal-exit)' "$state/.watch-cycle-exits.log" \
     || fail "terminated watcher exit was not classified in the lifecycle ledger"
+  fm_test_reap_pid "$watcher_pid" \
+    || fail "stopped-watcher pid $watcher_pid outlived the case that started it"
   pass "SIGSTOP distinguishes live PID from stale beacon and termination records the exit class"
 }
 

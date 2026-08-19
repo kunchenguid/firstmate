@@ -759,7 +759,8 @@ SH
   [ -f "$after_marker" ] || { rm -rf "$tmp"; fail "the lane never reached the script after the leaking one"; }
   grep -Fq "FM_TEST_LEAK $tmp/leaky.test.sh" "$out" \
     || { rm -rf "$tmp"; fail "a leaked descendant was not reported: $(cat "$out")"; }
-  grep -Fq 'exit=0' "$out" \
+  grep -Fq "FM_TEST_END " "$out" || { rm -rf "$tmp"; fail "no end marker was printed: $(cat "$out")"; }
+  grep -Fq "$tmp/leaky.test.sh exit=0 " "$out" \
     || { rm -rf "$tmp"; fail "the leaking script's own result was not preserved: $(cat "$out")"; }
   leaked=$(cat "$leak_pid_file" 2>/dev/null || true)
   [ -n "$leaked" ] || { rm -rf "$tmp"; fail "fixture recorded no leaked pid"; }

@@ -162,6 +162,15 @@ FM_TEST_REAP_GRACE_TICKS=${FM_TEST_REAP_GRACE_TICKS:-60}
 
 # Register one or more PIDs this test started, so cleanup reaps them even when
 # an assertion fails before the test's own reap runs.
+#
+# Two conditions decide whether a registered PID is actually reaped, and both
+# are the caller's to keep. First, the reap runs from fm_test_cleanup, so a test
+# file that installs its own EXIT trap must call fm_test_cleanup from inside it
+# or nothing here ever runs. Second, the PID must still be provably this shell's
+# at cleanup time, as one of its jobs or as a live descendant; a PID already
+# reparented to init cannot be told apart from a recycled one, so it is reported
+# rather than signalled. Register a process while its parent is still alive, and
+# reap it explicitly with fm_test_reap_pid on the passing path.
 fm_test_track_pid() {  # <pid> [<pid>...]
   local pid
   for pid in "$@"; do
@@ -273,8 +282,12 @@ fm_test_reap_tracked_pids() {
     case "$pid" in
       '' | *[!0-9]*) continue ;;
     esac
-    grep -qx -- "$pid" "$live" 2>/dev/null || continue
     fm_test_pid_gone "$pid" && continue
+    if ! grep -qx -- "$pid" "$live" 2>/dev/null; then
+      printf 'warn - registered pid %s is alive but is no longer a job or a descendant of this shell, so it was left alone\n' \
+        "$pid" >&2
+      continue
+    fi
     fm_test_reap_pid "$pid" || true
   done < "$FM_TEST_PID_REGISTRY"
   rm -f "$live" "$FM_TEST_PID_REGISTRY"
