@@ -273,10 +273,10 @@ test_comment_review_then_clearance() {
   [ -z "$out" ] || fail "benign follow-up must not clear a reviewer request"
   run_delivery "$home" "$fixture" show | grep -Fq 'review-issue' \
     || fail "benign follow-up removed the reviewer request hold"
-  write_view "$fixture" acme/alpha 17 '{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"COMMENTED","body":"Validation needs updating before merge.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}},{"state":"APPROVED","body":"","submittedAt":"2026-08-19T00:01:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_view "$fixture" acme/alpha 17 '{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"COMMENTED","body":"Validation needs updating before merge.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}},{"state":"COMMENTED","body":"Resolved.","submittedAt":"2026-08-19T00:01:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
-    || fail "cleared commented review did not become eligible"
+    || fail "resolved commented review did not become eligible"
   pass "commented review blocks until clearance"
 }
 

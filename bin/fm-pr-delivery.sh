@@ -329,13 +329,17 @@ classify_pr_json() { # <repo> <pr-json-object>
       or (.state == "COMMENTED" and change_request);
     def review_requests:
       (.reviews // []) as $reviews
+      | (.comments // []) as $comments
       | [$reviews[]? | .author] | unique as $authors
       | [
           $authors[] as $author
           | ($reviews | map(select(.author == $author)) | sort_by(.submittedAt // "")) as $history
           | ($history | map(select(reviewer_request)) | last) as $request
           | select($request != null)
-          | select(([$history[] | select(.state == "APPROVED" and ((.submittedAt // "") > ($request.submittedAt // "")))] | length) == 0)
+          | select(([
+              ($history[] | select((.state == "APPROVED" or resolution_comment) and ((.submittedAt // "") > ($request.submittedAt // "")))),
+              ($comments[]? | select(.author == $author and resolution_comment and ((.createdAt // "") > ($request.submittedAt // ""))))
+            ] | length) == 0)
         ] | length;
     def comment_request:
       change_request;
