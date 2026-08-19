@@ -644,6 +644,12 @@ A long-polling external process is registered as a *source* through its adapter,
 That adapter, and only that adapter, retries the one exact transient response a cut-short listener returns while its marks remain available (`error: Lavish Editor poll response was interrupted` with `code: SERVER_ERROR`), up to 12 times at 5 second intervals, so an internal retry never reaches the runner as a captured result.
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 0 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so re-arm a live board once to adopt this retry policy.
+The optional Signal adapter (`bin/fm-procevent-signal.sh`) is inert unless a home-local `config/signal-groups` file exists.
+Each non-comment row in that private file is `selector<TAB>Signal group id<TAB>display label`, and the selector is the only identifier used in the adapter's commands.
+Use `bin/fm-procevent-signal.sh arm <selector>` to register a nonterminal receive source and `bin/fm-procevent-signal.sh send <selector> [message-file|-]` to send content from a file or standard input.
+The adapter retires the receive source before every `signal-cli` account or send operation and restores it after success or failure.
+The adapter prefixes outbound content with the configured display label and colon exactly once, so each group can use its own private attribution label.
+The group mapping, account identifiers, message content, and captured Signal state remain home-local and are never printed in normal adapter output.
 
 The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action at most once before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs.
