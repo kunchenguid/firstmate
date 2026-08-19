@@ -2014,8 +2014,8 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 # retiring task's own created workspace - is deliberately LAST so no focus-safe
 # repositioning move is needed and the fixtures stay about the workspace close.
 
-configure_herdr_workspace_retire_case() {  # <case-dir> <foreign-pane:0|1> <created:0|1>
-  local case_dir=$1 foreign=$2 created=$3 token=AbCdEfGhIjKlMnOpQrStUv
+configure_herdr_workspace_retire_case() {  # <case-dir> <created:0|1>
+  local case_dir=$1 created=$2 token=AbCdEfGhIjKlMnOpQrStUv
   sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
   rm -f "$case_dir/state/task-x1.meta.bak"
   printf '%s\n' \
@@ -2031,7 +2031,6 @@ configure_herdr_workspace_retire_case() {  # <case-dir> <foreign-pane:0|1> <crea
     'version=1' \
     'task_id=task-x1' \
     "projection_id=$token" > "$case_dir/state/task-x1.herdr-presentation"
-  export FM_FAKE_HERDR_EXTRA_PANE="$foreign"
   cat > "$case_dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -2152,12 +2151,14 @@ SH
 }
 
 # run_workspace_retire_teardown <case-dir>: forced teardown with the retirement
-# fixture's markers wired up. Callers add a fixture knob as an ordinary leading
-# assignment. The idle-shell proof has no process-info fake to read, so one
-# attempt is enough for it to fall back to the ordinary close.
+# fixture's markers wired up. Callers add every fixture knob, including
+# FM_FAKE_HERDR_EXTRA_PANE, as an ordinary leading assignment so no case
+# inherits another case's setting. The idle-shell proof has no process-info fake
+# to read, so one attempt is enough for it to fall back to the ordinary close.
 run_workspace_retire_teardown() {  # <case-dir>
   local case_dir=$1
-  FM_FAKE_HERDR_LOG="$case_dir/herdr.log" \
+  FM_FAKE_HERDR_EXTRA_PANE="${FM_FAKE_HERDR_EXTRA_PANE:-0}" \
+    FM_FAKE_HERDR_LOG="$case_dir/herdr.log" \
     FM_FAKE_HERDR_CLOSED="$case_dir/closed" \
     FM_FAKE_HERDR_WS_CLOSED="$case_dir/ws-closed" \
     FM_FAKE_HERDR_WS_CLOSE_FAILED="$case_dir/ws-close-failed" \
@@ -2170,10 +2171,10 @@ test_herdr_teardown_closes_a_created_workspace_a_foreign_pane_keeps_alive() {
   local case_dir
   case_dir=$(make_case herdr-retire-foreign-pane)
   write_meta "$case_dir" local-only ship
-  configure_herdr_workspace_retire_case "$case_dir" 1 1
+  configure_herdr_workspace_retire_case "$case_dir" 1
   : > "$case_dir/herdr.log"
 
-  run_workspace_retire_teardown "$case_dir" \
+  FM_FAKE_HERDR_EXTRA_PANE=1 run_workspace_retire_teardown "$case_dir" \
     || fail "herdr-retire-foreign-pane: forced teardown failed: $(cat "$case_dir/stderr")"
   [ -e "$case_dir/closed" ] \
     || fail "herdr-retire-foreign-pane: the task pane was never closed"
@@ -2196,10 +2197,10 @@ test_herdr_teardown_leaves_nothing_when_the_workspace_empties_with_its_task_pane
   local case_dir
   case_dir=$(make_case herdr-retire-lone-pane)
   write_meta "$case_dir" local-only ship
-  configure_herdr_workspace_retire_case "$case_dir" 0 1
+  configure_herdr_workspace_retire_case "$case_dir" 1
   : > "$case_dir/herdr.log"
 
-  run_workspace_retire_teardown "$case_dir" \
+  FM_FAKE_HERDR_EXTRA_PANE=0 run_workspace_retire_teardown "$case_dir" \
     || fail "herdr-retire-lone-pane: forced teardown failed: $(cat "$case_dir/stderr")"
   [ -e "$case_dir/closed" ] \
     || fail "herdr-retire-lone-pane: the task pane was never closed"
@@ -2218,10 +2219,10 @@ test_herdr_teardown_restores_focus_a_created_workspace_close_moves() {
   local case_dir
   case_dir=$(make_case herdr-retire-focus-move)
   write_meta "$case_dir" local-only ship
-  configure_herdr_workspace_retire_case "$case_dir" 1 1
+  configure_herdr_workspace_retire_case "$case_dir" 1
   : > "$case_dir/herdr.log"
 
-  FM_FAKE_HERDR_STEAL_FOCUS=1 run_workspace_retire_teardown "$case_dir" \
+  FM_FAKE_HERDR_EXTRA_PANE=1 FM_FAKE_HERDR_STEAL_FOCUS=1 run_workspace_retire_teardown "$case_dir" \
     || fail "herdr-retire-focus-move: forced teardown failed: $(cat "$case_dir/stderr")"
   [ -e "$case_dir/ws-closed" ] \
     || fail "herdr-retire-focus-move: the leaked workspace survived teardown"
@@ -2236,10 +2237,10 @@ test_herdr_teardown_never_closes_an_adopted_workspace() {
   local case_dir
   case_dir=$(make_case herdr-retire-adopted)
   write_meta "$case_dir" local-only ship
-  configure_herdr_workspace_retire_case "$case_dir" 1 0
+  configure_herdr_workspace_retire_case "$case_dir" 0
   : > "$case_dir/herdr.log"
 
-  run_workspace_retire_teardown "$case_dir" \
+  FM_FAKE_HERDR_EXTRA_PANE=1 run_workspace_retire_teardown "$case_dir" \
     || fail "herdr-retire-adopted: forced teardown failed: $(cat "$case_dir/stderr")"
   [ -e "$case_dir/closed" ] \
     || fail "herdr-retire-adopted: the task pane was never closed"
@@ -2256,10 +2257,10 @@ test_herdr_teardown_restores_focus_when_the_created_workspace_close_fails() {
   local case_dir
   case_dir=$(make_case herdr-retire-close-fails)
   write_meta "$case_dir" local-only ship
-  configure_herdr_workspace_retire_case "$case_dir" 1 1
+  configure_herdr_workspace_retire_case "$case_dir" 1
   : > "$case_dir/herdr.log"
 
-  FM_FAKE_HERDR_WS_CLOSE_FAIL=1 FM_FAKE_HERDR_STEAL_FOCUS=1 \
+  FM_FAKE_HERDR_EXTRA_PANE=1 FM_FAKE_HERDR_WS_CLOSE_FAIL=1 FM_FAKE_HERDR_STEAL_FOCUS=1 \
     run_workspace_retire_teardown "$case_dir" \
     || fail "herdr-retire-close-fails: forced teardown failed: $(cat "$case_dir/stderr")"
   [ -e "$case_dir/ws-close-failed" ] \
@@ -2279,10 +2280,10 @@ test_herdr_teardown_leaves_a_created_workspace_holding_a_registered_agent() {
   local case_dir
   case_dir=$(make_case herdr-retire-live-agent)
   write_meta "$case_dir" local-only ship
-  configure_herdr_workspace_retire_case "$case_dir" 1 1
+  configure_herdr_workspace_retire_case "$case_dir" 1
   : > "$case_dir/herdr.log"
 
-  FM_FAKE_HERDR_LIVE_AGENT=w1:p9 run_workspace_retire_teardown "$case_dir" \
+  FM_FAKE_HERDR_EXTRA_PANE=1 FM_FAKE_HERDR_LIVE_AGENT=w1:p9 run_workspace_retire_teardown "$case_dir" \
     || fail "herdr-retire-live-agent: forced teardown failed: $(cat "$case_dir/stderr")"
   [ ! -e "$case_dir/ws-closed" ] \
     || fail "herdr-retire-live-agent: teardown closed a workspace still holding a registered agent"

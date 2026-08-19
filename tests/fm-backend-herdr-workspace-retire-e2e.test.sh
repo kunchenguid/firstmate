@@ -3,10 +3,14 @@
 # Cleanup used to close only its own task pane and rely on Herdr removing a
 # workspace whose last tab went with it, so any task workspace that also held a
 # pane firstmate does not own survived every teardown.
-# Part A reproduces that leak live: the production focus-preserving pane close
-# removes the task pane and the workspace stays behind.
-# Part B proves the fix: the created-workspace cleanup removes the workspace
-# itself, never the foreign pane, and never moves the captain's focus.
+# Part A MEASURES that leak on the installed release: the production
+# focus-preserving pane close removes the task pane and the workspace stays
+# behind.
+# Part B PROVES the fix on every release, so it builds its own subject rather
+# than reusing Part A's outcome: the created-workspace cleanup removes the
+# workspace itself, never the foreign pane, and never moves the captain's focus.
+# Every structural verdict here comes from a positive present-or-absent read; an
+# unreadable probe fails the run instead of passing as a removal.
 # Part C covers the other reproduction case, a workspace holding only the task
 # pane, where Herdr's own last-tab removal already applies and the cleanup must
 # be a silent no-op rather than a second close.
@@ -94,14 +98,51 @@ focus_snapshot() {
   printf '%s\t%s' "$workspace" "$tab"
 }
 ws_order() { lab workspace list | jq -er '[.result.workspaces[].workspace_id] | join(",")'; }
-ws_alive() { lab workspace get "$1" >/dev/null 2>&1; }
+# Positive tri-state presence for one exact workspace, mirroring the adapter's
+# own fm_backend_herdr_workspace_presence_state. A failed or unparseable probe
+# reads `unreadable`, never `absent`: treating it as absent would let a broken
+# transport masquerade as a release that removed the workspace, and every
+# structural verdict this guard draws would go quietly vacuous.
+ws_state() {  # <workspace_id> -> present|absent|unreadable
+  local list matches
+  list=$(lab workspace list 2>/dev/null) || { printf 'unreadable'; return 0; }
+  matches=$(printf '%s' "$list" | jq -r --arg workspace "$1" '
+    select((.result.workspaces | type) == "array")
+    | [.result.workspaces[] | select(.workspace_id == $workspace)] | length
+  ' 2>/dev/null) || matches=
+  case "$matches" in
+    0) printf 'absent' ;;
+    1) printf 'present' ;;
+    *) printf 'unreadable' ;;
+  esac
+}
+# The same tri-state for one exact pane, mirroring
+# fm_backend_herdr_pane_presence_state's structured not-found contract.
+pane_state() {  # <pane_id> -> present|absent|unreadable
+  local out code
+  out=$(lab pane get "$1" 2>&1) || true
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null) || code=
+  if [ -n "$code" ]; then
+    [ "$code" = pane_not_found ] && printf 'absent' || printf 'unreadable'
+    return 0
+  fi
+  if printf '%s' "$out" | jq -e --arg pane "$1" '.result.pane.pane_id == $pane' >/dev/null 2>&1; then
+    printf 'present'
+  else
+    printf 'unreadable'
+  fi
+}
+# Wait for a POSITIVE absence confirmation. An unreadable probe is retried and
+# then reported as itself, so it can never pass as a removal.
 wait_ws_gone() {  # <workspace_id>
-  local i=0
+  local i=0 state=
   while [ "$i" -lt 80 ]; do
-    ws_alive "$1" || return 0
+    state=$(ws_state "$1")
+    [ "$state" != absent ] || return 0
     sleep 0.1
     i=$((i + 1))
   done
+  printf '%s' "$state"
   return 1
 }
 # The geometry every part shares: the anchor holds the captain's focus, the
@@ -183,17 +224,22 @@ adapter() {  # <call-log> <function> [args...]
   ' _ "$ROOT" "$@" 2>&1
 }
 
+# LIVE_CLOSE records whether the retirement was actually driven to a real
+# workspace close against this release, so a run that never exercised it cannot
+# read identically to one that did.
+LIVE_CLOSE=0
+
 # --- Part A: the leak, live ------------------------------------------------
 read -r A_ANCHOR_WS A_ANCHOR_TAB _ <<<"$(mkws retire-a-anchor)" || fail 'could not create the Part A anchor workspace'
 read -r A_DOOMED_WS _ A_TASK_PANE <<<"$(mkws retire-a-doomed)" || fail 'could not create the Part A doomed workspace'
 read -r A_SPACER_WS _ _ <<<"$(mkws retire-a-spacer)" || fail 'could not create the Part A spacer workspace'
 read -r _ _ _ <<<"$(mkws retire-a-tail)" || fail 'could not create the Part A tail workspace'
-read -r _ A_FOREIGN_PANE <<<"$(mktab "$A_DOOMED_WS" retire-a-plugin)" || fail 'could not create the Part A foreign tab'
+read -r _ _ <<<"$(mktab "$A_DOOMED_WS" retire-a-plugin)" || fail 'could not create the Part A foreign tab'
 lab tab focus "$A_ANCHOR_TAB" >/dev/null || fail 'could not focus the Part A anchor'
 A_BEFORE=$(focus_snapshot) || fail 'could not capture the Part A pre-close focus'
 [ "$A_BEFORE" = "$(printf '%s\t%s' "$A_ANCHOR_WS" "$A_ANCHOR_TAB")" ] \
   || fail 'Part A anchor focus does not match the intended workspace and tab'
-A_SURVIVOR_ORDER=$(assert_geometry 'Part A' "$A_DOOMED_WS" "$A_SPACER_WS" "$A_ANCHOR_WS")
+assert_geometry 'Part A' "$A_DOOMED_WS" "$A_SPACER_WS" "$A_ANCHOR_WS" >/dev/null
 
 A_CLOSE_LOG="$TMP_ROOT/close-a.log"
 : > "$A_CLOSE_LOG"
@@ -201,57 +247,95 @@ A_OUT=$(adapter "$A_CLOSE_LOG" fm_backend_herdr_projection_close_pane_focus_pres
   "$HERDR_LAB_SESSION" "$A_TASK_PANE")
 A_STATUS=$?
 [ "$A_STATUS" -eq 0 ] || fail "the production task-pane close failed (status $A_STATUS): $A_OUT"
-if lab pane get "$A_TASK_PANE" >/dev/null 2>&1; then
-  fail 'Part A left the task pane behind, so the leak was never reached'
-fi
+A_TASK_PANE_STATE=$(pane_state "$A_TASK_PANE")
+[ "$A_TASK_PANE_STATE" = absent ] \
+  || fail "Part A needs a confirmed-gone task pane to measure the leak, got '$A_TASK_PANE_STATE'"
 LEAK_LIVE=0
-if ws_alive "$A_DOOMED_WS"; then
-  LEAK_LIVE=1
-  pass 'leak reproduced: closing the task pane left the whole workspace behind because a foreign pane remained'
-else
-  pass 'leak note: this Herdr release removed the workspace despite the remaining foreign pane; continuing with outcome-only assertions'
-fi
+case "$(ws_state "$A_DOOMED_WS")" in
+  present)
+    LEAK_LIVE=1
+    pass 'leak reproduced: closing the task pane left the whole workspace behind because a foreign pane remained'
+    ;;
+  absent)
+    pass 'leak note: this Herdr release removed the workspace despite the remaining foreign pane; Part B still proves the retirement'
+    ;;
+  *)
+    fail 'Part A could not read the doomed workspace, so this release measurement is inconclusive rather than leak-free'
+    ;;
+esac
 
 # --- Part B: the created-workspace cleanup ---------------------------------
-if [ "$LEAK_LIVE" = 1 ]; then
-  B_STATE=$(retiring_state_dir "$TMP_ROOT/b" "$A_DOOMED_WS" "$A_TASK_PANE")
-  B_RETIRE_LOG="$TMP_ROOT/retire-b.log"
-  : > "$B_RETIRE_LOG"
-  start_focus_sampler retire-b
-  B_OUT=$(adapter "$B_RETIRE_LOG" fm_backend_herdr_workspace_retire_created \
-    "$HERDR_LAB_SESSION" "$A_DOOMED_WS" created "$B_STATE" task-retiring)
-  B_STATUS=$?
-  stop_focus_sampler
-  [ "$B_STATUS" -eq 0 ] || fail "the created-workspace cleanup failed (status $B_STATUS): $B_OUT"
-  wait_ws_gone "$A_DOOMED_WS" || fail 'the created-workspace cleanup left the leaked workspace behind'
-  if lab pane get "$A_FOREIGN_PANE" >/dev/null 2>&1; then
-    fail 'the created-workspace cleanup removed the workspace but left its foreign pane alive'
-  fi
-  grep -q '^workspace close' "$B_RETIRE_LOG" \
-    || fail 'the created-workspace cleanup removed the workspace without closing it explicitly'
-  grep -q '^pane close' "$B_RETIRE_LOG" \
-    && fail 'the cleanup closed a pane firstmate does not own to force the last-tab behaviour'
-  grep -q '^tab close' "$B_RETIRE_LOG" \
-    && fail 'the cleanup closed a tab firstmate does not own to force the last-tab behaviour'
-  [ "$(ws_order)" = "$A_SURVIVOR_ORDER" ] \
-    || fail "the cleanup left a lasting workspace order change ($A_SURVIVOR_ORDER -> $(ws_order))"
-  B_AFTER=$(focus_snapshot) || fail 'could not capture the Part B post-cleanup focus'
-  [ "$B_AFTER" = "$A_BEFORE" ] \
-    || fail "the cleanup changed the exact focused workspace or tab ($A_BEFORE -> $B_AFTER)"
-  [ -s "$SAMPLE_LOG" ] || fail 'the Part B sampler captured no focus sample during the cleanup'
-  B_WRONG=$(grep -Fvxc -- "$A_BEFORE" "$SAMPLE_LOG" || true)
-  if [ "$B_WRONG" -eq 0 ]; then
-    pass 'cleanup: the leaked workspace was closed with exact focus preserved in every sample'
-  else
-    # A release whose explicit close moves focus off a non-focused workspace is
-    # exactly what the exact-tab restore backstop exists for. The window is
-    # accepted only as a bounded one that the restore actually closed.
-    grep -q '^tab focus' "$B_RETIRE_LOG" \
-      || fail "the cleanup exposed $B_WRONG wrong-focus samples and never restored the exact prior tab"
-    pass "cleanup: a bounded wrong-focus window of $B_WRONG samples was fully restored to the anchor"
-  fi
+#
+# Part A above is the release MEASUREMENT of the leak. This part is the fix
+# PROOF, and it must drive a real `workspace close` on every release rather than
+# only on one where Part A's leak reproduced, so it builds its own subject from
+# scratch instead of reusing whatever Part A happened to leave behind.
+# The subject is the exact shape the intent names: a firstmate-created workspace
+# holding a task pane plus one tab firstmate does not own. Only the task pane is
+# closed, so the foreign tab keeps the workspace alive under Herdr's own
+# last-tab rule and the retirement always has a live workspace to close.
+read -r B_ANCHOR_WS B_ANCHOR_TAB _ <<<"$(mkws retire-b-anchor)" || fail 'could not create the Part B anchor workspace'
+read -r B_DOOMED_WS _ B_TASK_PANE <<<"$(mkws retire-b-doomed)" || fail 'could not create the Part B doomed workspace'
+read -r B_SPACER_WS _ _ <<<"$(mkws retire-b-spacer)" || fail 'could not create the Part B spacer workspace'
+read -r _ _ _ <<<"$(mkws retire-b-tail)" || fail 'could not create the Part B tail workspace'
+read -r _ B_FOREIGN_PANE <<<"$(mktab "$B_DOOMED_WS" retire-b-plugin)" || fail 'could not create the Part B foreign tab'
+lab tab focus "$B_ANCHOR_TAB" >/dev/null || fail 'could not focus the Part B anchor'
+B_BEFORE=$(focus_snapshot) || fail 'could not capture the Part B pre-cleanup focus'
+[ "$B_BEFORE" = "$(printf '%s\t%s' "$B_ANCHOR_WS" "$B_ANCHOR_TAB")" ] \
+  || fail 'Part B anchor focus does not match the intended workspace and tab'
+B_SURVIVOR_ORDER=$(assert_geometry 'Part B' "$B_DOOMED_WS" "$B_SPACER_WS" "$B_ANCHOR_WS")
+
+B_CLOSE_LOG="$TMP_ROOT/close-b.log"
+: > "$B_CLOSE_LOG"
+B_CLOSE_OUT=$(adapter "$B_CLOSE_LOG" fm_backend_herdr_projection_close_pane_focus_preserving \
+  "$HERDR_LAB_SESSION" "$B_TASK_PANE")
+B_CLOSE_STATUS=$?
+[ "$B_CLOSE_STATUS" -eq 0 ] \
+  || fail "the Part B task-pane close failed (status $B_CLOSE_STATUS): $B_CLOSE_OUT"
+B_TASK_PANE_STATE=$(pane_state "$B_TASK_PANE")
+[ "$B_TASK_PANE_STATE" = absent ] \
+  || fail "Part B needs a confirmed-gone task pane before the retirement, got '$B_TASK_PANE_STATE'"
+B_SUBJECT_STATE=$(ws_state "$B_DOOMED_WS")
+[ "$B_SUBJECT_STATE" = present ] \
+  || fail "Part B could not stand up a live retirement subject: a workspace still holding a foreign tab read '$B_SUBJECT_STATE' after only its task pane was closed, so this run would prove nothing about the workspace close"
+
+B_STATE=$(retiring_state_dir "$TMP_ROOT/b" "$B_DOOMED_WS" "$B_TASK_PANE")
+B_RETIRE_LOG="$TMP_ROOT/retire-b.log"
+: > "$B_RETIRE_LOG"
+start_focus_sampler retire-b
+B_OUT=$(adapter "$B_RETIRE_LOG" fm_backend_herdr_workspace_retire_created \
+  "$HERDR_LAB_SESSION" "$B_DOOMED_WS" created "$B_STATE" task-retiring)
+B_STATUS=$?
+stop_focus_sampler
+[ "$B_STATUS" -eq 0 ] || fail "the created-workspace cleanup failed (status $B_STATUS): $B_OUT"
+B_GONE_STATE=$(wait_ws_gone "$B_DOOMED_WS") \
+  || fail "the created-workspace cleanup left the workspace behind (state: $B_GONE_STATE)"
+LIVE_CLOSE=1
+B_FOREIGN_STATE=$(pane_state "$B_FOREIGN_PANE")
+[ "$B_FOREIGN_STATE" = absent ] \
+  || fail "the created-workspace cleanup removed the workspace but its foreign pane read '$B_FOREIGN_STATE'"
+grep -q '^workspace close' "$B_RETIRE_LOG" \
+  || fail 'the created-workspace cleanup removed the workspace without closing it explicitly'
+grep -q '^pane close' "$B_RETIRE_LOG" \
+  && fail 'the cleanup closed a pane firstmate does not own to force the last-tab behaviour'
+grep -q '^tab close' "$B_RETIRE_LOG" \
+  && fail 'the cleanup closed a tab firstmate does not own to force the last-tab behaviour'
+[ "$(ws_order)" = "$B_SURVIVOR_ORDER" ] \
+  || fail "the cleanup left a lasting workspace order change ($B_SURVIVOR_ORDER -> $(ws_order))"
+B_AFTER=$(focus_snapshot) || fail 'could not capture the Part B post-cleanup focus'
+[ "$B_AFTER" = "$B_BEFORE" ] \
+  || fail "the cleanup changed the exact focused workspace or tab ($B_BEFORE -> $B_AFTER)"
+[ -s "$SAMPLE_LOG" ] || fail 'the Part B sampler captured no focus sample during the cleanup'
+B_WRONG=$(grep -Fvxc -- "$B_BEFORE" "$SAMPLE_LOG" || true)
+if [ "$B_WRONG" -eq 0 ]; then
+  pass 'cleanup: the surviving created workspace was closed with exact focus preserved in every sample'
 else
-  pass 'cleanup skipped: this release removed the leaked workspace before the cleanup could run'
+  # A release whose explicit close moves focus off a non-focused workspace is
+  # exactly what the exact-tab restore backstop exists for. The window is
+  # accepted only as a bounded one that the restore actually closed.
+  grep -q '^tab focus' "$B_RETIRE_LOG" \
+    || fail "the cleanup exposed $B_WRONG wrong-focus samples and never restored the exact prior tab"
+  pass "cleanup: a bounded wrong-focus window of $B_WRONG samples was fully restored to the anchor"
 fi
 
 # --- Part C: the workspace that empties with its own task pane -------------
@@ -269,8 +353,8 @@ C_OUT=$(adapter "$C_CLOSE_LOG" fm_backend_herdr_projection_close_pane_focus_pres
   "$HERDR_LAB_SESSION" "$C_TASK_PANE")
 C_STATUS=$?
 [ "$C_STATUS" -eq 0 ] || fail "the production task-pane close failed (status $C_STATUS): $C_OUT"
-wait_ws_gone "$C_DOOMED_WS" \
-  || fail 'a workspace holding only the task pane survived that pane going away'
+C_GONE_STATE=$(wait_ws_gone "$C_DOOMED_WS") \
+  || fail "a workspace holding only the task pane survived that pane going away (state: $C_GONE_STATE)"
 
 C_STATE=$(retiring_state_dir "$TMP_ROOT/c" "$C_DOOMED_WS" "$C_TASK_PANE")
 C_RETIRE_LOG="$TMP_ROOT/retire-c.log"
@@ -307,10 +391,12 @@ D_OUT=$(adapter "$D_RETIRE_LOG" fm_backend_herdr_workspace_retire_created \
 D_STATUS=$?
 [ "$D_STATUS" -ne 0 ] \
   || fail "cleanup accepted a workspace with no firstmate-created proof: $D_OUT"
-ws_alive "$D_ADOPTED_WS" \
-  || fail 'cleanup removed a workspace the captain owns'
-lab pane get "$D_FOREIGN_PANE" >/dev/null 2>&1 \
-  || fail 'cleanup removed a foreign pane in a workspace the captain owns'
+D_WS_STATE=$(ws_state "$D_ADOPTED_WS")
+[ "$D_WS_STATE" = present ] \
+  || fail "a workspace the captain owns must still be positively present, got '$D_WS_STATE'"
+D_FOREIGN_STATE=$(pane_state "$D_FOREIGN_PANE")
+[ "$D_FOREIGN_STATE" = present ] \
+  || fail "a foreign pane in a workspace the captain owns must still be positively present, got '$D_FOREIGN_STATE'"
 [ ! -s "$D_RETIRE_LOG" ] \
   || fail "cleanup without the created proof still talked to Herdr: $(cat "$D_RETIRE_LOG")"
 D_AFTER=$(focus_snapshot) || fail 'could not capture the Part D post-cleanup focus'
@@ -319,7 +405,7 @@ D_AFTER=$(focus_snapshot) || fail 'could not capture the Part D post-cleanup foc
 pass 'adopted workspace: cleanup refuses before any Herdr call and leaves it exactly as it was'
 
 STATUS=$(lab status --json) || fail 'could not read final named-lab version evidence'
-printf 'evidence: herdr=%s protocol=%s leak_live=%s default-session-tripwire=armed\n' \
+printf 'evidence: herdr=%s protocol=%s leak_live=%s live_close=%s default-session-tripwire=armed\n' \
   "$(printf '%s' "$STATUS" | jq -r '.client.version')" \
   "$(printf '%s' "$STATUS" | jq -r '.client.protocol')" \
-  "$LEAK_LIVE"
+  "$LEAK_LIVE" "$LIVE_CLOSE"
