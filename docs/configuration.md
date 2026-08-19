@@ -33,6 +33,14 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## T3 primary host (config/t3-primary)
+
+Optional local gitignored `config/t3-primary` opts this home into T3-hosted Cursor primary supervision.
+Presence enables session-start bind + park ensure; an optional first non-comment line may be a thread uuid or `thread_id=<uuid>`.
+The operator contract, binding file, park inject path, and Desktop stand-down rules are owned by [`docs/t3-primary-supervision.md`](t3-primary-supervision.md).
+This is not inherited into secondmate homes by default; each home that runs its primary inside T3 opts in separately.
+This is not the worker spawn `--backend t3` path.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
