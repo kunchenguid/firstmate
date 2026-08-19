@@ -1601,6 +1601,62 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
+# Quota instrumentation must price every real turn. A stop that continues one of
+# this guard's own blocks is the same turn and records once; a stop_hook_active
+# stop with no outstanding block is a genuinely new turn and MUST be recorded,
+# because Claude Code keeps that flag true for the rest of the session after any
+# asyncRewake continuation.
+install_quota_writer_probe() {
+  local dir=$1
+  cat > "$dir/bin/fm-turn-quota-writer.sh" << 'SH'
+#!/usr/bin/env bash
+printf 'called\n' >> "${FM_HOME:?}/state/.quota-writer-calls"
+SH
+  chmod +x "$dir/bin/fm-turn-quota-writer.sh"
+}
+
+quota_writer_calls() {
+  wc -l < "$1/state/.quota-writer-calls" 2>/dev/null | tr -d ' ' || printf '0'
+}
+
+test_hook_claude_mode_quota_records_every_new_turn() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-quota")
+  install_quota_writer_probe "$dir"
+  : > "$dir/state/task1.meta"
+
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "first --claude stop must block while unhealthy"
+  [ "$(quota_writer_calls "$dir")" = "1" ] || fail "a new turn must record exactly one quota row (got: $(quota_writer_calls "$dir"))"
+
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "the continuation of this guard's own block must re-block while still unhealthy"
+  [ "$(quota_writer_calls "$dir")" = "1" ] || fail "the continuation of a guard block must not append a second quota row (got: $(quota_writer_calls "$dir"))"
+
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "--claude must allow once the watcher is healthy again"
+  [ ! -f "$dir/state/.turnend-claude-blocks" ] || fail "allow must clear the consecutive-block ledger"
+  [ "$(quota_writer_calls "$dir")" = "1" ] || fail "the stop that closes a block chain is still the same turn (got: $(quota_writer_calls "$dir"))"
+
+  out=$(run_hook_claude "$dir" true); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -rf "$dir/state/.watch.lock"
+  expect_code 0 "$status" "a healthy later stop must still allow"
+  [ "$(quota_writer_calls "$dir")" = "2" ] || fail "stop_hook_active=true with no outstanding block is a new turn and must be recorded (got: $(quota_writer_calls "$dir"))"
+
+  pass "fm-turnend-guard --claude: quota records every new turn and never double-counts a guard-block continuation"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -1665,3 +1721,4 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
+test_hook_claude_mode_quota_records_every_new_turn

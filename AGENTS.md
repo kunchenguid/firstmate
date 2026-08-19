@@ -116,6 +116,9 @@ state/               runtime records and signals; gitignored
   x-poll.error x-poll.claim-error  generated Relay and offer-claim diagnostic dedupe markers
   .startup-network.*  status, report, per-step elapsed timings, inline-print claim, and lock for the deferred network stage session start runs off its blocking path; bin/fm-startup-network.sh
   .wake-queue        durable queued wakes retained until post-handling acknowledgement: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
+  quota-turns.log    one primary turn-end quota record per turn, read by bin/fm-turn-quota.sh report (docs/turnend-guard.md); its state fingerprint is a proxy that cannot prove a turn was useless
+  .turn-wake-kind    wake kind of the current turn, written by fm-wake-drain.sh for that record; never touch
+  .turn-quota-cache.json .turn-quota-agy-cache.json .turn-quota-error.log   quota-probe caches and the writer's swallowed-error log; never touch
   .watcher-down      private generation-bound recovery state coupling watcher downtime, durable wake presentation, and post-handling acknowledgement; never touch
   .<id>.open-decisions-cursor  per-task byte cursor and folded open-decision set bounding the OPEN DECISIONS scan's cost to new status-log appends; written only by fm-classify-lib.sh's status_open_decisions_incremental, removed by teardown, safe to delete (forces one full re-fold)
   .status-presentation-cursor .status-presentation-lock  fleet-wide per-task status identity/byte-offset manifest and serialization lock preventing already-presented status lines from being replayed as new; owned by fm-classify-lib.sh, with each task's row retired by teardown

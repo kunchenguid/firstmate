@@ -268,6 +268,7 @@ fi
 
 if [ ! -s "$FM_WAKE_QUEUE" ]; then
   : > "$FM_WAKE_QUEUE"
+  printf 'captain\n' > "$STATE/.turn-wake-kind" 2>/dev/null || true
   fm_recovery_marker_snapshot "$RECOVERY_MARKER" || true
   RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
   case "$RECOVERY_MARKER_TOKEN" in
@@ -284,6 +285,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   (print_status_presentation) || true
+  (print_open_decisions_section) || true
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
@@ -322,7 +324,20 @@ case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
   *) sleep "$FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT" ;;
 esac
 if [ -n "$RAW_ROWS" ]; then
+  first_kind=$(printf '%s\n' "$RAW_ROWS" | awk -F '\t' 'NR==1{print $3}')
+  case "$first_kind" in
+    signal|stale|check|heartbeat)
+      printf '%s\n' "$first_kind" > "$STATE/.turn-wake-kind" 2>/dev/null || true
+      ;;
+    *)
+      printf 'captain\n' > "$STATE/.turn-wake-kind" 2>/dev/null || true
+      ;;
+  esac
+  # Print-before-delete is the deliberate at-least-once no-loss boundary: a
+  # crash in this micro-gap may replay a wake, and annotations stay outside it.
   printf '%s\n' "$RAW_ROWS" || exit "$?"
+else
+  printf 'captain\n' > "$STATE/.turn-wake-kind" 2>/dev/null || true
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN

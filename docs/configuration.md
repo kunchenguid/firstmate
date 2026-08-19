@@ -311,6 +311,9 @@ An absent or incompatible `tasks-axi` reports `MISSING: tasks-axi (install: npm 
 An absent or incompatible `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)`.
 An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: npm install -g lavish-axi && lavish-axi setup hooks)`.
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
+That floor exists because it is the first build reporting per-credential auth sources, without which a candidate cannot be judged against the authentication surface it actually uses.
+`antigravity-usage` is the one optional tool here: per-turn quota instrumentation (`bin/fm-turn-quota-writer.sh`, see [`docs/turnend-guard.md`](turnend-guard.md)) probes it for Gemini/Antigravity consumption when it is on `PATH`, but it is never required, is never reported as `MISSING:`, and no bootstrap or dispatch path depends on it.
+When it is absent, its turn record fields are written as the explicit `absent` marker rather than zero, so a missing reading can never be read as a free turn.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 The locked session-start deferred network stage runs bootstrap's best-effort project clone refresh through `fm-fleet-sync.sh`.
