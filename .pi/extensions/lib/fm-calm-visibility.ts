@@ -52,6 +52,7 @@ export const FIRSTMATE_SYNTHETIC_KINDS = [
   "watcher",
   "turn-end-guard",
   "away-supervisor",
+  "context-refresh",
   "from-firstmate",
   "launch-brief",
   "legacy-operational",

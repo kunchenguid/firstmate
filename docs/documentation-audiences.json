@@ -67,6 +67,10 @@
       "target": "docs/verification/supervision.md"
     },
     {
+      "source": "docs/context-refresh.md",
+      "target": "docs/verification/supervision.md"
+    },
+    {
       "source": "docs/turnend-guard.md",
       "target": "docs/verification/supervision.md"
     },
@@ -242,6 +246,10 @@
     },
     {
       "path": "docs/configuration.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/context-refresh.md",
       "audience": "operator-current"
     },
     {

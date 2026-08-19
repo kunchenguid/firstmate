@@ -159,7 +159,7 @@
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
-#     __WORKTREE__  absolute path to the task worktree
+#     __WORKTREE__  absolute path to the task worktree, also the secondmate home used to locate its primary wrapper
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
@@ -1111,7 +1111,13 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude)
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false __WORKTREE__/bin/fm-primary.sh --firstmate-initial-prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)" -- --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__'
+      else
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
+      ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -2704,6 +2710,19 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+
+# A safely synced Claude secondmate has the tracked automatic context-refresh
+# wrapper. Preserve the longstanding launch-unchanged recovery boundary when a
+# dirty or divergent older home could not fast-forward and therefore lacks it:
+# launch plain Claude with the same initial charter rather than turning an
+# already-reported sync skip into a command-not-found failure. Its Stop hook set
+# is old too, so automatic refresh becomes available only after normal sync.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = claude ] \
+  && [ ! -x "$PROJ_ABS/bin/fm-primary.sh" ]; then
+  echo "warning: secondmate $ID lacks bin/fm-primary.sh after guarded sync; launching its existing Claude path without automatic context refresh" >&2
+  # shellcheck disable=SC2016 # placeholders and command substitution expand later in the target pane
+  LAUNCH='CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

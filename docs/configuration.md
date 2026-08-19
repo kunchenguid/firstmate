@@ -163,6 +163,22 @@ An inherited `data/captain-shared.md` counts in a secondmate's total but remains
 The internal [`/stow` skill](../.agents/skills/stow/SKILL.md) owns curation and its automatic secondmate cascade, which accounts every home against this same per-home allowance separately rather than against a fleet total.
 The helper's header owns exact parsing, publication, and report output mechanics.
 
+## Context restart budget (config/context-restart-budget)
+
+`config/context-restart-budget` is the primary-authoritative per-home token threshold for deliberate conversation handoff and restart.
+The locked mutable bootstrap path materializes the visible default of `400000` tokens in a primary home when the file is absent, and the inherited-local-material path propagates that value to registered secondmate homes.
+The file must be one positive base-10 integer followed by exactly one newline in a regular, single-linked file beneath a non-symlinked `config/` directory.
+Malformed, multi-line, symlinked, hardlinked, special, or otherwise unsafe values are rejected rather than replaced or treated as the default.
+Use `bin/fm-context-restart.sh read-budget` to validate and print the effective value.
+
+Claude is the first supported primary adapter.
+Its Stop hook checks only at completed turn boundaries and computes the current context as the latest assistant message's `input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`.
+Below threshold it emits nothing and spends no model tokens.
+At or above threshold it emits one typed handoff directive for that crossing, which runs the internal `/stow` pass before the session exits.
+Launch Claude with `bin/fm-primary.sh` for automatic successor startup in the same terminal.
+A plain `claude` launch still detects and prepares the handoff, but it requires the documented manual exit and relaunch fallback.
+[`context-refresh.md`](context-refresh.md) owns the mechanism, interruption behavior, successor alternatives, and non-Claude compatibility boundary.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
@@ -327,7 +343,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `backend`, `herdr-presentation-spaces`, `startup-memory-budget`, `context-restart-budget`, `trace-context`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.
