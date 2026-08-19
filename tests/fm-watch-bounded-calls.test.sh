@@ -549,6 +549,7 @@ test_herdr_shared_status_contract() {
   lab=$(make_lab herdr-shared-status)
   make_herdr "$lab" quick quick quick
   : > "$lab/timeout.log"
+  # shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
   raw=$(env FM_ROOT_OVERRIDE="$lab" FM_TEST_TIMEOUT_TARGET="agent get" \
     FM_TEST_TIMEOUT_LOG="$lab/timeout.log" PATH="$lab/fakebin:$BASE_PATH" \
     bash -c '. "$1"; fm_backend_herdr_agent_status_raw default w1:p2' \
@@ -627,6 +628,7 @@ test_apply_lock_namespace() {
   ' _ "$ROOT" "$ready" "$release" $$ &
   holder=$!
   wait_for_file "$ready" || fail "apply-lock namespace holder never acquired"
+  # shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
   FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed 1 env \
     FM_PROCEVENT_CLAIM_ROOT="$claims" bash -c '
       . "$1/bin/fm-pr-lib.sh"

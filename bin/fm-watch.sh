@@ -451,6 +451,7 @@ pause_state_class() {  # <window> <task>
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$(window_kind "$win")" != secondmate ]; then
       agent_alive_status=0
+      # shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
       agent_alive=$(fm_run_timed "$WATCH_BACKEND_PROBE_TIMEOUT" bash -c \
         '. "$1"; fm_backend_agent_alive "$2" "$3"' _ "$SCRIPT_DIR/fm-backend.sh" \
         "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive_status=$?
@@ -476,6 +477,7 @@ pause_state_class() {  # <window> <task>
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive_status=0
+    # shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
     agent_alive=$(fm_run_timed "$WATCH_BACKEND_PROBE_TIMEOUT" bash -c \
       '. "$1"; fm_backend_agent_alive "$2" "$3"' _ "$SCRIPT_DIR/fm-backend.sh" \
       "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive_status=$?
@@ -760,6 +762,7 @@ event_wait_or_sleep() {
   if [ "$_event_cap_key" != "$first_backend:$first_session" ]; then
     _event_cap_key="$first_backend:$first_session"
     capability_status=0
+    # shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
     fm_run_timed "$WATCH_BACKEND_PROBE_TIMEOUT" bash -c \
       '. "$1"; fm_backend_events_capable "$2" "$3"' _ "$SCRIPT_DIR/fm-backend.sh" \
       "$first_backend" "$first_session" || capability_status=$?
@@ -1151,6 +1154,7 @@ EOF
       continue
     fi
     capture_status=0
+    # shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
     tail40=$(fm_run_timed "$WATCH_BACKEND_PROBE_TIMEOUT" bash -c \
       '. "$1"; fm_backend_capture "$2" "$3" "$4" "$5"' _ "$SCRIPT_DIR/fm-backend.sh" \
       "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || capture_status=$?
@@ -1174,6 +1178,7 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     busy_status=0
+    # shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
     fm_run_timed "$WATCH_BACKEND_PROBE_TIMEOUT" bash -c \
       '. "$1"; window_is_busy "$2" "$3"' _ "$WATCH_PATH" "$w" "$tail40" || busy_status=$?
     if [ "$busy_status" -eq 0 ]; then

@@ -542,6 +542,7 @@ test_concurrent_resolution_closes_escalation_once() {
   # macOS Bash 3.2 has no BASHPID, so backgrounded functions from this shell
   # all inherit the same $$ and cannot model distinct lock owners faithfully.
   for _ in 1 2 3 4 5 6 7 8; do
+    # shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
     "$BASH" -u -c '
       . "$1/bin/fm-pending-reply-lib.sh"
       fm_pending_reply_try_resolve "$2" "$3"
@@ -571,10 +572,12 @@ test_concurrent_escalation_yields_to_late_reply() {
   printf 'done [corr=%s]: late concurrent reply\n' "$corr" > "$state/hibit.status"
 
   for _ in 1 2 3 4 5 6 7 8; do
+    # shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
     "$BASH" -u -c '
       . "$1/bin/fm-pending-reply-lib.sh"
       fm_pending_reply_maybe_escalate "$2" "$3"
     ' _ "$ROOT" "$state" "$corr" &
+    # shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
     "$BASH" -u -c '
       . "$1/bin/fm-pending-reply-lib.sh"
       fm_pending_reply_try_resolve "$2" "$3"
@@ -616,7 +619,9 @@ test_undelivered_records_are_scan_immutable() {
     probe_bin=$(make_backend_probe_stubs "$home")
     probe_log="$home/backend-probes.log"
     : > "$probe_log"
+    # shellcheck disable=SC2030,SC2031 # Probe fakes are deliberately scoped to this isolated subshell.
     export PATH="$probe_bin:$PATH"
+    # shellcheck disable=SC2030,SC2031 # Probe fakes are deliberately scoped to this isolated subshell.
     export FM_PENDING_BACKEND_PROBE_LOG="$probe_log"
     # This fixture clock is intentionally scoped to the isolated subshell.
     # shellcheck disable=SC2030,SC2031
@@ -933,6 +938,7 @@ test_unknown_backend_state_uses_capture_fallback() {
       sm_home="$home/sm"
       mkdir -p "$sm_home/state"
       probe_bin=$(make_backend_probe_stubs "$home")
+      # shellcheck disable=SC2030,SC2031 # Probe fakes are deliberately scoped to this isolated subshell.
       export PATH="$probe_bin:$PATH"
       export FM_PENDING_REPLY_GRACE_SECS=10
       # These fixture overrides are intentionally scoped to the isolated subshell.
@@ -950,6 +956,7 @@ test_unknown_backend_state_uses_capture_fallback() {
       # This hook override is intentionally scoped to the isolated subshell.
       # shellcheck disable=SC2030,SC2031
       export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+      # shellcheck disable=SC2030,SC2031 # Probe fakes are deliberately scoped to this isolated subshell.
       export FM_PENDING_TEST_CAPTURE='idle footer'
       fm_pending_reply_tick "$state"
       rec=$(fm_pending_reply_path "$state" "$corr")
@@ -981,6 +988,7 @@ test_kimi_capture_fallback_uses_recorded_harness() (
   sm_home="$home/sm"
   mkdir -p "$sm_home/state"
   probe_bin=$(make_backend_probe_stubs "$home")
+  # shellcheck disable=SC2030,SC2031 # Probe fakes are deliberately scoped to this isolated subshell.
   export PATH="$probe_bin:$PATH"
   # This fixture clock is intentionally scoped to the isolated subshell.
   # shellcheck disable=SC2030,SC2031
@@ -988,6 +996,7 @@ test_kimi_capture_fallback_uses_recorded_harness() (
   corr=$(fm_pending_reply_create "$home" "$state" hibit "kimi fallback")
   fm_pending_reply_mark_delivered "$state" "$corr"
   fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit" alpha kimi
+  # shellcheck disable=SC2030,SC2031 # Probe fakes are deliberately scoped to this isolated subshell.
   export FM_PENDING_TEST_CAPTURE=' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
 
   [ "$(fm_pending_reply_backend_observation tmux session:fm-hibit fm-hibit codex)" = fallback-idle ] \
@@ -1015,7 +1024,9 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     scan_log="$home/status-scans.log"
     : > "$probe_log"
     : > "$scan_log"
+    # shellcheck disable=SC2030,SC2031 # Probe fakes are deliberately scoped to this isolated subshell.
     export PATH="$probe_bin:$PATH"
+    # shellcheck disable=SC2030,SC2031 # Probe fakes are deliberately scoped to this isolated subshell.
     export FM_PENDING_BACKEND_PROBE_LOG="$probe_log"
     export FM_PENDING_NATIVE_STATUS=working
     # This fixture clock is intentionally scoped to the isolated subshell.

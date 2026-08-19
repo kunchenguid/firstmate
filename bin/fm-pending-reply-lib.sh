@@ -670,6 +670,7 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
 # which the caller accepts as idle only after its grace window.
 fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] [harness]
   local backend=$1 target=$2 expected_label=${3-} harness=${4-} native tail40 native_status=0 capture_status=0
+  # shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
   native=$(fm_run_timed "$PENDING_REPLY_BACKEND_TIMEOUT" bash -c \
     '. "$1"; fm_backend_busy_state "$2" "$3"' _ \
     "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh" "$backend" "$target" 2>/dev/null) || native_status=$?
@@ -685,6 +686,7 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] 
   case "$native" in
     busy|idle) printf '%s' "$native"; return 0 ;;
   esac
+  # shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
   tail40=$(fm_run_timed "$PENDING_REPLY_BACKEND_TIMEOUT" bash -c \
     '. "$1"; fm_backend_capture "$2" "$3" "$4" "$5"' _ \
     "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh" "$backend" "$target" 40 "$expected_label" \
