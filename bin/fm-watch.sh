@@ -947,8 +947,35 @@ while :; do
         fi
       fi
       if [ -n "$out" ]; then
+        # A positive open reading is not a wake: it is how a previous closure is
+        # forgotten. A closed PR that is reopened and closed again is two genuine
+        # events, and the second one deserves its wake. Only this reading clears
+        # the marker - silence must never do it, because silence is also an
+        # unreadable PR or a failed CLI lookup, and clearing on that would re-fire
+        # the wake on every flaky forge lookup.
+        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = open ]; then
+          fm_pr_poll_closed_marker_clear "$STATE" "$id" \
+            || triage_log "closed PR poll wake marker could not be cleared for $id"
+          continue
+        fi
+        # A closed-unmerged PR is neither a merge nor a failure: the change may
+        # have landed in a successor, so it wakes firstmate to reconcile. It does
+        # NOT retire the poll - a closed PR can be reopened and merged, and
+        # GitHub closes one automatically when its base branch is deleted, so
+        # retiring here would lose the merge wake that fires today. The poll
+        # therefore stays armed and keeps reporting closed every interval; the
+        # .seen-* marker is what holds that to one wake, and it is written only
+        # after the durable wake is appended.
+        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = closed ] \
+          && [ -e "$(fm_pr_poll_closed_marker_path "$STATE" "$id")" ]; then
+          continue
+        fi
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
+        if [ "$is_pr_poll" -eq 1 ] && [ "$out" = closed ]; then
+          fm_pr_poll_closed_marker_publish "$STATE" "$id" \
+            || triage_log "closed PR poll wake marker could not be recorded for $id"
+        fi
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
             fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \

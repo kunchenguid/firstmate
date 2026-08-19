@@ -16,6 +16,14 @@
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
+#
+# A validated exact closed result is NOT retired: a closed pull request can be
+# reopened and merged, so its poll stays armed and the merge still wakes
+# firstmate. Its one-time wake is instead suppressed by a .seen-* marker in the
+# watcher's own dedupe family, cleared here whenever a poll is published so a
+# re-armed task watching a new pull request wakes on its own closure, and
+# cleared by the watcher on a positive open reading so a reopened pull request
+# closed a second time wakes again.
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -521,9 +529,40 @@ fm_pr_poll_prepare() {
   fi
 }
 
+# Suppressor for the one-time closed-unmerged wake, in the watcher's .seen-*
+# dedupe family. The poll stays armed on a closed result, so the same reading
+# returns every check interval and only this marker keeps it to a single wake.
+fm_pr_poll_closed_marker_path() {  # <state> <id>
+  local state=$1 id=$2
+  fm_pr_task_id_valid "$id" || return 1
+  printf '%s/.seen-pr-closed-%s\n' "$state" "$id"
+}
+
+# Written only after the durable wake is appended, the same order scan_signals
+# and the process-event surfacing use, so a watcher killed mid-cycle repeats the
+# wake rather than swallowing it.
+fm_pr_poll_closed_marker_publish() {  # <state> <id>
+  local state=$1 id=$2 marker tmp
+  marker=$(fm_pr_poll_closed_marker_path "$state" "$id") || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  tmp=$(umask 077; mktemp "$state/.seen-pr-closed.XXXXXX") || return 1
+  mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
+}
+
+fm_pr_poll_closed_marker_clear() {  # <state> <id>
+  local marker
+  marker=$(fm_pr_poll_closed_marker_path "$1" "$2") || return 1
+  rm -f -- "$marker"
+}
+
 fm_pr_poll_publish_prepared() {
   [ -n "$FM_PR_POLL_DATA_TMP" ] && [ -n "$FM_PR_POLL_CHECK_TMP" ] \
     && [ -n "$FM_PR_POLL_REG_TMP" ] || return 1
+  # A published poll is a fresh watch: whatever closure the previous poll for
+  # this task already reported must not suppress this one's own closed wake.
+  # Cleared before anything is published, so a failed publish leaves no
+  # suppressor claiming a wake that was never surfaced for this poll.
+  fm_pr_poll_closed_marker_clear "${FM_PR_POLL_DATA_DEST%/*}" "$FM_PR_POLL_EXPECT_ID" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_DATA_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_REG_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
