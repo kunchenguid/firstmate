@@ -37,7 +37,7 @@ SUCCESSOR_BODY='A reset-safe context handoff completed. The native SessionStart 
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
-  sed -n '2,3{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,4{s/^# \{0,1\}//;p;}' "$0"
 }
 
 while [ "$#" -gt 0 ]; do

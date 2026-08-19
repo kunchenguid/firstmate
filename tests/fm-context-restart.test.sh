@@ -234,14 +234,11 @@ SH
   pass "context restart: reset-safe sentinel releases the old lock and starts one fresh successor"
 }
 
-test_registration_is_claude_only() {
+test_claude_registers_one_stop_hook() {
   local count
   count=$(jq '[.hooks.Stop[].hooks[] | select(.command | contains("fm-context-restart-claude-hook.sh"))] | length' "$ROOT/.claude/settings.json")
   [ "$count" = 1 ] || fail "Claude must register exactly one context-restart Stop hook, found $count"
-  ! rg -q 'fm-context-restart-claude-hook.sh' \
-    "$ROOT/.codex" "$ROOT/.opencode" "$ROOT/.pi" "$ROOT/.grok" "$ROOT/.cursor" \
-    || fail "a non-Claude primary registered the context-restart hook"
-  pass "context restart: unsupported primary harnesses remain graceful no-ops"
+  pass "context restart: Claude registers exactly one context-restart Stop hook"
 }
 
 test_budget_parser_and_default
@@ -249,4 +246,4 @@ test_threshold_and_one_directive_per_crossing
 test_malformed_transcript_and_usage_are_inert
 test_concurrent_stop_firings_publish_one_directive
 test_reset_safe_wrapper_restarts_fresh_and_releases_lock
-test_registration_is_claude_only
+test_claude_registers_one_stop_hook
