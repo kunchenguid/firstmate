@@ -193,9 +193,9 @@ project_repo_slug() { # <project>
 }
 
 build_task_index() {
-  local meta id pr head task yolo
-  TASK_BY_HEAD=''
+  local meta id pr project yolo
   TASK_BY_PR=''
+  TASK_PROJECT=''
   TASK_YOLO=''
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -204,32 +204,48 @@ build_task_index() {
     [ "$(meta_field "$meta" kind)" = secondmate ] && continue
     yolo=$(meta_field "$meta" yolo)
     pr=$(meta_field "$meta" pr)
+    project=$(meta_field "$meta" project)
     if [ -n "$pr" ]; then
       TASK_BY_PR="${TASK_BY_PR}${pr}"$'\t'"$id"$'\n'
     fi
+    TASK_PROJECT="${TASK_PROJECT}${id}"$'\t'"$project"$'\n'
     TASK_YOLO="${TASK_YOLO}${id}=${yolo:-off}"$'\n'
   done
 }
 
-task_for_head() { # <headRefName>
-  local head=$1 id
+task_matches_project() { # <task-id> <project>
+  local task=$1 project=$2 line
+  while IFS= read -r line; do
+    [ "$line" = "$task"$'\t'"$project" ] && return 0
+  done <<EOF
+${TASK_PROJECT:-}
+EOF
+  return 1
+}
+
+task_for_head() { # <headRefName> <project>
+  local head=$1 project=$2 id
   case "$head" in
     fm/*)
       id=${head#fm/}
-      valid_id "$id" && { printf '%s\n' "$id"; return 0; }
+      valid_id "$id" && task_matches_project "$id" "$project" \
+        && { printf '%s\n' "$id"; return 0; }
       ;;
   esac
   return 1
 }
 
-task_for_pr_url() { # <url>
-  local url=$1 line
+task_for_pr_url() { # <url> <project>
+  local url=$1 project=$2 line task
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
       "$url"$'\t'*)
-        printf '%s\n' "${line#*$'\t'}"
-        return 0
+        task=${line#*$'\t'}
+        if task_matches_project "$task" "$project"; then
+          printf '%s\n' "$task"
+          return 0
+        fi
         ;;
     esac
   done <<EOF
@@ -238,13 +254,13 @@ EOF
   return 1
 }
 
-match_task() { # <headRefName> <url>
-  local head=$1 url=$2 task
-  if task=$(task_for_head "$head"); then
+match_task() { # <headRefName> <url> <project>
+  local head=$1 url=$2 project=$3 task
+  if task=$(task_for_head "$head" "$project"); then
     printf '%s\n' "$task"
     return 0
   fi
-  if task=$(task_for_pr_url "$url"); then
+  if task=$(task_for_pr_url "$url" "$project"); then
     printf '%s\n' "$task"
     return 0
   fi
@@ -481,7 +497,7 @@ process_pr_record() { # <repo> <project> <pr-json> <deadline> -> sets ACTIONABLE
   num=$(printf '%s' "$classified" | jq -r '.number')
   url=$(printf '%s' "$classified" | jq -r '.url')
   head=$(printf '%s' "$classified" | jq -r '.head')
-  task=$(match_task "$(printf '%s' "$pr_json" | jq -r '.headRefName // ""')" "$url" 2>/dev/null || true)
+  task=$(match_task "$(printf '%s' "$pr_json" | jq -r '.headRefName // ""')" "$url" "$project" 2>/dev/null || true)
   reason_for_pr "$classified" "$task"
   queue_add_row "$repo" "$num" "$url" "${task:--}" "$REASON_CODE" "$REASON_DETAIL"
   new_fp=$(fingerprint_for "$classified" "$task" "$REASON_CODE")
@@ -580,7 +596,7 @@ scan_repo() { # <project> <repo> <deadline>
       *" $num "*) continue ;;
     esac
     url="https://github.com/$repo/pull/$num"
-    task=$(task_for_pr_url "$url" 2>/dev/null || true)
+    task=$(task_for_pr_url "$url" "$project" 2>/dev/null || true)
     check_post_merge "$repo" "$project" "$num" "$url" "$task" || return 1
     [ -z "${ACTIONABLE:-}" ] || return 0
   done

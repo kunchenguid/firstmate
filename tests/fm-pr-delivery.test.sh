@@ -300,6 +300,36 @@ EOF
   pass "repository state keys remain distinct"
 }
 
+test_task_authority_stays_with_its_project() {
+  local home fixture out
+  home=$(make_world taskproject)
+  fixture="$TMP_ROOT/fix-taskproject"
+  cat > "$home/data/projects.md" <<'EOF'
+- alpha [direct-PR] - task owner (added 2026-01-01)
+- beta [direct-PR] - unrelated PR (added 2026-01-01)
+EOF
+  setup_named_project "$home" alpha acme/alpha
+  setup_named_project "$home" beta acme/beta
+  mkdir -p "$fixture/open" "$fixture/view"
+  write_open "$fixture" acme/alpha '[]'
+  write_open "$fixture" acme/beta '[{"number":16,"url":"https://github.com/acme/beta/pull/16","headRefName":"fm/shared16","headRefOid":"ppp","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/beta 16 '{"number":16,"url":"https://github.com/acme/beta/pull/16","headRefName":"fm/shared16","headRefOid":"ppp","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  fm_write_meta "$home/state/shared16.meta" \
+    'window=fm-shared16' "worktree=$home/projects/shared16" 'project=alpha' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  [ -z "$out" ] || fail "task authority crossed into an unrelated project"
+  run_delivery "$home" "$fixture" show | grep -Fq 'no-task' \
+    || fail "cross-project branch was not held as unlinked"
+  fm_write_meta "$home/state/shared16.meta" \
+    'window=fm-shared16' "worktree=$home/projects/shared16" 'project=beta' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
+    || fail "same-project task did not become eligible"
+  pass "task authority remains scoped to its project"
+}
+
 test_deadline_retries_incomplete_repository() {
   local home fixture out
   home=$(make_world cursor)
@@ -453,6 +483,7 @@ test_optional_review_silence
 test_post_merge_routing
 test_closed_pr_state_retires_and_reopens
 test_repository_state_keys_do_not_alias
+test_task_authority_stays_with_its_project
 test_deadline_retries_incomplete_repository
 test_accelerate_marker
 test_show_blocked_queue
