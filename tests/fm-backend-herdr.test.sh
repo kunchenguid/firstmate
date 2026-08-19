@@ -289,6 +289,30 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag() {
   pass "fm_backend_herdr_cli: sets HERDR_SESSION AND appends a trailing --session flag on every call"
 }
 
+test_cli_helper_optional_timeout_stops_the_vendor_process_group() {
+  local dir fb child status=0 started elapsed
+  dir="$TMP_ROOT/cli-timeout"; fb="$dir/fakebin"; child="$dir/child.pid"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+sleep 30 &
+printf '%s\n' "$!" > "$FM_HERDR_CHILD_PID"
+wait
+SH
+  chmod +x "$fb/herdr"
+  started=$(date +%s)
+  PATH="$fb:$PATH" FM_HERDR_CHILD_PID="$child" FM_BACKEND_HERDR_CLI_TIMEOUT_SECS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_cli fmtest pane get w1:p1' "$ROOT" \
+    >/dev/null 2>&1 || status=$?
+  elapsed=$(( $(date +%s) - started ))
+  [ "$status" -eq 124 ] || fail "bounded Herdr CLI call should return 124, got $status"
+  [ "$elapsed" -le 4 ] || fail "bounded Herdr CLI call exceeded its deadline (${elapsed}s)"
+  [ -s "$child" ] || fail "bounded Herdr fixture did not publish its descendant pid"
+  kill -0 "$(cat "$child")" 2>/dev/null \
+    && fail "bounded Herdr CLI call left its vendor descendant alive"
+  pass "fm_backend_herdr_cli: an explicit timeout stops the whole stalled vendor process group"
+}
+
 # --- launcher_identity: the exact workspace a worker must be placed in -------
 #
 # Herdr injects HERDR_ENV/HERDR_PANE_ID/HERDR_SESSION/HERDR_SOCKET_PATH into
@@ -4410,6 +4434,7 @@ test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
+test_cli_helper_optional_timeout_stops_the_vendor_process_group
 test_launcher_identity_absent_without_a_herdr_pane
 test_launcher_identity_absent_when_herdr_env_alone_is_set
 test_launcher_identity_resolves_the_exact_pane_tab_and_workspace

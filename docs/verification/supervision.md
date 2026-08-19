@@ -459,6 +459,66 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+## Away-mode delivery retirement
+
+The delivery-retirement and shutdown boundary was verified on 2026-08-19 with macOS arm64, Bash 3.2.57, and Herdr 0.8.0 in a guarded non-default lab.
+The portable entry points were:
+
+```sh
+tests/fm-daemon.test.sh
+tests/fm-wake-daemon-lifecycle-e2e.test.sh
+tests/fm-backend-herdr.test.sh
+tests/fm-afk-return.test.sh
+```
+
+Relevant observed output was:
+
+```text
+ok - multiple escalations flush as a single batched digest
+ok - catch-all scan escalates a missed terminal once, not twice
+ok - max-defer on an empty stuck pane types once, alarms, and preserves the buffer
+ok - normal flush clears a stale wedge marker
+ok - confirmed pause recheck delivery stays retired until the next pause cadence
+ok - shutdown request starts no new submit and preserves the pending buffer
+ok - lifecycle: routine self-handles, terminal survives a watcher restart, buffers once, no dup, injects once
+ok - fm_backend_herdr_cli: an explicit timeout stops the whole stalled vendor process group
+ok - return catch-up precedes Bearings, owns live blocker remediation, preserves evidence once, and clears idempotently
+```
+
+The real Herdr delivery and shutdown run used the task-owned lab helper, one externally provisioned `fm-lab-` session, and the suite's `HERDR_LAB_SESSION` adoption path:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name afk-herdr-repeated-escalation-submit)
+trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
+HERDR_LAB_SESSION="$HERDR_LAB_SESSION" tests/fm-afk-inject-herdr-e2e.test.sh
+```
+
+Observed output was:
+
+```text
+ok - real herdr Scenario A: partial input defers injection; digest arrives clean after idle
+ok - real herdr Scenario B: swallowed Enter (via the herdr shim) produces exactly one clean digest
+ok - real herdr Scenario C: confirmed delivery retires its buffer and repeated catch-all scans cannot re-buffer it
+ok - real herdr Scenario D: an unconfirmed delivery remains durable across daemon shutdown
+ok - real herdr Scenario E: SIGTERM during confirmed submit retires once and exits without re-injection
+ok - real herdr Scenario F: shutdown after retirement exits with one delivered digest
+selected real-herdr afk injection e2e tests passed
+```
+
+The integration review covered every supported primary harness and runtime backend.
+
+| Axis | Review result |
+| --- | --- |
+| Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Cursor primaries | The retirement and cooperative shutdown path sits above harness-specific busy, composer, and submit classification, so all keep their existing type-once and Enter-only transport behavior; pi-signed shares Pi's integration. |
+| Muse | Not applicable because Muse is supported only for workers and scouts, not as a primary. |
+| tmux supervisor backend | Uses the same daemon retirement path and unchanged tmux submit core; portable batching, dedupe, pending, and catch-up tests passed. A live tmux injection rerun was unavailable because tmux was not installed on this host. |
+| Herdr supervisor backend | Uses the shared retirement path plus the new per-call hard deadline; the guarded live run above covered confirmed, unconfirmed, pre-retirement TERM, post-retirement TERM, repeated scans, and buffer cleanup. |
+| Zellij, Orca, and cmux supervisor backends | Not applicable because daemon startup still refuses these supervisor backends before injection; their task-status production and catch-all classification do not use a backend-specific retirement path. |
+
+`docs/architecture.md` owns the current retirement contract, and [runtime backend verification](runtime-backends.md#away-mode-transport) owns the Herdr transport evidence.
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

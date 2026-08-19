@@ -58,8 +58,8 @@
 #
 # The robustness shell from the prior always-inject version is preserved:
 # single-instance lock (portable helper, no flock dependency), crash-loop
-# backoff, pane-gone guard, and a signal-trapped shutdown that flushes buffered
-# escalations before exit.
+# backoff, pane-gone guard, and a signal-trapped shutdown that lets an active
+# delivery settle before retiring it or preserving it for the next owner.
 #
 # Usage: fm-supervise-daemon.sh
 #          Long-lived background loop. Normally started by the /afk skill, which
@@ -134,12 +134,18 @@
 #                                   not misread as pending input.
 #          FM_INJECT_CONFIRM_SLEEP  seconds between daemon submit checks
 #                                   (default 0.5)
+#          FM_AFK_HERDR_CLI_TIMEOUT_SECS positive whole-second hard bound for
+#                                   each Herdr CLI call made by this daemon
+#                                   (default 2). Invalid or zero
+#                                   values use the default so SIGTERM cannot wait
+#                                   forever behind a wedged transport call.
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
 #          instance via portable lock on state/.supervise-daemon.lock. Trapped
-#          SIGTERM/SIGINT shut down within ~1s, flush escalations, release the
-#          lock. A crashing fm-watch.sh is logged and restarted, never killing
+#          SIGTERM/SIGINT settle any active delivery, preserve unconfirmed
+#          escalations, and release the lock without a cleanup-time submit. A
+#          crashing fm-watch.sh is logged and restarted, never killing
 #          the daemon; a tight crash-restart spin is detected and backed off.
 set -u
 
@@ -210,6 +216,7 @@ WEDGE_ALARM_NOTIFIER_PID=
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
+AFK_HERDR_CLI_TIMEOUT_SECS_DEFAULT=2
 CRASH_THRESHOLD_DEFAULT=10
 CRASH_WINDOW_DEFAULT=60
 CRASH_BACKOFF_DEFAULT=60
@@ -644,15 +651,32 @@ escalate_add() {  # <state> <distilled-item>
 # inject failure (buffer preserved for retry / catch-up).
 escalate_flush() {  # <state>
   local state=$1 buf item n msg
+  # Publish flush ownership before consulting the shutdown request. If TERM
+  # lands on either side of that assignment, the following read decides
+  # deterministically whether this invocation was already allowed to proceed.
+  ESCALATE_FLUSH_ACTIVE=1
+  if [ "${SHUTDOWN_REQUESTED:-0}" -ne 0 ]; then
+    ESCALATE_FLUSH_ACTIVE=0
+    return 1
+  fi
   buf="$state/.subsuper-escalations"
-  [ -s "$buf" ] || return 0
+  if [ ! -s "$buf" ]; then
+    ESCALATE_FLUSH_ACTIVE=0
+    return 0
+  fi
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state"; then
+    : > "$buf"
+    rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+    ESCALATE_FLUSH_ACTIVE=0
+    return 0
+  fi
+  ESCALATE_FLUSH_ACTIVE=0
   return 1
 }
 
@@ -960,6 +984,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  [ "${SHUTDOWN_REQUESTED:-0}" -eq 0 ] || return 0
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1402,6 +1427,13 @@ fm_super_main() {
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
   fi
+  if [ "$BACKEND" = herdr ]; then
+    FM_BACKEND_HERDR_CLI_TIMEOUT_SECS=${FM_AFK_HERDR_CLI_TIMEOUT_SECS:-$AFK_HERDR_CLI_TIMEOUT_SECS_DEFAULT}
+    case "$FM_BACKEND_HERDR_CLI_TIMEOUT_SECS" in
+      ''|*[!0-9]*|0) FM_BACKEND_HERDR_CLI_TIMEOUT_SECS=$AFK_HERDR_CLI_TIMEOUT_SECS_DEFAULT ;;
+    esac
+    export FM_BACKEND_HERDR_CLI_TIMEOUT_SECS
+  fi
 
   # --- auto-discover the supervisor target (the pane running firstmate) -----
   # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
@@ -1446,16 +1478,63 @@ fm_super_main() {
   log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
   migrate_watcher_pause_markers "$STATE"
 
-  # --- shutdown: flush buffered escalations, reap child, release lock -------
-  local WATCHER_PID="" CUR_TMP=""
+  # --- shutdown: finish active delivery, preserve pending, reap, release -----
+  local WATCHER_PID="" WATCHER_IDENTITY="" CUR_TMP="" SHUTDOWN_REQUESTED=0
+  watcher_process_group() {  # <watcher-pid>
+    local pid=$1 pgid current_identity
+    current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+    [ -n "$WATCHER_IDENTITY" ] && [ "$current_identity" = "$WATCHER_IDENTITY" ] || return 1
+    pgid=$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d '[:space:]') || return 1
+    case "$pgid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    [ "$pgid" = "$pid" ] || return 1
+    printf '%s\n' "$pgid"
+  }
+  stop_watcher() {
+    # start_watcher gives this daemon's child tree its own process group. A
+    # verified group signal reaches a blocked Herdr reader without ever naming
+    # another home's watcher; the single-pid fallback is used only when that
+    # isolation proof is unavailable.
+    local pid=${WATCHER_PID:-} pgid attempt=0
+    [ -n "$pid" ] || return 0
+    pgid=$(watcher_process_group "$pid" 2>/dev/null || true)
+    if [ -n "$pgid" ]; then
+      kill -TERM -- "-$pgid" 2>/dev/null || true
+      while kill -0 -- "-$pgid" 2>/dev/null && [ "$attempt" -lt 20 ]; do
+        sleep 0.1
+        attempt=$((attempt + 1))
+      done
+      kill -0 -- "-$pgid" 2>/dev/null && kill -KILL -- "-$pgid" 2>/dev/null || true
+    elif [ "$(fm_pid_identity "$pid" 2>/dev/null || true)" = "$WATCHER_IDENTITY" ] && [ -n "$WATCHER_IDENTITY" ]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 20 ]; do
+        sleep 0.1
+        attempt=$((attempt + 1))
+      done
+      kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+    WATCHER_PID=""
+    WATCHER_IDENTITY=""
+  }
+  # shellcheck disable=SC2329 # Invoked indirectly by the TERM/INT trap below.
+  request_shutdown() {
+    # A TERM trap can run after the backend has confirmed a submit but before
+    # escalate_flush has retired that confirmed batch. Flushing recursively
+    # from this trap would see the same still-populated buffer and submit it a
+    # second time. Request shutdown cooperatively instead: the interrupted
+    # delivery returns through its normal retirement path. Cleanup starts no
+    # new submit: anything unconfirmed remains durable for the next owner.
+    SHUTDOWN_REQUESTED=1
+    if [ "${ESCALATE_FLUSH_ACTIVE:-0}" -eq 1 ]; then
+      log "daemon shutdown requested; finishing the active delivery boundary"
+    else
+      log "daemon shutdown requested; preserving pending delivery state"
+    fi
+  }
   cleanup() {
     trap - TERM INT
     wedge_alarm_stop_active_notifier
-    escalate_flush "$STATE" 2>/dev/null || true
-    if [ -n "${WATCHER_PID:-}" ]; then
-      kill "$WATCHER_PID" 2>/dev/null || true
-      wait "$WATCHER_PID" 2>/dev/null || true
-    fi
+    stop_watcher
     if [ -n "${CUR_TMP:-}" ]; then
       rm -f "$CUR_TMP" 2>/dev/null || true
     fi
@@ -1464,7 +1543,7 @@ fm_super_main() {
     log "daemon shutting down"
     exit 0
   }
-  trap cleanup TERM INT
+  trap request_shutdown TERM INT
 
   # --- crash-loop guard -----------------------------------------------------
   local crash_times=() backoff_secs=$CRASH_NORMAL_SLEEP
@@ -1487,13 +1566,27 @@ fm_super_main() {
   }
 
   start_watcher() {
+    local monitor_was_on=0
     CUR_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-watch.XXXXXX") || { log "error: mktemp failed; retrying in 5s"; sleep 5; return 1; }
+    case $- in *m*) monitor_was_on=1 ;; esac
+    set -m 2>/dev/null || { rm -f "$CUR_TMP"; CUR_TMP=""; log "error: watcher process-group isolation unavailable; retrying in 5s"; sleep 5; return 1; }
     "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
     WATCHER_PID=$!
+    [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+    WATCHER_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null) || {
+      kill -TERM "$WATCHER_PID" 2>/dev/null || true
+      wait "$WATCHER_PID" 2>/dev/null || true
+      WATCHER_PID=""
+      rm -f "$CUR_TMP"
+      CUR_TMP=""
+      log "error: watcher identity publication failed; retrying in 5s"
+      sleep 5
+      return 1
+    }
   }
 
   local rc reason
-  while true; do
+  while [ "$SHUTDOWN_REQUESTED" -eq 0 ]; do
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
     # swallowed by running the watcher with no injection target. We still back
@@ -1547,17 +1640,22 @@ fm_super_main() {
       start_watcher || continue
     fi
 
+    [ "$SHUTDOWN_REQUESTED" -eq 0 ] || break
+
     # --- one housekeeping tick (gated to HOUSEKEEPING_TICK), then poll -------
     # The watcher child runs on its own FM_POLL cadence internally; we only need
     # to detect its exit (the kill -0 above) promptly and run housekeeping often
     # enough that batch flushes, stale rechecks, and the catch-all scan fire on
     # cadence. Gating keeps a large fleet cheap between ticks.
     sleep 1
+    [ "$SHUTDOWN_REQUESTED" -eq 0 ] || break
     if [ "$(_file_age "$STATE/.subsuper-last-housekeep")" -ge "${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}" ]; then
       _now > "$STATE/.subsuper-last-housekeep"
       housekeeping "$STATE"
     fi
   done
+
+  cleanup
 }
 
 # Run only when executed, not when sourced (tests source the classifiers).

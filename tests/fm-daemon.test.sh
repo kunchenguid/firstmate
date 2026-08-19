@@ -349,6 +349,38 @@ test_housekeeping_paused_resurfaces_and_resets() {
   pass "housekeeping re-surfaces a stale declared pause on the long cadence and resets its window"
 }
 
+test_delivered_pause_recheck_stays_retired_until_next_cadence() {
+  local dir state fakebin win pane key sent composer
+  dir=$(make_supercase paused-delivery-retirement)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-w11-retire"; pane="$dir/pane.txt"; sent="$dir/sent.log"; composer="$dir/composer.txt"
+  printf 'window=%s\nbackend=tmux\nharness=claude\n' "$win" > "$state/held-w11-retire.meta"
+  printf 'paused: holding for the upstream tool release\n' > "$state/held-w11-retire.status"
+  printf 'idle prompt $\n' > "$pane"
+  printf '❯ \n' > "$composer"
+  : > "$sent"
+  key=$(printf '%s' "held-w11-retire" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 FM_ESCALATE_BATCH_SECS=99999 housekeeping "$state"
+  [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
+    || fail "pause recheck did not buffer exactly once"
+
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$composer" escalate_flush "$state" \
+    || fail "confirmed pause recheck delivery did not flush"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "confirmed pause recheck delivery remained buffered"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 FM_ESCALATE_BATCH_SECS=99999 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "delivered pause recheck was reconstructed before its next cadence"
+  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "pause recheck delivery submitted more than once"
+  pass "confirmed pause recheck delivery stays retired until the next pause cadence"
+}
+
 # A pause whose pane became busy again (the crew resumed) drops its marker without
 # escalating, exactly like a resumed wedge.
 test_housekeeping_paused_resumed_cleared() {
@@ -724,6 +756,23 @@ test_collapse_newlines_pure() {
   out=$(_collapse_newlines $'a\nb')
   [ "$out" = "a - b" ] || fail "collapse two lines failed: '$out'"
   pass "_collapse_newlines replaces newlines with literal separator"
+}
+
+test_shutdown_request_preserves_pending_without_new_submit() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase shutdown-no-new-submit)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '❯ \n' > "$capture"
+  escalate_add "$state" "needs-decision: preserve me"
+  afk_enter "$state"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" SHUTDOWN_REQUESTED=1 escalate_flush "$state"; then
+    fail "shutdown-requested flush unexpectedly reported delivery"
+  fi
+  [ ! -s "$sent" ] || fail "shutdown request started a new submit"
+  [ -s "$state/.subsuper-escalations" ] || fail "shutdown request discarded the pending buffer"
+  pass "shutdown request starts no new submit and preserves the pending buffer"
 }
 
 test_afk_absent_daemon_does_not_inject() {
@@ -1862,6 +1911,7 @@ test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
+test_delivered_pause_recheck_stays_retired_until_next_cadence
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_stale_marker_transitions_to_pause
@@ -1879,6 +1929,7 @@ test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
 test_signal_escalate_marks_seen_no_catchall_refire
 test_collapse_newlines_pure
+test_shutdown_request_preserves_pending_without_new_submit
 test_afk_absent_daemon_does_not_inject
 test_busy_guard_defers_when_supervisor_busy
 test_marker_detection
