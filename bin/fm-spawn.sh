@@ -14,6 +14,10 @@
 #   scaffolded before that line existed warns once and launches on the flag. When
 #   the explicit mode carries less rigor than the project's standing posture, a
 #   loud one-line deviation notice is printed and the spawn continues.
+#   Every spawn also refuses a brief that repeats a top-level "# " section, which
+#   is what hand-appending a regenerated brief onto the old one produces: the
+#   worker would follow whichever copy it read last. Regenerate with
+#   bin/fm-brief.sh --replace instead.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
@@ -1642,6 +1646,21 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
+
+# A brief that carries the same top-level section twice was appended to rather
+# than regenerated, which fm-brief.sh --replace now makes unnecessary. Refuse it
+# here because the damage lands on the worker: an agent follows the nearest,
+# most recent statement of a rule, so a duplicated brief silently governs by
+# whichever copy was read last, and nothing in the file marks which is current.
+# The mode check below reads only the FIRST delivery contract line, so a second
+# block carrying a different mode would otherwise launch unnoticed.
+DUP_SECTIONS=$(grep '^# ' "$BRIEF" | sort | uniq -d | sed 's/^/  /')
+if [ -n "$DUP_SECTIONS" ]; then
+  echo "error: $BRIEF repeats these sections, so which copy governs is undefined:" >&2
+  echo "$DUP_SECTIONS" >&2
+  echo "regenerate it with bin/fm-brief.sh --replace (which archives the superseded brief) instead of appending a second copy; use '##' for headings inside the task body" >&2
+  exit 1
+fi
 
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in

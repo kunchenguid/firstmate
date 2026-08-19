@@ -173,7 +173,7 @@ PERL
 test_help_includes_entire_header() {
   local help
   help=$("$ROOT/bin/fm-brief.sh" --help)
-  assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
+  assert_contains "$help" "brief.superseded-<n>.md so filled-in task text is recoverable." "fm-brief.sh --help omitted its header terminator"
   pass "fm-brief.sh: --help renders the complete header"
 }
 
@@ -321,54 +321,158 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
-test_no_mistakes_dod_wording() {
+# The no-mistakes pipeline contract is deferred, not deleted: the brief carries
+# the trigger and the pointer, and docs/crew-reference.md carries the substance.
+# Asserting both halves is what keeps a future "shorten the brief" edit from
+# quietly dropping a rule instead of moving it.
+test_no_mistakes_dod_defers_pipeline_contract_to_reference() {
   local home id brief
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
-    "no-mistakes DOD lost its guidance-reference sentence"
+
+  # The trigger must name the moment the worker will recognise, and the pointer
+  # must be an absolute path it can open from a project worktree.
   # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`no-mistakes axi run --help`' "$brief" \
-    "no-mistakes DOD must render literal backticks around the help command"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`help`' "$brief" \
-    "no-mistakes DOD must render literal backticks around help"
-  assert_grep "make \`--intent\` preserve all relevant content from this brief" "$brief" \
-    "no-mistakes DOD must require --intent to retain the accepted task contract"
-  assert_grep "carrying only each requirement's current accepted form" "$brief" \
-    "no-mistakes DOD must replace superseded requirements with their current accepted form"
-  assert_grep "retain direct requirements instead of substituting a diff summary" "$brief" \
-    "no-mistakes DOD must keep direct requirements and exclude generic scaffold boilerplate from --intent"
-  assert_grep "exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific" "$brief" \
-    "no-mistakes DOD must exclude non-task-specific scaffold boilerplate from --intent"
-  # The apostrophe in "firstmate's authority check" is now structurally safe
-  # (no `$(...)` wrapper around the heredoc), so it renders verbatim instead of
-  # being reworded or escaped away. test_no_heredoc_in_command_substitution
-  # guards the structure that makes it safe.
-  assert_grep "firstmate's authority check" "$brief" \
-    "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
-  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
+  assert_grep 'Before your first `no-mistakes` command, read' "$brief" \
+    "no-mistakes DOD lost the trigger that sends the worker to the pipeline contract"
+  assert_grep "$ROOT/docs/crew-reference.md" "$brief" \
+    "no-mistakes DOD must point at the crew reference by absolute path"
+  assert_grep "Reading it then is part of the task" "$brief" \
+    "no-mistakes DOD must make reading the deferred contract mandatory, not optional"
+
+  # The always-present part keeps only what the worker acts on unprompted.
+  assert_grep "Delivery contract: mode=no-mistakes" "$brief" \
+    "no-mistakes DOD lost its machine-readable delivery contract line"
+  assert_grep 'done: PR {url} checks green' "$brief" \
+    "no-mistakes DOD lost its CI-green return point"
+
+  # ...and the deferred detail is gone from the brief itself, so the deferral is
+  # real rather than a second copy.
+  assert_no_grep 'preserve all relevant content' "$brief" \
+    "no-mistakes DOD still restates the --intent contract the reference owns"
+  assert_no_grep "Avoid \`--yes\`" "$brief" \
+    "no-mistakes DOD still restates the --yes rule the reference owns"
+  pass "fm-brief.sh: no-mistakes DOD defers the pipeline contract behind a named trigger"
 }
 
-test_ship_project_memory_wording() {
+# Everything the brief stopped saying must still be reachable. This test is the
+# other half of the deferral: it fails if the reference is missing or has lost a
+# contract the brief now assumes it carries.
+test_crew_reference_owns_every_deferred_contract() {
+  local ref
+  ref="$ROOT/docs/crew-reference.md"
+  assert_present "$ref" "docs/crew-reference.md is missing, so every deferred contract is unreachable"
+
+  assert_grep "## Closing a decision, blocker, or wait you opened" "$ref" \
+    "crew reference lost the section the escalation rule points at"
+  assert_grep "even when the answer you received is exactly what started that work" "$ref" \
+    "crew reference lost the rule that done:/working: never closes a decision"
+  assert_grep 'key=<slug>' "$ref" \
+    "crew reference lost the keyed-close requirement"
+
+  assert_grep "## Driving the no-mistakes pipeline" "$ref" \
+    "crew reference lost the section the definition of done points at"
+  assert_grep "do not hand-edit, commit, or fix findings while a run is active" "$ref" \
+    "crew reference lost the no-hand-edit-during-a-run rule"
+  assert_grep "\`--intent\`" "$ref" \
+    "crew reference lost the --intent contract"
+  assert_grep "ask-user findings are not yours to answer" "$ref" \
+    "crew reference lost the ask-user escalation rule"
+  assert_grep "\`--yes\`" "$ref" \
+    "crew reference lost the --yes prohibition"
+  assert_grep "no-mistakes axi run --help" "$ref" \
+    "crew reference lost the pointer to the authoritative installed-binary help"
+  pass "fm-brief.sh: every contract deferred out of the brief is reachable in the crew reference"
+}
+
+# The declared-wait rule is deliberately NOT deferred: workers do not reliably
+# notice that their own running loop has become a wait, so there is no moment to
+# load it at. It must stay in the always-present part, carry its own heading
+# rather than sit as one numbered item among equals, and state the mechanism -
+# fm-classify-lib.sh reads only the LAST status line.
+test_declared_wait_rule_is_upfront_and_salient() {
+  local home kind id brief
+  home="$TMP_ROOT/declared-wait-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-declared-wait-$kind"
+    case "$kind" in
+      ship) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 ;;
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    assert_grep "# Before you wait, declare it" "$brief" \
+      "$kind: the declared-wait rule lost its own heading and is buried again"
+    assert_grep "Declare it BEFORE you start waiting" "$brief" \
+      "$kind: the declared-wait rule lost its before-the-wait ordering"
+    # The observed failure was a classification error, not a salience one: every
+    # example used to name something outside the pipeline, so two workers on
+    # 2026-08-19 idled on their own validation round without declaring, because
+    # the run was their own work. Name that case, and keep the self-test off the
+    # phrasing that reproduces the miss.
+    assert_grep "own validation round returning through the gate counts" "$brief" \
+      "$kind: the declared-wait rule stopped naming the gate wait, the case workers actually miss"
+    assert_grep "am I working, or watching?" "$brief" \
+      "$kind: the declared-wait self-test must ask working-or-watching"
+    assert_no_grep "wait on something that is not me" "$brief" \
+      "$kind: the self-test reverted to internal-vs-external framing, which is what made workers skip their own gate wait"
+    assert_grep 'holds only while it is your LAST status line' "$brief" \
+      "$kind: the declared-wait rule lost the mechanism that makes declaring stick"
+    assert_grep "$home/state/$id.status" "$brief" \
+      "$kind: the declared-wait rule must carry the ready-to-run status command"
+    # It must NOT have been pushed behind a pointer. The crew reference is
+    # linked only from the escalation rule (and, on a no-mistakes ship, from the
+    # definition of done); a third pointer means the wait rule was deferred too.
+    local refs expected
+    refs=$(grep -c "docs/crew-reference.md" "$brief")
+    case "$kind" in ship) expected=2 ;; *) expected=1 ;; esac
+    [ "$refs" -eq "$expected" ] \
+      || fail "$kind: expected $expected crew-reference pointers, found $refs - the declared-wait rule must stay inline, not be deferred behind a trigger"
+  done
+  pass "fm-brief.sh: the declared-wait rule stays upfront with its own heading and mechanism"
+}
+
+test_ship_project_memory_points_at_the_bar_owner() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
   mkdir -p "$home/data"
   id="brief-memory-c1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
-    "project-memory contract lost the durable-knowledge bar"
-  assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
-    "project-memory contract lost pointer-over-copy guidance"
-  assert_grep "lacks \`## Maintaining this file\`, add that short self-governance section" "$brief" \
-    "project-memory contract lost the self-governance add-in-same-pass rule"
-  pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
+  assert_grep "bin/fm-ensure-agents-md.sh ." "$brief" \
+    "project-memory contract lost the command that owns and injects the authoring bar"
+  assert_grep "follow the bar you find there" "$brief" \
+    "project-memory contract must send the worker to the bar the script writes into the file"
+  assert_grep "skip \`AGENTS.md\` edits for trivial tasks" "$brief" \
+    "project-memory contract lost its proportionality rule"
+  pass "fm-brief.sh: project memory points at the script that owns the authoring bar"
+}
+
+# fm-ensure-agents-md.sh must really own the bar the brief now defers to, and
+# must really inject it, or the brief's pointer is a dangling promise.
+test_agents_md_helper_carries_the_authoring_bar() {
+  local proj out
+  proj="$TMP_ROOT/authoring-bar-proj"
+  mkdir -p "$proj"
+  printf '# Demo\n\nExisting project knowledge.\n' > "$proj/AGENTS.md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$proj" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed on an AGENTS.md lacking the section: $out"
+  assert_grep "## Maintaining this file" "$proj/AGENTS.md" \
+    "fm-ensure-agents-md.sh did not inject the self-governance section the brief defers to"
+  assert_grep "useful to almost every future agent session" "$proj/AGENTS.md" \
+    "injected section lost the durable-knowledge bar the brief stopped restating"
+  assert_grep "point to the authoritative file or command instead" "$proj/AGENTS.md" \
+    "injected section lost the pointer-over-copy bar the brief stopped restating"
+  pass "fm-ensure-agents-md.sh: injects the authoring bar the brief defers to"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
@@ -433,8 +537,10 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
     brief="$home/data/$id/brief.md"
     assert_grep "# Herdr lifecycle declaration - NOT ENABLED" "$brief" \
       "$kind brief silently omitted the Herdr declaration"
-    assert_grep "regenerate the brief with \`--herdr-lab\` before dispatch" "$brief" \
+    assert_grep "have the brief regenerated with \`--herdr-lab\` before you continue" "$brief" \
       "$kind brief missing the fail-visible regeneration instruction"
+    assert_grep "would hit the captain's live fleet" "$brief" \
+      "$kind brief must name the concrete harm, not the scaffold's own detection limit"
   done
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
@@ -657,18 +763,142 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     brief="$home/data/$id/brief.md"
     assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
-    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
-    assert_grep 'Use `awaiting: {why}`' "$brief" \
-      "$kind brief did not instruct the configured pause status"
-    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
-    assert_no_grep '`paused: {why}`' "$brief" \
+    assert_no_grep 'paused: {' "$brief" \
       "$kind brief still instructs the default paused status"
-    assert_grep 'a blocker or wait clears' "$brief" \
-      "$kind brief did not require durable resolution when a blocker clears"
-    assert_grep 'even when the answer is what started that work' "$brief" \
-      "$kind brief did not warn that an answer-started done/working never closes a decision"
+    # Crew scaffolds carry the declared-wait section with a ready-to-run command;
+    # a secondmate charter keeps its own prose form, because a secondmate's idle
+    # endpoint is healthy by design and needs no wedge-avoidance push.
+    case "$kind" in
+      ship|scout)
+        assert_grep 'awaiting: {what you await' "$brief" \
+          "$kind brief did not render the configured pause verb in its declaration command"
+        ;;
+      secondmate)
+        # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+        assert_grep 'Use `awaiting: {why}`' "$brief" \
+          "secondmate charter did not instruct the configured pause status"
+        ;;
+    esac
   done
+  assert_grep 'even when the answer is what started that work' \
+    "$home/data/brief-pause-verb-secondmate/brief.md" \
+    "secondmate charter lost its inline decision-closing contract"
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
+}
+
+# The append defect: re-scaffolding an existing brief used to have exactly one
+# outcome, a refusal, which did not remove the need to re-scaffold (a corrected
+# base ref, a changed delivery mode). Operators satisfied that need by hand,
+# appending the regenerated text onto the old brief, and two live briefs ended up
+# carrying a full second copy of # Setup, # Rules and the status protocol with
+# nothing marking which governed. These tests pin both halves of the fix: the
+# default still refuses and changes nothing, and --replace regenerates in place
+# while archiving what it superseded.
+test_rescaffold_refuses_by_default_and_changes_nothing() {
+  local home id brief before out status
+  home="$TMP_ROOT/rescaffold-refuse-home"
+  mkdir -p "$home/data"
+  id="brief-rescaffold-r1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  printf '\n## Hand-added task detail\nAcceptance criteria the operator filled in.\n' >> "$brief"
+  before=$(cat "$brief")
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes 2>&1); status=$?
+  expect_code 1 "$status" "a re-scaffold without --replace must refuse"
+  assert_contains "$out" "already exists" "refusal must name the collision"
+  assert_contains "$out" "--replace" "refusal must name the supported regeneration path"
+  [ "$(cat "$brief")" = "$before" ] \
+    || fail "a refused re-scaffold modified the existing brief"
+  assert_absent "$home/data/$id/brief.superseded-1.md" \
+    "a refused re-scaffold must not archive anything"
+  pass "fm-brief.sh: a re-scaffold without --replace refuses and leaves the brief untouched"
+}
+
+test_replace_regenerates_in_place_and_archives_the_superseded_brief() {
+  local home id brief out status section count
+  home="$TMP_ROOT/rescaffold-replace-home"
+  mkdir -p "$home/data"
+  id="brief-rescaffold-r2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  printf '\n## Hand-added task detail\nAcceptance criteria the operator filled in.\n' >> "$brief"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --replace 2>&1); status=$?
+  expect_code 0 "$status" "--replace must regenerate an existing brief (got: $out)"
+
+  # Replaced, not appended: every contract section appears exactly once, and the
+  # superseded mode is gone rather than sitting above the new one.
+  for section in "# Setup" "# Rules" "# Definition of done" "# Before you wait, declare it"; do
+    count=$(grep -c "^$section\$" "$brief")
+    [ "$count" -eq 1 ] \
+      || fail "--replace produced $count copies of '$section'; a regenerated brief must replace, never append"
+  done
+  count=$(grep -c '^Delivery contract: mode=' "$brief")
+  [ "$count" -eq 1 ] \
+    || fail "--replace left $count delivery contract lines; the brief must record exactly one"
+  assert_grep "Delivery contract: mode=direct-PR" "$brief" "--replace did not apply the new delivery mode"
+  assert_no_grep "Delivery contract: mode=no-mistakes" "$brief" "--replace left the superseded delivery mode in the brief"
+
+  # Nothing is destroyed: the filled-in task text stays recoverable, and the
+  # operator is told where, so regenerating never looks riskier than hand-editing.
+  assert_present "$home/data/$id/brief.superseded-1.md" "--replace must archive the superseded brief"
+  assert_grep "Hand-added task detail" "$home/data/$id/brief.superseded-1.md" \
+    "the archived brief lost the operator's filled-in task text"
+  assert_contains "$out" "brief.superseded-1.md" "--replace must tell the operator where the superseded brief went"
+
+  # A second replace archives alongside the first rather than clobbering it.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only --replace >/dev/null 2>&1
+  assert_present "$home/data/$id/brief.superseded-2.md" "a second --replace must archive under a fresh name"
+  assert_grep "Hand-added task detail" "$home/data/$id/brief.superseded-1.md" \
+    "a second --replace overwrote the first archive"
+  pass "fm-brief.sh: --replace regenerates in place and archives the superseded brief"
+}
+
+# --replace applies to every scaffold kind, so no kind is left with hand-editing
+# as its only regeneration path.
+test_replace_applies_to_every_scaffold_kind() {
+  local home id status
+  home="$TMP_ROOT/rescaffold-kinds-home"
+  mkdir -p "$home/data"
+
+  id="brief-replace-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout --replace >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "--replace must regenerate a scout brief"
+  assert_present "$home/data/$id/brief.superseded-1.md" "scout --replace must archive the superseded brief"
+
+  id="brief-replace-secondmate"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects --replace >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "--replace must regenerate a secondmate charter"
+  assert_present "$home/data/$id/brief.superseded-1.md" "secondmate --replace must archive the superseded charter"
+  pass "fm-brief.sh: --replace works for ship, scout and secondmate scaffolds"
+}
+
+# Every generated brief must carry each top-level section exactly once. This is
+# the shape bin/fm-spawn.sh refuses on, so the scaffold and the guard cannot
+# drift into disagreement.
+test_generated_briefs_carry_each_section_once() {
+  local home kind id brief dupes
+  home="$TMP_ROOT/section-uniqueness-home"
+  mkdir -p "$home/data"
+  for kind in no-mistakes direct-PR local-only scout secondmate herdr; do
+    id="brief-unique-$kind"
+    case "$kind" in
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 ;;
+      secondmate) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 ;;
+      herdr) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --herdr-lab >/dev/null 2>&1 ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$kind" >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind: brief was not scaffolded"
+    dupes=$(grep '^# ' "$brief" | sort | uniq -d)
+    [ -z "$dupes" ] \
+      || fail "$kind: brief repeats top-level sections, which bin/fm-spawn.sh refuses: $dupes"
+  done
+  pass "fm-brief.sh: every generated brief carries each top-level section exactly once"
 }
 
 test_scout_and_secondmate_load_decision_hold_policy() {
@@ -720,8 +950,11 @@ test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
-test_no_mistakes_dod_wording
-test_ship_project_memory_wording
+test_no_mistakes_dod_defers_pipeline_contract_to_reference
+test_crew_reference_owns_every_deferred_contract
+test_declared_wait_rule_is_upfront_and_salient
+test_ship_project_memory_points_at_the_bar_owner
+test_agents_md_helper_carries_the_authoring_bar
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
@@ -730,5 +963,9 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_rescaffold_refuses_by_default_and_changes_nothing
+test_replace_regenerates_in_place_and_archives_the_superseded_brief
+test_replace_applies_to_every_scaffold_kind
+test_generated_briefs_carry_each_section_once
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold

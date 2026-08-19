@@ -6,9 +6,9 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
-#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab] [--replace]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab] [--replace]
+#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects} [--replace]
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -50,11 +50,22 @@
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
 # Ship tasks include a project-memory section so durable project-intrinsic
-# learnings can be committed to AGENTS.md through the project's delivery path;
-# it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
-# over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
-# self-governance section when a touched project AGENTS.md lacks it.
-# Refuses to overwrite an existing brief.
+# learnings can be committed to AGENTS.md through the project's delivery path.
+# It points at bin/fm-ensure-agents-md.sh rather than restating the authoring bar:
+# that script owns the bar and writes it into the touched file's own
+# "## Maintaining this file" section, so the rule arrives in the artifact the
+# crewmate is editing at the moment it applies.
+# The generated brief is progressively disclosed. Its always-present part carries
+# only what a worker must act on unprompted; conditional contracts live in
+# docs/crew-reference.md, and the brief names the trigger that sends the worker
+# there (a decision/blocker/wait it opened clearing, or its first no-mistakes
+# command). The declared-wait rule is deliberately NOT deferred and carries its own
+# heading: deferral needs a trigger the worker recognises before it needs the rule,
+# and workers demonstrably do not recognise that their own running loop has become
+# a wait.
+# An existing brief is never appended to. Re-scaffolding refuses by default and
+# needs an explicit --replace, which archives the superseded brief alongside it as
+# brief.superseded-<n>.md so filled-in task text is recoverable.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,6 +115,8 @@ fi
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+REPLACE=0
+ARCHIVED=
 MODE=
 MODE_SET=0
 POS=()
@@ -125,6 +138,7 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --replace) REPLACE=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
@@ -167,8 +181,34 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
 fi
 
 BRIEF="$DATA/$ID/brief.md"
-[ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
+# A re-scaffold is a real need (a corrected base ref, a changed delivery mode), and
+# a bare refusal does not remove that need - it only pushes the operator into an
+# unguarded path. Hand-appending a regenerated brief onto the old one is what that
+# produced: two full Setup/Rules blocks in one file, with nothing marking which
+# governs, so the worker follows whichever copy it read last. --replace is the
+# supported path, and it archives the superseded brief instead of destroying the
+# filled-in task text that made hand-editing look safer than regenerating.
+if [ -e "$BRIEF" ]; then
+  if [ "$REPLACE" -eq 0 ]; then
+    echo "error: $BRIEF already exists; pass --replace to regenerate it (the superseded brief is archived, never appended to)" >&2
+    exit 1
+  fi
+  n=1
+  while [ -e "$DATA/$ID/brief.superseded-$n.md" ]; do n=$((n + 1)); done
+  ARCHIVED="$DATA/$ID/brief.superseded-$n.md"
+  mv "$BRIEF" "$ARCHIVED"
+fi
 mkdir -p "$DATA/$ID"
+
+# Announce the scaffold. A replace names the archive so the superseded brief -
+# which usually holds the filled-in task text - is never quietly lost.
+announce() {  # <detail>
+  if [ -n "$ARCHIVED" ]; then
+    echo "scaffolded: $BRIEF ($1; replaced, superseded brief archived at $ARCHIVED)"
+  else
+    echo "scaffolded: $BRIEF ($1)"
+  fi
+}
 
 shell_quote() {
   printf "'"
@@ -257,9 +297,9 @@ An empty queue is a healthy resting state, not a cue to invent work: never spawn
 If this charter cannot be carried out, append \`blocked: {why}\` or \`failed: {why}\` to the main status file and stop.
 EOF
 if [ "$SECONDMATE_CHARTER" = "{TASK}" ]; then
-  echo "scaffolded: $BRIEF (secondmate charter; replace {TASK})"
+  announce "secondmate charter; replace {TASK}"
 else
-  echo "scaffolded: $BRIEF (secondmate charter)"
+  announce "secondmate charter"
 fi
 exit 0
 fi
@@ -291,12 +331,46 @@ HERDR_SECTION=$(printf '%s\n' \
 else
 IFS= read -r -d '' HERDR_SECTION <<'EOF' || true
 # Herdr lifecycle declaration - NOT ENABLED
-**HARD SAFETY GATE:** this scaffold cannot inspect the task text that replaces `{TASK}` later.
-If the task will start, stop, delete, restart, profile, or otherwise drive Herdr lifecycle behavior, stop and regenerate the brief with `--herdr-lab` before dispatch.
+**HARD SAFETY GATE:** this brief carries no Herdr isolation contract, so any Herdr lifecycle command you run here would hit the captain's live fleet.
+If the task will start, stop, delete, restart, profile, or otherwise drive Herdr lifecycle behavior, stop and have the brief regenerated with `--herdr-lab` before you continue.
 Do not add Herdr lifecycle commands to this unguarded brief by hand.
 EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
+
+# Deferred crew contracts live in one tracked reference the worker opens at a
+# named trigger, so their cost is paid only by the tasks that reach that moment.
+CREW_REFERENCE="$FM_ROOT/docs/crew-reference.md"
+
+# The declared-wait rule is NOT deferred, and deliberately so. Deferring a rule
+# needs a trigger the worker recognises BEFORE it needs the rule, and the
+# evidence says workers do not reliably notice that their own running loop has
+# become a wait: five crews idled on a long job in one day with this rule
+# present in every brief, buried as one numbered item among equals. So it gets a
+# heading of its own, the exact command, and the mechanism that makes declaring
+# matter - bin/fm-classify-lib.sh reads only the LAST status line, so a later
+# working: line silently cancels the pause bin/fm-watch.sh was honoring.
+# The gate-wait example is load-bearing, not decoration. Every example here used
+# to name something outside the pipeline (an upstream release, a rate-limit reset,
+# a scheduled window), and two workers on 2026-08-19 idled on their own validation
+# round without declaring, each costing a false wedge escalation: the run is their
+# own work, so it did not read as an external wait. The self-test is therefore
+# "working or watching", never "is this something other than me" - that phrasing
+# reproduces the miss. Do not trim the gate-wait case back out.
+IFS= read -r -d '' WAIT_SECTION <<EOF || true
+# Before you wait, declare it
+Ask this before every long-running command: once it starts, am I working, or watching?
+If you are watching, you are waiting, and a wait has to be declared.
+**Your own validation round returning through the gate counts, and it is the case workers miss.**
+It is your work, so it does not feel like an external wait - but while it runs you are idle, and an idle pane is all firstmate can see.
+A CI run, a long build or test suite, a review you are hosting, a rate-limit reset, a scheduled window all count the same way.
+Declare it BEFORE you start waiting:
+   \`echo "$PAUSED_VERB: {what you await, and what will end it}" >> $STATUS_FILE\`
+Firstmate cannot tell a pane that is waiting on purpose from one that has wedged, so an undeclared wait makes it interrupt you to find out; a declared one is left alone and rechecked on a long cadence.
+The declaration holds only while it is your LAST status line - appending \`working:\` on top of it cancels the pause, and you look wedged again.
+This is not \`blocked:\`. Pause when the wait will clear on its own; block when firstmate has to act.
+EOF
+WAIT_SECTION=${WAIT_SECTION%$'\n'}
 
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
@@ -321,20 +395,18 @@ The report is the only thing that survives, so anything worth keeping must be in
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
-   would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
+   would act on and the needs-decision/blocked/$PAUSED_VERB/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
-   firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
-   treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
-   A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
-   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+   You own closing what you open: when a decision, blocker, or wait you declared stops being true,
+   read \`$CREW_REFERENCE\` first - only a matching \`resolved\` line closes it.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+
+$WAIT_SECTION
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
@@ -344,7 +416,7 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-l
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
-echo "scaffolded: $BRIEF (scout; replace {TASK})"
+announce "scout; replace {TASK}"
 exit 0
 fi
 
@@ -389,16 +461,12 @@ The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
-You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
-When starting no-mistakes, make \`--intent\` preserve all relevant content from this brief's \`# Task\` section plus every later accepted Firstmate requirement, clarification, constraint, exclusion, and supersession, carrying only each requirement's current accepted form; retain direct requirements instead of substituting a diff summary, and exclude generic operational, status, delivery, and other scaffold boilerplate unless it is task-specific.
-Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+Before your first \`no-mistakes\` command, read \`$CREW_REFERENCE\`.
+It owns how you drive the pipeline: that you answer gates rather than implement fixes, what \`--intent\` must carry, how an escalated decision comes back to the gate, and where you stop.
+Reading it then is part of the task, not optional background.
 
-Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
-  Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
+One rule from it stays here, because it fires against your instinct at the moment it applies: ask-user findings are never yours to answer.
+Escalate with \`needs-decision:\` and stop (rule 6). Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
@@ -436,30 +504,26 @@ $RULE1
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
-   needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
+   needs-decision/blocked/$PAUSED_VERB/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
-   Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
-   known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
-   a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
-   cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.
-   A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
-   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+   You own closing what you open: when a decision, blocker, or wait you declared stops being true,
+   read \`$CREW_REFERENCE\` first - only a matching \`resolved\` line closes it.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
 
+$WAIT_SECTION
+
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
-Record only project knowledge useful to almost every future session.
-For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
-If you touch a project \`AGENTS.md\` that lacks \`## Maintaining this file\`, add that short self-governance section from \`$FM_ROOT/bin/fm-ensure-agents-md.sh\` in the same pass.
+That script owns the authoring bar and writes it into the file's own \`## Maintaining this file\` section; follow the bar you find there for whatever you add.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+announce "ship, mode=$MODE; replace {TASK}"

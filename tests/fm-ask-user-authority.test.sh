@@ -20,8 +20,18 @@ test_primary_and_secondmate_instruction_generation() {
     "generated implementation brief lets the worker own an ask-user decision"
   assert_grep "Firstmate applies the authority contract in its \`AGENTS.md\`" "$ship" \
     "generated implementation brief bypasses the primary authority owner"
-  assert_grep "silently bypass firstmate's authority check and any required captain escalation" "$ship" \
-    "generated implementation brief permits silent ask-user auto-resolution"
+  # The procedure is deferred to the crew reference at a named trigger, but the
+  # boundary itself stays inline: it fires against the worker's instinct to just
+  # answer the question, so it must not depend on the reference having been read.
+  assert_grep "Escalate with \`needs-decision:\` and stop" "$ship" \
+    "generated implementation brief lost the inline escalate-and-stop action"
+  assert_grep "$ROOT/docs/crew-reference.md" "$ship" \
+    "generated implementation brief lost the pointer to the deferred pipeline procedure"
+  assert_grep "silently bypass firstmate's authority check and any required captain escalation" \
+    "$ROOT/docs/crew-reference.md" \
+    "the crew reference permits silent ask-user auto-resolution"
+  assert_grep "no-mistakes axi respond" "$ROOT/docs/crew-reference.md" \
+    "the crew reference lost how an escalated decision returns to the gate"
   assert_no_grep 'the captain, not you, owns the ask-user decisions' "$ship" \
     "generated implementation brief retained conflicting captain-only wording"
 
