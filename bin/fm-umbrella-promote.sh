@@ -18,9 +18,14 @@
 #   2. VALIDATE before writing anything - epic slug + repos:, and every story's
 #      id: / repo: / pr_base: / matching epic:, and every involved repo registered
 #      in this home's data/projects.md.
-#   3. MOVE the epic dir -> data/plans/<epic-dir>/ (where the dashboard/dispatch
-#      read). Idempotent and never-clobber: an existing identical target is
-#      reconciled, a DIFFERING target refuses rather than clobbering.
+#   3. MOVE the epic dir -> data/plans/<epic-dir>/ (the canonical, durable copy
+#      the dashboard/dispatch read) and leave a BACK-SYMLINK in the umbrella at
+#      umbrellas/<id>/plans/<epic-dir> pointing to it, so the captain keeps
+#      designing the epic in the lab (next to repos/) with edits writing through
+#      to the real files - one source of truth, no duplicate, no "materialize on
+#      done" step. Idempotent and never-clobber: an existing identical target is
+#      reconciled, a DIFFERING target refuses rather than clobbering, and the
+#      back-symlink is replaced/verified rather than erroring on a re-run.
 #   4. SEED each story into the backlog deriving id/title-tag/repo FROM the story
 #      frontmatter, so backlog ids + `[<epic>]` tags always match the story files
 #      by construction (no orphans, one epic). Idempotent: an already-present
@@ -166,6 +171,9 @@ src_matches=()
 if [ -d "$UMBRELLA_DIR/plans" ]; then
   for d in "$UMBRELLA_DIR"/plans/*/; do
     [ -f "${d}epic.md" ] || continue
+    # Skip the post-promote back-symlink (points at data/plans/<epic>): it is not
+    # a fresh source, so a re-run falls through to the .promoted reconcile path.
+    [ -L "${d%/}" ] && continue
     src_matches+=("${d%/}")
   done
 fi
@@ -385,6 +393,26 @@ done
 # ============================================================================
 
 # --- move the epic dir into data/plans/ -------------------------------------
+# The epic is canonical in data/plans (durable + synced on homes where data/ is
+# a git repo), and the umbrella keeps only a BACK-SYMLINK to it, so the captain
+# can keep designing the epic in the lab (next to repos/) with edits writing
+# through to the real files - one source of truth, no duplicate. The umbrella is
+# machine-local scratch and never synced, so an absolute link target is stable
+# and correct regardless of the cwd it is read from. Idempotent: replaces a
+# stale link, never errors on a re-run, and never leaves a dangling link.
+ensure_backsymlink() {
+  [ -d "$EPIC_DST" ] || return 0   # canonical dir absent: create no dangling link
+  local link="$UMBRELLA_DIR/plans/$EPIC_BASE" target
+  target="$(cd "$PLANS_DST" && pwd)/$EPIC_BASE"
+  mkdir -p "$UMBRELLA_DIR/plans" || die "cannot create $UMBRELLA_DIR/plans"
+  # A real dir/file at the link path (a stale pre-symlink copy) must go first;
+  # an existing symlink is replaced in place by `ln -sfn`.
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    rm -rf -- "$link" || die "cannot remove stale $link before linking"
+  fi
+  ln -sfn "$target" "$link" || die "cannot create back-symlink $link -> $target"
+}
+
 mkdir -p "$PLANS_DST" || die "cannot create $PLANS_DST"
 
 if [ -n "$EPIC_SRC" ]; then
@@ -395,15 +423,18 @@ if [ -n "$EPIC_SRC" ]; then
     # Target already exists (a prior interrupted run, or an unrelated collision).
     if diff -rq "$EPIC_SRC" "$EPIC_DST" >/dev/null 2>&1; then
       rm -rf -- "$EPIC_SRC" || die "cannot remove already-promoted source $EPIC_SRC"
-      say "epic dir already at data/plans/$EPIC_BASE (identical); removed the umbrella copy."
+      ensure_backsymlink
+      say "epic dir already at data/plans/$EPIC_BASE (identical); replaced the umbrella copy with a back-symlink."
     else
       die "data/plans/$EPIC_BASE already exists and DIFFERS from the umbrella copy; refusing to clobber. Reconcile them by hand, then re-run."
     fi
   else
     mv "$EPIC_SRC" "$EPIC_DST" || die "failed to move $EPIC_SRC -> $EPIC_DST"
-    say "moved epic dir -> data/plans/$EPIC_BASE"
+    ensure_backsymlink
+    say "moved epic dir -> data/plans/$EPIC_BASE (umbrella keeps a back-symlink to it)"
   fi
 else
+  ensure_backsymlink   # heal an older plain-mv promote that left no back-symlink
   say "epic dir already promoted to data/plans/$EPIC_BASE (reconciling backlog only)."
 fi
 
