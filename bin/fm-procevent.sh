@@ -194,20 +194,14 @@ staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
 # waits for its own capture, while reconcile declines and retries next cycle,
 # because reconcile must never block on someone else's application.
 adapter_autohandle() {  # <wait|nowait> <adapter> <source-id> <result-file>
-  local mode=$1 adapter=$2 id=$3 result=$4 script seq lock status
+  local mode=$1 adapter=$2 id=$3 result=$4 script seq status
   script=$(adapter_script "$adapter")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
   seq=$(fm_procevent_result_sequence "$result") || return 1
   case "$seq" in ''|*[!0-9]*) return 1 ;; esac
-  (umask 077; mkdir -p "$(fm_procevent_claim_root)") || return 1
-  lock=$(fm_procevent_apply_lock_path "$id")
-  if [ "$mode" = wait ]; then
-    fm_lock_acquire_wait "$lock" || return 1
-  else
-    fm_lock_try_acquire "$lock" || return 1
-  fi
+  fm_procevent_apply_lock_acquire "$mode" "$id" || return 1
   if fm_procevent_is_handled "$STATE" "$id" "$seq"; then
-    fm_lock_release "$lock"
+    fm_procevent_apply_lock_release "$id"
     return 0
   fi
   # Silenced exactly like the terminal seam above, so an adapter that has no
@@ -216,7 +210,7 @@ adapter_autohandle() {  # <wait|nowait> <adapter> <source-id> <result-file>
   # announced, and the handler's own call reproduces the diagnostics in full.
   "$script" autohandle "$id" "$seq" "$result" >/dev/null 2>&1
   status=$?
-  fm_lock_release "$lock"
+  fm_procevent_apply_lock_release "$id"
   return "$status"
 }
 

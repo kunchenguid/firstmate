@@ -25,6 +25,8 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 Whether a recorded secondmate is still CONSUMING its own durable wake queue is a separate question that a live agent process does not answer, and `bin/fm-secondmate-wake-check.sh` owns it: its header states the signal, why the two rejected candidates were rejected, and which windows it leaves open, while the settings above bound its cadence and threshold.
 It runs as an adjunct to the watcher's ordinary cycle and to the session-start liveness sweep rather than as a monitor of its own, and it only reads - arming a watcher in another home stays forbidden.
+The watcher's external reconciliation, secondmate scan, backend probe, remote observation, and recovery-delivery calls use fixed internal deadlines owned by `bin/fm-watch.sh` and `bin/fm-pending-reply-lib.sh`, not operator configuration.
+The only unbounded supervision-loop dependency is its in-process wake-queue lock wait: moving either wake-delivering caller into a bounded child would swallow the action that exits the watcher, while dead holders are already reclaimed and the remaining live-holder case is a separate defect.
 
 ## Pi Calm preference (config/calm)
 

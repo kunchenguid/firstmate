@@ -63,6 +63,15 @@
 #                          unconsumed past its bound, so that home's wake loop is
 #                          not delivering even though its agent process may be
 #                          alive; bin/fm-secondmate-wake-check.sh owns the predicate
+# Every dependency the supervision loop shells out to is hard-bounded except
+# the wake-queue lock wait. fm_lock_acquire_wait is a sourced function running
+# inside the watcher process, so fm_run_timed cannot wrap it. Its two in-loop
+# callers - procevent_surface_queued and resurface_after_downtime through
+# fm_recovery_marker_arm_check - can call wake, which exits the watcher; moving
+# either into a bounded subshell would swallow that actionable exit in a child.
+# Dead lock holders are already reclaimed after FM_LOCK_STALE_AFTER by
+# fm_lock_try_acquire, so the residual gap is only a live holder that never
+# releases the wake-queue lock.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -95,6 +104,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -132,6 +143,22 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+# Adapter application can traverse SSH and lifecycle locks, so reconciliation gets 60 seconds.
+PROCEVENT_RECONCILE_TIMEOUT=60
+# Inactive reconciliation has its own budget, with 60 seconds of caller-side backstop.
+INACTIVE_RECONCILE_TIMEOUT=60
+# A secondmate scan can wait on local reads and this home's queue lock for 30 seconds.
+SECONDMATE_WAKE_SCAN_TIMEOUT=30
+# Backend state and capture probes get 10 seconds before the cycle continues conservatively.
+WATCH_BACKEND_PROBE_TIMEOUT=10
+for watcher_timeout in \
+  "$PROCEVENT_RECONCILE_TIMEOUT" \
+  "$INACTIVE_RECONCILE_TIMEOUT" \
+  "$SECONDMATE_WAKE_SCAN_TIMEOUT" \
+  "$WATCH_BACKEND_PROBE_TIMEOUT"; do
+  [ "$watcher_timeout" -gt 0 ] || exit 1
+done
+unset watcher_timeout
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
 # remaining rendered-text fallback (Grok only).
@@ -407,7 +434,7 @@ clear_pause_tracking() {  # <window>
 # Only a confidently dead ordinary crew may recover paused classification after
 # fm-crew-state has fallen back to stopped or unknown.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive
+  local win=$1 task=$2 key last recheck_file class agent_alive agent_alive_status
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
@@ -420,7 +447,15 @@ pause_state_class() {  # <window> <task>
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      agent_alive_status=0
+      agent_alive=$(fm_run_timed "$WATCH_BACKEND_PROBE_TIMEOUT" bash -c \
+        '. "$1"; fm_backend_agent_alive "$2" "$3"' _ "$SCRIPT_DIR/fm-backend.sh" \
+        "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive_status=$?
+      if [ "$agent_alive_status" -ne 0 ]; then
+        [ "$agent_alive_status" -eq 124 ] \
+          && triage_log "agent-alive probe exceeded its 10s bound: $win"
+        agent_alive=unknown
+      fi
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
         printf 'none'
@@ -437,7 +472,15 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+    agent_alive_status=0
+    agent_alive=$(fm_run_timed "$WATCH_BACKEND_PROBE_TIMEOUT" bash -c \
+      '. "$1"; fm_backend_agent_alive "$2" "$3"' _ "$SCRIPT_DIR/fm-backend.sh" \
+      "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive_status=$?
+    if [ "$agent_alive_status" -ne 0 ]; then
+      [ "$agent_alive_status" -eq 124 ] \
+        && triage_log "agent-alive probe exceeded its 10s bound: $win"
+      agent_alive=unknown
+    fi
     if [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"
       printf 'none'
@@ -676,7 +719,7 @@ heartbeat_scan_finds_actionable() {
 # supervision cycle: the reader is a short-lived subprocess of THIS watcher, not
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 event_wait_or_sleep() {
-  local w b session first_backend="" first_session="" rec rc
+  local w b session first_backend="" first_session="" rec rc capability_status
   local windows=()
   while IFS= read -r w; do
     b=$(window_backend "$w")
@@ -706,9 +749,15 @@ event_wait_or_sleep() {
   # read); re-probed only when the backend/session key changes.
   if [ "$_event_cap_key" != "$first_backend:$first_session" ]; then
     _event_cap_key="$first_backend:$first_session"
-    if fm_backend_events_capable "$first_backend" "$first_session"; then
+    capability_status=0
+    fm_run_timed "$WATCH_BACKEND_PROBE_TIMEOUT" bash -c \
+      '. "$1"; fm_backend_events_capable "$2" "$3"' _ "$SCRIPT_DIR/fm-backend.sh" \
+      "$first_backend" "$first_session" || capability_status=$?
+    if [ "$capability_status" -eq 0 ]; then
       _event_cap_ok=1
     else
+      [ "$capability_status" -eq 124 ] \
+        && triage_log "backend event-capability probe exceeded its 10s bound: $first_backend:$first_session"
       _event_cap_ok=0
     fi
     _event_cap_fails=0
@@ -884,7 +933,11 @@ while :; do
   # only republishes results already captured durably and restarts a source
   # whose owner is gone. It is a no-op with nothing registered.
   if [ -d "$STATE/procevent" ]; then
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+    procevent_reconcile_status=0
+    FM_HOME="$FM_HOME" fm_run_timed "$PROCEVENT_RECONCILE_TIMEOUT" \
+      "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || procevent_reconcile_status=$?
+    [ "$procevent_reconcile_status" -eq 124 ] \
+      && triage_log "process-event reconciliation exceeded its 60s bound"
   fi
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
@@ -899,12 +952,18 @@ while :; do
   # was created, so quiet cycles never wake firstmate or consume model tokens.
   inactive_out=
   if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    fm_run_timed "$INACTIVE_RECONCILE_TIMEOUT" \
     "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
     if [ -n "$inactive_out" ]; then
       wake "check: inactive-outcome"
     fi
   else
-    triage_log "inactive-outcome reconciliation unavailable"
+    inactive_reconcile_status=$?
+    if [ "$inactive_reconcile_status" -eq 124 ]; then
+      triage_log "inactive-outcome reconciliation exceeded its 60s bound"
+    else
+      triage_log "inactive-outcome reconciliation unavailable"
+    fi
   fi
 
   # A secondmate is woken by its own watcher, whose arming depends on its own
@@ -919,12 +978,18 @@ while :; do
   # secondmate through its own endpoint so it arms its own watcher.
   mate_wake_out=
   if mate_wake_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    fm_run_timed "$SECONDMATE_WAKE_SCAN_TIMEOUT" \
     "$SCRIPT_DIR/fm-secondmate-wake-check.sh" scan 2>/dev/null); then
     if [ -n "$mate_wake_out" ]; then
       wake "check: secondmate-wake-stall"
     fi
   else
-    triage_log "secondmate wake-loop check unavailable"
+    secondmate_scan_status=$?
+    if [ "$secondmate_scan_status" -eq 124 ]; then
+      triage_log "secondmate wake-loop scan exceeded its 30s bound"
+    else
+      triage_log "secondmate wake-loop check unavailable"
+    fi
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
@@ -1069,7 +1134,15 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    capture_status=0
+    tail40=$(fm_run_timed "$WATCH_BACKEND_PROBE_TIMEOUT" bash -c \
+      '. "$1"; fm_backend_capture "$2" "$3" "$4" "$5"' _ "$SCRIPT_DIR/fm-backend.sh" \
+      "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || capture_status=$?
+    if [ "$capture_status" -ne 0 ]; then
+      [ "$capture_status" -eq 124 ] \
+        && triage_log "backend capture exceeded its 10s bound: $w"
+      continue
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
@@ -1084,7 +1157,16 @@ EOF
     # harness renders its busy indicator) so busy-looking strings in displayed
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
-    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    busy_status=0
+    fm_run_timed "$WATCH_BACKEND_PROBE_TIMEOUT" bash -c \
+      '. "$1"; window_is_busy "$2" "$3"' _ "$WATCH_PATH" "$w" "$tail40" || busy_status=$?
+    if [ "$busy_status" -eq 0 ]; then
+      busy_now=0
+    else
+      busy_now=1
+      [ "$busy_status" -eq 124 ] \
+        && triage_log "window busy-state probe exceeded its 10s bound: $w"
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

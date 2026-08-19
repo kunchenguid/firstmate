@@ -78,6 +78,11 @@
 #   FM_PENDING_REPLY_SEND_HOOK    optional command template for recovery delivery
 #                                 (tests); receives task_id and full message as args
 #   FM_PENDING_REPLY_NOW          optional fixed epoch for deterministic tests
+#
+# Watcher-owned transport calls are hard-bounded at fixed, non-configurable
+# values: 30 seconds for recovery sends and remote observation, and 10 seconds
+# for local backend observation. A deadline keeps the record unresolved and
+# takes the same conservative branch as the call's existing failure result.
 
 # shellcheck source=bin/fm-marker-lib.sh
 _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PENDING_REPLY_LIB_DIR="."
@@ -89,10 +94,25 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-timeout-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
+# Remote observation can traverse SSH, so it gets a finite watcher-cycle budget.
+PENDING_REPLY_REMOTE_OBSERVE_TIMEOUT=30
+# Recovery delivery can wait on a wedged backend, so it gets a finite budget.
+PENDING_REPLY_SEND_TIMEOUT=30
+# Local backend probes must leave most of the watcher cycle available.
+PENDING_REPLY_BACKEND_TIMEOUT=10
+for pending_reply_timeout in \
+  "$PENDING_REPLY_REMOTE_OBSERVE_TIMEOUT" \
+  "$PENDING_REPLY_SEND_TIMEOUT" \
+  "$PENDING_REPLY_BACKEND_TIMEOUT"; do
+  [ "$pending_reply_timeout" -gt 0 ] || return 1
+done
+unset pending_reply_timeout
 
 fm_pending_reply_now() {
   if [ -n "${FM_PENDING_REPLY_NOW:-}" ]; then
@@ -649,13 +669,33 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
 # another read busy, and a weak rendered idle degrades to `fallback-idle`,
 # which the caller accepts as idle only after its grace window.
 fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] [harness]
-  local backend=$1 target=$2 expected_label=${3-} harness=${4-} native tail40
-  native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || printf 'unknown')
+  local backend=$1 target=$2 expected_label=${3-} harness=${4-} native tail40 native_status=0 capture_status=0
+  native=$(fm_run_timed "$PENDING_REPLY_BACKEND_TIMEOUT" bash -c \
+    '. "$1"; fm_backend_busy_state "$2" "$3"' _ \
+    "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh" "$backend" "$target" 2>/dev/null) || native_status=$?
+  if [ "$native_status" -eq 124 ]; then
+    if declare -F triage_log >/dev/null 2>&1; then
+      triage_log "pending-reply backend observation exceeded its 10s bound: $target"
+    fi
+    printf 'unknown'
+    return 0
+  elif [ "$native_status" -ne 0 ]; then
+    native=unknown
+  fi
   case "$native" in
     busy|idle) printf '%s' "$native"; return 0 ;;
   esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 "$expected_label" 2>/dev/null) \
-    || { printf 'unknown'; return 0; }
+  tail40=$(fm_run_timed "$PENDING_REPLY_BACKEND_TIMEOUT" bash -c \
+    '. "$1"; fm_backend_capture "$2" "$3" "$4" "$5"' _ \
+    "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh" "$backend" "$target" 40 "$expected_label" \
+    2>/dev/null) || capture_status=$?
+  if [ "$capture_status" -ne 0 ]; then
+    if [ "$capture_status" -eq 124 ] && declare -F triage_log >/dev/null 2>&1; then
+      triage_log "pending-reply backend capture exceeded its 10s bound: $target"
+    fi
+    printf 'unknown'
+    return 0
+  fi
   if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
     | fm_busy_lines_match "$harness"; then
     printf 'busy'
@@ -826,9 +866,15 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   else
     if [ -z "$parent_home" ] || [ ! -d "$parent_home" ]; then
       send_status=1
-    elif ! env FM_HOME="$parent_home" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
-      "$_FM_PENDING_REPLY_LIB_DIR/fm-send.sh" "$task_id" "$msg"; then
-      send_status=1
+    else
+      send_status=0
+      fm_run_timed "$PENDING_REPLY_SEND_TIMEOUT" env \
+        FM_HOME="$parent_home" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+        "$_FM_PENDING_REPLY_LIB_DIR/fm-send.sh" "$task_id" "$msg" || send_status=$?
+      if [ "$send_status" -eq 124 ] && declare -F triage_log >/dev/null 2>&1; then
+        triage_log "pending-reply recovery send exceeded its 30s bound: $task_id"
+      fi
+      [ "$send_status" -eq 0 ] || send_status=1
     fi
   fi
   if [ "$send_status" = 0 ]; then
@@ -1207,7 +1253,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
-  local observation observation_task found i
+  local observation observation_status observation_task found i
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
@@ -1296,8 +1342,17 @@ fm_pending_reply_tick() {  # <state-dir>
         done
         if [ "$found" = 0 ]; then
           if [ -n "$remote_host" ]; then
-            observation=$("$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
-              fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
+            observation_status=0
+            observation=$(fm_run_timed "$PENDING_REPLY_REMOTE_OBSERVE_TIMEOUT" \
+              "$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
+              fm-remote-secondmate-control.sh observe "$task_id" \
+              < /dev/null 2>/dev/null) || observation_status=$?
+            if [ "$observation_status" -ne 0 ]; then
+              if [ "$observation_status" -eq 124 ] && declare -F triage_log >/dev/null 2>&1; then
+                triage_log "remote secondmate observation exceeded its 30s bound: $task_id"
+              fi
+              observation=unknown
+            fi
             case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
           else
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")

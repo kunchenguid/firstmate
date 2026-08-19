@@ -231,7 +231,6 @@ cmd_scan() {
   if [ "$startup" -eq 0 ] && [ "$(scan_marker_age)" -lt "$SCAN_SECS" ]; then
     return 0
   fi
-  write_scan_marker || status=1
   for meta in "$STATE"/*.meta; do
     is_secondmate_meta "$meta" || continue
     id=$(basename "$meta" .meta)
@@ -258,8 +257,11 @@ cmd_scan() {
           status=1
         fi
         ;;
-    esac
+      esac
   done
+  if [ "$status" -eq 0 ]; then
+    write_scan_marker || status=1
+  fi
   return "$status"
 }
 

@@ -93,17 +93,38 @@ fm_procevent_apply_lock_path() {
   printf '%s/%s.apply.lock\n' "$(fm_procevent_claim_root)" "$1"
 }
 
-fm_procevent_source_lock_acquire() {
-  local id=$1 root
-  fm_procevent_source_id_valid "$id" || return 1
+fm_procevent_claim_root_prepare() {
+  local root
   root=$(fm_procevent_claim_root)
   (umask 077; mkdir -p "$root") || return 1
   [ -d "$root" ] && [ ! -L "$root" ] || return 1
+}
+
+fm_procevent_source_lock_acquire() {
+  local id=$1
+  fm_procevent_source_id_valid "$id" || return 1
+  fm_procevent_claim_root_prepare || return 1
   fm_lock_acquire_wait "$(fm_procevent_source_lock_path "$id")"
 }
 
 fm_procevent_source_lock_release() {
   fm_lock_release "$(fm_procevent_source_lock_path "$1")"
+}
+
+fm_procevent_apply_lock_acquire() {  # <wait|nowait> <source-id>
+  local mode=$1 id=$2 lock
+  fm_procevent_source_id_valid "$id" || return 1
+  fm_procevent_claim_root_prepare || return 1
+  lock=$(fm_procevent_apply_lock_path "$id")
+  case "$mode" in
+    wait) fm_lock_acquire_wait "$lock" ;;
+    nowait) fm_lock_try_acquire "$lock" ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_procevent_apply_lock_release() {
+  fm_lock_release "$(fm_procevent_apply_lock_path "$1")"
 }
 
 fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <argv...>
