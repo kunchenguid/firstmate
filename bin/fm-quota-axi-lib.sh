@@ -8,8 +8,9 @@
 # This file is the single owner of that version number. bin/fm-bootstrap.sh
 # turns a failing check into the operator-facing MISSING diagnostic, which is
 # what keeps an older build from reaching a dispatch intake at all.
+# Version 0.1.29 is the first compatible TraeX model-load and model-quota contract.
 
-FM_QUOTA_AXI_MIN=0.1.17
+FM_QUOTA_AXI_MIN=0.1.29
 
 fm_quota_axi_compatible() {
   local timeout=${1:-} output parts major minor patch extra

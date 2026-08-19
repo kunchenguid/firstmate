@@ -2,7 +2,7 @@
 name: quota-array-dispatch
 description: >-
   Agent-only decision procedure for resolving a matched crew-dispatch profile
-  array from current quota-axi output, including effective headroom and usable-runway evidence.
+  array from current quota-axi output, including effective headroom, usable runway, and configured telemetry constraints.
   Load when a dispatch rule or default resolves to more than one profile candidate.
 user-invocable: false
 metadata:
@@ -17,6 +17,8 @@ This skill is the single owner of the completion-aware profile-array selection p
 `quota-axi` remains data-only, reports whatever granularity the vendor supplies, and never recommends, selects, ranks, or infers a route.
 Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy, or producer-side route recommendation.
 Deterministic shell owns only schema, configuration, and version validation plus concrete spawn safeguards; every model-to-provider, provider-to-credential, and quota-applicability relation is yours to establish transparently and to show your evidence for.
+The optional per-candidate `preferWhileLoadBelowPercent` field is a local profile-array policy input, not provider data or shared product policy.
+It is valid only for a TraeX candidate with an explicit model and a positive numeric threshold.
 
 ## Collect facts
 
@@ -26,10 +28,12 @@ For each candidate, preserve explicit `harness`, `model`, and `provider`; `harne
 
 - task/profile fit and required reasoning class
 - applicable effective headroom (`effectivePercentRemaining`) from the established provider/model scope
-- usable runway status, `usableRunwaySeconds`, `projectedExhaustedAt`, `limitingWindowId`, `projectionConfidence`, `projectionBasis`, and any `unmeasurableWindowIds`
+- usable runway status, `usableRunwaySeconds`, `projectedExhaustedAt`, `limitingWindowId`, `projectionConfidence`, and any `unmeasurableWindowIds`; every projection is cycle-average, so the current contract has no `projectionBasis` field
 - the task-completion horizon and the evidence and confidence used to estimate it
 - effective pace, signed reserve per window, and worst reserve (`worstReservePercentPoints` or minimum signed reserve) for later diagnostic tie-breaking
-- schema notes when runway or pace fields are absent
+- for TraeX, the exact normalized `models[]` record joined by `catalogId`, including `load.status`, `load.percent`, `load.stale`, `quota.status`, `quota.scope`, `quota.windowIds`, `quota.relationship`, and `quota.sharing`
+- the configured `preferWhileLoadBelowPercent` value, when present
+- schema notes when runway, pace, or model telemetry fields are absent
 
 Stale raw windows are diagnostic, never headroom or fabricated runway.
 Grok's `credits.remaining` is a prepaid balance unrelated to `percentRemaining`; never read it as exhaustion.
@@ -47,8 +51,26 @@ Name the evidence for each relation you assert so the conclusion is inspectable.
 2. Apply quota at the granularity the vendor actually supplies.
    A provider-level or `all_models`/`all_products` scope bounds every model you established in that family, including one with no window of its own.
    A named-model or named-product scope is an additional bound for that model alone and is irrelevant to every other model in the family.
-   Read `quotaSemantics.description`, which states the vendor's own bounding rule.
+   Treat `quotaSemantics.effectiveAvailability` as the structured declaration of applicable scopes and bounds.
+   When a full snapshot includes `quotaSemantics.description`, use it as explanatory evidence; default `--json` legitimately omits it, so never require a second snapshot just to obtain prose.
 3. Record what remains unknown instead of converting it into a verdict.
+
+### TraeX model joins
+
+For TraeX, the same `quota-axi --json` snapshot normalizes the harness's read-only model catalog into `providers[].models[]`.
+Join the configured model to exactly one `models[].catalogId`; do not match by display label, backend name, array position, or the captain-approved display-name mapping.
+A fresh TraeX provider record whose normalized catalog does not contain that exact `catalogId` is concrete unsupported-model evidence.
+An unavailable, errored, rate-limited, auth-required, or stale provider record does not prove catalog absence and remains explicit uncertainty unless its selected credential is separately proven unusable.
+Do not run another catalog command for this array decision: the one quota snapshot already contains the normalized TraeX catalog, load, and quota joins.
+
+TraeX `load.percent` is provider-reported model load, can exceed 100, and is never quota usage, quota used, or quota remaining.
+Only a fresh record with `load.status: "known"`, `load.stale: false`, and a numeric `load.percent` can satisfy or violate `preferWhileLoadBelowPercent`.
+A value strictly below the configured threshold makes that otherwise viable TraeX candidate the explicit local preference; a value at or above the threshold blocks it.
+Missing, invalid, or stale load neither satisfies the preference nor blocks the candidate; disclose the uncertainty and continue with quota, runway, pace, fit, and reasoning evidence.
+
+Join `quota.status: "authoritative"` through its exact `quota.scope` to `quotaSemantics.effectiveAvailability[].scope`, and use `quota.windowIds` only as exact joins to `windows[]`.
+`not_reported`, `not_applicable`, or `invalid` quota is not zero headroom.
+Structurally equal TraeX windows remain distinct model-scoped evidence when `sharing` is `unknown`; never infer a shared family or account pool from equal values.
 
 ## Authentication is scoped to the selected surface
 
@@ -77,7 +99,9 @@ Negative reserve means usage is ahead of reset pace and creates conservation pre
 Positive reserve means usage is behind reset pace.
 `on_pace` is neutral.
 Conservation pressure is present for effective pace status `ahead`, effective pace status is `mixed` and any `aheadWindowIds` remain, or a bounding window is `ahead`.
+When pace is the first unresolved comparison, known `behind` evidence has less conservation pressure than `on_pace`, which has less than `ahead`; compare signed reserve within the same pace class without turning it into a score.
 `unknown` is valid explicit uncertainty from quota-axi, not parser failure or permission to assume health.
+A candidate with unknown pace remains eligible, but known lower conservation pressure can justify the choice when all earlier completion evidence is otherwise comparable.
 
 ## Selection order
 
@@ -85,26 +109,34 @@ Apply only among candidates satisfying required fit and strongest reasoning clas
 Never use headroom, runway, pace, or reserve to silently replace that reasoning class.
 
 1. Concrete contradictory evidence or malformed configuration: stop and report the tuple and that evidence.
+   Block only the affected candidate when the contradiction is candidate-scoped and another configured candidate remains usable; refuse the whole array only for malformed configuration or when no candidate can proceed.
+   A fresh authoritative applicable scope with `effectivePercentRemaining` at zero, `runway.status: "exhausted_now"`, or a joined provider depletion flag is concrete depleted-quota evidence for that candidate.
    Unmeasurable quota, a missing model-level window, an absent runway field, and a credential surface quota-axi does not model are uncertainty, never this rule.
-2. Honor any explicit captain instruction that sets a floor for that candidate before the generic comparison.
-   Do not invent a generic percentage floor or treat a low percentage as an automatic failure.
-3. Keep the strongest-reasoning class when every candidate is tight or completion evidence is poor.
+2. Apply `preferWhileLoadBelowPercent` only through the exact fresh TraeX model join above.
+   A known value below the threshold establishes the configured preference only when the candidate has no known completion shortfall; it never rescues depleted quota, a known runway that ends before likely completion, unsupported model evidence, an unusable credential, incompatible task fit, or a weaker-than-required reasoning class.
+   A known value at or above the threshold blocks that candidate, while unknown load leaves it eligible without preference.
+   Never invent a generic percentage floor or apply a configured threshold to quota remaining.
+3. Honor any explicit captain instruction that sets a floor for that candidate before the generic comparison.
+   The current concrete instruction overrides a conflicting local profile preference within its exact scope.
+4. Keep the strongest-reasoning class when every candidate is tight or completion evidence is poor.
    Dispatch inside that class when a candidate can proceed, or report that its strongest-class choice cannot proceed rather than downgrading it to conserve quota.
-4. Compare comparable-fit candidates on their applicable effective headroom and usable runway.
+5. Compare comparable-fit candidates on their applicable effective headroom and usable runway.
    Eliminate a candidate only when another candidate Pareto-dominates it on both dimensions, with at least one dimension strictly better.
    Establish dominance only from comparable known evidence, never by treating absent, `unknown`, or unmeasurable headroom or runway as zero or as a healthy value.
-5. Prefer supported runway evidence that projects availability through the inspectable likely-completion horizon.
+6. Prefer supported runway evidence that projects availability through the inspectable likely-completion horizon.
+   `projected_exhaustion` reaches only its finite `usableRunwaySeconds`; `through_reset` means every authoritative current-cycle bound reaches its own reset without exhaustion and has no synthetic finite deadline.
+   When a bound resets before the likely completion horizon, `through_reset` is positive evidence that the candidate crosses that reset, while a finite projection ending before completion is a known shortfall.
    Known evidence that does not reach that horizon is inferior to known evidence that does, even when its signed reserve is less negative.
-   Preserve projection confidence and basis, the limiting window, and the horizon estimate in the rationale rather than hiding them in a score or model-specific heuristic.
-6. Resolve remaining uncertainty explicitly.
+   Preserve projection confidence, the cycle-average basis, the limiting window when finite, and the horizon estimate in the rationale rather than hiding them in a score or model-specific heuristic.
+7. Resolve remaining uncertainty explicitly.
    An authenticated candidate with unknown or unmeasurable headroom or runway stays eligible and cannot be silently excluded or assumed sustainable.
    Prefer known viable evidence when otherwise comparable, and report uncertainty or ask the captain when it still prevents a justified choice.
-7. Use pace and signed reserve only as later diagnostic tie-break evidence among candidates still unresolved after headroom, runway, likely-completion viability, and uncertainty.
+8. Use pace and signed reserve only as later diagnostic tie-break evidence among candidates still unresolved after headroom, runway, likely-completion viability, and uncertainty.
    Pace and reserve never rescue a clearly inferior completion prospect.
-   Do not collapse these facts into an opaque composite score.
-8. Older schemas or absent runway/pace fields: do not crash, fabricate runway or pace, treat absence as healthy, or silently exclude a candidate.
-   State which evidence is unavailable, retain the candidate, and apply only the comparisons the snapshot supports.
-9. Genuine ties: stop and report every tied candidate for captain choice.
+   Do not collapse these facts, `selection.spendPriority`, or any other aggregate into an opaque routing score.
+9. Older schemas or absent runway, pace, or normalized TraeX model fields: do not crash, fabricate evidence, treat absence as healthy, or silently exclude a candidate.
+   State which evidence is unavailable, retain the candidate unless separate concrete evidence blocks it, and apply only the comparisons the snapshot supports.
+10. Genuine ties: stop and report every tied candidate for captain choice.
    Do not select by array order, harness name, or another arbitrary identity ordering.
    Report duplicate concrete profiles as a configuration error.
 

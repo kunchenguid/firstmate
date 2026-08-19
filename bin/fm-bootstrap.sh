@@ -1021,6 +1021,20 @@ crew_dispatch_validate() {
     def malformed_optional_fields($items):
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)));
+    def malformed_load_preferences:
+      configured_profiles
+      | any(has("preferWhileLoadBelowPercent")
+        and (((.preferWhileLoadBelowPercent | type) != "number") or .preferWhileLoadBelowPercent <= 0));
+    def scalar_load_preferences:
+      ([.rules[]? | select((.use? | type) == "object") | .use]
+        + (if has("default") and (.default | type) == "object" then [.default] else [] end))
+      | any(has("preferWhileLoadBelowPercent"));
+    def wrong_harness_load_preferences:
+      configured_profiles
+      | any(has("preferWhileLoadBelowPercent") and .harness != "traex");
+    def modelless_load_preferences:
+      configured_profiles
+      | any(has("preferWhileLoadBelowPercent") and ((.model? | type) != "string" or (.model | length) == 0));
     def bad_efforts:
       configured_profiles
       | map({h: .harness, e: .effort})
@@ -1046,6 +1060,10 @@ crew_dispatch_validate() {
     elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
     elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
     elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then "default profile model and effort must be non-empty strings when present"
+    elif malformed_load_preferences then "preferWhileLoadBelowPercent must be a positive number"
+    elif scalar_load_preferences then "preferWhileLoadBelowPercent is valid only in profile arrays"
+    elif wrong_harness_load_preferences then "preferWhileLoadBelowPercent is valid only for traex profiles"
+    elif modelless_load_preferences then "preferWhileLoadBelowPercent requires an explicit traex model"
     else
       (configured_profiles
         | map(.harness)
@@ -1069,7 +1087,10 @@ crew_dispatch_validate() {
       + (if ($p.model? != null) then "/" + ($p.model | tostring)
          elif ($p.effort? != null) then "/default"
          else "" end)
-      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end);
+      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end)
+      + (if ($p.preferWhileLoadBelowPercent? != null) then
+          "/prefer-load<" + ($p.preferWhileLoadBelowPercent | tostring)
+        else "" end);
     def profile_set($value; $selector):
       if ($value | type) == "array" then
         (($selector // "quota-balanced") + "[" + ([$value[] | profile(.)] | join(", ")) + "]")
