@@ -222,7 +222,8 @@ blocked is not treated as a queued-Enter busy signal, so a Cursor pane that repo
 Some harnesses never present a legibly idle native baseline at all, so the composer fallback is their only path.
 Herdr reports a Cursor pane `blocked` in every state, and Cursor's mid-turn composer renders its placeholder beside a right-aligned busy token, which is composer content and therefore `pending` on a composer that holds no user text.
 That fallback alone reported every delivered steer as unconfirmed, so it is paired with a rendered-footer transition: the pane's verified busy footer is read once before the first Enter, and an idle-to-busy transition across that Enter confirms the submit.
-It is the same semantic signal the native path uses and the same one the tmux submit core reads, so a pane already mid-turn before the text was typed still reports `pending` rather than borrowing another turn as proof of this delivery.
+It is the same semantic signal the native path uses and the same one the tmux submit core reads.
+A pane already mid-turn cannot borrow a rendered-footer transition as proof of this delivery; after retries, only proven pending text plus native `working` can establish that its Enter was accepted and queued.
 The composer verdict itself is deliberately unchanged: a right-aligned status token on the composer row stays content for every other caller, including the away-mode pre-injection guard.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed native transition falls through to the composer verdict rather than reporting a false swallow.
 
@@ -319,7 +320,6 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
 - Mid-session secondmate liveness is not implemented.
-- Busy-queued Enter and idle-native composer confirmation are owned by `fm_composer_queued_enter_verdict` and this adapter's native fallback; see Current transport behavior.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
 
 ## Regression entry points

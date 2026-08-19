@@ -2745,9 +2745,10 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # (bin/fm-tmux-lib.sh): an idle-to-busy transition ACROSS our Enter is proof the
 # harness accepted the submission. The baseline is taken before the first Enter
 # and only when the native baseline was not legibly idle, so the idle-baseline
-# path still never reads pane content until native stays idle, and a pane
-# already mid-turn before we typed keeps reporting `pending` rather than
-# borrowing someone else's turn as proof of our own delivery.
+# path still never reads pane content until native stays idle. A pane already
+# mid-turn cannot use a rendered-footer transition as proof of this Enter;
+# only the separate retries-exhausted, proven-pending queued-Enter verdict can
+# confirm delivery from its native working state.
 # Queued-while-busy Enter (OpenCode 1.18.4, and any harness that keeps typed
 # text visible until the current turn ends): after the retry budget, a proven
 # pending composer plus native agent_status=working is delivered, not swallowed.

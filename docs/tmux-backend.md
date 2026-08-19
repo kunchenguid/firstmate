@@ -98,7 +98,6 @@ Without that baseline, an `unknown` verdict is preserved untouched, so a busy-lo
 ## Limits and regression entry points
 
 - tmux is the reference path and supports secondmate homes.
-- The OpenCode busy-queue exception is the shared `fm_composer_queued_enter_verdict` policy; Herdr supplies its own busy primitive as documented in `docs/herdr-backend.md`.
 
 ```sh
 tests/fm-backend-tmux-smoke.test.sh

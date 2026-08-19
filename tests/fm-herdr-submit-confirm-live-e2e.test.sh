@@ -96,11 +96,30 @@ while [ "$i" -lt 45 ]; do
 done
 [ "$idle" = 1 ] || fail "Claude Code ($VERSION) on $HERDR_VER never registered an idle agent in the lab pane"
 
-verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "Reply with exactly the word PONG and nothing else." 3 0.4 0.4) \
+TOKEN="FMHERDRPONG$$_$RANDOM"
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "Reply with exactly $TOKEN and nothing else." 3 0.4 0.4) \
   || fail "send_text_submit failed to run against Claude Code ($VERSION) on $HERDR_VER"
 CHECKED=1
 [ "$verdict" = empty ] \
   || fail "Claude Code ($VERSION) on $HERDR_VER: a landed idle steer must confirm empty, got '$verdict'"
-pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER reports empty for a landed idle steer"
+
+# Confirm the instruction reached Claude, not merely that the composer cleared.
+# The token occurs once in the submitted prompt and once in Claude's reply.
+landed=0
+i=0
+screen=''
+while [ "$i" -lt 45 ]; do
+  screen=$(lab pane read "$PANE" --source recent --lines 200 2>/dev/null || true)
+  occurrences=$(printf '%s\n' "$screen" | grep -F -c "$TOKEN" || true)
+  if [ "$occurrences" -ge 2 ]; then
+    landed=1
+    break
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+[ "$landed" = 1 ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: submit reported '$verdict' but the expected reply never rendered"
+pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER reports empty and renders the requested reply in isolated session $SESSION"
 
 [ "$CHECKED" -gt 0 ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 checked no harness"
