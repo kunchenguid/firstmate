@@ -598,9 +598,8 @@ That command is the guard that refreshes this record; run it after every Herdr u
 
 ### Away-mode transport
 
-Herdr 0.8.0 was reverified on 2026-08-19 in an externally provisioned guarded lab through `tests/fm-afk-inject-herdr-e2e.test.sh` and `tests/fm-afk-launch.test.sh`.
+Herdr 0.8.0 delivery was reverified on 2026-08-19 in an externally provisioned guarded lab through `tests/fm-afk-inject-herdr-e2e.test.sh`.
 The delivery suite proved that one confirmed digest retires once, repeated catch-all scans do not reconstruct it, a native confirmation interrupted by TERM cannot trigger a cleanup-time resend, post-retirement TERM stays idempotent, and an unconfirmed digest remains durable.
-The launcher suite proved that a stop which cannot yet confirm daemon exit preserves its lifecycle record, a later retry converges only after exact absence, and the dedicated Herdr workspace still closes by exact pane identity without changing the captain tab.
 The Herdr adapter's opt-in CLI deadline was also exercised with a stalled vendor process and removed its whole process group at the bound.
 [Supervision verification](supervision.md#away-mode-delivery-retirement) owns the exact commands, output, cross-harness review, and non-applicable backend evidence for this pass.
 

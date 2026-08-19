@@ -73,10 +73,11 @@ cleanup_all() {
 trap cleanup_all EXIT
 if [ "$EXTERNAL_LAB" -eq 1 ]; then
   fm_herdr_lab_refuse_if_default "$SESSION" || fail "externally provisioned Herdr lab is absent or unsafe"
-  fm_herdr_lab_cli "$SESSION" status --json >/dev/null 2>&1 \
+  fm_herdr_lab_cli "$SESSION" status --json 2>/dev/null \
+    | jq -e '.server.running == true' >/dev/null 2>&1 \
     || fail "externally provisioned Herdr lab is not running"
 else
-  fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+  fm_herdr_lab_provision "$SESSION" || fail "could not provision isolated Herdr lab session"
 fi
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
@@ -298,6 +299,7 @@ start_daemon() {
   FM_SUPERVISOR_TARGET="$SUPERVISOR_TARGET" \
   FM_ESCALATE_BATCH_SECS=0 \
   FM_HOUSEKEEPING_TICK=1 \
+  FM_HEARTBEAT_SCAN_SECS="${FM_HEARTBEAT_SCAN_SECS:-15}" \
   FM_POLL=1 \
   FM_SIGNAL_GRACE=1 \
   FM_HEARTBEAT=999999 \
@@ -485,7 +487,7 @@ test_scenario_b() {
 test_scenario_c() {
   reset_state
   afk_enter "$STATE_DIR"
-  start_daemon
+  FM_HEARTBEAT_SCAN_SECS=1 start_daemon
 
   echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
   sleep 8
@@ -512,20 +514,19 @@ test_scenario_c() {
   [ "$user_count" -eq 0 ] \
     || fail "Scenario C: expected 0 user lines, got $user_count (spurious submission?)"
 
-  stop_daemon
-
   [ ! -s "$STATE_DIR/.subsuper-escalations" ] \
     || fail "Scenario C: confirmed delivery left a stale buffered digest"
   [ ! -e "$STATE_DIR/.subsuper-escalations.since" ] \
     || fail "Scenario C: confirmed delivery left the buffer age sidecar"
-  rm -f "$STATE_DIR/.subsuper-last-scan"
-  FM_HEARTBEAT_SCAN_SECS=0 FM_ESCALATE_BATCH_SECS=99999 housekeeping "$STATE_DIR"
-  FM_HEARTBEAT_SCAN_SECS=0 FM_ESCALATE_BATCH_SECS=99999 housekeeping "$STATE_DIR"
+  sleep 4
+  kill -0 "$DAEMON_PID" 2>/dev/null \
+    || fail "Scenario C: daemon exited before repeated scan cycles completed"
   [ ! -s "$STATE_DIR/.subsuper-escalations" ] \
     || fail "Scenario C: repeated catch-all scans re-buffered a delivered status"
   [ "$(injection_marker_count)" -eq 1 ] \
     || fail "Scenario C: repeated catch-all scans changed the delivered injection count"
 
+  stop_daemon
   pass "real herdr Scenario C: confirmed delivery retires its buffer and repeated catch-all scans cannot re-buffer it"
 }
 

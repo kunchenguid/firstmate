@@ -1400,7 +1400,7 @@ fm_super_main() {
   # into FM_SUPERVISOR_BACKEND makes inject_msg/pane_is_busy/pane_input_pending
   # (which read that env var) dispatch through the right backend without an
   # extra global thread-through.
-  local discovered_backend backend_source
+  local discovered_backend backend_source FM_BACKEND_HERDR_CLI_TIMEOUT_SECS
   backend_source="FM_SUPERVISOR_BACKEND"
   if [ -z "${FM_SUPERVISOR_BACKEND:-}" ]; then
     if [ -n "${TMUX_PANE:-}" ]; then
@@ -1432,7 +1432,6 @@ fm_super_main() {
     case "$FM_BACKEND_HERDR_CLI_TIMEOUT_SECS" in
       ''|*[!0-9]*|0) FM_BACKEND_HERDR_CLI_TIMEOUT_SECS=$AFK_HERDR_CLI_TIMEOUT_SECS_DEFAULT ;;
     esac
-    export FM_BACKEND_HERDR_CLI_TIMEOUT_SECS
   fi
 
   # --- auto-discover the supervisor target (the pane running firstmate) -----
@@ -1570,7 +1569,7 @@ fm_super_main() {
     CUR_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-watch.XXXXXX") || { log "error: mktemp failed; retrying in 5s"; sleep 5; return 1; }
     case $- in *m*) monitor_was_on=1 ;; esac
     set -m 2>/dev/null || { rm -f "$CUR_TMP"; CUR_TMP=""; log "error: watcher process-group isolation unavailable; retrying in 5s"; sleep 5; return 1; }
-    "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
+    env -u FM_BACKEND_HERDR_CLI_TIMEOUT_SECS "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
     WATCHER_PID=$!
     [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
     WATCHER_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null) || {
