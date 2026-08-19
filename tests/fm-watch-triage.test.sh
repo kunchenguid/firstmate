@@ -2186,8 +2186,14 @@ test_write_deferral_resurfaces_on_the_bounded_cadence() {
 # home runs its OWN supervision inside itself: its watcher beacon, pane hashes and
 # heartbeats keep state/ churning whether or not the mate produced anything. Reading
 # that as crew progress would quietly relax the kind-agnostic busy-turn backstop from
-# the escalation cadence to the hourly recheck for a mate that did nothing, so the
+# the escalation cadence to the hourly recheck for a task that did nothing, so the
 # probe must report no evidence and the unchanged schedule must still fire.
+# The home is recorded here by an ordinary crew task, which is the routing that
+# still reaches the wedge timer: a kind=secondmate window is triaged at all only
+# while it declares a pause, and busy_turn_bound_check hands any declared wait to
+# the bounded pause cadence instead. That leaves the .fm-secondmate-home marker -
+# not the kind= field - as the discriminator this path exercises, and the marker
+# is what the probe must honor for whoever records such a home.
 test_secondmate_home_supervision_churn_is_not_write_evidence() {
   local dir state fakebin out drain_out capture_file window key sig pid home back
   dir=$(make_case secondmate-home-churn); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2196,12 +2202,12 @@ test_secondmate_home_supervision_churn_is_not_write_evidence() {
   mkdir -p "$home/state"
   printf 'sm-mate\n' > "$home/.fm-secondmate-home"
   printf 'Working... (12.3s)' > "$capture_file"
-  printf 'window=%s\nkind=secondmate\nharness=pi\nworktree=%s\n' "$window" "$home" > "$state/mate.meta"
+  printf 'window=%s\nkind=ship\nharness=pi\nworktree=%s\n' "$window" "$home" > "$state/mate.meta"
   record_pi_busy "$state" mate
-  # A mate's stale pane is only triaged under a declared pause, and a busy one is
-  # bounded by its completed-turn age; no turn ever completed here, so the spawn
-  # record itself is aged past the bound that routes it into the wedge timer.
-  printf 'paused: awaiting the captain\n' > "$state/mate.status"
+  # A busy pane is bounded by its completed-turn age; no turn ever completed here,
+  # so the spawn record itself is aged past the bound, and with no declared wait
+  # busy_turn_bound_check routes the crossed bound into the wedge timer.
+  printf 'working: relaying for the captain\n' > "$state/mate.status"
   sig=$(seen_sig "$state/mate.status"); printf '%s' "$sig" > "$state/.seen-mate_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   set_mtime "$(( $(date +%s) - 4000 ))" "$state/mate.meta"
@@ -2218,13 +2224,13 @@ test_secondmate_home_supervision_churn_is_not_write_evidence() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 40 || fail "a mate home's own supervision churn deferred an escalation it must not defer"
-  grep -F "stale: $window" "$out" >/dev/null || fail "the mate escalation did not print a stale wake"
-  grep -F "possible wedge" "$out" >/dev/null || fail "the mate escalation did not flag a possible wedge"
-  [ ! -e "$state/.writing-since-$key" ] || fail "a mate's provisioned home was probed as if it were a code tree"
-  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "the mate escalation was not counted"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the mate escalation failed"
-  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the mate escalation was not queued"
-  pass "a secondmate's own home supervision churn is not crew write evidence, so its pane keeps the unchanged escalation schedule"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the mate-home escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the mate-home escalation did not flag a possible wedge"
+  [ ! -e "$state/.writing-since-$key" ] || fail "a provisioned mate home was probed as if it were a code tree"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "the mate-home escalation was not counted"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the mate-home escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the mate-home escalation was not queued"
+  pass "a provisioned firstmate home's own supervision churn is not crew write evidence, so its pane keeps the unchanged escalation schedule"
 }
 
 # A write deferral is a bounded chain, not a permanent one: its .writing-since
