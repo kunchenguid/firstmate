@@ -1359,6 +1359,33 @@ SH
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
 
+test_herdr_clear_completed_refuses_an_ungraduated_sibling_tab_worker() {
+  local case_dir rc
+  case_dir=$(make_case herdr-clear-completed-ungraduated)
+  write_meta "$case_dir" local-only ship
+  sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=default' \
+    'herdr_workspace_id=wG' \
+    'herdr_tab_id=wG:tQ' \
+    'herdr_pane_id=wG:pQ' \
+    'herdr_presentation=tabs' >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" --clear-completed > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "clear-completed: an ungraduated sibling-tab worker should refuse --clear-completed"
+  grep -q 'not a retained completed worker' "$case_dir/stderr" \
+    || fail "clear-completed: refusal did not name the completed-only restriction: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "clear-completed: refusal removed the durable record of an ungraduated worker"
+  pass "teardown --clear-completed releases only genuinely completed sibling-tab workers"
+}
+
 # Flat (non-projected) Herdr endpoint whose fake pane exists until a locked
 # close removes it. The socket path is case-local so the derived presentation
 # lock never collides with another test or a real fleet session.
@@ -2601,6 +2628,7 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
+test_herdr_clear_completed_refuses_an_ungraduated_sibling_tab_worker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes

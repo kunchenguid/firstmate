@@ -114,6 +114,10 @@ case "$cmd $sub" in
   "status --json")
     printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
     ;;
+  "session list")
+    printf '{"sessions":[{"name":"%s","running":true,"socket_path":"%s"}]}\n' \
+      "${HERDR_SESSION:-fmtest}" "${FM_FAKE_SOCKET:-$STATE.socket}"
+    ;;
   "workspace list")
     jq_state '{result:{workspaces:.workspaces}}'
     ;;
@@ -137,8 +141,25 @@ case "$cmd $sub" in
        | .next = (.next + 1)' | save
     printf '{"result":{"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$tabid" "$paneid"
     ;;
+  "tab get")
+    tab=${3:-}
+    jq_state --arg t "$tab" '
+      [.tabs[] | select(.tab_id == $t)]
+      | if length == 1 then {result:{tab:.[0]}} else {error:{code:"tab_not_found"}} end'
+    ;;
+  "tab rename")
+    tab=${3:-}; label=${4:-}
+    jq_state --arg t "$tab" --arg l "$label" '
+      .tabs |= map(if .tab_id == $t then .label = $l else . end)' | save
+    ;;
   "pane list")
     jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
+    ;;
+  "pane get")
+    pane=${3:-}
+    jq_state --arg p "$pane" '
+      [.tabs[] | select(.pane_id == $p)]
+      | if length == 1 then {result:{pane:.[0]}} else {error:{code:"pane_not_found"}} end'
     ;;
   "pane close")
     pane=${3:-}
@@ -1158,7 +1179,7 @@ test_release_floor_verdict_survives_losing_either_signal() {
   pass "herdr presentation floor: either signal alone can carry an above verdict, and each divergence is real"
 }
 
-test_presentation_preference_reports_three_distinct_states() {
+test_presentation_preference_reports_four_distinct_states() {
   local dir config got
   dir="$TMP_ROOT/presentation-preference"; config="$dir/config"; mkdir -p "$config"
   preference() {
@@ -1172,10 +1193,148 @@ test_presentation_preference_reports_three_distinct_states() {
   printf 'off\n' > "$config/herdr-presentation-spaces"
   got=$(preference "$config")
   [ "$got" = off ] || fail "an explicit off must report off, got '$got'"
+  printf 'tabs\n' > "$config/herdr-presentation-spaces"
+  got=$(preference "$config")
+  [ "$got" = tabs ] || fail "an explicit tabs selection must report tabs, got '$got'"
   printf 'disabled\n' > "$config/herdr-presentation-spaces"
   got=$(preference "$config")
   [ "$got" = default ] || fail "an unrecognized value must report the default, got '$got'"
-  pass "herdr presentation: config parsing separates a deliberate choice from an unconfigured default"
+  pass "herdr presentation: config parsing separates sibling tabs, projection, opt-out, and the unconfigured default"
+}
+
+test_sibling_tab_label_uses_only_the_closed_marker_grammar() {
+  local out status
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_task_tab_label "●" "Build worker workflow"
+    printf "\\n"
+    fm_backend_herdr_task_tab_label "?" "Choose release policy" shortid
+  ' "$ROOT") || fail "sibling tab label formatting failed"
+  [ "$out" = $'● Build worker workflow\n? Choose release policy · shortid' ] \
+    || fail "sibling tab label formatting changed human title or disambiguator: $out"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_tab_label "x" title' "$ROOT" >/dev/null 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "an unrecognized sibling tab marker was accepted"
+  pass "herdr sibling-tab labels accept only the visible worker-state grammar"
+}
+
+test_sibling_tab_disambiguator_extends_a_colliding_prefix() {
+  local dir state fb got
+  dir="$TMP_ROOT/sibling-tab-disambiguator"; mkdir -p "$dir"; state="$dir/state.json"
+  fb=$(make_herdr_statefake "$dir")
+  jq -n '{next:4,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[
+    {tab_id:"w1:t1",label:"● Shared title",workspace_id:"w1",pane_id:"w1:p1"},
+    {tab_id:"w1:t2",label:"● Shared title · abcdefgh",workspace_id:"w1",pane_id:"w1:p2"}
+  ],agent_status:{}}' > "$state"
+  got=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_tab_disambiguator fmtest:w1 "● Shared title" abcdefgh-c' "$ROOT") \
+    || fail "sibling tab disambiguation failed"
+  [ "$got" = abcdefgh- ] \
+    || fail "a third shared-prefix task did not receive a collision-free disambiguator: '$got'"
+  pass "herdr sibling tabs extend a shared id prefix until the visible label is unique"
+}
+
+task_tab_fixture() {
+  local dir=$1 agent=$2 label=$3 completed=${4:-0}
+  local state="$dir/state.json" home="$dir/home"
+  mkdir -p "$home/state"
+  jq -n --arg label "$label" --arg agent "$agent" '
+    {next:2,
+     workspaces:[{workspace_id:"w1",label:"firstmate",focused:true,active_tab_id:"w1:t1"}],
+     tabs:[{tab_id:"w1:t1",label:$label,workspace_id:"w1",pane_id:"w1:p1",focused:true}],
+     agent_status:(if $agent == "" then {} else {"w1:p1":$agent} end)}' > "$state"
+  {
+    echo 'window=fmtest:w1:p1'
+    echo 'endpoint_task_id=tasktab'
+    echo 'worktree=/tmp/tasktab'
+    echo 'project=/tmp/project'
+    echo 'harness=pi'
+    echo 'kind=ship'
+    echo 'backend=herdr'
+    echo 'herdr_session=fmtest'
+    echo 'herdr_workspace_id=w1'
+    echo 'herdr_tab_id=w1:t1'
+    echo 'herdr_pane_id=w1:p1'
+    echo 'herdr_presentation=tabs'
+    echo 'task_title=Complete fixture'
+    [ "$completed" = 1 ] && echo 'herdr_tab_completed=1'
+  } > "$home/state/tasktab.meta"
+}
+
+test_completed_task_tab_refuses_a_registered_done_agent() {
+  local dir state fb out status
+  dir="$TMP_ROOT/task-tab-done-agent"; mkdir -p "$dir"; state="$dir/state.json"
+  fb=$(make_herdr_statefake "$dir")
+  task_tab_fixture "$dir" 'done' '◐ Complete fixture'
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_FAKE_HERDR_STATE="$state" \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-herdr-task-tab.sh" complete tasktab 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a registered done agent was retained as a completed view-only worker"
+  [ "$(jq -r '.tabs[0].label' "$state")" = '◐ Complete fixture' ] \
+    || fail "a failed completed transition changed the visible task tab"
+  [ -z "$(grep '^herdr_tab_completed=' "$dir/home/state/tasktab.meta" || true)" ] \
+    || fail "a registered done agent published completed retention metadata"
+  pass "herdr sibling completion refuses a registered done agent before retaining the task"
+}
+
+test_completed_task_tab_refresh_keeps_the_completed_marker() {
+  local dir state fb status
+  dir="$TMP_ROOT/task-tab-completed-refresh"; mkdir -p "$dir"; state="$dir/state.json"
+  fb=$(make_herdr_statefake "$dir")
+  task_tab_fixture "$dir" '' '◐ Complete fixture' 1
+  printf 'done: implementation committed\n' > "$dir/home/state/tasktab.status"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_FAKE_HERDR_STATE="$state" \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-herdr-task-tab.sh" refresh tasktab
+  status=$?
+  [ "$status" -eq 0 ] || fail "refresh failed for a retained completed worker"
+  [ "$(jq -r '.tabs[0].label' "$state")" = '✓ Complete fixture' ] \
+    || fail "a status refresh overwrote a retained completed tab with a review marker"
+  pass "herdr sibling tab refresh keeps retained completed workers view-only"
+}
+
+test_completed_graduation_only_marks_an_agent_free_done_worker() {
+  local dir state fb out status
+  dir="$TMP_ROOT/task-tab-graduate-done"; mkdir -p "$dir"; state="$dir/state.json"
+  fb=$(make_herdr_statefake "$dir")
+  task_tab_fixture "$dir" '' '◐ Complete fixture'
+  printf 'done: implementation committed\n' > "$dir/home/state/tasktab.status"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_FAKE_HERDR_STATE="$state" \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-herdr-task-tab.sh" complete tasktab 2>&1); status=$?
+  [ "$status" -eq 0 ] || fail "an agent-free done worker could not graduate to completed"$'\n'"$out"
+  [ "$(jq -r '.tabs[0].label' "$state")" = '✓ Complete fixture' ] \
+    || fail "an agent-free done worker did not receive the completed marker"
+  grep '^herdr_tab_completed=1$' "$dir/home/state/tasktab.meta" >/dev/null \
+    || fail "an agent-free done worker was not published as a retained completed worker"
+  pass "herdr sibling completion graduates only an agent-free done worker to the completed marker"
+}
+
+test_completed_retention_keeps_non_done_workers_ungraduated() {
+  local dir state fb out status case_id verb expected
+  while IFS='|' read -r case_id verb expected; do
+    dir="$TMP_ROOT/task-tab-retain-$case_id"; mkdir -p "$dir"; state="$dir/state.json"
+    fb=$(make_herdr_statefake "$dir")
+    task_tab_fixture "$dir" '' '◐ Complete fixture'
+    printf '%s: last recorded event\n' "$verb" > "$dir/home/state/tasktab.status"
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_FAKE_HERDR_STATE="$state" \
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$dir/home/state" \
+      "$ROOT/bin/fm-herdr-task-tab.sh" complete tasktab 2>&1); status=$?
+    [ "$status" -eq 0 ] || fail "$case_id retention failed"$'\n'"$out"
+    [ "$(jq -r '.tabs[0].label' "$state")" = "$expected Complete fixture" ] \
+      || fail "$case_id retention painted the wrong marker: $(jq -r '.tabs[0].label' "$state")"
+    [ -z "$(grep '^herdr_tab_completed=' "$dir/home/state/tasktab.meta" || true)" ] \
+      || fail "$case_id retention graduated a worker that never wrote a done event"
+  done <<'CASES'
+failed|failed|!
+blocked|blocked|?
+decision|needs-decision|?
+stopped|working|!
+CASES
+  pass "herdr sibling completion retains stopped/failed/decision workers with their own markers"
 }
 
 test_projection_journal_is_atomic_and_uses_128_bit_token() {
@@ -4368,7 +4527,13 @@ test_presentation_floor_warning_marker_is_atomic_and_symlink_safe
 test_presentation_running_server_release_is_load_bearing
 test_release_floor_verdict_matches_the_measured_releases
 test_release_floor_verdict_survives_losing_either_signal
-test_presentation_preference_reports_three_distinct_states
+test_presentation_preference_reports_four_distinct_states
+test_sibling_tab_label_uses_only_the_closed_marker_grammar
+test_sibling_tab_disambiguator_extends_a_colliding_prefix
+test_completed_task_tab_refuses_a_registered_done_agent
+test_completed_task_tab_refresh_keeps_the_completed_marker
+test_completed_graduation_only_marks_an_agent_free_done_worker
+test_completed_retention_keeps_non_done_workers_ungraduated
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane

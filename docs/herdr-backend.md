@@ -50,7 +50,7 @@ The first workspace in a completely empty Herdr session must become focused beca
 Herdr does not enforce workspace or tab label uniqueness, so a label can never decide where a worker goes.
 Herdr 0.7.5 exports `HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_SESSION`, `HERDR_SOCKET_PATH`, `HERDR_TAB_ID`, and `HERDR_WORKSPACE_ID` into every process it manages a pane for, and a Firstmate or secondmate agent's own commands inherit them.
 Older injection shapes are unverified, so a claimed launcher pane without the injected socket identity cannot be trusted.
-With presentation spaces disabled, a crewmate or scout is created in the exact workspace that identity currently resolves to, read live from Herdr rather than from the injected snapshot, so the worker always appears beside the agent that launched it.
+With presentation spaces disabled, or with the explicit sibling-tab setting, a crewmate or scout is created in the exact workspace that identity currently resolves to, read live from Herdr rather than from the injected snapshot, so the worker always appears beside the agent that launched it.
 Duplicate labels elsewhere in the session are irrelevant, and the globally focused workspace is never the target.
 A `--secondmate` launch is the deliberate exception: it stands up that secondmate home's own workspace instead of joining the launcher's.
 
@@ -70,7 +70,13 @@ Closing its last tab can remove the workspace, and the next spawn recreates it.
 ## Presentation spaces
 
 Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
-A home opts out by writing `off` into local gitignored `config/herdr-presentation-spaces`, and forces the projection on by writing `on`.
+Writing `tabs` into local gitignored `config/herdr-presentation-spaces` instead selects a sibling-tab workflow for directly delegated transient workers.
+That workflow creates only the normal worker tab in the launcher's current workspace with `--no-focus`, never creates a presentation workspace or auxiliary tab, and records exact endpoint ids before changing the tab label.
+The tab title is the first task instruction prefixed by `●` while working, `◐` when a ship is ready for review, `?` for a decision or blocker, `!` when firstmate stops it, and `✓` when a scout reports completion.
+A duplicate human working title receives only a short task-id disambiguator.
+When a sibling-tab result is safely complete, `fm-teardown.sh <id>` leaves its sleeping `✓` tab, durable result, and isolated copy retained until the captain asks to clear it through `fm-teardown.sh <id> --clear-completed`.
+Retained workers never auto-clean under resource pressure, and one warning episode is surfaced only when measured available memory drops below 2 GiB or the exact completed-worker process trees exceed 10 GiB RSS.
+A home opts out by writing `off`, and forces the disposable workspace projection on by writing `on`.
 An absent file leaves the choice to the version floor below, an empty file and the value `on` are both a deliberate opt-in, values are compared with whitespace stripped and case ignored, and an unrecognized value warns and follows the unconfigured default rather than failing a spawn over a purely visual setting.
 The empty file is the historical presence-based opt-in form, so every home that had already enabled the projection stays enabled with no migration step, and no previously enabled home can be turned off by the default or by the floor.
 A home that never created the file gains the projection at its next Herdr spawn on a supported release; that flip is deliberate, and it reaches only the Herdr backend because no other runtime backend has a projection path.
@@ -98,7 +104,7 @@ The token is visible in the workspace title because Herdr exposes no verified hi
 
 The owning parent is the launcher's own exact workspace, resolved from the same identity the flat path uses, and falls back to a unique home-label lookup only for a Firstmate outside Herdr.
 Projected children are never collapsed back into that parent; it is the placement and ordering reference the projection is bound under.
-The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
+The disposable projection's normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
 Only the exact seeded default tab returned by the same workspace-create response can be pruned.
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
 An ambiguous response grants no mutation or cleanup authority.

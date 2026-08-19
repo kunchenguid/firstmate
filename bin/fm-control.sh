@@ -291,6 +291,11 @@ RECORDED_HARNESS=$(fm_meta_get "$META" harness)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
 [ -n "$KIND" ] || KIND=ship
+if [ "$VERB" = relaunch ] \
+   && [ "$(fm_meta_get "$META" herdr_presentation)" = tabs ] \
+   && [ "$(fm_meta_get "$META" herdr_tab_completed)" = 1 ]; then
+  die "task $ID is a retained completed sibling-tab worker; clear it before creating a new task instead of reusing its tab"
+fi
 
 HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
@@ -827,6 +832,7 @@ do_relaunch() {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
   }
   RELAUNCH_AGENT_CONFIRMED=1
+  FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-herdr-task-tab.sh" working "$ID" >/dev/null 2>&1 || true
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
@@ -854,6 +860,7 @@ case "$VERB" in
     ;;
   exit)
     result=$(do_exit)
+    FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-herdr-task-tab.sh" stopped "$ID" >/dev/null 2>&1 || true
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
     ;;
   relaunch)
