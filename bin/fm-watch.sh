@@ -1086,6 +1086,28 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
+    if [ "$kind" != secondmate ] && status_is_paused_or_captain_held "$last"; then
+      pause_recheck_state=$(cat "$STATE/.paused-rechecked-$key" 2>/dev/null || true)
+      pause_liveness=$(pause_declaration_liveness "$w")
+      if [ "$pause_recheck_state" = surfaced ]; then
+        if ! afk_present; then
+          handle_paused_stale "$w" "$task" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
+        fi
+        continue
+      fi
+      if [ "$pause_liveness" = dead ]; then
+        crew_state=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || crew_state=
+        crew_state_name=${crew_state#state: }
+        crew_state_name=${crew_state_name%% *}
+        crew_state_source=${crew_state#*source: }
+        crew_state_source=${crew_state_source%% *}
+        if [ "$crew_state_name" = working ] && [ "$crew_state_source" = run-step ]; then
+          clear_pause_state "$w"
+        else
+          surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
+        fi
+      fi
+    fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')

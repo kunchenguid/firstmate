@@ -825,6 +825,211 @@ queued_stale_wakes() {  # <state> <window>
   awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue"
 }
 
+DECLARED_PAUSE_CASE_ERROR=
+
+declared_pause_capture_failure_case() {  # <name> <window-exists> <command> <crew-state> absorbed|surfaced
+  local name=$1 window_exists=$2 command=$3 crew_state=$4 expect=$5
+  local dir state fakebin out statusf window key prior_hash pid wakes recheck
+  DECLARED_PAUSE_CASE_ERROR=
+  dir=$(make_case "declared-pause-capture-$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; statusf="$state/held.status"; window="test:fm-held"
+  cat > "$fakebin/tmux" <<'TMUX'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows)
+    [ "${FM_FAKE_TMUX_WINDOW_EXISTS:-0}" = 1 ] && printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
+    exit 0
+    ;;
+  capture-pane)
+    exit 1
+    ;;
+  display-message)
+    case "$*" in
+      *pane_current_command*)
+        [ -n "${FM_FAKE_TMUX_CURRENT_COMMAND:-}" ] || exit 1
+        printf '%s\n' "$FM_FAKE_TMUX_CURRENT_COMMAND"
+        exit 0
+        ;;
+    esac
+    ;;
+esac
+exit 1
+TMUX
+  chmod +x "$fakebin/tmux"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: holding for the upstream tool release\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  prior_hash="capture-prior-$name"
+  printf '%s' "$prior_hash" > "$state/.hash-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_WINDOW_EXISTS="$window_exists" FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
+    FM_FAKE_CREW_STATE="$crew_state" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  if [ "$expect" = surfaced ]; then
+    if ! wait_for_exit "$pid" 40; then
+      DECLARED_PAUSE_CASE_ERROR="$name did not surface before the failed capture"
+      return 1
+    fi
+    wakes=$(queued_stale_wakes "$state" "$window")
+    recheck=$(cat "$state/.paused-rechecked-$key" 2>/dev/null || true)
+    if [ "$wakes" -ne 1 ] || [ ! -e "$state/.paused-$key" ] || \
+      [ "$recheck" != surfaced ] || \
+      [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" != "$prior_hash" ]; then
+      DECLARED_PAUSE_CASE_ERROR="$name surfaced without the once-only pause and stale markers"
+      return 1
+    fi
+    if ! ack_stopped_cycle "$state"; then
+      DECLARED_PAUSE_CASE_ERROR="$name could not acknowledge its first surface"
+      return 1
+    fi
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+      FM_FAKE_TMUX_WINDOW_EXISTS="$window_exists" FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
+      FM_FAKE_CREW_STATE="$crew_state" FM_STATE_OVERRIDE="$state" \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$WATCH" >> "$out" &
+    pid=$!
+    if ! wait_live "$pid" 30; then
+      reap "$pid"
+      DECLARED_PAUSE_CASE_ERROR="$name repeated its immediate surface after rearm"
+      return 1
+    fi
+    wakes=$(queued_stale_wakes "$state" "$window")
+    recheck=$(cat "$state/.paused-rechecked-$key" 2>/dev/null || true)
+    if [ "$wakes" -ne 0 ] || [ ! -e "$state/.paused-$key" ] || \
+      [ "$recheck" != surfaced ] || \
+      [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" != "$prior_hash" ]; then
+      reap "$pid"
+      DECLARED_PAUSE_CASE_ERROR="$name lost its once-only pause and stale markers after rearm"
+      return 1
+    fi
+    reap "$pid"
+    return 0
+  fi
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    DECLARED_PAUSE_CASE_ERROR="$name surfaced despite live-agent or run-step evidence"
+    return 1
+  fi
+  wakes=$(queued_stale_wakes "$state" "$window")
+  recheck=$(cat "$state/.paused-rechecked-$key" 2>/dev/null || true)
+  if [ "$wakes" -ne 0 ] || [ "$recheck" = surfaced ] || \
+    [ -e "$state/.paused-resurfaced-$key" ]; then
+    reap "$pid"
+    DECLARED_PAUSE_CASE_ERROR="$name recorded an immediate surface while it should stay absorbed"
+    return 1
+  fi
+  reap "$pid"
+}
+
+declared_pause_busy_case() {  # <name> <command> absorbed|surfaced
+  local name=$1 command=$2 expect=$3
+  local dir state fakebin out capture_file statusf window key prior_hash pid wakes recheck
+  DECLARED_PAUSE_CASE_ERROR=
+  dir=$(make_case "declared-pause-busy-$name"); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'busy pane content changed\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\nbackend=tmux\n' "$window" > "$state/held.meta"
+  record_pi_busy "$state" held
+  printf 'captain-held [key=route]: tracked by held-decision-route\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  prior_hash="busy-prior-$name"
+  printf '%s' "$prior_hash" > "$state/.hash-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=3600 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if [ "$expect" = surfaced ]; then
+    if ! wait_for_exit "$pid" 40; then
+      DECLARED_PAUSE_CASE_ERROR="$name waited behind the stale busy record"
+      return 1
+    fi
+    wakes=$(queued_stale_wakes "$state" "$window")
+    recheck=$(cat "$state/.paused-rechecked-$key" 2>/dev/null || true)
+    if [ "$wakes" -ne 1 ] || [ ! -e "$state/.paused-$key" ] || \
+      [ "$recheck" != surfaced ] || \
+      [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" != "$prior_hash" ]; then
+      DECLARED_PAUSE_CASE_ERROR="$name surfaced without the once-only pause and stale markers"
+      return 1
+    fi
+    if ! ack_stopped_cycle "$state"; then
+      DECLARED_PAUSE_CASE_ERROR="$name could not acknowledge its first surface"
+      return 1
+    fi
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
+      FM_FAKE_CREW_STATE='state: working · source: pane · harness busy' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_BUSY_TURN_MAX_SECS=3600 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    if ! wait_live "$pid" 30; then
+      reap "$pid"
+      DECLARED_PAUSE_CASE_ERROR="$name repeated its immediate surface after rearm"
+      return 1
+    fi
+    wakes=$(queued_stale_wakes "$state" "$window")
+    recheck=$(cat "$state/.paused-rechecked-$key" 2>/dev/null || true)
+    if [ "$wakes" -ne 0 ] || [ ! -e "$state/.paused-$key" ] || \
+      [ "$recheck" != surfaced ] || \
+      [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" != "$prior_hash" ]; then
+      reap "$pid"
+      DECLARED_PAUSE_CASE_ERROR="$name lost its once-only pause and stale markers after rearm"
+      return 1
+    fi
+    reap "$pid"
+    return 0
+  fi
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    DECLARED_PAUSE_CASE_ERROR="$name surfaced despite a live agent"
+    return 1
+  fi
+  wakes=$(queued_stale_wakes "$state" "$window")
+  recheck=$(cat "$state/.paused-rechecked-$key" 2>/dev/null || true)
+  if [ "$wakes" -ne 0 ] || [ "$recheck" = surfaced ] || \
+    [ -e "$state/.paused-resurfaced-$key" ]; then
+    reap "$pid"
+    DECLARED_PAUSE_CASE_ERROR="$name recorded an immediate surface while it should stay absorbed"
+    return 1
+  fi
+  reap "$pid"
+}
+
+test_declared_pause_precedes_capture_and_busy_short_circuits() {
+  local errors=
+  if ! declared_pause_capture_failure_case missing-dead 0 '' \
+    'state: unknown · source: none · backend target gone' surfaced; then
+    errors="$errors; $DECLARED_PAUSE_CASE_ERROR"
+  fi
+  if ! declared_pause_capture_failure_case capture-failed-live 1 grok \
+    'state: paused · source: status-log · holding for the upstream tool release' absorbed; then
+    errors="$errors; $DECLARED_PAUSE_CASE_ERROR"
+  fi
+  if ! declared_pause_capture_failure_case missing-active-run 0 '' \
+    'state: working · source: run-step · validating (running)' absorbed; then
+    errors="$errors; $DECLARED_PAUSE_CASE_ERROR"
+  fi
+  if ! declared_pause_busy_case stale-busy-dead zsh surfaced; then
+    errors="$errors; $DECLARED_PAUSE_CASE_ERROR"
+  fi
+  if ! declared_pause_busy_case stale-busy-live pi absorbed; then
+    errors="$errors; $DECLARED_PAUSE_CASE_ERROR"
+  fi
+  [ -z "$errors" ] || fail "declared-pause preflight failures${errors}"
+  pass "declared-pause death surfaces before capture and busy bypasses while live agents and active runs stay absorbed"
+}
+
 # --- a DECLARED pause: liveness decides whether the declaration is TRUSTWORTHY,
 #     it never replaces the class ---------------------------------------------
 # The live 2026-08-12 case: a worker parked on an accurate `paused:` line was woken
@@ -2470,6 +2675,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+test_declared_pause_precedes_capture_and_busy_short_circuits
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
