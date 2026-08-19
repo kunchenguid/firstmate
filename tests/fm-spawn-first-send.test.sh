@@ -12,7 +12,7 @@
 #
 # The fake tmux below is a byte-lossy shell: it drops the leading character of
 # every delivery in a configurable window, records what the pane actually
-# received, and executes a delivered `touch '<path>'` for real. That makes the
+# received, and executes a delivered `touch <path>` for real. That makes the
 # gate's own readiness signal - a marker file only a byte-exact line can create -
 # observable end to end, and lets each case assert on the exact bytes the pane
 # saw rather than on the script's source.
@@ -30,8 +30,9 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-first-send)
 # FM_FAKE_SWALLOW_FROM..FM_FAKE_SWALLOW_UNTIL inclusive lose their leading
 # character, exactly like the live incident; every delivery (corrupted or not) is
 # appended to FM_FAKE_DELIVERED so a case can assert what the pane received. A
-# delivered line of the form `touch '<path>'` is then executed for real, which is
-# the only way the readiness marker can ever appear.
+# delivered line of the form `touch <path>` is then executed for real, which is
+# the only way the readiness marker can ever appear - and, exactly like a real
+# shell, a head-truncated form is not that shape and creates nothing.
 make_lossy_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -42,9 +43,8 @@ log_delivery() {
   local line=$1 path
   printf '%s\n' "$line" >> "${FM_FAKE_DELIVERED:?FM_FAKE_DELIVERED unset}"
   case "$line" in
-    touch\ \'*\')
-      path=${line#touch \'}
-      path=${path%\'}
+    touch\ /*)
+      path=${line#touch }
       : > "$path"
       ;;
   esac
@@ -73,7 +73,7 @@ case "${1:-}" in
       exit 0
     fi
     if [ "${#args[@]}" -eq 1 ]; then
-      # A bare key: the gate's pre-clear Enter, or the launch submit.
+      # A bare key: the gate's retry pre-clear C-c, or the launch submit.
       printf 'key %s\n' "${args[0]}" >> "${FM_FAKE_DELIVERED:?}"
       exit 0
     fi
@@ -259,6 +259,10 @@ test_unready_shell_fails_loudly() {
   assert_not_contains "$out" "spawned $id" "spawn reported success despite an unready shell"
   assert_not_delivered_prefix "treehouse get" \
     "treehouse get reached the pane after the readiness gate had given up"
+  # Each resend must be able to escape a continuation prompt a partial line left
+  # behind. A bare Enter cannot; C-c can, which is why the pre-clear is a C-c.
+  [ "$(delivered_line_count 'key C-c')" -ge 1 ] \
+    || fail "the gate's resends never cleared the input line, so a stranded continuation prompt would swallow every later probe"
   pass "an unready pane shell refuses the spawn loudly instead of sending into it"
 }
 
@@ -280,30 +284,70 @@ test_healthy_shell_pays_one_probe_per_gate() {
   assert_contains "$out" "spawned $id" "spawn did not report success"
   first_line=$(sed -n '1p' "$DELIVERED")
   case "$first_line" in
-    touch\ \'*) : ;;
+    touch\ /*) : ;;
     *) fail "the readiness probe did not precede the first task command (first delivery: '$first_line')" ;;
   esac
+  [ "$(delivered_line_count 'key C-c')" = 0 ] \
+    || fail "a healthy shell should never pay the gate's retry pre-clear C-c"
   [ "$(delivered_line_count 'key Enter')" = 1 ] \
-    || fail "a healthy shell should need no pre-clear Enter retry, only the launch submit"
+    || fail "a healthy spawn should send exactly one bare Enter, the launch submit"
   [ "$elapsed" -le 8 ] || fail "a healthy spawn took ${elapsed}s - the gate is charging retries it should not need"
   pass "a healthy pane answers the first probe, and the probe precedes the command it guards"
 }
 
 # The probe directory is scratch: it must never survive the spawn, on the
 # success path or the refusal path.
+#
+# The refusal half runs against its own fully scaffolded fixture rather than a
+# made-up id on the success fixture. An id with no brief dies at fm-spawn's
+# brief check, long before a pane or a probe directory exists, so the cleanup
+# assertion would pass vacuously. The case therefore proves the refusal actually
+# came from the readiness gate before it trusts what the gate left behind.
 test_probe_scratch_is_cleaned_up() {
-  local rec id before after
+  local rec id out status before after
+  before=$(count_probe_scratch)
+
   id=first-send-scratch-e5
   rec=$(make_case scratch "$id")
   read_case "$rec"
+  out=$(run_spawn "$id" 1 0)
+  status=$?
+  expect_code 0 "$status" "the success half of the cleanup case never spawned"
+  assert_contains "$out" "spawned $id" "the success half of the cleanup case never spawned"
 
-  before=$(count_probe_scratch)
-  run_spawn "$id" 1 0 >/dev/null 2>&1
-  run_spawn "$id-refused" 1 100000 FM_SPAWN_READY_POLLS=2 >/dev/null 2>&1 || true
+  id=first-send-scratch-refused-g7
+  rec=$(make_case scratch-refused "$id")
+  read_case "$rec"
+  out=$(run_spawn "$id" 1 100000 FM_SPAWN_READY_POLLS=2)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the refusal half of the cleanup case did not refuse"
+  assert_contains "$out" "never confirmed it can read a command line" \
+    "the refusal half never reached the readiness gate, so its cleanup is unproven"
+
   after=$(count_probe_scratch)
   [ "$after" -le "$before" ] \
     || fail "readiness probe scratch directories leaked (before=$before after=$after)"
   pass "readiness probe scratch is removed on both the success and refusal paths"
+}
+
+# A misconfigured budget knob must not brick spawning. A zero poll count would
+# otherwise skip the probe loop entirely and refuse every spawn with a message
+# blaming a pane that was never asked anything, so it falls back to the default.
+test_misconfigured_budget_knob_falls_back_to_its_default() {
+  local rec id out status
+  id=first-send-bad-knob-h8
+  rec=$(make_case bad-knob "$id")
+  read_case "$rec"
+
+  out=$(run_spawn "$id" 1 0 FM_SPAWN_READY_POLLS=0)
+  status=$?
+  expect_code 0 "$status" "a zero poll count refused a spawn a healthy pane should have passed"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_not_contains "$out" "never confirmed it can read a command line" \
+    "a zero poll count made the gate blame the pane instead of falling back to its default"
+  assert_delivered_prefix "treehouse get" \
+    "the pane never received an intact treehouse get"
+  pass "a zero budget knob falls back to its default instead of refusing every spawn"
 }
 
 # The fixture escape hatch has to be explicit, and it has to be the ONLY thing
@@ -329,6 +373,7 @@ test_swallowed_leading_bytes_never_corrupt_the_first_command
 test_second_gate_protects_the_launch_environment
 test_unready_shell_fails_loudly
 test_healthy_shell_pays_one_probe_per_gate
+test_misconfigured_budget_knob_falls_back_to_its_default
 test_fixture_bypass_is_explicit
 test_probe_scratch_is_cleaned_up
 

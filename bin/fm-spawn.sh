@@ -143,9 +143,13 @@
 #   Orca spawn - and a pane that never answers refuses the spawn rather than
 #   launching into a possibly corrupted command. FM_SPAWN_READY_POLLS (default
 #   300), FM_SPAWN_READY_INTERVAL (default 0.1s), and FM_SPAWN_READY_RESEND_EVERY
-#   (default every 10 polls) tune that budget; FM_SPAWN_READY_BYPASS=1 is a
-#   test-fixture escape hatch for suites whose fake backend has no shell behind
-#   it, never for a live home.
+#   (default every 10 polls) tune that budget, and a zero or non-numeric value
+#   for any of the three falls back to that knob's own default rather than
+#   bricking every spawn; FM_SPAWN_READY_BYPASS=1 is a test-fixture escape hatch
+#   for suites whose fake backend has no shell behind it, never for a live home.
+#   The marker command is sent unquoted so no truncation can strand the pane's
+#   shell in a quote continuation; a probe path that is not a plain absolute path
+#   of shell-inert characters therefore refuses the spawn rather than be sent.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
@@ -2213,29 +2217,49 @@ spawn_await_shell_ready() {  # <target> <what-the-caller-is-about-to-send>
   polls=${FM_SPAWN_READY_POLLS:-300}
   interval=${FM_SPAWN_READY_INTERVAL:-0.1}
   resend_every=${FM_SPAWN_READY_RESEND_EVERY:-10}
-  [ "$resend_every" -ge 1 ] 2>/dev/null || resend_every=1
+  # Fail closed on a misconfigured knob rather than let one brick spawning: a
+  # zero or non-numeric poll count would refuse every spawn without sending a
+  # single probe while the message blamed the pane, a zero resend stride would
+  # divide by zero, and a non-numeric interval would kill sleep. Each falls back
+  # to its own documented default.
+  [ "$polls" -ge 1 ] 2>/dev/null || polls=300
+  [ "$resend_every" -ge 1 ] 2>/dev/null || resend_every=10
+  case "$interval" in
+    ''|.|*[!0-9.]*|*.*.*) interval=0.1 ;;
+    *[1-9]*) : ;;
+    *) interval=0.1 ;;
+  esac
   SPAWN_READY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-spawn-ready.XXXXXX") || {
     echo "error: could not create a shell-readiness probe directory for $W" >&2
     return 1
   }
   marker="$SPAWN_READY_DIR/ready"
-  # The probe line carries the marker path single-quoted, which covers every
-  # path character except a single quote itself. Refuse rather than send a line
-  # whose quoting the pane's shell would parse differently than intended.
+  # The probe line carries the marker path UNQUOTED on purpose. A quoted line
+  # can lose enough leading bytes to leave the pane's shell holding one
+  # unbalanced quote, and from that PS2 continuation every later probe adds an
+  # even number of quotes, so the parity never returns and no probe ever runs.
+  # Unquoted, every head truncation still degrades to a word the shell cannot
+  # run, which is the property this gate depends on. That only holds while the
+  # path needs no quoting, so refuse anything but a plain absolute path made of
+  # characters no shell reinterprets, exactly as the quote guard did before.
   case "$marker" in
-    *\'*)
+    [!/]*|*[!A-Za-z0-9._/+:@-]*)
       spawn_ready_cleanup
-      echo "error: shell-readiness probe path contains a single quote and cannot be sent safely: $marker" >&2
+      echo "error: shell-readiness probe path is not a plain absolute path and cannot be sent safely: $marker" >&2
       return 1
       ;;
   esac
   while [ "$i" -lt "$polls" ]; do
     if [ $((i % resend_every)) -eq 0 ]; then
-      # Every resend after the first submits a bare Enter first, so a prior
-      # attempt left half-typed on the input line is flushed as its own failing
-      # command instead of being concatenated onto this one.
-      [ "$sends" -eq 0 ] || spawn_send_key "$target" Enter || true
-      spawn_send_text_line "$target" "touch '$marker'" || true
+      # Every resend after the first clears the input line with C-c first, so a
+      # prior attempt left half-typed - or any continuation state a partial line
+      # produced - is discarded instead of being concatenated onto this one. A
+      # bare Enter cannot escape a continuation prompt, C-c can. The tradeoff is
+      # that C-c can interrupt rc sourcing, which is acceptable only because a
+      # resend means the shell already failed to answer a whole probe window. A
+      # healthy first probe never pays it.
+      [ "$sends" -eq 0 ] || spawn_send_key "$target" C-c || true
+      spawn_send_text_line "$target" "touch $marker" || true
       sends=$((sends + 1))
     fi
     if [ -e "$marker" ]; then

@@ -120,9 +120,8 @@ case "${1:-} ${2:-}" in
     # the marker file that line creates appears. Strictly additive - no fixture
     # state changes here, so every other assertion in these suites is unaffected.
     case "${4:-}" in
-      "touch '"*"'")
-        delivered=${4#touch \'}
-        delivered=${delivered%\'}
+      "touch /"*)
+        delivered=${4#touch }
         : > "$delivered" 2>/dev/null || true
         ;;
     esac
