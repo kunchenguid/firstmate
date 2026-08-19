@@ -134,10 +134,15 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
-#   Before a fresh ship or scout worker starts, its clean task worktree fetches
-#   origin, resolves the current remote default branch, and resets to its tip.
-#   An unreachable origin, unresolved default branch, or non-clean worktree
-#   refuses the spawn rather than risking a PR based on stale history.
+#   Before a fresh ship or scout worker starts, its clean task worktree is
+#   reset to the current default-branch tip. On Firstmate's own repository
+#   (the project is this FM_ROOT or FM_HOME) that tip is the primary's local
+#   default-branch commit, never origin: local main is authoritative and
+#   origin may be a third-party parent. On every other project the worktree
+#   fetches origin, resolves the current remote default branch, and resets to
+#   its tip. An unreachable origin (ordinary projects), an unresolved default
+#   branch, or a non-clean worktree refuses the spawn rather than risking a
+#   PR based on stale or foreign history.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1727,8 +1732,55 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# Both bases end the same way: refuse a dirty worktree, reset --hard onto the
+# resolved base, then verify HEAD actually landed there. Only the target ref and
+# the noun in each message differ, so one helper owns the tail and a later fix
+# cannot reach one base and miss the other.
+reset_spawn_worktree_to_base() {  # <worktree> <label> <target> <expected> <base-label>
+  local worktree=$1 label=$2 target=$3 expected=$4 base_label=$5 status actual
+  status=$(git -C "$worktree" status --porcelain) || {
+    echo "error: could not inspect $label worktree '$worktree' before refreshing its base" >&2
+    return 1
+  }
+  if [ -n "$status" ]; then
+    echo "error: $label worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+    return 1
+  fi
+  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+    echo "error: could not reset $label worktree '$worktree' to $base_label; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  if [ "$actual" != "$expected" ]; then
+    echo "error: $label worktree '$worktree' is at '${actual:-unknown}', not $base_label ('$expected'); refusing to launch" >&2
+    return 1
+  fi
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 default target expected
+  local proj_real root_real home_real
+  proj_real=$PROJ_ABS_REAL
+  root_real=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || root_real=$FM_ROOT
+  home_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || home_real=$FM_HOME
+  # Firstmate-on-itself: local default branch is the fleet's running tree.
+  # Fetching origin here would reset workers onto a third-party parent tip
+  # whenever origin still names that parent, which is how unreviewed
+  # upstream commits enter a ship branch.
+  if [ "$proj_real" = "$root_real" ] || [ "$proj_real" = "$home_real" ]; then
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine the local default branch for firstmate worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="refs/heads/$default"
+    expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+      echo "error: local default branch '$default' is not a commit for firstmate worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    reset_spawn_worktree_to_base "$worktree" firstmate "$expected" "$expected" "local '$default'" \
+      || return 1
+    return 0
+  fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -1750,23 +1802,7 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  status=$(git -C "$worktree" status --porcelain) || {
-    echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
-    return 1
-  }
-  if [ -n "$status" ]; then
-    echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
-    return 1
-  fi
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
-    echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
-  if [ "$actual" != "$expected" ]; then
-    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
-    return 1
-  fi
+  reset_spawn_worktree_to_base "$worktree" pooled "$target" "$expected" "current '$target'"
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>
@@ -2189,7 +2225,7 @@ kimi_wait_for_delivery() {
   return 1
 }
 
-kimi_spawn_fail() {  # <detail>
+spawn_harness_fail() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
 }
@@ -2815,7 +2851,7 @@ fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
-    kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
+    spawn_harness_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
@@ -2825,15 +2861,15 @@ if [ "$HARNESS" = kimi ]; then
   KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
     "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
     "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || {
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    spawn_harness_fail "kimi brief pointer could not be submitted"
     exit 1
   }
   if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    spawn_harness_fail "kimi brief pointer could not be submitted"
     exit 1
   fi
   if ! kimi_wait_for_delivery; then
-    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    spawn_harness_fail "kimi brief pointer delivery was not confirmed"
     exit 1
   fi
 fi

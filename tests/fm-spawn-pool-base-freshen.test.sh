@@ -227,11 +227,67 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+test_firstmate_repo_uses_local_main_not_diverged_origin() {
+  local rec id out status local_main origin_main head
+  id='pool-firstmate-local-main-r6'
+  rec=$(make_case firstmate-local "$id")
+  read_case_record "$rec"
+
+  # Firstmate-on-itself: the project is the home. Local main is the fleet's
+  # tree; origin/main diverges with a commit that must not enter the worker.
+  HOME_DIR=$PROJECT_DIR
+  mkdir -p "$PROJECT_DIR/data/$id" "$PROJECT_DIR/state" "$PROJECT_DIR/config"
+  printf 'codex\n' > "$PROJECT_DIR/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$PROJECT_DIR/data/$id/brief.md"
+  touch "$PROJECT_DIR/state/.last-watcher-beat"
+
+  printf 'local-authoritative\n' > "$PROJECT_DIR/local-main.txt"
+  git -C "$PROJECT_DIR" add local-main.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'local main is authoritative'
+  local_main=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+
+  git clone --quiet "file://$CASE_DIR/origin.git" "$CASE_DIR/parent-pub"
+  printf 'unreviewed-parent\n' > "$CASE_DIR/parent-pub/upstream.txt"
+  git -C "$CASE_DIR/parent-pub" add upstream.txt
+  git -C "$CASE_DIR/parent-pub" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'unreviewed parent commit'
+  git -C "$CASE_DIR/parent-pub" push --quiet origin main
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  origin_main=$(git -C "$PROJECT_DIR" rev-parse origin/main)
+  [ "$origin_main" != "$local_main" ] \
+    || fail "fixture did not diverge origin/main from local main"
+
+  git -C "$POOL_DIR" reset --hard "$origin_main" >/dev/null
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$origin_main" ] \
+    || fail "fixture did not place the pooled worktree on origin/main"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "firstmate-on-itself spawn should refresh from local main"
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$head" = "$local_main" ] \
+    || fail "firstmate spawn left HEAD at $head, not local main $local_main (origin/main is $origin_main)"
+  git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_main" ] \
+    || fail "a careless git checkout -b after firstmate spawn did not start on local main"
+  assert_grep 'local-authoritative' "$POOL_DIR/local-main.txt" \
+    "firstmate spawn omitted local-main content"
+  [ ! -e "$POOL_DIR/upstream.txt" ] \
+    || fail "firstmate spawn imported the unreviewed parent tree"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed firstmate spawn: HEAD=%s local=%s origin=%s\n' \
+      "$head" "$local_main" "$origin_main"
+  fi
+  pass "firstmate-on-itself spawn resets to local main, not a diverged origin/main"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_firstmate_repo_uses_local_main_not_diverged_origin
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

@@ -24,6 +24,24 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Landing remote (git `origin`)
+
+Git, `gh`, and no-mistakes all default to the `origin` remote.
+A Firstmate checkout that lands work on its own fork, while keeping a third-party parent around for courtesy upstream PRs, must point `origin` at that fork so a worker doing the obvious thing branches, pulls, and opens PRs there.
+`bin/fm-landing-remote.sh` is the single owner of that remapping: it runs only on the primary checkout, names the parent `upstream`, sets the `gh` default repo to `origin`, and re-inits no-mistakes without `--fork-url` so the gate opens PRs on the landing remote.
+Its header owns the flags, URL comparison, linked-worktree refusal, and idempotency.
+`apply` has one outcome: it exits 0 only when the remap, the refetch, the branch tracking repair, the `gh` default, and the no-mistakes re-init all succeeded, because a partial remap still sends a flagless `gh pr create` to the parent.
+A `gh` or `no-mistakes` that is not on `PATH` at all is the single exception: `apply` warns, names the one command to run once that tool is installed, and still exits 0.
+Every refusal runs before the first write, and any later failure restores the remotes, the branch tracking, and the git defaults it found, so a failed `apply` leaves the checkout as it was and can be re-run.
+The remap shape is recorded before the first write, and traps on `EXIT`, `HUP`, `INT` and `TERM` cover the whole mutating window, so a `set -e` abort, a Ctrl-C, or a `kill` during the refetch still restores and still exits non-zero rather than leaving the checkout with no `origin`.
+Only an uncatchable `SIGKILL` can get past that window.
+When a restore step itself fails, `apply` says the remotes were not put back and need hand repair instead of claiming a re-appliable checkout.
+The state it captures and restores is the repository's own local config, including the `remote.origin.gh-resolved` key `gh repo set-default` writes, so a failed run cannot leave `gh` pointed at a repository the restored checkout no longer names.
+Every path that decides to change something refetches `origin`, so an interrupted run cannot leave `origin` naming ours while its tracking refs still hold the parent's tips.
+The git defaults it sets are exactly `checkout.defaultRemote` and `remote.pushDefault`, both pointed at `origin`; it does not touch branch autosetup.
+`apply` is a no-op that touches the network not at all once origin, upstream, the git defaults, and the `gh` default are already in place, so a correctly remapped primary still applies cleanly while offline.
+Do not rewrite remotes from a linked worktree; the configuration is shared with the primary.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
