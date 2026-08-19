@@ -1086,16 +1086,11 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
+    pause_run_step_active=0
     if [ "$kind" != secondmate ] && status_is_paused_or_captain_held "$last"; then
       pause_recheck_state=$(cat "$STATE/.paused-rechecked-$key" 2>/dev/null || true)
       pause_liveness=$(pause_declaration_liveness "$w")
-      if [ "$pause_recheck_state" = surfaced ]; then
-        if ! afk_present; then
-          handle_paused_stale "$w" "$task" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
-        fi
-        continue
-      fi
-      if [ "$pause_liveness" = dead ]; then
+      if [ "$pause_recheck_state" = surfaced ] || [ "$pause_liveness" = dead ]; then
         crew_state=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || crew_state=
         crew_state_name=${crew_state#state: }
         crew_state_name=${crew_state_name%% *}
@@ -1103,12 +1098,24 @@ EOF
         crew_state_source=${crew_state_source%% *}
         if [ "$crew_state_name" = working ] && [ "$crew_state_source" = run-step ]; then
           clear_pause_state "$w"
+          pause_run_step_active=1
+        elif [ "$pause_recheck_state" = surfaced ]; then
+          if ! afk_present; then
+            handle_paused_stale "$w" "$task" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
+          fi
+          continue
         else
           surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
         fi
       fi
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
+      if [ "$kind" != secondmate ] && status_is_paused_or_captain_held "$last" \
+        && [ "$pause_run_step_active" -eq 0 ] && [ "$pause_liveness" != dead ] && ! afk_present; then
+        handle_paused_stale "$w" "$task" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
+      fi
+      continue
+    fi
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"
