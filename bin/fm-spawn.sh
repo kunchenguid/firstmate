@@ -2225,7 +2225,7 @@ kimi_wait_for_delivery() {
   return 1
 }
 
-kimi_spawn_fail() {  # <detail>
+spawn_harness_fail() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
 }
@@ -2851,7 +2851,7 @@ fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
-    kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
+    spawn_harness_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
@@ -2861,15 +2861,15 @@ if [ "$HARNESS" = kimi ]; then
   KIMI_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
     "$BACKEND" "$T" "$KIMI_POINTER" "$KIMI_SUBMIT_RETRIES" \
     "$KIMI_SUBMIT_SLEEP" "$KIMI_SUBMIT_SETTLE" "$W") || {
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    spawn_harness_fail "kimi brief pointer could not be submitted"
     exit 1
   }
   if [ "$KIMI_SUBMIT_VERDICT" = send-failed ]; then
-    kimi_spawn_fail "kimi brief pointer could not be submitted"
+    spawn_harness_fail "kimi brief pointer could not be submitted"
     exit 1
   fi
   if ! kimi_wait_for_delivery; then
-    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    spawn_harness_fail "kimi brief pointer delivery was not confirmed"
     exit 1
   fi
 fi
