@@ -2173,9 +2173,7 @@ teardown_backend_preflight() {  # <backend> <task-id> <home>
     unset FM_ROOT_OVERRIDE
     unset _FM_BACKEND_TMUX_SOURCED _FM_BACKEND_HERDR_SOURCED _FM_BACKEND_ZELLIJ_SOURCED
     unset _FM_BACKEND_ORCA_SOURCED _FM_BACKEND_CMUX_SOURCED
-    FM_HOME=$home
-    FM_ROOT=$home
-    fm_backend_source "$backend"
+    FM_HOME=$home FM_ROOT=$home fm_backend_source "$backend"
   ); then
     return 0
   fi
