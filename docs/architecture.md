@@ -27,7 +27,7 @@ A durable `captain-held` endpoint uses that bounded cadence only after the backe
 The secondmate idle-endpoint exemption is unchanged.
 The pause's initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
-After a parked or terminal status has already surfaced, unchanged stale pane drift is absorbed until a new status signal or a new run-step parked, PR-ready, or failed generation appears.
+After a parked or terminal status has already surfaced, unchanged stale pane drift is absorbed until a new status signal or a new run-step parked, done, or failed generation appears.
 No-change heartbeats are also benign.
 Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin/fm-inactive-reconcile.sh` on its own bounded cadence, while locked session start performs the same bounded local scan immediately.
 In each home the scan considers only that home's long-inactive direct ordinary crewmates, excludes captain-held work, and accepts only `done` or `failed` from `bin/fm-crew-state.sh`.
