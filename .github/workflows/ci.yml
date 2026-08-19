@@ -23,6 +23,9 @@ jobs:
       # Single owner of the lint definition (file set + config + version). Do not
       # re-spell the shellcheck command here; keep CI and the pre-push gate on it.
       - run: bin/fm-lint.sh
+      # ShellCheck cannot see the .mjs tools, and nothing else parsed them: a
+      # syntax error in one reached main green.
+      - run: bin/fm-lint-node.sh
 
   behavior-test-plan:
     name: Behavior test shard plan
@@ -66,6 +69,28 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      # The Pi credential store is what bin/fm-pi-refresh.mjs holds a lock in
+      # and writes through. Without Pi here its store contract skipped, and a
+      # skip that cannot fail is indistinguishable from coverage: two mutations
+      # of the actuator passed this job green. FM_PI_REQUIRED turns a failed
+      # install into a red test rather than a silent skip.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Pi for the credential-store contract
+        run: |
+          set -eu
+          npm install -g @earendil-works/pi-coding-agent
+          # By absolute path: a bare specifier does not resolve from the global
+          # prefix, and FM_PI_PACKAGE_DIR spares the test a PATH lookup for a
+          # binary it never runs.
+          root="$(npm root -g)/@earendil-works/pi-coding-agent"
+          test -f "$root/dist/core/auth-storage.js"
+          node -e "console.log(require('$root/package.json').version)"
+          {
+            echo "FM_PI_PACKAGE_DIR=$root"
+            echo "FM_PI_REQUIRED=1"
+          } >> "$GITHUB_ENV"
       - name: Prepare private shard state
         run: |
           set -eu

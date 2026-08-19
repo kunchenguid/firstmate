@@ -40,11 +40,13 @@ States, most usable first:
                file, over the byte bound, malformed, or carrying no token
                material at all
 
-`refreshable` is deliberately distinct from `usable`. Firstmate has no token
-refresh anywhere - no job, no timer, no call site - so nothing on the host
-turns a `refreshable` profile into a `usable` one. Only an interactive
-provider login, or the provider CLI reaching its own auth host from wherever
-the profile runs, does that.
+`refreshable` is deliberately distinct from `usable`, and stays distinct even
+where a refresher exists. `bin/fm-pi-refresh.py` renews Pi profiles on the
+host, so a `refreshable` Pi profile can become `usable` there; nothing renews
+a codex or claude profile, and no caller whose network excludes the provider's
+auth host can turn a `refreshable` profile of any harness into a usable one
+where it runs. Reporting `refreshable` therefore still means "not usable
+here", and a caller that needs a live credential asks for `usable`.
 
 Usage:
   fm-credential-expiry.py report [--json] [--margin-seconds N]
@@ -336,13 +338,13 @@ def inspect_profile(
         if facts.get("access_expires_at") is not None and facts["access_expires_at"] > moment:
             record["detail"] = (
                 f"{resolved_harness} access token expires at {expiry}, inside the "
-                "window this caller needs it for; refresh material is present but "
-                "firstmate never refreshes it"
+                "window this caller needs it for; refresh material is present, "
+                "which this caller cannot use where it runs"
             )
         else:
             record["detail"] = (
                 f"{resolved_harness} access token expired at {expiry}; refresh "
-                "material is present but firstmate never refreshes it"
+                "material is present, which this caller cannot use where it runs"
             )
         return record
 
