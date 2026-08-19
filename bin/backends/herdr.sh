@@ -2804,6 +2804,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         printf 'send-failed'
         return 0
       fi
+      sleep "$sleep_s"
       continue
     fi
     if [ "$baseline" = idle ]; then
