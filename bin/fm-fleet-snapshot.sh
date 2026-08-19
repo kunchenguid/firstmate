@@ -865,17 +865,33 @@ registry_secondmates_json() {
 BASH
   )
   parse_filter=$(cat <<'JQ'
-      [ inputs
+      # The runtime segment between "projects:" and "added" is captured loosely and
+      # then held to the same vocabulary bin/fm-secondmate-registry-lib.sh honors,
+      # so this second parser refuses exactly what the owning parser refuses
+      # instead of reporting a record the launcher rejects as a healthy mate.
+      # A key only opens a field at the start of the segment or after the ";" that
+      # closed the previous one, so the repeated-key guards are anchored to that
+      # boundary: the same literal inside a model value is part of the value.
+      ("^(?!.*(?:^|;)[[:space:]]*harness:.*(?:^|;)[[:space:]]*harness:)"
+        + "(?!.*(?:^|;)[[:space:]]*model:.*(?:^|;)[[:space:]]*model:)"
+        + "(?!.*(?:^|;)[[:space:]]*effort:.*(?:^|;)[[:space:]]*effort:)"
+        + "(?:[[:space:]]*(?:harness:[[:space:]]*(?:claude|codex|opencode|pi-signed|pi|grok|kimi)"
+        + "|model:[[:space:]]*(?!(?:-|default)[[:space:]]*;)[^;)[:space:][:cntrl:]]+"
+        + "|effort:[[:space:]]*(?:low|medium|high|xhigh|max))?[[:space:]]*;)*[[:space:]]*$") as $runtime_re
+      | [ inputs
         | select(startswith("- "))
         | (capture("^- (?<id>[^[:space:]]+)")?) as $id
         | select($id != null)
-        | ([capture("^.*\\(host:[[:space:]]*(?<host>[^;)]*);[[:space:]]*root:[[:space:]]*(?<root>[^;)]*);[[:space:]]*home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*.*;[[:space:]]*projects:[[:space:]]*[^;)]*;[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $remote
-        | ([capture("^.*\\(home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*.*;[[:space:]]*projects:[[:space:]]*[^;)]*;[[:space:]]*added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $local
+        | ([capture("^.*\\(host:[[:space:]]*(?<host>[^;)]*);[[:space:]]*root:[[:space:]]*(?<root>[^;)]*);[[:space:]]*home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*.*;[[:space:]]*projects:[[:space:]]*[^;)]*;(?<runtime>.*)added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $remote
+        | ([capture("^.*\\(home:[[:space:]]*(?<home>[^;)]*);[[:space:]]*scope:[[:space:]]*.*;[[:space:]]*projects:[[:space:]]*[^;)]*;(?<runtime>.*)added[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}\\)[[:space:]]*$")?][0] // null) as $local
         | ($local // $remote) as $route
         | (($local == null) and ($remote != null)) as $is_remote
         | {id:$id.id,home:($route.home // null),host:(if $is_remote then $remote.host else null end),root:(if $is_remote then $remote.root else null end),
            remote:$is_remote,registered:true,
-           registry_error:(if $route == null or ($route.home | length) == 0 then "registry entry has no home" else null end)} ]
+           registry_error:(
+             if $route == null or ($route.home | length) == 0 then "registry entry has no home"
+             elif ($route.runtime | test($runtime_re)) | not then "registry entry has an unreadable runtime pin"
+             else null end)} ]
       | group_by(.id)
       | map(if length > 1 then .[0] + {registry_error:"duplicate secondmate id in registry"} else .[0] end)
 JQ

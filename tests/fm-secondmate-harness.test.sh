@@ -41,6 +41,14 @@
 #      spawn only when the harness also resolves from that file, so the pin is
 #      durable across every respawn while explicit per-spawn harness/model/effort
 #      flags still win.
+#   D) Per-secondmate runtime. A secondmate's own record in data/secondmates.md
+#      may carry optional harness:, model:, and effort: fields, each independent
+#      of the others, re-resolved on every spawn the way home: already is. They
+#      outrank config/secondmate-harness and are outranked by explicit per-spawn
+#      flags, so two mates in one home run different runtimes and a relaunch
+#      keeps each mate's choice instead of reverting to the home-wide pin. A
+#      record with none of them is the legacy form and behaves exactly as before;
+#      an unverified harness or an out-of-vocabulary effort is refused loudly.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -887,6 +895,352 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
   assert_not_contains "$launch" "model_reasoning_effort=\"high\"" \
     "explicit-harness-explicit-axes: launch leaked the file's effort token"
   pass "C8 spawn: an explicit --harness still honors explicit model/effort flags"
+}
+
+# ===========================================================================
+# D) Per-secondmate durable runtime. A secondmate's own record in
+# data/secondmates.md may carry optional harness:, model:, and effort: fields,
+# each independent, re-resolved on every spawn so a per-mate choice survives a
+# relaunch instead of reverting to the home-wide config/secondmate-harness pin.
+# ===========================================================================
+
+# write_secondmate_record <world> <id> <home> [<runtime-fields>]
+# Appends one record for <id>. <runtime-fields> is the literal optional segment,
+# e.g. " harness: codex; model: gpt-x;"; omitted it writes the legacy form.
+write_secondmate_record() {
+  local world=$1 id=$2 home=$3 runtime=${4:-}
+  mkdir -p "$world/home/data"
+  printf -- '- %s - %s mate (home: %s; scope: %s domain; projects: ;%s added 2026-01-01)\n' \
+    "$id" "$id" "$home" "$id" "$runtime" >> "$world/home/data/secondmates.md"
+}
+
+# spawn_secondmate_from_record <world> <id> <launchlog> [extra fm-spawn.sh args...]
+# Launches WITHOUT the home positional, the exact shape the bootstrap liveness
+# relaunch uses, so the home and the runtime both come from the record.
+spawn_secondmate_from_record() {
+  local world=$1 id=$2 launchlog=$3 fakebin
+  shift 3
+  mkdir -p "$world/home/state" "$world/home/data"
+  fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
+  : > "$launchlog"
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$@" --secondmate
+}
+
+# Two mates in one home, each on its own recorded runtime, against a home-wide
+# pin that must govern neither of them fully: the fully pinned mate takes all
+# three axes from its record, while the model-only mate keeps the config harness
+# and effort and overrides just the model.
+test_registry_runtime_per_mate() {
+  local w a b meta launchlog launch out status
+  w="$TMP_ROOT/registry-runtime-per-mate"
+  a="$w/infra"
+  b="$w/docs"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude opus high\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$a" infra
+  make_seeded_home "$b" docs
+  write_secondmate_record "$w" infra "$a" ' harness: codex; model: gpt-x; effort: xhigh;'
+  write_secondmate_record "$w" docs "$b" ' model: cheap-1;'
+
+  out=$(spawn_secondmate_from_record "$w" infra "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "per-mate: the fully pinned mate should launch"$'\n'"$out"
+  meta="$w/home/state/infra.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "per-mate: infra harness not codex (got '$(meta_field "$meta" harness)')"
+  [ "$(meta_field "$meta" model)" = gpt-x ] || fail "per-mate: infra model not gpt-x (got '$(meta_field "$meta" model)')"
+  [ "$(meta_field "$meta" effort)" = xhigh ] || fail "per-mate: infra effort not xhigh (got '$(meta_field "$meta" effort)')"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "--model 'gpt-x'" "per-mate: infra launch did not carry its recorded model"
+  assert_contains "$launch" "-c 'model_reasoning_effort=\"xhigh\"'" "per-mate: infra launch did not carry its recorded effort"
+  assert_not_contains "$launch" "--model 'opus'" "per-mate: infra launch leaked the home-wide model pin"
+
+  out=$(spawn_secondmate_from_record "$w" docs "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "per-mate: the model-only mate should launch"$'\n'"$out"
+  meta="$w/home/state/docs.meta"
+  [ "$(meta_field "$meta" harness)" = claude ] || fail "per-mate: docs harness should stay the home-wide claude (got '$(meta_field "$meta" harness)')"
+  [ "$(meta_field "$meta" model)" = cheap-1 ] || fail "per-mate: docs model not cheap-1 (got '$(meta_field "$meta" model)')"
+  [ "$(meta_field "$meta" effort)" = high ] || fail "per-mate: docs effort should inherit the home-wide high (got '$(meta_field "$meta" effort)')"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'cheap-1' --effort 'high'" \
+    "per-mate: docs launch did not mix its recorded model with the inherited harness and effort"
+  pass "D1 spawn: two mates in one home each launch on their own recorded runtime, per axis"
+}
+
+# The regression this whole capability exists to prevent: a relaunch - the path
+# recovery and /updatefirstmate use - must re-resolve the record, not revert to
+# the home-wide pin.
+test_registry_runtime_survives_relaunch() {
+  local w sm meta launchlog out status
+  w="$TMP_ROOT/registry-runtime-relaunch"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude opus high\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  write_secondmate_record "$w" sm "$sm" ' harness: codex; model: gpt-x; effort: low;'
+
+  out=$(spawn_secondmate_from_record "$w" sm "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "relaunch: first launch should succeed"$'\n'"$out"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" model)" = gpt-x ] || fail "relaunch: first launch did not take the recorded model"
+
+  rm -f "$launchlog"
+  out=$(spawn_secondmate_from_record "$w" sm "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "relaunch: respawn should succeed"$'\n'"$out"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "relaunch: harness reverted to the home-wide pin (got '$(meta_field "$meta" harness)')"
+  [ "$(meta_field "$meta" model)" = gpt-x ] || fail "relaunch: model reverted to the home-wide pin (got '$(meta_field "$meta" model)')"
+  [ "$(meta_field "$meta" effort)" = low ] || fail "relaunch: effort reverted to the home-wide pin (got '$(meta_field "$meta" effort)')"
+  assert_contains "$(cat "$launchlog")" "--model 'gpt-x'" "relaunch: respawn launch did not carry the recorded model"
+  assert_not_contains "$(cat "$launchlog")" "--model 'opus'" "relaunch: respawn launch reverted to the home-wide model"
+  pass "D2 spawn: a relaunch preserves the recorded runtime instead of reverting to the home-wide pin"
+}
+
+# A registry file written before this capability existed must parse, validate,
+# and launch exactly as it did: the home-wide pin governs it end to end.
+test_registry_pre_change_record_unchanged() {
+  local w sm meta launchlog out status
+  w="$TMP_ROOT/registry-runtime-legacy"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config" "$w/home/state"
+  printf 'claude opus high\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  write_secondmate_record "$w" sm "$sm"
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    "$ROOT/bin/fm-home-seed.sh" validate 2>&1); status=$?
+  expect_code 0 "$status" "legacy: a pre-change registry should still validate"$'\n'"$out"
+
+  out=$(spawn_secondmate_from_record "$w" sm "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "legacy: a pre-change record should still launch"$'\n'"$out"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = claude ] || fail "legacy: harness not the home-wide claude"
+  [ "$(meta_field "$meta" model)" = opus ] || fail "legacy: model not the home-wide opus"
+  [ "$(meta_field "$meta" effort)" = high ] || fail "legacy: effort not the home-wide high"
+  pass "D3 spawn: a registry written before this change parses, validates, and launches unchanged"
+}
+
+# A recorded harness or effort outside its verified vocabulary is refused before
+# any launch, naming the axis and the value - never silently ignored, and never a
+# quiet fall back to the config pin the record does not name.
+test_registry_runtime_invalid_values_refused() {
+  local w sm launchlog err rc out
+  w="$TMP_ROOT/registry-runtime-invalid"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config" "$w/home/state"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  write_secondmate_record "$w" sm "$sm" ' harness: muse;'
+
+  rc=0
+  err=$(spawn_secondmate_from_record "$w" sm "$launchlog" 2>&1 >/dev/null) || rc=$?
+  [ "$rc" -ne 0 ] || fail "invalid: a recorded unverified harness should refuse the spawn"
+  assert_contains "$err" "unverified recorded harness for sm: muse" "invalid: refusal does not name the recorded harness"
+  [ -e "$w/home/state/sm.meta" ] && fail "invalid: a meta was written despite the refusal"
+
+  rm -f "$w/home/data/secondmates.md"
+  write_secondmate_record "$w" sm "$sm" ' effort: turbo;'
+  rc=0
+  err=$(spawn_secondmate_from_record "$w" sm "$launchlog" 2>&1 >/dev/null) || rc=$?
+  [ "$rc" -ne 0 ] || fail "invalid: a recorded out-of-vocabulary effort should refuse the spawn"
+  assert_contains "$err" "invalid recorded effort for sm: turbo" "invalid: refusal does not name the recorded effort"
+  [ -e "$w/home/state/sm.meta" ] && fail "invalid: a meta was written despite the effort refusal"
+
+  rc=0
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    "$ROOT/bin/fm-home-seed.sh" validate 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "invalid: registry validation should refuse the same record"
+  assert_contains "$out" "invalid recorded effort for sm: turbo" "invalid: validation does not name the recorded effort"
+
+  # "-" and "default" are the launch routes' own "no model" sentinels and mean
+  # opposite things on the two routes, so neither is a recordable model.
+  local sentinel
+  for sentinel in - default; do
+    rm -f "$w/home/data/secondmates.md"
+    write_secondmate_record "$w" sm "$sm" " model: $sentinel;"
+    rc=0
+    err=$(spawn_secondmate_from_record "$w" sm "$launchlog" 2>&1 >/dev/null) || rc=$?
+    [ "$rc" -ne 0 ] || fail "invalid: a recorded '$sentinel' model should refuse the spawn"
+    assert_contains "$err" "unusable recorded model for sm: $sentinel" \
+      "invalid: refusal does not name the recorded model sentinel '$sentinel'"
+    [ -e "$w/home/state/sm.meta" ] && fail "invalid: a meta was written despite the model refusal"
+    rc=0
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+      FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+      FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+      "$ROOT/bin/fm-home-seed.sh" validate 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "invalid: validation should refuse a recorded '$sentinel' model"
+  done
+  pass "D4 spawn: an invalid recorded harness, effort, or model sentinel is refused loudly, at launch and at validation"
+}
+
+# A recorded harness suppresses the config tokens (they were written against the
+# config's own harness), while explicit per-spawn flags still beat the record.
+test_registry_runtime_precedence_edges() {
+  local w sm meta launchlog out status
+  w="$TMP_ROOT/registry-runtime-precedence"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude opus high\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  write_secondmate_record "$w" sm "$sm" ' harness: codex;'
+
+  out=$(spawn_secondmate_from_record "$w" sm "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "precedence: harness-only record should launch"$'\n'"$out"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "precedence: harness not codex"
+  [ "$(meta_field "$meta" model)" = default ] || fail "precedence: a recorded harness must not pick up the config model token"
+  [ "$(meta_field "$meta" effort)" = default ] || fail "precedence: a recorded harness must not pick up the config effort token"
+  assert_not_contains "$(cat "$launchlog")" "--model" "precedence: launch leaked the config model token"
+
+  rm -f "$w/home/state/sm.meta"
+  out=$(spawn_secondmate_from_record "$w" sm "$launchlog" --model gpt-5.5 --effort low 2>&1); status=$?
+  expect_code 0 "$status" "precedence: explicit flags should launch"$'\n'"$out"
+  [ "$(meta_field "$meta" model)" = gpt-5.5 ] || fail "precedence: explicit --model did not beat the record"
+  [ "$(meta_field "$meta" effort)" = low ] || fail "precedence: explicit --effort did not beat the record"
+  pass "D5 spawn: a recorded harness suppresses the config tokens and explicit flags beat the record"
+}
+
+# The captain-facing edit path: set axes, clear one, and refuse a bad value
+# without touching the stored record.
+test_registry_runtime_edit_action() {
+  local w sm reg before out rc
+  w="$TMP_ROOT/registry-runtime-edit"
+  sm="$w/sm"
+  reg="$w/home/data/secondmates.md"
+  mkdir -p "$w/home/state"
+  make_seeded_home "$sm" sm
+  write_secondmate_record "$w" sm "$sm"
+
+  seed_runtime() {
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+      FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+      FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+      "$ROOT/bin/fm-home-seed.sh" runtime "$@"
+  }
+
+  out=$(seed_runtime sm harness=codex model=gpt-x effort=xhigh 2>&1) || fail "edit: setting the runtime failed"$'\n'"$out"
+  assert_contains "$out" "harness: codex; model: gpt-x; effort: xhigh;" "edit: printed record missing the recorded runtime"
+  assert_contains "$(cat "$reg")" "harness: codex; model: gpt-x; effort: xhigh;" "edit: stored record missing the recorded runtime"
+
+  out=$(seed_runtime sm model=- 2>&1) || fail "edit: clearing the model failed"$'\n'"$out"
+  assert_not_contains "$(cat "$reg")" "model:" "edit: a cleared axis is still stored"
+  assert_contains "$(cat "$reg")" "harness: codex; effort: xhigh;" "edit: clearing one axis disturbed the others"
+
+  before=$(cat "$reg")
+  rc=0
+  out=$(seed_runtime sm effort=turbo 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "edit: an invalid effort should be refused"
+  assert_contains "$out" "invalid effort for sm: turbo" "edit: refusal does not name the value"
+  [ "$(cat "$reg")" = "$before" ] || fail "edit: a refused value changed the stored record"
+
+  rc=0
+  out=$(seed_runtime sm harness=muse 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "edit: an unverified harness should be refused"
+  assert_contains "$out" "unverified harness for sm: muse" "edit: refusal does not name the harness"
+  [ "$(cat "$reg")" = "$before" ] || fail "edit: a refused harness changed the stored record"
+
+  # An empty value is an input error, not a second spelling of the "-" clear
+  # sentinel: an unset shell variable expanding into the assignment must never
+  # erase a recorded axis and report success.
+  local axis
+  for axis in harness model effort; do
+    rc=0
+    out=$(seed_runtime sm "$axis=" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "edit: an empty $axis value should be refused"
+    assert_contains "$out" "empty value for $axis on sm" "edit: refusal does not name the empty axis '$axis'"
+    [ "$(cat "$reg")" = "$before" ] || fail "edit: an empty $axis value changed the stored record"
+  done
+  # ";" and ")" terminate a runtime field and the record suffix, so a model
+  # carrying either cannot round-trip: the record either stops parsing or reads
+  # as a broken runtime pin in the fleet snapshot.
+  local separator
+  for separator in 'gpt-x;evil' 'gpt-x)evil'; do
+    rc=0
+    out=$(seed_runtime sm "model=$separator" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "edit: a model carrying a record separator should be refused: $separator"
+    assert_contains "$out" "unusable model for sm: $separator" "edit: refusal does not name the separator model '$separator'"
+    [ "$(cat "$reg")" = "$before" ] || fail "edit: a refused separator model changed the stored record"
+  done
+  pass "D6 registry: the runtime edit action sets, clears, and refuses per axis without disturbing the record"
+}
+
+# Re-seeding an already-registered mate at the same home is a supported flow
+# (adding a project, refreshing the charter). It rewrites that mate's record, so
+# it must carry the recorded runtime forward: the pin is durable across every
+# rewrite of the record, not only across relaunches.
+test_registry_runtime_survives_reseed() {
+  local w sm meta launchlog out status
+  w="$TMP_ROOT/registry-runtime-reseed"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config" "$w/home/state" "$w/home/data" "$w/home/projects"
+  printf 'claude opus high\n' > "$w/home/config/secondmate-harness"
+
+  run_seed() {
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+      FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+      FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+      FM_SECONDMATE_CHARTER='runtime durability charter' \
+      "$ROOT/bin/fm-home-seed.sh" "$@"
+  }
+
+  out=$(run_seed sm "$sm" --no-projects 2>&1) || fail "reseed: initial seed failed"$'\n'"$out"
+  out=$(run_seed runtime sm harness=codex model=gpt-x effort=xhigh 2>&1) \
+    || fail "reseed: recording the runtime failed"$'\n'"$out"
+
+  out=$(run_seed sm "$sm" --no-projects 2>&1) || fail "reseed: re-seeding the same home failed"$'\n'"$out"
+  out=$(run_seed validate 2>&1) || fail "reseed: the rewritten registry does not validate"$'\n'"$out"
+
+  out=$(spawn_secondmate_from_record "$w" sm "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "reseed: the re-seeded mate should launch"$'\n'"$out"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] \
+    || fail "reseed: harness reverted to the home-wide pin (got '$(meta_field "$meta" harness)')"
+  [ "$(meta_field "$meta" model)" = gpt-x ] \
+    || fail "reseed: model reverted to the home-wide pin (got '$(meta_field "$meta" model)')"
+  [ "$(meta_field "$meta" effort)" = xhigh ] \
+    || fail "reseed: effort reverted to the home-wide pin (got '$(meta_field "$meta" effort)')"
+  assert_contains "$(cat "$launchlog")" "--model 'gpt-x'" "reseed: the launch lost the recorded model"
+  assert_not_contains "$(cat "$launchlog")" "--model 'opus'" "reseed: the launch reverted to the home-wide model"
+  pass "D7 registry: a re-seed of an already-registered mate preserves its recorded runtime"
+}
+
+test_registry_reseed_keeps_dotted_id_siblings() {
+  local w out reg
+  w="$TMP_ROOT/registry-reseed-dotted-ids"
+  mkdir -p "$w/home/config" "$w/home/state" "$w/home/data" "$w/home/projects"
+  reg="$w/home/data/secondmates.md"
+
+  run_seed() {
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+      FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+      FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+      FM_SECONDMATE_CHARTER='dotted id charter' \
+      "$ROOT/bin/fm-home-seed.sh" "$@"
+  }
+
+  out=$(run_seed a.b "$w/a.b" --no-projects 2>&1) || fail "dotted ids: seeding a.b failed"$'\n'"$out"
+  out=$(run_seed axb "$w/axb" --no-projects 2>&1) || fail "dotted ids: seeding axb failed"$'\n'"$out"
+  out=$(run_seed a.b "$w/a.b" --no-projects 2>&1) || fail "dotted ids: re-seeding a.b failed"$'\n'"$out"
+
+  [ "$(grep -c '^- axb ' "$reg")" = 1 ] \
+    || fail "dotted ids: re-seeding a.b unregistered the sibling axb"$'\n'"$(cat "$reg")"
+  [ "$(grep -c '^- a\.b ' "$reg")" = 1 ] \
+    || fail "dotted ids: re-seeding a.b did not leave exactly one a.b record"$'\n'"$(cat "$reg")"
+  out=$(run_seed validate 2>&1) || fail "dotted ids: the rewritten registry does not validate"$'\n'"$out"
+  pass "D8 registry: a re-seed matches its id exactly and keeps dotted-id siblings"
 }
 
 test_spawned_secondmate_uses_its_harness_supervision_model() {
@@ -2086,7 +2440,7 @@ SH
 
 test_config_reread_serializes_concurrent_pushes() {
   local w head fakebin marker entered log first_out second_out first_pid first_status second_status
-  local first_instr second_instr first_line second_line
+  local first_instr second_instr first_line second_line entered_deadline
   w=$(new_world config-reread-serialized-pushes)
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
@@ -2120,9 +2474,15 @@ SH
       "$ROOT/bin/fm-config-push.sh" > "$first_out" 2>&1
   ) &
   first_pid=$!
-  for _ in $(seq 1 100); do
-    [ -e "$entered" ] && break
-    sleep 0.02
+  # The backgrounded push must reach pointer delivery before the second one can
+  # overlap it. Bound that wait by wall clock, not by a fixed iteration count:
+  # the old 100 x 0.02s spin gave the whole push two seconds to start, discover
+  # the home, converge its config, and publish a generation, which a loaded
+  # multi-lane or CI host misses routinely - a slow machine then reported as a
+  # serialization defect. The bound still fails loudly if delivery never happens.
+  entered_deadline=$(( $(date +%s) + 60 ))
+  while [ ! -e "$entered" ] && [ "$(date +%s)" -lt "$entered_deadline" ]; do
+    sleep 0.05
   done
   [ -e "$entered" ] || fail "first config push did not reach pointer delivery"
   first_instr=$(reread_instruction_path "$w/sm") \
@@ -2541,6 +2901,14 @@ test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
+test_registry_runtime_per_mate
+test_registry_runtime_survives_relaunch
+test_registry_pre_change_record_unchanged
+test_registry_runtime_invalid_values_refused
+test_registry_runtime_precedence_edges
+test_registry_runtime_edit_action
+test_registry_runtime_survives_reseed
+test_registry_reseed_keeps_dotted_id_siblings
 test_spawned_secondmate_uses_its_harness_supervision_model
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges

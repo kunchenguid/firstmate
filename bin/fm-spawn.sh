@@ -102,7 +102,8 @@
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
-#   harness (config/secondmate-harness -> config/crew-harness -> own), so the
+#   harness (that mate's own recorded harness: field, then config/secondmate-harness
+#   -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
@@ -113,15 +114,21 @@
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
+#   A secondmate's OWN record in data/secondmates.md may pin its runtime per mate
+#   with optional harness:, model:, and effort: fields, each independent of the
+#   others (bin/fm-secondmate-registry-lib.sh owns that record format and refuses
+#   an unverified harness or an out-of-vocabulary effort before any launch).
 #   config/secondmate-harness may also carry an optional model and effort as extra
-#   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
-#   --secondmate spawn, those tokens apply only when this spawn also resolves its
-#   harness from config/secondmate-harness. An explicit per-spawn --harness,
-#   positional harness arg, or raw launch command starts with clean model/effort
-#   defaults unless the caller also passes explicit --model/--effort flags. When
-#   the file governs the spawn, its model/effort tokens are re-resolved on every
-#   respawn exactly like the harness axis, and explicit --model/--effort flags
-#   still win over the file's tokens.
+#   whitespace-separated tokens ("<harness> [<model>] [<effort>]"), applying to
+#   every secondmate this home launches. Per axis, strongest first: an explicit
+#   per-spawn --harness/--model/--effort flag, then this mate's recorded field,
+#   then the config tokens - which apply only when this spawn also resolves its
+#   harness from config/secondmate-harness, so a recorded harness suppresses them.
+#   An explicit per-spawn --harness, positional harness arg, or raw launch command
+#   starts with clean model/effort defaults unless the caller also passes explicit
+#   --model/--effort flags. Both durable sources are re-resolved on every respawn,
+#   local and remote alike, so a per-mate or home-wide pin survives recovery,
+#   /updatefirstmate, and restart.
 #   A --secondmate spawn also propagates the primary's declared inherited local
 #   material, so the secondmate's OWN crewmates inherit primary config and the
 #   secondmate receives the primary's read-only shared captain-preference file
@@ -398,6 +405,7 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
+  local reg_harness reg_model reg_effort
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
@@ -415,15 +423,27 @@ spawn_remote_secondmate() {
     echo "error: secondmate registry could not be locked for remote spawn" >&2
     return 1
   fi
-  remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
+  # Read the record once, in this shell rather than a subshell, so a refusal from
+  # its recorded runtime fields reaches this caller instead of reading as "not a
+  # remote route" and silently falling through to the local path.
+  if ! secondmate_registry_line_for_id "$DATA/secondmates.md" "$id"; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    [ -z "$SECONDMATE_REGISTRY_ERROR" ] || { echo "error: $SECONDMATE_REGISTRY_ERROR" >&2; return 1; }
+    return 3
+  fi
+  remote=$SECONDMATE_REGISTRY_REMOTE
   if [ "$remote" != 1 ]; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 3
   fi
-  host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
-  root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
-  home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home)
+  host=$SECONDMATE_REGISTRY_HOST
+  root=$SECONDMATE_REGISTRY_ROOT
+  home=$SECONDMATE_REGISTRY_HOME
+  reg_harness=$SECONDMATE_REGISTRY_HARNESS
+  reg_model=$SECONDMATE_REGISTRY_MODEL
+  reg_effort=$SECONDMATE_REGISTRY_EFFORT
   positional=${POS[1]:-}
   if [ "${#POS[@]}" -gt 2 ]; then
     fm_lock_release "$registry_lock" || true
@@ -435,28 +455,38 @@ spawn_remote_secondmate() {
     harness=$HARNESS_ARG
   elif [ -n "$positional" ]; then
     harness=$positional
+  elif [ -n "$reg_harness" ]; then
+    harness=$reg_harness
   else
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
-  case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
-    *)
-      fm_lock_release "$registry_lock" || true
-      fm_lock_release "$SPAWN_TASK_LOCK" || true
-      echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
-      return 1
-      ;;
-  esac
+  if ! secondmate_registry_runtime_harness_ok "$harness"; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate spawn requires a verified harness adapter, not a raw launch command: $harness" >&2
+    return 1
+  fi
   model=${MODEL:--}
   effort=${EFFORT:--}
+  # Same per-axis precedence as a local route: explicit flag, then this mate's own
+  # record, then the config tokens - which a recorded harness suppresses, because
+  # they were written against the config's harness rather than this one.
   if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
     if [ "$MODEL_SET" -eq 0 ]; then
-      model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
-      [ -n "$model" ] || model=-
+      if [ -n "$reg_model" ]; then
+        model=$reg_model
+      elif [ -z "$reg_harness" ]; then
+        model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
+        [ -n "$model" ] || model=-
+      fi
     fi
     if [ "$EFFORT_SET" -eq 0 ]; then
-      effort=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
-      [ -n "$effort" ] || effort=-
+      if [ -n "$reg_effort" ]; then
+        effort=$reg_effort
+      elif [ -z "$reg_harness" ]; then
+        effort=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
+        [ -n "$effort" ] || effort=-
+      fi
     fi
   fi
   # A remote second mate always runs on Herdr: its server belongs to the host's
@@ -1180,6 +1210,28 @@ launch_template() {
   esac
 }
 
+# This secondmate's OWN durable runtime, read from its registry record on every
+# spawn exactly the way home:, host:, and root: already are, so a per-mate choice
+# survives every respawn (recovery, /updatefirstmate, restart) instead of
+# reverting to the home-wide config pin. Each axis is independent: a record may
+# pin only a model and inherit the rest.
+# bin/fm-secondmate-registry-lib.sh owns the record format and its validation;
+# a record that refuses to parse stops the spawn here rather than silently
+# launching on the config fallback the record does not name.
+SM_REG_HARNESS=
+SM_REG_MODEL=
+SM_REG_EFFORT=
+if [ "$KIND" = secondmate ] && [ -f "$DATA/secondmates.md" ] && [ ! -L "$DATA/secondmates.md" ]; then
+  if secondmate_registry_line_for_id "$DATA/secondmates.md" "$ID"; then
+    SM_REG_HARNESS=$SECONDMATE_REGISTRY_HARNESS
+    SM_REG_MODEL=$SECONDMATE_REGISTRY_MODEL
+    SM_REG_EFFORT=$SECONDMATE_REGISTRY_EFFORT
+  elif [ -n "$SECONDMATE_REGISTRY_ERROR" ]; then
+    echo "error: $SECONDMATE_REGISTRY_ERROR" >&2
+    exit 1
+  fi
+fi
+
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
     LAUNCH=$ARG3
@@ -1198,8 +1250,13 @@ case "$ARG3" in
     # The launch_template lookup below is the unverified-adapter guard for both
     # kinds: a harness with no template aborts the spawn.
     if [ "$KIND" = secondmate ]; then
-      HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
-      harness_src='config/secondmate-harness (falling back to config/crew-harness)'
+      if [ -n "$SM_REG_HARNESS" ]; then
+        HARNESS=$SM_REG_HARNESS
+        harness_src='the secondmate record in data/secondmates.md'
+      else
+        HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
+        harness_src='config/secondmate-harness (falling back to config/crew-harness)'
+      fi
     else
       if [ -f "$CONFIG/crew-dispatch.json" ]; then
         echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
@@ -1258,6 +1315,34 @@ case "$HARNESS" in
     ;;
 esac
 
+# muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
+# instance, so it needs a primary supervision protocol; muse has none, and its
+# Claude-compatible hook dialect explicitly rejects the model-reawakening and
+# asyncRewake handlers that firstmate's primary turn-end supervision is built on
+# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
+# secondmate whose supervision cycle could never be armed.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
+  echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+
+# pi-signed is an explicitly selected executable identity, not an alias that may
+# silently fall back to pi. Resolve it from PATH before creating an endpoint and
+# retain the literal name in the launch command and task metadata.
+if [ "$HARNESS" = pi-signed ] && ! command -v pi-signed >/dev/null 2>&1; then
+  echo "error: pi-signed executable not found on PATH; install the signed Pi wrapper or select a different verified harness" >&2
+  exit 1
+fi
+
+# Model and effort for a --secondmate spawn, per axis, strongest first: explicit
+# --model/--effort flags, then this mate's own registry record, then the optional
+# tokens config/secondmate-harness carries alongside the harness
+# ("<harness> [<model>] [<effort>]"). Both durable sources apply only when no
+# explicit per-spawn harness or raw launch command was supplied, so the harness
+# in effect is the one they were recorded against. A registry-recorded harness
+# also suppresses the config tokens, which belong to the config's own harness.
+# Resolving here on every spawn is what makes both pins durable across respawns.
+
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
 # --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
@@ -1266,16 +1351,24 @@ esac
 # --model/--effort flags still win over the file's tokens.
 if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   if [ "$MODEL_SET" -eq 0 ]; then
-    SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
-    [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
+    if [ -n "$SM_REG_MODEL" ]; then
+      MODEL=$SM_REG_MODEL
+    elif [ -z "$SM_REG_HARNESS" ]; then
+      SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
+      [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
+    fi
   fi
   if [ "$EFFORT_SET" -eq 0 ]; then
-    SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
-    if [ -n "$SM_EFFORT" ]; then
-      case "$SM_EFFORT" in
-        low|medium|high|xhigh|max) EFFORT=$SM_EFFORT ;;
-        *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
-      esac
+    if [ -n "$SM_REG_EFFORT" ]; then
+      EFFORT=$SM_REG_EFFORT
+    elif [ -z "$SM_REG_HARNESS" ]; then
+      SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
+      if [ -n "$SM_EFFORT" ]; then
+        case "$SM_EFFORT" in
+          low|medium|high|xhigh|max) EFFORT=$SM_EFFORT ;;
+          *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2 ;;
+        esac
+      fi
     fi
   fi
 fi

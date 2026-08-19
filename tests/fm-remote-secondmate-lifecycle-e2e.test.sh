@@ -223,6 +223,17 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     printf 'harness=codex\n'
     exit 0
     ;;
+  capture-launch:fm-remote-secondmate-control.sh:*)
+    # Record the runtime the parent actually hands to the remote control script
+    # and stop there: this boundary is what the recorded runtime has to reach.
+    [ "$_command_action" = launch ] || exit 93
+    perl -MMIME::Base64=decode_base64 -e '
+      my $data=decode_base64($ARGV[0]);
+      my @args=split(/\0/, $data);
+      print join("\n", @args[2..$#args]), "\n";
+    ' "$argv_b64" > "$FM_FAKE_LAUNCH_ARGS"
+    exit 94
+    ;;
   provision-block-fail:fm-remote-home-provision.sh:*)
     touch "$FM_FAKE_SEED_ENTERED"
     while [ ! -f "$FM_FAKE_SEED_RELEASE" ]; do sleep 0.02; done
@@ -275,6 +286,7 @@ remote_env() {
   FM_FAKE_INHERIT_PAYLOAD="$TMP_ROOT/inherit.payload" \
   FM_FAKE_LAUNCH_ENTERED="$TMP_ROOT/launch.entered" \
   FM_FAKE_LAUNCH_RELEASE="$TMP_ROOT/launch.release" \
+  FM_FAKE_LAUNCH_ARGS="$TMP_ROOT/launch.args" \
   FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_REMOTE_REPLY_WAIT_SECONDS=10 \
   "$@"
 }
@@ -814,6 +826,79 @@ cmp -s "$TMP_ROOT/registry-before-nonherdr.md" "$PARENT/data/secondmates.md" \
 mv -f "$TMP_ROOT/remote-ios-before-legacy.meta" "$remote_route_meta"
 rm -f "$TMUX_STATE"
 pass "non-herdr remote endpoints are refused without changing either route"
+
+# The remote route resolves this mate's OWN recorded runtime the same way the
+# local route does: per axis the record outranks config/secondmate-harness, a
+# recorded harness suppresses the config's model/effort tokens, a record naming
+# none of them still takes the config tokens, and a malformed runtime field
+# refuses the spawn instead of reading as "not a remote route" and silently
+# falling through to a local launch.
+cp "$PARENT/data/secondmates.md" "$TMP_ROOT/registry-before-runtime.md"
+cp "$PARENT/config/secondmate-harness" "$TMP_ROOT/secondmate-harness-before-runtime"
+printf 'codex opus high\n' > "$PARENT/config/secondmate-harness"
+LAUNCH_ARGS="$TMP_ROOT/launch.args"
+
+set_ios_runtime() {  # <runtime-fields>
+  local runtime=$1 line
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "- ios "*) printf '%s\n' "${line/; added /; $runtime added }" ;;
+        *) printf '%s\n' "$line" ;;
+      esac
+    done < "$TMP_ROOT/registry-before-runtime.md"
+  } > "$PARENT/data/secondmates.md"
+}
+
+capture_remote_launch() {  # <label>
+  rm -f "$LAUNCH_ARGS"
+  set +e
+  FM_FAKE_SSH_MODE=capture-launch remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+    > "$TMP_ROOT/spawn-runtime-$1.out" 2>&1
+  set -e
+  [ -f "$LAUNCH_ARGS" ] \
+    || fail "remote spawn ($1) never reached the remote launch boundary: $(cat "$TMP_ROOT/spawn-runtime-$1.out")"
+}
+
+launch_arg() {  # <1-based field: id harness model effort backend>
+  sed -n "$1p" "$LAUNCH_ARGS"
+}
+
+set_ios_runtime 'harness: grok; model: gpt-x; effort: xhigh;'
+capture_remote_launch pinned
+[ "$(launch_arg 2)" = grok ] || fail "remote launch ignored the recorded harness (got '$(launch_arg 2)')"
+[ "$(launch_arg 3)" = gpt-x ] || fail "remote launch ignored the recorded model (got '$(launch_arg 3)')"
+[ "$(launch_arg 4)" = xhigh ] || fail "remote launch ignored the recorded effort (got '$(launch_arg 4)')"
+
+set_ios_runtime 'harness: grok;'
+capture_remote_launch harness-only
+[ "$(launch_arg 2)" = grok ] || fail "remote launch ignored the harness-only record (got '$(launch_arg 2)')"
+[ "$(launch_arg 3)" = - ] \
+  || fail "a recorded harness did not suppress the config model token (got '$(launch_arg 3)')"
+[ "$(launch_arg 4)" = - ] \
+  || fail "a recorded harness did not suppress the config effort token (got '$(launch_arg 4)')"
+
+cp "$TMP_ROOT/registry-before-runtime.md" "$PARENT/data/secondmates.md"
+capture_remote_launch legacy
+[ "$(launch_arg 2)" = codex ] || fail "a runtime-less record did not take the config harness (got '$(launch_arg 2)')"
+[ "$(launch_arg 3)" = opus ] || fail "a runtime-less record did not take the config model token (got '$(launch_arg 3)')"
+[ "$(launch_arg 4)" = high ] || fail "a runtime-less record did not take the config effort token (got '$(launch_arg 4)')"
+
+set_ios_runtime 'effort: turbo;'
+rm -f "$LAUNCH_ARGS"
+set +e
+FM_FAKE_SSH_MODE=capture-launch remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-runtime-malformed.out" 2>&1
+runtime_malformed_rc=$?
+set -e
+[ "$runtime_malformed_rc" -ne 0 ] || fail "remote spawn accepted a malformed recorded runtime"
+assert_grep "invalid recorded effort for ios: turbo" "$TMP_ROOT/spawn-runtime-malformed.out" \
+  "remote refusal did not name the malformed recorded effort"
+assert_absent "$LAUNCH_ARGS" "a malformed recorded runtime still reached the remote launch boundary"
+
+cp "$TMP_ROOT/registry-before-runtime.md" "$PARENT/data/secondmates.md"
+cp "$TMP_ROOT/secondmate-harness-before-runtime" "$PARENT/config/secondmate-harness"
+pass "the remote route resolves each recorded runtime axis and refuses a malformed one"
 
 rm -f "$TMP_ROOT/inherit.entered" "$TMP_ROOT/inherit.release" "$TMP_ROOT/inherit.payload"
 cat > "$PARENT/data/captain-shared.md" <<'EOF'

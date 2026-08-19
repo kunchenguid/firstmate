@@ -854,6 +854,80 @@ test_registry_unavailability_and_bounds_are_explicit() {
   pass "registry unavailability and bounded truncation remain explicit"
 }
 
+# A record may carry this secondmate's own runtime (harness/model/effort) between
+# "projects:" and "added". The snapshot's registry reader is a second parser over
+# the same record format as bin/fm-secondmate-registry-lib.sh, so it must keep
+# reading home, and a remote record's host/root placement, through that segment
+# instead of reporting a working mate as a broken entry with no home.
+test_registry_runtime_records_keep_placement() {
+  local home fakebin canonical json local_mate remote_mate
+  home=$(make_home registry-runtime)
+  local_mate="$TMP_ROOT/registry-runtime-local"
+  remote_mate="/remote/homes/registry-runtime-remote"
+  make_valid_secondmate_home rt-local "$local_mate"
+  {
+    printf -- '- rt-local - fixture domain (home: %s; scope: fixture; projects: sample; harness: codex; model: gpt-x; effort: xhigh; added 2026-07-13)\n' \
+      "$local_mate"
+    printf -- '- rt-remote - fixture domain (host: remote-mac; root: /remote/root; home: %s; scope: fixture; projects: sample; model: gpt-x; added 2026-07-13)\n' \
+      "$remote_mate"
+    printf -- '- rt-token - fixture domain (host: remote-mac; root: /remote/root; home: %s-token; scope: fixture; projects: sample; harness: codex; model: vendor-harness:model:v1; effort: max; added 2026-07-13)\n' \
+      "$remote_mate"
+  } > "$home/data/secondmates.md"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e --arg home "$local_mate" '
+    .secondmate_current.registry.records
+    | (any(.[]; .id == "rt-local" and .home == $home and .remote == false
+        and .registry_error == null))
+  ' >/dev/null || fail "a runtime-bearing local record lost its home: $canonical"
+  printf '%s' "$canonical" | jq -e --arg home "$remote_mate" '
+    .secondmate_current.registry.records
+    | (any(.[]; .id == "rt-remote" and .home == $home and .remote == true
+        and .host == "remote-mac" and .root == "/remote/root"
+        and .registry_error == null))
+  ' >/dev/null || fail "a runtime-bearing remote record lost its placement: $canonical"
+  printf '%s' "$canonical" | jq -e --arg home "$remote_mate-token" '
+    .secondmate_current.registry.records
+    | (any(.[]; .id == "rt-token" and .home == $home and .remote == true
+        and .host == "remote-mac" and .root == "/remote/root"
+        and .registry_error == null))
+  ' >/dev/null || fail "a model value embedding a runtime key read as a repeated key: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.omitted // []) | any(.surface | test("registry entry has no home")) | not
+  ' >/dev/null || fail "bearings reported a runtime-bearing record as unregistered: $json"
+  pass "runtime-bearing registry records keep home and remote placement in the snapshot"
+}
+
+# The launcher refuses a runtime pin outside the recorded vocabulary, so the
+# snapshot's second parser must refuse it too rather than reading the record as a
+# healthy mate that no spawn route will ever accept.
+test_registry_malformed_runtime_is_not_healthy() {
+  local home fakebin canonical mate
+  home=$(make_home registry-runtime-bad)
+  mate="$TMP_ROOT/registry-runtime-bad-home"
+  make_valid_secondmate_home rt-bad "$mate"
+  {
+    printf -- '- rt-effort - fixture domain (home: %s/effort; scope: fixture; projects: sample; effort: turbo; added 2026-07-13)\n' "$mate"
+    printf -- '- rt-key - fixture domain (home: %s/key; scope: fixture; projects: sample; mode: fast; added 2026-07-13)\n' "$mate"
+    printf -- '- rt-model - fixture domain (home: %s/model; scope: fixture; projects: sample; model: -; added 2026-07-13)\n' "$mate"
+    printf -- '- rt-harness - fixture domain (home: %s/harness; scope: fixture; projects: sample; harness: muse; added 2026-07-13)\n' "$mate"
+    printf -- '- rt-unterminated - fixture domain (home: %s/unterminated; scope: fixture; projects: sample; effort: high added 2026-07-13)\n' "$mate"
+    printf -- '- rt-repeat - fixture domain (home: %s/repeat; scope: fixture; projects: sample; harness: pi; harness: codex; added 2026-07-13)\n' "$mate"
+  } > "$home/data/secondmates.md"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.registry.records
+    | (map(select(.registry_error == null)) | length) == 0
+      and (all(.[]; .id | test("^rt-")))
+      and length == 6
+  ' >/dev/null || fail "a refused runtime pin read as a healthy registry record: $canonical"
+  pass "registry records the launcher refuses carry a snapshot registry_error"
+}
+
 test_current_landed_baseline_is_repeatable_and_prior_report_independent() {
   local home fakebin one two
   home=$(make_home standalone-baseline); write_fixture "$home"
@@ -1906,6 +1980,8 @@ test_parent_decision_is_untrusted_contradiction_only
 test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
+test_registry_runtime_records_keep_placement
+test_registry_malformed_runtime_is_not_healthy
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity

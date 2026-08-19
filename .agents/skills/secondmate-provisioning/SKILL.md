@@ -41,6 +41,28 @@ The home-seeded `data/charter.md` is the sole owner of boilerplate idle-by-defau
 The `scope:` field is used during intake.
 The `projects:` field is a non-exclusive clone list, not ownership.
 
+A record may also pin that one secondmate's own durable runtime, as up to three independently optional fields written between `projects:` and `added`, in this order:
+
+```markdown
+- <id> - <summary> (home: ...; scope: ...; projects: ...; harness: <adapter>; model: <name>; effort: <level>; added <date>)
+```
+
+Set them with the edit action rather than by hand, both when a secondmate is created (seed the home first, then set the axes it needs) and whenever its runtime changes later:
+
+```sh
+bin/fm-home-seed.sh runtime <id> harness=codex model=gpt-x effort=high
+bin/fm-home-seed.sh runtime <id> model=-
+```
+
+That action takes the registry lock, validates each value, and validates the whole rewritten registry before replacing it, so a refused edit leaves the record untouched; `bin/fm-home-seed.sh --help` owns its mechanics and `bin/fm-secondmate-registry-lib.sh` owns the record format.
+Re-seeding an already-registered id, local or remote, rewrites its placement and project list but carries the recorded runtime forward, so a re-seed never silently returns that mate to the home-wide pin.
+`bin/fm-spawn.sh` re-resolves these fields on every spawn, local and remote alike, exactly the way it re-resolves `home:`, so a per-mate choice survives recovery, `/updatefirstmate`, and restart.
+Per axis, strongest first: an explicit per-spawn `--harness`, `--model`, or `--effort` flag, then this mate's recorded field, then `config/secondmate-harness`.
+The axes are independent - a mate may pin only a model, or only an effort, and inherit the rest - with one deliberate exception: a recorded `harness:` suppresses that file's model and effort tokens, because those were written against the file's own harness.
+A record carrying none of these fields is the pre-existing form and behaves exactly as it always did, on the home-wide pin.
+Recording an unverified harness, an effort outside `low|medium|high|xhigh|max`, or an unusable model is refused at edit time, at `bin/fm-home-seed.sh validate`, and again before any launch; a record that will not parse stops the spawn instead of quietly launching on the fallback it does not name.
+A remote route resolves the same fields under the same precedence and keeps refusing anything but a verified adapter at the host boundary.
+
 ## Charter and seed
 
 Scaffold a secondmate charter with:
@@ -85,12 +107,12 @@ Release happens only on explicit retirement or seed rollback, never on routine r
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the gitignored `.fm-secondmate-parent` durable binding before the required `.fm-secondmate-home` identity marker; the parser header in [`bin/fm-secondmate-parent-lib.sh`](../../../bin/fm-secondmate-parent-lib.sh) owns the record contract, and both files must remain in place.
-`bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
+`bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving that mate's own recorded `harness:` field, then `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness, unless an explicit per-spawn harness override is passed.
 
 `config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
 A bare `<harness>` (today's format, e.g. `claude`) behaves exactly as before - harness only, no model/effort flag - so this is fully backward-compatible.
 `bin/fm-harness.sh secondmate-model` and `bin/fm-harness.sh secondmate-effort` print the optional 2nd/3rd tokens (empty when absent, or when the file is absent/`default`/harness-only); they read only `config/secondmate-harness`, never `config/crew-harness`, which stays a bare adapter name.
-For a `--secondmate` spawn, `bin/fm-spawn.sh` populates `MODEL`/`EFFORT` from those tokens only when the harness itself came from the secondmate config path for that spawn.
+For a `--secondmate` spawn, `bin/fm-spawn.sh` populates `MODEL`/`EFFORT` from those tokens only when the harness itself came from the secondmate config path for that spawn, and a mate's own recorded runtime fields outrank them per axis as the routing table above states.
 For a local route, an explicit per-spawn `--harness` flag, positional harness arg, or raw launch command starts clean on model and effort too, unless the caller also passes explicit `--model` or `--effort`.
 A remote route accepts only a verified harness adapter and refuses a raw launch command at the host boundary.
 When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` flag always wins over the file's token for that axis.

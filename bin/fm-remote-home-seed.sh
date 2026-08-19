@@ -209,9 +209,30 @@ MANIFEST_BYTES=$(LC_ALL=C wc -c < "$TMP/manifest" | tr -d ' ')
 
 TODAY=$(date +%F)
 REG_TMP="$TMP/secondmates.next"
-if [ -f "$REG" ]; then grep -vE "^- $ID( |$)" "$REG" > "$REG_TMP" || true; else : > "$REG_TMP"; fi
-printf -- '- %s - %s (host: %s; root: %s; home: %s; scope: %s; projects: %s; added %s)\n' \
-  "$ID" "$SUMMARY" "$HOST" "$REMOTE_ROOT" "$REMOTE_HOME" "$SCOPE" "$PROJECTS_CSV" "$TODAY" >> "$REG_TMP"
+# Re-seeding an existing route rewrites its record, so this mate's OWN recorded
+# runtime is carried forward rather than reset to the home-wide config pin, and
+# the line is rendered through the shared writer bin/fm-secondmate-registry-lib.sh
+# owns so the local and remote writers cannot drift from the parsed format.
+KEPT_HARNESS=; KEPT_MODEL=; KEPT_EFFORT=
+if [ -f "$REG" ] && [ ! -L "$REG" ] && secondmate_registry_line_for_id "$REG" "$ID"; then
+  KEPT_HARNESS=$SECONDMATE_REGISTRY_HARNESS
+  KEPT_MODEL=$SECONDMATE_REGISTRY_MODEL
+  KEPT_EFFORT=$SECONDMATE_REGISTRY_EFFORT
+fi
+if [ -f "$REG" ]; then secondmate_registry_without_id "$REG" "$ID" > "$REG_TMP" || true; else : > "$REG_TMP"; fi
+SECONDMATE_REGISTRY_ID=$ID
+SECONDMATE_REGISTRY_SUMMARY=$SUMMARY
+SECONDMATE_REGISTRY_REMOTE=1
+SECONDMATE_REGISTRY_HOST=$HOST
+SECONDMATE_REGISTRY_ROOT=$REMOTE_ROOT
+SECONDMATE_REGISTRY_HOME=$REMOTE_HOME
+SECONDMATE_REGISTRY_SCOPE=$SCOPE
+SECONDMATE_REGISTRY_PROJECTS=$PROJECTS_CSV
+SECONDMATE_REGISTRY_HARNESS=$KEPT_HARNESS
+SECONDMATE_REGISTRY_MODEL=$KEPT_MODEL
+SECONDMATE_REGISTRY_EFFORT=$KEPT_EFFORT
+SECONDMATE_REGISTRY_ADDED=$TODAY
+secondmate_registry_render_line >> "$REG_TMP"
 mv -f -- "$REG_TMP" "$REG"
 if ! secondmate_registry_validate_bindings "$REG" secondmate_registry_path_key "$ID" "$REMOTE_HOME"; then
   if [ "$REG_EXISTED" -eq 1 ]; then cp "$TMP/registry.before" "$REG"; else rm -f -- "$REG"; fi

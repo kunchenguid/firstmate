@@ -392,7 +392,7 @@ remote_secondmate_teardown() {
   remote_pending_replies_cleanup \
     || { echo "error: remote pending-reply cleanup failed; preserving the local route for retry" >&2; return 1; }
   tmp="$SECONDMATE_REG.tmp.$$"
-  grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
+  secondmate_registry_without_id "$SECONDMATE_REG" "$ID" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
   status_retire_presentation_task "$STATE" "$ID" || return 1
   rm -f -- "$STATE/$ID.meta" "$STATE/$ID.turn-ended"
@@ -2272,7 +2272,7 @@ remove_secondmate_registry_entry() {
   lock=$(secondmate_registry_lock_path "$STATE")
   fm_lock_acquire_wait "$lock" || return 1
   tmp="$SECONDMATE_REG.tmp.$$"
-  grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
+  secondmate_registry_without_id "$SECONDMATE_REG" "$id" > "$tmp" || true
   mv "$tmp" "$SECONDMATE_REG" || rc=$?
   fm_lock_release "$lock"
   return "$rc"
