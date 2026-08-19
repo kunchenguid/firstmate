@@ -122,7 +122,14 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ "$MODE" = compile ] || [ "${#CONTEXT_TEXTS[@]}" -eq 0 ] || { usage >&2; exit 2; }
+# Each mode accepts only its own flags, so a mistyped invocation is an error
+# rather than a silently ignored option.
+if [ "$MODE" = catalog ]; then
+  [ "${#CONTEXT_TEXTS[@]}" -eq 0 ] && [ "${#CONTEXT_FILES[@]}" -eq 0 ] \
+    && [ "$NO_AUTO_CONTEXT" -eq 0 ] || { usage >&2; exit 2; }
+else
+  [ "$DRY_RUN" -eq 0 ] || { usage >&2; exit 2; }
+fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/.fm-memory-compile.XXXXXX") || die 'could not create a working directory'
 # shellcheck disable=SC2329 # Registered by the EXIT and signal traps below.

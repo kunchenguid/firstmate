@@ -910,6 +910,9 @@ if [ -d "$DATA/memory" ]; then
       printf 'Falling back to the uncapped whole-file memory print below.\n'
     fi
     rm -f "$MEMORY_TMP" "$MEMORY_TMP.err"
+  else
+    printf '\nMEMORY_COMPILE_FAILED: could not create a temporary file for the compiled bundle.\n'
+    printf 'Falling back to the uncapped whole-file memory print below.\n'
   fi
 fi
 if [ "$MEMORY_COMPILED" -eq 0 ]; then

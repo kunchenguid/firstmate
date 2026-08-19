@@ -285,7 +285,7 @@ test_a_symlinked_note_is_skipped_not_followed() {
 # --- catalog publication ----------------------------------------------------
 
 test_catalog_publishes_and_reports_its_own_staleness() {
-  local home out
+  local home out rc
   home=$(new_home catalog)
   printf 'CORE\n' > "$home/data/memory/core.md"
   write_note "$home" one 'First claim' 'alpha' 2026-08-18
@@ -306,6 +306,21 @@ test_catalog_publishes_and_reports_its_own_staleness() {
   FM_HOME="$home" "$COMPILE" catalog >/dev/null
   out=$(compile "$home" --no-auto-context)
   assert_not_contains "$out" 'catalog.md on disk is stale' 'republishing did not clear the staleness'
+
+  # Each mode takes only its own flags, so a mistyped invocation cannot be
+  # silently ignored and read as a compile that simply matched nothing.
+  set +e
+  FM_HOME="$home" "$COMPILE" catalog --context alpha >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 2 "$rc" 'catalog mode accepted a compile-only flag'
+  set +e
+  FM_HOME="$home" "$COMPILE" compile --dry-run >/dev/null 2>&1
+  rc=$?
+  set -e
+  expect_code 2 "$rc" 'compile mode accepted a catalog-only flag'
+  FM_HOME="$home" "$COMPILE" catalog --dry-run >/dev/null 2>&1 \
+    || fail 'catalog --dry-run was rejected'
   pass 'the catalog is published on demand, rendered fresh on every compile, and reports staleness'
 }
 
