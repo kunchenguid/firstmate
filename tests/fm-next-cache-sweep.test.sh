@@ -21,6 +21,9 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
+# Fixture commits pass -c commit.gpgsign=false explicitly rather than relying on
+# the harness to neutralize it, so a host that signs commits by default cannot
+# make these cases depend on a personal signing key.
 SWEEP="$ROOT/bin/fm-next-cache-sweep.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-next-cache-sweep)
@@ -39,7 +42,7 @@ add_next_app() {
   head -c 4096 /dev/zero > "$app/.next/static/chunk.js"
   printf '%s/.next\n' "$sub" >> "$wt/.gitignore"
   git -C "$wt" add -A >/dev/null 2>&1
-  git -C "$wt" -c user.email=t@t -c user.name=t commit -qm "next app at $sub"
+  git -C "$wt" -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -qm "next app at $sub"
 }
 
 # A firstmate home with a project clone, a fake treehouse pool, and a fakebin.
@@ -55,7 +58,7 @@ make_case() {
   git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
   printf '# app\n' > "$case_dir/_seed/README.md"
   git -C "$case_dir/_seed" add README.md
-  git -C "$case_dir/_seed" -c user.email=t@t -c user.name=t \
+  git -C "$case_dir/_seed" -c commit.gpgsign=false -c user.email=t@t -c user.name=t \
     commit -qm "origin baseline"
   git -C "$case_dir/_seed" push -q origin main
   rm -rf "$case_dir/_seed"
@@ -248,7 +251,7 @@ test_sweep_skips_stashed_copy() {
   wt=$(add_pool_worktree "$case_dir" 1)
   add_next_app "$wt" packages/frontend
   printf 'work in progress\n' >> "$wt/README.md"
-  git -C "$wt" -c user.email=t@t -c user.name=t stash -q
+  git -C "$wt" -c commit.gpgsign=false -c user.email=t@t -c user.name=t stash -q
   printf '1 available\n' > "$case_dir/pool-status"
 
   out=$(run_sweep "$case_dir" 2>&1)
@@ -428,7 +431,7 @@ test_sweep_leaves_tracked_next_directory() {
   printf 'export default {}\n' > "$wt/packages/frontend/next.config.ts"
   printf 'checked in\n' > "$wt/packages/frontend/.next/fixture.txt"
   git -C "$wt" add -A >/dev/null 2>&1
-  git -C "$wt" -c user.email=t@t -c user.name=t commit -qm "tracked .next fixture"
+  git -C "$wt" -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -qm "tracked .next fixture"
   printf '1 available\n' > "$case_dir/pool-status"
 
   out=$(run_sweep "$case_dir" 2>&1)
@@ -450,7 +453,7 @@ test_sweep_leaves_ignored_next_outside_a_next_app() {
   printf 'irreplaceable\n' > "$wt/notes/.next/keep.txt"
   printf 'notes/.next\n' >> "$wt/.gitignore"
   git -C "$wt" add -A >/dev/null 2>&1
-  git -C "$wt" -c user.email=t@t -c user.name=t commit -qm "ignored non-app .next"
+  git -C "$wt" -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -qm "ignored non-app .next"
   printf '1 available\n' > "$case_dir/pool-status"
 
   out=$(run_sweep "$case_dir" 2>&1)
@@ -473,7 +476,7 @@ test_sweep_leaves_node_modules_and_source() {
   printf 'export default {}\n' > "$wt/node_modules/some-pkg/next.config.js"
   printf 'node_modules\n' >> "$wt/.gitignore"
   git -C "$wt" add -A >/dev/null 2>&1
-  git -C "$wt" -c user.email=t@t -c user.name=t commit -qm "ignore node_modules"
+  git -C "$wt" -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -qm "ignore node_modules"
   printf '1 available\n' > "$case_dir/pool-status"
 
   out=$(run_sweep "$case_dir" 2>&1)
@@ -533,7 +536,7 @@ make_teardown_case() {  # <name>
   git init -q --bare "$dir/origin.git"
   git -C "$dir/origin.git" symbolic-ref HEAD refs/heads/main
   git clone -q "$dir/origin.git" "$dir/_seed" 2>/dev/null
-  git -C "$dir/_seed" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$dir/_seed" -c commit.gpgsign=false -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
   git -C "$dir/_seed" push -q origin main
   rm -rf "$dir/_seed"
   git clone -q "$dir/origin.git" "$dir/project"
@@ -636,7 +639,7 @@ test_teardown_refusal_keeps_the_copy_intact() {
   case_dir=$(make_teardown_case teardown-refuse)
   add_next_app "$case_dir/wt" packages/frontend
   # Unlanded commit: teardown must refuse, and refusing means changing nothing.
-  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+  git -C "$case_dir/wt" -c commit.gpgsign=false -c user.email=t@t -c user.name=t \
     commit -q --allow-empty -m "unlanded work"
 
   set +e
