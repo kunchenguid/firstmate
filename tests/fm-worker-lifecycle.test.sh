@@ -1845,14 +1845,20 @@ PY
   pass "landing authority refreshes and prunes origin before proving reachability"
 }
 
-account_authority_real_helper() {
+endpoint_authority_checkout_helper() {
   local tmp
-  fm_test_tmproot_into tmp fm-worker-account-authority
-  mkdir -p "$tmp/accounts/claude/3"
-  ln -s "$tmp/accounts/claude/3" "$tmp/accounts/claude/link"
-  FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1 \
-  FM_ACCOUNT_DIRECTORY_ROOT="$tmp/accounts" \
-  python3 - "$AUTHORITY" "$ROOT" "$tmp/accounts/claude/3" "$tmp/accounts/claude/link" <<'PY' || fail "account authority against the real helper failed"
+  fm_test_tmproot_into tmp fm-worker-endpoint-authority
+  # A production FM_HOME is a data home with no bin/. The backend helper must
+  # resolve from the checkout that ships this tool; resolving it under the
+  # home made every receipt die at rc 127 before any endpoint was probed.
+  mkdir -p "$tmp/home/state" "$tmp/shim"
+  cat > "$tmp/shim/tmux" <<'SH'
+#!/bin/sh
+echo "no server running on /tmp/fm-endpoint-authority-test" >&2
+exit 1
+SH
+  chmod +x "$tmp/shim/tmux"
+  PATH="$tmp/shim:$PATH" python3 - "$AUTHORITY" "$tmp/home" <<'PY' || fail "endpoint authority did not resolve its helper from the checkout"
 import importlib.util
 import sys
 from pathlib import Path
@@ -1860,6 +1866,29 @@ spec = importlib.util.spec_from_file_location("worker_authority", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 home = Path(sys.argv[2])
+assert not (home / "bin").exists()
+evidence = module.endpoint_evidence(home, "task-x", {"backend": ["tmux"], "window": ["fmtest:1"]})
+assert b"absent" in evidence
+PY
+  pass "endpoint authority sources the checkout backend helper against a binless home"
+}
+
+account_authority_real_helper() {
+  local tmp
+  fm_test_tmproot_into tmp fm-worker-account-authority
+  mkdir -p "$tmp/accounts/claude/3"
+  ln -s "$tmp/accounts/claude/3" "$tmp/accounts/claude/link"
+  FM_ACCOUNT_DIRECTORY_TEST_LAB=firstmate-account-directory-test-lab-v1 \
+  FM_ACCOUNT_DIRECTORY_ROOT="$tmp/accounts" \
+  python3 - "$AUTHORITY" "$tmp" "$tmp/accounts/claude/3" "$tmp/accounts/claude/link" <<'PY' || fail "account authority against the real helper failed"
+import importlib.util
+import sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("worker_authority", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+home = Path(sys.argv[2])
+assert not (home / "bin").exists()
 values = {"account_home": [sys.argv[3]], "account_task": ["task-x"]}
 evidence = module.account_evidence(values, "task-x", home)
 assert b"ordinary-account-owner" in evidence
@@ -2226,6 +2255,7 @@ end_to_end_lifecycle
 shared_specialized_cli
 shared_shape_cli
 landing_authority_refresh
+endpoint_authority_checkout_helper
 account_authority_real_helper
 restart_idempotency
 partial_apply_never_persists

@@ -11,6 +11,9 @@ import subprocess
 import sys
 
 
+ROOT = Path(__file__).resolve().parent.parent
+
+
 AUTHORITY_SCHEMA = "fm.worker-authority/v1"
 RELEASE_SCHEMA = "fm.worker-release/v2"
 REQUIRED_HEADINGS = (
@@ -75,7 +78,7 @@ def endpoint_evidence(home, task, values):
     backend = values.get("backend", ["tmux"])[0]
     target = exactly(values, "window")
     expected = "fm-{}".format(task)
-    helper = home / "bin" / "fm-backend.sh"
+    helper = ROOT / "bin" / "fm-backend.sh"
     script = '. "$1"; fm_backend_target_state "$2" "$3" "$4" "${5:-}"'
     result = subprocess.run(
         ["bash", "-c", script, "_", str(helper), backend, target, expected,
@@ -145,7 +148,7 @@ def account_evidence(values, task, home):
     account_task = values.get("account_task", [task])[0]
     if account_task != task:
         raise AuthorityError("account authority task identity differs")
-    helper = home / "bin" / "fm-account-directory.sh"
+    helper = ROOT / "bin" / "fm-account-directory.sh"
     if not helper.is_file():
         raise AuthorityError("ordinary account authority helper is unavailable")
     vendor = "claude" if "claude" in Path(account_home).parts else "codex" if "codex" in Path(account_home).parts else ""
@@ -165,7 +168,7 @@ def account_evidence(values, task, home):
         'cd "$account" && pwd -P'
     )
     result = subprocess.run(
-        ["bash", "-c", script, "_", str(home / "bin" / "fm-account-directory.sh"), vendor, account_home],
+        ["bash", "-c", script, "_", str(ROOT / "bin" / "fm-account-directory.sh"), vendor, account_home],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env={**os.environ, "FM_HOME": str(home), "FM_ROOT": str(home)},
     )
