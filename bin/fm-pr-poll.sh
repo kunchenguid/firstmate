@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated PR/MR poll sidecar.
-# It emits exactly one merged line for a merged PR or MR and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
+# It emits exactly one merged line for a merged PR or MR. On GitHub it also
+# emits one closed line for a pull request closed without merging, and one open
+# line for one that is still open. It stays silent on every other reading and on
+# every error, so a failed lookup can never be read as a merge and a closed pull
+# request is never reported as one. A closed pull request is not a failure - its
+# work may have landed in a successor - so the two are distinct results and
+# firstmate reconciles the closed one. The open line wakes nobody: it is the
+# positive reading the watcher uses to forget an earlier closure, so a pull
+# request that is reopened and closed again wakes a second time. Silence must
+# never do that, because silence also means an unreadable pull request or a
+# failed CLI lookup.
+# The GitLab path emits merged only: the token glab prints for a closed merge
+# request could not be verified against a real glab here, and an unverified token
+# would make that half a silent no-op, so it is deliberately left out of scope.
+# The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub and glab
 # for GitLab, so an upstream checkout needs no extra tooling to follow either.
@@ -63,7 +75,11 @@ case "$provider" in
     esac
     [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
     state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
-    [ "$state" = MERGED ] && printf '%s\n' merged
+    case "$state" in
+      MERGED) printf '%s\n' merged ;;
+      CLOSED) printf '%s\n' closed ;;
+      OPEN) printf '%s\n' open ;;
+    esac
     ;;
   gitlab)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
