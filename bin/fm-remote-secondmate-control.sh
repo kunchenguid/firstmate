@@ -188,6 +188,12 @@ cmd_send() {
   validate_id "$id"
   validate_home "$id"
   remote_endpoint_require "$id"
+  # fm-send's exit status is the delivery verdict the parent home acts on
+  # (0 = confirmed, 3 = delivered with the submit read-back unconfirmed, other
+  # nonzero = failed; see bin/fm-send.sh's header). The job worker, entrypoint,
+  # and ssh all preserve it, so no mapping may happen here: flattening exit 3
+  # into a generic failure is exactly the false-negative the parent's remote
+  # send path exists to avoid.
   FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$TARGET_HOME/state" \
     "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "$message"
 }
