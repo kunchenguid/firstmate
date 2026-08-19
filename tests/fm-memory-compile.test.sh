@@ -446,6 +446,111 @@ test_migration_refuses_to_remove_history_it_could_not_archive() {
   pass 'the migration refuses to remove the original when it cannot archive it'
 }
 
+test_core_shadowing_captain_emits_notice() {
+  local home out
+  home=$(new_home core-shadow-captain)
+  printf '# core\n\nSTANDING-CORE-TEXT\n' > "$home/data/memory/core.md"
+  printf 'CAPTAIN-PREFERENCES-TEXT\n' > "$home/data/captain.md"
+
+  out=$(compile "$home" --no-auto-context)
+  assert_contains "$out" 'STANDING-CORE-TEXT' 'core.md body was not injected'
+  assert_not_contains "$out" 'CAPTAIN-PREFERENCES-TEXT' 'captain.md body was injected'
+  assert_contains "$out" 'MEMORY_NOTICE: data/captain.md is still present' \
+    'shadowed data/captain.md did not produce a notice'
+
+  # An empty captain.md does not produce a notice
+  : > "$home/data/captain.md"
+  out=$(compile "$home" --no-auto-context)
+  assert_not_contains "$out" 'MEMORY_NOTICE: data/captain.md is still present' \
+    'an empty data/captain.md produced an unnecessary notice'
+  pass 'data/memory/core.md shadowing a non-empty data/captain.md emits a notice naming its tokens'
+}
+
+test_missing_context_file_exits_nonzero() {
+  local home out rc
+  home=$(new_home missing-context-file)
+  printf 'CORE\n' > "$home/data/memory/core.md"
+
+  set +e
+  out=$(compile "$home" --no-auto-context --context-file "$home/data/nonexistent.md" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" 'missing context-file should exit non-zero'
+  assert_contains "$out" 'context file not found' 'error message did not identify missing context file'
+  pass 'missing context file causes compiler to exit non-zero'
+}
+
+test_symlinked_memory_dir_is_guarded() {
+  local home out outside
+  home=$(new_home symlink-memdir)
+  rm -rf "$home/data/memory"
+  outside="$TMP_ROOT/outside-memory"
+  mkdir -p "$outside/notes"
+  printf 'OUTSIDE-CORE\n' > "$outside/core.md"
+  ln -s "$outside" "$home/data/memory"
+
+  out=$(compile "$home" --no-auto-context)
+  assert_not_contains "$out" 'OUTSIDE-CORE' \
+    'symlinked data/memory directory was read by compiler'
+  pass 'symlinked data/memory directory is guarded and not trusted'
+}
+
+test_migration_handles_slug_collisions_and_refuses_when_headings_lost() {
+  local home out note1 note2 rc
+  home=$(new_home migrate-collision)
+  cat > "$home/data/learnings.md" <<'LEARN'
+## The `gh` CLI needs auth <!--a:2026-08-01-->
+
+FIRST-CLAIM-BODY
+
+## The `gh` CLI needs auth. <!--a:2026-08-02-->
+
+SECOND-CLAIM-BODY
+LEARN
+
+  out=$(FM_HOME="$home" FM_MEMORY_MIGRATE_DATE=2026-08-20 "$MIGRATE") \
+    || fail "migration with collisions failed: $out"
+  assert_contains "$out" '2 note(s) created, 0 already present' \
+    'slug collision was counted as already present rather than disambiguated'
+
+  note1="$home/data/memory/notes/the-gh-cli-needs-auth.md"
+  note2="$home/data/memory/notes/the-gh-cli-needs-auth-2.md"
+  [ -f "$note1" ] || fail "first colliding note missing: $note1"
+  [ -f "$note2" ] || fail "disambiguated note missing: $note2"
+  assert_contains "$(<"$note1")" 'FIRST-CLAIM-BODY' 'first note body missing'
+  assert_contains "$(<"$note2")" 'SECOND-CLAIM-BODY' 'disambiguated note body missing'
+
+  # Idempotent re-run preserves both
+  cat > "$home/data/learnings.md" <<'LEARN'
+## The `gh` CLI needs auth <!--a:2026-08-01-->
+
+FIRST-CLAIM-BODY
+
+## The `gh` CLI needs auth. <!--a:2026-08-02-->
+
+SECOND-CLAIM-BODY
+LEARN
+  out=$(FM_HOME="$home" FM_MEMORY_MIGRATE_DATE=2026-08-20 "$MIGRATE") \
+    || fail "rerun failed: $out"
+  assert_contains "$out" '0 note(s) created, 2 already present' \
+    'rerun did not identify both notes as kept'
+
+  # Refusal: learnings file with content but no valid headings
+  cat > "$home/data/learnings.md" <<'LEARN'
+No headings in this file, just raw text.
+LEARN
+  set +e
+  out=$(FM_HOME="$home" FM_MEMORY_MIGRATE_DATE=2026-08-20 "$MIGRATE" 2>&1)
+  rc=$?
+  set -e
+  expect_code 1 "$rc" 'migration should refuse to remove learnings when no headings found'
+  assert_contains "$out" 'refusing to remove data/learnings.md' \
+    'refusal error message was not emitted'
+  [ -f "$home/data/learnings.md" ] || fail 'learnings.md was deleted despite no headings migrated'
+
+  pass 'migration disambiguates slug collisions, preserves them on rerun, and refuses removal if headings are missing'
+}
+
 test_migration_on_a_home_with_no_learnings_still_builds_the_layout() {
   local home out
   home=$(new_home migrate-empty)
@@ -458,14 +563,18 @@ test_migration_on_a_home_with_no_learnings_still_builds_the_layout() {
 
 test_bundle_is_core_catalog_and_matched_notes_only
 test_core_falls_back_to_captain_then_reports_absence
+test_core_shadowing_captain_emits_notice
 test_triggers_match_whole_words_case_insensitively
 test_auto_context_reads_live_fleet_work
+test_missing_context_file_exits_nonzero
 test_budget_cap_drops_notes_first_then_the_catalog_and_never_the_core
 test_an_unreadable_budget_is_a_hard_error
 test_missing_memory_still_produces_a_bundle
 test_a_symlinked_note_is_skipped_not_followed
+test_symlinked_memory_dir_is_guarded
 test_catalog_publishes_and_reports_its_own_staleness
 test_migration_splits_learnings_into_atomic_cited_notes
+test_migration_handles_slug_collisions_and_refuses_when_headings_lost
 test_migration_freezes_and_archives_before_removing_the_original
 test_migration_dry_run_and_keep_learnings_write_nothing_away
 test_migration_refuses_to_remove_history_it_could_not_archive

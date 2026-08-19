@@ -898,20 +898,20 @@ print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 # compiler could not run - a startup that cannot compile memory must still start
 # with the memory it has, not with none.
 MEMORY_COMPILED=0
-if [ -d "$DATA/memory" ]; then
-  MEMORY_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-session-start-memory.XXXXXX" 2>/dev/null || true)
-  if [ -n "$MEMORY_TMP" ]; then
-    if "$SCRIPT_DIR/fm-memory-compile.sh" compile >"$MEMORY_TMP" 2>"$MEMORY_TMP.err"; then
+if [ -d "$DATA/memory" ] && [ ! -L "$DATA/memory" ]; then
+  MEMORY_TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-session-start-memory.XXXXXX" 2>/dev/null || true)
+  if [ -n "$MEMORY_TMP_DIR" ] && [ -d "$MEMORY_TMP_DIR" ]; then
+    if "$SCRIPT_DIR/fm-memory-compile.sh" compile >"$MEMORY_TMP_DIR/bundle" 2>"$MEMORY_TMP_DIR/err"; then
       subsection "curated memory (compiled, capped - bin/fm-memory-compile.sh)"
-      cat "$MEMORY_TMP"
+      cat "$MEMORY_TMP_DIR/bundle"
       MEMORY_COMPILED=1
     else
-      printf '\nMEMORY_COMPILE_FAILED: %s\n' "$(tr '\n' ' ' < "$MEMORY_TMP.err")"
+      printf '\nMEMORY_COMPILE_FAILED: %s\n' "$(tr '\n' ' ' < "$MEMORY_TMP_DIR/err")"
       printf 'Falling back to the uncapped whole-file memory print below.\n'
     fi
-    rm -f "$MEMORY_TMP" "$MEMORY_TMP.err"
+    rm -rf "$MEMORY_TMP_DIR"
   else
-    printf '\nMEMORY_COMPILE_FAILED: could not create a temporary file for the compiled bundle.\n'
+    printf '\nMEMORY_COMPILE_FAILED: could not create a temporary directory for the compiled bundle.\n'
     printf 'Falling back to the uncapped whole-file memory print below.\n'
   fi
 fi

@@ -6,7 +6,10 @@
 #
 # `read` prints the one validated effective budget from
 # config/startup-memory-budget.  `report` prints the stable local estimate for
-# data/captain.md, data/captain-shared.md, and data/learnings.md together.
+# the legacy whole-file memory surface (data/captain.md, data/captain-shared.md,
+# and data/learnings.md). In a home using data/memory/, the compiled memory
+# bundle is capped independently by bin/fm-memory-compile.sh, and
+# data/captain-shared.md is printed outside that compiled cap.
 # Bootstrap owns default materialization; this command never creates or repairs
 # configuration, so an absent, malformed, symlinked, hardlinked, or otherwise
 # unsafe value is a concrete error rather than an inferred default.
@@ -22,7 +25,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 
 usage() {
-  sed -n '2,11{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,15{s/^# \{0,1\}//;p;}' "$0"
 }
 
 print_error() {

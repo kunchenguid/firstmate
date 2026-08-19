@@ -77,6 +77,12 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 MEMORY="$DATA/memory"
 NOTES_DIR="$MEMORY/notes"
 
+# A symlinked data/memory would defeat every per-file symlink guard below in one
+# step, because the files inside the link target are ordinary regular files.
+# The directory itself is therefore checked exactly like the files in it.
+MEMORY_DIR_OK=1
+[ ! -L "$MEMORY" ] || MEMORY_DIR_OK=0
+
 CONTEXT_BYTES=${FM_MEMORY_CONTEXT_BYTES:-65536}
 case "$CONTEXT_BYTES" in ''|*[!0-9]*|0) CONTEXT_BYTES=65536 ;; esac
 
@@ -138,16 +144,83 @@ trap cleanup EXIT INT TERM
 
 # --- note metadata ----------------------------------------------------------
 
-# note_meta <path>: prints "<title>\t<triggers>\t<updated>" for one note.
-note_meta() {
-  awk '
+# note_inventory: prints "<file>\t<title>\t<triggers>\t<updated>\t<shown>" per
+# note, by file name, where <shown> is the shortened trigger list the catalog
+# displays.  A note that is not an ordinary regular file is skipped rather than
+# read, so the bundle never follows a symlink out of the memory directory.
+#
+# Every note is read by ONE awk pass rather than one process per note: this runs
+# on the session-start critical path, and a home with fifty notes paid for two
+# hundred processes when each note was measured and formatted on its own.
+note_inventory() {
+  local path count=0
+  [ "$MEMORY_DIR_OK" -eq 1 ] || return 0
+  [ -d "$NOTES_DIR" ] && [ ! -L "$NOTES_DIR" ] || return 0
+  : > "$TMP/notepaths"
+  for path in "$NOTES_DIR"/*.md; do
+    [ -f "$path" ] && [ ! -L "$path" ] || continue
+    printf '%s\n' "$path" >> "$TMP/notepaths"
+    count=$((count + 1))
+  done
+  [ "$count" -gt 0 ] || return 0
+  (cd "$NOTES_DIR" && wc -c -- *.md > "$TMP/notebytes" 2>/dev/null) || true
+  awk -v listfile="$TMP/notepaths" -v bytesfile="$TMP/notebytes" '
     function clean(s) {
       gsub(/\t/, " ", s)
       sub(/^[[:space:]]+/, "", s)
       sub(/[[:space:]]+$/, "", s)
       return s
     }
-    NR == 1 && $0 == "---" { fm = 1; next }
+    # Only the first few triggers are shown.  The full list is what the
+    # compiler matches on; a catalog line exists so a reader knows the note is
+    # there, and 51 full trigger lists cost more budget than they return.
+    function shown(s,   i, c) {
+      c = 0
+      for (i = 1; i <= length(s); i++) {
+        if (substr(s, i, 1) != ",") continue
+        if (++c == 3) { s = substr(s, 1, i - 1); break }
+      }
+      sub(/[[:space:]]+$/, "", s)
+      return s
+    }
+    function flush(   t, tok) {
+      if (base == "") return
+      t = (title != "" ? title : heading)
+      if (t == "") t = base
+      tok = (base in notetokens ? notetokens[base] : 0)
+      printf "%s\t%s\t%s\t%s\t%s\t%s\n", base, t, triggers, updated, shown(triggers), tok
+      base = ""
+    }
+    BEGIN {
+      if (bytesfile != "") {
+        while ((getline bline < bytesfile) > 0) {
+          sub(/^[[:space:]]+/, "", bline)
+          split(bline, bparts, /[[:space:]]+/)
+          bpath = bparts[2]
+          sub(/^.*\//, "", bpath)
+          if (bpath != "total" && bpath != "") {
+            bcount = bparts[1] + 0
+            notetokens[bpath] = int((bcount + 2) / 3)
+          }
+        }
+      }
+      while ((getline path < listfile) > 0) {
+        b = path
+        sub(/^.*\//, "", b)
+        order[++n] = b
+        pending[b] = 1
+        ARGV[n] = path
+      }
+      ARGC = n + 1
+    }
+    FNR == 1 {
+      flush()
+      base = FILENAME
+      sub(/^.*\//, "", base)
+      pending[base] = 0
+      title = ""; triggers = ""; updated = ""; heading = ""; fm = 0
+      if ($0 == "---") { fm = 1; next }
+    }
     fm && $0 == "---" { fm = 0; next }
     fm {
       if (match($0, /^[A-Za-z_][A-Za-z0-9_-]*:/)) {
@@ -164,36 +237,24 @@ note_meta() {
       sub(/^#+[[:space:]]*/, "", h)
       heading = clean(h)
     }
+    # An empty note file never triggers a rule, so it is emitted here rather
+    # than falling out of the catalog that is supposed to list every note.
     END {
-      if (title == "") title = heading
-      printf "%s\t%s\t%s\n", title, triggers, updated
+      flush()
+      for (i = 1; i <= n; i++) {
+        if (pending[order[i]]) {
+          tok = (order[i] in notetokens ? notetokens[order[i]] : 0)
+          printf "%s\t%s\t\t\t\t%s\n", order[i], order[i], tok
+        }
+      }
     }
-  ' "$1"
-}
-
-# note_inventory: prints "<path>\t<title>\t<triggers>\t<updated>" per note, by
-# path.  A note that is not an ordinary regular file is skipped rather than
-# read, so the bundle never follows a symlink out of the memory directory.
-note_inventory() {
-  local path base meta title triggers updated
-  [ -d "$NOTES_DIR" ] || return 0
-  for path in "$NOTES_DIR"/*.md; do
-    [ -f "$path" ] && [ ! -L "$path" ] || continue
-    base=$(basename "$path")
-    meta=$(note_meta "$path")
-    title=${meta%%"$TAB"*}
-    meta=${meta#*"$TAB"}
-    triggers=${meta%%"$TAB"*}
-    updated=${meta#*"$TAB"}
-    [ -n "$title" ] || title=$base
-    printf '%s\t%s\t%s\t%s\n' "$base" "$title" "$triggers" "$updated"
-  done | LC_ALL=C sort -t"$TAB" -k1,1
+  '
 }
 
 # render_catalog: the compiled index, one line per note, rendered from the
 # notes themselves so it is correct even when catalog.md on disk is stale.
 render_catalog() {
-  local base title triggers updated line
+  local base title updated shown line
   printf '<!-- compiled by bin/fm-memory-compile.sh from data/memory/notes/ -->\n\n'
   if [ ! -s "$TMP/inventory" ]; then
     printf 'No notes filed yet in data/memory/notes/.\n'
@@ -206,15 +267,12 @@ render_catalog() {
     [ -n "$line" ] || continue
     base=${line%%"$TAB"*}; line=${line#*"$TAB"}
     title=${line%%"$TAB"*}; line=${line#*"$TAB"}
-    triggers=${line%%"$TAB"*}
-    updated=${line#*"$TAB"}
+    line=${line#*"$TAB"}
+    updated=${line%%"$TAB"*}; line=${line#*"$TAB"}
+    shown=${line%%"$TAB"*}
     [ -n "$updated" ] || updated='?'
-    # Only the first few triggers are shown.  The full list is what the
-    # compiler matches on; a catalog line exists so a reader knows the note is
-    # there, and 51 full trigger lists cost more budget than they return.
-    triggers=$(printf '%s\n' "$triggers" | cut -d, -f1-3 | sed -e 's/[[:space:]]*$//')
-    [ -n "$triggers" ] || triggers='-'
-    printf -- '- %s (%s | %s | %s)\n' "$title" "$base" "$triggers" "$updated"
+    [ -n "$shown" ] || shown='-'
+    printf -- '- %s (%s | %s | %s)\n' "$title" "$base" "$shown" "$updated"
   done < "$TMP/inventory"
 }
 
@@ -228,6 +286,7 @@ if [ "$MODE" = catalog ]; then
     cat "$TMP/catalog"
     exit 0
   fi
+  [ "$MEMORY_DIR_OK" -eq 1 ] || die 'data/memory is a symlink; refusing to publish through it'
   [ -d "$MEMORY" ] || mkdir -p "$MEMORY" || die "could not create $MEMORY"
   if [ -L "$MEMORY/catalog.md" ]; then
     die 'data/memory/catalog.md is a symlink; refusing to publish through it'
@@ -240,6 +299,11 @@ if [ "$MODE" = catalog ]; then
 fi
 
 # --- match context ----------------------------------------------------------
+
+for path in "${CONTEXT_FILES[@]-}"; do
+  [ -n "$path" ] || continue
+  [ -f "$path" ] || die "context file not found: $path"
+done
 
 build_context() {
   local path
@@ -257,7 +321,6 @@ build_context() {
   fi
   for path in "${CONTEXT_FILES[@]-}"; do
     [ -n "$path" ] || continue
-    [ -f "$path" ] || die "context file not found: $path"
     head -c "$CONTEXT_BYTES" "$path"
     printf '\n'
   done
@@ -303,7 +366,7 @@ hot_notes() {
       }
       if (!hit) next
       updated = ($4 == "" ? "0000-00-00" : $4)
-      printf "%s\t%s\n", updated, $1
+      printf "%s\t%s\t%s\n", updated, $1, $6
     }
   ' "$TMP/inventory" | LC_ALL=C sort -t"$TAB" -k1,1r -k2,2
 }
@@ -333,9 +396,13 @@ CORE_LABEL=
 CORE_TOKENS=0
 NOTICES=()
 
-if [ -f "$MEMORY/core.md" ] && [ ! -L "$MEMORY/core.md" ]; then
+if [ "$MEMORY_DIR_OK" -eq 1 ] && [ -f "$MEMORY/core.md" ] && [ ! -L "$MEMORY/core.md" ]; then
   CORE_PATH="$MEMORY/core.md"
   CORE_LABEL='data/memory/core.md'
+  if [ -f "$DATA/captain.md" ] && [ ! -L "$DATA/captain.md" ] && [ -s "$DATA/captain.md" ]; then
+    CAPTAIN_TOKENS=$(tokens_of_file "$DATA/captain.md")
+    NOTICES+=("MEMORY_NOTICE: data/captain.md is still present (${CAPTAIN_TOKENS} estimated tokens) and is NOT injected because data/memory/core.md takes precedence. Fold standing preferences into data/memory/core.md, or remove data/captain.md.")
+  fi
 elif [ -f "$DATA/captain.md" ] && [ ! -L "$DATA/captain.md" ]; then
   CORE_PATH="$DATA/captain.md"
   CORE_LABEL='data/captain.md (standing constitution; data/memory/core.md is ABSENT)'
@@ -350,7 +417,7 @@ fi
 render_catalog > "$TMP/catalog"
 CATALOG_TOKENS=$(tokens_of_file "$TMP/catalog")
 
-if [ -f "$MEMORY/catalog.md" ] && [ ! -L "$MEMORY/catalog.md" ]; then
+if [ "$MEMORY_DIR_OK" -eq 1 ] && [ -f "$MEMORY/catalog.md" ] && [ ! -L "$MEMORY/catalog.md" ]; then
   cmp -s "$TMP/catalog" "$MEMORY/catalog.md" \
     || NOTICES+=('MEMORY_NOTICE: data/memory/catalog.md on disk is stale relative to data/memory/notes/. The catalog in this bundle was rendered fresh from the notes; republish the file with bin/fm-memory-compile.sh catalog.')
 else
@@ -382,9 +449,11 @@ line=
 : > "$TMP/selected"
 if [ "$CORE_OVER" -eq 0 ] && [ "$CATALOG_KEPT" -eq 1 ]; then
   while IFS= read -r line; do
-    base=${line#*"$TAB"}
-    [ -n "$base" ] || continue
-    note_tokens=$(tokens_of_file "$NOTES_DIR/$base")
+    [ -n "$line" ] || continue
+    line=${line#*"$TAB"}
+    base=${line%%"$TAB"*}
+    note_tokens=${line#*"$TAB"}
+    case "$note_tokens" in ''|*[!0-9]*) note_tokens=0 ;; esac
     if fm_startup_memory_decimal_le "$((TOTAL + note_tokens))" "$BUDGET"; then
       TOTAL=$((TOTAL + note_tokens))
       HOT_TOKENS=$((HOT_TOKENS + note_tokens))

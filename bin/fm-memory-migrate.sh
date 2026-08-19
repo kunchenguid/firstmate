@@ -229,10 +229,13 @@ triggers_for() {
 
 CREATED=0
 KEPT=0
+TOTAL_HEADINGS=0
 : > "$TMP/report"
+mkdir -p "$TMP/claimed"
 
 for part in "$TMP/parts"/*; do
   [ -f "$part" ] || continue
+  TOTAL_HEADINGS=$((TOTAL_HEADINGS + 1))
   heading=$(head -n 1 "$part")
   heading=${heading#\#\# }
 
@@ -262,8 +265,21 @@ for part in "$TMP/parts"/*; do
 
   slug=$(slugify "$title")
   [ -n "$slug" ] || slug="note-$(basename "$part")"
+
+  candidate_slug="$slug"
+  suffix=1
+  while [ -f "$TMP/claimed/$candidate_slug" ]; do
+    suffix=$((suffix + 1))
+    candidate_slug="${slug}-${suffix}"
+  done
+  touch "$TMP/claimed/$candidate_slug"
+  slug="$candidate_slug"
+
   target="$NOTES_DIR/$slug.md"
   if [ -e "$target" ] || [ -L "$target" ]; then
+    if [ ! -f "$target" ] || [ -L "$target" ]; then
+      die "refusing to overwrite non-regular file or symlink: $target"
+    fi
     KEPT=$((KEPT + 1))
     printf 'kept    notes/%s.md\n' "$slug" >> "$TMP/report"
     continue
@@ -291,10 +307,26 @@ done
 cat "$TMP/report"
 printf 'migrate: %s note(s) created, %s already present\n' "$CREATED" "$KEPT"
 
+if [ "$TOTAL_HEADINGS" -eq 0 ]; then
+  die 'refusing to remove data/learnings.md: no headings were found to migrate'
+fi
+if [ "$((CREATED + KEPT))" -ne "$TOTAL_HEADINGS" ]; then
+  die "refusing to remove data/learnings.md: only $((CREATED + KEPT)) of $TOTAL_HEADINGS headings were accounted for"
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
   printf 'migrate: --dry-run, nothing was written and data/learnings.md was not touched\n'
   exit 0
 fi
+
+for claimed_file in "$TMP/claimed"/*; do
+  [ -f "$claimed_file" ] || continue
+  c_slug=$(basename "$claimed_file")
+  c_target="$NOTES_DIR/$c_slug.md"
+  if [ ! -f "$c_target" ] || [ -L "$c_target" ]; then
+    die "refusing to remove data/learnings.md: expected note notes/$c_slug.md is missing or not a regular file"
+  fi
+done
 
 # --- catalog ----------------------------------------------------------------
 

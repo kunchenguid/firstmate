@@ -146,10 +146,12 @@ Shared captain preferences that apply across secondmate domains live only in the
 ## Compiled working memory (data/memory/)
 
 Fleet-local operational facts and gotchas live locally as one atomic note per claim under `data/memory/notes/`, alongside an optional standing constitution in `data/memory/core.md`, the regenerable index `data/memory/catalog.md`, and the never-injected candidate tray `data/memory/drop/`.
+The standing constitution `data/memory/core.md` holds standing preferences, authority boundaries, and core guidelines with a 1,500-2,500 estimated-token target.
 The whole directory is gitignored and is created by `bin/fm-memory-migrate.sh`, which also splits a home's legacy `data/learnings.md` into notes and freezes the original under `data/memory/raw/` before archiving it to `data/memory-archive.md`.
 There is no shared notes directory by captain decision.
 
 Session start injects this memory through `bin/fm-memory-compile.sh`, which selects a core, a catalog of every note, and the notes whose triggers match live fleet work, and refuses to emit more than the startup memory budget below allows.
+The budget caps the compiled memory bundle only; `data/captain-shared.md` is printed outside that cap.
 That script's header is the single owner of the note format, the trigger-matching rule, and the precedence that decides what is dropped first under budget pressure.
 A home with no `data/memory/` directory keeps the previous whole-file print of `data/captain.md` and `data/learnings.md`, and so does a session where the compile could not run, so a startup that cannot cap its memory still starts with the memory it has.
 Curating notes follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect what is there first and curate it instead of appending forever.
@@ -158,6 +160,7 @@ Curating notes follows the internal [`stow` skill's](../.agents/skills/stow/SKIL
 
 `config/startup-memory-budget` is the primary-authoritative per-home allowance for the startup prompt-memory surface.
 `bin/fm-memory-compile.sh` enforces it as a hard cap on the curated-memory bundle it emits at session start.
+The budget caps the compiled memory bundle only, and `data/captain-shared.md` is printed outside that cap.
 `bin/fm-startup-memory-budget.sh report` separately accounts the legacy whole-file surface of `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md` against the same value.
 The locked mutable bootstrap path materializes its visible default of `7500` estimated tokens in a primary home when the file is absent.
 To select another allowance, replace the primary home's file with one valid positive value in the exact format below; the next locked bootstrap convergence or `bin/fm-config-push.sh` propagates it to registered secondmates.
