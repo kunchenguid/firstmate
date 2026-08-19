@@ -2809,7 +2809,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       verdict=$(fm_backend_herdr_composer_state "$target")
       case "$verdict" in
         empty) printf 'empty'; return 0 ;;
-        pending|pending-unproven|unknown) ;;
+        pending|pending-unproven) ;;
         *) printf '%s' "$verdict"; return 0 ;;
       esac
     else
