@@ -260,6 +260,47 @@ EOF
   pass "apply refetches origin so tracking refs stop naming the parent"
 }
 
+# On the set-url path the remap moves no refs, so a fetch that cannot run leaves
+# refs/remotes/origin/* holding the parent's tips while origin's URL and the git
+# and gh defaults all say ours. verify compares only the URL, so that split
+# state would read as correctly configured. apply must fail instead.
+test_apply_fails_loudly_when_the_new_origin_cannot_be_fetched() {
+  local rec dir ours parent clone fakebin log out rc parent_main
+  rec=$(make_fork_fixture unreachable-origin)
+  IFS='|' read -r dir ours parent clone <<EOF
+$rec
+EOF
+  git -C "$clone" remote add upstream "file://$parent"
+  git -C "$clone" fetch --quiet upstream
+  git -C "$clone" remote remove fork
+  parent_main=$(git -C "$clone" rev-parse refs/remotes/origin/main)
+  fakebin=$(fm_fakebin "$dir/fake")
+  log="$dir/stub.log"
+  : > "$log"
+  install_careless_stubs "$fakebin" "$log"
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" "$LANDING" apply \
+    --ours "file://$dir/does-not-exist.git" \
+    --upstream "file://$parent" \
+    --repo "$clone" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "apply reported success after it could not fetch the new origin"
+  assert_contains "$out" "could not fetch the new origin" \
+    "apply did not name the failed refetch as the reason"
+  [ "$(git -C "$clone" rev-parse refs/remotes/origin/main)" = "$parent_main" ] \
+    || fail "fixture assumption broken: origin/main moved despite the failed fetch"
+  [ -z "$(git -C "$clone" config --get checkout.defaultRemote || true)" ] \
+    || fail "apply set checkout.defaultRemote while origin's refs still name the parent"
+  [ -z "$(git -C "$clone" config --get remote.pushDefault || true)" ] \
+    || fail "apply set remote.pushDefault while origin's refs still name the parent"
+  if grep -q 'repo set-default' "$log"; then
+    fail "apply pointed gh at origin while origin's refs still name the parent"
+  fi
+  pass "apply fails loudly when the new origin cannot be fetched"
+}
+
 test_apply_refuses_an_unrelated_origin() {
   local rec dir ours parent clone out rc
   rec=$(make_fork_fixture unrelated-origin)
@@ -280,6 +321,7 @@ EOF
 test_careless_path_without_apply_names_parent
 test_apply_makes_careless_branch_and_default_repo_land_on_ours
 test_apply_with_existing_upstream_refreshes_tracking_refs
+test_apply_fails_loudly_when_the_new_origin_cannot_be_fetched
 test_apply_refuses_a_linked_worktree
 test_apply_refuses_an_unrelated_origin
 

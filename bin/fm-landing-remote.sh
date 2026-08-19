@@ -15,7 +15,8 @@
 #
 # apply rewrites remotes in the named checkout so `origin` is --ours and
 # `upstream` is --upstream, refetches `origin` so its remote-tracking refs stop
-# holding the previous remote's tips, sets `checkout.defaultRemote` and
+# holding the previous remote's tips and fails when that refetch cannot run,
+# sets `checkout.defaultRemote` and
 # `remote.pushDefault` to `origin`, points `gh repo set-default` at `origin`
 # when `gh` is on PATH, and re-inits no-mistakes without --fork-url when
 # `no-mistakes` is on PATH so its PR target follows the new origin.
@@ -114,15 +115,15 @@ fix_default_branch_tracking() {
 # Every remap leaves refs/remotes/origin/* holding whatever the previous origin
 # published. Until they are refetched, `origin/<default>` still resolves to the
 # parent's tip, so a careless checkout or a base-freshness read would keep
-# taking upstream work from a remote that now claims to be ours.
+# taking upstream work from a remote that now claims to be ours. A failed fetch
+# is therefore fatal: every config value would say ours while the refs still
+# name the parent, and verify compares only the URL, so that split state would
+# read as correctly configured.
 refresh_origin_tracking() {
-  if ! git -C "$REPO" fetch --prune --quiet origin; then
-    echo "warning: fetched nothing from the new origin; tracking refs may still name the previous remote until a later fetch" >&2
-    return 0
-  fi
-  if ! git -C "$REPO" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "warning: could not resolve origin's default branch; run: git remote set-head origin --auto" >&2
-  fi
+  git -C "$REPO" fetch --prune --quiet origin \
+    || fail "could not fetch the new origin, so refs/remotes/origin/* may still name the previous remote; re-run apply once the remote is reachable"
+  git -C "$REPO" remote set-head origin --auto >/dev/null 2>&1 \
+    || fail "could not resolve origin's default branch after refetching; re-run apply once the remote is reachable"
 }
 
 set_default_git_and_gh() {
