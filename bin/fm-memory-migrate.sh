@@ -155,7 +155,7 @@ STOPWORDS=' that this with from when what which have been will they their there
  more most less some such very just also does done make made take takes
  without within about after before because while where whose whom here
  captain worker runs run every each once still even both single
- rebasing telling suspect parallel mutation crewmates pipeline environmental '
+ rebasing telling suspect parallel mutation crewmate pipeline environmental '
 
 # triggers_for <heading>: SPECIFIC terms only, in descending specificity -
 # backticked identifiers, then compound identifiers (a token carrying `-`, `_`
@@ -202,13 +202,16 @@ triggers_for() {
     esac
     [ "${#token}" -ge 4 ] || continue
     token=$(printf '%s\n' "$token" | LC_ALL=C tr '[:upper:]' '[:lower:]')
-    token=${token%s}
-    [ "${#token}" -ge 4 ] || continue
-    case "$STOPWORDS" in *" $token "*) continue ;; esac
+    # The stopword test also tries the singular, so `Crewmates` is rejected by
+    # the `crewmate` entry - but the TRIGGER keeps its original spelling,
+    # because matching is whole-token and a stemmed `window` would stop
+    # matching the `windows` it came from.
+    case "$STOPWORDS" in
+      *" $token "*|*" ${token%s} "*) continue ;;
+    esac
     out+=("$token")
   done < <(printf '%s\n' "$heading" \
     | sed -e "s/${BACKTICK}[^${BACKTICK}]*${BACKTICK}//g" \
-    | sed -e "s/'s\\b//g" \
     | sed -e 's/[^A-Za-z0-9]\{1,\}/ /g' | tr ' ' '\n')
 
   seen=' '
