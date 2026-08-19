@@ -62,7 +62,9 @@
 # a failed rewrite, a view carrying no recognized archive block heading, or any
 # other tasks-axi read failure - is reported loudly as its own failure and is
 # never reported as an absent record, so a read fault can neither pass the gate
-# nor be mistaken for a decision that was never taken.
+# nor be mistaken for a decision that was never taken. The read-only view is
+# staged and read inside an explicit subshell whose own EXIT trap removes it, so
+# it survives neither a return nor a signal that terminates the lookup.
 #
 # `resolve`, `answer`, and `decline` close active holds; `repair` attests a hold
 # already closed outside this script. All four paths require a non-empty captain
@@ -271,11 +273,15 @@ task_show() {  # <id>
 # out of, or any tasks-axi failure that is not a plain NOT_FOUND. An unreadable
 # archive is therefore never mistaken for an absent record. The view path is
 # absolutized before it crosses `tasks_axi`'s `cd` into FM_HOME, which would
-# otherwise resolve a relative path against a different directory, and it is a
-# fresh private temp file per lookup so a lookup inside a command substitution
-# can never leak one past this process.
+# otherwise resolve a relative path against a different directory. The view is a
+# fresh private temp file per lookup, staged and read inside an explicit subshell
+# that registers its own EXIT trap before anything else can fail, so it is
+# removed on every return path and on a signal that terminates the lookup; only
+# SIGKILL can leave one behind. That subshell's trap table is its own, so a
+# lookup inside a command substitution neither sees nor disturbs this script's
+# own EXIT trap.
 archived_show() {  # <id>
-  local id=$1 tmpdir view rc=0 content_rc=0
+  local id=$1 tmpdir content_rc=0
   [ -f "$ARCHIVE" ] || return 1
   grep -q '[^[:space:]]' "$ARCHIVE" || content_rc=$?
   case "$content_rc" in
@@ -291,28 +297,29 @@ archived_show() {  # <id>
     printf 'fm-decision-hold: cannot resolve a private temp directory to stage a read-only view of %s\n' "$ARCHIVE" >&2
     return 2
   fi
-  if ! view=$(umask 077; mktemp "$tmpdir/fm-decision-archive.XXXXXX"); then
-    printf 'fm-decision-hold: cannot stage a read-only view of %s\n' "$ARCHIVE" >&2
-    return 2
-  fi
-  if ! sed 's/^## Archived\([[:space:]].*\)\{0,1\}$/## Done/' "$ARCHIVE" > "$view"; then
-    rm -f -- "$view"
-    printf 'fm-decision-hold: cannot read %s\n' "$ARCHIVE" >&2
-    return 2
-  fi
-  if ! grep -q '^## Done' "$view"; then
-    rm -f -- "$view"
-    printf 'fm-decision-hold: %s holds records under no recognized archive block heading, so its records could not be read\n' "$ARCHIVE" >&2
-    return 2
-  fi
-  tasks_axi show "$id" --full --file "$view" 2>/dev/null || rc=$?
-  rm -f -- "$view"
-  case "$rc" in
-    0) return 0 ;;
-    1) return 1 ;;
-  esac
-  printf 'fm-decision-hold: tasks-axi could not read the done archive view of %s (exit %s)\n' "$ARCHIVE" "$rc" >&2
-  return 2
+  (
+    view=$(umask 077; mktemp "$tmpdir/fm-decision-archive.XXXXXX") || {
+      printf 'fm-decision-hold: cannot stage a read-only view of %s\n' "$ARCHIVE" >&2
+      exit 2
+    }
+    trap 'rm -f -- "$view"' EXIT
+    rc=0
+    if ! sed 's/^## Archived\([[:space:]].*\)\{0,1\}$/## Done/' "$ARCHIVE" > "$view"; then
+      printf 'fm-decision-hold: cannot read %s\n' "$ARCHIVE" >&2
+      exit 2
+    fi
+    if ! grep -q '^## Done' "$view"; then
+      printf 'fm-decision-hold: %s holds records under no recognized archive block heading, so its records could not be read\n' "$ARCHIVE" >&2
+      exit 2
+    fi
+    tasks_axi show "$id" --full --file "$view" 2>/dev/null || rc=$?
+    case "$rc" in
+      0) exit 0 ;;
+      1) exit 1 ;;
+    esac
+    printf 'fm-decision-hold: tasks-axi could not read the done archive view of %s (exit %s)\n' "$ARCHIVE" "$rc" >&2
+    exit 2
+  )
 }
 
 # The record for <id> wherever it durably lives: the live backlog first, then
@@ -346,9 +353,16 @@ show_field() {  # <show-output> <field>
 }
 
 origin_exists_here() {  # <origin-id>
-  [ -f "$STATE/$1.meta" ] && return 0
-  [ -f "$DATA/$1/report.md" ] && return 0
-  record_show "$1" >/dev/null 2>&1
+  local id=$1 archived_rc=0
+  [ -f "$STATE/$id.meta" ] && return 0
+  [ -f "$DATA/$id/report.md" ] && return 0
+  task_show "$id" >/dev/null 2>&1 && return 0
+  archived_show "$id" >/dev/null || archived_rc=$?
+  case "$archived_rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+  esac
+  fail "cannot read $ARCHIVE while checking whether origin $id is owned by this home"
 }
 
 list_has_key() {  # <comma-list> <key>

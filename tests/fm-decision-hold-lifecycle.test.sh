@@ -1599,6 +1599,106 @@ test_unrecognized_archive_heading_never_reads_as_an_absent_decision() {
   pass "an unreadable done archive is never read as an absent decision"
 }
 
+# A post-teardown re-review reaches an origin whose metadata and report are both
+# gone, so only the durable record still answers for which home owns it. An
+# archive that cannot be read must be reported as that read fault, never as an
+# origin this home does not own.
+test_unreadable_archive_is_not_reported_as_a_foreign_origin() {
+  local home id archive
+  home=$(make_home unreadable-archive-origin)
+  archive="$home/data/done-archive.md"
+  id=sample-unreadable-origin-review
+  archive_one_resolved_decision "$home" "$id" choice
+  tasks_in "$home" "done" "$id" --report "data/$id/report.md" >/dev/null \
+    || fail "could not close the origin scout"
+  tasks_in "$home" prune --keep 0 >/dev/null || fail "could not archive the origin scout"
+  rm -f "$home/state/$id.meta" "$home/state/$id.status"
+  rm -rf "${home:?}/data/$id"
+
+  # Control: while the archive reads, the archived origin record answers for it.
+  run_decisions "$home" hold "$id" late \
+    --title "A late sample choice" --reason "late captain choice pending" --repo sample >/dev/null \
+    || fail "a readable archive did not answer for the origin's ownership"
+
+  sed 's/^## Archived/## Vaulted/' "$archive" > "$archive.rewritten" \
+    || fail "could not stage the unrecognized archive heading"
+  mv "$archive.rewritten" "$archive" || fail "could not install the unrecognized archive heading"
+  if run_decisions "$home" hold "$id" later \
+    --title "Another late sample choice" --reason "later captain choice pending" --repo sample \
+    > "$home/origin-hold.out" 2> "$home/origin-hold.err"; then
+    fail "hold accepted an origin whose ownership could not be read"
+  fi
+  assert_grep "while checking whether origin $id is owned by this home" "$home/origin-hold.err" \
+    "hold must name the archive read fault"
+  assert_no_grep "is not owned by the active home" "$home/origin-hold.err" \
+    "an unreadable archive must never be reported as a foreign origin"
+  if run_decisions "$home" complete "$id" --none \
+    > "$home/origin-complete.out" 2> "$home/origin-complete.err"; then
+    fail "completion accepted an origin whose ownership could not be read"
+  fi
+  assert_grep "while checking whether origin $id is owned by this home" "$home/origin-complete.err" \
+    "completion must name the archive read fault"
+  assert_no_grep "is not owned by the active home" "$home/origin-complete.err" \
+    "an unreadable archive must never be reported as a foreign origin"
+  assert_absent "$home/state/$id.meta" "a refused completion recreated origin metadata"
+  pass "an unreadable archive is reported as a read fault, not as a foreign origin"
+}
+
+# The read-only view holds a full copy of the done archive, captain decision text
+# included, so it must not outlive the lookup that staged it. A signal that kills
+# the run mid-lookup must still take the view with it.
+test_a_killed_archive_lookup_leaves_no_view_behind() {
+  local home id viewdir marker job waited staged leaked
+  home=$(make_home archive-view-signal)
+  id=sample-archive-signal-review
+  archive_one_resolved_decision "$home" "$id" choice
+  viewdir="$home/view-tmp"
+  mkdir -p "$viewdir"
+  marker="$home/lookup-reached-the-view"
+
+  # A tasks-axi that stalls only on the staged view, so the lookup can be killed
+  # while the view exists; every other call is the real binary.
+  cat > "$home/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in
+    *fm-decision-archive.*)
+      : > "$marker"
+      sleep 30
+      exit 0
+      ;;
+  esac
+done
+exec "\${REAL_TASKS_AXI:?}" "\$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+
+  set -m
+  run_decisions_in "$home" "$viewdir" "$home" verify "$id" >/dev/null 2>&1 &
+  job=$!
+  set +m
+  waited=0
+  while [ ! -f "$marker" ] && [ "$waited" -lt 400 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  [ -f "$marker" ] || fail "the archived lookup never reached its staged view"
+  staged=$(find "$viewdir" -name 'fm-decision-archive.*' | wc -l | tr -d ' ')
+  [ "$staged" = 1 ] || fail "expected exactly one staged archive view, found $staged"
+
+  kill -TERM -"$job" 2>/dev/null || kill -TERM "$job" 2>/dev/null || true
+  wait "$job" 2>/dev/null || true
+  waited=0
+  while [ "$(find "$viewdir" -name 'fm-decision-archive.*' | wc -l | tr -d ' ')" != 0 ] \
+    && [ "$waited" -lt 200 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  leaked=$(find "$viewdir" -name 'fm-decision-archive.*' | wc -l | tr -d ' ')
+  [ "$leaked" = 0 ] || fail "a killed archive lookup left $leaked read-only archive view(s) behind"
+  pass "a killed archive lookup leaves no read-only view behind"
+}
+
 test_uninventoried_report_decision_refuses_completion
 
 test_scout_teardown_always_requires_inventory_verification
@@ -1621,3 +1721,5 @@ test_resolved_decisions_survive_done_pruning_before_the_completion_gate
 test_archived_out_of_band_close_still_blocks_the_gate
 test_archived_decision_verifies_under_a_relative_tmpdir
 test_unrecognized_archive_heading_never_reads_as_an_absent_decision
+test_unreadable_archive_is_not_reported_as_a_foreign_origin
+test_a_killed_archive_lookup_leaves_no_view_behind
