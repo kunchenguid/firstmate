@@ -36,7 +36,8 @@ These are supported-API boundaries rather than hidden-content failures.
 Calm has no numeric Pi version minimum or maximum and never refuses Pi solely because its version is newer than a previously verified version.
 The collapsed-thinking and operational-user-row presentation adapters probe the exact Pi API seam they patch when Calm loads.
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapter, and unrelated Pi extensions remain available.
-The collapsed-thinking adapter additionally checks the private Pi thinking-presentation fields only on renders where Calm is actively hiding thinking — the only case that reads them — and fails loudly, naming the fields, if a Pi upgrade renames them, because a silent mismatch would regress the hidden-block spacing instead of surfacing the incompatibility. Renders with Calm presentation off and stock export renders never read those fields and are unaffected by the check.
+The collapsed-thinking adapter additionally checks the private Pi thinking-presentation fields only on renders where Calm is actively hiding thinking - the only case that reads them - and fails loudly, naming the fields, if a Pi upgrade renames them, because a silent mismatch would regress the hidden-block spacing instead of surfacing the incompatibility.
+Renders with Calm presentation off and stock export renders never read those fields and are unaffected by the check.
 
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
 While the persisted Calm preference is off, Calm registers none of those overrides and therefore contests no built-in tool name.

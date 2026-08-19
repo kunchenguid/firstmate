@@ -3,7 +3,7 @@
 // if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
 // instead of blocking Calm or Pi. The patched method likewise checks the private
 // hiddenThinkingLabel/hideThinkingBlock fields, but only on renders where Calm is actively
-// hiding thinking — the only case that reads them — and throws at render time if a Pi
+// hiding thinking - the only case that reads them - and throws at render time if a Pi
 // upgrade renames them: deliberately loud there, because a renamed field would silently
 // regress the hidden-block gaps. Renders with Calm presentation off and stock export
 // renders never read the fields and are never affected by the check.
