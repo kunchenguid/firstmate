@@ -54,6 +54,9 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# A ship brief makes the worker verify its base before branching, against the
+# ref bin/fm-spawn.sh actually leaves the worktree on: the local default branch
+# for firstmate's own repository, and origin's fetched tip for every other project.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -101,6 +104,7 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -266,6 +270,40 @@ fi
 
 REPO=${POS[1]}
 
+# bin/fm-spawn.sh resolves the same repo argument the same way, then leaves the
+# task worktree on the local default branch for firstmate's own repository and
+# on the freshly fetched origin tip for every other project. The base a brief
+# asserts must be the base spawn actually left, so this mirrors that split.
+resolve_project_dir_arg() {
+  local path=$1
+  case "$path" in
+    projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
+    *) printf '%s\n' "$path" ;;
+  esac
+}
+
+repo_is_firstmate_itself() {
+  local proj_real root_real home_real
+  proj_real=$(cd "$(resolve_project_dir_arg "$REPO")" 2>/dev/null && pwd -P) || return 1
+  root_real=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || root_real=$FM_ROOT
+  home_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || home_real=$FM_HOME
+  [ "$proj_real" = "$root_real" ] || [ "$proj_real" = "$home_real" ]
+}
+
+if repo_is_firstmate_itself; then
+  BASE_REF_MAIN='refs/heads/main'
+  BASE_REF_MASTER='refs/heads/master'
+  BASE_DESC='the local default branch'
+  BASE_REJECT='do not branch from a remote tip'
+  BASE_BLOCKED='blocked: worktree is not on the local default branch'
+else
+  BASE_REF_MAIN='refs/remotes/origin/main'
+  BASE_REF_MASTER='refs/remotes/origin/master'
+  BASE_DESC='the base firstmate reset it to'
+  BASE_REJECT='do not branch from an unverified base'
+  BASE_BLOCKED='blocked: worktree is not on the base firstmate reset it to'
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -425,8 +463,8 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. Confirm this worktree is on the local default branch before creating yours: \`git rev-parse HEAD\` must equal \`git rev-parse refs/heads/main\` (or \`refs/heads/master\` if that is the default).
-If it does not, STOP - do not branch from a remote tip - append \`blocked: worktree is not on the local default branch\` to the status file and stop.
+1. Confirm this worktree is on $BASE_DESC before creating yours: \`git rev-parse HEAD\` must equal \`git rev-parse $BASE_REF_MAIN\` (or \`$BASE_REF_MASTER\` if that is the default).
+If it does not, STOP - $BASE_REJECT - append \`$BASE_BLOCKED\` to the status file and stop.
 Then create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
 # Rules

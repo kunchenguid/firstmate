@@ -32,10 +32,13 @@ make_fork_fixture() {
   git -C "$clone" remote add fork "file://$ours"
   git -C "$clone" fetch --quiet fork
 
-  # Local main is ahead of both remotes (the fleet's authoritative tree).
+  # Local main is ahead of the parent and published on ours (the fleet's
+  # authoritative tree), so the two remotes disagree about what main is.
   printf 'local-authoritative\n' > "$clone/local.txt"
   git -C "$clone" add local.txt
   git -C "$clone" commit -qm 'local main is authoritative'
+  git -C "$clone" push --quiet fork main
+  git -C "$clone" fetch --quiet fork
 
   # The parent diverges with a commit that must never land in our tree.
   git clone --quiet "$parent" "$dir/parent-pub"
@@ -46,6 +49,20 @@ make_fork_fixture() {
 
   git -C "$clone" fetch --quiet origin
   printf '%s\n' "$dir|$ours|$parent|$clone"
+}
+
+# Reproduce the state a worker actually starts in: bin/fm-spawn.sh fetches
+# origin and leaves the task worktree at a detached HEAD on origin's tip. The
+# careless `git checkout -b` then inherits whichever repository origin names,
+# which is the defect this helper exists to expose.
+spawn_like_worktree() {  # <clone> <path>
+  local clone=$1 path=$2 default
+  git -C "$clone" fetch --quiet origin
+  git -C "$clone" remote set-head origin --auto >/dev/null 2>&1 || true
+  default=$(git -C "$clone" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null) \
+    || default=origin/main
+  git -C "$clone" worktree add --quiet --detach "$path" "$default"
+  printf '%s\n' "$default"
 }
 
 install_careless_stubs() {
@@ -74,7 +91,7 @@ SH
 }
 
 test_careless_path_without_apply_names_parent() {
-  local rec dir ours parent clone origin
+  local rec dir ours parent clone origin worker
   rec=$(make_fork_fixture without-apply)
   IFS='|' read -r dir ours parent clone <<EOF
 $rec
@@ -84,7 +101,18 @@ EOF
     *parent.git*) ;;
     *) fail "fixture origin was not the parent: $origin" ;;
   esac
-  ( cd "$clone" && git checkout -b fm/careless >/dev/null )
+
+  # Red-before baseline for test_apply_makes_careless_branch_and_default_repo_land_on_ours:
+  # with origin still naming the parent, the careless branch carries the
+  # unreviewed parent commit and none of our tree.
+  worker="$dir/worker"
+  spawn_like_worktree "$clone" "$worker" >/dev/null
+  ( cd "$worker" && git checkout -b fm/careless >/dev/null 2>&1 )
+  [ -e "$worker/upstream.txt" ] \
+    || fail "un-remapped careless branch did not carry the parent's unreviewed commit"
+  [ ! -e "$worker/local.txt" ] \
+    || fail "un-remapped careless branch already carried our tree, so the fixture proves nothing"
+
   if "$LANDING" verify --ours "file://$ours" --repo "$clone" >/dev/null 2>"$dir/verify.err"; then
     fail "verify succeeded while origin still named the parent"
   fi
@@ -96,7 +124,7 @@ EOF
 }
 
 test_apply_makes_careless_branch_and_default_repo_land_on_ours() {
-  local rec dir ours parent clone fakebin log origin out rc branch_head local_main
+  local rec dir ours parent clone fakebin log origin out rc branch_head local_main worker
   rec=$(make_fork_fixture with-apply)
   IFS='|' read -r dir ours parent clone <<EOF
 $rec
@@ -122,15 +150,19 @@ EOF
     fail "leftover fork remote still exists after apply"
   fi
 
-  # Careless branch creation: no extra start-point, no remote flags.
-  ( cd "$clone" && git checkout -b fm/careless >/dev/null )
-  branch_head=$(git -C "$clone" rev-parse HEAD)
+  # Careless branch creation from the worker's real starting state: a detached
+  # worktree on origin's tip, then `git checkout -b` with no start-point and no
+  # remote flags. Which repository origin names decides the whole outcome.
+  worker="$dir/worker"
+  spawn_like_worktree "$clone" "$worker" >/dev/null
+  ( cd "$worker" && git checkout -b fm/careless >/dev/null 2>&1 )
+  branch_head=$(git -C "$worker" rev-parse HEAD)
   local_main=$(git -C "$clone" rev-parse refs/heads/main)
   [ "$branch_head" = "$local_main" ] \
-    || fail "careless git checkout -b did not start from local main"
-  assert_grep 'local-authoritative' "$clone/local.txt" \
-    "careless branch omitted the local-main tree"
-  [ ! -e "$clone/upstream.txt" ] \
+    || fail "careless git checkout -b started from $branch_head, not our main $local_main"
+  assert_grep 'local-authoritative' "$worker/local.txt" \
+    "careless branch omitted our authoritative tree"
+  [ ! -e "$worker/upstream.txt" ] \
     || fail "careless branch imported the unreviewed parent tree"
 
   assert_grep "repo set-default origin" "$log" \
@@ -159,23 +191,73 @@ EOF
 }
 
 test_apply_refuses_a_linked_worktree() {
-  local rec dir ours parent clone wt out rc
+  local rec dir ours parent clone wt target out rc
   rec=$(make_fork_fixture worktree-refuse)
   IFS='|' read -r dir ours parent clone <<EOF
 $rec
 EOF
   git -C "$clone" worktree add --quiet --detach "$dir/wt"
   wt="$dir/wt"
-  set +e
-  out=$("$LANDING" apply --ours "file://$ours" --upstream "file://$parent" --repo "$wt" 2>&1)
+  mkdir -p "$wt/sub/deeper"
+  # The worktree top level and any depth below it share the primary's remotes,
+  # so both must be refused. A guard that only looks for a `.git` file sees
+  # nothing at the subdirectory and rewrites the fleet's remotes from there.
+  for target in "$wt" "$wt/sub" "$wt/sub/deeper"; do
+    set +e
+    out=$("$LANDING" apply --ours "file://$ours" --upstream "file://$parent" --repo "$target" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "apply succeeded from linked worktree path $target"
+    assert_contains "$out" "linked worktree" \
+      "apply did not refuse to rewrite remotes from linked worktree path $target"
+    [ "$(git -C "$clone" remote get-url origin)" = "file://$parent" ] \
+      || fail "refused apply from $target still rewrote the shared remotes"
+  done
+  pass "apply refuses to rewrite remotes from a linked worktree at any depth"
+}
+
+# The remap branch taken when `upstream` already names the parent only changed
+# origin's URL. Without a refetch, refs/remotes/origin/* still held the parent's
+# tips, so the careless path kept resolving origin/main to the parent even
+# though origin claimed to be ours.
+test_apply_with_existing_upstream_refreshes_tracking_refs() {
+  local rec dir ours parent clone fakebin log rc origin_main local_main parent_main worker
+  rec=$(make_fork_fixture existing-upstream)
+  IFS='|' read -r dir ours parent clone <<EOF
+$rec
+EOF
+  git -C "$clone" remote add upstream "file://$parent"
+  git -C "$clone" fetch --quiet upstream
+  fakebin=$(fm_fakebin "$dir/fake")
+  log="$dir/stub.log"
+  : > "$log"
+  install_careless_stubs "$fakebin" "$log"
+
+  PATH="$fakebin:$PATH" "$LANDING" apply \
+    --ours "file://$ours" \
+    --upstream "file://$parent" \
+    --repo "$clone" > "$dir/apply.out" 2>"$dir/apply.err"
   rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "apply succeeded from a linked worktree"
-  assert_contains "$out" "linked worktree" \
-    "apply did not refuse to rewrite remotes from a linked worktree"
-  [ "$(git -C "$clone" remote get-url origin)" = "file://$parent" ] \
-    || fail "refused apply still rewrote the shared remotes"
-  pass "apply refuses to rewrite remotes from a linked worktree"
+  expect_code 0 "$rc" "apply should remap origin when upstream already names the parent"
+  [ "$(git -C "$clone" remote get-url origin)" = "file://$ours" ] \
+    || fail "origin was not remapped onto the landing remote"
+
+  origin_main=$(git -C "$clone" rev-parse refs/remotes/origin/main)
+  local_main=$(git -C "$clone" rev-parse refs/heads/main)
+  parent_main=$(git -C "$clone" rev-parse refs/remotes/upstream/main)
+  [ "$origin_main" != "$parent_main" ] \
+    || fail "origin/main still resolves to the parent tip $parent_main after apply"
+  [ "$origin_main" = "$local_main" ] \
+    || fail "origin/main is $origin_main, not our published main $local_main"
+
+  worker="$dir/worker"
+  spawn_like_worktree "$clone" "$worker" >/dev/null
+  ( cd "$worker" && git checkout -b fm/careless >/dev/null 2>&1 )
+  [ ! -e "$worker/upstream.txt" ] \
+    || fail "careless branch still imported the unreviewed parent tree after apply"
+  assert_grep 'local-authoritative' "$worker/local.txt" \
+    "careless branch omitted our authoritative tree after apply"
+  pass "apply refetches origin so tracking refs stop naming the parent"
 }
 
 test_apply_refuses_an_unrelated_origin() {
@@ -197,6 +279,7 @@ EOF
 
 test_careless_path_without_apply_names_parent
 test_apply_makes_careless_branch_and_default_repo_land_on_ours
+test_apply_with_existing_upstream_refreshes_tracking_refs
 test_apply_refuses_a_linked_worktree
 test_apply_refuses_an_unrelated_origin
 

@@ -163,6 +163,7 @@ For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved tas
 On Firstmate's own repository that tip is the primary's local default-branch commit, never origin, because local main is the fleet's running tree and origin may still name a third-party parent.
 On every other project the worktree fetches origin and resets to that remote default-branch tip.
 Its header owns the exact refusal mechanics, while `tests/fm-spawn-pool-base-freshen.test.sh` owns the portable regression coverage.
+A ship brief repeats that same boundary as a worker-side refusal, naming the local default branch for Firstmate's own repository and origin's tip for every other project, so the base it asserts is the base the spawn actually left.
 `bin/fm-landing-remote.sh` is the owner of remapping `origin` onto the repository work lands on so `git`, `gh`, and no-mistakes default to that tree instead of a parent remote.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.

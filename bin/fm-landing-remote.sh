@@ -14,7 +14,8 @@
 #   fm-landing-remote.sh verify --ours <url> [--repo <dir>]
 #
 # apply rewrites remotes in the named checkout so `origin` is --ours and
-# `upstream` is --upstream, sets `checkout.defaultRemote` and
+# `upstream` is --upstream, refetches `origin` so its remote-tracking refs stop
+# holding the previous remote's tips, sets `checkout.defaultRemote` and
 # `remote.pushDefault` to `origin`, points `gh repo set-default` at `origin`
 # when `gh` is on PATH, and re-inits no-mistakes without --fork-url when
 # `no-mistakes` is on PATH so its PR target follows the new origin.
@@ -76,10 +77,18 @@ require_repo() {
 
 # Linked worktrees share remotes with the primary. apply must run against the
 # primary checkout so a worker cannot silently retarget the fleet's remotes.
-# A linked worktree has a `.git` file, not a directory; that signal is older
-# and more portable than --absolute-git-common-dir.
+# The `.git`-is-a-file signal only exists at a worktree's top level, so a --repo
+# pointing at any subdirectory of a linked worktree would slip past it. Compare
+# the per-worktree git dir against the shared common dir instead: they differ
+# for a linked worktree from any depth, and match in the primary.
 require_primary_checkout() {
-  if [ -f "$REPO/.git" ]; then
+  local git_dir common_dir
+  git_dir=$( cd "$REPO" && d=$(git rev-parse --git-dir) && cd "$d" && pwd -P ) || git_dir=
+  common_dir=$( cd "$REPO" && d=$(git rev-parse --git-common-dir) && cd "$d" && pwd -P ) || common_dir=
+  if [ -z "$git_dir" ] || [ -z "$common_dir" ]; then
+    fail "could not resolve the git directory of '$REPO'; refusing to rewrite remotes"
+  fi
+  if [ "$git_dir" != "$common_dir" ]; then
     fail "refusing to rewrite remotes from a linked worktree; run this on the primary checkout"
   fi
 }
@@ -100,6 +109,20 @@ fix_default_branch_tracking() {
       git -C "$REPO" config "branch.${branch}.merge" "refs/heads/${branch}"
     fi
   done
+}
+
+# Every remap leaves refs/remotes/origin/* holding whatever the previous origin
+# published. Until they are refetched, `origin/<default>` still resolves to the
+# parent's tip, so a careless checkout or a base-freshness read would keep
+# taking upstream work from a remote that now claims to be ours.
+refresh_origin_tracking() {
+  if ! git -C "$REPO" fetch --prune --quiet origin; then
+    echo "warning: fetched nothing from the new origin; tracking refs may still name the previous remote until a later fetch" >&2
+    return 0
+  fi
+  if ! git -C "$REPO" remote set-head origin --auto >/dev/null 2>&1; then
+    echo "warning: could not resolve origin's default branch; run: git remote set-head origin --auto" >&2
+  fi
 }
 
 set_default_git_and_gh() {
@@ -183,6 +206,7 @@ cmd_apply() {
     if [ -n "$fork_url" ] && urls_equal "$fork_url" "$OURS"; then
       git -C "$REPO" remote remove fork
     fi
+    refresh_origin_tracking
     fix_default_branch_tracking
     set_default_git_and_gh
     refresh_no_mistakes
@@ -201,8 +225,6 @@ cmd_apply() {
       git -C "$REPO" remote rename fork origin
     else
       git -C "$REPO" remote add origin "$OURS"
-      git -C "$REPO" fetch --quiet origin || \
-        echo "warning: fetched nothing from the new origin; tracking refs may be empty until a later fetch" >&2
     fi
   else
     git -C "$REPO" remote set-url origin "$OURS"
@@ -211,6 +233,7 @@ cmd_apply() {
     fi
   fi
 
+  refresh_origin_tracking
   fix_default_branch_tracking
   set_default_git_and_gh
   refresh_no_mistakes
