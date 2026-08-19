@@ -24,7 +24,7 @@ printf '%s\n' "$*" >> "$log"
 case "${1:-}" in
   listAccounts)
     while [ -e "$lock" ]; do sleep 0.02; done
-    printf 'Number: +10000000000\n'
+    printf 'Number: +10000000000 (aci: 11111111-2222-3333-4444-555555555555)\n'
     ;;
   -a)
     shift 2
@@ -38,7 +38,7 @@ case "${1:-}" in
         mv "$queue.next" "$queue"
         group=${row%%|*}
         body=${row#*|}
-        printf 'Id: %s\nBody: %s\n' "$group" "$body"
+        printf 'Id: %s\nBody: %s\nGroup info:\n  Id: %s\n  Type: DELIVER\n' "$group" "$body" "$group"
         ;;
       send)
         [ ! -e "$lock" ] || exit 92
