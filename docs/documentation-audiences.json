@@ -387,6 +387,30 @@
     {
       "path": ".agents/skills/bws/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/google-developer-docs-style/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": "skills/google-developer-docs-style/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/google-developer-docs-style/references/accessibility-and-global.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/google-developer-docs-style/references/link-and-crossref.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/google-developer-docs-style/references/lists-and-headings.md",
+      "audience": "public-product"
+    },
+    {
+      "path": "skills/google-developer-docs-style/references/word-list-lookup.md",
+      "audience": "public-product"
     }
   ]
 }
