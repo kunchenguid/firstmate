@@ -1732,10 +1732,35 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+# Both bases end the same way: refuse a dirty worktree, reset --hard onto the
+# resolved base, then verify HEAD actually landed there. Only the target ref and
+# the noun in each message differ, so one helper owns the tail and a later fix
+# cannot reach one base and miss the other.
+reset_spawn_worktree_to_base() {  # <worktree> <label> <target> <expected> <base-label>
+  local worktree=$1 label=$2 target=$3 expected=$4 base_label=$5 status actual
+  status=$(git -C "$worktree" status --porcelain) || {
+    echo "error: could not inspect $label worktree '$worktree' before refreshing its base" >&2
+    return 1
+  }
+  if [ -n "$status" ]; then
+    echo "error: $label worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
+    return 1
+  fi
+  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+    echo "error: could not reset $label worktree '$worktree' to $base_label; refusing to launch from a potentially stale base" >&2
+    return 1
+  fi
+  actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  if [ "$actual" != "$expected" ]; then
+    echo "error: $label worktree '$worktree' is at '${actual:-unknown}', not $base_label ('$expected'); refusing to launch" >&2
+    return 1
+  fi
+}
+
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 default target expected
   local proj_real root_real home_real
-  proj_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || proj_real=$PROJ_ABS
+  proj_real=$PROJ_ABS_REAL
   root_real=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || root_real=$FM_ROOT
   home_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || home_real=$FM_HOME
   # Firstmate-on-itself: local default branch is the fleet's running tree.
@@ -1752,23 +1777,8 @@ freshen_spawn_worktree_base() {  # <worktree>
       echo "error: local default branch '$default' is not a commit for firstmate worktree '$worktree'; refusing to launch from a potentially stale base" >&2
       return 1
     }
-    status=$(git -C "$worktree" status --porcelain) || {
-      echo "error: could not inspect firstmate worktree '$worktree' before refreshing its base" >&2
-      return 1
-    }
-    if [ -n "$status" ]; then
-      echo "error: firstmate worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
-      return 1
-    fi
-    if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
-      echo "error: could not reset firstmate worktree '$worktree' to local '$default'; refusing to launch from a potentially stale base" >&2
-      return 1
-    fi
-    actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
-    if [ "$actual" != "$expected" ]; then
-      echo "error: firstmate worktree '$worktree' is at '${actual:-unknown}', not local '$default' ('$expected'); refusing to launch" >&2
-      return 1
-    fi
+    reset_spawn_worktree_to_base "$worktree" firstmate "$expected" "$expected" "local '$default'" \
+      || return 1
     return 0
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
@@ -1792,23 +1802,7 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  status=$(git -C "$worktree" status --porcelain) || {
-    echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
-    return 1
-  }
-  if [ -n "$status" ]; then
-    echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
-    return 1
-  fi
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
-    echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
-  if [ "$actual" != "$expected" ]; then
-    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
-    return 1
-  fi
+  reset_spawn_worktree_to_base "$worktree" pooled "$target" "$expected" "current '$target'"
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>

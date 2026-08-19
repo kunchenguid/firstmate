@@ -492,6 +492,156 @@ EOF
   pass "apply refuses an origin that is neither ours nor the named parent"
 }
 
+# Make chosen git invocations fail inside apply and let every other one through.
+# The remap is a pair of renames, so a fixture whose every command succeeds
+# cannot show what the primary checkout looks like when the second one dies.
+install_failing_git_stub() {  # <fakebin> <failfile> <pattern>...
+  local fakebin=$1 failfile=$2 real
+  shift 2
+  real=$(command -v git)
+  printf '%s\n' "$@" > "$failfile"
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+args="\$*"
+while IFS= read -r pat; do
+  [ -n "\$pat" ] || continue
+  case "\$args" in
+    *"\$pat"*) exit 1 ;;
+  esac
+done < '$failfile'
+exec '$real' "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
+# The mutating remap is two renames on one checkout. If the second one dies the
+# primary is left with no `origin` at all, which strands git, gh, and
+# no-mistakes and makes every retry refuse at the missing remote. apply must put
+# the checkout back instead.
+test_a_dead_rename_mid_remap_restores_the_checkout() {
+  local rec dir ours parent clone fakebin log out rc
+  rec=$(make_fork_fixture dead-rename)
+  IFS='|' read -r dir ours parent clone <<EOF
+$rec
+EOF
+  fakebin=$(fm_fakebin "$dir/fake")
+  log="$dir/stub.log"
+  : > "$log"
+  install_careless_stubs "$fakebin" "$log"
+  install_failing_git_stub "$fakebin" "$dir/git-fail" "remote rename fork origin"
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" "$LANDING" apply \
+    --ours "file://$ours" \
+    --upstream "file://$parent" \
+    --repo "$clone" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "apply reported success after the second rename died"
+  [ "$(git -C "$clone" remote get-url origin 2>&1)" = "file://$parent" ] \
+    || fail "the dead remap left origin as '$(git -C "$clone" remote get-url origin 2>&1)', not the parent it started as"
+  [ "$(git -C "$clone" remote get-url fork 2>&1)" = "file://$ours" ] \
+    || fail "the dead remap did not leave the fork remote naming ours"
+  if git -C "$clone" remote get-url upstream >/dev/null 2>&1; then
+    fail "the dead remap left the upstream name it created"
+  fi
+  [ "$(git -C "$clone" config --get branch.trunk.remote || true)" = origin ] \
+    || fail "the dead remap left trunk tracking a remote that no longer exists"
+  [ -z "$(git -C "$clone" config --get checkout.defaultRemote || true)" ] \
+    || fail "the dead remap left checkout.defaultRemote behind"
+  assert_contains "$out" "checkout was restored" \
+    "apply did not say the checkout was put back"
+
+  install_careless_stubs "$fakebin" "$log"
+  rm -f "$fakebin/git"
+  PATH="$fakebin:$PATH" "$LANDING" apply \
+    --ours "file://$ours" \
+    --upstream "file://$parent" \
+    --repo "$clone" > "$dir/retry.out" 2>"$dir/retry.err"
+  rc=$?
+  expect_code 0 "$rc" "the retry should apply cleanly once the rename can succeed (got: $(cat "$dir/retry.err"))"
+  [ "$(git -C "$clone" remote get-url origin)" = "file://$ours" ] \
+    || fail "the retry did not land origin on the landing remote"
+  pass "a rename that dies mid-remap restores the checkout and the retry still applies"
+}
+
+# When the restore itself cannot run, the operator has to know the remotes need
+# hand repair. A message promising a restored, re-appliable checkout would send
+# them straight back into an apply that refuses at the missing origin.
+test_a_failed_restore_is_reported_as_needing_hand_repair() {
+  local rec dir ours parent clone fakebin log out rc
+  rec=$(make_fork_fixture dead-restore)
+  IFS='|' read -r dir ours parent clone <<EOF
+$rec
+EOF
+  fakebin=$(fm_fakebin "$dir/fake")
+  log="$dir/stub.log"
+  : > "$log"
+  install_careless_stubs "$fakebin" "$log"
+  install_failing_git_stub "$fakebin" "$dir/git-fail" \
+    "remote rename fork origin" "remote rename upstream origin"
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" "$LANDING" apply \
+    --ours "file://$ours" \
+    --upstream "file://$parent" \
+    --repo "$clone" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "apply reported success after both the remap and the restore died"
+  assert_contains "$out" "NOT restored" \
+    "apply claimed a restored checkout after the restore itself failed"
+  assert_contains "$out" "repair them by hand" \
+    "apply did not tell the operator to repair the remotes by hand"
+  pass "a failed restore is reported as needing hand repair, not as a restored checkout"
+}
+
+# `gh repo set-default --view` prints whatever repository gh recorded, so a zero
+# exit and a non-empty name prove nothing about which repository that is. Only
+# `remote.origin.gh-resolved = base` means gh sends a flagless `gh pr create` to
+# origin.
+test_apply_fails_when_gh_records_a_different_default() {
+  local rec dir ours parent clone fakebin log out rc
+  rec=$(make_fork_fixture gh-wrong-default)
+  IFS='|' read -r dir ours parent clone <<EOF
+$rec
+EOF
+  fakebin=$(fm_fakebin "$dir/fake")
+  log="$dir/stub.log"
+  : > "$log"
+  install_careless_stubs "$fakebin" "$log"
+  cat > "$fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$log'
+case "\$1 \$2 \${3:-}" in
+  "repo set-default origin"|"repo set-default origin ")
+    git config remote.origin.gh-resolved third-party/firstmate
+    exit 0
+    ;;
+  "repo set-default --view"|"repo set-default --view ")
+    printf 'third-party/firstmate\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/gh"
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" "$LANDING" apply \
+    --ours "file://$ours" \
+    --upstream "file://$parent" \
+    --repo "$clone" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "apply reported success while gh's default was a repository other than origin"
+  assert_contains "$out" "gh pr create" \
+    "apply did not name the consequence a wrong gh default has"
+  [ "$(git -C "$clone" remote get-url origin)" = "file://$parent" ] \
+    || fail "the failed apply left origin remapped despite gh's wrong default"
+  pass "apply fails when gh records a default repository that is not origin"
+}
+
 test_careless_path_without_apply_names_parent
 test_apply_makes_careless_branch_and_default_repo_land_on_ours
 test_apply_with_existing_upstream_refreshes_tracking_refs
@@ -500,5 +650,8 @@ test_apply_fails_when_the_gh_default_cannot_be_set
 test_apply_completes_a_partly_arranged_checkout
 test_apply_refuses_a_linked_worktree
 test_apply_refuses_an_unrelated_origin
+test_a_dead_rename_mid_remap_restores_the_checkout
+test_a_failed_restore_is_reported_as_needing_hand_repair
+test_apply_fails_when_gh_records_a_different_default
 
 echo "# all fm-landing-remote tests passed"

@@ -22,9 +22,14 @@
 # `no-mistakes` is on PATH so its PR target follows the new origin.
 # apply has one outcome: it exits 0 only when every one of those steps
 # succeeded. Everything that can refuse runs before anything is written, and
-# every later failure - the refetch, the gh default, the no-mistakes re-init -
-# restores the remotes, the branch tracking, and the git defaults it found, so
-# a failed apply leaves the checkout as it was and can be re-run.
+# every later failure - a remote rename or add, a git config write, the
+# refetch, the gh default, the no-mistakes re-init - restores the remotes, the
+# branch tracking, and the git defaults it found, so a failed apply leaves the
+# checkout as it was and can be re-run. The shape of the remap is known before
+# the first write and an exit trap covers the whole mutating window, so an
+# abort part-way through a rename pair still restores. When a restore step
+# itself fails, apply says the remotes were not put back and need hand repair
+# rather than claiming a re-appliable checkout.
 # Restoring cannot recreate remote-tracking refs that a fetch replaced or that
 # `git remote remove` deleted, so it refetches the remotes it puts back and
 # leaves those refs holding the landing remote's tips when it cannot reach them.
@@ -145,7 +150,7 @@ capture_branch_tracking() {
 # apply refuses a fork whose URL is not --ours, so a branch that tracked either
 # one must still track the landing remote under its one surviving name.
 repoint_landing_branch_tracking() {  # <captured tracking>
-  local branch remote merge
+  local branch remote merge rc=0
   [ -n "$1" ] || return 0
   while IFS="$(printf '\t')" read -r branch remote merge; do
     [ -n "$branch" ] || continue
@@ -153,27 +158,29 @@ repoint_landing_branch_tracking() {  # <captured tracking>
       origin|fork) ;;
       *) continue ;;
     esac
-    git -C "$REPO" config "branch.${branch}.remote" origin
+    git -C "$REPO" config "branch.${branch}.remote" origin || rc=1
     if [ -n "$merge" ]; then
-      git -C "$REPO" config "branch.${branch}.merge" "$merge"
+      git -C "$REPO" config "branch.${branch}.merge" "$merge" || rc=1
     fi
   done <<TRACKED
 $1
 TRACKED
+  return $rc
 }
 
 restore_captured_branch_tracking() {  # <captured tracking>
-  local branch remote merge
+  local branch remote merge rc=0
   [ -n "$1" ] || return 0
   while IFS="$(printf '\t')" read -r branch remote merge; do
     [ -n "$branch" ] || continue
-    git -C "$REPO" config "branch.${branch}.remote" "$remote"
+    git -C "$REPO" config "branch.${branch}.remote" "$remote" || rc=1
     if [ -n "$merge" ]; then
-      git -C "$REPO" config "branch.${branch}.merge" "$merge"
+      git -C "$REPO" config "branch.${branch}.merge" "$merge" || rc=1
     fi
   done <<TRACKED
 $1
 TRACKED
+  return $rc
 }
 
 # Reachability is checked before the first write so an unreachable or mistyped
@@ -193,23 +200,36 @@ refresh_origin_tracking() {
   git -C "$REPO" remote set-head origin --auto >/dev/null 2>&1 || return 1
 }
 
-# Put the checkout back the way apply found it. The two rename shapes invert
-# exactly, refs included. The rewrite shapes cannot recreate remote-tracking
-# refs a later fetch replaced or `git remote remove` deleted, so they refetch
-# what they put back and leave those refs holding the landing remote's tips
-# when the network they are being restored because of is still down.
+# Put the checkout back the way apply found it. The shape is recorded before
+# the first write, so this also runs against a half-written remap: every step
+# is conditioned on the remote layout actually present, and a step whose write
+# never landed is skipped instead of failing. The rewrite shapes cannot
+# recreate remote-tracking refs a later fetch replaced or `git remote remove`
+# deleted, so they refetch what they put back and leave those refs holding the
+# landing remote's tips when the network they are being restored because of is
+# still down.
 restore_pre_apply_remotes() {
   case $REMAP_SHAPE in
     renamed-fork)
-      git -C "$REPO" remote rename origin fork || return 1
-      git -C "$REPO" remote rename upstream origin || return 1
+      if ! remote_exists fork && remote_exists origin; then
+        git -C "$REPO" remote rename origin fork || return 1
+      fi
+      if ! remote_exists origin && remote_exists upstream; then
+        git -C "$REPO" remote rename upstream origin || return 1
+      fi
       ;;
     added-origin)
-      git -C "$REPO" remote remove origin || return 1
-      git -C "$REPO" remote rename upstream origin || return 1
+      if remote_exists origin && remote_exists upstream; then
+        git -C "$REPO" remote remove origin || return 1
+      fi
+      if ! remote_exists origin && remote_exists upstream; then
+        git -C "$REPO" remote rename upstream origin || return 1
+      fi
       ;;
     reurled-origin|tidied-remotes)
-      git -C "$REPO" remote set-url origin "$ORIGIN_BEFORE" || return 1
+      if remote_exists origin; then
+        git -C "$REPO" remote set-url origin "$ORIGIN_BEFORE" || return 1
+      fi
       if [ -z "$UPSTREAM_BEFORE" ] && remote_exists upstream; then
         git -C "$REPO" remote remove upstream || return 1
       fi
@@ -226,24 +246,65 @@ restore_pre_apply_remotes() {
 }
 
 restore_git_default_config() {
+  local rc=0
   if [ -n "$DEFAULT_REMOTE_BEFORE" ]; then
-    git -C "$REPO" config checkout.defaultRemote "$DEFAULT_REMOTE_BEFORE"
+    git -C "$REPO" config checkout.defaultRemote "$DEFAULT_REMOTE_BEFORE" || rc=1
   else
     git -C "$REPO" config --unset checkout.defaultRemote 2>/dev/null || true
   fi
   if [ -n "$PUSH_DEFAULT_BEFORE" ]; then
-    git -C "$REPO" config remote.pushDefault "$PUSH_DEFAULT_BEFORE"
+    git -C "$REPO" config remote.pushDefault "$PUSH_DEFAULT_BEFORE" || rc=1
   else
     git -C "$REPO" config --unset remote.pushDefault 2>/dev/null || true
   fi
-  return 0
+  return $rc
 }
 
+# Returns non-zero when any part of the checkout could not be put back, so the
+# caller can say what actually happened instead of promising a re-appliable
+# checkout. Clearing APPLY_IN_FLIGHT here keeps the exit trap from restoring a
+# second time on the way out.
 restore_pre_apply_state() {
-  restore_pre_apply_remotes \
-    || echo "warning: could not restore the remotes this apply rewrote; run fm-landing-remote.sh status and repair them by hand" >&2
-  restore_captured_branch_tracking "$TRACKING_BEFORE"
-  restore_git_default_config
+  local rc=0
+  APPLY_IN_FLIGHT=0
+  restore_pre_apply_remotes || rc=1
+  restore_captured_branch_tracking "$TRACKING_BEFORE" || rc=1
+  restore_git_default_config || rc=1
+  return $rc
+}
+
+# Every mutating step ends here, so one failure and one restore produce one
+# honest sentence. The trailing clause is decided by whether the restore
+# actually worked, never assumed.
+fail_after_restore() {  # <what failed>
+  if restore_pre_apply_state; then
+    fail "$1 The checkout was restored, so re-run apply once the cause is fixed"
+  fi
+  fail "$1 The remotes, branch tracking, or git defaults this apply rewrote were NOT restored; run fm-landing-remote.sh status and repair them by hand before using this checkout"
+}
+
+# `set -eu` can abort the mutating window at a command no `||` guard covers, and
+# a half-written remap can leave the checkout with no origin at all. The trap is
+# armed after the shape is recorded and before the first write, so any exit from
+# inside that window still restores.
+# Arm the restore before the first write, never after it. Every caller records
+# REMAP_SHAPE first, so the trap knows what to undo even when the very first
+# rename is the thing that fails.
+begin_apply_mutations() {
+  APPLY_IN_FLIGHT=1
+  trap abort_apply_in_flight EXIT
+}
+
+abort_apply_in_flight() {
+  local status=$?
+  [ "$APPLY_IN_FLIGHT" = 1 ] || return 0
+  APPLY_IN_FLIGHT=0
+  echo "error: apply stopped part-way through rewriting the remotes of '$REPO' (status $status)" >&2
+  if restore_pre_apply_state; then
+    echo "error: the checkout was restored, so re-run apply once the cause is fixed" >&2
+  else
+    echo "error: the remotes, branch tracking, or git defaults this apply rewrote were NOT restored; run fm-landing-remote.sh status and repair them by hand before using this checkout" >&2
+  fi
   return 0
 }
 
@@ -253,7 +314,6 @@ restore_pre_apply_state() {
 # this script exists to kill, so a gh that is present but did not take the
 # default is a failed apply, not a warning over a green exit code.
 record_gh_default() {
-  local recorded
   if ! command -v gh >/dev/null 2>&1; then
     echo "warning: gh is not on PATH; git origin is the landing remote, but gh has no default repo, so run 'gh repo set-default origin' once gh is installed" >&2
     return 0
@@ -262,9 +322,8 @@ record_gh_default() {
     echo "warning: gh repo set-default origin exited non-zero" >&2
     return 1
   fi
-  recorded=$(cd "$REPO" && gh repo set-default --view 2>/dev/null || true)
-  if [ -z "$recorded" ]; then
-    echo "warning: gh recorded no default repository" >&2
+  if ! gh_default_is_origin; then
+    echo "warning: gh did not record origin as its default repository" >&2
     return 1
   fi
   return 0
@@ -361,48 +420,64 @@ cmd_apply() {
 
   if urls_equal "$origin" "$OURS"; then
     REMAP_SHAPE=tidied-remotes
+    begin_apply_mutations
     if [ -z "$upstream_url" ]; then
-      git -C "$REPO" remote add upstream "$UPSTREAM"
+      git -C "$REPO" remote add upstream "$UPSTREAM" \
+        || fail_after_restore "could not add the upstream remote $UPSTREAM."
     fi
     if [ -n "$fork_url" ]; then
-      git -C "$REPO" remote remove fork
+      git -C "$REPO" remote remove fork \
+        || fail_after_restore "could not remove the leftover fork remote."
     fi
   else
     require_landing_remote_reachable
     if [ -z "$upstream_url" ]; then
-      git -C "$REPO" remote rename origin upstream
       if [ -n "$fork_url" ]; then
-        git -C "$REPO" remote rename fork origin
         REMAP_SHAPE=renamed-fork
       else
-        git -C "$REPO" remote add origin "$OURS"
         REMAP_SHAPE=added-origin
       fi
-    else
-      git -C "$REPO" remote set-url origin "$OURS"
+      begin_apply_mutations
+      git -C "$REPO" remote rename origin upstream \
+        || fail_after_restore "could not rename the origin remote to upstream."
       if [ -n "$fork_url" ]; then
-        git -C "$REPO" remote remove fork
+        git -C "$REPO" remote rename fork origin \
+          || fail_after_restore "could not rename the fork remote to origin."
+      else
+        git -C "$REPO" remote add origin "$OURS" \
+          || fail_after_restore "could not add origin at $OURS."
       fi
+    else
       REMAP_SHAPE=reurled-origin
+      begin_apply_mutations
+      git -C "$REPO" remote set-url origin "$OURS" \
+        || fail_after_restore "could not point origin at $OURS."
+      if [ -n "$fork_url" ]; then
+        git -C "$REPO" remote remove fork \
+          || fail_after_restore "could not remove the leftover fork remote."
+      fi
     fi
     if ! refresh_origin_tracking; then
-      restore_pre_apply_state
-      fail "could not fetch $OURS after the remap, so origin's tracking refs would still name the previous remote; the checkout was restored, so re-run apply once the landing remote is reachable"
+      fail_after_restore "could not fetch $OURS after the remap, so origin's tracking refs would still name the previous remote."
     fi
   fi
 
-  repoint_landing_branch_tracking "$TRACKING_BEFORE"
-  git -C "$REPO" config checkout.defaultRemote origin
-  git -C "$REPO" config remote.pushDefault origin
+  repoint_landing_branch_tracking "$TRACKING_BEFORE" \
+    || fail_after_restore "could not repoint the branches that tracked the renamed remotes at origin."
+  git -C "$REPO" config checkout.defaultRemote origin \
+    || fail_after_restore "could not set checkout.defaultRemote to origin."
+  git -C "$REPO" config remote.pushDefault origin \
+    || fail_after_restore "could not set remote.pushDefault to origin."
 
   if ! record_gh_default; then
-    restore_pre_apply_state
-    fail "gh did not record origin as its default repository; with no gh default and both origin and upstream present, gh ranks upstream above origin, so a flagless 'gh pr create' can still open the PR on the third-party parent. The checkout was restored, so re-run apply once gh can record the default"
+    fail_after_restore "gh did not record origin as its default repository; with no gh default and both origin and upstream present, gh ranks upstream above origin, so a flagless 'gh pr create' can still open the PR on the third-party parent."
   fi
   if ! refresh_no_mistakes; then
-    restore_pre_apply_state
-    fail "no-mistakes --yes init failed, so its stored PR target would still name the previous remote and the pipeline would open PRs there; the checkout was restored, so re-run apply once init can succeed"
+    fail_after_restore "no-mistakes --yes init failed, so its stored PR target would still name the previous remote and the pipeline would open PRs there."
   fi
+
+  APPLY_IN_FLIGHT=0
+  trap - EXIT
 
   if [ "$REMAP_SHAPE" = tidied-remotes ]; then
     echo "landing-remote: origin already points at the landing remote"
@@ -423,6 +498,7 @@ TRACKING_BEFORE=
 DEFAULT_REMOTE_BEFORE=
 PUSH_DEFAULT_BEFORE=
 REMAP_SHAPE=
+APPLY_IN_FLIGHT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help)
