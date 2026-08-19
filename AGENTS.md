@@ -543,6 +543,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `gitops-knowledge` - load before Flux CD concept questions, CRD manifest generation, or GitOps repository structure guidance covered by the adopted official `fluxcd/agent-skills` skill; also load `flux-classic-gitops` when classic controller installs apply.
 - `gitops-repo-audit` - load before auditing or validating a local Flux GitOps repository with read-only schema, migration, and security checks from the adopted official `fluxcd/agent-skills` skill; also load `flux-classic-gitops` when classic controller installs apply.
 - `flux-classic-gitops` - load with an adopted Flux skill when controllers are installed from tracked gotk manifests rather than Flux Operator; overrides Operator and `flux bootstrap` preference only.
+- `sops-age` - load before any work with `sops`, `age`, or `age-keygen`: encrypting or decrypting files, editing encrypted manifests, rotating age recipients or data keys, or resolving an age private key from bws.
 
 ## 14. Relay
 
