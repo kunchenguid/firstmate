@@ -316,13 +316,16 @@ classify_pr_json() { # <repo> <pr-json-object>
       ((.reviewThreads.nodes // []) | map(select(.isResolved == false)) | length);
     def text:
       ((.body // "") | gsub("^\\s+|\\s+$"; "") | ascii_downcase);
-    def benign_comment:
-      text | test("^(lgtm|looks good( to me)?|approved|thanks|fyi|resolved|fixed|addressed)[.![:space:]]*$");
     def resolution_comment:
       text | test("^(resolved|fixed|addressed)([.![:space:]]|$)");
+    def change_request:
+      text as $text
+      | ($text | test("(^|[^[:alnum:]])(please|must|should|need|needs|required|require|could you|can you|would you|kindly)([[:space:]]+[^[:space:]]+){0,3}[[:space:]]+(fix|update|change|revise|address|rework|re-review|rereview)([^[:alnum:]]|$)"))
+        or ($text | test("^(fix|update|change|revise|address|rework|re-review|rereview)([[:space:]]|[.!:]|$)"))
+        or ($text | test("(^|[^[:alnum:]])(changes?|updates?|fixes?|re-?review)([[:space:]]+(are|is|were|be))?[[:space:]]+(needed|required|requested)([^[:alnum:]]|$)"));
     def reviewer_request:
       (.state == "CHANGES_REQUESTED")
-      or (.state == "COMMENTED" and (text | length > 0) and (benign_comment | not));
+      or (.state == "COMMENTED" and change_request);
     def review_requests:
       (.reviews // []) as $reviews
       | [$reviews[]? | .author] | unique as $authors
@@ -334,7 +337,7 @@ classify_pr_json() { # <repo> <pr-json-object>
           | select(([$history[] | select(.state == "APPROVED" and ((.submittedAt // "") > ($request.submittedAt // "")))] | length) == 0)
         ] | length;
     def comment_request:
-      (text | length > 0) and (benign_comment | not);
+      change_request;
     def conversation_requests:
       .prAuthor as $pr_author
       | (.reviews // []) as $reviews

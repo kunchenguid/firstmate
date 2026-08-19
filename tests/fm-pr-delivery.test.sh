@@ -244,13 +244,13 @@ test_optional_review_silence() {
   fixture="$TMP_ROOT/fix-optional"
   setup_project "$home" "$fixture"
   write_open "$fixture" acme/alpha '[{"number":6,"url":"https://github.com/acme/alpha/pull/6","headRefName":"fm/opt6","headRefOid":"fff","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
-  write_view "$fixture" acme/alpha 6 '{"number":6,"url":"https://github.com/acme/alpha/pull/6","headRefName":"fm/opt6","headRefOid":"fff","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[{"state":"COMMENTED","body":"Looks good to me.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"FYI.","createdAt":"2026-08-19T00:00:01Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_view "$fixture" acme/alpha 6 '{"number":6,"url":"https://github.com/acme/alpha/pull/6","headRefName":"fm/opt6","headRefOid":"fff","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[{"state":"COMMENTED","body":"I verified this on staging.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"FYI.","createdAt":"2026-08-19T00:00:01Z","author":{"login":"reviewer"}},{"body":"I verified this on staging.","createdAt":"2026-08-19T00:00:02Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/opt6.meta" \
     'window=fm-opt6' "worktree=$home/projects/opt6" 'project=alpha' \
     'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
-    || fail "REVIEW_REQUIRED without threads should be eligible"
+    || fail "neutral review comments should not block eligibility"
   pass "optional-review silence allows eligible when checks green"
 }
 
