@@ -1,7 +1,10 @@
 // Verified against Pi 0.81.1 and 0.82.0, which export AssistantMessageComponent with an
 // updateContent method. installCalmAssistantLayout() probes that exact method and throws
 // if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
-// instead of blocking Calm or Pi.
+// instead of blocking Calm or Pi. The patched method likewise checks the private
+// hiddenThinkingLabel/hideThinkingBlock fields it reads and throws at render time if a Pi
+// upgrade renames them: that failure is deliberately loud rather than degraded, because a
+// renamed field would silently regress the hidden-block gaps.
 // This layout removes collapsed thinking and the mid-turn assistant text blocks
 // classified as "assistant-working-note" from a shallow presentation copy. The message
 // itself, model context, session storage, and export rendering are never touched.
