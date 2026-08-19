@@ -1,31 +1,31 @@
 ---
 name: epic-plan
-description: Give every story in a scaffolded epic a real, phased implementation plan by invoking the fleet's actual ck-plan planner (ClaudeKit's ck-plan, as a CLI where present or as an agent-invoked skill) once per story, producing a per-story plan directory of plan.md + phase-*.md. The story file's implementation-plan section becomes a POINTER to that plan directory - the plan is never hand-written into the story. Use after /epic-scaffold, once the stories exist and before the review gate. Third skill in the epic pipeline; hands off to /epic-review.
+description: Give every story in a scaffolded epic a real, phased implementation plan by authoring a per-story plan directory of plan.md + phase-*.md directly, with genuine planning rigor - overview, requirements, architecture, related files, steps, success criteria, and risks. The story file's implementation-plan section becomes a POINTER to that plan directory - the plan is never hand-written into the story body. Use after /epic-scaffold, once the stories exist and before the review gate. Third skill in the epic pipeline; hands off to /epic-review.
 user-invocable: true
 ---
 
-<!-- maintainers: public, installer-facing skill. Keep it standalone and harness-agnostic - no private paths, no tool-specific or single-harness syntax. It is one of six epic-pipeline skills (epic-new -> epic-scaffold -> epic-plan -> epic-review -> epic-handoff -> epic-ship) that share one voice and one output format. This skill DRIVES a real planner (ClaudeKit's ck-plan). `ck` is NOT guaranteed to be a shell CLI - on most harnesses it is the agent-invoked `ck:ck-plan` skill, so the skill detects the capability rather than assuming a CLI. It must not reimplement planning - defer to `ck plan --help` (CLI) or the ck-plan skill for the exact contract; the hand-authored fallback exists only for harnesses with no ck at all. -->
+<!-- maintainers: public, installer-facing skill. Keep it standalone and harness-agnostic - no private paths, no tool-specific or single-harness syntax. It is one of six epic-pipeline skills (epic-new -> epic-scaffold -> epic-plan -> epic-review -> epic-handoff -> epic-ship) that share one voice and one output format. The PRIMARY mechanism is authoring the plan directory directly with real rigor, because that works on any harness with no external CLI. A planning CLI is an OPTIONAL accelerator only when one genuinely exists and works; do not make the skill depend on it. -->
 
 # epic-plan
 
-Turn each scaffolded story into a real, phased implementation plan - produced by the fleet's actual planning tool, not written by hand.
-For every story the epic contains, you run the planner once and get back a per-story plan directory: a `plan.md` and one `phase-*.md` per phase.
+Turn each scaffolded story into a real, phased implementation plan - authored with genuine rigor, not left as a paragraph of good intentions inside the story.
+For every story the epic contains, you produce a per-story plan directory: a `plan.md` and one `phase-*.md` per phase.
 The story's implementation-plan section then points at that directory.
 When the story is later dispatched, the worker follows the plan directory's concrete phases instead of improvising - which is the whole point: a plan a human reviewed beats a plan invented mid-implementation.
 
 You are the PLANNER.
-You do not review the epic and you do not write the plans by hand - you drive the planning tool per story and wire each story to its plan directory.
+You do not review the epic - you write each story's plan directory and wire each story to it.
 
 ## When to use
 
 - `/epic-scaffold` produced an epic with standard stories, and each story now needs its implementation plan before the review gate.
 - A story's scope changed and its plan directory needs regenerating.
 
-## Why a real planner, not a hand-written section
+## Why a phased plan directory, not a hand-written section
 
 A hand-written "implementation plan" inside a story tends to be a paragraph of good intentions.
-The real planner researches the codebase, breaks the work into phases with success criteria and risks, and writes structured files a worker can execute step by step.
-Running it per story is what keeps dispatch honest: the worker has phases to follow, so it does not hallucinate the shape of the work.
+A real plan directory breaks the work into phases with success criteria and risks, in structured files a worker can execute step by step.
+Writing one per story is what keeps dispatch honest: the worker has phases to follow, so it does not hallucinate the shape of the work.
 
 ## Procedure
 
@@ -36,36 +36,34 @@ Do this once per story in the epic.
 
         plans/<epic>/stories/<id>-plan/
 
-   This is relative to the repo the story targets (the planner's default project scope is that repo's `./plans/`).
+   This is relative to the repo the story targets (plans live in that repo's `./plans/`).
    Keep `<epic>` and `<id>` exactly as they appear in the story frontmatter so the plan directory is traceable to the story.
 
-2. **Run the real planner in full mode, scoped to that directory.**
-   `ck` is ClaudeKit's ck-plan planner, but it is NOT guaranteed to be a shell command on your PATH - on most harnesses it is an agent-invoked skill.
-   So detect the capability, in this order, and use the first one that exists:
+2. **Author the plan directory directly, with real rigor.**
+   This is the primary mechanism and it works on any harness with nothing but a text editor.
+   Create `plan.md` and one `phase-*.md` per phase in the directory above.
+   Use phases that fit the story - `Research`, `Implement`, `Test` is the default shape; adjust when the work genuinely calls for it.
+   `plan.md` holds the story-level overview, requirements, architecture, and the list of phases.
+   Each `phase-*.md` holds that phase's overview, requirements, architecture notes, related files, concrete implementation steps, success criteria, and risks.
+   Plan in full - research the codebase first, then write the phased breakdown - because the story is about to be reviewed and then executed; a skipped-research plan is the paragraph of good intentions you are replacing.
 
-   1. **`ck` CLI on PATH.** If `command -v ck` succeeds, run the ClaudeKit CLI directly:
+3. **Optional accelerator: a real planning CLI, only if one genuinely works here.**
+   Some fleets ship a planning CLI that scaffolds the same `plan.md` + `phase-*.md` shape.
+   Do NOT assume one exists, and do NOT reach for a fleet planning skill whose CLI may be missing - that stalls the story on a command that is not there.
+   Use a CLI only when you have confirmed it is real and runnable on this harness, for example both of:
 
-          ck plan create --title "<story id>: <story heading>" --phases "Research,Implement,Test" --dir plans/<epic>/stories/<id>-plan --source skill
+        command -v ck            # the binary is on PATH
+        ck plan --help           # prints a real `plan` subcommand, not an error
 
-      This scaffolds `plan.md` and one `phase-*.md` stub per phase.
-      `ck plan --help` is the single owner of the exact flags and modes; defer to it rather than duplicating them here.
+   If, and only if, both hold, you MAY let that CLI scaffold the stubs (for example `ck plan create --dir plans/<epic>/stories/<id>-plan`; defer to `ck plan --help` for its exact flags), then still fill them per step 4.
+   If either check fails, ignore the CLI entirely and author the directory by hand per step 2 - that is the expected path, not a fallback.
 
-   2. **The real ck-plan skill (primary path).** Otherwise, invoke your harness's ck-plan skill - for example `/ck:ck-plan` on a Claude-family harness, or the equivalent skill invocation on your harness.
-      Point it at this story and the target plan directory `plans/<epic>/stories/<id>-plan/` and ask for the same output: a `plan.md` plus one `phase-*.md` per phase.
-      This is the same tool as the CLI, driven the way your harness invokes skills, and satisfies the requirement to use the real ck-plan.
+4. **Read before you write - every plan file.**
+   Whether you scaffolded the files by hand or with a CLI, read `plan.md` and every `phase-*.md` before composing long content into them.
+   A directory listing is not enough.
+   Only after that read pass, fill each file with the real plan: overview, requirements, architecture, related files, implementation steps, success criteria, and risks.
 
-   3. **Hand-authored fallback (no ck on this harness).** If neither a `ck` CLI nor a ck-plan skill is available, author the same-shape plan directory by hand: write `plan.md` and one `phase-*.md` per phase with the same content a plan carries - overview, requirements, architecture, related files, implementation steps, success criteria, and risks.
-      Note in `plan.md` that ck was unavailable on this harness and the plan was authored directly, so a reviewer knows why.
-
-   Whichever path you take, use full mode (research + phased breakdown), not a fast skip, because the story is about to be reviewed and then executed - and the output is the same either way: a per-story plan directory the story points at.
-
-3. **Read before you write - every generated file.**
-   The CLI and skill paths write real stub files.
-   Before composing any long content, read `plan.md` and every generated `phase-*.md` stub - a directory listing is not enough, and on some tools skipping a stub read gets that file's write rejected.
-   Only after that read pass, fill `plan.md` and each phase with the real plan: overview, requirements, architecture, related files, implementation steps, success criteria, and risks.
-   (The hand-authored fallback creates these files itself, so there is nothing to read first - just write the same content.)
-
-4. **Point the story at its plan directory - do not inline the plan.**
+5. **Point the story at its plan directory - do not inline the plan.**
    In the story's implementation-plan section, replace the placeholder with a pointer, not a copy:
 
         ## Implementation plan
@@ -75,7 +73,7 @@ Do this once per story in the epic.
 
    The plan lives in one place - the plan directory - so it cannot drift from a second copy pasted into the story.
 
-5. **Move to the next story** and repeat until every story has a plan directory and a pointer.
+6. **Move to the next story** and repeat until every story has a plan directory and a pointer.
 
 ## Output
 
