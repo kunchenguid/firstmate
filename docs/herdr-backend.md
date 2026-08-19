@@ -299,7 +299,7 @@ It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
 
 On stop, the daemon receives termination while `state/.afk` still exists so any active submit can settle through its original confirmation and retirement path.
-Shutdown starts no second submit: a confirmed batch is already retired, while an unconfirmed batch remains available to return catch-up.
+Shutdown starts no second submit: the original path retires a confirmed batch, while an unconfirmed batch remains available to return catch-up.
 The recorded terminal is then closed, and the AFK flag is removed last.
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
 

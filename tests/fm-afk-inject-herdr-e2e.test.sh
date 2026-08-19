@@ -438,6 +438,9 @@ test_scenario_a() {
     *) fail "Scenario A: digest misclassified (expected injection): $digest_line" ;;
   esac
 
+  printf 'evidence - scenario=A human_submissions=%s injection_submissions=%s merged_lines=0\n' \
+    "$(grep -c $'\tuser$' "$LOG_FILE" || true)" \
+    "$(grep -c $'\tinjection$' "$LOG_FILE" || true)"
   stop_daemon
   pass "real herdr Scenario A: partial input defers injection; digest arrives clean after idle"
 }
@@ -474,6 +477,8 @@ test_scenario_b() {
   [ "$user_count" -eq 0 ] \
     || fail "Scenario B: expected 0 user lines, got $user_count (spurious Enter submitted an empty line?)"
 
+  printf 'evidence - scenario=B injection_count=%s user_submissions=%s swallowed_enter_retried=true\n' \
+    "$marker_count" "$user_count"
   stop_daemon
   pass "real herdr Scenario B: swallowed Enter (via the herdr shim) produces exactly one clean digest"
 }
@@ -522,6 +527,10 @@ test_scenario_c() {
   [ "$(injection_marker_count)" -eq 1 ] \
     || fail "Scenario C: repeated catch-all scans changed the delivered injection count"
 
+  printf 'evidence - scenario=C injection_count=%s buffer_bytes=%s age_sidecar=%s repeated_scan_reinjection=false\n' \
+    "$(injection_marker_count)" \
+    "$(wc -c < "$STATE_DIR/.subsuper-escalations" 2>/dev/null | tr -d ' ')" \
+    "$([ -e "$STATE_DIR/.subsuper-escalations.since" ] && printf present || printf absent)"
   stop_daemon
   pass "real herdr Scenario C: confirmed delivery retires its buffer and repeated catch-all scans cannot re-buffer it"
 }
@@ -585,6 +594,9 @@ test_scenario_d_max_defer() {
   # composer returns empty without terminating the loop used by later scenarios.
   fm_backend_herdr_send_key "$SUPERVISOR_TARGET" Enter >/dev/null 2>&1 || true
   sleep 1
+  printf 'evidence - scenario=D buffer_bytes=%s wedge_marker=%s daemon_exited=true\n' \
+    "$(wc -c < "$STATE_DIR/.subsuper-escalations" 2>/dev/null | tr -d ' ')" \
+    "$([ -s "$STATE_DIR/.subsuper-inject-wedged" ] && printf present || printf absent)"
   pass "real herdr Scenario D: an unconfirmed delivery remains durable across daemon shutdown"
 }
 
@@ -615,6 +627,11 @@ test_scenario_e_shutdown_during_confirmed_flush() {
     || fail "Scenario E: confirmed delivery retained its age sidecar after shutdown"
   [ ! -e "$STATE_DIR/.subsuper-inject-wedged" ] \
     || fail "Scenario E: confirmed delivery produced a false wedge marker"
+  printf 'evidence - scenario=E injection_count=%s buffer_bytes=%s age_sidecar=%s wedge_marker=%s daemon_exited=true\n' \
+    "$(injection_marker_count)" \
+    "$(wc -c < "$STATE_DIR/.subsuper-escalations" 2>/dev/null | tr -d ' ')" \
+    "$([ -e "$STATE_DIR/.subsuper-escalations.since" ] && printf present || printf absent)" \
+    "$([ -e "$STATE_DIR/.subsuper-inject-wedged" ] && printf present || printf absent)"
   pass "real herdr Scenario E: SIGTERM during confirmed submit retires once and exits without re-injection"
 }
 
@@ -645,6 +662,9 @@ test_scenario_f_shutdown_after_flush() {
     || fail "Scenario F: shutdown re-injected an already-retired delivery"
   [ ! -s "$STATE_DIR/.subsuper-escalations" ] \
     || fail "Scenario F: shutdown restored an already-retired buffer"
+  printf 'evidence - scenario=F injection_count=%s buffer_bytes=%s daemon_exited=true\n' \
+    "$(injection_marker_count)" \
+    "$(wc -c < "$STATE_DIR/.subsuper-escalations" 2>/dev/null | tr -d ' ')"
   pass "real herdr Scenario F: shutdown after retirement exits with one delivered digest"
 }
 

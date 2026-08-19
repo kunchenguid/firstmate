@@ -486,7 +486,7 @@ ok - fm_backend_herdr_cli: an explicit timeout stops the whole stalled vendor pr
 ok - return catch-up precedes Bearings, owns live blocker remediation, preserves evidence once, and clears idempotently
 ```
 
-The real Herdr delivery and shutdown run used the task-owned lab helper, one externally provisioned `fm-lab-` session, and the suite's `HERDR_LAB_SESSION` adoption path:
+The real Herdr delivery and shutdown run used the task-owned lab helper, one externally provisioned `fm-lab-` session, and the suite's externally owned `HERDR_LAB_SESSION` path:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh
