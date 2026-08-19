@@ -924,6 +924,8 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
+  # Use a tool absent from the default test base path so host system packages
+  # cannot mask it.
   rm -f "$fakebin/chrome-devtools-axi"
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
@@ -1316,6 +1318,37 @@ EOF
   assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
 
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
+}
+
+test_remote_agent_startup_recovery() {
+  local rec root home fakebin out id=remote-ida state_dir
+  rec=$(new_world remote-agent-startup)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  state_dir="$home/state/remote-tasks/$id"
+  mkdir -p "$state_dir"
+  cat >"$home/state/$id.meta" <<EOF
+kind=scout
+executor=remote-agent
+provider=ida
+task_type=research
+remote_state=$state_dir
+EOF
+  chmod 0600 "$home/state/$id.meta"
+  cat >"$state_dir/state.json" <<EOF
+{"schema":"fm-remote-agent-task-state.v1","task_id":"$id","executor":"remote-agent","provider":"ida","task_type":"research","revision":1,"phase":"terminal-success","instruction_file":"$home/data/$id/instructions.txt","instruction_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytedcli_version":"0.128.0","outcome":"succeeded","error_class":null,"provider_checkpoint":"result-verified","waiter":"terminal","result_availability":"zero","result_path":null,"report_path":null,"provider_state":{"region":"sg","identity":"user","session_marker":"firstmate:$id:aaaaaaaaaaaaaaaa","session_id":"70001","task_id":"80001","agent_id":"9001","agent_name":"iDA Test","model":"ida-test","provider_status":"completed"},"created_at":"2026-08-19T00:00:00Z","updated_at":"2026-08-19T00:00:00Z"}
+EOF
+  chmod 0600 "$state_dir/state.json"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: not applicable (executor=remote-agent provider=ida)" \
+    "session start pretended a remote agent had a local endpoint"
+  assert_contains "$out" "state: done · source: remote-state · provider=ida phase=terminal-success outcome=succeeded" \
+    "session start did not recover native remote-agent current state"
+  pass "session start recovers native remote-agent state without a local endpoint"
 }
 
 # --- composition: real scripts run, not reimplemented ------------------------
@@ -2203,6 +2236,7 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_remote_agent_startup_recovery
 test_composition_invokes_real_scripts
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder

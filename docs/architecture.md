@@ -113,30 +113,33 @@ All are harness-scoped rather than a global pattern union, and none is a recorde
 
 `bin/fm-task-dispatch.sh` is the narrow executor boundary above task execution.
 The default `local-agent` executor delegates argument ownership to `bin/fm-spawn.sh`, so every existing harness, runtime backend, endpoint, semantic busy-state source, and isolated-worktree assertion remains on its established path.
-The `cloud-worker/aime` executor instead delegates to `bin/fm-cloud-research-aime.sh` and creates no harness, runtime backend, endpoint, terminal, or worktree.
-AIME is therefore neither a harness nor a runtime backend.
+The explicit `remote-agent/aime` and `remote-agent/ida` selectors create no harness, runtime backend, endpoint, terminal, or worktree.
+Remote agents are therefore task executors, not harnesses or runtime backends, and no heuristic chooses between the two providers.
 
-Both executors reuse the ordinary Firstmate task identity and lifecycle.
-An AIME research task keeps its backlog item, private brief and instruction, status-event history, supervision obligation, `data/<id>/report.md`, decision-hold gate, and completion handling, while its metadata discriminates `executor=cloud-worker` and `provider=aime` instead of faking local fields.
+All executors reuse the ordinary Firstmate task identity and lifecycle.
+A remote research task keeps its backlog item, private brief and instruction, status-event history, supervision obligation, `data/<id>/report.md`, decision-hold gate, and completion handling, while its metadata records `executor=remote-agent` and an explicit `provider=aime|ida` instead of faking local fields.
 `bin/fm-task-state.sh` and `bin/fm-task-retire.sh` are the matching provider-aware read and retirement boundaries.
 Legacy or explicit local task records delegate unchanged to `fm-crew-state.sh` and `fm-teardown.sh`.
 
-The AIME executor checkpoints provider, site, space, identity, instruction digest, session identity, message identity, event cursor, and remote-write phase in private local state.
-It records a possible create or send acceptance before issuing that write, so a restart adopts a known session and never converts an uncertain distributed outcome into an automatic retry.
-Once a side effect may have occurred, no provider or site fallback is permitted.
-An interrupted local waiter is not cloud cancellation because the supported CLI exposes no cancellation operation.
+`bin/fm-remote-agent-lib.sh` is the authoritative shared owner for the native remote metadata vocabulary and the normalized iDA state phases, private artifacts, report linkage, and provider-neutral safety checks.
+Provider adapters own their command surfaces, identities, observations, state interpretation, result extraction, and cancellation capabilities.
+AIME deliberately retains its proven `fm-aime-task-state.v1` mechanics; `bin/fm-remote-agent-aime.sh` selects that lifecycle with the new executor discriminator.
+Existing `executor=cloud-worker`, `provider=aime` records remain readable, adoptable, cancellable, and retireable through their original paths without migration or rewriting.
 
 Asynchronous monitoring uses the existing process-to-event transport.
 `bin/fm-procevent-aime.sh` owns AIME event replay, session and output readback, cursor continuity, duplicate handling, provider classification, deterministic report generation, and re-arming.
 Its terminal-unavailable seam recognizes only identity-bound provider status `stopped` plus authoritative terminal replay plus unavailable bounded output readback, records that as terminal failure, and stops the canonical source.
 The same adapter owns the bounded exact-generation preflight, private quarantine-before-acknowledgement order, exact queued-wake removal, and idempotent retry boundary.
+`bin/fm-procevent-ida.sh` owns iDA's durable session-marker reconciliation, single submission boundary, official session readback, normalized terminal result, report capture, acknowledgement, and re-arming.
+An ambiguous iDA submission or read times out into identity reconciliation before any retry; a missing, duplicate, or truncated match never silently creates another session.
 The generic runner remains transport only and wakes Firstmate through the existing durable check path.
 No local LLM Scout is required for monitoring, readback, or report wrapping.
 
 In document mode AIME creates the requested Feishu document itself.
 Firstmate validates and records the returned canonical URL, identity, and revision, but performs no local document creation, copying, rewriting, sharing, or permission change.
+iDA records a self-contained normalized report or its authoritative result identity and keeps `available`, exact `zero`, `unavailable`, and `error` distinct.
 Provider output remains evidence and input rather than implementation, publication, merge, destructive, or security authority.
-[`configuration.md`](configuration.md#aime-cloud-research-worker-configaime-cloud-worker) owns the operator contract, the [`cloud-research-worker` skill](../.agents/skills/cloud-research-worker/SKILL.md) owns the conditional procedure, and [`verification/aime-cloud-worker.md`](verification/aime-cloud-worker.md) owns current empirical evidence.
+[`configuration.md`](configuration.md#remote-research-agents) owns public setup and limits, the [`cloud-research-worker` skill](../.agents/skills/cloud-research-worker/SKILL.md) owns conditional operation, and [`verification/remote-agents.md`](verification/remote-agents.md) plus [`verification/aime-cloud-worker.md`](verification/aime-cloud-worker.md) own current empirical evidence.
 
 ## Runtime session backends
 

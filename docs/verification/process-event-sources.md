@@ -139,10 +139,12 @@ Without this launcher, reconcile would silently fail to start a runner on macOS 
 ## Scope
 
 The runner is domain-neutral and creates no endpoint, task metadata, or backlog item, so the supported primary harnesses and runtime backends are unaffected except through the `check` wake they already consume.
-Current adapters include Lavish review polling, remote-secondmate reply relay, and AIME cloud research readback.
+Current adapters include Lavish review polling, remote-secondmate reply relay, and AIME plus iDA remote research readback.
 Adding another requires a new `bin/fm-procevent-<adapter>.sh`, whose `terminal` command is optional and defaults to keeping the source armed.
 Its `autohandle` command is optional in the same way and defaults to leaving the captured result unacknowledged, so it keeps being announced to a handler exactly as before.
 AIME-specific replay, cursor, result, and restart evidence lives in [`aime-cloud-worker.md`](aime-cloud-worker.md).
+iDA submission reconciliation, normalized result capture, privacy, and restart evidence lives in [`remote-agents.md`](remote-agents.md).
+The iDA adapter implements both optional applying hooks: `terminal` retires a terminal or ambiguous source generation, and `autohandle` validates the recorded marker, updates normalized task state, writes a safe report or blocker, acknowledges the exact generation, and re-arms only healthy nonterminal work.
 
 Proactive delivery is inside that same boundary.
 The watcher reports a queued process-event result through the one shared actionable-exit path (`wake` in `bin/fm-push-transition-lib.sh`) that every existing signal, stale, and check wake already uses, so it reads no pane, queries no backend, and names no harness.

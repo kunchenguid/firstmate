@@ -7,7 +7,8 @@ description: >-
   Owns the arming commands, the durable result read, which wakes must be
   routed to their adapter instead of acknowledged generically, the handled
   acknowledgement contract, the one-owner rule, the precise durability
-  boundary, the AIME applying path, and the Lavish adapter's loss limitation.
+  boundary, the AIME and iDA applying paths, and the Lavish adapter's loss
+  limitation.
 user-invocable: false
 metadata:
   internal: true
@@ -38,7 +39,12 @@ Load `cloud-research-worker` first; that skill owns AIME intake, provider-result
 The AIME adapter owns authoritative event replay, session and output readback, durable cursor continuity, duplicate handling, acknowledgement, and re-arming.
 For the exact provider-stopped terminal/output-unavailable failure class, it also owns the bounded identity-bound quarantine, generation acknowledgement, exact queued-wake retirement, and idempotent retirement preparation defined by `cloud-research-worker`; generic acknowledgement never substitutes for that seal.
 
-`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-remote-reply.sh --help`, and `bin/fm-procevent-aime.sh --help` own the exact commands and flags.
+An iDA remote research source is armed and handled through `bin/fm-procevent-ida.sh`.
+Load `cloud-research-worker` first; that skill owns iDA selection, intake, session-marker reconciliation, result, restart, cancellation-authority, and retirement procedure.
+The iDA adapter owns first submission, official session readback, normalized report capture, acknowledgement, and re-arming.
+An ambiguous observation is terminal for that source generation so it cannot retry submission, but the recorded task remains blocked for explicit adoption/reconciliation.
+
+`bin/fm-procevent.sh --help`, `bin/fm-procevent-lavish.sh --help`, `bin/fm-procevent-remote-reply.sh --help`, `bin/fm-procevent-aime.sh --help`, and `bin/fm-procevent-ida.sh --help` own the exact commands and flags.
 
 Two rules the commands cannot enforce for you:
 
@@ -64,6 +70,13 @@ Two rules the commands cannot enforce for you:
   Here `<task-id>` is the `<source-id>` with its `aime-` prefix removed.
   The runner normally applies the observation on capture, but this call is the required idempotent confirmation when the wake remains unacknowledged.
   Never acknowledge an `aime` wake through the generic command, because only the adapter validates the recorded provider identity, advances the event cursor, writes or preserves the result, acknowledges it, and re-arms when needed.
+: For `ida`, a captured observation is applied only by
+  ```sh
+  bin/fm-procevent-ida.sh handle <task-id> <sequence> <result-file>
+  ```
+  Here `<task-id>` is the `<source-id>` with its `ida-` prefix removed.
+  The runner normally applies the observation on capture, but this call is the required idempotent confirmation when the wake remains unacknowledged.
+  Never acknowledge an `ida` wake generically, because only the adapter validates the recorded marker, updates normalized state, captures the report or blocker, acknowledges the generation, and re-arms when safe.
   Use the generic path below only after fully handling a result whose adapter has no applying command.
   [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns the automatic-application contract and its failure boundary.
 : A captured result with no durable handled acknowledgement stays eligible for bounded re-announcement on the existing wake queue - across any number of drains and firstmate restarts, not only the crash window right after capture - until it is explicitly acknowledged. Once you have fully handled a result, durably record it:
@@ -87,6 +100,7 @@ Supported by tests:
 - output that reached the runner is stored atomically at mode `0600` **before** any event referencing it is published;
 - the remote-reply adapter reads its append-only source non-destructively from an offset plus prefix hash, so a pre-capture retry can derive the same bytes again, while source truncation or replacement is detected rather than silently rebased;
 - the AIME adapter replays from its durable provider cursor and binds session and output readback to the recorded session and message identities, while unavailable readback is preserved and re-armed unless the same observation proves the provider-stopped terminal-unavailable failure class;
+- the iDA adapter reconciles its durable unique session marker before the only allowed create and after uncertain submission, preserves normalized provider/session identity, and keeps private request and raw provider bytes out of the captured result;
 - proactive delivery, adapter-owned terminal retirement, and adapter-owned automatic application follow the operating contract in [`docs/configuration.md`](../../../docs/configuration.md);
 - a durably captured result with no handled acknowledgement remains eligible for bounded re-announcement across any number of drains and restarts, and repeat wakes retain the same source and sequence for deduplication;
 - the handled acknowledgement is generation-keyed to the exact source and sequence, private, path-safe, durable, and idempotent, and is the only thing that stops re-announcement;

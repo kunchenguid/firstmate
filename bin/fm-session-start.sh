@@ -699,9 +699,9 @@ for meta in "$STATE"/*.meta; do
 
   executor=$(fm_meta_get "$meta" executor)
   [ -n "$executor" ] || executor=local-agent
-  if [ "$executor" = cloud-worker ]; then
+  if [ "$executor" = cloud-worker ] || [ "$executor" = remote-agent ]; then
     provider=$(fm_meta_get "$meta" provider)
-    printf 'endpoint: not applicable (executor=cloud-worker provider=%s)\n' "${provider:-unknown}"
+    printf 'endpoint: not applicable (executor=%s provider=%s)\n' "$executor" "${provider:-unknown}"
     FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-task-state.sh" "$id" 2>/dev/null \
