@@ -438,6 +438,7 @@ pause_state_class() {  # <window> <task>
   death_surface_file="$STATE/.paused-rechecked-$key"
   agent_alive=${3:-}
   [ -n "$agent_alive" ] || agent_alive=$(pause_declaration_liveness "$win")
+  [ "$agent_alive" != alive ] || rm -f "$death_surface_file"
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=
   state=${line#state: }
   state=${state%% *}

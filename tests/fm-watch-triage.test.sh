@@ -1570,7 +1570,57 @@ test_live_declared_pause_surfaces_once_after_agent_dies() {
     || fail "dead-agent liveness flicker queued $total_wakes total wakes (want exactly one)"
   [ "$(file_mtime "$state/.paused-resurfaced-$key")" = "$surface_resurface_mtime" ] \
     || fail "unknown liveness refreshed the surfaced pause throttle marker"
-  pass "a live declared pause surfaces once when its dead agent later reads unknown"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "confidently alive replacement surfaced while preserving the declared pause"
+  fi
+  [ "$(queued_stale_wakes "$state" "$window")" -eq 0 ] \
+    || { reap "$pid"; fail "confidently alive replacement queued a stale wake"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the alive replacement absorb"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 \
+    || { reap "$pid"; fail "alive replacement's distinct death did not surface immediately"; }
+  wakes=$(queued_stale_wakes "$state" "$window")
+  [ "$wakes" -eq 1 ] \
+    || fail "replacement death queued $wakes wakes (want exactly one)"
+  total_wakes=$((total_wakes + wakes))
+  ack_stopped_cycle "$state" || fail "could not acknowledge the replacement death surface"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "replacement death re-surfaced within the same death episode"
+  fi
+  wakes=$(queued_stale_wakes "$state" "$window")
+  total_wakes=$((total_wakes + wakes))
+  [ "$wakes" -eq 0 ] \
+    || { reap "$pid"; fail "replacement death queued $wakes repeated wakes"; }
+  reap "$pid"
+  [ "$total_wakes" -eq 2 ] \
+    || fail "two distinct death episodes queued $total_wakes total wakes (want exactly two)"
+  pass "each distinct dead-agent episode surfaces exactly once"
 }
 
 test_scheduled_pause_recheck_does_not_throttle_later_death() {
