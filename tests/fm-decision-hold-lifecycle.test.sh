@@ -1586,6 +1586,12 @@ test_archived_out_of_band_close_still_blocks_the_gate() {
   fi
   assert_grep "repair reaches only" "$home/gap-repair.err" \
     "repair must say it cannot reach an archived record"
+  assert_grep "closed outside fm-decision-hold" "$home/gap-repair.err" \
+    "the repair refusal must name the out-of-band close that archived this identity"
+  assert_grep "nothing was decided" "$home/gap-repair.err" \
+    "the repair refusal must say no captain decision was ever recorded for this identity"
+  assert_no_grep "new decision key" "$home/gap-repair.err" \
+    "an unresolved archived identity must not be sent to a new decision key it cannot clear"
   if run_decisions "$home" answer "$id" gap --decision-file "$home/late-decision.txt" \
     > "$home/gap-answer.out" 2> "$home/gap-answer.err"; then
     fail "answer closed an archived record that fm-decision-hold never closed"

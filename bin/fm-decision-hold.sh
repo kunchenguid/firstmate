@@ -1109,7 +1109,8 @@ command_repair() {
   # Only a live record can take the missing resolution block; the archive is
   # tasks-axi's append-only history and this script never writes it.
   [ "$tier" = live ] \
-    || fail "captain hold $id was closed outside fm-decision-hold and archived in $ARCHIVE without a recorded captain decision; repair reaches only live records in $FM_HOME/data/backlog.md"
+    || fail "$(archived_state_reason "$id" "$show" '' \
+         "repair reaches only live records in $FM_HOME/data/backlog.md")"
   [ "$state" = "done" ] \
     || fail "captain hold $id is still open (state=$state); use resolve or decline to close it with the captain's decision"
   body=$(resolution_body repaired "$ROUTED_NONE")
