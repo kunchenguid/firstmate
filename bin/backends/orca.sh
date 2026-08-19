@@ -9,9 +9,10 @@
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
 # every backend so the decision cannot drift.
-[ -r "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh" >&2; exit 1; }
+_FM_BACKEND_ORCA_LIB_DIR="${FM_BACKEND_LIB_DIR:-$(cd "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
+[ -r "$_FM_BACKEND_ORCA_LIB_DIR/fm-composer-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$_FM_BACKEND_ORCA_LIB_DIR/fm-composer-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-composer-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
+. "$_FM_BACKEND_ORCA_LIB_DIR/fm-composer-lib.sh"
 
 fm_backend_orca_tool_check() {
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }

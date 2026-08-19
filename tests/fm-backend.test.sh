@@ -479,17 +479,19 @@ test_backend_validate_refuses_unknown() {
 }
 
 test_backend_source_shell_portable() {
-  local out status
+  local out status backend
   # zsh does not word-split unquoted expansions; sourcing fm-backend.sh from
   # an interactive zsh session must still recognize known backend names.
   if command -v zsh >/dev/null 2>&1; then
-    zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source herdr && whence -w fm_backend_herdr_capture >/dev/null" 2>/dev/null \
-      || fail "zsh: fm_backend_source herdr should load the adapter when sourced"
+    for backend in tmux herdr zellij orca cmux; do
+      zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source $backend && whence -w fm_backend_${backend}_capture >/dev/null" 2>/dev/null \
+        || fail "zsh: fm_backend_source $backend should load the adapter when sourced"
+    done
     out=$(zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source bogus" 2>&1) \
       && fail "zsh: fm_backend_source bogus should fail"
     assert_contains "$out" "unknown backend 'bogus'" \
       "zsh: fm_backend_source did not reject bogus with the expected error"
-    pass "zsh: fm_backend_source recognizes known backends and rejects unknown ones"
+    pass "zsh: fm_backend_source loads every known backend and rejects unknown ones"
   else
     pass "zsh: shell-portable backend matching skipped (zsh not found)"
   fi

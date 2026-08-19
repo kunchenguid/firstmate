@@ -41,12 +41,13 @@
 # probe, and the capability descriptor - plus the busy detection and submit
 # cores that consume the shared verdict.
 
-[ -r "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh" >&2; exit 1; }
+_FM_TMUX_LIB_DIR="${FM_BACKEND_LIB_DIR:-$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
+[ -r "$_FM_TMUX_LIB_DIR/fm-composer-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$_FM_TMUX_LIB_DIR/fm-composer-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-composer-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
-[ -r "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh" >&2; exit 1; }
+. "$_FM_TMUX_LIB_DIR/fm-composer-lib.sh"
+[ -r "$_FM_TMUX_LIB_DIR/fm-cursor-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$_FM_TMUX_LIB_DIR/fm-cursor-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-cursor-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+. "$_FM_TMUX_LIB_DIR/fm-cursor-lib.sh"
 
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor

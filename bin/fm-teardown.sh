@@ -54,6 +54,10 @@
 # the retired home. Removing a leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# Before any destructive change, teardown must load the task's recorded backend
+# adapter and its required sibling libraries. A missing or unreadable file
+# produces a named, non-zero refusal with the task state intact. Forced
+# secondmate teardown applies the same preflight recursively to every descendant.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it

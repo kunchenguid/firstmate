@@ -13,9 +13,10 @@
 # cursor-agent and the far-too-generic legacy alias `agent`, and it runs as a
 # bundled node script. bin/fm-cursor-lib.sh is the fleet's single owner of that
 # decision, so this file delegates to it rather than widening the name match.
-[ -r "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh" >&2; exit 1; }
+_FM_SESSION_LOCK_LIB_DIR="${FM_BACKEND_LIB_DIR:-$(cd "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}"
+[ -r "$_FM_SESSION_LOCK_LIB_DIR/fm-cursor-lib.sh" ] || { printf '%s: missing required library: %s\n' "${BASH_SOURCE[0]}" "$_FM_SESSION_LOCK_LIB_DIR/fm-cursor-lib.sh" >&2; exit 1; }
 # shellcheck source=bin/fm-cursor-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+. "$_FM_SESSION_LOCK_LIB_DIR/fm-cursor-lib.sh"
 
 # Known harness command names; extend when a new adapter is verified.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'

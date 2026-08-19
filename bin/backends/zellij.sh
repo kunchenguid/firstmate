@@ -112,7 +112,7 @@
 # has no per-home CONTAINER split (one shared session for every home), but
 # FM_HOME/FM_ROOT now also feed fm_backend_zellij_home_label's tab-title tag
 # below.
-FM_BACKEND_ZELLIJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+FM_BACKEND_ZELLIJ_ROOT="${FM_BACKEND_DEFAULT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_ZELLIJ_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
