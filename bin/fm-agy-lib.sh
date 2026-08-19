@@ -132,19 +132,35 @@ fm_agy_resolve_binary() {
 FM_AGY_PROBE_TIMEOUT=${FM_AGY_PROBE_TIMEOUT:-20}
 
 # fm_agy_bounded_output: run an agy subcommand under a hard wall-clock bound, or
-# refuse. Refusing when no timeout utility exists is deliberate and is what
+# refuse. Refusing when nothing can impose a bound is deliberate and is what
 # makes this fail-safe rather than fail-slow: the caller's contract is that an
-# unreachable catalogue establishes NOTHING, so declining to probe degrades to
-# "not validated" instead of blocking a lock-holding spawn indefinitely.
+# unreachable probe establishes NOTHING, so declining to run it degrades to "not
+# validated" instead of blocking a lock-holding spawn indefinitely.
+#
+# The perl fallback is not a nicety. A stock macOS has neither `timeout` nor
+# `gtimeout` unless coreutils was installed by hand, so without it every probe
+# on this library - the model catalogue AND the quota poll that holds the agy
+# ladder's floor up - silently declined to run on exactly the platform the fleet
+# runs on. perl ships with macOS and with every supported Linux, and this is the
+# same fork/setpgrp/alarm bound bin/fm-nm-run-lib.sh already uses.
 fm_agy_bounded_output() {  # <agy-binary> <args...>
-  local path=$1 runner=
+  local path=$1 runner=none
   shift
   [ -n "$path" ] && [ -x "$path" ] || return 1
   if command -v timeout >/dev/null 2>&1; then runner=timeout
   elif command -v gtimeout >/dev/null 2>&1; then runner=gtimeout
+  elif command -v perl >/dev/null 2>&1; then runner=perl
   fi
-  [ -n "$runner" ] || return 1
-  "$runner" "$FM_AGY_PROBE_TIMEOUT" "$path" "$@" </dev/null 2>/dev/null
+  case "$runner" in
+    timeout|gtimeout)
+      "$runner" "$FM_AGY_PROBE_TIMEOUT" "$path" "$@" </dev/null 2>/dev/null
+      ;;
+    perl)
+      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+        "$FM_AGY_PROBE_TIMEOUT" "$path" "$@" </dev/null 2>/dev/null
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # fm_agy_list_models: the account's own live catalogue, one

@@ -30,15 +30,29 @@
 # path every crewmate and scout launch already takes, so an ordinary dispatch
 # cannot route around it.
 #
-# THE EVIDENCE. quota-axi does not model agy at all, so the only live source is
-# the agy pane footer ("<model> | ctx: <n>% | quota: <percent remaining>
-# (<time to reset>)"). bin/fm-watch.sh records it into this home's state/ as the
-# panes redraw, and bin/fm-agy-quota-lib.sh owns that format and its freshness
-# rule: a reading older than its own reported reset window reads back as
-# `unknown`, because the window it described has rolled over. That footer
-# percentage is the SESSION-WINDOW quota, which is the only thing that governs a
-# rung; a transient per-minute or per-request throttle is not exhaustion and
-# never appears here.
+# THE EVIDENCE. quota-axi does not model agy at all, so agy answers for itself.
+# bin/fm-agy-quota-lib.sh owns every part of that: the live intake poll this
+# gate runs at dispatch time, the opportunistic pane-footer reading
+# bin/fm-watch.sh records, the format both write, and the freshness rule that
+# ages a reading out. The percentage is the SESSION-WINDOW quota, which is the
+# only thing that governs a rung; a transient per-minute or per-request throttle
+# is not exhaustion and never appears here.
+#
+# WHY THE POLL IS PART OF THE GATE. One `agy --print /quota` call answers EVERY
+# model at once, and this gate needs exactly that, because it makes two
+# decisions and they lean on different rungs:
+#
+#   - Is the requested rung above its own floor? That needs the requested rung.
+#   - Is it the HIGHEST available rung? That needs every rung above it.
+#
+# Before the poll, evidence refreshed only when a live agy pane happened to
+# redraw, so a home with no agy pane running had none. That did not merely fail
+# the floor open. It ALSO blocked every descent, because a descent is refused
+# unless the rungs above are proven exhausted - so rung 1 launched unchecked
+# below its floor while rung 2 was refused for lack of proof, and dispatch
+# escaped the ladder upward to a more expensive model outside it entirely. The
+# fix for both halves is the same fresh reading, which is why the poll runs once
+# here, ahead of both decisions, rather than beside either one.
 #
 # Readings are per-home, because state/ is. The quota itself is per-account, so
 # a secondmate that has never drawn an agy pane of its own knows nothing about
@@ -46,11 +60,12 @@
 # rule below, which is the right answer anyway: a home with no evidence starts
 # at the top of the ladder rather than assuming somebody else spent it.
 #
-# THE ASYMMETRY, WHICH IS THE WHOLE DESIGN. Quota evidence is frequently absent:
-# a fresh home has never drawn an agy pane, and a reading expires on its own
-# window. Refusing every agy launch without evidence would wedge the fleet, and
-# allowing every launch without evidence would enforce nothing. So absence is
-# resolved by direction of travel:
+# THE ASYMMETRY, WHICH IS THE WHOLE DESIGN. Quota evidence can still be absent
+# after the poll: agy may not be installed, jq may be missing, the call may time
+# out, or the account may report no quota summary. The captain ruled on
+# 2026-08-19 that this must not stop work - "we should not allow the fleet to
+# stall" - so absence is never a refusal to launch at the top. Nor is it a
+# licence to descend. Absence is resolved by direction of travel:
 #
 #   - Climbing or staying at the top needs no evidence. Rung 1 is the ladder's
 #     first choice anyway, and no rung sits above it to exhaust.
@@ -61,6 +76,21 @@
 #   - A rung's OWN floor refuses only on positive evidence. An unknown reading
 #     for the requested rung is not proof it is spent, and treating it as such
 #     would wedge the fleet for the same reason as above.
+#
+# WHEN THE POLL ITSELF IS UNAVAILABLE, that asymmetry is what the gate falls
+# back to, and it says which of the two it did. Rung 1 still launches, so agy
+# work never stalls; a descent is still refused, because nothing proved the rung
+# above spent. The refusal names the failed live read rather than reporting a
+# bare absence, so the reader can tell "never observed" from "could not reach
+# agy just now" and reaches for FM_AGY_LADDER_OVERRIDE instead of quietly
+# abandoning the ladder for a costlier model outside it.
+#
+# HEADROOM FOR LAUNCHES IN FLIGHT. A reading describes the account at the moment
+# it was taken, so concurrent launches are invisible to it and a burst at 26%
+# could all clear a 25% floor before any of them was counted. Each authorized
+# launch is recorded, and FM_AGY_LADDER_INFLIGHT_MARGIN percentage points are
+# reserved per launch still unreflected in the reading. The comparison is
+# against that reserved figure, not the bare reading.
 #
 # OFF-LADDER MODELS. agy offers models the ladder does not name (Gemini 3.1 Pro
 # (Low), Claude Sonnet 4.6, GPT-OSS 120B, and so on), and a launch with no
@@ -125,25 +155,64 @@ fm_agy_ladder_at_or_below() {  # <percent> <floor>
   awk -v p="$1" -v f="$2" 'BEGIN { exit !(p <= f) }'
 }
 
-# fm_agy_ladder_state: what the recorded evidence says about one rung.
-# Prints "exhausted <percent>", "available <percent>", or "unknown".
-# "unknown" covers both a rung never observed and a reading whose own reset
-# window has since elapsed - bin/fm-agy-quota-lib.sh collapses the two, and it
-# is right to: a window that rolled over says nothing about what is left now.
+# FM_AGY_LADDER_INFLIGHT_MARGIN: percentage points reserved for each authorized
+# launch a current reading cannot have seen yet. One point is deliberately
+# coarse: the figure it protects is a reserve, and reserving slightly too much
+# costs a launch that can be made a moment later, while reserving too little
+# costs the captain's quarter.
+FM_AGY_LADDER_INFLIGHT_MARGIN=${FM_AGY_LADDER_INFLIGHT_MARGIN:-1}
+
+# fm_agy_ladder_reserved: a rung's percentage minus the headroom owed to
+# launches already in flight against it.
+fm_agy_ladder_reserved() {  # <percent> <in-flight>
+  awk -v p="$1" -v n="$2" -v m="$FM_AGY_LADDER_INFLIGHT_MARGIN" \
+    'BEGIN { v = p - (n * m); printf "%.1f", (v < 0 ? 0 : v) }'
+}
+
+# fm_agy_ladder_state: what the current evidence says about one rung.
+# Prints "<verdict> <percent> <in-flight>", where verdict is `exhausted` or
+# `available`, or the bare word "unknown".
+#
+# The percentage printed is always the READING, so a caller reports the evidence
+# it actually has; the verdict is decided on that reading MINUS the headroom
+# owed to in-flight launches, which is the figure the account will really be at
+# once they land. The in-flight count is printed too so a refusal can explain
+# the gap between the two rather than appearing to contradict its own number.
+#
+# "unknown" covers a rung never observed, a reading past the max-age ceiling,
+# and a reading whose own reset window has elapsed - bin/fm-agy-quota-lib.sh
+# collapses all three, and it is right to: none of them says what is left now.
 fm_agy_ladder_state() {  # <rung> <state-dir> [<now>]
   local rung=$1 state_dir=$2 now=${3:-}
-  local display reading percent
+  local display reading percent in_flight effective
   display=$(fm_agy_ladder_display "$rung") || return 1
   reading=$(fm_agy_quota_read "$display" "$state_dir" "$now")
   case "$reading" in
     unknown|'') printf 'unknown'; return 0 ;;
   esac
   percent=${reading%% *}
-  if fm_agy_ladder_at_or_below "$percent" "$(fm_agy_ladder_floor "$rung")"; then
-    printf 'exhausted %s' "$percent"
+  in_flight=$(fm_agy_inflight_count "$rung" "$state_dir" "$now")
+  effective=$(fm_agy_ladder_reserved "$percent" "$in_flight")
+  if fm_agy_ladder_at_or_below "$effective" "$(fm_agy_ladder_floor "$rung")"; then
+    printf 'exhausted %s %s' "$percent" "$in_flight"
   else
-    printf 'available %s' "$percent"
+    printf 'available %s %s' "$percent" "$in_flight"
   fi
+}
+
+# fm_agy_ladder_inflight_clause: the " (... in flight ...)" fragment a message
+# carries when headroom was reserved, and nothing at all when it was not, so the
+# ordinary single-launch reason stays exactly as short as it was.
+fm_agy_ladder_inflight_clause() {  # <percent> <in-flight>
+  # Guarded rather than compared directly: a caller that reached here with a
+  # non-numeric count must add no clause, never abort the reason mid-sentence.
+  case "${2:-}" in
+    ''|*[!0-9]*) return 0 ;;
+    0) return 0 ;;
+  esac
+  printf ' (%s launch(es) already in flight reserve %s%%, leaving %s%%)' \
+    "$2" "$(awk -v n="$2" -v m="$FM_AGY_LADDER_INFLIGHT_MARGIN" 'BEGIN { printf "%.1f", n * m }')" \
+    "$(fm_agy_ladder_reserved "$1" "$2")"
 }
 
 # fm_agy_ladder_check: the decision, with no override applied. Always prints one
@@ -153,7 +222,7 @@ fm_agy_ladder_state() {  # <rung> <state-dir> [<now>]
 #   2  allow, but the model is not on the ladder and is not governed by it
 fm_agy_ladder_check() {  # <model> <state-dir> [<now>]
   local model=$1 state_dir=$2 now=${3:-}
-  local rung above state percent floor display above_display
+  local rung above state percent in_flight floor display above_display unreachable=
 
   if [ -z "$model" ] || [ "$model" = default ]; then
     printf 'no model was requested, so agy chooses its own and the ladder cannot be applied to this launch'
@@ -166,23 +235,34 @@ fm_agy_ladder_check() {  # <model> <state-dir> [<now>]
   fi
   display=$(fm_agy_ladder_display "$rung")
 
+  # Distinguish "never observed" from "asked agy just now and could not reach
+  # it". Both leave the same absence behind, but only the second tells a reader
+  # that retrying, or the override, is the move - rather than concluding the
+  # ladder is unusable and leaving it for a model outside the policy.
+  if [ "${FM_AGY_LADDER_POLL_STATUS:-}" = unavailable ]; then
+    unreachable=' (a live quota read was attempted just now and did not answer)'
+  fi
+
   # Descending: every rung above must be PROVEN exhausted. Absence of evidence
   # refuses here, because this is the move the policy constrains.
   above=1
   while [ "$above" -lt "$rung" ]; do
     state=$(fm_agy_ladder_state "$above" "$state_dir" "$now")
     above_display=$(fm_agy_ladder_display "$above")
+    percent=${state#* }
+    in_flight=${percent#* }
+    percent=${percent%% *}
     case "$state" in
       exhausted*) ;;
       available*)
-        percent=${state#available }
-        printf 'rung %s (%s) still has %s%% remaining above its %s%% floor, so rung %s (%s) is not the highest available rung' \
-          "$above" "$above_display" "$percent" "$(fm_agy_ladder_floor "$above")" "$rung" "$display"
+        printf 'rung %s (%s) still has %s%% remaining above its %s%% floor%s, so rung %s (%s) is not the highest available rung' \
+          "$above" "$above_display" "$percent" "$(fm_agy_ladder_floor "$above")" \
+          "$(fm_agy_ladder_inflight_clause "$percent" "$in_flight")" "$rung" "$display"
         return 1
         ;;
       *)
-        printf 'rung %s (%s) has no current quota reading, so rung %s (%s) cannot be shown to be the highest available rung; run rung 1 first, or record a reading by opening an agy pane on rung %s' \
-          "$above" "$above_display" "$rung" "$display" "$above"
+        printf 'rung %s (%s) has no current quota reading%s, so rung %s (%s) cannot be shown to be the highest available rung; run rung 1 first, or set FM_AGY_LADDER_OVERRIDE=<reason> rather than leaving the ladder for a model outside it' \
+          "$above" "$above_display" "$unreachable" "$rung" "$display"
         return 1
         ;;
     esac
@@ -192,26 +272,27 @@ fm_agy_ladder_check() {  # <model> <state-dir> [<now>]
   # The requested rung's own floor. Refuses only on positive evidence.
   state=$(fm_agy_ladder_state "$rung" "$state_dir" "$now")
   floor=$(fm_agy_ladder_floor "$rung")
+  percent=${state#* }
+  in_flight=${percent#* }
+  percent=${percent%% *}
   case "$state" in
     exhausted*)
-      percent=${state#exhausted }
       if [ "$rung" = 1 ]; then
-        printf 'rung 1 (%s) is at %s%% remaining, at or below the %s%% floor reserved for the captain; automatic dispatch never takes that last quarter' \
-          "$display" "$percent" "$floor"
+        printf 'rung 1 (%s) is at %s%% remaining%s, at or below the %s%% floor reserved for the captain; automatic dispatch never takes that last quarter' \
+          "$display" "$percent" "$(fm_agy_ladder_inflight_clause "$percent" "$in_flight")" "$floor"
       else
-        printf 'rung %s (%s) is exhausted at %s%% remaining (floor %s%%), so it cannot take this launch' \
-          "$rung" "$display" "$percent" "$floor"
+        printf 'rung %s (%s) is exhausted at %s%% remaining%s (floor %s%%), so it cannot take this launch' \
+          "$rung" "$display" "$percent" "$(fm_agy_ladder_inflight_clause "$percent" "$in_flight")" "$floor"
       fi
       return 1
       ;;
     available*)
-      percent=${state#available }
-      printf 'rung %s (%s) has %s%% remaining above its %s%% floor and every rung above it is exhausted' \
-        "$rung" "$display" "$percent" "$floor"
+      printf 'rung %s (%s) has %s%% remaining above its %s%% floor%s and every rung above it is exhausted' \
+        "$rung" "$display" "$percent" "$floor" "$(fm_agy_ladder_inflight_clause "$percent" "$in_flight")"
       ;;
     *)
-      printf 'rung %s (%s) has no current quota reading; nothing shows it spent, and every rung above it is exhausted' \
-        "$rung" "$display"
+      printf 'rung %s (%s) has no current quota reading%s; nothing shows it spent, and every rung above it is exhausted' \
+        "$rung" "$display" "$unreachable"
       ;;
   esac
   return 0
@@ -225,9 +306,40 @@ fm_agy_ladder_check() {  # <model> <state-dir> [<now>]
 #   1  launch is refused; the printed line is the reason
 fm_agy_ladder_gate() {  # <model> <state-dir> [<now>]
   local reason rc=0
+
+  # Refresh the evidence before deciding on it, once, for every rung at a time.
+  # Only for a model the ladder actually ranks: an off-ladder or unmodelled
+  # launch is not governed by any floor, so it must not pay for a network call
+  # while bin/fm-spawn.sh holds the spawn locks. A poll that cannot run leaves
+  # whatever was recorded in place and is remembered, not raised: the gate still
+  # decides, and says which fallback it decided on.
+  FM_AGY_LADDER_POLL_STATUS=skipped
+  if [ "${1:-}" != '' ] && [ "${1:-}" != default ] && fm_agy_ladder_rung "$1" >/dev/null 2>&1; then
+    if [ "${FM_AGY_QUOTA_POLL:-on}" = off ]; then
+      FM_AGY_LADDER_POLL_STATUS=off
+    elif fm_agy_quota_poll "${2:-}" "${3:-}"; then
+      FM_AGY_LADDER_POLL_STATUS=ok
+    else
+      FM_AGY_LADDER_POLL_STATUS=unavailable
+    fi
+  fi
+
   reason=$(fm_agy_ladder_check "$@") || rc=$?
   case "$rc" in
-    0) return 0 ;;
+    0)
+      # An allow the floor could not actually check is the one allow worth
+      # breaking the silence for, and only when the live read was tried and
+      # failed - a home that has simply never observed this rung is the ordinary
+      # first launch and stays quiet.
+      if [ "$FM_AGY_LADDER_POLL_STATUS" = unavailable ]; then
+        case "$reason" in
+          *'no current quota reading'*)
+            printf 'notice: agy ladder could not read current quota, so this launch is unchecked against the floor: %s\n' "$reason"
+            ;;
+        esac
+      fi
+      return 0
+      ;;
     2)
       printf 'notice: agy ladder not applied: %s\n' "$reason"
       return 0

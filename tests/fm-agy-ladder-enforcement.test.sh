@@ -22,6 +22,15 @@
 #      would be worse than no gate.
 #   6. Both spellings agy accepts resolve to the same rung, and a model the
 #      ladder does not rank is allowed but reported.
+#   7. Headroom is reserved for launches already in flight, so a burst just
+#      above the floor cannot all clear it on one pre-burst reading.
+#   8. The intake poll serves BOTH decisions the gate makes. Stale evidence did
+#      not only fail the floor open - it also blocked every descent, because a
+#      descent needs the rungs above PROVEN spent. One fresh poll answers every
+#      rung, which is what keeps the ladder usable instead of pushing dispatch
+#      off it onto a costlier model.
+#   9. When the poll cannot answer, the gate still decides and says which
+#      fallback it took: rung 1 launches, a descent does not.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -30,6 +39,18 @@ set -u
 . "$ROOT/bin/fm-agy-ladder-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-agy-ladder)
+
+# The rule-matrix cases below decide on readings this file writes by hand, so
+# the live intake poll is off for them: a real poll would replace those readings
+# with the host account's own and every expectation would turn on whatever agy
+# says today. Every case that exercises the poll - including the bin/fm-spawn.sh
+# ones - turns it back on explicitly, against a stub agy.
+export FM_AGY_QUOTA_POLL=off
+# Pinned rather than inherited so a host that tunes them cannot move a boundary
+# this suite asserts against.
+export FM_AGY_QUOTA_MAX_AGE=300
+export FM_AGY_INFLIGHT_TTL=300
+export FM_AGY_LADDER_INFLIGHT_MARGIN=1
 
 RUNG1='Claude Opus 4.6 (Thinking)'
 RUNG2='Gemini 3.1 Pro (High)'
@@ -296,7 +317,198 @@ test_override_must_be_deliberate() {
   pass "an empty override variable is not an override"
 }
 
-# --- 5. The gate is on the real dispatch path -------------------------------
+# --- 5. Headroom for launches already in flight ------------------------------
+#
+# A reading describes the account at the moment it was taken. Concurrent
+# launches are invisible to it, so at 26% an unbounded burst could all clear the
+# 25% floor on the same pre-burst number and land the account well under the
+# captain's reserve before anything was re-read.
+
+test_a_burst_just_above_the_floor_is_refused() {
+  local state rc=0 out
+  state=$(fresh_state burst)
+  record "$state" "$RUNG1" 26.0 '4h 0m'
+
+  # The first launch fits: 26% really is above 25%.
+  out=$(gate_out "$state" "$RUNG1") || rc=$?
+  [ "$rc" -eq 0 ] || fail "the first launch at 26% must be allowed (rc=$rc)"
+
+  # Each authorized launch reserves its margin. bin/fm-spawn.sh records this the
+  # moment the gate allows; here the same ledger is driven directly.
+  for _ in 1 2; do
+    fm_agy_inflight_record 1 "$state"
+    rc=0
+    out=$(gate_out "$state" "$RUNG1") || rc=$?
+  done
+
+  [ "$rc" -eq 1 ] || fail "a burst at 26% must be refused before it crosses the floor (rc=$rc)"
+  assert_contains "$out" "is at 26.0%" "the refusal must still report the evidence it read"
+  assert_contains "$out" "in flight" "the refusal must say headroom was reserved for launches in flight"
+  assert_contains "$out" "leaving 24.0%" "the refusal must show the figure it actually compared"
+  assert_contains "$out" "reserved for the captain" "the refusal is still the captain's floor"
+
+  # The reading itself never moved, so this is the reservation refusing and not
+  # some other change of evidence.
+  case "$(fm_agy_quota_read "$RUNG1" "$state")" in
+    '26.0 '*) ;;
+    *) fail "the burst must be refused on the SAME reading that allowed the first launch" ;;
+  esac
+  pass "a burst of launches just above the floor is refused before it crosses the captain's reserve"
+}
+
+test_in_flight_reservations_expire() {
+  local state rc=0 now
+  state=$(fresh_state inflight-expire)
+  record "$state" "$RUNG1" 26.0 '4h 0m'
+  now=$(date +%s)
+
+  fm_agy_inflight_record 1 "$state" "$now"
+  fm_agy_inflight_record 1 "$state" "$now"
+  rc=0
+  fm_agy_ladder_check "$RUNG1" "$state" "$now" >/dev/null || rc=$?
+  [ "$rc" -eq 1 ] || fail "two launches in flight at 26% must be refused (rc=$rc)"
+
+  # Once a reading could have seen them, they stop being reserved - otherwise
+  # every past launch would permanently shrink the rung. The reading is re-taken
+  # at the same moment so this turns on expiry alone.
+  record "$state" "$RUNG1" 26.0 '4h 0m'
+  rc=0
+  fm_agy_ladder_check "$RUNG1" "$state" "$((now + 301))" >/dev/null || rc=$?
+  [ "$rc" -eq 0 ] || fail "expired reservations must stop reserving headroom (rc=$rc)"
+  pass "headroom is reserved only for launches a current reading cannot have seen"
+}
+
+# --- 6. The intake poll serves the floor AND the descent ---------------------
+#
+# This is the half the original diagnosis understated. Absent evidence does not
+# only fail rung 1's floor open; it also refuses every descent, because a
+# descent must PROVE the rungs above are spent. Both halves are fixed by the
+# same fresh reading, and one poll answers every rung at once.
+
+# stub_agy_quota <dir> <rung1-fraction> <rung2-fraction>: an `agy` on PATH that
+# answers /quota with the real command's JSON shape and runs no turn.
+stub_agy_quota() {
+  local dir=$1 f1=$2 f2=$3 fakebin
+  mkdir -p "$dir"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/agy" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *models*)
+    printf 'claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n'
+    printf 'gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n'
+    printf 'gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n'
+    ;;
+  */quota*)
+    cat <<'JSON'
+{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"All Models","buckets":[
+{"id":"claude-opus-4-6-thinking","name":"Claude Opus 4.6 (Thinking)","remaining_fraction":$f1,"reset_time":""},
+{"id":"gemini-3.1-pro-high","name":"Gemini 3.1 Pro (High)","remaining_fraction":$f2,"reset_time":""}
+]}]}}}
+JSON
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/agy"
+  printf '%s\n' "$fakebin"
+}
+
+test_the_poll_unblocks_a_descent_stale_evidence_refused() {
+  local state fakebin rc=0 out
+  command -v jq >/dev/null 2>&1 || { echo "skip - the intake poll needs jq, which is absent"; return 0; }
+
+  state=$(fresh_state poll-descent)
+
+  # Rung 1 was observed spent, but long enough ago that the reading is no longer
+  # evidence. This is the state a home sits in whenever no agy pane is running.
+  record "$state" "$RUNG1" 4.0 '5h 0m'
+  rc=0
+  out=$(fm_agy_ladder_check "$RUNG2" "$state" "$(( $(date +%s) + 400 ))") || rc=$?
+  [ "$rc" -eq 1 ] || fail "a descent on a reading past the ceiling must be refused (rc=$rc)"
+  assert_contains "$out" "has no current quota reading" \
+    "stale evidence must read as unproven, which is what blocks the descent"
+
+  # The same request, with the poll allowed to answer: rung 1 really is spent,
+  # so the descent is now PROVEN rather than merely likely, and it proceeds.
+  fakebin=$(stub_agy_quota "$TMP_ROOT/poll-descent-bin" 0.04 0.91)
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_AGY_QUOTA_POLL=on fm_agy_ladder_gate "$RUNG2" "$state") || rc=$?
+  [ "$rc" -eq 0 ] || fail "a live poll proving rung 1 spent must permit the descent (rc=$rc)"
+  [ -z "$out" ] || fail "an authorized descent must stay quiet, got '$out'"
+  pass "a live poll turns an unprovable descent into an authorized one, instead of stranding the ladder"
+}
+
+test_the_poll_holds_the_floor_a_stale_reading_would_have_missed() {
+  local state fakebin rc=0 out
+  command -v jq >/dev/null 2>&1 || { echo "skip - the intake poll needs jq, which is absent"; return 0; }
+
+  state=$(fresh_state poll-floor)
+  # An hours-old reading says rung 1 is healthy. Under the window-only rule this
+  # authorised every launch for the rest of its window; the account has since
+  # fallen below the captain's reserve.
+  record "$state" "$RUNG1" 95.0 '5h 0m'
+  fakebin=$(stub_agy_quota "$TMP_ROOT/poll-floor-bin" 0.203 0.91)
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_AGY_QUOTA_POLL=on fm_agy_ladder_gate "$RUNG1" "$state") || rc=$?
+  [ "$rc" -eq 1 ] || fail "the poll's current reading must hold the floor the stale one missed (rc=$rc)"
+  assert_contains "$out" "is at 20.3%" "the refusal must act on the polled figure, not the stale one"
+  assert_not_contains "$out" "95.0" "the stale reading must not survive the poll"
+
+  # And the descent it implies is now available, which is the whole point of
+  # polling every rung at once rather than only the requested one.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_AGY_QUOTA_POLL=on fm_agy_ladder_gate "$RUNG2" "$state") || rc=$?
+  [ "$rc" -eq 0 ] || fail "the same poll must authorize the descent it just justified (rc=$rc)"
+  pass "one poll both holds rung 1's floor and authorizes the descent that follows from it"
+}
+
+# --- 7. When the poll itself cannot answer ----------------------------------
+#
+# The captain ruled the fleet must not stall, so an unreachable quota service
+# never refuses a launch at the top of the ladder. It must still refuse a
+# descent, and it must SAY which of the two it did, so the reader reaches for
+# the override rather than abandoning the ladder for a model outside it.
+
+stub_agy_silent() {  # <dir>: an agy that answers nothing at all
+  local dir=$1 fakebin
+  mkdir -p "$dir"
+  fakebin=$(fm_fakebin "$dir")
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/agy"
+  chmod +x "$fakebin/agy"
+  printf '%s\n' "$fakebin"
+}
+
+test_an_unavailable_poll_never_stalls_rung_one_but_still_blocks_a_descent() {
+  local state fakebin rc=0 out
+  state=$(fresh_state poll-unavailable)
+  fakebin=$(stub_agy_silent "$TMP_ROOT/poll-unavailable-bin")
+
+  # Rung 1 launches. This is the no-stall ruling: no evidence is not a reason to
+  # stop agy work at the top of the ladder.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_AGY_QUOTA_POLL=on fm_agy_ladder_gate "$RUNG1" "$state") || rc=$?
+  [ "$rc" -eq 0 ] || fail "an unreachable quota read must not stall rung 1 (rc=$rc)"
+  assert_contains "$out" "unchecked against the floor" \
+    "an allow the floor could not check must say so rather than passing silently"
+
+  # The descent is still refused, and the reason distinguishes "could not reach
+  # agy just now" from "never observed" so the next step is obvious.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_AGY_QUOTA_POLL=on fm_agy_ladder_gate "$RUNG2" "$state") || rc=$?
+  [ "$rc" -eq 1 ] || fail "an unreachable quota read must not authorize a descent (rc=$rc)"
+  assert_contains "$out" "a live quota read was attempted just now and did not answer" \
+    "the refusal must name the failed live read, not report a bare absence"
+  assert_contains "$out" "FM_AGY_LADDER_OVERRIDE" \
+    "the refusal must name the way through, so the ladder is not abandoned for a costlier model"
+
+  # The two verdicts diverge on identical evidence, which is the asymmetry
+  # itself; assert the divergence so neither half can go quietly vacuous.
+  pass "an unreachable quota read launches rung 1, refuses a descent, and names which it did"
+}
+
+# --- 8. The gate is on the real dispatch path -------------------------------
 #
 # Everything above proves the decision. This proves it is WIRED: bin/fm-spawn.sh
 # is the one path every agy crewmate and scout launch takes, so the gate has to
@@ -322,7 +534,11 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/agy"
-  env "$@" PATH="$fakebin:$PATH" \
+  # The poll is left ON for these cases, against that same stub, which answers
+  # nothing for /quota. That is deliberate: it proves the live read sits on the
+  # real dispatch path and that failing to answer degrades to the recorded
+  # reading instead of stopping the spawn.
+  env "$@" PATH="$fakebin:$PATH" FM_AGY_QUOTA_POLL=on \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
     FM_CONFIG_OVERRIDE="$dir/config" FM_PROJECTS_OVERRIDE="$dir/projects" \
     "$ROOT/bin/fm-spawn.sh" agy-ladder-probe "$dir/projects" --scout \
@@ -358,6 +574,28 @@ test_spawn_passes_an_honest_launch_through() {
   pass "fm-spawn.sh: an honest rung-1 launch passes the gate and proceeds"
 }
 
+test_spawn_reserves_headroom_for_the_launch_it_authorized() {
+  local state out rc=0
+  state=$(fresh_state spawn-inflight)
+  record "$state" "$RUNG1" 91.0 '4h 0m'
+
+  [ "$(fm_agy_inflight_count 1 "$state")" = 0 ] \
+    || fail "a fresh state must owe no headroom"
+
+  out=$(spawn_agy "$state" "$RUNG1") || rc=$?
+  assert_contains "$out" "no brief at" "the launch must have been authorized"
+  [ "$(fm_agy_inflight_count 1 "$state")" = 1 ] \
+    || fail "an authorized rung-1 launch must reserve headroom against the NEXT launch"
+
+  # A refused launch spends nothing, so it must reserve nothing either.
+  rc=0
+  spawn_agy "$state" "$RUNG3" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "the rung-3 probe must be refused while rung 1 is healthy"
+  [ "$(fm_agy_inflight_count 3 "$state")" = 0 ] \
+    || fail "a refused launch must not reserve headroom"
+  pass "fm-spawn.sh: an authorized launch reserves its headroom and a refused one does not"
+}
+
 test_spawn_records_the_override() {
   local state out rc=0
   state=$(fresh_state spawn-override)
@@ -384,6 +622,12 @@ test_lower_rung_launches_once_every_rung_above_is_spent
 test_off_ladder_models_are_allowed_but_reported
 test_override_launches_and_is_visible
 test_override_must_be_deliberate
+test_a_burst_just_above_the_floor_is_refused
+test_in_flight_reservations_expire
+test_the_poll_unblocks_a_descent_stale_evidence_refused
+test_the_poll_holds_the_floor_a_stale_reading_would_have_missed
+test_an_unavailable_poll_never_stalls_rung_one_but_still_blocks_a_descent
 test_spawn_refuses_a_ladder_violation
 test_spawn_passes_an_honest_launch_through
 test_spawn_records_the_override
+test_spawn_reserves_headroom_for_the_launch_it_authorized
