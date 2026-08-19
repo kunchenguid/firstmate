@@ -598,7 +598,8 @@ fm_daemon_supervisor_transport() {  # <backend> <function> [arguments...]
   fi
   timeout=${FM_AFK_HERDR_CLI_TIMEOUT_SECS:-$AFK_HERDR_CLI_TIMEOUT_SECS_DEFAULT}
   case "$timeout" in
-    ''|*[!0-9]*|0) timeout=$AFK_HERDR_CLI_TIMEOUT_SECS_DEFAULT ;;
+    ''|*[!0-9]*) timeout=$AFK_HERDR_CLI_TIMEOUT_SECS_DEFAULT ;;
+    *) [ -n "${timeout//0/}" ] || timeout=$AFK_HERDR_CLI_TIMEOUT_SECS_DEFAULT ;;
   esac
   FM_BACKEND_HERDR_CLI_TIMEOUT_SECS=$timeout
   "$@"
@@ -607,11 +608,11 @@ fm_daemon_supervisor_transport() {  # <backend> <function> [arguments...]
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness
   harness=$(fm_daemon_primary_harness)
-  native=$(fm_daemon_supervisor_transport "$backend" fm_backend_busy_state "$backend" "$target" 2>/dev/null)
+  native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$native" in
     busy) return 0 ;;
   esac
-  tail40=$(fm_daemon_supervisor_transport "$backend" fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
+  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
     | fm_busy_lines_match "$harness"
 }
@@ -1176,7 +1177,7 @@ inject_msg() {  # <message> [state]
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
   fm_daemon_supervisor_transport "$backend" fm_backend_target_exists "$backend" "$target" || return 1
   # (3) Busy-guard: never inject into an in-use supervisor pane.
-  if fm_daemon_supervisor_transport "$backend" pane_is_busy "$target" "$backend"; then
+  if pane_is_busy "$target" "$backend"; then
     log "inject deferred: supervisor pane busy (agent mid-turn)"
     return 1
   fi

@@ -34,6 +34,19 @@ fm_backend_herdr_test_record_fixture_pid() {
   printf '%s\n' "$1" >> "$FM_BACKEND_HERDR_TEST_FIXTURE_PIDS"
 }
 
+fm_backend_herdr_test_unregister_fixture_pid() {
+  local pid=$1 pending="$FM_BACKEND_HERDR_TEST_FIXTURE_PIDS.pending"
+  awk -v pid="$pid" '$0 != pid' "$FM_BACKEND_HERDR_TEST_FIXTURE_PIDS" > "$pending" \
+    && mv "$pending" "$FM_BACKEND_HERDR_TEST_FIXTURE_PIDS"
+}
+
+fm_backend_herdr_test_stop_fixture_pid() {
+  local pid=$1 signal=${2:-TERM}
+  kill -"$signal" "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  fm_backend_herdr_test_unregister_fixture_pid "$pid"
+}
+
 fm_backend_herdr_test_cleanup() {
   local pid pgid
   while IFS= read -r pid; do
@@ -1572,7 +1585,7 @@ test_projection_close_emptying_after_focus_uses_pane_death_without_move() {
     FM_BACKEND_HERDR_DEATH_CLOSE_POLLS=2 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w2:p2' "$ROOT" 2>&1)
   status=$?
-  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid"
   [ "$status" -eq 0 ] || fail "emptying close behind focus should succeed through the pane-death path: $out"
   [ ! -s "$dir/mover.log" ] || fail "a close already behind focus invoked the workspace mover"
   assert_contains "$(cat "$log")" $'pane\x1fprocess-info' "pane-death close skipped the idle-shell proof"
@@ -1612,7 +1625,7 @@ test_projection_close_emptying_before_focus_repositions_then_uses_pane_death() {
     FM_BACKEND_HERDR_DEATH_CLOSE_POLLS=2 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w1:p1' "$ROOT" 2>&1)
   status=$?
-  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid"
   [ "$status" -eq 0 ] || fail "repositioned emptying close should succeed through the pane-death path: $out"
   [ "$(cat "$dir/mover.log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w1"$'\t'"3" ] \
     || fail "the repositioning move did not target the exact doomed workspace at the list length: $(cat "$dir/mover.log")"
@@ -1648,7 +1661,7 @@ test_projection_close_emptying_before_last_focus_needs_no_move() {
     FM_BACKEND_HERDR_DEATH_CLOSE_POLLS=2 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w1:p1' "$ROOT" 2>&1)
   status=$?
-  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid"
   [ "$status" -eq 0 ] || fail "emptying close with last focus should succeed through the pane-death path: $out"
   [ ! -s "$dir/mover.log" ] || fail "a last-focused close invoked the workspace mover"
   assert_not_contains "$(cat "$log")" $'pane\x1fclose' "last-focused emptying close used the focus-unsafe explicit close"
@@ -1681,7 +1694,7 @@ test_projection_close_emptying_last_workspace_needs_no_move() {
     FM_BACKEND_HERDR_DEATH_CLOSE_POLLS=2 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w3:p1' "$ROOT" 2>&1)
   status=$?
-  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid"
   [ "$status" -eq 0 ] || fail "last-workspace emptying close should succeed through the pane-death path: $out"
   [ ! -s "$dir/mover.log" ] || fail "an already-last close invoked the workspace mover"
   assert_not_contains "$(cat "$log")" $'pane\x1fclose' "last-workspace emptying close used the focus-unsafe explicit close"
@@ -1714,7 +1727,7 @@ test_projection_close_non_emptying_stays_plain_without_proof_or_move() {
   assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' "non-emptying close ran the idle-shell proof"
   [ ! -s "$dir/mover.log" ] || fail "non-emptying close invoked the workspace mover"
   kill -0 "$bgpid" 2>/dev/null || fail "non-emptying close signaled the pane's shell"
-  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid"
   pass "herdr presentation cleanup: a non-emptying close stays plain with no proof, move, or signal"
 }
 
@@ -1771,7 +1784,7 @@ test_projection_close_ambiguous_positions_fall_back_to_plain_close() {
   assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' "ambiguous positions ran the idle-shell proof"
   [ ! -s "$dir/mover.log" ] || fail "ambiguous positions invoked the workspace mover"
   kill -0 "$bgpid" 2>/dev/null || fail "ambiguous positions signaled the pane's shell"
-  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid"
   pass "herdr presentation cleanup: an ambiguous workspace layout falls back to the plain close"
 }
 
@@ -1809,7 +1822,7 @@ test_projection_close_move_failure_falls_back_to_plain_close() {
   assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw1:p1' "move failure did not use the plain close"
   assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' "move failure ran the idle-shell proof"
   kill -0 "$bgpid" 2>/dev/null || fail "move failure signaled the pane's shell"
-  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid"
   pass "herdr presentation cleanup: a failed repositioning move falls back to the plain close with a warning"
 }
 
@@ -1841,7 +1854,7 @@ test_projection_close_busy_pane_falls_back_to_plain_close() {
   [ "$status" -eq 0 ] || fail "a busy pane should fall back to the plain close: $out"
   assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw2:p2' "a busy pane did not use the plain close"
   kill -0 "$bgpid" 2>/dev/null || fail "a busy pane close signaled the pane's shell"
-  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid"
   pass "herdr presentation cleanup: a pane with a live foreground process falls back to the plain close"
 }
 
@@ -1873,7 +1886,7 @@ test_projection_close_transient_prompt_helper_settles_then_uses_pane_death() {
     FM_BACKEND_HERDR_DEATH_CLOSE_POLLS=2 FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=3 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w2:p2' "$ROOT" 2>&1)
   status=$?
-  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid"
   [ "$status" -eq 0 ] || fail "a transient prompt helper should settle into the pane-death path: $out"
   [ "$(grep -c $'pane\x1fprocess-info' "$log")" -ge 2 ] \
     || fail "the settle window did not retry the idle-shell proof"
@@ -1912,10 +1925,11 @@ test_projection_close_death_escalates_sigkill_after_sighup_survival() {
   [ "$status" -eq 0 ] || fail "a SIGHUP-surviving shell should be finished by the SIGKILL escalation: $out"
   assert_not_contains "$(cat "$log")" $'pane\x1fclose' "the SIGKILL escalation used the focus-unsafe explicit close"
   if kill -0 "$bgpid" 2>/dev/null; then
-    kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+    fm_backend_herdr_test_stop_fixture_pid "$bgpid"
     fail "the SIGKILL escalation left the trapped shell alive"
   fi
   wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_unregister_fixture_pid "$bgpid"
   pass "herdr presentation cleanup: a SIGHUP-surviving shell is escalated to SIGKILL before giving up"
 }
 
@@ -1950,7 +1964,7 @@ test_projection_close_death_failure_falls_back_to_plain_close() {
   status=$?
   [ "$status" -eq 0 ] || fail "an unkillable shell should fall back to the plain close: $out"
   assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw2:p2' "a failed pane-death close did not use the plain close fallback"
-  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid"
   pass "herdr presentation cleanup: a failed pane-death close falls back to the plain close"
 }
 
@@ -1984,6 +1998,7 @@ test_projection_close_death_still_restores_a_stolen_focus() {
   status=$?
   [ "$status" -eq 0 ] || fail "the pane-death close with a restored backstop should succeed: $out"
   assert_contains "$(cat "$log")" $'tab\x1ffocus\x1fw1:t1' "the backstop did not restore the exact prior tab"
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid"
   pass "herdr presentation cleanup: the exact-tab restore remains the backstop behind the pane-death close"
 }
 
@@ -2020,9 +2035,10 @@ test_projection_close_death_never_sigkills_a_reused_pid() {
   status=$?
   if ! kill -0 "$bgpid" 2>/dev/null; then
     wait "$bgpid" 2>/dev/null || true
+    fm_backend_herdr_test_unregister_fixture_pid "$bgpid"
     fail "the SIGKILL escalation signaled a pid the exact pane no longer owns"
   fi
-  kill -KILL "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid" KILL
   [ "$status" -eq 0 ] || fail "the refused escalation should fall back to the plain close: $out"
   assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw2:p2' "the refused escalation did not fall back to the plain close"
   pass "herdr presentation cleanup: SIGKILL never reaches a pid the exact pane no longer owns"
@@ -2081,7 +2097,7 @@ assert_projection_close_failed_removal_rolls_back_the_reposition() {
     FM_BACKEND_HERDR_DEATH_CLOSE_POLLS=2 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w1:p1' "$ROOT" 2>&1)
   status=$?
-  kill -KILL "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid" KILL
   [ "$status" -ne 0 ] || fail "an unconfirmed removal must report failure: $out"
   [ "$(wc -l < "$dir/mover.log" | tr -d ' ')" = 2 ] \
     || fail "a failed removal did not roll the reposition back exactly once: $(cat "$dir/mover.log")"
@@ -2150,6 +2166,7 @@ test_kill_emptying_non_focused_uses_pane_death() {
   [ ! -e "$lock_held" ] || fail "the generic kill retained its presentation lock"
   assert_not_contains "$(cat "$log")" $'pane\x1fclose' "an emptying non-focused kill used the focus-unsafe explicit close"
   assert_not_contains "$(cat "$log")" $'tab\x1ffocus' "an emptying non-focused kill moved focus"
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid"
   pass "fm_backend_herdr_kill: one session lock covers the focus-safe emptying removal"
 }
 
@@ -2181,7 +2198,7 @@ test_kill_focused_workspace_stays_plain_close() {
   assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw2:p2' "a focused-workspace kill did not use the plain close"
   assert_not_contains "$(cat "$log")" $'pane\x1fprocess-info' "a focused-workspace kill ran the idle-shell proof"
   kill -0 "$bgpid" 2>/dev/null || fail "a focused-workspace kill signaled the pane's shell"
-  kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
+  fm_backend_herdr_test_stop_fixture_pid "$bgpid"
   pass "fm_backend_herdr_kill: killing the focused workspace's tab keeps the legitimate plain close"
 }
 
@@ -4664,3 +4681,4 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+[ ! -s "$FM_BACKEND_HERDR_TEST_FIXTURE_PIDS" ] || fail "reaped fixture pids remained registered"

@@ -776,7 +776,7 @@ test_shutdown_request_preserves_pending_without_new_submit() {
 }
 
 test_daemon_shutdown_reaps_watcher_after_exec_identity_change() {
-  local dir state fakebin capture daemon_pid watcher_pid watcher_pgid i=0
+  local dir state fakebin capture daemon_pid watcher_pid watcher_ppid watcher_pgid i=0
   dir=$(make_supercase shutdown-watcher-exec)
   state="$dir/state"; fakebin="$dir/fakebin"; capture="$dir/pane.txt"
   printf '❯ \n' > "$capture"
@@ -809,9 +809,16 @@ SH
     i=$((i + 1))
   done
   if kill -0 "$daemon_pid" 2>/dev/null; then
+    watcher_ppid=$(ps -p "$watcher_pid" -o ppid= 2>/dev/null | tr -d '[:space:]')
     watcher_pgid=$(ps -p "$watcher_pid" -o pgid= 2>/dev/null | tr -d '[:space:]')
-    case "$watcher_pgid" in ''|*[!0-9]*|0|1) ;; *) kill -TERM -- "-$watcher_pgid" 2>/dev/null || true ;; esac
+    if [ "$watcher_ppid" = "$daemon_pid" ] && [ "$watcher_pgid" = "$watcher_pid" ]; then
+      kill -TERM -- "-$watcher_pgid" 2>/dev/null || true
+    elif [ "$watcher_ppid" = "$daemon_pid" ]; then
+      kill -TERM "$watcher_pid" 2>/dev/null || true
+    fi
     kill -TERM "$daemon_pid" 2>/dev/null || true
+    sleep 0.1
+    kill -0 "$daemon_pid" 2>/dev/null && kill -KILL "$daemon_pid" 2>/dev/null || true
     wait "$daemon_pid" 2>/dev/null || true
     fail "daemon shutdown hung after its watcher exec changed process identity"
   fi
@@ -1910,9 +1917,11 @@ test_herdr_timeout_is_scoped_to_supervisor_transport() {
     pane_is_busy() { printf 'busy %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"; return 1; }
     fm_backend_composer_state() { printf 'composer %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"; printf 'empty'; }
     fm_backend_send_text_submit() { printf 'submit %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"; printf 'empty'; }
+    record_zero_timeout() { printf 'zero %s\n' "${FM_BACKEND_HERDR_CLI_TIMEOUT_SECS:-unset}" >> "$log"; }
     FM_AFK_HERDR_CLI_TIMEOUT_SECS=7 FM_SUPERVISOR_BACKEND=herdr \
       FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
       || fail "scoped-timeout inject_msg failed"
+    FM_AFK_HERDR_CLI_TIMEOUT_SECS=00 fm_daemon_supervisor_transport herdr record_zero_timeout
     task_window_backend() { printf 'herdr'; }
     task_window_harness() { printf 'claude'; }
     window_to_task() { printf 'worker'; }
@@ -1925,10 +1934,11 @@ test_herdr_timeout_is_scoped_to_supervisor_transport() {
       || fail "worker timeout-scope probe returned unreadable"
   ) || fail "Herdr timeout-scope subshell failed"
   [ "$(sed -n '1p' "$log")" = "target 7" ] || fail "target probe missed the supervisor timeout"
-  [ "$(sed -n '2p' "$log")" = "busy 7" ] || fail "busy probe missed the supervisor timeout"
+  [ "$(sed -n '2p' "$log")" = "busy unset" ] || fail "busy probe inherited the supervisor transport timeout"
   [ "$(sed -n '3p' "$log")" = "composer 7" ] || fail "composer probe missed the supervisor timeout"
   [ "$(sed -n '4p' "$log")" = "submit 7" ] || fail "submit probe missed the supervisor timeout"
-  [ "$(sed -n '5p' "$log")" = "worker unset" ] || fail "supervisor timeout leaked into a worker read"
+  [ "$(sed -n '5p' "$log")" = "zero 2" ] || fail "numeric zero timeout did not use the default"
+  [ "$(sed -n '6p' "$log")" = "worker unset" ] || fail "supervisor timeout leaked into a worker read"
   pass "Herdr timeout applies to supervisor transport without changing worker reads"
 }
 
