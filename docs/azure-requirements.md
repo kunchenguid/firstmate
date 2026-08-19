@@ -324,8 +324,9 @@ Acceptance: a measured review completes in 20 to 30 minutes, with the breakdown 
 
 Status: NOT DONE.
 
-The controller holds a single `pending_action`, so every provider mutation serializes.
-That is the direct blocker on this requirement.
+The durable state now holds per-slot `pending_actions` with a load fence and a revision CAS
+(C2's second change), but every provider mutation still serializes behind the fleet lock.
+That lock is the remaining direct blocker on this requirement.
 
 The lock is the other half, and the harder one: `controller_lock` is held across provider calls
 and for an execute's whole guest run, and the code's own note records that fixing only the lock was

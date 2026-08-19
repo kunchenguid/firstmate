@@ -140,7 +140,7 @@ The general worker contract forbids a browser profile rather than allocating one
 The OS disk is disposable, while the account and task disks detach from VM deletion and remain encrypted by the guest contract.
 Provider-account credentials never enter ARM parameters, controller output, logs, tags, images, browser state, or the control home.
 
-A submitted provider action has a canonical SHA-256 idempotency key and remains in `pending_action` until the exact provider result is durably applied.
+A submitted provider action has a canonical SHA-256 idempotency key and remains in the per-slot `pending_actions` map until the exact provider result is durably applied; the map entry is a deep copy that re-derives its own key at every load, and the legacy scalar slot permanently holds a sentinel an old binary refuses rather than misreads.
 After a host restart, the same action and key are replayed.
 The Azure singleton deployment is incremental and receives the same task, home, assignment, and snapshot bindings, so replay converges one generation rather than creating a second assignment.
 A visible VM with another task or assignment binding refuses instead of being adopted.
@@ -236,9 +236,9 @@ bin/fm-worker-lifecycle.sh reconcile \
   --confirm-subscription "$FM_AZURE_SUBSCRIPTION_ID"
 ```
 
-One home lock serializes local state and one pending provider action.
+One home lock serializes local state; unapplied provider actions are durable per slot in `pending_actions`, every load is fenced to the lock hold that commits it, and a save whose on-disk revision moved since its load refuses instead of overwriting another writer's document.
 Each reconcile refreshes Azure before selecting the next action and stops after 64 actions even if a provider never converges.
-A provider error preserves the pending action and records a bounded cleanup refusal.
+A provider error preserves the slot's pending action and records a bounded cleanup refusal.
 The next controller process replays that exact action before considering new work.
 
 `status` is local and bounded by default, while `status --live` refreshes Azure and cost evidence.

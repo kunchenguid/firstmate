@@ -58,6 +58,8 @@ for marker in (
     "REGIONAL_ADMISSION_CEILING_VCPUS = 128", "AUTHOR_PLAN_VCPUS = MAX_WORKERS * VCPUS_PER_WORKER",
     "SPECIALIZED_SHAPE_VCPUS = 40", "SHARED_HEADROOM_VCPUS = 22", "MAX_WORKERS = 16",
     'FM_AZURE_WORKER_WARM_IDLE currently must remain zero', "pending_action",
+    "pending_actions", "LEGACY_PENDING_SENTINEL", "superseded-by-pending-actions",
+    "revision moved from", "FencedState",
     "capacity-reserve", "capacity-reserve-shape", "capacity-release", "merged_specialized_reservations",
     "command_withdraw", "command_surrender", "WORKER AUTHORITY REFUSED",
     "--confirm-discard-unlanded",
@@ -1296,19 +1298,42 @@ assert "task-10@gen-10" not in after_withdraw["queue"], after_withdraw["queue"]
 # fleet's convergence with it.
 request(11)
 pending_state = controller_state()
-pending_state["pending_action"] = {
-    "type": "create", "idempotency_key": "f" * 64, "slot": 9,
-    "bindings": {"task": "task-11", "task_generation": "gen-11"},
-    "request": {"task": "task-11", "task_generation": "gen-11"},
+# The claims must be REAL minted actions: verify_state re-derives the
+# idempotency key from the stored bytes, so a hand-typed "f"*64 claim now
+# refuses at load, and a guard tested through an unloadable file tests
+# nothing. Two entries prove the guard fans out over the whole map, not just
+# its first entry.
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location("controller_mod", controller_path)
+_cmod = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_cmod)
+_menv = {"deployment_generation": "dep-one", "owner": "owner"}
+def _mint(slot, task):
+    worker = {
+        "slot": slot, "sku": "sku", "sku_family": "fam", "cloud_generation": 1,
+        "cloud_instance_id": None, "reservation_usd": 1.0, "resources": {},
+        "bindings": {"task": task, "task_generation": "gen-11" if task == "task-11" else "gen-x"},
+    }
+    return _cmod.make_action(_menv, "create", worker=worker,
+                             item={"task": task, "task_generation": worker["bindings"]["task_generation"]})
+pending_state["pending_actions"] = {
+    "3": _mint(3, "task-unrelated"),
+    "9": _mint(9, "task-11"),
 }
 controller_file = Path(env["FM_HOME"]) / "state/azure-workers/controller.json"
+pre_block = controller_file.read_text()
 controller_file.write_text(json.dumps(pending_state, sort_keys=True, separators=(",", ":")))
 pending_refusal = run("withdraw", "--task", "task-11", "--task-generation", "gen-11",
                       "--confirm-withdraw", "--confirm-subscription",
                       env["FM_AZURE_SUBSCRIPTION_ID"], check=False)
 assert pending_refusal.returncode != 0, "withdraw dropped an entry a pending action names"
-assert "pending" in pending_refusal.stderr, pending_refusal.stderr
+assert "still names" in pending_refusal.stderr, pending_refusal.stderr
+assert "slot 9" in pending_refusal.stderr, (
+    "the guard did not fan out past the first map entry", pending_refusal.stderr)
 assert "task-11@gen-11" in controller_state()["queue"], "the refused entry was dropped anyway"
+controller_file.write_text(pre_block)
+run("withdraw", "--task", "task-11", "--task-generation", "gen-11", "--confirm-withdraw",
+    "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
 
 # `assigning` is persisted before the provider call and, behind a slow create,
 # can hold for hours. It still counts as demand, so the refusal must not tell
@@ -2099,11 +2124,19 @@ moved = {
     }
     for kind in controller.REQUIRED_RESOURCE_KINDS
 }
-action = {"type": "create", "slot": 1, "idempotency_key": "k", "request_digest": "d"}
+# A real minted action: execute_action now durably claims it, and the claim
+# must self-hash at save, so a fake key would make this unit die at the save
+# and never reach the moved-identity apply it exists to test.
+MINT_WORKER = dict(copy.deepcopy(WORKER), sku="sku", sku_family="fam",
+                   cloud_generation=1, cloud_instance_id=None, reservation_usd=1.0)
+action = controller.make_action(
+    {"deployment_generation": "dep-one", "owner": "owner"}, "create",
+    worker=MINT_WORKER, item={"task": "one", "task_generation": "spawn:aaaaaaaaaaaaaaaa"})
 
 # The provider is the only thing stubbed; execute_action itself is the real one.
 controller.provider_call = lambda environment, operation, payload: {
-    "result": {"idempotency_key": "k", "worker": {"slot": 1, "resources": moved}}
+    "result": {"idempotency_key": action["idempotency_key"],
+               "worker": {"slot": 1, "resources": moved}}
 }
 
 with controller.controller_lock(env):
@@ -2117,6 +2150,39 @@ with controller.controller_lock(env):
     except controller.LifecycleError as error:
         raised = error
 assert raised is not None, "execute_action accepted a moved identity"
+assert "identity" in str(raised) or "foreign" in str(raised) or "exact" in str(raised), (
+    "the refusal was not the apply's; the unit degraded into testing something else", str(raised))
+
+# The crash-during-provider window: the durable claim must already be on disk
+# when the provider is called, or a crash there strands a cloud mutation with
+# no replay obligation. The file, not the caller's object, is the proof.
+durable = json.loads((env["state_path"]).read_text())
+assert durable["pending_actions"]["1"]["idempotency_key"] == action["idempotency_key"], (
+    "execute_action called the provider without a durable claim on its slot")
+
+def _boom(environment, operation, payload):
+    raise controller.LifecycleError("provider process modeled as crashing")
+controller.provider_call = _boom
+with controller.controller_lock(env):
+    crash_state = controller.load_state(env)
+    crashed = None
+    try:
+        controller.execute_action(env, crash_state, json.loads(json.dumps(action)))
+    except controller.LifecycleError as error:
+        crashed = error
+assert crashed is not None
+durable = json.loads((env["state_path"]).read_text())
+assert durable["pending_actions"]["1"]["idempotency_key"] == action["idempotency_key"], (
+    "a crash during the provider call left no durable claim to replay")
+# And on the CALLER'S object after the earlier failed apply: a pop that moved
+# ahead of the apply would erase the replay obligation from the very object a
+# later refusal handler saves, silently wedging the slot instead of replaying.
+assert state["pending_actions"]["1"]["idempotency_key"] == action["idempotency_key"], (
+    "a failed apply left the caller's object without its slot's durable claim")
+controller.provider_call = lambda environment, operation, payload: {
+    "result": {"idempotency_key": action["idempotency_key"],
+               "worker": {"slot": 1, "resources": moved}}
+}
 
 # The object the caller still holds, not the file. execute_action does not save
 # after a failed apply, so nothing reaches disk on this path either way; what
@@ -2138,7 +2204,16 @@ with controller.controller_lock(env):
     replayed = controller.load_state(env)
     replayed["workers"]["1"] = copy.deepcopy(WORKER)
     replayed["queue"][WORKER["queue_key"]] = {"status": "queued", "slot": None}
-    replayed["pending_action"] = action
+    # A real minted claim: verify_state re-derives the idempotency key from
+    # the stored bytes at save, so the fake used before this schema would
+    # make the document unsaveable and the unit vacuous.
+    mint_worker = dict(copy.deepcopy(WORKER), sku="sku", sku_family="fam",
+                       cloud_generation=1, cloud_instance_id=None, reservation_usd=1.0)
+    replay_action = controller.make_action(
+        {"deployment_generation": env["deployment_generation"], "owner": env["owner"]},
+        "create", worker=mint_worker,
+        item=replayed["queue"][WORKER["queue_key"]])
+    replayed["pending_actions"]["1"] = replay_action
     controller.save_state(env, replayed)
     raised = None
     try:
@@ -2233,29 +2308,46 @@ item = {
     "repository_binding": "4" * 64, "owner_kind": "primary", "role": "author",
     "eligible": True, "discretionary": True, "status": "queued", "enqueued_at": module.iso_utc(),
 }
+item2 = dict(item, task="restart-task-two", task_generation="restart-gen-two",
+             home_binding="5" * 64, account_binding="6" * 64,
+             worktree_binding="7" * 64, repository_binding="8" * 64)
+actions = []
 with module.controller_lock(env):
     state = module.load_state(env)
-    state["queue"][module.request_key(item["task"], item["task_generation"])] = item
+    for entry in (item, item2):
+        state["queue"][module.request_key(entry["task"], entry["task_generation"])] = entry
     inventory = module.provider_call(env, "inventory")["inventory"]
-    action = module.next_reconcile_action(env, state, inventory)
-    state["pending_action"] = action
-    module.save_state(env, state)
-    # The provider completed, but the controller process is modeled as dying
-    # before it durably applied the response.
-    module.provider_call(env, "mutate", action)
+    revision_before = state["revision"]
+    for _ in range(2):
+        # Each planning pass claims the next free slot; parking the claim on
+        # the map (without applying) is exactly the crash-before-apply image,
+        # and two of them at once is the shape the scalar could never hold.
+        action = module.next_reconcile_action(env, state, inventory)
+        state["pending_actions"][str(action["slot"])] = action
+        module.save_state(env, state)
+        # The provider completed, but the controller process is modeled as
+        # dying before it durably applied the response.
+        module.provider_call(env, "mutate", action)
+        actions.append(action)
+assert sorted(str(a["slot"]) for a in actions) == ["1", "2"]
 
 with module.controller_lock(env):
     restarted = module.load_state(env)
-    assert restarted["pending_action"]["idempotency_key"] == action["idempotency_key"]
+    assert restarted["pending_action"] == module.LEGACY_PENDING_SENTINEL
+    assert restarted["revision"] > revision_before
+    for action in actions:
+        held = restarted["pending_actions"][str(action["slot"])]
+        assert held["idempotency_key"] == action["idempotency_key"]
     assert module.replay_pending(env, restarted) is True
-    assert restarted["pending_action"] is None
-    assert len(restarted["workers"]) == 1
+    assert restarted["pending_actions"] == {}
+    assert len(restarted["workers"]) == 2
 fixture = json.loads(Path(os.environ["FIXTURE_STATE"]).read_text())
-matching = [call for call in fixture["calls"] if call["key"] == action["idempotency_key"]]
-assert len(matching) == 2
-assert len(fixture["seen"]) == 1 and len(fixture["workers"]) == 1
+for action in actions:
+    matching = [call for call in fixture["calls"] if call["key"] == action["idempotency_key"]]
+    assert len(matching) == 2, (action["slot"], len(matching))
+assert len(fixture["seen"]) == 2 and len(fixture["workers"]) == 2
 PY
-  pass "restart replays one exact idempotency key without duplicating assignment"
+  pass "restart replays each per-slot idempotency key exactly once without duplicating assignment"
 }
 
 
@@ -2528,6 +2620,7 @@ def base_state():
         "queue": {"task-1@gen-1": {"status": "assigned", "slot": 1, "task": "task-1", "task_generation": "gen-1"}},
         "workers": {"1": worker_record()},
         "pending_action": None,
+        "pending_actions": {},
         "executions": {},
     }
 
@@ -2563,7 +2656,7 @@ expect_refusal(base_state(), args(task="../escape"), "bounded identifier charact
 
 # A pending provider action blocks the whole lane.
 state = base_state()
-state["pending_action"] = {"type": "execute", "request": {"task": "other", "task_generation": "gen-9"}}
+state["pending_actions"] = {"2": {"type": "execute", "request": {"task": "other", "task_generation": "gen-9"}}}
 expect_refusal(state, args(), "pending provider action")
 
 # A converged entry names its credential recovery instead of a generic refusal.
@@ -2632,6 +2725,238 @@ PY
 }
 
 
+
+legacy_scalar_migration() {
+  local tmp provider fixture home envfile
+  fm_test_tmproot_into tmp fm-worker-legacy-migration
+  provider="$tmp/provider.py"
+  fixture="$tmp/provider-state.json"
+  home="$tmp/home"
+  mkdir -p "$home"
+  write_fixture_provider "$provider"
+  envfile="$tmp/env"
+  cat >"$envfile" <<EOF
+FM_HOME=$home
+FM_AZURE_SUBSCRIPTION_ID=$SUB
+FM_AZURE_DEPLOYMENT_GENERATION=dep-one
+FM_AZURE_OWNER_TAG=owner
+FM_AZURE_NAMING_PREFIX=fmtest
+FM_WORKER_PROVIDER_COMMAND=python3 $provider
+FIXTURE_STATE=$fixture
+FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS=1
+EOF
+
+  python3 - "$CONTROLLER" "$WRAPPER" "$envfile" <<'PY' || fail "the legacy scalar pending action did not migrate onto the map"
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+controller_path, wrapper, envfile = sys.argv[1:]
+env = os.environ.copy()
+for line in Path(envfile).read_text().splitlines():
+    key, value = line.split("=", 1)
+    env[key] = value
+
+spec = importlib.util.spec_from_file_location("controller", controller_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+for key, value in ((k, v) for k, v in env.items() if k.startswith("FM")):
+    os.environ[key] = value
+menv = module.environment()
+
+# A pre-map controller.json: populated scalar, no pending_actions, no revision.
+# The action must be REAL: after migration verify_state re-derives its key.
+worker = {
+    "slot": 1, "sku": "sku", "sku_family": "fam", "cloud_generation": 1,
+    "cloud_instance_id": None, "reservation_usd": 1.0, "resources": {},
+    "bindings": {"task": "legacy-task", "task_generation": "legacy-gen"},
+}
+action = module.make_action(
+    {"deployment_generation": menv["deployment_generation"], "owner": menv["owner"]},
+    "create", worker=worker, item={"task": "legacy-task", "task_generation": "legacy-gen"})
+legacy = module.empty_state(menv)
+legacy["pending_action"] = action
+del legacy["pending_actions"]
+del legacy["revision"]
+path = Path(env["FM_HOME"]) / "state/azure-workers"
+path.mkdir(parents=True)
+(path / "controller.json").write_text(json.dumps(legacy, sort_keys=True, separators=(",", ":")))
+
+# A read-only command loads the legacy file.
+result = subprocess.run([wrapper, "status", "--json"], env=env, text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+assert result.returncode == 0, result.stderr
+status = json.loads(result.stdout)
+assert status["pending_mutations"] == [{"slot": 1, "type": "create"}], status["pending_mutations"]
+
+# A saving command makes the migration durable.
+result = subprocess.run([
+    wrapper, "request", "--task", "fresh-task", "--task-generation", "fresh-gen",
+    "--home-binding", "1" * 64, "--account-binding", "2" * 64,
+    "--worktree-binding", "3" * 64, "--repository-binding", "4" * 64,
+    "--repository-generation", "repo-1", "--owner-kind", "primary", "--eligible",
+], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+assert result.returncode == 0, result.stderr
+durable = json.loads((path / "controller.json").read_text())
+assert durable["pending_actions"]["1"]["idempotency_key"] == action["idempotency_key"]
+assert durable["pending_action"] == "superseded-by-pending-actions"
+assert durable["revision"] >= 1
+PY
+  pass "a legacy scalar pending action migrates onto the map and poisons the scalar"
+}
+
+state_fence_and_revision_cas() {
+  local tmp home
+  fm_test_tmproot_into tmp fm-worker-state-fence
+  home="$tmp/home"
+  mkdir -p "$home"
+  FM_HOME="$home" \
+  FM_AZURE_SUBSCRIPTION_ID=$SUB \
+  FM_AZURE_DEPLOYMENT_GENERATION=dep-one \
+  FM_AZURE_OWNER_TAG=owner \
+  FM_AZURE_NAMING_PREFIX=fmtest \
+  python3 - "$CONTROLLER" <<'PY' || fail "the load fence, revision CAS, or re-entrancy refusal is not enforced"
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("controller", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+env = module.environment()
+
+# Re-entrant acquisition refuses instead of deadlocking.
+with module.controller_lock(env):
+    try:
+        with module.controller_lock(env):
+            pass
+    except module.LifecycleError as exc:
+        assert "already held" in str(exc), exc
+    else:
+        raise AssertionError("re-entrant controller lock acquisition was allowed")
+
+# A state loaded outside the committing lock hold refuses to save.
+with module.controller_lock(env):
+    stale = module.load_state(env)
+    module.save_state(env, stale)
+with module.controller_lock(env):
+    try:
+        module.save_state(env, stale)
+    except module.LifecycleError as exc:
+        assert "outside the committing lock hold" in str(exc), exc
+    else:
+        raise AssertionError("a state loaded under an earlier hold was committed")
+
+# A plain dict never saves, whatever it claims to be.
+with module.controller_lock(env):
+    fresh = module.load_state(env)
+    try:
+        module.save_state(env, dict(fresh))
+    except module.LifecycleError as exc:
+        assert "not loaded through load_state" in str(exc), exc
+    else:
+        raise AssertionError("an unfenced document was committed")
+
+# A tampered claim refuses at load: the stored bytes no longer re-derive
+# the stored idempotency key, so a hand-edited, truncated, or fabricated
+# claim cannot ride the map into a replay.
+with module.controller_lock(env):
+    doc = module.load_state(env)
+    worker = {
+        "slot": 1, "sku": "sku", "sku_family": "fam", "cloud_generation": 1,
+        "cloud_instance_id": None, "reservation_usd": 1.0, "resources": {},
+        "bindings": {"task": "t", "task_generation": "g"},
+    }
+    claim = module.make_action(
+        {"deployment_generation": env["deployment_generation"], "owner": env["owner"]},
+        "deallocate", worker=worker)
+    doc["pending_actions"]["1"] = claim
+    module.save_state(env, doc)
+raw = json.loads(Path(env["state_path"]).read_text())
+raw["pending_actions"]["1"]["cloud_generation"] = 7
+Path(env["state_path"]).write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+with module.controller_lock(env):
+    try:
+        module.load_state(env)
+    except module.LifecycleError as exc:
+        assert "pending provider action is malformed" in str(exc), exc
+    else:
+        raise AssertionError("a tampered claim loaded cleanly")
+# Restore an honest document for the CAS case below.
+raw["pending_actions"] = {}
+Path(env["state_path"]).write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+
+# A corrupt legacy scalar refuses at load instead of being paved over.
+raw = json.loads(Path(env["state_path"]).read_text())
+raw["pending_action"] = "corrupted-garbage"
+Path(env["state_path"]).write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+with module.controller_lock(env):
+    try:
+        module.load_state(env)
+    except module.LifecycleError as exc:
+        assert "pending provider action is malformed" in str(exc), exc
+    else:
+        raise AssertionError("a corrupt legacy scalar was silently paved over")
+
+# A legacy scalar that DISAGREES with the map entry for its slot refuses.
+raw["pending_action"] = claim
+disagreeing = json.loads(json.dumps(claim))
+disagreeing["cloud_generation"] = 2
+disagreeing["idempotency_key"] = module.action_id(disagreeing)
+raw["pending_actions"] = {"1": disagreeing}
+Path(env["state_path"]).write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+with module.controller_lock(env):
+    try:
+        module.load_state(env)
+    except module.LifecycleError as exc:
+        assert "disagree" in str(exc), exc
+    else:
+        raise AssertionError("disagreeing legacy and per-slot claims loaded cleanly")
+
+# A claim naming a slot outside 1..MAX_WORKERS refuses, even when it
+# self-hashes: the planner can never produce one, so it is a hand edit.
+out_of_range = {
+    "slot": 17, "sku": "sku", "sku_family": "fam", "cloud_generation": 1,
+    "cloud_instance_id": None, "reservation_usd": 1.0, "resources": {},
+    "bindings": {"task": "t", "task_generation": "g"},
+}
+range_claim = module.make_action(
+    {"deployment_generation": env["deployment_generation"], "owner": env["owner"]},
+    "deallocate", worker=out_of_range)
+raw["pending_action"] = None
+raw["pending_actions"] = {"17": range_claim}
+Path(env["state_path"]).write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+with module.controller_lock(env):
+    try:
+        module.load_state(env)
+    except module.LifecycleError as exc:
+        assert "pending provider action is malformed" in str(exc), exc
+    else:
+        raise AssertionError("a claim outside the slot range loaded cleanly")
+raw["pending_actions"] = {}
+Path(env["state_path"]).write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+
+# The revision CAS: a concurrent writer moved the file after this load.
+with module.controller_lock(env):
+    mine = module.load_state(env)
+    on_disk = json.loads(Path(env["state_path"]).read_text())
+    on_disk["revision"] = int(on_disk.get("revision", 0)) + 1
+    Path(env["state_path"]).write_text(json.dumps(on_disk, sort_keys=True, separators=(",", ":")))
+    try:
+        module.save_state(env, mine)
+    except module.LifecycleError as exc:
+        assert "revision moved from" in str(exc), exc
+    else:
+        raise AssertionError("a stale save overwrote a moved revision")
+PY
+  pass "the load fence, revision CAS, and re-entrancy refusal each fail loudly"
+}
+
+
 static_contract
 classification_and_admission_matrix
 azure_provider_refusal_matrix
@@ -2646,5 +2971,7 @@ partial_apply_never_persists
 surrender_lane
 surrender_refuses_when_ordinary_authority_passes
 surrender_refusal_matrix
+legacy_scalar_migration
+state_fence_and_revision_cas
 
 echo "# fm-worker-lifecycle.test.sh: all assertions passed"

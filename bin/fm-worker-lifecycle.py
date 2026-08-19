@@ -33,6 +33,12 @@ import uuid
 ROOT = Path(__file__).resolve().parent.parent
 AZURE_PROVIDER = ROOT / "bin" / "fm-azure-worker-provider.py"
 STATE_SCHEMA = "fm.worker-lifecycle/v1"
+# The scalar pending_action slot this schema carried is superseded by the
+# per-slot pending_actions map. The sentinel is deliberately a string an OLD
+# binary's verify_state refuses ("pending provider action is malformed"), so a
+# rollback cannot read None, plan fresh work, and blind-overwrite a live claim:
+# it refuses loudly instead, cured by rolling forward.
+LEGACY_PENDING_SENTINEL = "superseded-by-pending-actions"
 REQUEST_SCHEMA = "fm.worker-request/v1"
 EXECUTION_SCHEMA = "fm.worker-execution/v1"
 EXECUTION_RESULT_SCHEMA = "fm.worker-execution-result/v1"
@@ -90,6 +96,12 @@ PROVIDER_STEER_TIMEOUT_SECONDS = 1800
 # that actually ran.
 PROVIDER_GUEST_RUN_SLACK_SECONDS = 8400
 MAX_PROVIDER_OUTPUT_BYTES = 2 * 1024 * 1024
+# Every provider mutation type the claim contract covers. admission-refused is
+# a bare planning verdict with no idempotency key, never claimed, never sent.
+ACTION_TYPES = frozenset({
+    "create", "resume", "deallocate", "delete-compute", "reset", "execute", "steer",
+})
+
 REQUIRED_RESOURCE_KINDS = (
     "vm", "nic", "os-disk", "task-disk", "account-disk", "identity",
     "role-assignment", "state-container", "monitor-extension", "bootstrap-command",
@@ -295,8 +307,25 @@ def environment():
     }
 
 
+_LOCK_STATE = {"held": False, "epoch": 0}
+
+
+class FencedState(dict):
+    """The durable document, stamped with the lock epoch and disk revision it
+    was loaded under. A dict subclass serializes through json.dump unchanged;
+    the stamps live on attributes, never in the document."""
+
+    epoch = 0
+    revision = 0
+
+
 @contextlib.contextmanager
 def controller_lock(env):
+    # Re-entrant acquisition would deadlock on a second file description of the
+    # same lock file; refusing it loudly also structurally prevents replaying
+    # pending work from inside a hold.
+    if _LOCK_STATE["held"]:
+        raise LifecycleError("controller lock is already held by this process")
     env["state_dir"].mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(env["state_dir"], 0o700)
     with open(env["lock_path"], "a+", encoding="utf-8") as handle:
@@ -305,10 +334,16 @@ def controller_lock(env):
         # crewmates serialize here. Callers WAIT rather than fail; making the
         # loser error out was tried and reverted, because status, reconcile and
         # release would then start failing under ordinary contention. Real
-        # concurrency needs per-action pending state so the provider call can
-        # run outside this lock, which is its own change.
+        # concurrency needs the provider call to run outside this lock, which
+        # is the next change in this series; the per-slot claim map, the load
+        # fence and the revision CAS below are its durable groundwork.
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        yield
+        _LOCK_STATE["held"] = True
+        _LOCK_STATE["epoch"] += 1
+        try:
+            yield
+        finally:
+            _LOCK_STATE["held"] = False
 
 
 def empty_state(env):
@@ -326,7 +361,9 @@ def empty_state(env):
         "workers": {},
         "capacity_reservations": {},
         "completed_worker_seconds": 0.0,
-        "pending_action": None,
+        "pending_action": LEGACY_PENDING_SENTINEL,
+        "pending_actions": {},
+        "revision": 0,
         "cleanup_refusals": [],
         "last_metrics": None,
         "executions": {},
@@ -379,8 +416,36 @@ def verify_state(env, state):
         require_binding("capacity reservation fence", reservation.get("fence_binding"))
         if "shape_id" in reservation:
             require_id("capacity shape id", reservation.get("shape_id"))
-    if state.get("pending_action") is not None and not isinstance(state["pending_action"], dict):
+    legacy = state.get("pending_action")
+    if legacy is not None and legacy != LEGACY_PENDING_SENTINEL:
+        # A dict here means load_state's migration did not run; anything else
+        # is corruption. Both refuse rather than guess.
         raise LifecycleError("pending provider action is malformed")
+    revision = state.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise LifecycleError("lifecycle state revision is malformed")
+    pending = state.get("pending_actions")
+    if not isinstance(pending, dict) or len(pending) > MAX_WORKERS:
+        raise LifecycleError("pending provider action inventory is malformed")
+    for slot_key, action in pending.items():
+        # Bounded by MAX_WORKERS, never env max_workers: lowering
+        # FM_AZURE_WORKER_MAX must not make an existing state file unloadable.
+        # slot_key membership in workers is deliberately NOT required here:
+        # enforcing it converts a recoverable wedge into a file that refuses
+        # even `status`, and apply_action_result already raises on a missing
+        # worker in every branch.
+        if (
+            not isinstance(action, dict)
+            or not slot_key.isdigit()
+            or not 1 <= int(slot_key) <= MAX_WORKERS
+            or str(action.get("slot")) != slot_key
+            or action.get("type") not in ACTION_TYPES
+            or action.get("deployment_generation") != expected["deployment_generation"]
+            or action.get("owner") != expected["owner"]
+            or action_id(action) != action.get("idempotency_key")
+        ):
+            raise LifecycleError("pending provider action is malformed")
+        require_binding("pending action idempotency key", action.get("idempotency_key"))
 
 
 def load_state(env):
@@ -392,14 +457,60 @@ def load_state(env):
         state = empty_state(env)
     state.setdefault("capacity_reservations", {})
     state.setdefault("executions", {})
+    state.setdefault("pending_actions", {})
+    state.setdefault("revision", 0)
+    legacy = state.get("pending_action")
+    if legacy is not None and legacy != LEGACY_PENDING_SENTINEL and not isinstance(legacy, dict):
+        # The old binary refused this shape loudly; paving it over with the
+        # sentinel would silently destroy whatever replay obligation the
+        # corrupted bytes used to be. Refuse rather than guess.
+        raise LifecycleError("pending provider action is malformed")
+    if isinstance(legacy, dict):
+        # apply_action_result has always addressed the worker by
+        # action["slot"], so the action already carries its own key; nothing
+        # is invented. Idempotent on every load; durable at the next save.
+        slot = str(legacy.get("slot", ""))
+        if not slot.isdigit():
+            raise LifecycleError("legacy pending provider action carries no exact slot")
+        held = state["pending_actions"].get(slot)
+        if held is not None and held != legacy:
+            raise LifecycleError(
+                "legacy and per-slot pending actions disagree for slot {}".format(slot))
+        state["pending_actions"][slot] = legacy
+    state["pending_action"] = LEGACY_PENDING_SENTINEL
     verify_state(env, state)
-    return state
+    fenced = FencedState(state)
+    fenced.epoch = _LOCK_STATE["epoch"]
+    fenced.revision = int(state["revision"])
+    return fenced
 
 
 def save_state(env, state):
+    if not isinstance(state, FencedState):
+        raise LifecycleError("lifecycle state was not loaded through load_state")
+    if not _LOCK_STATE["held"] or state.epoch != _LOCK_STATE["epoch"]:
+        # The load fence: this object was loaded outside the lock hold that is
+        # trying to commit it, so anything read from it may already be stale.
+        raise LifecycleError("lifecycle state was loaded outside the committing lock hold")
+    on_disk = 0
+    try:
+        current = read_json(env["state_path"], "lifecycle state")
+        on_disk = int(current.get("revision", 0))
+    except LifecycleError as exc:
+        if "is absent" not in str(exc):
+            raise
+    if on_disk != state.revision:
+        # Last-writer-wins over this document would not corrupt the file; it
+        # would silently forget another writer's cloud resource identities and
+        # re-admit a VM that exists and is billing. Refuse, naming both.
+        raise LifecycleError(
+            "lifecycle state revision moved from {} to {} since this load; reload and retry".format(
+                state.revision, on_disk))
+    state["revision"] = on_disk + 1
     state["updated_at"] = iso_utc()
     verify_state(env, state)
     save_json_atomic(env["state_path"], state)
+    state.revision = state["revision"]
 
 
 def request_key(task, generation):
@@ -1107,9 +1218,12 @@ APPLY_SCOPE = ("workers", "queue", "executions", "completed_worker_seconds")
 # BOTH sides does not, because the apply writes only into the copy.
 #
 # It excludes the whole subtree rather than the aliased part, so an apply that
-# rebound `state["pending_action"]` outright would go unseen. That is safe only
-# because both call sites set it themselves immediately afterwards.
-CALLER_OWNED_KEYS = ("pending_action",)
+# rebound the pending claim state outright would go unseen. That is safe only
+# because both call sites set it themselves immediately afterwards. The stored
+# claims in pending_actions are deep copies and share nothing with the live
+# document, but the exclusion also covers the caller popping its own slot's
+# claim between apply and commit.
+CALLER_OWNED_KEYS = ("pending_action", "pending_actions", "revision")
 
 
 def assert_scoped(before, after, *, slot, queue_key, request_digest):
@@ -1183,14 +1297,22 @@ def apply_result_transactionally(env, state, action, result):
 
 
 def execute_action(env, state, action):
-    state["pending_action"] = action
+    slot = str(action.get("slot", ""))
+    if not slot.isdigit():
+        raise LifecycleError("provider mutation carries no exact slot")
+    # deepcopy is load-bearing, not hygiene: make_action aliases live state
+    # into the action (action["request"] IS the queue entry; bindings and
+    # resources are the worker's own dicts), and apply_action_result mutates
+    # some of those in place. A stored claim that can change after it was
+    # hashed turns verify_state's self-hash check into a random wedge.
+    state["pending_actions"][slot] = copy.deepcopy(action)
     save_state(env, state)
     response = provider_call(env, "mutate", action)
     result = response.get("result")
     if not isinstance(result, dict) or result.get("idempotency_key") != action["idempotency_key"]:
         raise LifecycleError("provider mutation result is not bound to the exact idempotency key")
     apply_result_transactionally(env, state, action, result)
-    state["pending_action"] = None
+    state["pending_actions"].pop(slot, None)
     save_state(env, state)
 
 
@@ -1297,17 +1419,18 @@ def apply_action_result(env, state, action, result):
 
 
 def replay_pending(env, state):
-    action = state.get("pending_action")
-    if action is None:
-        return False
-    response = provider_call(env, "mutate", action)
-    result = response.get("result")
-    if not isinstance(result, dict) or result.get("idempotency_key") != action.get("idempotency_key"):
-        raise LifecycleError("replayed provider mutation is not idempotently bound")
-    apply_result_transactionally(env, state, action, result)
-    state["pending_action"] = None
-    save_state(env, state)
-    return True
+    drained = False
+    for slot in sorted(state.get("pending_actions") or {}, key=int):
+        action = state["pending_actions"][slot]
+        response = provider_call(env, "mutate", action)
+        result = response.get("result")
+        if not isinstance(result, dict) or result.get("idempotency_key") != action.get("idempotency_key"):
+            raise LifecycleError("replayed provider mutation is not idempotently bound")
+        apply_result_transactionally(env, state, action, result)
+        state["pending_actions"].pop(slot, None)
+        save_state(env, state)
+        drained = True
+    return drained
 
 
 def refresh_classifications(state, inventory, now=None):
@@ -1609,6 +1732,11 @@ def status_projection(env, state, inventory=None):
         "warm_idle_target": env["warm_idle"],
         "retained_disks": retained_disks,
         "cleanup_refusals": state["cleanup_refusals"][-10:],
+        "pending_mutations": [
+            {"slot": int(slot), "type": action.get("type")}
+            for slot, action in sorted(
+                (state.get("pending_actions") or {}).items(), key=lambda p: int(p[0]))
+        ],
     }
 
 
@@ -1640,6 +1768,9 @@ def print_status(status, json_output):
     print("specialized-queue: queued={} reserved={}".format(
         status["specialized_queued_reservations"], status["specialized_reserved_reservations"],
     ))
+    if status["pending_mutations"]:
+        print("pending-mutations: {}".format(json.dumps(
+            status["pending_mutations"], sort_keys=True, separators=(",", ":"))))
     print("idle: cooldown={}s warm={} retained-disks={} cleanup-refusals={}".format(
         status["idle_cooldown_seconds"], status["warm_idle_target"],
         status["retained_disks"], len(status["cleanup_refusals"]),
@@ -2442,17 +2573,19 @@ def command_withdraw(env, args):
         # and raises, and because the pending action never clears, that repeats
         # forever. One stale entry would take the whole fleet's convergence
         # with it.
-        pending = state.get("pending_action") or {}
-        pending_request = pending.get("request") or {}
-        pending_bindings = pending.get("bindings") or {}
-        for candidate in (pending_request, pending_bindings):
-            if candidate.get("task") is None:
-                continue
-            if request_key(candidate["task"], candidate["task_generation"]) == key:
-                raise LifecycleError(
-                    "withdraw refuses a task generation a pending {} action still names; "
-                    "reconcile it first".format(pending.get("type", "provider"))
-                )
+        for slot_key in sorted(state.get("pending_actions") or {}, key=int):
+            pending = state["pending_actions"][slot_key]
+            pending_request = pending.get("request") or {}
+            pending_bindings = pending.get("bindings") or {}
+            for candidate in (pending_request, pending_bindings):
+                if candidate.get("task") is None:
+                    continue
+                if request_key(candidate["task"], candidate["task_generation"]) == key:
+                    raise LifecycleError(
+                        "withdraw refuses a task generation a pending {} action on slot {} "
+                        "still names; reconcile it first".format(
+                            pending.get("type", "provider"), slot_key)
+                    )
         del state["queue"][key]
         save_state(env, state)
     # A machine-readable receipt naming the exact entry that was deleted. The
@@ -2531,7 +2664,7 @@ def command_surrender(env, args):
         raise LifecycleError("--confirm-subscription must exactly match FM_AZURE_SUBSCRIPTION_ID")
     with controller_lock(env):
         state = load_state(env)
-        if state.get("pending_action") is not None:
+        if state.get("pending_actions"):
             raise LifecycleError("a pending provider action exists; reconcile first")
         key = request_key(args.task, args.task_generation)
         item = state["queue"].get(key)
@@ -2657,7 +2790,7 @@ def command_resume(env, args):
     require_binding("repository binding", args.repository_binding)
     with controller_lock(env):
         state = load_state(env)
-        if state.get("pending_action") is not None:
+        if state.get("pending_actions"):
             replay_pending(env, state)
         key = request_key(require_id("task", args.task), require_id("task generation", args.task_generation))
         item = state["queue"].get(key)
