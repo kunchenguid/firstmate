@@ -538,8 +538,14 @@ test_concurrent_resolution_closes_escalation_once() {
     "$corr" "$corr" > "$state/hibit.status"
   printf 'done [corr=%s]: concurrent delayed reply\n' "$corr" >> "$state/hibit.status"
 
+  # Use independent shells, matching the real watcher/report caller topology.
+  # macOS Bash 3.2 has no BASHPID, so backgrounded functions from this shell
+  # all inherit the same $$ and cannot model distinct lock owners faithfully.
   for _ in 1 2 3 4 5 6 7 8; do
-    fm_pending_reply_try_resolve "$state" "$corr" &
+    "$BASH" -u -c '
+      . "$1/bin/fm-pending-reply-lib.sh"
+      fm_pending_reply_try_resolve "$2" "$3"
+    ' _ "$ROOT" "$state" "$corr" &
   done
   wait
 
@@ -565,8 +571,14 @@ test_concurrent_escalation_yields_to_late_reply() {
   printf 'done [corr=%s]: late concurrent reply\n' "$corr" > "$state/hibit.status"
 
   for _ in 1 2 3 4 5 6 7 8; do
-    fm_pending_reply_maybe_escalate "$state" "$corr" &
-    fm_pending_reply_try_resolve "$state" "$corr" &
+    "$BASH" -u -c '
+      . "$1/bin/fm-pending-reply-lib.sh"
+      fm_pending_reply_maybe_escalate "$2" "$3"
+    ' _ "$ROOT" "$state" "$corr" &
+    "$BASH" -u -c '
+      . "$1/bin/fm-pending-reply-lib.sh"
+      fm_pending_reply_try_resolve "$2" "$3"
+    ' _ "$ROOT" "$state" "$corr" &
   done
   wait
 

@@ -217,7 +217,9 @@ run_watch() {  # <lab> <timeout-target> [env assignments...]
   : > "$lab/timeout.log"
   : > "$lab/watch.out"
   : > "$lab/watch.err"
-  FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed 5 \
+  # Inner timeout shims return immediately; this outer bound only catches a
+  # watcher-cycle hang. Leave enough room for shell/process startup under load.
+  FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed 15 \
     env FM_TIMEOUT_MECHANISM_OVERRIDE= FM_HOME="$lab/home" \
       FM_STATE_OVERRIDE="$lab/home/state" FM_ROOT_OVERRIDE="$lab" \
       FM_POLL=0.1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \

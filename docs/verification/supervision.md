@@ -446,6 +446,12 @@ Observed guarantee: after ordinary `session_shutdown` for `/new`, `/resume`, and
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
 
+Portable coverage for outside-in secondmate wake-loop detection and hard watcher-cycle dependency bounds was added on 2026-08-19.
+`tests/fm-secondmate-wake-check.test.sh` drives real home queues and distinguishes an old unacknowledged wake from a healthy idle or recent queue while pinning malformed-row handling, durable report deduplication, cadence, remote-route exclusion, and bounded settings.
+`tests/fm-secondmate-liveness.test.sh` covers the session-start case where the agent process is alive but its wake loop is stalled, including the requirement to report without respawning over that live agent.
+`tests/fm-watch-bounded-calls.test.sh` forces watcher-cycle dependencies past their fixed deadlines and verifies conservative state retention plus continuation to the next actionable stage.
+[`docs/configuration.md`](../configuration.md) owns the operating contract, and the affected script headers own exact deadlines and failure mechanics.
+
 Deterministic entry points:
 
 ```sh
@@ -454,6 +460,9 @@ tests/fm-pi-primary-types.test.sh
 tests/fm-watcher-lock.test.sh
 tests/fm-watch-arm.test.sh
 tests/fm-wake-queue.test.sh
+tests/fm-secondmate-wake-check.test.sh
+tests/fm-secondmate-liveness.test.sh
+tests/fm-watch-bounded-calls.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
