@@ -95,7 +95,7 @@ wait_poll_cycle() {  # <state> <pid> [limit-ticks]
     sleep 0.1
     i=$((i + 1))
   done
-  return 0
+  return 1
 }
 
 # Every wait_for_exit budget in this file is 100 ticks (10s), not because any
