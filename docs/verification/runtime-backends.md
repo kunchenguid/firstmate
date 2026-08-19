@@ -455,6 +455,30 @@ Part C is the case the suite could not reach before: a doomed pane whose shell h
 On 0.7.5 that fallback exposed a bounded four-sample wrong-focus window and restored the anchor exactly; on 0.8.0 the same fallback exposed none, which is why default-on projection is floored at 0.8.0 rather than mitigated further below it.
 The suite also cross-checks its own Part A measurement against the floor classifier on whatever release it runs, so a drifted protocol-to-release mapping fails there rather than silently gating on the wrong thing.
 
+### Created-workspace retirement
+
+Closing a task pane is not enough to remove the workspace Firstmate created for it: Herdr removes a workspace only when its last tab goes away, so any extra tab Firstmate does not own keeps the whole workspace alive after cleanup.
+The created-workspace retirement regression ran on 2026-08-19 against Herdr 0.8.0 protocol 19 on Linux x86_64:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-herdr-workspace-retire-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - leak reproduced: closing the task pane left the whole workspace behind because a foreign pane remained
+ok - cleanup: the leaked workspace was closed with exact focus preserved in every sample
+ok - lone task pane: the workspace goes with it and cleanup stays a silent no-op
+ok - adopted workspace: cleanup refuses before any Herdr call and leaves it exactly as it was
+evidence: herdr=0.8.0 protocol=19 leak_live=1 default-session-tripwire=armed
+```
+
+`leak_live=1` records that this release genuinely reproduced the leak before the retirement path ran, so the removal assertion is not vacuous.
+The same run proves the three boundaries the retirement depends on: the workspace close never issued a `pane close` or `tab close` against the tab Firstmate does not own, a workspace that already emptied with its own task pane took no second close and printed nothing, and a workspace without the created proof was refused before any Herdr call was made at all.
+Focus was sampled continuously across the close and matched the captain's anchor workspace and tab in every sample, with the exact prior-tab restore still armed behind it for a release whose explicit close moves focus off a non-focused workspace.
+
 ### Presentation version floor
 
 Default-on presentation projection is floored at Herdr 0.8.0.

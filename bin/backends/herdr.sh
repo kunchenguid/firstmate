@@ -1846,6 +1846,138 @@ fm_backend_herdr_workspace_presence_state() {  # <session> <workspace_id>
   esac
 }
 
+# fm_backend_herdr_workspace_retire_created: remove one workspace FIRSTMATE
+# CREATED, once no firstmate task pane remains in it.
+#
+# Cleanup used to close only its own task pane and rely on Herdr removing a
+# workspace whose last tab went with it. Any workspace that also held a pane
+# firstmate does not own - a plugin sidebar, an extra tab the captain opened -
+# therefore survived every teardown, and projected one-task workspaces
+# accumulated without bound.
+# The removal is the WORKSPACE close. A leftover pane firstmate does not own is
+# never closed to force Herdr's last-tab side effect.
+#
+# <created-proof> must be the literal "created": an ADOPTED workspace is the
+# captain's and is never prunable (see "Default-tab prune safety" in
+# docs/herdr-backend.md). The caller owns that durable proof and states it here
+# so no call site can reach the close without one.
+# <state-dir> is this home's own state directory and <exclude-task-id> is the
+# retiring task, whose own records are still on disk at cleanup time.
+#
+# Every gate below refuses rather than closing:
+# - an already-absent workspace returns success, so a rerun is a plain no-op;
+# - an unreadable workspace, no unambiguous focus snapshot, the target being
+#   the focused workspace itself, or a remaining tab that is the captain's
+#   active tab;
+# - a remaining pane whose agent state is live or unknown, so a registered
+#   agent is never closed out from under itself and an unreadable response
+#   never licenses a close;
+# - any other still-recorded task in this home that names this session and
+#   workspace, or whose recorded pane is still present here.
+# That last scan, not a pane label, is the "no firstmate task pane remains"
+# test: a renamed plugin, a second plugin, and a hand-added pane all read the
+# same way, and a label-matched fix would break again quietly.
+# Focus safety across releases: an explicit close that empties a non-focused
+# workspace moves focus on Herdr 0.7.5 (the workspace-removal focus rules above
+# own the exact behavior), so the exact prior tab is captured before the close
+# and restored after it, the same backstop every other presentation mutation
+# uses. On 0.8.0 and newer the restore is a verified no-op. Gating the retirement
+# on that floor instead would leak the workspaces nothing else removes, so this
+# is the same authorized containment as session-start cleanup rather than a
+# second version gate.
+# Returns 0 only when the workspace is confirmed gone or was already absent.
+fm_backend_herdr_workspace_retire_created() {  # <session> <workspace-id> <created-proof> <state-dir> <exclude-task-id>
+  local session=$1 workspace=$2 proof=$3 state_dir=$4 exclude=$5
+  local before presence tabs panes pane_ids pane state meta base recorded
+  [ -n "$session" ] && [ -n "$workspace" ] && [ -n "$state_dir" ] && [ -n "$exclude" ] || return 2
+  [ "$proof" = created ] || return 2
+  presence=$(fm_backend_herdr_workspace_presence_state "$session" "$workspace")
+  case "$presence" in
+    dead) return 0 ;;
+    present) ;;
+    *)
+      echo "warning: herdr workspace cleanup could not read the exact workspace; leaving it in place" >&2
+      return 1
+      ;;
+  esac
+  before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
+    echo "warning: herdr workspace cleanup could not capture exact active workspace and tab; leaving the workspace in place" >&2
+    return 1
+  }
+  if [ "${before%%$'\t'*}" = "$workspace" ]; then
+    echo "warning: herdr workspace cleanup target is the captain's focused workspace; leaving it in place" >&2
+    return 1
+  fi
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || {
+    echo "warning: herdr workspace cleanup could not list the workspace's tabs; leaving it in place" >&2
+    return 1
+  }
+  if ! printf '%s' "$tabs" | jq -e --arg tab "${before#*$'\t'}" '
+    (.result.tabs | type) == "array"
+    and ([.result.tabs[] | select(.tab_id == $tab)] | length) == 0
+  ' >/dev/null 2>&1; then
+    echo "warning: herdr workspace cleanup found the captain's active tab or an ambiguous tab list; leaving the workspace in place" >&2
+    return 1
+  fi
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || {
+    echo "warning: herdr workspace cleanup could not list the workspace's panes; leaving it in place" >&2
+    return 1
+  }
+  if ! printf '%s' "$panes" | jq -e '
+    (.result.panes | type) == "array"
+    and ([.result.panes[] | select((.pane_id | type) == "string" and (.pane_id | length) > 0)] | length)
+      == (.result.panes | length)
+  ' >/dev/null 2>&1; then
+    echo "warning: herdr workspace cleanup received an ambiguous pane list; leaving the workspace in place" >&2
+    return 1
+  fi
+  pane_ids=$(printf '%s' "$panes" | jq -r '.result.panes[].pane_id' 2>/dev/null) || pane_ids=
+  while IFS= read -r pane; do
+    [ -n "$pane" ] || continue
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+    case "$state" in
+      dead|no-agent) : ;;
+      *)
+        echo "warning: herdr workspace cleanup found a $state agent still registered in the workspace; leaving it in place" >&2
+        return 1
+        ;;
+    esac
+  done <<EOF
+$pane_ids
+EOF
+  for meta in "$state_dir"/*.meta; do
+    [ -f "$meta" ] || continue
+    base=${meta##*/}
+    [ "${base%.meta}" != "$exclude" ] || continue
+    recorded=$(sed -n 's/^herdr_session=//p' "$meta" 2>/dev/null | head -n 1)
+    [ "$recorded" = "$session" ] || continue
+    recorded=$(sed -n 's/^herdr_workspace_id=//p' "$meta" 2>/dev/null | head -n 1)
+    if [ "$recorded" = "$workspace" ]; then
+      echo "warning: herdr workspace cleanup found another task still recorded in the workspace; leaving it in place" >&2
+      return 1
+    fi
+    recorded=$(sed -n 's/^herdr_pane_id=//p' "$meta" 2>/dev/null | head -n 1)
+    [ -n "$recorded" ] || continue
+    case $'\n'"$pane_ids"$'\n' in
+      *$'\n'"$recorded"$'\n'*)
+        echo "warning: herdr workspace cleanup found another task's recorded pane still live in the workspace; leaving it in place" >&2
+        return 1
+        ;;
+    esac
+  done
+  if ! fm_backend_herdr_cli "$session" workspace close "$workspace" >/dev/null 2>&1; then
+    echo "warning: herdr workspace cleanup could not close the workspace it created" >&2
+    fm_backend_herdr_projection_focus_restore "$session" "$before" "workspace close" || true
+    return 1
+  fi
+  presence=$(fm_backend_herdr_workspace_presence_state "$session" "$workspace")
+  fm_backend_herdr_projection_focus_restore "$session" "$before" "workspace close" || true
+  if [ "$presence" != dead ]; then
+    echo "warning: herdr workspace cleanup could not confirm removal of the workspace it created" >&2
+    return 1
+  fi
+}
+
 # fm_backend_herdr_explicit_close_pane_confirmed: issue one explicit close and
 # succeed only when a structured follow-up proves the exact pane is gone.
 fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>

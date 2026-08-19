@@ -1898,6 +1898,12 @@ case "$BACKEND" in
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
+    # Durable created-versus-adopted proof for teardown's workspace cleanup: a
+    # workspace this spawn CREATED may be closed once no firstmate task pane
+    # remains in it, while an ADOPTED one is the captain's and never prunable.
+    # Only this process knows which happened, so it records the answer rather
+    # than leaving cleanup to infer it from labels or tab counts later.
+    HERDR_WORKSPACE_CREATED=0
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
@@ -1926,6 +1932,11 @@ case "$BACKEND" in
           case "$HERDR_RECLAIM_STATUS" in
             0)
               HERDR_PROJECTED=1
+              # The version 2 binding this reclaim just validated is published
+              # only by firstmate's own projected create, so the reclaimed
+              # workspace is firstmate-created even though this spawn did not
+              # create it.
+              HERDR_WORKSPACE_CREATED=1
               HERDR_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
               HERDR_SEEDED_DEFAULT_TAB_ID=""
               HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
@@ -1984,6 +1995,7 @@ case "$BACKEND" in
               exit 1
             fi
             HERDR_PROJECTED=1
+            HERDR_WORKSPACE_CREATED=1
             HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
             HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
             HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
@@ -2025,6 +2037,9 @@ case "$BACKEND" in
       # re-derived from labels - see docs/herdr-backend.md "Default-tab prune").
       CONTAINER=${HERDR_CONTAINER_RAW%%$'\t'*}
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
+      # The same empty-versus-present second field that gates the default-tab
+      # prune is the created-versus-adopted answer teardown needs later.
+      [ -z "$HERDR_SEEDED_DEFAULT_TAB_ID" ] || HERDR_WORKSPACE_CREATED=1
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
       HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
@@ -2632,7 +2647,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_workspace_created herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2660,6 +2675,10 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
+    # Written only for a workspace this spawn created, so an adopted
+    # workspace's metadata stays exactly as it was and cleanup has no proof to
+    # act on.
+    [ "$HERDR_WORKSPACE_CREATED" != 1 ] || echo "herdr_workspace_created=1"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
   fi

@@ -1949,7 +1949,7 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
   [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
     || fail "confirmed exact-pane close did not retire the presentation journal"
   assert_not_contains "$(cat "$log")" "workspace close" \
-    "projected teardown must never call workspace close"
+    "a task with no firstmate-created workspace proof still closed the workspace"
   assert_contains "$(cat "$log")" "tab focus w2:t2" \
     "projected teardown did not restore the exact pre-close active tab"
   pass "herdr projection teardown retires its journal only after confirming the exact recorded pane is gone"
@@ -1978,7 +1978,7 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   assert_grep "not confirmed gone" "$case_dir/stderr" \
     "unconfirmed projected close did not explain why the records were retained"
   assert_not_contains "$(cat "$log")" "workspace close" \
-    "unconfirmed projected close must not escalate to workspace cleanup"
+    "an unconfirmed pane close still escalated to closing the workspace"
   pass "herdr projection teardown retains every record when post-close presence is unknown"
 }
 
@@ -2000,6 +2000,266 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
   assert_grep "exact-tab restoration failed" "$case_dir/stderr" \
     "herdr-projection-restore-failure: teardown swallowed the focus helper's restore warning"
   pass "herdr projection teardown surfaces failed focus restoration without turning confirmed cleanup into a hard failure"
+}
+
+# --- created-workspace cleanup ---------------------------------------------
+#
+# Herdr removes a workspace only when its LAST tab goes, so a task workspace
+# that also held a pane firstmate does not own survived every teardown and the
+# one-workspace-per-task layout accumulated them without bound. These cases run
+# the real teardown against a stateful fake that models that rule exactly: w1
+# outlives its task pane if and only if a foreign pane is still in it.
+#
+# w2 is the captain's own focused workspace, w3 is a bystander, and w1 - the
+# retiring task's own created workspace - is deliberately LAST so no focus-safe
+# repositioning move is needed and the fixtures stay about the workspace close.
+
+configure_herdr_workspace_retire_case() {  # <case-dir> <foreign-pane:0|1> <created:0|1>
+  local case_dir=$1 foreign=$2 created=$3 token=AbCdEfGhIjKlMnOpQrStUv
+  sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=fmtest' \
+    'herdr_workspace_id=w1' \
+    'herdr_tab_id=w1:t2' \
+    'herdr_pane_id=w1:p2' >> "$case_dir/state/task-x1.meta"
+  # The durable created-versus-adopted proof spawn records. Without it the
+  # workspace is the captain's and cleanup has nothing to act on.
+  [ "$created" != 1 ] || printf 'herdr_workspace_created=1\n' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' \
+    'version=1' \
+    'task_id=task-x1' \
+    "projection_id=$token" > "$case_dir/state/task-x1.herdr-presentation"
+  export FM_FAKE_HERDR_EXTRA_PANE="$foreign"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+ws1=1
+[ ! -e "${FM_FAKE_HERDR_WS_CLOSED:?}" ] || ws1=0
+# Herdr's own rule: the workspace goes with its last tab, so w1 outlives its
+# task pane only while a pane firstmate does not own is still in it.
+if [ "${FM_FAKE_HERDR_EXTRA_PANE:-0}" != 1 ] && [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
+  ws1=0
+fi
+focused=w2
+if [ "${FM_FAKE_HERDR_STEAL_FOCUS:-0}" = 1 ] && [ "$ws1" = 0 ] \
+   && [ ! -e "${FM_FAKE_HERDR_RESTORED:?}" ]; then
+  # Herdr 0.7.5 moves focus to a neighbor when a close empties a non-focused
+  # workspace; 0.8.0 does not.
+  focused=w3
+fi
+case "${1:-} ${2:-}" in
+  "workspace list")
+    if [ "$focused" = w2 ]; then
+      spaces='{"workspace_id":"w2","active_tab_id":"w2:t2","label":"firstmate","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}'
+    else
+      spaces='{"workspace_id":"w2","active_tab_id":"w2:t2","label":"firstmate","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":true}'
+    fi
+    [ "$ws1" = 0 ] \
+      || spaces="$spaces,{\"workspace_id\":\"w1\",\"active_tab_id\":\"w1:t2\",\"label\":\"└ retire the leak · p:AbCdEfGhIjKlMnOpQrStUv\",\"focused\":false}"
+    printf '{"result":{"workspaces":[%s]}}\n' "$spaces"
+    ;;
+  "tab list")
+    case "$*" in
+      *"--workspace w2"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","focused":true}]}}' ;;
+      *"--workspace w3"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w3:t1","focused":true}]}}' ;;
+      *"--workspace w1"*)
+        tabs=
+        [ -e "$FM_FAKE_HERDR_CLOSED" ] || tabs='{"tab_id":"w1:t2","label":"fm-task-x1","focused":false}'
+        if [ "${FM_FAKE_HERDR_EXTRA_PANE:-0}" = 1 ] && [ "$ws1" = 1 ]; then
+          [ -z "$tabs" ] || tabs="$tabs,"
+          tabs="$tabs{\"tab_id\":\"w1:t9\",\"label\":\"Sidebar\",\"focused\":true}"
+        fi
+        printf '{"result":{"tabs":[%s]}}\n' "$tabs"
+        ;;
+      *) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+    esac
+    ;;
+  "pane list")
+    case "$*" in
+      *"--workspace w1"*)
+        panes=
+        [ -e "$FM_FAKE_HERDR_CLOSED" ] || panes='{"pane_id":"w1:p2","tab_id":"w1:t2"}'
+        if [ "${FM_FAKE_HERDR_EXTRA_PANE:-0}" = 1 ] && [ "$ws1" = 1 ]; then
+          [ -z "$panes" ] || panes="$panes,"
+          panes="$panes{\"pane_id\":\"w1:p9\",\"tab_id\":\"w1:t9\"}"
+        fi
+        printf '{"result":{"panes":[%s]}}\n' "$panes"
+        ;;
+      *) printf '%s\n' '{"result":{"panes":[]}}' ;;
+    esac
+    ;;
+  "status --json")
+    printf '%s\n' '{"client":{"version":"0.8.0","protocol":19},"server":{"running":true}}'
+    ;;
+  "session list")
+    printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}'
+    ;;
+  "pane close")
+    [ "${3:-}" != w1:p2 ] || : > "${FM_FAKE_HERDR_CLOSED:?}"
+    ;;
+  "workspace close")
+    [ "${FM_FAKE_HERDR_WS_CLOSE_FAIL:-0}" != 1 ] || exit 1
+    [ "${3:-}" != w1 ] || : > "${FM_FAKE_HERDR_WS_CLOSED:?}"
+    ;;
+  "pane get")
+    case "${3:-}" in
+      w1:p2)
+        if [ -e "$FM_FAKE_HERDR_CLOSED" ]; then
+          printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+          exit 1
+        fi
+        printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1"}}}'
+        ;;
+      w1:p9)
+        if [ "$ws1" = 0 ]; then
+          printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+          exit 1
+        fi
+        printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p9","tab_id":"w1:t9","workspace_id":"w1"}}}'
+        ;;
+      *)
+        printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  "tab get")
+    printf '{"result":{"tab":{"tab_id":"%s","workspace_id":"%s"}}}\n' "${3:-}" "${3%%:*}"
+    ;;
+  "tab focus")
+    : > "${FM_FAKE_HERDR_RESTORED:?}"
+    printf '{"result":{"tab":{"tab_id":"%s","focused":true}}}\n' "${3:-}"
+    ;;
+  "agent get")
+    if [ "${FM_FAKE_HERDR_LIVE_AGENT:-}" = "${3:-}" ]; then
+      printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}'
+    else
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
+      exit 1
+    fi
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+}
+
+# run_workspace_retire_teardown <case-dir>: forced teardown with the retirement
+# fixture's markers wired up. Callers add a fixture knob as an ordinary leading
+# assignment. The idle-shell proof has no process-info fake to read, so one
+# attempt is enough for it to fall back to the ordinary close.
+run_workspace_retire_teardown() {  # <case-dir>
+  local case_dir=$1
+  FM_FAKE_HERDR_LOG="$case_dir/herdr.log" \
+    FM_FAKE_HERDR_CLOSED="$case_dir/closed" \
+    FM_FAKE_HERDR_WS_CLOSED="$case_dir/ws-closed" \
+    FM_FAKE_HERDR_RESTORED="$case_dir/restored" \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+}
+
+test_herdr_teardown_closes_a_created_workspace_a_foreign_pane_keeps_alive() {
+  local case_dir
+  case_dir=$(make_case herdr-retire-foreign-pane)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_workspace_retire_case "$case_dir" 1 1
+  : > "$case_dir/herdr.log"
+
+  run_workspace_retire_teardown "$case_dir" \
+    || fail "herdr-retire-foreign-pane: forced teardown failed: $(cat "$case_dir/stderr")"
+  [ -e "$case_dir/closed" ] \
+    || fail "herdr-retire-foreign-pane: the task pane was never closed"
+  [ -e "$case_dir/ws-closed" ] \
+    || fail "herdr-retire-foreign-pane: the workspace a foreign pane kept alive survived teardown"
+  assert_contains "$(cat "$case_dir/herdr.log")" "workspace close w1" \
+    "teardown did not close the created workspace it left behind"
+  assert_not_contains "$(cat "$case_dir/herdr.log")" "pane close w1:p9" \
+    "teardown closed a pane firstmate does not own to force the last-tab behavior"
+  assert_not_contains "$(cat "$case_dir/herdr.log")" "tab close w1:t9" \
+    "teardown closed a tab firstmate does not own to force the last-tab behavior"
+  [ ! -e "$case_dir/restored" ] \
+    || fail "herdr-retire-foreign-pane: a close that never moved focus still changed the captain's focus"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-retire-foreign-pane: confirmed cleanup did not reclaim the durable record"
+  pass "herdr teardown closes a created workspace a foreign pane would otherwise keep alive"
+}
+
+test_herdr_teardown_leaves_nothing_when_the_workspace_empties_with_its_task_pane() {
+  local case_dir
+  case_dir=$(make_case herdr-retire-lone-pane)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_workspace_retire_case "$case_dir" 0 1
+  : > "$case_dir/herdr.log"
+
+  run_workspace_retire_teardown "$case_dir" \
+    || fail "herdr-retire-lone-pane: forced teardown failed: $(cat "$case_dir/stderr")"
+  [ -e "$case_dir/closed" ] \
+    || fail "herdr-retire-lone-pane: the task pane was never closed"
+  assert_not_contains "$(cat "$case_dir/herdr.log")" "workspace close" \
+    "a workspace already gone with its last tab was still sent a close"
+  assert_not_contains "$(cat "$case_dir/stderr")" "workspace cleanup" \
+    "a workspace already gone with its last tab produced a cleanup warning"
+  [ ! -e "$case_dir/restored" ] \
+    || fail "herdr-retire-lone-pane: removing the lone task pane moved the captain's focus"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-retire-lone-pane: confirmed cleanup did not reclaim the durable record"
+  pass "herdr teardown leaves no workspace behind when the task pane was the last one in it"
+}
+
+test_herdr_teardown_restores_focus_a_created_workspace_close_moves() {
+  local case_dir
+  case_dir=$(make_case herdr-retire-focus-move)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_workspace_retire_case "$case_dir" 1 1
+  : > "$case_dir/herdr.log"
+
+  FM_FAKE_HERDR_STEAL_FOCUS=1 run_workspace_retire_teardown "$case_dir" \
+    || fail "herdr-retire-focus-move: forced teardown failed: $(cat "$case_dir/stderr")"
+  [ -e "$case_dir/ws-closed" ] \
+    || fail "herdr-retire-focus-move: the leaked workspace survived teardown"
+  assert_contains "$(cat "$case_dir/herdr.log")" "tab focus w2:t2" \
+    "a workspace close that moved focus did not restore the captain's exact tab"
+  assert_not_contains "$(cat "$case_dir/stderr")" "did not restore" \
+    "the focus restore after the workspace close reported failure"
+  pass "herdr teardown restores the captain's exact tab when closing a created workspace moves focus"
+}
+
+test_herdr_teardown_never_closes_an_adopted_workspace() {
+  local case_dir
+  case_dir=$(make_case herdr-retire-adopted)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_workspace_retire_case "$case_dir" 1 0
+  : > "$case_dir/herdr.log"
+
+  run_workspace_retire_teardown "$case_dir" \
+    || fail "herdr-retire-adopted: forced teardown failed: $(cat "$case_dir/stderr")"
+  [ -e "$case_dir/closed" ] \
+    || fail "herdr-retire-adopted: the task pane was never closed"
+  [ ! -e "$case_dir/ws-closed" ] \
+    || fail "herdr-retire-adopted: teardown closed a workspace the captain owns"
+  assert_not_contains "$(cat "$case_dir/herdr.log")" "workspace close" \
+    "a workspace with no firstmate-created proof was still sent a close"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-retire-adopted: leaving the captain's workspace alone blocked record cleanup"
+  pass "herdr teardown never closes a workspace it cannot prove firstmate created"
+}
+
+test_herdr_teardown_leaves_a_created_workspace_holding_a_registered_agent() {
+  local case_dir
+  case_dir=$(make_case herdr-retire-live-agent)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_workspace_retire_case "$case_dir" 1 1
+  : > "$case_dir/herdr.log"
+
+  FM_FAKE_HERDR_LIVE_AGENT=w1:p9 run_workspace_retire_teardown "$case_dir" \
+    || fail "herdr-retire-live-agent: forced teardown failed: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/ws-closed" ] \
+    || fail "herdr-retire-live-agent: teardown closed a workspace still holding a registered agent"
+  assert_grep "live agent still registered" "$case_dir/stderr" \
+    "teardown did not explain why it left the workspace in place"
+  pass "herdr teardown leaves a created workspace in place while an agent is still registered in it"
 }
 
 # --- Fix 1: conclude/abort the task's own parked no-mistakes run before the
@@ -2611,6 +2871,11 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
+test_herdr_teardown_closes_a_created_workspace_a_foreign_pane_keeps_alive
+test_herdr_teardown_leaves_nothing_when_the_workspace_empties_with_its_task_pane
+test_herdr_teardown_restores_focus_a_created_workspace_close_moves
+test_herdr_teardown_never_closes_an_adopted_workspace
+test_herdr_teardown_leaves_a_created_workspace_holding_a_registered_agent
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
