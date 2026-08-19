@@ -434,12 +434,16 @@ test_calm_assistant_layout_field_check_and_restore() {
 const pkg = await import("@earendil-works/pi-coding-agent");
 const { AssistantMessageComponent } = pkg;
 
-// A throwing original stands in for a Pi upgrade whose updateContent fails mid-render;
-// the patch must still restore lastMessage instead of losing the original thinking content.
+// A switchable original stands in for Pi's updateContent: recording mode proves the
+// field check stays out of renders that never read the fields, and throwing mode stands
+// in for a Pi upgrade whose updateContent fails mid-render, where the patch must still
+// restore lastMessage instead of losing the original thinking content.
 let originalCalls = 0;
-AssistantMessageComponent.prototype.updateContent = function () {
+let originalThrows = true;
+AssistantMessageComponent.prototype.updateContent = function (message) {
   originalCalls++;
-  throw new Error("boom-from-original-updateContent");
+  if (originalThrows) throw new Error("boom-from-original-updateContent");
+  this.rendered = message;
 };
 
 const assistant = await import("./.pi/extensions/lib/fm-calm-assistant-layout.ts");
@@ -447,6 +451,7 @@ const visibility = await import("./.pi/extensions/lib/fm-calm-visibility.ts");
 assistant.installCalmAssistantLayout();
 
 {
+  visibility.setCalmPresentation(true);
   const instance = Object.create(AssistantMessageComponent.prototype);
   let reason;
   try {
@@ -456,7 +461,7 @@ assistant.installCalmAssistantLayout();
   }
   if (!reason?.includes("hiddenThinkingLabel") || !reason.includes("hideThinkingBlock")) {
     throw new Error(
-      `an instance missing hiddenThinkingLabel/hideThinkingBlock did not fail loudly naming both fields: ${String(reason)}`,
+      `with Calm hiding thinking, an instance missing hiddenThinkingLabel/hideThinkingBlock did not fail loudly naming both fields: ${String(reason)}`,
     );
   }
   if (originalCalls !== 0) {
@@ -465,6 +470,30 @@ assistant.installCalmAssistantLayout();
 }
 
 {
+  visibility.setCalmPresentation(false);
+  originalThrows = false;
+  const instance = Object.create(AssistantMessageComponent.prototype);
+  const message = { stopReason: "endTurn", content: [] };
+  instance.updateContent(message);
+  if (originalCalls !== 1 || instance.rendered !== message) {
+    throw new Error("with Calm presentation off, a field-missing instance did not render through the original updateContent");
+  }
+}
+
+{
+  visibility.setCalmPresentation(true);
+  visibility.setCalmStockExportRendering(true);
+  const instance = Object.create(AssistantMessageComponent.prototype);
+  const message = { stopReason: "endTurn", content: [] };
+  instance.updateContent(message);
+  visibility.setCalmStockExportRendering(false);
+  if (originalCalls !== 2 || instance.rendered !== message) {
+    throw new Error("during stock export rendering, a field-missing instance did not render through the original updateContent");
+  }
+}
+
+{
+  originalThrows = true;
   visibility.setCalmPresentation(true);
   const instance = Object.create(AssistantMessageComponent.prototype);
   instance.hiddenThinkingLabel = "";
@@ -488,7 +517,7 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm assistant-layout field-check and restore-on-throw path failed: $out"
   [ -z "$out" ] || fail "Pi calm assistant-layout field-check test printed output: $out"
-  pass "the collapsed-thinking adapter fails loudly on a renamed hiddenThinkingLabel/hideThinkingBlock field and restores lastMessage even when the original updateContent throws mid-render"
+  pass "the collapsed-thinking adapter fails loudly on a renamed hiddenThinkingLabel/hideThinkingBlock field only while Calm actively hides thinking, renders untouched when Calm is off or during stock export, and restores lastMessage even when the original updateContent throws mid-render"
 }
 
 test_builtin_gate_load_time() {

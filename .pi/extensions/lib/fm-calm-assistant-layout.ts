@@ -2,9 +2,11 @@
 // updateContent method. installCalmAssistantLayout() probes that exact method and throws
 // if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
 // instead of blocking Calm or Pi. The patched method likewise checks the private
-// hiddenThinkingLabel/hideThinkingBlock fields it reads and throws at render time if a Pi
-// upgrade renames them: that failure is deliberately loud rather than degraded, because a
-// renamed field would silently regress the hidden-block gaps.
+// hiddenThinkingLabel/hideThinkingBlock fields, but only on renders where Calm is actively
+// hiding thinking — the only case that reads them — and throws at render time if a Pi
+// upgrade renames them: deliberately loud there, because a renamed field would silently
+// regress the hidden-block gaps. Renders with Calm presentation off and stock export
+// renders never read the fields and are never affected by the check.
 // This layout removes collapsed thinking and the mid-turn assistant text blocks
 // classified as "assistant-working-note" from a shallow presentation copy. The message
 // itself, model context, session storage, and export rendering are never touched.
@@ -73,15 +75,15 @@ export function installCalmAssistantLayout(): void {
     message: AssistantMessage,
   ): void {
     const state = this as unknown as AssistantMessagePresentationState;
-    if (typeof state.hiddenThinkingLabel !== "string" || typeof state.hideThinkingBlock !== "boolean") {
-      throw new Error(
-        "Firstmate Calm requires AssistantMessageComponent.hiddenThinkingLabel and hideThinkingBlock",
-      );
+    let hideThinking = false;
+    if (patch.hidesThinking()) {
+      if (typeof state.hiddenThinkingLabel !== "string" || typeof state.hideThinkingBlock !== "boolean") {
+        throw new Error(
+          "Firstmate Calm requires AssistantMessageComponent.hiddenThinkingLabel and hideThinkingBlock",
+        );
+      }
+      hideThinking = state.hiddenThinkingLabel === "" && state.hideThinkingBlock;
     }
-    const hideThinking =
-      state.hiddenThinkingLabel === "" &&
-      state.hideThinkingBlock &&
-      patch.hidesThinking();
     const hideWorkingNote =
       patch.hidesWorkingNote() && isMidTurnAssistantMessage(message);
     const presentationMessage =
