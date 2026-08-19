@@ -1873,7 +1873,12 @@ fm_backend_herdr_workspace_presence_state() {  # <session> <workspace_id>
 #   agent is never closed out from under itself and an unreadable response
 #   never licenses a close;
 # - any other still-recorded task in this home that names this session and
-#   workspace, or whose recorded pane is still present here.
+#   workspace, or whose recorded pane is still present here;
+# - a duplicated endpoint key in any of those records, which is ambiguity about
+#   which task holds what rather than proof that none of them holds this
+#   workspace (fm_backend_meta_exact_value's contract, applied here because a
+#   first-occurrence read would license a close on a value the rest of the
+#   system does not resolve to).
 # That last scan, not a pane label, is the "no firstmate task pane remains"
 # test: a renamed plugin, a second plugin, and a hand-added pane all read the
 # same way, and a label-matched fix would break again quietly.
@@ -1888,7 +1893,7 @@ fm_backend_herdr_workspace_presence_state() {  # <session> <workspace_id>
 # Returns 0 only when the workspace is confirmed gone or was already absent.
 fm_backend_herdr_workspace_retire_created() {  # <session> <workspace-id> <created-proof> <state-dir> <exclude-task-id>
   local session=$1 workspace=$2 proof=$3 state_dir=$4 exclude=$5
-  local before presence tabs panes pane_ids pane state meta base recorded
+  local before presence tabs panes pane_ids pane state meta base recorded key count
   [ -n "$session" ] && [ -n "$workspace" ] && [ -n "$state_dir" ] && [ -n "$exclude" ] || return 2
   [ "$proof" = created ] || return 2
   presence=$(fm_backend_herdr_workspace_presence_state "$session" "$workspace")
@@ -1949,14 +1954,22 @@ EOF
     [ -f "$meta" ] || continue
     base=${meta##*/}
     [ "${base%.meta}" != "$exclude" ] || continue
-    recorded=$(sed -n 's/^herdr_session=//p' "$meta" 2>/dev/null | head -n 1)
+    for key in herdr_session herdr_workspace_id herdr_pane_id; do
+      count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
+      case "$count" in
+        ''|0|1) continue ;;
+      esac
+      echo "warning: herdr workspace cleanup found an ambiguous $key in another task's record; leaving the workspace in place" >&2
+      return 1
+    done
+    recorded=$(sed -n 's/^herdr_session=//p' "$meta" 2>/dev/null)
     [ "$recorded" = "$session" ] || continue
-    recorded=$(sed -n 's/^herdr_workspace_id=//p' "$meta" 2>/dev/null | head -n 1)
+    recorded=$(sed -n 's/^herdr_workspace_id=//p' "$meta" 2>/dev/null)
     if [ "$recorded" = "$workspace" ]; then
       echo "warning: herdr workspace cleanup found another task still recorded in the workspace; leaving it in place" >&2
       return 1
     fi
-    recorded=$(sed -n 's/^herdr_pane_id=//p' "$meta" 2>/dev/null | head -n 1)
+    recorded=$(sed -n 's/^herdr_pane_id=//p' "$meta" 2>/dev/null)
     [ -n "$recorded" ] || continue
     case $'\n'"$pane_ids"$'\n' in
       *$'\n'"$recorded"$'\n'*)

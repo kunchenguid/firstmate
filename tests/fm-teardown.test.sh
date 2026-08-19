@@ -2044,10 +2044,12 @@ if [ "${FM_FAKE_HERDR_EXTRA_PANE:-0}" != 1 ] && [ -e "${FM_FAKE_HERDR_CLOSED:?}"
   ws1=0
 fi
 focused=w2
-if [ "${FM_FAKE_HERDR_STEAL_FOCUS:-0}" = 1 ] && [ "$ws1" = 0 ] \
+if [ "${FM_FAKE_HERDR_STEAL_FOCUS:-0}" = 1 ] \
+   && { [ "$ws1" = 0 ] || [ -e "${FM_FAKE_HERDR_WS_CLOSE_FAILED:?}" ]; } \
    && [ ! -e "${FM_FAKE_HERDR_RESTORED:?}" ]; then
   # Herdr 0.7.5 moves focus to a neighbor when a close empties a non-focused
-  # workspace; 0.8.0 does not.
+  # workspace; 0.8.0 does not. A close that reports failure can have moved focus
+  # before failing, which is why the restore runs on that path too.
   focused=w3
 fi
 case "${1:-} ${2:-}" in
@@ -2101,7 +2103,10 @@ case "${1:-} ${2:-}" in
     [ "${3:-}" != w1:p2 ] || : > "${FM_FAKE_HERDR_CLOSED:?}"
     ;;
   "workspace close")
-    [ "${FM_FAKE_HERDR_WS_CLOSE_FAIL:-0}" != 1 ] || exit 1
+    if [ "${FM_FAKE_HERDR_WS_CLOSE_FAIL:-0}" = 1 ]; then
+      : > "${FM_FAKE_HERDR_WS_CLOSE_FAILED:?}"
+      exit 1
+    fi
     [ "${3:-}" != w1 ] || : > "${FM_FAKE_HERDR_WS_CLOSED:?}"
     ;;
   "pane get")
@@ -2155,6 +2160,7 @@ run_workspace_retire_teardown() {  # <case-dir>
   FM_FAKE_HERDR_LOG="$case_dir/herdr.log" \
     FM_FAKE_HERDR_CLOSED="$case_dir/closed" \
     FM_FAKE_HERDR_WS_CLOSED="$case_dir/ws-closed" \
+    FM_FAKE_HERDR_WS_CLOSE_FAILED="$case_dir/ws-close-failed" \
     FM_FAKE_HERDR_RESTORED="$case_dir/restored" \
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -2244,6 +2250,29 @@ test_herdr_teardown_never_closes_an_adopted_workspace() {
   [ ! -e "$case_dir/state/task-x1.meta" ] \
     || fail "herdr-retire-adopted: leaving the captain's workspace alone blocked record cleanup"
   pass "herdr teardown never closes a workspace it cannot prove firstmate created"
+}
+
+test_herdr_teardown_restores_focus_when_the_created_workspace_close_fails() {
+  local case_dir
+  case_dir=$(make_case herdr-retire-close-fails)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_workspace_retire_case "$case_dir" 1 1
+  : > "$case_dir/herdr.log"
+
+  FM_FAKE_HERDR_WS_CLOSE_FAIL=1 FM_FAKE_HERDR_STEAL_FOCUS=1 \
+    run_workspace_retire_teardown "$case_dir" \
+    || fail "herdr-retire-close-fails: forced teardown failed: $(cat "$case_dir/stderr")"
+  [ -e "$case_dir/ws-close-failed" ] \
+    || fail "herdr-retire-close-fails: the workspace close was never attempted"
+  [ ! -e "$case_dir/ws-closed" ] \
+    || fail "herdr-retire-close-fails: the fixture reported a close it was told to fail"
+  assert_grep "could not close the workspace it created" "$case_dir/stderr" \
+    "a failed workspace close did not warn about the workspace left behind"
+  assert_contains "$(cat "$case_dir/herdr.log")" "tab focus w2:t2" \
+    "a failed workspace close that moved focus did not restore the captain's exact tab"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-retire-close-fails: a failed workspace close blocked reclaiming the durable record"
+  pass "herdr teardown warns and still restores the captain's exact tab when the workspace close fails"
 }
 
 test_herdr_teardown_leaves_a_created_workspace_holding_a_registered_agent() {
@@ -2874,6 +2903,7 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_herdr_teardown_closes_a_created_workspace_a_foreign_pane_keeps_alive
 test_herdr_teardown_leaves_nothing_when_the_workspace_empties_with_its_task_pane
 test_herdr_teardown_restores_focus_a_created_workspace_close_moves
+test_herdr_teardown_restores_focus_when_the_created_workspace_close_fails
 test_herdr_teardown_never_closes_an_adopted_workspace
 test_herdr_teardown_leaves_a_created_workspace_holding_a_registered_agent
 test_squash_merged_branch_deleted_allows

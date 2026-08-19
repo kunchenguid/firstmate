@@ -1444,8 +1444,9 @@ test_projection_close_rechecks_required_agent_state_at_boundary() {
 # tab goes. These fixtures drive the explicit workspace close that fixes it, and
 # pin every gate that must refuse instead: no created proof, an unreadable
 # workspace, the captain's focused workspace or active tab, a still-registered
-# agent, another task still recorded in the same workspace, and an unconfirmed
-# removal. The foreign pane is never a close target in any of them.
+# agent, another task still recorded in the same workspace, an ambiguous
+# endpoint key in another task's record, and an unconfirmed removal. The foreign
+# pane is never a close target in any of them.
 #
 # w2 is the captain's focused workspace throughout, w1 is the retiring task's
 # own created workspace, and w1:p9 is a pane firstmate does not own.
@@ -1627,6 +1628,42 @@ test_workspace_retire_created_refuses_when_another_tasks_pane_is_still_present()
   assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
     "a workspace still holding another task's live pane was closed anyway"
   pass "herdr created-workspace retirement: another task's still-live pane blocks the close"
+}
+
+test_workspace_retire_created_refuses_an_ambiguous_key_in_another_tasks_record() {
+  local dir log resp out status state key lines
+  # A duplicated endpoint key is ambiguity about which task holds what, exactly
+  # as fm_backend_meta_exact_value treats it before any destructive step. Each
+  # record below duplicates ONE key so that reading the first occurrence sails
+  # past the gate while the later occurrence names this very workspace or one of
+  # its live panes, which is the case where picking an occurrence would license
+  # closing a workspace a live task still holds.
+  for key in herdr_session herdr_workspace_id herdr_pane_id; do
+    dir="$TMP_ROOT/retire-ambiguous-$key"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; : > "$log"
+    case "$key" in
+      herdr_session)
+        lines=('backend=herdr' 'herdr_session=other' 'herdr_session=fmtest' 'herdr_workspace_id=w1')
+        ;;
+      herdr_workspace_id)
+        lines=('backend=herdr' 'herdr_session=fmtest' 'herdr_workspace_id=w7' 'herdr_workspace_id=w1')
+        ;;
+      *)
+        lines=('backend=herdr' 'herdr_session=fmtest' 'herdr_workspace_id=w7' \
+          'herdr_pane_id=w5:p3' 'herdr_pane_id=w1:p9')
+        ;;
+    esac
+    state=$(retire_state_dir "$dir" "${lines[@]}")
+    retire_reach_the_close_boundary "$resp"
+    out=$(retire_run "$dir" "$state")
+    status=$?
+    [ "$status" -ne 0 ] || fail "a duplicated $key must refuse the close: $out"
+    assert_contains "$out" "ambiguous $key in another task's record" \
+      "the duplicated-$key refusal did not name the ambiguity it read"
+    assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
+      "a duplicated $key still licensed the workspace close"
+  done
+  pass "herdr created-workspace retirement: a duplicated endpoint key in another task's record refuses the close"
 }
 
 test_workspace_retire_created_closes_the_workspace_and_never_the_foreign_pane() {
@@ -4733,6 +4770,7 @@ test_workspace_retire_created_refuses_when_the_captains_active_tab_remains_in_it
 test_workspace_retire_created_refuses_a_still_registered_agent
 test_workspace_retire_created_refuses_when_another_task_records_the_workspace
 test_workspace_retire_created_refuses_when_another_tasks_pane_is_still_present
+test_workspace_retire_created_refuses_an_ambiguous_key_in_another_tasks_record
 test_workspace_retire_created_closes_the_workspace_and_never_the_foreign_pane
 test_workspace_retire_created_restores_focus_a_close_moves
 test_workspace_retire_created_reports_an_unconfirmed_removal

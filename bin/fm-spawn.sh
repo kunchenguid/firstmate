@@ -1032,6 +1032,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+    # A relaunch ADOPTS this task's own recorded endpoint rather than creating
+    # one, so the workspace is the same workspace and a workspace firstmate
+    # created stays created. The recorded created-versus-adopted proof is
+    # therefore carried forward here rather than defaulted, which would drop
+    # teardown's only authority to retire the workspace on every relaunch.
+    if [ "$(fm_meta_get "$RELAUNCH_META" herdr_workspace_created)" = 1 ]; then
+      HERDR_WORKSPACE_CREATED=1
+    else
+      HERDR_WORKSPACE_CREATED=0
+    fi
   fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config

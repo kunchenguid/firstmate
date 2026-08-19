@@ -182,7 +182,7 @@ Operational compromises:
 `tests/fm-herdr-session-cleanup-e2e.test.sh` covers the restored-shell cleanup in a guarded non-default named lab.
 `tests/fm-backend-herdr-focus-flash-e2e.test.sh` reproduces the raw explicit-close focus steal on the installed release and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval; [`verification/runtime-backends.md`](verification/runtime-backends.md#workspace-removal-focus-safety) owns the active versioned evidence.
 `tests/fm-backend-herdr-workspace-retire-e2e.test.sh` reproduces the surviving-workspace leak on the installed release and proves the created-workspace retirement removes it without closing a foreign pane, without a second close when the workspace already emptied, without any call at all for an adopted workspace, and without moving the captain's focus; [`verification/runtime-backends.md`](verification/runtime-backends.md#created-workspace-retirement) owns the active versioned evidence.
-`tests/fm-backend-herdr.test.sh` and `tests/fm-teardown.test.sh` pin the retirement's refusals and the teardown call site portably.
+`tests/fm-backend-herdr.test.sh` and `tests/fm-teardown.test.sh` pin the retirement's refusals and the teardown call site portably, and `tests/fm-control-relaunch.test.sh` pins the created proof surviving a relaunch without ever being invented for an adopted workspace.
 
 ## Default-tab prune safety
 
@@ -333,8 +333,8 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - Mutable labels can collide; they are never placement or destructive authority.
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
-- The created proof lives only with a task whose own spawn created the workspace, so in the flat per-home layout a relaunch that adopts the existing workspace loses it, and a creating task that tears down while another task still holds a pane there refuses the close.
-  Either way that one shared workspace survives until the next spawn adopts it again, which bounds the flat leak at one workspace per home rather than one per task.
+- The created proof lives only with a task whose own spawn created the workspace, so in the flat per-home layout a creating task that tears down while another task still holds a pane there refuses the close.
+  That one shared workspace survives until the next spawn adopts it again, which bounds the flat leak at one workspace per home rather than one per task.
 - Mid-session secondmate liveness is not implemented.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
 
