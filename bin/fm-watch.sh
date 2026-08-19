@@ -455,7 +455,7 @@ pause_state_class() {  # <window> <task>
         '. "$1"; fm_backend_agent_alive "$2" "$3"' _ "$SCRIPT_DIR/fm-backend.sh" \
         "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive_status=$?
       if [ "$agent_alive_status" -ne 0 ]; then
-        [ "$agent_alive_status" -eq 124 ] \
+        fm_timeout_status_is_expired "$agent_alive_status" \
           && triage_log "agent-alive probe exceeded its 10s bound: $win"
         agent_alive=unknown
       fi
@@ -480,7 +480,7 @@ pause_state_class() {  # <window> <task>
       '. "$1"; fm_backend_agent_alive "$2" "$3"' _ "$SCRIPT_DIR/fm-backend.sh" \
       "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive_status=$?
     if [ "$agent_alive_status" -ne 0 ]; then
-      [ "$agent_alive_status" -eq 124 ] \
+      fm_timeout_status_is_expired "$agent_alive_status" \
         && triage_log "agent-alive probe exceeded its 10s bound: $win"
       agent_alive=unknown
     fi
@@ -676,6 +676,11 @@ run_check_capture() {
   wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || FM_CHECK_STATUS=$?
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
+  if fm_timeout_status_is_expired "$FM_CHECK_STATUS"; then
+    FM_CHECK_STATUS=124
+    fm_check_output_cleanup
+    return 0
+  fi
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
   fm_check_output_cleanup
 }
@@ -761,7 +766,7 @@ event_wait_or_sleep() {
     if [ "$capability_status" -eq 0 ]; then
       _event_cap_ok=1
     else
-      [ "$capability_status" -eq 124 ] \
+      fm_timeout_status_is_expired "$capability_status" \
         && triage_log "backend event-capability probe exceeded its 10s bound: $first_backend:$first_session"
       _event_cap_ok=0
     fi
@@ -941,7 +946,7 @@ while :; do
     procevent_reconcile_status=0
     FM_HOME="$FM_HOME" fm_run_timed "$PROCEVENT_RECONCILE_TIMEOUT" \
       "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || procevent_reconcile_status=$?
-    [ "$procevent_reconcile_status" -eq 124 ] \
+    fm_timeout_status_is_expired "$procevent_reconcile_status" \
       && triage_log "process-event reconciliation exceeded its 60s bound"
   fi
   # Then deliver any queued-but-unsurfaced result, including one a runner
@@ -964,7 +969,7 @@ while :; do
     fi
   else
     inactive_reconcile_status=$?
-    if [ "$inactive_reconcile_status" -eq 124 ]; then
+    if fm_timeout_status_is_expired "$inactive_reconcile_status"; then
       triage_log "inactive-outcome reconciliation exceeded its 60s bound"
     else
       triage_log "inactive-outcome reconciliation unavailable"
@@ -990,7 +995,7 @@ while :; do
     fi
   else
     secondmate_scan_status=$?
-    if [ "$secondmate_scan_status" -eq 124 ]; then
+    if fm_timeout_status_is_expired "$secondmate_scan_status"; then
       triage_log "secondmate wake-loop scan exceeded its 30s bound"
     else
       triage_log "secondmate wake-loop check unavailable"
@@ -1042,7 +1047,7 @@ while :; do
           continue
         fi
       fi
-      if [ "${FM_CHECK_STATUS:-0}" -eq 124 ]; then
+      if fm_timeout_status_is_expired "${FM_CHECK_STATUS:-0}"; then
         triage_log "authenticated check exceeded its ${CHECK_TIMEOUT}s bound: $(basename "$c")"
         check_sweep_timed_out=1
         continue
@@ -1150,7 +1155,7 @@ EOF
       '. "$1"; fm_backend_capture "$2" "$3" "$4" "$5"' _ "$SCRIPT_DIR/fm-backend.sh" \
       "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || capture_status=$?
     if [ "$capture_status" -ne 0 ]; then
-      [ "$capture_status" -eq 124 ] \
+      fm_timeout_status_is_expired "$capture_status" \
         && triage_log "backend capture exceeded its 10s bound: $w"
       continue
     fi
@@ -1175,7 +1180,7 @@ EOF
       busy_now=0
     else
       busy_now=1
-      [ "$busy_status" -eq 124 ] \
+      fm_timeout_status_is_expired "$busy_status" \
         && triage_log "window busy-state probe exceeded its 10s bound: $w"
     fi
     if [ "$h" = "$prev" ]; then

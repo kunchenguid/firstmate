@@ -1111,7 +1111,7 @@ crew_absorb_class() {  # <id>
   [ -n "$id" ] || { printf 'none'; return; }
   line=$(fm_run_timed "$CREW_STATE_READ_TIMEOUT" "$FM_CREW_STATE_BIN" "$id" \
     2>/dev/null) || read_status=$?
-  if [ "$read_status" -eq 124 ]; then
+  if fm_timeout_status_is_expired "$read_status"; then
     if declare -F triage_log >/dev/null 2>&1; then
       triage_log "crew current-state read exceeded its 15s bound: $id"
     fi

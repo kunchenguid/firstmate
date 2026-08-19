@@ -673,7 +673,7 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] 
   native=$(fm_run_timed "$PENDING_REPLY_BACKEND_TIMEOUT" bash -c \
     '. "$1"; fm_backend_busy_state "$2" "$3"' _ \
     "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh" "$backend" "$target" 2>/dev/null) || native_status=$?
-  if [ "$native_status" -eq 124 ]; then
+  if fm_timeout_status_is_expired "$native_status"; then
     if declare -F triage_log >/dev/null 2>&1; then
       triage_log "pending-reply backend observation exceeded its 10s bound: $target"
     fi
@@ -690,7 +690,7 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] 
     "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh" "$backend" "$target" 40 "$expected_label" \
     2>/dev/null) || capture_status=$?
   if [ "$capture_status" -ne 0 ]; then
-    if [ "$capture_status" -eq 124 ] && declare -F triage_log >/dev/null 2>&1; then
+    if fm_timeout_status_is_expired "$capture_status" && declare -F triage_log >/dev/null 2>&1; then
       triage_log "pending-reply backend capture exceeded its 10s bound: $target"
     fi
     printf 'unknown'
@@ -871,7 +871,7 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
       fm_run_timed "$PENDING_REPLY_SEND_TIMEOUT" env \
         FM_HOME="$parent_home" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
         "$_FM_PENDING_REPLY_LIB_DIR/fm-send.sh" "$task_id" "$msg" || send_status=$?
-      if [ "$send_status" -eq 124 ] && declare -F triage_log >/dev/null 2>&1; then
+      if fm_timeout_status_is_expired "$send_status" && declare -F triage_log >/dev/null 2>&1; then
         triage_log "pending-reply recovery send exceeded its 30s bound: $task_id"
       fi
       [ "$send_status" -eq 0 ] || send_status=1
@@ -1348,7 +1348,7 @@ fm_pending_reply_tick() {  # <state-dir>
               fm-remote-secondmate-control.sh observe "$task_id" \
               < /dev/null 2>/dev/null) || observation_status=$?
             if [ "$observation_status" -ne 0 ]; then
-              if [ "$observation_status" -eq 124 ] && declare -F triage_log >/dev/null 2>&1; then
+              if fm_timeout_status_is_expired "$observation_status" && declare -F triage_log >/dev/null 2>&1; then
                 triage_log "remote secondmate observation exceeded its 30s bound: $task_id"
               fi
               observation=unknown

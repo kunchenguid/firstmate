@@ -17,6 +17,15 @@ assert_file() {  # <path> <message>
   [ -f "$1" ] || fail "$2"
 }
 
+wait_for_file() {  # <path>
+  local path=$1
+  for _ in $(seq 1 100); do
+    [ -s "$path" ] && return 0
+    sleep 0.02
+  done
+  return 1
+}
+
 make_lab() {  # <name>
   local name=$1 lab source
   lab="$TMP_ROOT/$name"
@@ -166,7 +175,7 @@ if [ -n "$kill_after" ]; then
   kill -KILL "$child" 2>/dev/null || true
 fi
 wait "$child" 2>/dev/null || true
-exit 124
+exit 137
 SH
   chmod 0700 "$lab/fakebin/timeout"
 }
@@ -533,6 +542,21 @@ SH
   pass "event agent-status timeout preserves polling and durable signals"
 }
 
+test_herdr_shared_status_contract() {
+  local lab raw
+  lab=$(make_lab herdr-shared-status)
+  make_herdr "$lab" quick quick quick
+  : > "$lab/timeout.log"
+  raw=$(env FM_ROOT_OVERRIDE="$lab" FM_TEST_TIMEOUT_TARGET="agent get" \
+    FM_TEST_TIMEOUT_LOG="$lab/timeout.log" PATH="$lab/fakebin:$BASE_PATH" \
+    bash -c '. "$1"; fm_backend_herdr_agent_status_raw default w1:p2' \
+      _ "$lab/bin/backends/herdr.sh") \
+    || fail "shared Herdr agent-status read failed"
+  [ "$raw" = idle ] \
+    || fail "event deadline changed the shared Herdr agent-status contract: $raw"
+  pass "shared Herdr agent-status reads retain their existing contract"
+}
+
 test_term_ignoring_check() {
   local lab state check
   lab=$(make_lab term-ignoring-check); state="$lab/home/state"
@@ -541,6 +565,7 @@ test_term_ignoring_check() {
   cat > "$check" <<'SH'
 #!/usr/bin/env bash
 trap '' TERM
+printf 'partial check output\n'
 fifo="${0}.fifo"
 mkfifo "$fifo"
 exec 9<> "$fifo"
@@ -557,6 +582,8 @@ SH
     "$state/.watch-triage.log" "authenticated check deadline was not logged"
   assert_absent "$state/.last-check" \
     "timed-out authenticated check advanced the slow-check cadence"
+  assert_no_grep 'partial check output' "$state/.wake-queue" \
+    "timed-out authenticated check surfaced partial output"
   assert_grep 'cycle-exit.status' "$state/.wake-queue" \
     "timed-out authenticated check lost the next actionable signal"
   pass "TERM-ignoring authenticated check is killed without advancing cadence"
@@ -580,6 +607,39 @@ test_crew_state_triage() {
   pass "crew current-state timeout surfaces instead of absorbing supervision"
 }
 
+test_apply_lock_namespace() {
+  local lab claims ready release holder contender_status=0
+  lab=$(make_lab apply-lock-namespace); claims="$lab/claims"
+  ready="$lab/apply-ready"; release="$lab/apply-release"
+  FM_PROCEVENT_CLAIM_ROOT="$claims" bash -c '
+    . "$1/bin/fm-pr-lib.sh"
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-procevent-lib.sh"
+    fm_procevent_apply_lock_acquire wait remote-reply-a || exit 1
+    trap "fm_procevent_apply_lock_release remote-reply-a" EXIT
+    printf "ready\n" > "$2"
+    while [ ! -e "$3" ]; do
+      kill -0 "$4" 2>/dev/null || exit 0
+      sleep 0.02
+    done
+  ' _ "$ROOT" "$ready" "$release" $$ &
+  holder=$!
+  wait_for_file "$ready" || fail "apply-lock namespace holder never acquired"
+  FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed 1 env \
+    FM_PROCEVENT_CLAIM_ROOT="$claims" bash -c '
+      . "$1/bin/fm-pr-lib.sh"
+      . "$1/bin/fm-wake-lib.sh"
+      . "$1/bin/fm-procevent-lib.sh"
+      fm_procevent_source_lock_acquire remote-reply-a.apply || exit 1
+      fm_procevent_source_lock_release remote-reply-a.apply
+    ' _ "$ROOT" || contender_status=$?
+  : > "$release"
+  wait "$holder" 2>/dev/null || true
+  [ "$contender_status" -eq 0 ] \
+    || fail "apply lock collided with valid source id remote-reply-a.apply"
+  pass "apply locks use a namespace disjoint from source locks"
+}
+
 test_apply_lock_symlink() {
   local lab state redirected sentinel
   lab=$(make_lab apply-lock-symlink); state="$lab/home/state"
@@ -600,7 +660,7 @@ SH
   FM_HOME="$lab/home" FM_STATE_OVERRIDE="$state" FM_PROCEVENT_CLAIM_ROOT="$lab/claim-root" \
     "$lab/bin/fm-procevent.sh" reconcile >/dev/null
   assert_absent "$sentinel" "symlinked claim root allowed adapter application"
-  assert_absent "$redirected/source.apply.lock" "symlinked claim root redirected apply-lock state"
+  assert_absent "$redirected/apply-locks/source.lock" "symlinked claim root redirected apply-lock state"
   assert_file "$state/procevent-inbox/source.1.result" "rejected apply lock lost the pending capture"
   assert_absent "$state/procevent-inbox/source.1.handled" "rejected apply lock acknowledged the capture"
   pass "apply lock rejects a symlinked machine-wide claim root"
@@ -621,8 +681,10 @@ CASES=(
   events_capability
   event_socket_discovery
   event_agent_status
+  herdr_shared_status_contract
   term_ignoring_check
   crew_state_triage
+  apply_lock_namespace
   apply_lock_symlink
 )
 

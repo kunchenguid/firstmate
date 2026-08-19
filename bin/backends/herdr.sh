@@ -2937,17 +2937,17 @@ fm_backend_herdr_classify_submit_agent_status() {  # <raw-agent_status>
 # successful send-text), so re-checking server liveness on every poll would
 # only add latency without adding safety.
 fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out
+  out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null) || { printf ''; return 0; }
+  printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null
+}
+
+fm_backend_herdr_event_agent_status_raw() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out status=0
   out=$(fm_run_timed "$FM_BACKEND_HERDR_EVENT_PROBE_TIMEOUT" env \
     HERDR_SESSION="$session" herdr agent get "$pane_id" --session "$session" \
     2>/dev/null) || status=$?
-  if [ "$status" -ne 0 ]; then
-    if [ "$status" -eq 124 ] && declare -F triage_log >/dev/null 2>&1; then
-      triage_log "Herdr event agent-status probe exceeded its 10s bound: $session:$pane_id"
-    fi
-    printf ''
-    return 0
-  fi
+  [ "$status" -eq 0 ] || return "$status"
   printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null
 }
 
@@ -3120,15 +3120,17 @@ fm_backend_herdr_list_live() {  # <session>
 # session's - verified: default -> ~/.config/herdr/herdr.sock, named ->
 # ~/.config/herdr/sessions/<name>/herdr.sock). Empty on any failure.
 fm_backend_herdr_socket_path() {  # <session>
+  local session=$1
+  herdr session list --json 2>/dev/null \
+    | jq -r --arg name "$session" '.sessions[]? | select(.name == $name) | .socket_path // empty' 2>/dev/null \
+    | head -1
+}
+
+fm_backend_herdr_event_socket_path() {  # <session>
   local session=$1 sessions status=0
   sessions=$(fm_run_timed "$FM_BACKEND_HERDR_EVENT_PROBE_TIMEOUT" \
     herdr session list --json 2>/dev/null) || status=$?
-  if [ "$status" -ne 0 ]; then
-    if [ "$status" -eq 124 ] && declare -F triage_log >/dev/null 2>&1; then
-      triage_log "Herdr event socket discovery exceeded its 10s bound: $session"
-    fi
-    return 0
-  fi
+  [ "$status" -eq 0 ] || return "$status"
   printf '%s' "$sessions" \
     | jq -r --arg name "$session" '.sessions[]? | select(.name == $name) | .socket_path // empty' 2>/dev/null \
     | head -1
@@ -3260,8 +3262,13 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   if [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" != 1 ]; then
     fm_backend_herdr_events_capable "$session" || return 2
   fi
-  local sock
-  sock=$(fm_backend_herdr_socket_path "$session")
+  local sock socket_status=0
+  sock=$(fm_backend_herdr_event_socket_path "$session") || socket_status=$?
+  if [ "$socket_status" -ne 0 ]; then
+    fm_timeout_status_is_expired "$socket_status" \
+      && triage_log "Herdr event socket discovery exceeded its 10s bound: $session"
+    return 2
+  fi
   [ -n "$sock" ] || return 2
 
   # Map each window to its herdr pane id (strip the leading "<session>:").
@@ -3285,7 +3292,7 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   done < <(fm_backend_herdr_event_reader_cmd)
   [ "${#reader[@]}" -gt 0 ] || return 2
 
-  local fifo_dir fifo reader_pid line ws status agent raw record hit rc=1 reader_rc=0
+  local fifo_dir fifo reader_pid line ws status agent raw record hit rc=1 reader_rc=0 probe_status
   fifo_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-eventwait.XXXXXX") || return 2
   fifo="$fifo_dir/events"
   if ! mkfifo "$fifo" 2>/dev/null; then
@@ -3314,7 +3321,13 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
       if [ -z "$pane_id" ] || [ "$pane_id" = "$w" ]; then
         continue
       fi
-      raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
+      probe_status=0
+      raw=$(fm_backend_herdr_event_agent_status_raw "$session" "$pane_id") || probe_status=$?
+      if [ "$probe_status" -ne 0 ]; then
+        fm_timeout_status_is_expired "$probe_status" \
+          && triage_log "Herdr event agent-status probe exceeded its 10s bound: $session:$pane_id"
+        continue
+      fi
       [ -n "$raw" ] || continue
       record=$(fm_backend_herdr_normalize_event "$pane_id" "" "$raw" "")
       if hit=$(fm_backend_herdr_apply_transition "$state" "$session" "$record"); then

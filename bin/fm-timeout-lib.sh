@@ -15,6 +15,10 @@
 #       except 124, which means the bound was hit (GNU timeout's convention,
 #       reproduced by the perl and bash fallbacks).
 #
+#   fm_timeout_status_is_expired <status>
+#       True for both deadline statuses produced by supported runners: 124
+#       after normal timeout handling and 137 when kill-after escalation wins.
+#
 # A non-positive bound is not a bound: `timeout 0` and the perl fallback's
 # `alarm 0` both disable the deadline, so callers must reject 0 before calling.
 #
@@ -26,6 +30,13 @@
 # and the bash fallback uses monitor mode to give the bounded child its own
 # process group before signaling its negative pid.
 set -u
+
+fm_timeout_status_is_expired() {
+  case "${1:-}" in
+    124|137) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 fm_timeout_mechanism() {
   if [ "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" = bash ]; then

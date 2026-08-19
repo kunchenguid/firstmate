@@ -90,7 +90,11 @@ fm_procevent_source_lock_path() {
 # step twice. Machine-wide for the same reason the source lock is: separate
 # homes can share one underlying source store.
 fm_procevent_apply_lock_path() {
-  printf '%s/%s.apply.lock\n' "$(fm_procevent_claim_root)" "$1"
+  printf '%s/%s.lock\n' "$(fm_procevent_apply_lock_root)" "$1"
+}
+
+fm_procevent_apply_lock_root() {
+  printf '%s/apply-locks\n' "$(fm_procevent_claim_root)"
 }
 
 fm_procevent_claim_root_prepare() {
@@ -100,10 +104,22 @@ fm_procevent_claim_root_prepare() {
   [ -d "$root" ] && [ ! -L "$root" ] || return 1
 }
 
-fm_procevent_source_lock_acquire() {
-  local id=$1
+fm_procevent_lock_namespace_prepare() {  # <source|apply> <source-id>
+  local namespace=$1 id=$2 root
   fm_procevent_source_id_valid "$id" || return 1
   fm_procevent_claim_root_prepare || return 1
+  case "$namespace" in
+    source) return 0 ;;
+    apply) root=$(fm_procevent_apply_lock_root) ;;
+    *) return 1 ;;
+  esac
+  (umask 077; mkdir -p "$root") || return 1
+  [ -d "$root" ] && [ ! -L "$root" ] || return 1
+}
+
+fm_procevent_source_lock_acquire() {
+  local id=$1
+  fm_procevent_lock_namespace_prepare source "$id" || return 1
   fm_lock_acquire_wait "$(fm_procevent_source_lock_path "$id")"
 }
 
@@ -113,8 +129,7 @@ fm_procevent_source_lock_release() {
 
 fm_procevent_apply_lock_acquire() {  # <wait|nowait> <source-id>
   local mode=$1 id=$2 lock
-  fm_procevent_source_id_valid "$id" || return 1
-  fm_procevent_claim_root_prepare || return 1
+  fm_procevent_lock_namespace_prepare apply "$id" || return 1
   lock=$(fm_procevent_apply_lock_path "$id")
   case "$mode" in
     wait) fm_lock_acquire_wait "$lock" ;;
