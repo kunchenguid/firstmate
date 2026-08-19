@@ -2781,7 +2781,7 @@ fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local raw_status footer_baseline='' allow_rendered=0
+  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -2796,7 +2796,9 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     footer_baseline=$(fm_backend_herdr_rendered_busy_state "$target")
   fi
   while :; do
-    fm_backend_herdr_send_key "$target" Enter || true
+    if fm_backend_herdr_send_key "$target" Enter; then
+      enter_sent=1
+    fi
     if [ "$baseline" = idle ]; then
       verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
         "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
@@ -2828,8 +2830,12 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     fi
     i=$((i + 1))
     if [ "$i" -ge "$retries" ]; then
-      fm_composer_queued_enter_verdict "$verdict" \
-        "$(fm_backend_herdr_queued_enter_busy "$target" "$allow_rendered")"
+      if [ "$enter_sent" -eq 0 ]; then
+        printf 'send-failed'
+      else
+        fm_composer_queued_enter_verdict "$verdict" \
+          "$(fm_backend_herdr_queued_enter_busy "$target" "$allow_rendered")"
+      fi
       return 0
     fi
   done
