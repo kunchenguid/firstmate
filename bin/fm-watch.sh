@@ -34,12 +34,14 @@
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
-#                          turn completes); past that bound busy_turn_over_age
-#                          routes it through the same wedge timer, so it surfaces
-#                          with the identical "stale: ..." reason, escalation
-#                          count, and demand-deep-inspection marker, for human
-#                          inspection only - never an automatic interrupt,
-#                          signal, or restart of the worker or its tool process.
+#                          turn completes). Past that bound, a declared external
+#                          wait or verified captain-held transfer uses the long
+#                          pause recheck cadence; every other pane goes through
+#                          the same wedge timer and surfaces with the identical
+#                          "stale: ..." reason, escalation count, and
+#                          demand-deep-inspection marker, for human inspection
+#                          only - never an automatic interrupt, signal, or restart
+#                          of the worker or its tool process.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -360,22 +362,15 @@ handle_paused_stale() {  # <window> <task> <hash>
 # nothing itself; it only chooses which absorber owns the crossed bound.
 # 0 when the declared-pause cadence took the pane, 1 when the wedge timer did.
 #
-# A busy pane past BUSY_TURN_MAX_SECS is normally a wedge suspect: a hung
-# foreground call hiding behind a busy signature. But a crew that declared
-# `paused:` (or a verified captain-held transfer) is stating that its one
-# long-running foreground call IS the expected wait - a review-hosting scout
-# parked in a single blocking `lavish-axi poll`, a bounded watch loop, a
-# rate-limit sleep - so reading that declaration as a wedge produced the 2026-08
-# false-wedge stream: an escalation, and eventually a demand-deep-inspection
-# escalation, every STALE_ESCALATE_SECS for as long as the review stayed open.
-# The discriminator is the declaration TOGETHER with liveness (the caller has
-# already confirmed the pane is busy), never a blanket silencing of the wedge
-# escalator: a crew that declared nothing, or whose pane is not live, keeps the
-# unchanged wedge path. It also stays bounded, because handle_paused_stale
-# re-surfaces the pause once per PAUSE_RESURFACE_SECS so a forgotten wait cannot
-# rot invisibly. Away mode is deliberately untouched: there the daemon owns pause
-# triage (its classify_stale reads the same declared-pause vocabulary), and this
-# watcher must hand off a plain identity rather than decorate one.
+# A busy pane past BUSY_TURN_MAX_SECS is normally a wedge suspect because a hung
+# foreground call can hide behind a busy signature. A `paused:` declaration or
+# verified captain-held transfer instead identifies that live foreground call as
+# the expected external wait. The caller has already confirmed liveness through
+# the busy verdict, so this exception does not suppress undeclared wedges or
+# alter the separate non-busy classification. handle_paused_stale keeps the
+# exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS. Away mode
+# remains daemon-owned and receives the undecorated wake identity for its own
+# classification.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
   if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then

@@ -1243,10 +1243,12 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
 # of liveness in every existing classifier, so a genuinely hung foreground tool
 # call behind a busy signature ran undetected for 25h. BUSY_TURN_MAX_SECS bounds
 # how long a busy pane may run with no completed turn (state/<id>.turn-ended, or
-# the task's spawn record before any turn completes); past the bound the SAME
-# wedge_timer_check already used for a provably-working non-busy stale takes
-# over, so escalation reuses the identical stale reason, escalation counter, and
-# demand-deep-inspection marker - never an automatic interrupt or restart.
+# the task's spawn record before any turn completes); past the bound, panes
+# without a declared external wait or verified captain-held transfer take the
+# SAME wedge_timer_check already used for a provably-working non-busy stale.
+# Escalation reuses the identical stale reason, escalation counter, and
+# demand-deep-inspection marker - never an
+# automatic interrupt or restart.
 
 test_busy_pane_below_turn_age_bound_is_absorbed() {
   local dir state fakebin out capture_file window key sig pid
@@ -1446,13 +1448,8 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
 }
 
 # --- declared pause + busy pane: the busy-turn bound must honor the declaration
-# 2026-08 review-scout incident (#2614): a scout hosting a Lavish review declares
-# `paused:` and then blocks in ONE long foreground call (`lavish-axi poll`) that
-# never completes a turn. Its pane reads BUSY, so the stale path - which already
-# honors a declared pause - never runs; instead the busy-pane completed-turn
-# bound routed the pane straight into wedge_timer_check, which re-escalated
-# "possible wedge, escalation N" (and, past the threshold, demand-deep-inspection)
-# every FM_STALE_ESCALATE_SECS for as long as the review stayed open.
+# A single foreground call can keep a declared external wait semantically busy
+# past the completed-turn bound, bypassing the ordinary stale-pause path.
 # This fixture pins all three halves of the contract: the declared pause is
 # absorbed instead of wedged (A), it is still rechecked on the long
 # PAUSE_RESURFACE_SECS cadence so a forgotten wait cannot rot invisibly (B), and
