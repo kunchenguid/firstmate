@@ -859,6 +859,23 @@ test_archived_decision_without_an_answer_still_fails_the_gate() {
   fi
   assert_grep "archived by backlog retention" "$home/archived-repair.err" \
     "repair did not report why the archived decision could not be recorded"
+
+  # Re-holding the identity cannot record the missing answer either, so it must
+  # refuse for the true reason instead of reporting the decision as resolved.
+  if run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample \
+    > "$home/archived-hold.out" 2> "$home/archived-hold.err"; then
+    fail "re-holding an archived decision with no recorded captain answer was accepted"
+  fi
+  assert_no_grep "already durably resolved" "$home/archived-hold.err" \
+    "the refusal claimed an unanswered archived decision was durably resolved"
+  assert_grep "closed with no recorded captain answer" "$home/archived-hold.err" \
+    "the refusal did not report that the decision was closed with no captain answer"
+  assert_grep "archived by backlog retention" "$home/archived-hold.err" \
+    "the refusal did not report that backlog retention had archived the record"
+  assert_no_grep "$hold" "$home/data/backlog.md" \
+    "the refused hold recreated a live backlog row for the archived decision"
+
   if run_decisions "$home" verify "$id" > "$home/still-shut.out" 2> "$home/still-shut.err"; then
     fail "a refused repair still satisfied the completion gate"
   fi

@@ -129,9 +129,11 @@
 # retrying could ever pass it again - a failure mode that only appeared when a
 # review went WELL, because answering more decisions over a longer session is
 # exactly what pushes the earliest ones past the retention window. Every read that
-# asks whether a durable captain decision EXISTS therefore uses task_show_durable,
-# which consults the active backlog and then the archive. Every write stays on
-# task_show, because the archive is a record tasks-axi cannot rewrite, and a
+# asks whether a durable captain decision EXISTS therefore consults the active
+# backlog and then the archive, through task_show_durable, or - where the refusal
+# depends on which of the two files holds the record, as in `hold` - through those
+# same two reads in that order. Every write stays on task_show, because the
+# archive is a record tasks-axi cannot rewrite, and a
 # mutation path that cannot reach its target says so instead of reporting the
 # record as absent. bin/fm-tasks-axi-lib.sh owns the archived read itself.
 set -eu
@@ -386,15 +388,20 @@ verify_hold_active() {  # <hold-id>
   [ "$hold_kind" = captain ] || fail "backlog item $id is not held for the captain"
 }
 
+# On success it publishes the record it read as HOLD_RESOLVED_SHOW, so the
+# idempotent-retry callers read the durable record once rather than twice.
+HOLD_RESOLVED_SHOW=''
 verify_hold_resolved() {  # <hold-id>
   local id=$1 show state kind body
+  HOLD_RESOLVED_SHOW=''
   show=$(task_show_durable "$id") || return 1
   state=$(show_field "$show" state)
   kind=$(show_field "$show" kind)
   body=$(show_field "$show" body)
   [ "$state" = "done" ] || return 1
   [ "$kind" = captain ] || return 1
-  body_has_resolution_record "$body"
+  body_has_resolution_record "$body" || return 1
+  HOLD_RESOLVED_SHOW=$show
 }
 
 verify_hold_durable() {  # <hold-id>
@@ -440,7 +447,7 @@ command_id() {
 }
 
 command_hold() {
-  local origin=${1:-} key=${2:-} title='' reason='' repo='' id show state kind existing_title body
+  local origin=${1:-} key=${2:-} title='' reason='' repo='' id show='' found=0 archived=0 state kind existing_title existing_body body
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -462,10 +469,25 @@ command_hold() {
   id=$(hold_id "$origin" "$key")
   # The identity check spans the archive so a decision retention has already filed
   # is recognised as taken, instead of being recreated as a colliding live row.
-  if show=$(task_show_durable "$id"); then
+  if show=$(task_show "$id"); then
+    found=1
+  elif show=$(task_show_archived "$id"); then
+    found=1
+    archived=1
+  fi
+  if [ "$found" = 1 ]; then
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
+    existing_body=$(show_field "$show" body)
+    # An archived row always renders done, so a close that never recorded the
+    # captain's answer must not be reported as a decision the captain resolved.
+    if [ "$archived" = 1 ] && [ "$state" = "done" ] && ! body_has_resolution_record "$existing_body"; then
+      fail "captain decision $id was closed with no recorded captain answer and then archived by backlog \
+retention into $(fm_tasks_axi_archive_path "$FM_HOME"), which tasks-axi cannot rewrite; neither repair \
+nor a fresh hold on this decision key can record the missing answer, and $key stays in the recorded \
+decision inventory of $origin, so verify keeps refusing this origin"
+    fi
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
@@ -618,8 +640,7 @@ command_resolve() {
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_resolved "$id"; then
-    hold_show=$(task_show_durable "$id")
-    hold_body=$(show_field "$hold_show" body)
+    hold_body=$(show_field "$HOLD_RESOLVED_SHOW" body)
     verify_resolution_identity "$id" "$hold_body" "$DECISION_DIGEST" "$routed_csv"
     printf 'resolved: %s\n' "$id"
     return 0
@@ -691,8 +712,7 @@ close_unrouted_hold() {  # <mode> <outcome-word> <origin-id> <decision-key> <fla
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_resolved "$id"; then
-    hold_show=$(task_show_durable "$id")
-    hold_body=$(show_field "$hold_show" body)
+    hold_body=$(show_field "$HOLD_RESOLVED_SHOW" body)
     verify_resolution_identity "$id" "$hold_body" "$DECISION_DIGEST" "$ROUTED_NONE"
     printf '%s: %s\n' "$outcome" "$id"
     return 0
