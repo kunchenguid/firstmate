@@ -31,11 +31,11 @@
 #   3. The tree is clean. Uncommitted work is unlanded work.
 #   4. There are no stashes. A stash is unlanded work that a clean tree does not
 #      show, and nobody is watching an idle copy to notice it disappear.
-# Checks 3 and 4 read git and change nothing. A copy that fails any check keeps
-# its build output; the sweep says which check failed and moves on. Every check
-# treats "could not determine" as "owned": an unreadable pool, an unparseable
-# status, a path that is not an inspectable git worktree, or a git command that
-# fails all skip the copy rather than assume it is free.
+# Checks 3 and 4 read git and change nothing. A copy with a proven owner keeps
+# its build output and is reported. An ownership input that is absent,
+# unreadable, malformed, or incomplete refuses reclamation at that input's
+# scope: task-record enumeration refuses the whole sweep, and pool or worktree
+# inspection refuses that project before any of its copies are touched.
 #
 # One race is left open deliberately. A copy can be leased in the moment between
 # the pool reporting it available and the removal running. Closing that would
@@ -66,6 +66,11 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 
 sweep_die() { printf 'fm-next-cache-sweep: %s\n' "$1" >&2; exit 2; }
 
+sweep_incomplete() {
+  printf 'sweep: incomplete ownership input: %s; reclamation refused\n' "$1" >&2
+  return 1
+}
+
 sweep_usage() {
   cat <<'TXT'
 Usage: fm-next-cache-sweep.sh [--dry-run] [<project-dir>...]
@@ -77,8 +82,9 @@ With no project directory, sweeps every project clone under $FM_HOME/projects.
 
 A copy is swept only when the pool reports it available, no task record in this
 home or a registered secondmate home names it, its tree is clean, and it holds
-no stashes. Anything else is skipped and reported. Read this script's header for
-the full rule, and bin/fm-next-cache-lib.sh's for what counts as build output.
+no stashes. Proven owners are skipped and reported; incomplete ownership input
+refuses its whole scope. Read this script's header for the full rule, and
+bin/fm-next-cache-lib.sh's for what counts as build output.
 TXT
 }
 
@@ -104,57 +110,118 @@ command -v python3 >/dev/null 2>&1 \
 # plus every locally registered secondmate's. A remote secondmate's home lives on
 # another machine and cannot hold this machine's pool, so it is not consulted.
 TASK_STATE_DIRS=
-TASK_RECORD_ERROR=
+sweep_resolve_directory() {
+  CDPATH='' cd -- "$1" 2>/dev/null && pwd -P
+}
+
+sweep_path_identity() {  # <path>
+  local resolved
+  resolved=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || return 1
+  if [ "$(uname)" = Darwin ]; then
+    stat -L -f '%d:%i' "$resolved" 2>/dev/null
+  else
+    stat -L -c '%d:%i' "$resolved" 2>/dev/null
+  fi
+}
+
 sweep_task_record_state_dirs() {
-  local registry="$DATA/secondmates.md" registry_contents line home
+  local registry="$DATA/secondmates.md" registry_contents line home resolved_home
   TASK_STATE_DIRS=$STATE
-  if [ ! -e "$registry" ] && [ ! -L "$registry" ]; then return 0; fi
-  if [ ! -f "$registry" ] || ! registry_contents=$(cat "$registry" 2>/dev/null); then
-    TASK_RECORD_ERROR="cannot read secondmate registry: $registry"
-    return 1
+  if [ ! -f "$registry" ] || [ -L "$registry" ] || [ ! -r "$registry" ] \
+    || ! registry_contents=$(cat "$registry" 2>/dev/null); then
+    sweep_incomplete "cannot read secondmate registry: $registry"
+    return
   fi
   while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in '- '*) ;; *) continue ;; esac
-    if ! secondmate_registry_parse_line "$line"; then
-      TASK_RECORD_ERROR="malformed secondmate registry entry in $registry: $line"
-      return 1
-    fi
-    if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then continue; fi
-    home=$SECONDMATE_REGISTRY_HOME
-    if [ ! -e "$home" ] && [ ! -L "$home" ]; then
-      printf 'sweep: registered local secondmate home is absent: %s; no local task records to inspect\n' \
-        "$home" >&2
-      continue
-    fi
-    TASK_STATE_DIRS="$TASK_STATE_DIRS"$'\n'"$home/state"
+    case "$line" in
+      '- '*)
+        if ! secondmate_registry_parse_line "$line"; then
+          sweep_incomplete "malformed secondmate registry entry in $registry: $line"
+          return
+        fi
+        if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ]; then
+          home=$SECONDMATE_REGISTRY_HOME
+          case "$home" in
+            /*) ;;
+            *)
+              sweep_incomplete "unsafe non-absolute secondmate home: $home"
+              return
+              ;;
+          esac
+          if ! resolved_home=$(sweep_resolve_directory "$home"); then
+            sweep_incomplete "cannot resolve registered local secondmate home: $home"
+            return
+          fi
+          TASK_STATE_DIRS="$TASK_STATE_DIRS"$'\n'"$resolved_home/state"
+        fi
+        ;;
+    esac
   done <<EOT
 $registry_contents
 EOT
 }
 
 TASK_WORKTREES=
+TASK_WORKTREE_IDENTITIES=
 sweep_load_task_worktrees() {
-  local state_dir meta worktrees
+  local state_dir meta meta_contents worktree kind remote_host identity
   TASK_WORKTREES=
-  TASK_RECORD_ERROR=
+  TASK_WORKTREE_IDENTITIES=
   sweep_task_record_state_dirs || return 1
   while IFS= read -r state_dir; do
-    [ -n "$state_dir" ] || continue
+    if [ -z "$state_dir" ]; then
+      sweep_incomplete "task state directory enumeration returned an empty path"
+      return
+    fi
     if [ ! -d "$state_dir" ] || [ ! -r "$state_dir" ] || [ ! -x "$state_dir" ]; then
-      TASK_RECORD_ERROR="cannot read task state directory: $state_dir"
-      return 1
+      sweep_incomplete "cannot read task state directory: $state_dir"
+      return
     fi
     for meta in "$state_dir"/*.meta; do
-      if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then continue; fi
-      if [ ! -f "$meta" ] || ! worktrees=$(sed -n 's/^worktree=//p' "$meta" 2>/dev/null); then
-        TASK_RECORD_ERROR="cannot read task metadata: $meta"
-        return 1
-      fi
-      [ -n "$worktrees" ] || continue
-      if [ -n "$TASK_WORKTREES" ]; then
-        TASK_WORKTREES="$TASK_WORKTREES"$'\n'"$worktrees"
-      else
-        TASK_WORKTREES=$worktrees
+      if [ -e "$meta" ] || [ -L "$meta" ]; then
+        if [ ! -f "$meta" ] || [ -L "$meta" ] || [ ! -r "$meta" ] \
+          || ! meta_contents=$(cat "$meta" 2>/dev/null); then
+          sweep_incomplete "cannot read task metadata: $meta"
+          return
+        fi
+        worktree=$(printf '%s\n' "$meta_contents" | sed -n 's/^worktree=//p')
+        kind=$(printf '%s\n' "$meta_contents" | sed -n 's/^kind=//p')
+        remote_host=$(printf '%s\n' "$meta_contents" | sed -n 's/^remote_host=//p')
+        case "$worktree" in
+          ''|*$'\n'*)
+            sweep_incomplete "task metadata has no single worktree: $meta"
+            return
+            ;;
+          /*) ;;
+          *)
+            sweep_incomplete "task metadata has a non-absolute worktree: $meta ($worktree)"
+            return
+            ;;
+        esac
+        case "$kind$remote_host" in
+          *$'\n'*)
+            sweep_incomplete "task metadata has ambiguous placement: $meta"
+            return
+            ;;
+        esac
+        if [ -n "$remote_host" ]; then
+          if [ "$kind" != secondmate ]; then
+            sweep_incomplete "task metadata has an invalid remote placement: $meta"
+            return
+          fi
+        else
+          if ! identity=$(sweep_path_identity "$worktree"); then
+            sweep_incomplete "cannot resolve task-record worktree: $worktree"
+            return
+          fi
+          if [ -n "$TASK_WORKTREES" ]; then
+            TASK_WORKTREES="$TASK_WORKTREES"$'\n'"$worktree"
+            TASK_WORKTREE_IDENTITIES="$TASK_WORKTREE_IDENTITIES"$'\n'"$identity"
+          else
+            TASK_WORKTREES=$worktree
+            TASK_WORKTREE_IDENTITIES=$identity
+          fi
+        fi
       fi
     done
   done <<EOT
@@ -162,30 +229,17 @@ $TASK_STATE_DIRS
 EOT
 }
 
-sweep_path_identity() {  # <path>
-  if [ "$(uname)" = Darwin ]; then
-    stat -f '%d:%i' "$1" 2>/dev/null
-  else
-    stat -c '%d:%i' "$1" 2>/dev/null
-  fi
-}
-
 # Does any task record name <path> as its worktree?
 sweep_task_owns() {  # <path>
-  local path=$1 path_identity recorded recorded_identity
+  local path=$1 path_identity
   if [ -n "$TASK_WORKTREES" ] && printf '%s\n' "$TASK_WORKTREES" | grep -Fxq -- "$path"; then
     return 0
   fi
   path_identity=$(sweep_path_identity "$path") || return 2
-  [ -n "$TASK_WORKTREES" ] || return 1
-  while IFS= read -r recorded; do
-    [ -n "$recorded" ] || continue
-    if [ ! -e "$recorded" ] && [ ! -L "$recorded" ]; then continue; fi
-    recorded_identity=$(sweep_path_identity "$recorded") || return 2
-    if [ "$recorded_identity" = "$path_identity" ]; then return 0; fi
-  done <<EOT
-$TASK_WORKTREES
-EOT
+  if [ -n "$TASK_WORKTREE_IDENTITIES" ] \
+    && printf '%s\n' "$TASK_WORKTREE_IDENTITIES" | grep -Fxq -- "$path_identity"; then
+    return 0
+  fi
   return 1
 }
 
@@ -211,19 +265,22 @@ if not isinstance(pool, list):
 for entry in pool:
     if not isinstance(entry, dict):
         sys.exit(1)
-    status = entry.get("status") or ""
-    path = entry.get("path") or ""
-    if path:
-        print("%s\t%s" % (status, path))
+    status = entry.get("status")
+    path = entry.get("path")
+    if not isinstance(status, str) or not status:
+        sys.exit(1)
+    if not isinstance(path, str) or not path or not path.startswith("/"):
+        sys.exit(1)
+    if any(c in status or c in path for c in "\t\r\n"):
+        sys.exit(1)
+    print("%s\t%s" % (status, path))
 '
 }
 
 # Why <worktree> may not be swept, printed as "<class><tab><reason>"; empty when
-# it may be. The class separates a copy shown to have an owner (`owned`) from
-# one whose ownership could not be established at all (`undetermined`). Both
-# skip, but they are reported differently: an undetermined copy is always named,
-# because the same broken inspection that hides its owner also hides how much it
-# is holding, and a silent skip there would read as "nothing here".
+# it may be. `owned` is a complete answer for that copy. `undetermined` makes
+# the project's preflight incomplete, so none of that project's copies may be
+# touched.
 sweep_unowned_reason() {  # <status> <worktree>
   local status=$1 wt=$2 task_ownership
   # Only the pool's own word for "available" clears this check. Any other
@@ -274,21 +331,103 @@ sweep_unowned_reason() {  # <status> <worktree>
   printf '\n'
 }
 
+sweep_project_plan() {  # <entries>
+  local entries=$1 status wt verdict class reason plan='' record
+  while IFS=$'\t' read -r status wt; do
+    if [ -n "$status$wt" ]; then
+      if [ -z "$status" ] || [ -z "$wt" ]; then
+        sweep_incomplete "pool entry did not yield a complete status and path"
+        return
+      fi
+      if [ ! -d "$wt" ]; then
+        sweep_incomplete "pool worktree is not an inspectable directory: $wt"
+        return
+      fi
+      verdict=$(sweep_unowned_reason "$status" "$wt")
+      if [ -n "$verdict" ]; then
+        class=${verdict%%	*}
+        reason=${verdict#*	}
+        if [ "$class" = undetermined ]; then
+          sweep_incomplete "$wt could not be assessed ($reason)"
+          return
+        fi
+        record="owned"$'\t'"$reason"$'\t'"$wt"
+      else
+        record="free"$'\t'"-"$'\t'"$wt"
+      fi
+      if [ -n "$plan" ]; then
+        plan="$plan"$'\n'"$record"
+      else
+        plan=$record
+      fi
+    fi
+  done <<EOT
+$entries
+EOT
+  printf '%s\n' "$plan"
+}
+
+sweep_apply_project_plan() {  # <plan>
+  local plan=$1 action reason wt
+  while IFS=$'\t' read -r action reason wt; do
+    if [ -n "$action" ]; then
+      if [ "$action" = owned ]; then
+        fm_next_cache_total_kb "$wt" >/dev/null
+        if [ "$FM_NEXT_CACHE_TOTAL_KB" -gt 0 ]; then
+          printf 'sweep: skipped %s (%s), holding %s\n' \
+            "$wt" "$reason" "$(fm_next_cache_human_kb "$FM_NEXT_CACHE_TOTAL_KB")"
+          SKIPPED=$(( SKIPPED + 1 ))
+        fi
+      else
+        if [ "$DRY_RUN" = 1 ]; then
+          fm_next_cache_report "$wt" "sweep" || RC=1
+        else
+          fm_next_cache_reclaim "$wt" "sweep" || RC=1
+        fi
+        if [ "$FM_NEXT_CACHE_TOTAL_KB" -gt 0 ]; then
+          TOTAL_KB=$(( TOTAL_KB + FM_NEXT_CACHE_TOTAL_KB ))
+          RECLAIMED=$(( RECLAIMED + 1 ))
+        fi
+      fi
+    fi
+  done <<EOT
+$plan
+EOT
+}
+
+sweep_project() {  # <project>
+  local project=$1 project_real entries plan
+  if ! project_real=$(sweep_resolve_directory "$project"); then
+    sweep_incomplete "cannot enter project: $project"
+    return
+  fi
+  if ! entries=$(sweep_pool_entries "$project_real"); then
+    sweep_incomplete "cannot read the worktree pool for $project_real"
+    return
+  fi
+  if ! plan=$(sweep_project_plan "$entries"); then
+    return 1
+  fi
+  sweep_apply_project_plan "$plan"
+}
+
 if [ "${#PROJECT_ARGS[@]}" -gt 0 ]; then
   TARGETS=("${PROJECT_ARGS[@]}")
 else
   TARGETS=()
   for dir in "$PROJECTS"/*/; do
-    [ -d "$dir" ] || continue
-    dir=${dir%/}
-    git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 || continue
-    TARGETS+=("$dir")
+    if [ -d "$dir" ]; then
+      dir=${dir%/}
+      if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+        TARGETS+=("$dir")
+      fi
+    fi
   done
 fi
 
 [ "${#TARGETS[@]}" -gt 0 ] || sweep_die "no project clones to sweep under $PROJECTS"
 
-sweep_load_task_worktrees || sweep_die "$TASK_RECORD_ERROR"
+sweep_load_task_worktrees || sweep_die "task-record ownership inputs are incomplete"
 
 RC=0
 TOTAL_KB=0
@@ -296,52 +435,10 @@ RECLAIMED=0
 SKIPPED=0
 INCOMPLETE=0
 for project in "${TARGETS[@]}"; do
-  if ! project_real=$(CDPATH='' cd -- "$project" 2>/dev/null && pwd -P); then
-    printf 'sweep: cannot enter project %s\n' "$project" >&2
+  if ! sweep_project "$project"; then
     RC=1
     INCOMPLETE=$(( INCOMPLETE + 1 ))
-    continue
   fi
-  if ! entries=$(sweep_pool_entries "$project_real"); then
-    printf 'sweep: cannot read the worktree pool for %s\n' "$project_real" >&2
-    RC=1
-    INCOMPLETE=$(( INCOMPLETE + 1 ))
-    continue
-  fi
-  while IFS=$'\t' read -r status wt; do
-    [ -n "$wt" ] || continue
-    [ -d "$wt" ] || continue
-    verdict=$(sweep_unowned_reason "$status" "$wt")
-    if [ -n "$verdict" ]; then
-      class=${verdict%%	*}
-      reason=${verdict#*	}
-      fm_next_cache_total_kb "$wt" >/dev/null
-      if [ "$class" = undetermined ]; then
-        # Always named: the failed inspection that hid the owner also hid the
-        # size, so "holding 0" here means "could not measure", not "empty".
-        printf 'sweep: skipped %s (%s); its contents could not be assessed\n' "$wt" "$reason"
-        SKIPPED=$(( SKIPPED + 1 ))
-      elif [ "$FM_NEXT_CACHE_TOTAL_KB" -gt 0 ]; then
-        # An owned copy is worth a line only when it is actually holding
-        # something; an idle copy that never built anything is not news.
-        printf 'sweep: skipped %s (%s), holding %s\n' \
-          "$wt" "$reason" "$(fm_next_cache_human_kb "$FM_NEXT_CACHE_TOTAL_KB")"
-        SKIPPED=$(( SKIPPED + 1 ))
-      fi
-      continue
-    fi
-    if [ "$DRY_RUN" = 1 ]; then
-      fm_next_cache_report "$wt" "sweep" || RC=1
-    else
-      fm_next_cache_reclaim "$wt" "sweep" || RC=1
-    fi
-    if [ "$FM_NEXT_CACHE_TOTAL_KB" -gt 0 ]; then
-      TOTAL_KB=$(( TOTAL_KB + FM_NEXT_CACHE_TOTAL_KB ))
-      RECLAIMED=$(( RECLAIMED + 1 ))
-    fi
-  done <<EOT
-$entries
-EOT
 done
 
 sweep_copies() {  # <count>
@@ -359,7 +456,7 @@ fi
 
 if [ "$RECLAIMED" -eq 0 ]; then
   if [ "$SKIPPED" -gt 0 ]; then
-    printf 'sweep: nothing to reclaim; %s were skipped as owned or unassessable (listed above)%s\n' \
+    printf 'sweep: nothing to reclaim; %s were skipped as owned (listed above)%s\n' \
       "$(sweep_copies "$SKIPPED")" "$INCOMPLETE_NOTE"
   elif [ "$INCOMPLETE" -gt 0 ]; then
     printf 'sweep: nothing to reclaim in inspected projects%s\n' "$INCOMPLETE_NOTE"
