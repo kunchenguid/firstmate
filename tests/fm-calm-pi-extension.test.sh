@@ -406,7 +406,7 @@ JS
 }
 
 test_calm_assistant_layout_field_check_and_restore() {
-  local fixture out status
+  local fixture out output_file status
   if ! command -v node >/dev/null 2>&1; then
     echo "skip: node not found for Pi calm assistant-layout field-check test"
     return 0
@@ -430,7 +430,10 @@ test_calm_assistant_layout_field_check_and_restore() {
     '}' \
     >"$fixture/project/node_modules/@earendil-works/pi-coding-agent/index.js"
 
-  out=$(cd "$fixture/project" && node --input-type=module 2>&1 <<'JS'
+  # Redirect to a file instead of capturing via $(...): stock macOS Bash 3.2 cannot
+  # parse a heredoc body inside command substitution.
+  output_file="$fixture/node-output"
+  (cd "$fixture/project" && node --input-type=module) >"$output_file" 2>&1 <<'JS'
 const pkg = await import("@earendil-works/pi-coding-agent");
 const { AssistantMessageComponent } = pkg;
 
@@ -513,8 +516,8 @@ assistant.installCalmAssistantLayout();
   }
 }
 JS
-)
   status=$?
+  out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm assistant-layout field-check and restore-on-throw path failed: $out"
   [ -z "$out" ] || fail "Pi calm assistant-layout field-check test printed output: $out"
   pass "the collapsed-thinking adapter fails loudly on a renamed hiddenThinkingLabel/hideThinkingBlock field only while Calm actively hides thinking, renders untouched when Calm is off or during stock export, and restores lastMessage even when the original updateContent throws mid-render"
