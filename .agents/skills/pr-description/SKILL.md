@@ -77,11 +77,11 @@ The 2026-08-19 observations below come from browser reads of the same probe body
 
 | Feature | GitHub PR body | Codebase MR description | Required fallback |
 | --- | --- | --- | --- |
-| Mermaid fenced block | Live result recorded after probe | Live result recorded after probe | Use an ASCII tree, focused diff, or table where Mermaid does not render. |
-| Details block | Live result recorded after probe | Live result recorded after probe | Use a short `Implementation and traceability` section with compact bullets where it does not collapse. |
-| Markdown table | Live result recorded after probe | Live result recorded after probe | Use short labeled bullets where it does not render as a table. |
-| Task list | Live result recorded after probe | Live result recorded after probe | Use `Done`, `Pending`, and `Not verified` labeled bullets where interactive task boxes do not render. |
-| Markdown image | Live result recorded after probe | Live result recorded after probe | Use a descriptive link and equivalent alt text where the image does not render inline. |
+| Mermaid fenced block | Supported; the live body replaced the source with a rendered Mermaid iframe. | Supported; the live description replaced the source with an interactive SVG. | If a future target renderer does not support Mermaid, use an ASCII tree, focused diff, or table. |
+| Details block | Supported; the live body rendered the summary and kept the body collapsed by default. | Supported; the live description rendered a closed `details` element and hid its body by default. | If a future target renderer does not collapse it, use a short `Implementation and traceability` section with compact bullets. |
+| Markdown table | Supported; the live body rendered header and data cells as a table. | Supported; the live description rendered header and data cells as a table. | If a future target renderer does not support tables, use short labeled bullets. |
+| Task list | Supported; the live body rendered disabled task checkboxes. | Supported; the live description rendered task checkboxes, whose checked state can be toggled by an authorized viewer. | If a future target renderer does not support task boxes, use `Done`, `Pending`, and `Not verified` labeled bullets. |
+| Markdown image | Supported; the live body displayed the image inline. | Supported for a directly fetchable HTTPS image URL; the live description loaded the image inline at its natural dimensions. | Use a direct asset URL rather than a redirecting web-page URL; if the target still cannot load it, provide a descriptive link and equivalent alt text. |
 
 ## General description shape
 
