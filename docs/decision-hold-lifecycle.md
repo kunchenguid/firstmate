@@ -34,8 +34,9 @@ All four require a non-empty captain decision file and record the same resolutio
 An exact retry is idempotent, while a changed decision or, for `resolve`, a changed routed-task set is rejected.
 
 The `resolve` subcommand is the routed path and additionally requires at least one existing dependent task whose structured `blocked-by` edge points to the hold.
-It clears each dependency edge through tasks-axi and marks the hold Done only after those writes succeed.
+It clears each still-live dependency edge through tasks-axi and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, and a failed intermediate step leaves the hold open.
+A routed task counts wherever it durably lives, so a retry is not defeated by routed work that ordinary pruning archived after an earlier attempt recorded the resolution and cleared its edge, while a routed task in neither tier is still refused.
 
 The public `answer` and `decline` subcommands share one unrouted close implementation and differ only in the `Resolution mode:` they record and the outcome word they print, so neither can drift into a weaker ordinary close than the other.
 Both ordinarily record `(none)` as the routed identities and refuse while any task in the same backlog is still blocked by the hold, because releasing routed work without recording it is `resolve`'s job.
