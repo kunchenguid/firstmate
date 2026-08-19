@@ -142,6 +142,7 @@ family_for_basename() {
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
+    fm-prime-agent-lib.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
@@ -931,6 +932,15 @@ families_for_changed_path() {
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
+      ;;
+    bin/fm-prime-agent-lib.sh)
+      # Retirement of prime-agent's detached daemon sessions: its own unit
+      # suite (pure-contract-unit), the teardown that sources it and calls it
+      # at every worktree release (pr-forge), and the fake-root fixture that
+      # materializes it for that teardown (session-bootstrap).
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' pr-forge
+      printf '%s\n' session-bootstrap
       ;;
     bin/fm-nm-run-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both

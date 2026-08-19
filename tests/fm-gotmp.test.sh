@@ -78,6 +78,12 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
+  # fm-prime-agent-lib.sh (and the fm-timeout-lib.sh it bounds its CLI calls
+  # with): teardown sources it unconditionally to retire prime-agent's detached
+  # daemon sessions. Neither does anything in this fixture, whose task has
+  # harness=claude, but both are real siblings teardown now requires.
+  ln -s "$ROOT/bin/fm-prime-agent-lib.sh" "$fake/bin/fm-prime-agent-lib.sh"
+  ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -156,6 +162,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
+  # Same newly-required prime-agent siblings as the builder above.
+  ln -s "$ROOT/bin/fm-prime-agent-lib.sh" "$fake/bin/fm-prime-agent-lib.sh"
+  ln -s "$ROOT/bin/fm-timeout-lib.sh" "$fake/bin/fm-timeout-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
