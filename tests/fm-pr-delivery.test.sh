@@ -260,7 +260,7 @@ test_comment_review_then_clearance() {
   fixture="$TMP_ROOT/fix-commentreview"
   setup_project "$home" "$fixture"
   write_open "$fixture" acme/alpha '[{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
-  write_view "$fixture" acme/alpha 17 '{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"COMMENTED","body":"Please update the validation.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_view "$fixture" acme/alpha 17 '{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"COMMENTED","body":"Validation needs updating before merge.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/comment17.meta" \
     'window=fm-comment17' "worktree=$home/projects/comment17" 'project=alpha' \
     'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
@@ -268,12 +268,12 @@ test_comment_review_then_clearance() {
   [ -z "$out" ] || fail "commented review requesting a change should hold delivery"
   run_delivery "$home" "$fixture" show | grep -Fq 'review-issue' \
     || fail "commented review did not produce a review-issue hold"
-  write_view "$fixture" acme/alpha 17 '{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"COMMENTED","body":"Please update the validation.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}},{"state":"COMMENTED","body":"FYI.","submittedAt":"2026-08-19T00:00:30Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_view "$fixture" acme/alpha 17 '{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"COMMENTED","body":"Validation needs updating before merge.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}},{"state":"COMMENTED","body":"FYI.","submittedAt":"2026-08-19T00:00:30Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   [ -z "$out" ] || fail "benign follow-up must not clear a reviewer request"
   run_delivery "$home" "$fixture" show | grep -Fq 'review-issue' \
     || fail "benign follow-up removed the reviewer request hold"
-  write_view "$fixture" acme/alpha 17 '{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"COMMENTED","body":"Please update the validation.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}},{"state":"APPROVED","body":"","submittedAt":"2026-08-19T00:01:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_view "$fixture" acme/alpha 17 '{"number":17,"url":"https://github.com/acme/alpha/pull/17","headRefName":"fm/comment17","headRefOid":"qqq","baseRefName":"main","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviews":{"nodes":[{"state":"COMMENTED","body":"Validation needs updating before merge.","submittedAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}},{"state":"APPROVED","body":"","submittedAt":"2026-08-19T00:01:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
     || fail "cleared commented review did not become eligible"
@@ -286,7 +286,7 @@ test_pr_comment_then_clearance() {
   fixture="$TMP_ROOT/fix-prcomment"
   setup_project "$home" "$fixture"
   write_open "$fixture" acme/alpha '[{"number":22,"url":"https://github.com/acme/alpha/pull/22","headRefName":"fm/comment22","headRefOid":"ttt","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
-  write_view "$fixture" acme/alpha 22 '{"number":22,"url":"https://github.com/acme/alpha/pull/22","headRefName":"fm/comment22","headRefOid":"ttt","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"Please update validation.","createdAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_view "$fixture" acme/alpha 22 '{"number":22,"url":"https://github.com/acme/alpha/pull/22","headRefName":"fm/comment22","headRefOid":"ttt","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"Could you add a regression test?","createdAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/comment22.meta" \
     'window=fm-comment22' "worktree=$home/projects/comment22" 'project=alpha' \
     'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
@@ -294,16 +294,33 @@ test_pr_comment_then_clearance() {
   [ -z "$out" ] || fail "ordinary PR comment requesting a change should hold delivery"
   run_delivery "$home" "$fixture" show | grep -Fq 'review-issue' \
     || fail "ordinary PR comment did not produce a review-issue hold"
-  write_view "$fixture" acme/alpha 22 '{"number":22,"url":"https://github.com/acme/alpha/pull/22","headRefName":"fm/comment22","headRefOid":"ttt","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"Please update validation.","createdAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}},{"body":"FYI.","createdAt":"2026-08-19T00:00:30Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_view "$fixture" acme/alpha 22 '{"number":22,"url":"https://github.com/acme/alpha/pull/22","headRefName":"fm/comment22","headRefOid":"ttt","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"Could you add a regression test?","createdAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}},{"body":"FYI.","createdAt":"2026-08-19T00:00:30Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   [ -z "$out" ] || fail "benign PR-comment follow-up must not clear a reviewer request"
   run_delivery "$home" "$fixture" show | grep -Fq 'review-issue' \
     || fail "benign PR-comment follow-up removed the reviewer request hold"
-  write_view "$fixture" acme/alpha 22 '{"number":22,"url":"https://github.com/acme/alpha/pull/22","headRefName":"fm/comment22","headRefOid":"ttt","baseRefName":"main","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[{"state":"APPROVED","body":"","submittedAt":"2026-08-19T00:01:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"Please update validation.","createdAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_view "$fixture" acme/alpha 22 '{"number":22,"url":"https://github.com/acme/alpha/pull/22","headRefName":"fm/comment22","headRefOid":"ttt","baseRefName":"main","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"author"},"reviews":{"nodes":[{"state":"APPROVED","body":"","submittedAt":"2026-08-19T00:01:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"comments":{"nodes":[{"body":"Could you add a regression test?","createdAt":"2026-08-19T00:00:00Z","author":{"login":"reviewer"}}],"pageInfo":{"hasPreviousPage":false}},"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
     || fail "approved ordinary PR comment request did not become eligible"
   pass "ordinary PR comments block until clearance"
+}
+
+test_closed_snapshot_holds_delivery() {
+  local home fixture out
+  home=$(make_world closedsnapshot)
+  fixture="$TMP_ROOT/fix-closedsnapshot"
+  setup_project "$home" "$fixture"
+  write_open "$fixture" acme/alpha '[{"number":24,"url":"https://github.com/acme/alpha/pull/24","headRefName":"fm/closed24","headRefOid":"vvv","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
+  write_view "$fixture" acme/alpha 24 '{"number":24,"url":"https://github.com/acme/alpha/pull/24","headRefName":"fm/closed24","headRefOid":"vvv","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"CLOSED"}'
+  fm_write_meta "$home/state/closed24.meta" \
+    'window=fm-closed24' "worktree=$home/projects/closed24" 'project=alpha' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
+  out=$(run_delivery "$home" "$fixture" _scan-locked 1)
+  [ -z "$out" ] || fail "closed snapshot should not queue delivery"
+  run_delivery "$home" "$fixture" show | grep -Fq 'not-open' \
+    || fail "closed snapshot did not produce an explicit hold"
+  pass "closed snapshots never queue delivery"
 }
 
 test_review_thread_revalidation() {
@@ -668,6 +685,7 @@ test_review_evidence_uses_single_snapshot
 test_optional_review_silence
 test_comment_review_then_clearance
 test_pr_comment_then_clearance
+test_closed_snapshot_holds_delivery
 test_review_thread_revalidation
 test_check_evidence_requires_success
 test_generic_authority_hold_ignores_yolo

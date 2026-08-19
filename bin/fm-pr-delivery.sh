@@ -320,8 +320,8 @@ classify_pr_json() { # <repo> <pr-json-object>
       text | test("^(resolved|fixed|addressed)([.![:space:]]|$)");
     def change_request:
       text as $text
-      | ($text | test("(^|[^[:alnum:]])(please|must|should|need|needs|required|require|could you|can you|would you|kindly)([[:space:]]+[^[:space:]]+){0,3}[[:space:]]+(fix|update|change|revise|address|rework|re-review|rereview)([^[:alnum:]]|$)"))
-        or ($text | test("^(fix|update|change|revise|address|rework|re-review|rereview)([[:space:]]|[.!:]|$)"))
+      | ($text | test("(^|[^[:alnum:]])(please|must|should|need|needs|required|require|could you|can you|would you|can we|could we|kindly)([[:space:]]+[^[:space:]]+){0,3}[[:space:]]+(fix|fixing|update|updating|change|changing|revise|revising|address|addressing|rework|reworking|re-review|rereview|add|adding|remove|removing|test|testing|cover|covering|validate|validating)([^[:alnum:]]|$)"))
+        or ($text | test("^(fix|update|change|revise|address|rework|re-review|rereview|add|remove|test|cover|validate)([[:space:]]|[.!:]|$)"))
         or ($text | test("(^|[^[:alnum:]])(changes?|updates?|fixes?|re-?review)([[:space:]]+(are|is|were|be))?[[:space:]]+(needed|required|requested)([^[:alnum:]]|$)"));
     def reviewer_request:
       (.state == "CHANGES_REQUESTED")
@@ -364,6 +364,7 @@ classify_pr_json() { # <repo> <pr-json-object>
     {
       repo: $repo,
       prAuthor: (.prAuthor // ""),
+      state: (.state // "UNKNOWN"),
       number: (.number | tostring),
       url: (.url // "-"),
       head: (.headRefOid // ""),
@@ -388,7 +389,8 @@ classify_pr_json() { # <repo> <pr-json-object>
 
 reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_detail
   local classified=$1 task=${2:-}
-  local checks review mergeable unresolved review_requests conversation_requests reviews_truncated comments_truncated hold
+  local state checks review mergeable unresolved review_requests conversation_requests reviews_truncated comments_truncated hold
+  state=$(printf '%s' "$classified" | jq -r '.state')
   checks=$(printf '%s' "$classified" | jq -r '.checks')
   review=$(printf '%s' "$classified" | jq -r '.review')
   mergeable=$(printf '%s' "$classified" | jq -r '.mergeable')
@@ -397,6 +399,11 @@ reason_for_pr() { # <classified-json> <task-id-or-empty> -> reason_code reason_d
   conversation_requests=$(printf '%s' "$classified" | jq -r '.conversation_requests')
   reviews_truncated=$(printf '%s' "$classified" | jq -r '.reviews_truncated')
   comments_truncated=$(printf '%s' "$classified" | jq -r '.comments_truncated')
+  if [ "$state" != OPEN ]; then
+    REASON_CODE=not-open
+    REASON_DETAIL="snapshot state is $state"
+    return 0
+  fi
   case "$checks" in
     none) REASON_CODE=checks-missing; REASON_DETAIL='no successful checks reported'; return 0 ;;
     incomplete) REASON_CODE=checks-incomplete; REASON_DETAIL='check evidence is truncated'; return 0 ;;
