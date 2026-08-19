@@ -711,6 +711,33 @@ clear_actionable_run_state_surfaced() {  # <task>
   rm -f "$(actionable_run_state_surfaced_path "$1")"
 }
 
+# Per-window in-process cache over crew_state_line. fm-crew-state.sh may make a
+# bounded no-mistakes call (fm-classify-lib's cost contract), so the run-state
+# surfacing paths below, which run on every stale poll of an unchanged pane,
+# must not re-read crew state each cycle. A cached line is reused for
+# STALE_ESCALATE_SECS (the same cadence as the .paused-rechecked-* throttle)
+# and dropped when the pane hash changes, so a fresh outcome after visible
+# activity is read immediately. The cache dies with this watcher process; every
+# wake exits the watcher, so a relaunched watcher always starts with one fresh
+# read per window.
+crew_state_cache_invalidate() {  # <window>
+  eval "_crew_state_at_$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_')=0"
+}
+
+# Sets CREW_STATE_CACHED_LINE (must run in the watcher's own shell, never a
+# command substitution, or the cache write is lost with the subshell).
+crew_state_line_cached() {  # <window> <task>
+  local win=$1 task=$2 suffix now at
+  suffix=$(printf '%s' "$win" | tr -c 'A-Za-z0-9' '_')
+  now=$(date +%s)
+  eval "at=\${_crew_state_at_$suffix:-0}"
+  if [ $((now - at)) -ge "$STALE_ESCALATE_SECS" ]; then
+    eval "_crew_state_line_$suffix=\$(crew_state_line \"\$task\" || true)"
+    eval "_crew_state_at_$suffix=\$now"
+  fi
+  eval "CREW_STATE_CACHED_LINE=\${_crew_state_line_$suffix}"
+}
+
 surface_actionable_run_state_if_new() {  # <window> <task> <hash> <crew-state-line> [pause-throttle]
   local win=$1 task=$2 h=$3 crew_state=$4 actionable_run_state actionable_run_state_marker key reason
   actionable_run_state=$(crew_actionable_run_state_line_from_state_line "$crew_state" || true)
@@ -740,7 +767,8 @@ surface_paused_actionable_run_state_if_new() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 last crew_state
   last=$(last_status_line "$STATE/$task.status")
   status_is_paused_or_captain_held "$last" || return 1
-  crew_state=$(crew_state_line "$task" || true)
+  crew_state_line_cached "$win" "$task"
+  crew_state=$CREW_STATE_CACHED_LINE
   surface_actionable_run_state_if_new "$win" "$task" "$h" "$crew_state" pause-throttle
 }
 
@@ -1205,7 +1233,8 @@ EOF
           # exact terminal status was already surfaced through a signal, stale
           # hash drift is no new captain-facing information and is absorbed.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            crew_state=$(crew_state_line "$task" || true)
+            crew_state_line_cached "$w" "$task"
+            crew_state=$CREW_STATE_CACHED_LINE
             if [ "$(crew_absorb_class_from_state_line "$crew_state")" = working ]; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
@@ -1225,11 +1254,13 @@ EOF
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then
-            crew_state=$(crew_state_line "$task" || true)
+            crew_state_line_cached "$w" "$task"
+            crew_state=$CREW_STATE_CACHED_LINE
             surface_actionable_run_state_if_new "$w" "$task" "$h" "$crew_state" \
               || wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
           else
-            crew_state=$(crew_state_line "$task" || true)
+            crew_state_line_cached "$w" "$task"
+            crew_state=$CREW_STATE_CACHED_LINE
             if [ "$(crew_absorb_class_from_state_line "$crew_state")" = working ]; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
@@ -1309,6 +1340,7 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
+      crew_state_cache_invalidate "$w"
       paused_bound=1
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0

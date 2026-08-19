@@ -1099,7 +1099,9 @@ signal_reason_is_actionable() {  # <file> ...
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
-# run it only on no-verb signal and first-sighting stale paths, never every wake.
+# run it only on no-verb signal, first-sighting stale, and throttled recheck paths
+# (the watcher caches the line per window for its stale-escalate cadence), never
+# every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class_from_state_line() {  # <line>
   local line=$1 state src

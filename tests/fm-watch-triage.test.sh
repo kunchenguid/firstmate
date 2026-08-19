@@ -1722,6 +1722,55 @@ test_afk_paused_status_wakes_once_for_actionable_run_outcomes() {
   pass "AFK paused stale panes wake once for PR-ready or failed run outcomes"
 }
 
+# --- unchanged paused stale panes must not re-read crew state every poll ------
+# fm-crew-state.sh may make a bounded no-mistakes call, so the run-state
+# surfacing paths cache the crew-state line per window for the stale-escalate
+# cadence instead of sampling it on every poll of an unchanged idle pane.
+test_paused_stale_crew_state_read_throttled() {
+  local dir state fakebin out capture_file calls task window statusf key pane_hash sig pid
+  dir=$(make_case paused-stale-crew-state-throttle)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  capture_file="$dir/pane.txt"
+  calls="$dir/crew-state-calls"
+  task="paused-throttle"
+  window="test:fm-$task"
+  statusf="$state/$task.status"
+  printf 'paused: awaiting external validation slot\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-${task}_status"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
+  printf 'paused throttle pane\n' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "paused throttle pane")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  date +%s > "$state/.paused-rechecked-$key"
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+count=$(cat "$FM_FAKE_CREW_STATE_COUNT" 2>/dev/null || echo 0)
+printf '%s\n' "$((count + 1))" > "$FM_FAKE_CREW_STATE_COUNT"
+printf 'state: paused · source: status-log · awaiting external validation slot\n'
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE_COUNT="$calls" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "paused throttle watcher exited during its first cycle: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "paused throttle watcher exited during a later cycle: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "unchanged paused stale printed a wake: $(cat "$out")"; }
+  [ "$(cat "$calls" 2>/dev/null || true)" = 1 ] \
+    || { reap "$pid"; fail "unchanged paused stale re-sampled crew state every poll ($(cat "$calls" 2>/dev/null || echo 0) reads)"; }
+  reap "$pid"
+  pass "unchanged paused stale panes sample crew state once per watcher, not every poll"
+}
+
 # --- consecutive wedge escalations on the same pane demand deep inspection ----
 # Root cause of the PR #252 incident's ~20 minutes of unnoticed green: each
 # wedge escalation fires, gets classified as "still validating" one poll later
@@ -2719,6 +2768,7 @@ test_nonterminal_paused_rechecks_authoritative_state
 test_paused_authoritative_working_preserves_wedge_timer
 test_paused_status_wakes_once_for_actionable_run_outcomes
 test_afk_paused_status_wakes_once_for_actionable_run_outcomes
+test_paused_stale_crew_state_read_throttled
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_triage_log_size_cap_accepts_spaced_wc_counts
 test_procevent_captured_result_surfaces_proactively
