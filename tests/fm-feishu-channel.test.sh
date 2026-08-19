@@ -50,14 +50,17 @@ import { createHash } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  assertManualRebindSafe,
   bindSession,
   claimNextOutbound,
   claimTransportOwner,
   convergeConfiguredSession,
   createPairing,
   deterministicChunks,
+  failOutboundAttempt,
   findInboundByDeliveryRef,
   ingressCounts,
+  IDEMPOTENCY_WINDOW_MS,
   offerFeishuIngress,
   pathsForHome,
   pendingFeishuIngress,
@@ -224,7 +227,7 @@ function remote(overrides = {}) {
     chat_id: "oc_chat1234",
     chat_type: "p2p",
     message_type: "text",
-    content: "remote request",
+    content: "/fm-feishu-rebind",
     create_time: "1",
     ...overrides,
   };
@@ -263,6 +266,7 @@ assert.equal(pi.sends.length, 1, "repeated pump ticks duplicated the recovered n
 assert.equal(pi.sends[0].options?.deliverAs, "steer", "Feishu input did not use Pi's native steering queue");
 const marker = parseFeishuMarker(pi.sends[0].content);
 assert.equal(marker?.deliveryRef, first.deliveryRef);
+assert(pi.sends[0].content.endsWith("/fm-feishu-rebind"), "slash-like Feishu text did not remain ordinary native-queue message content");
 assert(!pi.sends[0].content.includes("ou_captain1234") && !pi.sends[0].content.includes("oc_chat1234"), "private Feishu identity leaked into Pi context");
 assert(renderFeishuSourceBadge(pi.sends[0].content, "user").includes("Feishu - authorized P2P"));
 assert.equal(ingressCounts(home).queued, 1, "native Pi submission was not recorded without a custom scheduler ACK");
@@ -599,8 +603,10 @@ const rebindFile = join(rebindSession, "s.jsonl");
 writeFileSync(rebindFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: rebindSession })}\n`);
 const rebindBinding = bindSession(rebindHome, { sessionId, sessionFile: rebindFile, sessionCwd: rebindSession, headerId: sessionId, headerCwd: rebindSession });
 const rebindInbound = publishFeishuInbound(rebindHome, remote({ event_id: "evt_rebind", message_id: "om_rebindSource1234" }));
+assert.throws(() => assertManualRebindSafe(rebindHome), /zero pending, offered, or uncertain delivery work/, "manual rebind accepted pending ingress");
 assert.throws(() => offerFeishuIngress(rebindHome, rebindInbound.deliveryRef, { sessionId, bindingId: rebindBinding.binding_id, bindingGeneration: rebindBinding.generation + 1 }), /binding fence mismatch/, "changed generation reached the native Pi queue");
 offerFeishuIngress(rebindHome, rebindInbound.deliveryRef, { sessionId, bindingId: rebindBinding.binding_id, bindingGeneration: rebindBinding.generation });
+assert.throws(() => assertManualRebindSafe(rebindHome), /zero pending, offered, or uncertain delivery work/, "manual rebind accepted ingress already offered to Pi");
 assert.throws(() => bindSession(rebindHome, { sessionId, sessionFile: rebindFile, sessionCwd: rebindSession, headerId: sessionId, headerCwd: rebindSession }, { rebind: true }), /belongs to the current Pi native queue/);
 const replacementId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const replacementFile = join(rebindSession, "replacement.jsonl");
@@ -616,6 +622,31 @@ assert.throws(() => convergeConfiguredSession(rebindHome, {
   headerId: replacementId,
   headerCwd: rebindSession,
 }), /belongs to the prior Pi native queue/);
+
+const uncertainHome = join(home, "uncertain-home");
+mkdirSync(join(uncertainHome, "data"), { recursive: true });
+mkdirSync(join(uncertainHome, "state"), { recursive: true });
+createPairing(uncertainHome, { appIdFingerprint: process.env.APP_FINGERPRINT, allowedUser: "ou_captain1234", allowedChat: "oc_chat1234" });
+const uncertainSession = join(uncertainHome, "session");
+mkdirSync(uncertainSession);
+const uncertainFile = join(uncertainSession, "s.jsonl");
+writeFileSync(uncertainFile, `${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: uncertainSession })}\n`);
+const uncertainBinding = bindSession(uncertainHome, { sessionId, sessionFile: uncertainFile, sessionCwd: uncertainSession, headerId: sessionId, headerCwd: uncertainSession });
+assert.equal(registerAssistantOutbound(uncertainHome, {
+  text: "uncertain outbound",
+  assistantEntryId: "feed1000",
+  sessionOrder: 1,
+  sessionEntryTimestamp: "2026-08-12T00:01:00.000Z",
+  sessionId,
+  bindingGeneration: uncertainBinding.generation,
+}).status, "registered");
+assert.throws(() => assertManualRebindSafe(uncertainHome), /zero pending, offered, or uncertain delivery work/, "manual rebind accepted pending outbound delivery");
+const uncertainClaim = claimNextOutbound(uncertainHome, { nowMs: 1000 });
+assert(uncertainClaim, "uncertainty fixture did not claim outbound delivery");
+failOutboundAttempt(uncertainHome, uncertainClaim, new Error("ambiguous fixture"), { ambiguous: true, nowMs: 1000 });
+assert.equal(claimNextOutbound(uncertainHome, { nowMs: 1000 + IDEMPOTENCY_WINDOW_MS }), undefined);
+assert.equal(statusSummary(uncertainHome).outbound_uncertain, 1, "uncertainty fixture did not reach terminal delivery uncertainty");
+assert.throws(() => assertManualRebindSafe(uncertainHome), /zero pending, offered, or uncertain delivery work/, "manual rebind accepted uncertain outbound delivery");
 
 const secretHome = join(home, "secret-home");
 mkdirSync(join(secretHome, "data"), { recursive: true });
@@ -696,18 +727,21 @@ printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$SID" "$BRIDGE_S
 cat > "$BRIDGE_FIXTURE/bin/fm-feishu-lifecycle.mjs" <<'JS'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { convergeConfiguredSession } from "./fm-feishu-state.mjs";
+const action = process.argv[2];
 let body = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { body += chunk; });
 process.stdin.on("end", () => {
-  if (readFileSync(`${process.env.FM_HOME}/config/feishu.env`, "utf8").includes("FM_FEISHU_ENABLED=false")) return;
+  const config = readFileSync(`${process.env.FM_HOME}/config/feishu.env`, "utf8");
+  if (config.includes("FM_FEISHU_ENABLED=false")) return;
+  if (!config.includes("FM_FEISHU_ENABLED=true")) throw new Error("fixture configuration refused");
   const identity = JSON.parse(body);
   const { binding } = convergeConfiguredSession(process.env.FM_HOME, {
     appIdFingerprint: process.env.APP_FINGERPRINT,
     allowedUser: "ou_captain1234",
     allowedChat: "oc_chat1234",
   }, identity);
-  appendFileSync(process.env.BRIDGE_LIFECYCLE_LOG, `${identity.sessionId}\n`);
+  appendFileSync(process.env.BRIDGE_LIFECYCLE_LOG, `${action === "manual-rebind" ? "manual-rebind:" : ""}${identity.sessionId}\n`);
   const transportDir = `${process.env.FM_HOME}/state/feishu/transport`;
   const owner = `${transportDir}/fixture-owner`;
   if (!existsSync(owner)) {
@@ -715,8 +749,37 @@ process.stdin.on("end", () => {
     writeFileSync(owner, `${binding.binding_id}\n`);
     appendFileSync(process.env.BRIDGE_TRANSPORT_LOG, `start generation=${binding.generation}\n`);
   } else if (readFileSync(owner, "utf8").trim() !== binding.binding_id) {
-    throw new Error("fixture transport owner did not follow the exact binding");
+    writeFileSync(owner, `${binding.binding_id}\n`);
+    appendFileSync(process.env.BRIDGE_TRANSPORT_LOG, `start generation=${binding.generation}\n`);
   }
+  const parentStat = readFileSync(`/proc/${process.ppid}/stat`, "utf8");
+  const processStartToken = parentStat.slice(parentStat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
+  const nonce = "b".repeat(48);
+  writeFileSync(`${transportDir}/owner.json`, `${JSON.stringify({
+    schema: "fm-feishu-transport-owner.v1",
+    pid: process.ppid,
+    nonce,
+    module_file: `${process.env.FM_ROOT_OVERRIDE}/bin/fm-feishu-transport.mjs`,
+    home_realpath: process.env.FM_HOME,
+    process_start_token: processStartToken,
+    config_file_identity: null,
+    started_at: new Date().toISOString(),
+  })}\n`);
+  writeFileSync(`${transportDir}/health.json`, `${JSON.stringify({
+    schema: "fm-feishu-transport-health.v2",
+    phase: "healthy",
+    healthy: true,
+    owner_pid: process.ppid,
+    owner_nonce: nonce,
+    owner_process_start_token: processStartToken,
+    binding_id: binding.binding_id,
+    binding_generation: binding.generation,
+    reconnects: 0,
+    last_connected_at: new Date().toISOString(),
+    last_identity_verified_at: new Date().toISOString(),
+    last_error_type: null,
+    updated_at: new Date().toISOString(),
+  })}\n`);
 });
 JS
 cat > "$BRIDGE_FIXTURE/bin/fm-feishu-transport.sh" <<'SH'
@@ -745,7 +808,7 @@ SID="$SID" \
 APP_FINGERPRINT="$APP_FINGERPRINT" \
 node --input-type=module <<'JS'
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 function fakeEventBus() {
   const channels = new Map();
@@ -768,6 +831,7 @@ function fakePi() {
   return {
     commands,
     handlers,
+    sends: [],
     events,
     on(name, handler) {
       const list = handlers.get(name) ?? [];
@@ -778,7 +842,7 @@ function fakePi() {
     registerEntryRenderer() {},
     registerCommand(name, options) { commands.set(name, options); },
     appendEntry() {},
-    sendUserMessage() {},
+    sendUserMessage(content, options) { this.sends.push({ content, options }); },
     sendMessage() {},
   };
 }
@@ -791,6 +855,7 @@ let pi = fakePi();
 bridge.default(pi);
 assert.deepEqual([...pi.commands.keys()].sort(), [
   "fm-feishu-disable",
+  "fm-feishu-rebind",
   "fm-feishu-status",
 ]);
 assert(!pi.handlers.has("input") && !pi.handlers.has("tool_call") && !pi.handlers.has("turn_start"));
@@ -826,26 +891,73 @@ assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().s
 assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), ["start generation=1"], "repeated settled or agent_start boundary duplicated transport startup");
 
 writeFileSync(`${process.env.FM_HOME}/lock-mode`, "other\n");
+const deniedBefore = notices.length;
+await pi.commands.get("fm-feishu-rebind").handler("", ctx);
+assert.equal(notices.length, deniedBefore + 1, "wrong-owner rebind did not return one local refusal");
+assert(notices.at(-1).includes("fully exit other Pi processes"), "wrong-owner refusal omitted the safe local recovery action");
+writeFileSync(`${process.env.FM_HOME}/lock-mode`, "owned\n");
+
+const originalConfig = readFileSync(`${process.env.FM_HOME}/config/feishu.env`, "utf8");
+writeFileSync(`${process.env.FM_HOME}/config/feishu.env`, "private-config-value-must-not-leak\n", { mode: 0o600 });
+await pi.commands.get("fm-feishu-rebind").handler("", ctx);
+assert(notices.at(-1).includes("config-check locally"), "configuration refusal omitted the body-free local recovery check");
+writeFileSync(`${process.env.FM_HOME}/config/feishu.env`, originalConfig, { mode: 0o600 });
+
+const replacementId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const replacementDir = `${process.env.FM_HOME}/replacement-session`;
+const replacementFile = `${replacementDir}/current.jsonl`;
+mkdirSync(replacementDir);
+writeFileSync(replacementFile, `${JSON.stringify({ type: "session", version: 3, id: replacementId, cwd: replacementDir })}\n`);
+const replacementCtx = {
+  ...ctx,
+  cwd: replacementDir,
+  sessionManager: {
+    getSessionFile() { return replacementFile; },
+    getSessionId() { return replacementId; },
+    getHeader() { return { id: replacementId, cwd: replacementDir }; },
+    getEntries() { return []; },
+  },
+};
+await pi.commands.get("fm-feishu-rebind").handler("", replacementCtx);
+let rebound = JSON.parse(readFileSync(`${process.env.FM_HOME}/data/feishu/bindings/active.json`, "utf8"));
+assert.equal(rebound.generation, 2, "manual stale-session replacement did not advance exactly one generation");
+assert.equal(rebound.session_id, replacementId, "manual stale-session replacement did not bind the exact command session");
+assert.equal(notices.at(-1), "Feishu channel rebound to this Pi session and is healthy.");
+const transportAfterReplacement = readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8");
+await pi.commands.get("fm-feishu-rebind").handler("", replacementCtx);
+rebound = JSON.parse(readFileSync(`${process.env.FM_HOME}/data/feishu/bindings/active.json`, "utf8"));
+assert.equal(rebound.generation, 2, "already-current manual rebind changed the binding generation");
+assert.equal(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8"), transportAfterReplacement, "already-current manual rebind churned the healthy transport");
+assert.equal(notices.at(-1), "Feishu channel is already bound to this Pi session and healthy.");
+const commandMessages = notices.slice(deniedBefore);
+for (const privateValue of ["private-config-value-must-not-leak", process.env.APP_FINGERPRINT, process.env.SID, replacementId, process.env.BRIDGE_SESSION_FILE, replacementFile, "ou_captain1234", "oc_chat1234"]) {
+  assert(!commandMessages.some((message) => message.includes(privateValue)), `manual rebind result leaked private value: ${privateValue}`);
+}
+const lifecycleAfterManualRebind = readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n");
+const transportAfterManualRebind = readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n");
+
+writeFileSync(`${process.env.FM_HOME}/lock-mode`, "other\n");
 await emit(pi, "session_shutdown", { reason: "reload" }, ctx);
 rmSync(`${process.env.FM_HOME}/state/.pi-feishu-extension-loaded`);
 pi = fakePi();
 bridge.default(pi);
 turnend.default(pi);
 await emit(pi, "session_start", { reason: "reload" }, ctx);
-assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [process.env.SID], "reload bypassed the missing lock owner");
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), lifecycleAfterManualRebind, "reload bypassed the missing lock owner");
 assert(!existsSync(`${process.env.FM_HOME}/state/.pi-feishu-extension-loaded`), "unowned reload published the loaded marker");
 await emit(pi, "agent_start", {}, ctx);
-assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [process.env.SID], "post-reload wrong-owner agent_start activated the channel");
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), lifecycleAfterManualRebind, "post-reload wrong-owner agent_start activated the channel");
 writeFileSync(`${process.env.FM_HOME}/lock-mode`, "owned\n");
 await emit(pi, "agent_start", {}, ctx);
-assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [process.env.SID, process.env.SID], "first owned turn after reload did not converge the configured channel");
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [...lifecycleAfterManualRebind, process.env.SID], "first owned turn after reload did not converge the configured channel");
 assert(existsSync(`${process.env.FM_HOME}/state/.pi-feishu-extension-loaded`), "first owned turn after reload did not publish the loaded marker");
-assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), ["start generation=1"], "reload recovery duplicated transport startup");
+const transportAfterReload = [...transportAfterManualRebind, "start generation=3"];
+assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), transportAfterReload, "reload recovery did not converge exactly once");
 
 await pi.commands.get("fm-feishu-disable").handler("", ctx);
 assert(existsSync(process.env.BRIDGE_TRANSPORT_LOG), notices.join("\n"));
-assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), ["start generation=1", "disable-config generation=1"]);
-assert(notices.every((message) => !message.includes("refused")), notices.join("\n"));
+assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), [...transportAfterReload, "disable-config generation=3"]);
+assert(notices.filter((message) => message.includes("refused")).every((message) => message.startsWith("Feishu rebind refused.")), notices.join("\n"));
 
 rmSync(`${process.env.FM_HOME}/data/feishu`, { recursive: true });
 rmSync(`${process.env.FM_HOME}/state/feishu`, { recursive: true });
@@ -857,9 +969,9 @@ turnend.default(pi);
 await emit(pi, "session_start", { reason: "reload" }, ctx);
 await emit(pi, "agent_start", {}, ctx);
 assert(!existsSync(`${process.env.FM_HOME}/data/feishu`) && !existsSync(`${process.env.FM_HOME}/state/feishu`), "disabled public lifecycle created Feishu state");
-assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [process.env.SID, process.env.SID], "disabled public lifecycle reconciled a pairing");
-assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), ["start generation=1", "disable-config generation=1"], "disabled public lifecycle started a transport");
-console.log("ok - local Pi bridge converges after delayed ownership and keeps only status and durable disable controls");
+assert.deepEqual(readFileSync(process.env.BRIDGE_LIFECYCLE_LOG, "utf8").trim().split("\n"), [...lifecycleAfterManualRebind, process.env.SID], "disabled public lifecycle reconciled a pairing");
+assert.deepEqual(readFileSync(process.env.BRIDGE_TRANSPORT_LOG, "utf8").trim().split("\n"), [...transportAfterReload, "disable-config generation=3"], "disabled public lifecycle started a transport");
+console.log("ok - local Pi bridge converges after delayed ownership and exposes safe local status, rebind, and disable controls");
 JS
 
 # The transport test replaces the official SDK boundary with one local module.

@@ -61,7 +61,7 @@ An invalid file returns one actionable error that contains no configured value.
 ## Automatic pairing and binding
 
 Normal startup of a trusted local persisted Pi session validates the file, derives the App ID fingerprint, authenticates through the official SDK, verifies the configured chat is P2P, stores the exact pairing, binds the exact current session, and starts or recovers one transport.
-No `/fm-feishu-pair`, `/fm-feishu-bind`, `/fm-feishu-rebind`, credential export, or manual transport start is required.
+No manual command, credential export, or manual transport start is required for healthy startup.
 Healthy startup is silent and idempotent.
 Pi's initial `session_start` callback can run before the operational session-start turn has acquired the Firstmate lock.
 After that turn settles, the tracked Pi extensions retry activation for the same session through their process-local lifecycle boundary, so normal startup needs neither a second Pi process nor `/reload`.
@@ -80,6 +80,10 @@ Changing the configured app, user, or chat supersedes unsent events from the pri
 
 Use `/fm-feishu-disable` to stop the verified transport gracefully, retire the pairing and binding, and atomically set `FM_FEISHU_ENABLED=false`.
 Use `/fm-feishu-status` for the detailed local identity and queue view.
+Use `/fm-feishu-rebind` only from the trusted local Pi TUI when explicit recovery must move the configured channel to that exact current persisted session.
+The command reuses configuration-driven replacement, refuses pending or offered inbound work and pending or uncertain outbound work, keeps the prior-transport shutdown and generation fences, and reports success only after the exact current binding and transport are healthy.
+An already-current healthy binding is an idempotent success without generation or transport churn.
+On refusal, follow the body-free local status and configuration checks named by the command; never delete private records or restart only the transport to bypass an ownership ambiguity.
 No Feishu message can enable, disable, pair, bind, rebind, or move the channel.
 
 ## Direct SDK long connection
@@ -186,7 +190,7 @@ A missing SDK dependency reports its existing optional-feature prerequisite with
 
 The focused regression uses a local mock of the official SDK constructor, long-connection callbacks, reconnect callbacks, P2P chat API, and message APIs.
 It performs no real authentication, network connection, app configuration, event consumption, Pi-session mutation, or Feishu send.
-It proves absent and disabled inertness, strict data parsing, ownership and permission refusal, symlink refusal, silent idempotent activation, session replacement, owner replacement, transport recovery, durable disable, credential rejection and redaction, native TUI non-interception, direct operational follow-up delivery, native Feishu steer submission, exact session and generation fencing, all-origin finalized Assistant mirroring, pre-binding-history exclusion, exact routine-response exclusion and historical-record neutralization, restart deduplication, non-Assistant exclusion, deterministic post rendering, supported-structure preservation, unsupported-source literal preservation, table, quote, and list-aware chunking and refusal, exact post locale and `md` element encoding, canonical bound-chat `message.create`, replay deduplication, app/chat refusal, stable outbound UUIDs, definite failure without carrier fallback, ambiguous retry handling, single-flight serialization, owner-verified stop, and absence of the former command transport path.
+It proves absent and disabled inertness, strict data parsing, ownership and permission refusal, symlink refusal, silent idempotent activation, session replacement, owner replacement, transport recovery, durable disable, credential rejection and redaction, native TUI non-interception, direct operational follow-up delivery, native Feishu steer submission, exact session and generation fencing, all-origin finalized Assistant mirroring, pre-binding-history exclusion, exact routine-response exclusion and historical-record neutralization, restart deduplication, non-Assistant exclusion, manual rebind stale-session replacement, already-current idempotence, Feishu-origin refusal, pending or uncertain delivery refusal, deterministic post rendering, supported-structure preservation, unsupported-source literal preservation, table, quote, and list-aware chunking and refusal, exact post locale and `md` element encoding, canonical bound-chat `message.create`, replay deduplication, app/chat refusal, stable outbound UUIDs, definite failure without carrier fallback, ambiguous retry handling, single-flight serialization, owner-verified stop, and absence of the former command transport path.
 
 That mock does not prove a real app's scopes, developer-console long-connection selection, tenant policy, or production network reachability.
 A future live integration check requires explicit operator authorization and disposable app credentials.
