@@ -1688,18 +1688,33 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # still-symlinked PROJ_ABS can misfire both ways: false-negative (the poll
 # below never notices the pane left the project) or false-positive (the
 # isolation guard refuses a spawn that never actually tangled). Canonicalize
-# once here so every downstream comparison uses the same physical form
-# (docs/herdr-backend.md "Known gaps").
+# once here so the project is named in the same physical form the backends
+# report (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
-real_path_or_raw() {  # <path>
-  local path=$1 real
-  if real=$(cd "$path" 2>/dev/null && pwd -P); then
-    printf '%s\n' "$real"
-  else
-    printf '%s\n' "$path"
-  fi
-}
+# Canonicalizing is still not enough to decide "is this the same directory?" by
+# string comparison, because a path spelling is not a directory identity. On a
+# case-insensitive volume - the macOS default - .../Code/firstmate and
+# .../code/firstmate are ONE directory, and bash's `pwd -P` resolves symlinks
+# but PRESERVES whichever case the caller cd'd with (zsh canonicalizes instead,
+# which is why a zsh spot-check misses this entirely). Meanwhile every backend's
+# pane-path read and `git rev-parse --show-toplevel` report the canonical case.
+# Comparing those spellings as strings broke the chain below in both directions:
+# the settle loop read the pane's canonical-case PROJECT path as "the pane
+# already left the project" and recorded the primary checkout as the worktree,
+# and the isolation guard compared the same two spellings and passed instead of
+# refusing. Device+inode is the filesystem's own answer: equal for every
+# spelling that reaches one directory, never equal for two distinct ones.
+# Prints empty, and still succeeds so `set -e` callers stay simple, when the
+# path is unreadable; every caller treats empty as "cannot prove it", which
+# waits or refuses rather than assuming isolation.
+if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then
+  path_identity() { [ -n "${1:-}" ] || return 0; stat -f '%d:%i' "$1" 2>/dev/null || true; }
+else
+  path_identity() { [ -n "${1:-}" ] || return 0; stat -c '%d:%i' "$1" 2>/dev/null || true; }
+fi
+
+PROJ_ABS_ID=$(path_identity "$PROJ_ABS_REAL")
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
@@ -1709,19 +1724,20 @@ real_path_or_raw() {  # <path>
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
+
+# Refuses unless WT is provably the top-level of a worktree that is NOT the
+# project. Both comparisons are directory identities, not path strings: the
+# spelling WT arrived in comes from a backend's pane read while wt_top comes
+# from git, so two spellings of one directory must not read as two directories
+# (and vice versa). An identity that cannot be read at all stays empty and
+# refuses, because isolation unproven is isolation refused.
 validate_spawn_worktree() {  # <source> <inspect-target>
-  local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
-  wt_real=
-  if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
-    wt_real=
-  fi
-  proj_real=$PROJ_ABS_REAL
+  local source=$1 inspect_target=$2 wt_id wt_top wt_top_id
+  wt_id=$(path_identity "$WT")
   wt_top=$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top_real=
-  if ! wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P); then
-    wt_top_real=
-  fi
-  if [ -z "$wt_real" ] || [ -z "$wt_top_real" ] || [ "$wt_real" != "$wt_top_real" ] || [ "$wt_real" = "$proj_real" ]; then
+  wt_top_id=$(path_identity "$wt_top")
+  if [ -z "$wt_id" ] || [ -z "$wt_top_id" ] || [ -z "$PROJ_ABS_ID" ] \
+    || [ "$wt_id" != "$wt_top_id" ] || [ "$wt_id" = "$PROJ_ABS_ID" ]; then
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
@@ -2198,15 +2214,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
   # that worktree, so the replacement agent starts where the work is rather
-  # than wherever the pane happened to drift.
-  relaunch_wt_real=$(real_path_or_raw "$WT")
+  # than wherever the pane happened to drift. Same directory identity, not the
+  # same path string: the pane reports the canonical spelling while the recorded
+  # worktree carries whatever spelling the original spawn wrote, so comparing
+  # strings would refuse a relaunch into the very worktree holding the work.
+  relaunch_wt_id=$(path_identity "$WT")
   relaunch_seen=
+  relaunch_seen_id=
   for _ in $(seq 1 10); do
     relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
-    [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
+    relaunch_seen_id=$(path_identity "$relaunch_seen")
+    [ -z "$relaunch_wt_id" ] || [ -z "$relaunch_seen_id" ] || [ "$relaunch_seen_id" != "$relaunch_wt_id" ] || break
     sleep 0.5
   done
-  if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
+  if [ -z "$relaunch_wt_id" ] || [ -z "$relaunch_seen_id" ] || [ "$relaunch_seen_id" != "$relaunch_wt_id" ]; then
     echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
     exit 1
   fi
@@ -2219,35 +2240,38 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
   # worktree and tangle a hook into the primary checkout. The window id never lies.
-  # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
-  # prefix would otherwise make the pane's OS-level cwd read differ from
-  # PROJ_ABS on the very first poll, before the pane has actually moved.
+  # Compare by directory identity (PROJ_ABS_ID), not by path string: the pane
+  # reports its cwd in the canonical spelling the OS holds, while PROJ_ABS came
+  # from however firstmate addressed the project. A symlinked prefix or a
+  # different case in that spelling would otherwise make the very first poll -
+  # taken before the pane has moved at all - read as "already left the project",
+  # which is exactly how a spawn came to record the PRIMARY CHECKOUT as the
+  # worktree. One identity covers both.
   #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  # A single read that is genuinely outside the project is still not proof the
+  # pane settled there: on some tmux/WSL setups a brand-new window's
+  # pane_current_path transiently reports an unrelated stale path (seen live as
+  # another real git checkout entirely) before the shell catches up with
+  # treehouse get's cd. That stale path resolves to a real, distinct worktree
+  # top-level too, so it passes validate_spawn_worktree below, and accepting it
+  # on one read alone silently records the wrong worktree= in state/<id>.meta.
+  # Require two consecutive reads to agree on the same non-project directory
+  # before accepting it; a mismatch just becomes the new candidate rather than
+  # resetting the wait, so a pane that is already settled by the first real read
+  # only costs the one existing inter-poll sleep as confirmation, not a whole
+  # extra cycle on top. A read whose identity cannot be taken at all is not a
+  # settled directory, so it keeps the loop waiting rather than becoming a
+  # candidate that the guard would only have to refuse later.
   candidate=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
-    if [ -n "$p" ]; then
-      p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-        if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-          WT="$p"
-          break
-        fi
-        candidate="$p_real"
-      else
-        candidate=""
+    p_id=$(path_identity "$p")
+    if [ -n "$p_id" ] && [ "$p_id" != "$PROJ_ABS_ID" ]; then
+      if [ -n "$candidate" ] && [ "$p_id" = "$candidate" ]; then
+        WT="$p"
+        break
       fi
+      candidate="$p_id"
     else
       candidate=""
     fi
