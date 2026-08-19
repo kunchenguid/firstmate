@@ -46,6 +46,24 @@
 #                          and has not been surfaced yet; reported once per
 #                          captured generation, never again while that record
 #                          stays queued and never once it is acknowledged
+#   check: secondmate-stalled <id>: ...
+#                          a secondmate's own last status event DECLARES work
+#                          (a working: line) that nothing has followed, and its
+#                          status stream has then been SILENT past
+#                          FM_DECLARED_WORK_SILENCE_SECS. Nothing here reads the
+#                          endpoint: the status log is a durable record this host
+#                          already holds, so this reads a remote mate through the
+#                          same path, needs no launch wiring, and reads no
+#                          rendered surface. Deliberately not a "stale:" reason:
+#                          the mate's idle endpoint is healthy by design and stays
+#                          exempt from the stale loop. It is a RECONCILIATION
+#                          wake, not an alarm - the silence may be long legitimate
+#                          work, a phase finished without closing its record, work
+#                          nothing resumed, or, for a remote mate, a relay that
+#                          stopped delivering - so the reason asks for a cheap
+#                          check before acting. Surfaced EXACTLY ONCE per declared-work
+#                          episode, until a later status event ends it, and never
+#                          for a declared paused: wait or a terminal last event.
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -160,6 +178,31 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # turn-ended and resets the age. Set generously above any legitimate interval
 # between completed turns, including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
+# A secondmate's idle endpoint is healthy by design, which is why the stale loop
+# below skips it. That exemption holds only while the mate has nothing
+# outstanding: its own last event may DECLARE work (a `working:` line), and a
+# declaration is an intention, never proof the work was launched. A mate that
+# writes its plan and ends its turn therefore leaves declared work that nothing
+# will ever resume, invisible to every existing detector - the stale loop skips
+# the healthy idle endpoint, and the heartbeat backstop correctly absorbs a
+# status that is neither captain-relevant nor unpresented. DECLARED_WORK_SILENCE_SECS
+# bounds how long that mate's own status stream may then stay SILENT before the
+# combination surfaces under its own reason; fm-classify-lib.sh owns the decision
+# and the default's rationale.
+# An override that is not a whole number of seconds cannot bound anything, and
+# the decision refuses to guess from one - so it would leave this detector
+# permanently silent, which is the blindness it exists to end. Reject it loudly
+# once and keep supervising on the default: a misconfigured knob must never be
+# able to switch supervision off, and it is never worth killing the watcher over.
+DECLARED_WORK_SILENCE_SECS=${FM_DECLARED_WORK_SILENCE_SECS:-$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT}
+case "$DECLARED_WORK_SILENCE_SECS" in
+  ''|*[!0-9]*)
+    printf 'watcher: FM_DECLARED_WORK_SILENCE_SECS=%s is not a whole number of seconds; supervising declared-work silence on the %ss default instead\n' \
+      "$DECLARED_WORK_SILENCE_SECS" "$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT" >&2
+    triage_log "rejected FM_DECLARED_WORK_SILENCE_SECS=$DECLARED_WORK_SILENCE_SECS, using the ${FM_DECLARED_WORK_SILENCE_SECS_DEFAULT}s default"
+    DECLARED_WORK_SILENCE_SECS=$FM_DECLARED_WORK_SILENCE_SECS_DEFAULT
+    ;;
+esac
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -321,6 +364,78 @@ busy_turn_over_age() {  # <task>
   f="$STATE/$task.turn-ended"
   [ -e "$f" ] || f="$STATE/$task.meta"
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
+}
+
+# Surface a secondmate whose own last event declares work while its own status
+# stream has gone quiet past DECLARED_WORK_SILENCE_SECS. This is NOT the stale
+# path and must never become it: the mate's idle endpoint is healthy by design
+# and stays exempt, so the finding is the unresumed declaration plus the silence,
+# never the quiet endpoint.
+# WHAT IS MEASURED, AND WHY IT IS THE STATUS LOG. A live secondmate writes status
+# events; one that declared work and stopped quits writing them. Status files are
+# append-only, so the file's own age IS the time since its last event - a durable
+# record this host already holds. Nothing here reads the endpoint: a secondmate
+# can never have parent-side turn or busy wiring, because it is launched as a
+# PRIMARY firstmate session in its own home and bin/fm-spawn.sh deliberately
+# excludes kind=secondmate from that worker wiring so the parent cannot land on
+# the turn boundary that keeps the mate's own supervision alive. Reading its pane
+# instead was rejected: rendered text is a fragile surface and a false-alarm
+# source. Measuring the log needs no launch wiring, no capture, and no per-host
+# branch, and it reads a REMOTE mate through the same path, because its
+# escalations are ingested into this same state directory and its stream goes
+# quiet the same way. What that reading measures for a remote mate is the
+# PARENT-SIDE copy the ingest writes, so a relay that stopped delivering leaves
+# the same frozen record as a mate that stopped: the wake names that cause
+# alongside the others, and telling the two apart would take transport health
+# this watcher deliberately does not build here.
+# Ordered cheapest-first: the last status line the caller already read decides
+# first and rejects almost every mate outright, before anything else is computed.
+# RECONCILIATION, NOT ALARM. Silence is not proof of a stall. The mate may be
+# doing long legitimate work with nothing supervisor-actionable to report, may
+# have finished a phase without closing its record, may genuinely be stopped, or
+# - remotely - may be reporting normally behind a relay that stopped delivering
+# its events here. From outside these are indistinguishable, which is why the
+# threshold is generous and the wake asks for a cheap check before acting rather
+# than asserting a stall.
+# SINGLE-FIRE. The .stalled-* marker is a LATCH, not a throttle: a declared-work
+# episode surfaces exactly once and stays silent until a later status event ends
+# the episode. The marker holds the status log's SIGNATURE at wake time - the
+# same size:mtime episode boundary scan_signals persists in .seen-* - so what
+# ends an episode is the mate's own event, never watcher uptime: an append the
+# poll sees inside the sub-threshold window clears the marker outright, and one
+# that lands while no watcher is running still reads as a new episode on the
+# next poll. A bare existence check cannot tell those apart, and would stay
+# latched forever against a mate that declared again and went quiet across a
+# restart or a slept host - permanently blinding the detector for exactly the
+# mate it exists to catch. One wake suffices because the wake queue is durable and is
+# acknowledged only after the handling turn, so a single wake cannot be lost.
+# That bound is also what makes the accepted false readings cheap: whichever of
+# the four it turns out to be, the mate is worth one look, and suppressing the
+# finished-but-unclosed reading was deliberately NOT built, since it would need a
+# cross-home backlog read this watcher has no business making.
+# <key> is the caller's already-computed marker key (pure parameter expansion in
+# the poll loop), passed in rather than rebuilt here so this costs no subshell.
+secondmate_declared_work_check() {  # <task> <last-status-line> <marker-key>
+  local task=$1 last=$2 key=$3 age reason sig marker
+  if ! status_declares_work "$last"; then
+    rm -f "$STATE/.stalled-$key"
+    return 0
+  fi
+  age=$(age_of "$STATE/$task.status")
+  if ! status_declared_work_stalled "$last" "$age" "$DECLARED_WORK_SILENCE_SECS"; then
+    rm -f "$STATE/.stalled-$key"
+    return 0
+  fi
+  marker="$STATE/.stalled-$key"
+  sig=$(fm_wake_signal_sig "$STATE/$task.status") || sig=''
+  if [ -e "$marker" ]; then
+    [ -n "$sig" ] || return 0
+    [ "$sig" != "$(cat "$marker" 2>/dev/null)" ] || return 0
+  fi
+  reason="check: secondmate-stalled $task: declared work, then no status event for ${age}s - may be long legitimate work with nothing to report, a phase it finished without closing its record, work nothing resumed, or, for a remote mate, a relay that stopped delivering its events here; check cheaply before acting (last report: $last)"
+  fm_wake_append check "secondmate-stalled:$task" "$reason" || exit 1
+  printf '%s\n' "$sig" > "$marker"
+  wake "$reason"
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -1014,8 +1129,12 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$w"
     fi
-    if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
-      continue
+    if [ "$kind" = secondmate ]; then
+      # Runs for every secondmate, including the ones the stale exemption below
+      # skips: an unresumed declaration is exactly what a healthy idle endpoint
+      # hides. The stale exemption itself is unchanged.
+      secondmate_declared_work_check "$task" "$last" "$key"
+      status_is_paused "$last" || continue
     fi
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)

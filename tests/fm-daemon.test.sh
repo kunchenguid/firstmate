@@ -658,6 +658,63 @@ test_handle_wake_routes_self_and_escalate() {
   pass "handle_wake routes routine->self and captain->escalate"
 }
 
+# Emit the declared-work stall reason the way bin/fm-watch.sh actually emits it,
+# rather than restating a literal here that drifts the moment the watcher's
+# wording changes. The watcher is sourced in a CHILD shell - its BASH_SOURCE guard
+# returns before the singleton lock and the poll loop - so this suite's own
+# sourced daemon functions are untouched, and only the reason string comes back.
+# The status file is stamped far in the past so the silence gate holds under the
+# ordinary default threshold.
+secondmate_stall_reason() {  # <scratch-state> <task> <last-status-line>
+  local scratch=$1 task=$2 line=$3
+  mkdir -p "$scratch" || return 1
+  printf '%s\n' "$line" > "$scratch/$task.status" || return 1
+  touch -t 200001010000 "$scratch/$task.status" || return 1
+  FM_STATE_OVERRIDE="$scratch" bash -c '
+    . "$1/bin/fm-watch.sh"
+    wake() { printf "%s\n" "$1"; }
+    fm_wake_append() { :; }
+    secondmate_declared_work_check "$2" "$3" reason-probe
+  ' _ "$ROOT" "$task" "$line"
+}
+
+# A secondmate that declared work and then idled reaches away mode as its own
+# reason, not as a stale pane. It must survive the daemon's whole routing path:
+# recognized as a wake, escalated (never self-handled, which is what let the
+# 2026-08-16 stall stay invisible), and it must leave no wedge/pause marker behind
+# that housekeeping would later re-age against a healthy idle secondmate.
+# The reason key is the away-mode contract: renaming or dropping secondmate-stalled
+# breaks what the captain reads in the digest, so this asserts the emitter's own
+# key survives the whole routing path rather than a literal restated here.
+test_handle_wake_secondmate_stall_escalates() {
+  local dir state reason key
+  dir=$(make_supercase handle-secondmate-stall)
+  state="$dir/state"
+  printf 'window=sess:fm-mate-s1\nkind=secondmate\n' > "$state/mate-s1.meta"
+  printf 'working [key=aterrizaje]: the remaining six relaunch one by one\n' > "$state/mate-s1.status"
+  reason=$(secondmate_stall_reason "$dir/reason-state" mate-s1 \
+    'working [key=aterrizaje]: the remaining six relaunch one by one') \
+    || fail "could not emit a declared-work stall reason from the watcher"
+  [ -n "$reason" ] \
+    || fail "the watcher emitted no reason for a mate whose declared work went silent"
+  case "$reason" in
+    "check: secondmate-stalled mate-s1: "*) ;;
+    *) fail "the watcher no longer emits the secondmate-stalled reason away mode routes: $reason" ;;
+  esac
+  is_wake_reason "$reason" || fail "the secondmate stall reason was not recognized as a wake"
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "away mode self-handled a secondmate stall instead of escalating it"
+  grep -F "secondmate-stalled mate-s1" "$state/.subsuper-escalations" >/dev/null \
+    || fail "the escalated digest lost the stall it is about"
+  key=$(printf '%s' "mate-s1" | tr ':/.' '___')
+  [ ! -e "$state/.subsuper-stale-$key" ] \
+    || fail "a stall wake left a wedge marker that would re-age a healthy idle secondmate"
+  [ ! -e "$state/.subsuper-paused-$key" ] \
+    || fail "a stall wake left a pause marker on a mate that declared no external wait"
+  pass "away mode escalates a declared-work stall under its own reason, leaving no stale or pause tracking"
+}
+
 test_inject_skip_forces_self() {
   local dir state
   dir=$(make_supercase skip)
@@ -1864,6 +1921,7 @@ test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
+test_handle_wake_secondmate_stall_escalates
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
