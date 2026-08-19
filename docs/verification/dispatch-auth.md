@@ -12,9 +12,11 @@ Credential paths below are shown with the home directory replaced by `<home>`.
 
 ## Quota granularity the judgment depends on
 
-Verified 2026-07-30 against quota-axi 0.1.16.
+Verified 2026-07-30 against quota-axi 0.1.16; re-verified 2026-08-19 against quota-axi 0.1.29.
 
-`quota-axi --json` reports availability at whatever granularity the vendor supplies, and states the vendor's own bounding rule in `quotaSemantics.description`.
+`quota-axi --json` reports availability at whatever granularity the vendor supplies.
+The default `--json` output carries no `quotaSemantics.description` for any provider; the bounding-rule prose appears only in a `--full` snapshot, so the structured `effectiveAvailability` scopes are the bounding evidence `--json` itself supplies.
+The example below shows the full-snapshot form.
 
 ```json
 {
@@ -42,7 +44,7 @@ Three properties follow and are load-bearing for dispatch:
 
 ## Completion-runway shape the judgment depends on
 
-Verified 2026-07-31 against quota-axi 0.1.17 schema 3.
+Verified 2026-08-19 against quota-axi 0.1.29 schema 5.
 The command below records the producer shape without persisting account-specific quota values:
 
 ```sh
@@ -51,7 +53,7 @@ quota-axi --json | jq '{schemaVersion, effectiveAvailabilityFields: ([.providers
 
 ```json
 {
-  "schemaVersion": 3,
+  "schemaVersion": 5,
   "effectiveAvailabilityFields": [
     [
       "boundedBy",
@@ -60,6 +62,7 @@ quota-axi --json | jq '{schemaVersion, effectiveAvailabilityFields: ([.providers
       "pace",
       "runway",
       "scope",
+      "selection",
       "status"
     ]
   ],
@@ -67,23 +70,23 @@ quota-axi --json | jq '{schemaVersion, effectiveAvailabilityFields: ([.providers
     [
       "limitingWindowId",
       "projectedExhaustedAt",
-      "projectionBasis",
-      "projectionConfidence",
       "status",
       "usableRunwaySeconds"
     ],
     [
-      "limitingWindowId",
-      "projectedExhaustedAt",
+      "projectionConfidence",
+      "status"
+    ],
+    [
       "status",
-      "usableRunwaySeconds"
+      "unmeasurableWindowIds"
     ]
   ]
 }
 ```
 
 `runway` is nested under each effective-availability scope, so the same provider/model applicability rules govern both effective headroom and runway.
-Projection confidence and basis are not present on every known runway, so selection must preserve their absence as uncertainty rather than fabricate them.
+Projection confidence is not present on every known runway, and no schema-5 runway carries `projectionBasis`, so selection must preserve absent confidence as uncertainty rather than fabricate a basis.
 The older-schema fallback contract is owned by `quota-array-dispatch`; this evidence does not reinterpret an absent runway or pace field.
 
 ## Provider-family counterfactual that this producer schema supports
@@ -175,4 +178,4 @@ It asserts that the script accepts no harness, model, or provider input, never c
 `tests/fm-spawn-dispatch-profile.test.sh` owns spawn's deterministic profile and harness refusals.
 `tests/fm-bootstrap.test.sh` owns the quota-axi version-floor diagnostic.
 `tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake `quota-axi --json` snapshot per case.
-It covers the Claude 1 percent versus Codex 55 percent reserve regression, explicit accounting for unmeasurable runway, and the strongest-reasoning constraint.
+It covers the Claude 1 percent versus Codex 55 percent reserve regression, explicit accounting for unmeasurable runway, and the strongest-reasoning constraint, plus the schema-5 TraeX load-threshold, quota-depletion, runway-horizon, pace, quota-scope, unsupported-model, tie-order, and all-tight cases.
