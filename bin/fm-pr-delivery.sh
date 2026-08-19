@@ -321,7 +321,7 @@ classify_pr_json() { # <repo> <pr-json-object>
     def change_request:
       text as $text
       | ($text | test("(^|[^[:alnum:]])(please|must|should|need|needs|required|require|could you|can you|would you|can we|could we|kindly)([[:space:]]+[^[:space:]]+){0,3}[[:space:]]+(fix|fixing|update|updating|change|changing|revise|revising|address|addressing|rework|reworking|re-review|rereview|add|adding|remove|removing|test|testing|cover|covering|validate|validating)([^[:alnum:]]|$)"))
-        or ($text | test("(^|[^[:alnum:]])(could|can|would) (you|we)([[:space:]]|[?!.]|$)"))
+        or ($text | test("(^|[.?!][[:space:]]+)(could|can|would)([[:space:]]|[?!.]|$)"))
         or ($text | test("^(fix|update|change|revise|address|rework|re-review|rereview|add|remove|test|cover|validate)([[:space:]]|[.!:]|$)"))
         or ($text | test("(^|[^[:alnum:]])(changes?|updates?|fixes?|re-?review)([[:space:]]+(are|is|were|be))?[[:space:]]+(needed|required|requested)([^[:alnum:]]|$)"));
     def reviewer_request:
