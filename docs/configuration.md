@@ -460,6 +460,26 @@ Inherited launchd variables use a narrow harmless allowlist; undeclared variable
 macOS launchd is the primary fleet scheduler in this release.
 Scheduler installation and health checks dispatch through an adapter seam, while a future Linux cron or systemd adapter remains explicit follow-up work rather than silently claiming coverage today.
 
+## Pi credential renewal (LaunchAgent)
+
+On macOS, bootstrap reports `PI_AUTH_REFRESH: unavailable: ...` until the Pi credential renewal LaunchAgent is installed.
+After the owner approves that background owner, install it with:
+
+```sh
+bin/fm-bootstrap.sh install pi-auth-refresh
+```
+
+This job is machine-global rather than per-home, because one Pi credential pool at `~/.pi/agent/auth.json` serves every Firstmate home on the machine.
+Every home therefore reports on the same one job: the installed schedule is identified by what it runs, never by which checkout is asking, so a home that did not install it still reads it as healthy.
+It runs `bin/fm-pi-refresh.py run-once --all --scheduled` every `FM_PI_REFRESH_INTERVAL` seconds, six hours by default, against a renewal horizon of half the observed credential life, so the machine has to be off for five consecutive days before a token is lost.
+
+A heartbeat counts only when it carries the activation nonce baked into the installed plist, and that nonce reaches a process only through launchd's copy of the job environment.
+A `run-once --scheduled` typed by hand therefore records nothing at all, so it can neither forge proof of life nor overwrite the real one.
+The heartbeat also carries what the run was: a schedule whose profiles all renewed reports `installed`, one whose profiles need an interactive login reports `attention` and is still a working schedule, and one whose runs fail reports `failing`.
+`bin/fm-pi-refresh.py scheduler-status` reports those apart from `absent`, `orphaned` (launchd holds the label with nothing describing it), `foreign`, `unloaded`, `unproven` and `stale`.
+
+Bootstrap never installs this job on its own: a background owner that writes credentials is installed deliberately.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

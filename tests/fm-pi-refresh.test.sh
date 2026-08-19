@@ -17,6 +17,14 @@ ADAPTER="$ROOT/bin/fm-pi-refresh.mjs"
 # than by reading the output and hoping.
 MARKER=fmtestpirefreshmarker
 
+# File scope on purpose. Only one unit used to set this, which made the other
+# units' isolation depend on the very property one of them asserts: a mutation
+# that let a non-scheduled run stamp wrote a fixture heartbeat into the
+# operator's real state root.
+FM_PI_REFRESH_STATE_ROOT=$(fm_test_tmproot fm-pi-refresh-state)
+FM_PI_REFRESH_LAUNCH_AGENTS_DIR=$(fm_test_tmproot fm-pi-refresh-agents)
+export FM_PI_REFRESH_STATE_ROOT FM_PI_REFRESH_LAUNCH_AGENTS_DIR
+
 file_mode() {
   python3 -c 'import os,sys; print("%o" % (os.stat(sys.argv[1]).st_mode & 0o777))' "$1"
 }
@@ -86,6 +94,297 @@ if [ "\$1" = "--version" ]; then printf '%s\n' '$version'; exit 0; fi
 exit $code
 SH
   chmod +x "$path"
+}
+
+# A launchctl that succeeds and records what it was asked to do, so the install
+# sequence is asserted rather than assumed. A real launchctl would register a
+# real job on the developer's machine.
+# `registers` is the case a return code cannot express: launchctl accepting a
+# bootstrap while launchd ends up holding nothing. Without it, checking the
+# return code and checking the loaded state are the same assertion.
+make_fake_launchctl() {
+  local path=$1 log=$2 loaded=$3 bootstrap_code=${4:-0} bootout_code=${5:-0} registers=${6:-1}
+  cat >"$path" <<SH
+#!/bin/sh
+printf '%s\n' "\$*" >>'$log'
+case "\$1" in
+  print) [ -f '$loaded' ] ;;
+  bootstrap)
+    if [ $bootstrap_code -eq 0 ] && [ $registers -eq 1 ]; then : >'$loaded'; fi
+    exit $bootstrap_code
+    ;;
+  bootout) [ $bootout_code -ne 0 ] || rm -f '$loaded'; exit $bootout_code ;;
+esac
+SH
+  chmod +x "$path"
+}
+
+# Read the nonce launchd would carry, so a test can run the job the way the
+# schedule runs it instead of asserting against a copy of the mechanism.
+installed_nonce() {
+  python3 -c '
+import plistlib, sys
+print(plistlib.load(open(sys.argv[1], "rb"))["EnvironmentVariables"]["FM_PI_REFRESH_ACTIVATION_NONCE"])
+' "$1"
+}
+
+scheduler_contract() {
+  local work out code fakebin piroot log loaded agents state nonce
+  work=$(fm_test_tmproot fm-pi-refresh-schedule)
+  make_pool "$work/auth.json"
+  piroot=$work/pi
+  make_fake_pi "$piroot"
+  fakebin=$(fm_fakebin "$work")
+  log=$work/launchctl.log
+  loaded=$work/launchd-holds-it
+  agents=$work/agents
+  state=$work/state
+  make_fake_launchctl "$fakebin/launchctl" "$log" "$loaded"
+  make_fake_node "$fakebin/node" v99.0.0 "$work/node-ran" 3
+  mkdir -p "$agents"
+
+  # The install refuses a non-macOS host, and CI runs this file on Linux. The
+  # seam is the one bin/fm-checkout-refresh.sh uses for the same reason.
+  export FM_PI_REFRESH_PLATFORM=Darwin
+  export FM_PI_REFRESH_LAUNCH_AGENTS_DIR="$agents"
+  export FM_PI_REFRESH_STATE_ROOT="$state"
+  export FM_PI_REFRESH_LAUNCHCTL="$fakebin/launchctl"
+  export FM_PI_BIN="$piroot/bin/pi"
+  export FM_PI_NODE_BIN="$fakebin/node"
+
+  code=0
+  out=$(FM_PI_REFRESH_PLATFORM=Linux python3 "$TOOL" install-scheduler 2>&1) || code=$?
+  expect_code 1 "$code" "install-scheduler accepted a host with no scheduler adapter"
+  assert_contains "$out" "Linux" "the refusal did not name the host it refused"
+
+  out=$(python3 "$TOOL" scheduler-status 2>&1) || true
+  assert_contains "$out" "absent" "an uninstalled schedule did not report absent"
+
+  code=0
+  out=$(python3 "$TOOL" ensure 2>&1) || code=$?
+  expect_code 1 "$code" "ensure passed with no schedule installed"
+  assert_contains "$out" "install-scheduler" "ensure did not name how to install one"
+
+  code=0
+  out=$(python3 "$TOOL" install-scheduler --interval-seconds 1 2>&1) || code=$?
+  expect_code 1 "$code" "install-scheduler accepted an interval below its own floor"
+  assert_absent "$agents/com.firstmate.pi-auth-refresh.plist" "a refused interval still wrote a plist"
+
+  python3 "$TOOL" install-scheduler --interval-seconds 900 >/dev/null 2>&1 \
+    || fail "install-scheduler refused a healthy host"
+  assert_present "$agents/com.firstmate.pi-auth-refresh.plist" "no schedule plist was written"
+  expect_code 600 "$(file_mode "$agents/com.firstmate.pi-auth-refresh.plist")" \
+    "the schedule plist is not owner-only"
+  assert_grep 'bootout' "$log" "install never booted out a previous job"
+  python3 - "$log" <<'PY' || fail "install bootstrapped before it booted out"
+import sys
+
+lines = [line.strip() for line in open(sys.argv[1]) if line.strip()]
+boot = next(i for i, line in enumerate(lines) if line.startswith("bootout"))
+strap = next(i for i, line in enumerate(lines) if line.startswith("bootstrap"))
+assert boot < strap, lines
+PY
+
+  # A LaunchAgent inherits almost no environment, so every path the job needs
+  # at fire time has to be absolute inside the plist.
+  python3 - "$agents/com.firstmate.pi-auth-refresh.plist" "$TOOL" <<'PY' \
+    || fail "the schedule plist does not describe the job it must run"
+import plistlib
+import pathlib
+import sys
+
+job = plistlib.load(open(sys.argv[1], "rb"))
+assert job["Label"] == "com.firstmate.pi-auth-refresh", job["Label"]
+assert job["RunAtLoad"] is True, job
+assert job["StartInterval"] == 900, job
+arguments = job["ProgramArguments"]
+assert str(pathlib.Path(sys.argv[2]).resolve()) in arguments, arguments
+assert arguments[-3:] == ["run-once", "--all", "--scheduled"], arguments
+environment = job["EnvironmentVariables"]
+for name in ("PATH", "HOME", "FM_PI_BIN", "FM_PI_NODE_BIN",
+             "FM_PI_REFRESH_STATE_ROOT", "FM_PI_REFRESH_ACTIVATION_NONCE",
+             # The job checks its nonce against its own plist, so it must be
+             # told where that plist is rather than assuming the default path.
+             "FM_PI_REFRESH_LAUNCH_AGENTS_DIR"):
+    assert name in environment, name
+for name in ("HOME", "FM_PI_BIN", "FM_PI_NODE_BIN", "FM_PI_REFRESH_STATE_ROOT"):
+    assert environment[name].startswith("/"), (name, environment[name])
+assert len(environment["FM_PI_REFRESH_ACTIVATION_NONCE"]) >= 16, "the nonce is guessable"
+PY
+
+  out=$(python3 "$TOOL" scheduler-status 2>&1) || true
+  assert_contains "$out" "unproven" "a schedule that never ran reported as healthy"
+
+  # The nonce is the whole mechanism: a `--scheduled` typed by hand carries
+  # none, so it must write nothing at all. Otherwise it could either forge
+  # proof of life or destroy the real one.
+  python3 "$TOOL" run-once --source "$work/auth.json" --slot openai-codex --scheduled \
+    --backup-root "$work/backups" --destination-root "$work/homes" >/dev/null 2>&1 || true
+  assert_absent "$state/heartbeat.json" "a hand-run --scheduled faked scheduler liveness"
+
+  # Run it the way launchd runs it: same command, same nonce.
+  nonce=$(installed_nonce "$agents/com.firstmate.pi-auth-refresh.plist")
+  FM_PI_REFRESH_ACTIVATION_NONCE="$nonce" python3 "$TOOL" run-once \
+    --source "$work/auth.json" --slot openai-codex --scheduled \
+    --backup-root "$work/backups" --destination-root "$work/homes" >/dev/null 2>&1 || true
+  assert_present "$state/heartbeat.json" "the scheduled invocation left no proof of life"
+  expect_code 600 "$(file_mode "$state/heartbeat.json")" "the heartbeat is not owner-only"
+  out=$(python3 "$TOOL" scheduler-status --json 2>&1) || true
+  assert_contains "$out" '"heartbeat_kind": "failed"' "a failed scheduled run reported as ok"
+  assert_contains "$out" "failing" "a failing schedule did not report as failing"
+
+  # A profile that needs a browser is not a broken schedule. Calling it one is
+  # the alarm that gets ignored, so it reports separately and ensure passes.
+  FM_PI_REFRESH_ACTIVATION_NONCE="$nonce" python3 "$TOOL" run-once \
+    --source "$work/auth.json" --slot openai-codex-3 --scheduled \
+    --backup-root "$work/backups" --destination-root "$work/homes" >/dev/null 2>&1 || true
+  out=$(python3 "$TOOL" scheduler-status 2>&1) || true
+  assert_contains "$out" "attention" "an unrenewable profile reported the schedule as broken"
+  python3 "$TOOL" ensure >/dev/null 2>&1 \
+    || fail "ensure called a working schedule unavailable because a profile needs a login"
+
+  # Machine-global: a different checkout must read the same job the same way,
+  # or eight of this machine's nine homes warn at every session start and the
+  # remedy they print tears the working job down.
+  local elsewhere
+  elsewhere=$work/other-home/bin
+  mkdir -p "$elsewhere"
+  cp "$ROOT/bin/fm-pi-refresh.py" "$ROOT/bin/fm-pi-account-home.py" \
+    "$ROOT/bin/fm-credential-expiry.py" "$ROOT/bin/fm-pi-refresh.mjs" "$elsewhere/"
+  out=$(python3 "$elsewhere/fm-pi-refresh.py" scheduler-status 2>&1) || true
+  assert_not_contains "$out" "different checkout" \
+    "a second Firstmate home called the machine-global schedule foreign"
+  assert_contains "$out" "attention" "a second home did not read the same schedule state"
+
+  # An old heartbeat is staleness, not health, however good its last outcome.
+  python3 - "$state/heartbeat.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+value = json.load(open(path))
+value["kind"] = "ok"
+value["ok"] = True
+value["at"] = "2001-01-01T00:00:00Z"
+json.dump(value, open(path, "w"))
+PY
+  out=$(python3 "$TOOL" scheduler-status 2>&1) || true
+  assert_contains "$out" "stale" "an ancient heartbeat reported as healthy"
+
+  # A plist that launchd is not holding is installed, not working.
+  rm -f "$loaded"
+  out=$(python3 "$TOOL" scheduler-status 2>&1) || true
+  assert_contains "$out" "unloaded" "an unloaded schedule reported as healthy"
+
+  # launchd holding the label with nothing describing it is its own state, and
+  # was previously inexpressible because absent was decided before launchd was
+  # ever asked.
+  : >"$loaded"
+  mv "$agents/com.firstmate.pi-auth-refresh.plist" "$work/parked.plist"
+  out=$(python3 "$TOOL" scheduler-status 2>&1) || true
+  assert_contains "$out" "orphaned" "a running job with no plist reported as absent"
+  mv "$work/parked.plist" "$agents/com.firstmate.pi-auth-refresh.plist"
+
+  # A job that runs something else, or that never stamps, is not this schedule.
+  python3 - "$agents/com.firstmate.pi-auth-refresh.plist" <<'PY'
+import plistlib
+import sys
+
+path = sys.argv[1]
+job = plistlib.load(open(path, "rb"))
+job["ProgramArguments"] = ["/usr/bin/true"]
+plistlib.dump(job, open(path, "wb"))
+PY
+  out=$(python3 "$TOOL" scheduler-status 2>&1) || true
+  assert_contains "$out" "foreign" "a job running something else was claimed as this schedule"
+
+  python3 - "$agents/com.firstmate.pi-auth-refresh.plist" "$TOOL" <<'PY'
+import pathlib
+import plistlib
+import sys
+
+path = sys.argv[1]
+job = plistlib.load(open(path, "rb"))
+job["ProgramArguments"] = ["/usr/bin/python3", str(pathlib.Path(sys.argv[2]).resolve()),
+                           "run-once", "--all"]
+plistlib.dump(job, open(path, "wb"))
+PY
+  out=$(python3 "$TOOL" scheduler-status 2>&1) || true
+  assert_contains "$out" "proof of life" "a schedule that never stamps was accepted as healthy"
+
+  # A refused bootstrap must not leave the new definition on disk with the old
+  # job still running: every report reads the file, so it would describe a job
+  # launchd never accepted.
+  python3 "$TOOL" install-scheduler --interval-seconds 3600 >/dev/null 2>&1 \
+    || fail "reinstall refused"
+  make_fake_launchctl "$fakebin/launchctl" "$log" "$loaded" 5 0
+  code=0
+  out=$(python3 "$TOOL" install-scheduler --interval-seconds 1800 2>&1) || code=$?
+  expect_code 1 "$code" "a refused bootstrap was reported as an install"
+  python3 - "$agents/com.firstmate.pi-auth-refresh.plist" <<'PY' \
+    || fail "a refused install left its own definition on disk"
+import plistlib
+import sys
+
+job = plistlib.load(open(sys.argv[1], "rb"))
+assert job["StartInterval"] == 3600, job["StartInterval"]
+PY
+
+  # launchctl reporting success while launchd holds nothing is not an install.
+  # A return code cannot see this; only re-probing the loaded state can.
+  make_fake_launchctl "$fakebin/launchctl" "$log" "$loaded" 0 0 0
+  rm -f "$loaded"
+  code=0
+  out=$(python3 "$TOOL" install-scheduler --interval-seconds 3600 2>&1) || code=$?
+  expect_code 1 "$code" "an install launchd did not accept was reported as installed"
+  assert_contains "$out" "not holding it" "the refusal did not say launchd holds nothing"
+  make_fake_launchctl "$fakebin/launchctl" "$log" "$loaded" 0 0 1
+  python3 "$TOOL" install-scheduler --interval-seconds 3600 >/dev/null 2>&1 \
+    || fail "reinstall refused after a non-registering bootstrap"
+
+  # A bootout that does not take must not be reported as a removal, and the
+  # plist must stay so the job launchd is still running remains describable.
+  make_fake_launchctl "$fakebin/launchctl" "$log" "$loaded" 0 5
+  : >"$loaded"
+  code=0
+  out=$(python3 "$TOOL" uninstall-scheduler 2>&1) || code=$?
+  expect_code 1 "$code" "uninstall reported success while launchd kept the job"
+  assert_present "$agents/com.firstmate.pi-auth-refresh.plist" \
+    "uninstall removed the only description of a job that is still running"
+
+  make_fake_launchctl "$fakebin/launchctl" "$log" "$loaded" 0 0
+  python3 "$TOOL" uninstall-scheduler >/dev/null 2>&1 || fail "uninstall-scheduler refused"
+  assert_absent "$agents/com.firstmate.pi-auth-refresh.plist" "uninstall left the plist behind"
+
+  # Bootstrap must surface an unhealthy schedule, and the real bootstrap must
+  # be the thing that does it.
+  out=$(cd "$ROOT" && FM_GATE_REFUSE_BYPASS=1 FM_PI_REFRESH_BOOTSTRAP_TEST=1 \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    bash "$ROOT/bin/fm-bootstrap.sh" 2>&1 || true)
+  assert_contains "$out" "PI_AUTH_REFRESH" \
+    "the real bootstrap stayed silent about a missing schedule when asked not to"
+
+  out=$(cd "$ROOT" && FM_GATE_REFUSE_BYPASS=1 \
+    FM_BOOTSTRAP_DETECT_ONLY=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    bash "$ROOT/bin/fm-bootstrap.sh" 2>&1 || true)
+  assert_not_contains "$out" "PI_AUTH_REFRESH" \
+    "the schedule report leaked into every bootstrap run under the test bypass"
+
+  # The install target operators are told to run, driven through the real
+  # bootstrap rather than by calling the tool directly.
+  out=$(cd "$ROOT" && FM_PI_REFRESH_PLATFORM=Darwin \
+    FM_PI_REFRESH_LAUNCH_AGENTS_DIR="$agents" FM_PI_REFRESH_STATE_ROOT="$state" \
+    FM_PI_REFRESH_LAUNCHCTL="$fakebin/launchctl" FM_PI_BIN="$piroot/bin/pi" \
+    FM_PI_NODE_BIN="$fakebin/node" \
+    bash "$ROOT/bin/fm-bootstrap.sh" install pi-auth-refresh 2>&1 || true)
+  assert_contains "$out" "pi-auth-refresh" "the bootstrap install target named nothing"
+  assert_present "$agents/com.firstmate.pi-auth-refresh.plist" \
+    "bin/fm-bootstrap.sh install pi-auth-refresh installed no schedule"
+  python3 "$TOOL" uninstall-scheduler >/dev/null 2>&1 || true
+
+  unset FM_PI_REFRESH_PLATFORM FM_PI_REFRESH_LAUNCHCTL FM_PI_BIN FM_PI_NODE_BIN
+  export FM_PI_REFRESH_LAUNCH_AGENTS_DIR="$agents"
+  pass "the schedule is machine-global, stamps only for launchd, and reports absent, orphaned, foreign, unloaded, unproven, stale, failing and attention apart from healthy"
 }
 
 selection_contract() {
@@ -510,3 +809,4 @@ republish_contract
 pool_integrity_contract
 adapter_outcome_contract
 adapter_store_contract
+scheduler_contract

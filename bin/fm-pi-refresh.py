@@ -31,8 +31,21 @@ What it does, in order:
              it to be usable, so the run's exit code means the fleet is live
              rather than that an HTTP call returned 200
 
+It also owns the schedule that makes the above unattended: one machine-global
+macOS LaunchAgent running `run-once --all --scheduled` on an interval. Machine
+global because the credential pool is: one `auth.json` serves every Firstmate
+home on the machine, and this machine has nine of them, so a per-home job would
+install redundant refreshers racing for one lock.
+
+A heartbeat counts only when it carries the activation nonce baked into the
+installed plist, which exists only in launchd's copy of the job environment.
+A hand-run `--scheduled` therefore writes nothing at all rather than making an
+absent or dead schedule look alive.
+
 What it never does: log in. A profile whose refresh material is gone needs a
 human and a browser, and this says so by name instead of pretending otherwise.
+It also never installs the schedule on its own: a background owner that writes
+credentials is installed deliberately, so `ensure` reports and waits.
 
 Token material is never printed, returned, or logged. Accounts and tokens
 appear only as truncated digests, and a provider error is redacted before it is
@@ -44,6 +57,11 @@ Usage:
   fm-pi-refresh.py run-once [--source PATH] [--destination-root DIR]
                             [--horizon-seconds N] [--slot NAME]... [--all]
                             [--backup-root DIR] [--timeout-ms N] [--json]
+                            [--scheduled]
+  fm-pi-refresh.py install-scheduler [--interval-seconds N]
+  fm-pi-refresh.py uninstall-scheduler
+  fm-pi-refresh.py scheduler-status [--json]
+  fm-pi-refresh.py ensure
 """
 
 from __future__ import annotations
@@ -54,7 +72,10 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
+import plistlib
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -116,6 +137,32 @@ DEFAULT_DESTINATION_ROOT = "~/.local/share/agent-fleet/accounts/pi"
 # credential that dies an hour from now is not a successful renewal.
 VERIFY_MARGIN_SECONDS = 24 * 60 * 60
 
+# One label for the machine, because one credential pool serves every Firstmate
+# home on it and this machine has nine.
+SCHEDULER_LABEL = "com.firstmate.pi-auth-refresh"
+
+# Six hours against a five-day horizon. The interval only has to be short
+# enough that a machine which wakes at all inside the horizon renews; a fire
+# outside the horizon is a no-op, so a shorter interval buys nothing.
+DEFAULT_INTERVAL_SECONDS = 6 * 60 * 60
+MIN_INTERVAL_SECONDS = 300
+MAX_INTERVAL_SECONDS = 24 * 60 * 60
+
+# A heartbeat is stale after this many intervals. Two would call a job late by
+# one skipped fire dead; three tolerates a missed wake without hiding a job
+# that has actually stopped.
+HEARTBEAT_STALE_INTERVALS = 3
+
+LAUNCH_AGENTS_DIR = "~/Library/LaunchAgents"
+
+# The installed job is identified by what it runs, not by which checkout is
+# asking. Nine Firstmate homes share one credential pool and one label.
+REFRESH_ENTRYPOINT_NAME = "fm-pi-refresh.py"
+
+# launchctl answers locally or not at all; a hang here would wedge a session
+# start rather than report a broken schedule.
+LAUNCHCTL_TIMEOUT_SECONDS = 20
+
 
 # Any run of this length in the base64url alphabet is treated as token material.
 # The adapter redacts its own writes, but stderr is a channel this side does not
@@ -131,11 +178,20 @@ def redact(text: str, limit: int = 300) -> str:
 
 
 class RefreshError(RuntimeError):
-    """One renewal run cannot proceed, or did not produce a live fleet."""
+    """One renewal run cannot proceed, or did not produce a live fleet.
+
+    `attention` marks the case where the schedule itself is working and
+    something it renews needs a human. Reporting that as a broken schedule is
+    the alarm that gets ignored.
+    """
+
+    def __init__(self, message: str, *, attention: bool = False) -> None:
+        super().__init__(message)
+        self.attention = attention
 
 
-def fail(message: str) -> None:
-    raise RefreshError(message)
+def fail(message: str, *, attention: bool = False) -> None:
+    raise RefreshError(message, attention=attention)
 
 
 def load_tool(path: Path, name: str) -> Any:
@@ -658,6 +714,33 @@ def command_report(args: argparse.Namespace) -> int:
 
 
 def command_run_once(args: argparse.Namespace) -> int:
+    """Run one renewal, stamping the heartbeat when launchd is the caller.
+
+    The stamp is written whether or not the renewal succeeded, and carries
+    which it was: a job that fails every fire must not read as a dead
+    scheduler, and a scheduler that stopped firing must not read as healthy
+    from its last success.
+    """
+
+    if not getattr(args, "scheduled", False):
+        return _run_once(args)
+    now = time.time()
+    try:
+        code = _run_once(args)
+    except RefreshError as exc:
+        record_heartbeat(
+            kind="attention" if exc.attention else "failed", detail=str(exc), now=now
+        )
+        raise
+    record_heartbeat(
+        kind="ok" if code == 0 else "failed",
+        detail="renewed" if code == 0 else f"run-once exited {code}",
+        now=now,
+    )
+    return code
+
+
+def _run_once(args: argparse.Namespace) -> int:
     if args.all and args.slot:
         fail("--all and --slot name different selections; pass one")
     if not args.all and not args.slot:
@@ -697,9 +780,17 @@ def command_run_once(args: argparse.Namespace) -> int:
             for record in unrenewable:
                 print(f"  {record['slot']}: {record['reason']}", file=sys.stderr)
         # An unrenewable profile is a real problem, but it is a problem a
-        # renewal run cannot fix: it needs a browser. Say so and exit non-zero
-        # so a scheduled run does not report success over a dying account.
-        return 1 if unrenewable else 0
+        # renewal run cannot fix: it needs a browser. Non-zero so a scheduled
+        # run does not report success over a dying account, and marked as
+        # needing attention rather than as a broken schedule, because the
+        # schedule did exactly what it is for.
+        if unrenewable:
+            fail(
+                "these profiles cannot be renewed and need an interactive login: "
+                + ", ".join(record["slot"] for record in unrenewable),
+                attention=True,
+            )
+        return 0
 
     backup = backup_pool(source, backup_root, now=now, expected=expected)
     summary["backup"] = str(backup)
@@ -789,9 +880,557 @@ def command_run_once(args: argparse.Namespace) -> int:
     if unrenewable:
         fail(
             "these profiles cannot be renewed and need an interactive login: "
-            + ", ".join(record["slot"] for record in unrenewable)
+            + ", ".join(record["slot"] for record in unrenewable),
+            attention=True,
         )
     return 0
+
+
+# ---------------------------------------------------------------------------
+# The schedule
+#
+# Every fact about the schedule is read from ONE machine-global place: the
+# plist at a fixed label. This machine carries nine Firstmate homes, each with
+# its own checkout, and the credential pool they share is machine-global too.
+# An earlier shape compared the installed job against the reporting checkout's
+# own path, so exactly one home could ever report healthy, the other eight
+# printed a warning at every session start forever, and the remedy that warning
+# printed tore down the working job and pointed it at whichever home ran it.
+#
+# A heartbeat counts only when it carries the activation nonce baked into the
+# installed plist. That is what makes "a manual run cannot fake scheduler
+# liveness" a property rather than a convention: a hand-run `--scheduled`
+# has no nonce, so it writes nothing at all. `bin/fm-report-retention.sh`
+# holds itself to the same rule the same way.
+# ---------------------------------------------------------------------------
+
+
+def scheduler_platform() -> str:
+    return os.environ.get("FM_PI_REFRESH_PLATFORM") or platform.system()
+
+
+def default_state_root() -> Path:
+    base = os.environ.get("XDG_STATE_HOME") or "~/.local/state"
+    return Path(base).expanduser() / "firstmate" / "pi-auth-refresh"
+
+
+def scheduler_state_root() -> Path:
+    override = os.environ.get("FM_PI_REFRESH_STATE_ROOT")
+    return Path(override).expanduser() if override else default_state_root()
+
+
+def launch_agents_dir() -> Path:
+    return Path(
+        os.environ.get("FM_PI_REFRESH_LAUNCH_AGENTS_DIR") or LAUNCH_AGENTS_DIR
+    ).expanduser()
+
+
+def plist_path() -> Path:
+    return launch_agents_dir() / f"{SCHEDULER_LABEL}.plist"
+
+
+def heartbeat_path(state_root: Path | None = None) -> Path:
+    return (state_root or scheduler_state_root()) / "heartbeat.json"
+
+
+def scheduler_interval() -> int:
+    raw = os.environ.get("FM_PI_REFRESH_INTERVAL") or str(DEFAULT_INTERVAL_SECONDS)
+    try:
+        value = int(raw)
+    except ValueError:
+        fail(f"FM_PI_REFRESH_INTERVAL is not a whole number of seconds: {raw!r}")
+    require_interval(value, "FM_PI_REFRESH_INTERVAL")
+    return value
+
+
+def require_interval(value: int, label: str) -> None:
+    if not MIN_INTERVAL_SECONDS <= value <= MAX_INTERVAL_SECONDS:
+        fail(
+            f"{label} must be between {MIN_INTERVAL_SECONDS} and "
+            f"{MAX_INTERVAL_SECONDS} seconds (got {value})"
+        )
+
+
+def write_private_json(path: Path, value: dict[str, Any]) -> None:
+    private_directory(path.parent)
+    try:
+        existing = path.lstat()
+    except FileNotFoundError:
+        existing = None
+    except OSError as exc:
+        fail(f"state file is unreadable at {path}: {exc.strerror}")
+    if existing is not None and (
+        not stat.S_ISREG(existing.st_mode) or path.is_symlink()
+    ):
+        fail(f"refusing to write state through a non-regular path at {path}")
+    temp = path.with_name(f".{path.name}.tmp")
+    handle = os.open(
+        str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
+def record_heartbeat(*, kind: str, detail: str, now: float) -> None:
+    """Stamp proof of life, but only for the invocation launchd started.
+
+    The nonce is the whole mechanism. It exists only in the installed plist's
+    environment, so it reaches this process only when launchd started it. A
+    hand-run `--scheduled` therefore writes nothing rather than overwriting a
+    real heartbeat, which would be a denial rather than a forgery but is just
+    as bad: the point is that the report reflects the schedule.
+    """
+
+    presented = os.environ.get("FM_PI_REFRESH_ACTIVATION_NONCE") or ""
+    installed = installed_job().get("nonce") or ""
+    if not presented or presented != installed:
+        return
+    write_private_json(
+        heartbeat_path(),
+        {
+            "at": utc(now),
+            "kind": kind,
+            "ok": kind == "ok",
+            "nonce": presented,
+            "detail": redact(detail),
+        },
+    )
+
+
+def resolve_runtime(override: str | None, default_name: str) -> str:
+    """Resolve one absolute runtime path for the plist.
+
+    A LaunchAgent inherits almost no PATH, so every runtime it needs is baked
+    in as an absolute path rather than looked up at fire time.
+    """
+
+    candidate = override or default_name
+    located = shutil.which(candidate)
+    if not located:
+        fail(f"cannot resolve {candidate!r} to an absolute path for the schedule")
+    return str(Path(located).resolve())
+
+
+def launchctl_binary() -> str:
+    return os.environ.get("FM_PI_REFRESH_LAUNCHCTL") or "launchctl"
+
+
+def run_launchctl(arguments: list[str]) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return subprocess.run(
+            [launchctl_binary(), *arguments],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=LAUNCHCTL_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # This runs at every session start. A traceback header is not an
+        # operator sentence, and TimeoutExpired is a SubprocessError, which
+        # main's refusal contract does not catch.
+        fail(
+            f"launchctl did not answer {' '.join(arguments[:2])} within "
+            f"{LAUNCHCTL_TIMEOUT_SECONDS}s"
+        )
+    except OSError as exc:
+        fail(f"launchctl could not be run: {exc.strerror or exc}")
+    raise AssertionError("unreachable")
+
+
+def launchd_holds_label() -> bool:
+    if not shutil.which(launchctl_binary()):
+        return False
+    return run_launchctl(["print", f"gui/{os.getuid()}/{SCHEDULER_LABEL}"]).returncode == 0
+
+
+def read_plist(path: Path) -> dict[str, Any] | None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode):
+        return None
+    try:
+        with path.open("rb") as stream:
+            value = plistlib.load(stream)
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def installed_job() -> dict[str, Any]:
+    """Read the one installed schedule, from wherever it was installed.
+
+    Everything downstream keys off this rather than off the reporting
+    checkout, so every Firstmate home on the machine reports the same answer
+    about the same job.
+    """
+
+    job = read_plist(plist_path())
+    if job is None:
+        return {}
+    environment = job.get("EnvironmentVariables")
+    environment = environment if isinstance(environment, dict) else {}
+    arguments = job.get("ProgramArguments")
+    arguments = arguments if isinstance(arguments, list) else []
+    root = environment.get("FM_PI_REFRESH_STATE_ROOT")
+    return {
+        "arguments": [str(value) for value in arguments],
+        "interval": job.get("StartInterval") if isinstance(job.get("StartInterval"), int) else None,
+        "nonce": environment.get("FM_PI_REFRESH_ACTIVATION_NONCE"),
+        "state_root": Path(root).expanduser() if isinstance(root, str) and root else None,
+    }
+
+
+def job_runs_this_tool(arguments: list[str]) -> str:
+    """Name what is wrong with an installed job's command, or an empty string.
+
+    Deliberately NOT a comparison against this checkout's own path: the job is
+    machine-global and the reporting checkout is not. What matters is that the
+    installed command is a renewal that stamps its own proof, whichever
+    checkout installed it.
+    """
+
+    named = [value for value in arguments if Path(value).name == REFRESH_ENTRYPOINT_NAME]
+    if not named:
+        return (
+            f"the installed schedule runs no {REFRESH_ENTRYPOINT_NAME}; it belongs "
+            "to something else that claimed this label"
+        )
+    if not Path(named[0]).is_file():
+        return f"the installed schedule runs {named[0]}, which is no longer there"
+    index = arguments.index(named[0])
+    verbs = arguments[index + 1 :]
+    if "run-once" not in verbs:
+        return "the installed schedule does not run a renewal"
+    if "--scheduled" not in verbs:
+        # Without it the job renews but never stamps, so it would sit at
+        # unproven forever while working perfectly.
+        return "the installed schedule never records proof of life"
+    return ""
+
+
+def scheduler_job(interval: int, state_root: Path, nonce: str) -> dict[str, Any]:
+    entrypoint = pi_executable()
+    node = node_binary(entrypoint)
+    python = resolve_runtime(os.environ.get("FM_PI_REFRESH_PYTHON"), "python3")
+    search = os.pathsep.join(
+        [
+            str(Path(node).parent),
+            str(Path(python).parent),
+            str(entrypoint.parent),
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ]
+    )
+    return {
+        "Label": SCHEDULER_LABEL,
+        "ProgramArguments": [
+            python,
+            str(Path(__file__).resolve()),
+            "run-once",
+            "--all",
+            "--scheduled",
+        ],
+        "EnvironmentVariables": {
+            "PATH": search,
+            # Pinned rather than inherited: the credential pool, the account
+            # homes and the copy directory all resolve from it, and the state
+            # root beside them is pinned already.
+            "HOME": str(Path.home()),
+            "FM_PI_BIN": str(entrypoint),
+            "FM_PI_NODE_BIN": node,
+            "FM_PI_REFRESH_STATE_ROOT": str(state_root),
+            "FM_PI_REFRESH_INTERVAL": str(interval),
+            "FM_PI_REFRESH_ACTIVATION_NONCE": nonce,
+            # The job reads its own plist to check its nonce, so it has to be
+            # told where that plist is. Without this the check only works when
+            # the plist sits at the default path, which is true in production
+            # and silently false anywhere it is installed elsewhere.
+            "FM_PI_REFRESH_LAUNCH_AGENTS_DIR": str(launch_agents_dir()),
+        },
+        "RunAtLoad": True,
+        "StartInterval": interval,
+        "StandardOutPath": str(state_root / "run.out"),
+        "StandardErrorPath": str(state_root / "run.err"),
+    }
+
+
+def write_plist(destination: Path, job: dict[str, Any]) -> None:
+    try:
+        existing = destination.lstat()
+    except FileNotFoundError:
+        existing = None
+    except OSError as exc:
+        fail(f"the schedule plist is unreadable at {destination}: {exc.strerror}")
+    if existing is not None and (
+        not stat.S_ISREG(existing.st_mode) or destination.is_symlink()
+    ):
+        fail(f"refusing to replace a non-regular schedule plist at {destination}")
+    temp = destination.with_name(f".{destination.name}.tmp")
+    handle = os.open(
+        str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            plistlib.dump(job, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, destination)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
+def command_install_scheduler(args: argparse.Namespace) -> int:
+    if scheduler_platform() != "Darwin":
+        fail(
+            "the Pi renewal schedule is a macOS LaunchAgent; this host is "
+            f"{scheduler_platform()} and has no scheduler adapter yet"
+        )
+    if not shutil.which(launchctl_binary()):
+        fail("launchctl is unavailable, so no schedule can be installed")
+    interval = args.interval_seconds or scheduler_interval()
+    require_interval(interval, "--interval-seconds")
+    state_root = scheduler_state_root()
+    private_directory(state_root)
+    nonce = secrets.token_hex(16)
+    job = scheduler_job(interval, state_root, nonce)
+
+    agents = launch_agents_dir()
+    if not agents.exists():
+        private_directory(agents)
+    destination = plist_path()
+    previous = destination.read_bytes() if destination.is_file() else None
+
+    domain = f"gui/{os.getuid()}"
+    write_plist(destination, job)
+    run_launchctl(["bootout", f"{domain}/{SCHEDULER_LABEL}"])
+    loaded = run_launchctl(["bootstrap", domain, str(destination)])
+    if loaded.returncode != 0:
+        # The plist was already published, so a refused bootstrap would
+        # otherwise leave the new definition on disk with the old job running
+        # and every report reading the file rather than launchd.
+        detail = redact(loaded.stderr.decode("utf-8", errors="replace").strip())
+        if previous is None:
+            try:
+                destination.unlink()
+            except OSError:
+                pass
+        else:
+            destination.write_bytes(previous)
+            os.chmod(destination, 0o600)
+            run_launchctl(["bootstrap", domain, str(destination)])
+        fail(f"launchctl refused the Pi renewal schedule: {detail}")
+
+    # Bind the LOADED job, not the file just written. A file check cannot tell
+    # a bootstrapped definition from one launchd never accepted.
+    if not launchd_holds_label():
+        fail("launchctl accepted the Pi renewal schedule but launchd is not holding it")
+    # `RunAtLoad` fires the first run asynchronously, so the job is loaded
+    # before it has reported anything. `unproven` is the correct state at this
+    # instant; only a job launchd is not holding is an installation failure.
+    report = scheduler_report()
+    if report["state"] not in {"installed", "unproven"}:
+        fail("the Pi renewal schedule did not come up: " + report["detail"])
+    print(
+        f"installed {SCHEDULER_LABEL} every {interval}s at {destination}\n"
+        f"  proof of life lands in {heartbeat_path(state_root)} on its first fire"
+    )
+    return 0
+
+
+def command_uninstall_scheduler(_: argparse.Namespace) -> int:
+    domain = f"gui/{os.getuid()}"
+    destination = plist_path()
+    if shutil.which(launchctl_binary()):
+        run_launchctl(["bootout", f"{domain}/{SCHEDULER_LABEL}"])
+        # The return code alone is not proof: a bootout can report failure for
+        # a job already gone, and success for one that stays. Re-probe, and
+        # never unlink the plist while launchd still holds the label, or the
+        # job keeps rotating credentials with nothing left to describe it.
+        if launchd_holds_label():
+            fail(
+                f"launchd still holds {SCHEDULER_LABEL} after bootout; the plist is "
+                f"left at {destination} so the running job stays describable"
+            )
+    try:
+        destination.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        fail(f"the schedule plist cannot be removed at {destination}: {exc.strerror}")
+    print(f"removed {SCHEDULER_LABEL}")
+    return 0
+
+
+def scheduler_report(now: float | None = None) -> dict[str, Any]:
+    """Describe the one machine-global schedule.
+
+    launchd is asked FIRST, so a job that is loaded with no plist behind it is
+    expressible instead of reading as absent.
+    """
+
+    moment = time.time() if now is None else now
+    destination = plist_path()
+    held = launchd_holds_label()
+    record: dict[str, Any] = {
+        "label": SCHEDULER_LABEL,
+        "plist": str(destination),
+        "plist_present": False,
+        "loaded": held,
+        "interval_seconds": None,
+        "state_root": None,
+        "heartbeat_at": None,
+        "heartbeat_age_seconds": None,
+        "heartbeat_kind": None,
+        "state": "absent",
+        "detail": "",
+    }
+    job = installed_job()
+    if not job:
+        if held:
+            record["state"] = "orphaned"
+            record["detail"] = (
+                f"launchd holds {SCHEDULER_LABEL} but nothing describes it at "
+                f"{destination}; bootout it or reinstall"
+            )
+        else:
+            record["detail"] = f"no schedule is installed at {destination}"
+        return record
+
+    record["plist_present"] = True
+    record["interval_seconds"] = job["interval"]
+    record["state_root"] = str(job["state_root"]) if job["state_root"] else None
+    problem = job_runs_this_tool(job["arguments"])
+    if problem:
+        record["state"] = "foreign"
+        record["detail"] = problem
+        return record
+    if not held:
+        record["state"] = "unloaded"
+        record["detail"] = "the schedule is installed but launchd is not holding it"
+        return record
+
+    interval = job["interval"] or DEFAULT_INTERVAL_SECONDS
+    limit = interval * HEARTBEAT_STALE_INTERVALS
+    if job["state_root"] is None:
+        record["state"] = "foreign"
+        record["detail"] = "the installed schedule names no state root, so it cannot report"
+        return record
+    beat = heartbeat_path(job["state_root"])
+    value = None
+    try:
+        if beat.is_file() and not beat.is_symlink():
+            value = json.loads(beat.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        value = None
+    if not isinstance(value, dict) or value.get("nonce") != job["nonce"]:
+        # An unproven job that has been loaded far longer than its own interval
+        # has not "not fired yet", it has stopped.
+        try:
+            age = moment - destination.lstat().st_mtime
+        except OSError:
+            age = 0.0
+        if age > limit:
+            record["state"] = "stale"
+            record["detail"] = (
+                f"the schedule was installed {int(age)}s ago and has never reported a "
+                f"run of its own, past {limit}s of its own interval"
+            )
+            return record
+        record["state"] = "unproven"
+        record["detail"] = (
+            "the schedule is loaded and has not reported a run of its own yet; it "
+            "proves itself on its first fire"
+        )
+        return record
+
+    try:
+        stamp = datetime.datetime.strptime(value["at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc
+        )
+    except (KeyError, TypeError, ValueError):
+        record["state"] = "unproven"
+        record["detail"] = f"the heartbeat at {beat} carries no readable instant"
+        return record
+    age = moment - stamp.timestamp()
+    record["heartbeat_at"] = value["at"]
+    record["heartbeat_age_seconds"] = int(age)
+    record["heartbeat_kind"] = value.get("kind")
+    if age > limit:
+        record["state"] = "stale"
+        record["detail"] = (
+            f"the schedule last ran {int(age)}s ago, past {limit}s of its own interval"
+        )
+        return record
+    if value.get("kind") == "attention":
+        # The schedule is working. Something it renews cannot be renewed
+        # without a human, and calling that an unavailable schedule is the
+        # alarm that gets ignored.
+        record["state"] = "attention"
+        record["detail"] = "the schedule is running; " + str(value.get("detail", ""))[:200]
+        return record
+    if value.get("kind") != "ok":
+        record["state"] = "failing"
+        record["detail"] = "the last scheduled renewal failed: " + str(
+            value.get("detail", "")
+        )[:200]
+        return record
+    record["state"] = "installed"
+    record["detail"] = f"last renewed {int(age)}s ago"
+    return record
+
+
+HEALTHY_SCHEDULER_STATES = ("installed", "attention")
+
+
+def command_scheduler_status(args: argparse.Namespace) -> int:
+    record = scheduler_report()
+    if args.json:
+        print(json.dumps(record, indent=2, sort_keys=True))
+    else:
+        print(f"{record['state']}: {record['detail']}")
+        print(f"  plist     {record['plist']}")
+        print(f"  interval  {record['interval_seconds']}")
+        print(f"  heartbeat {record['heartbeat_at'] or '-'}")
+    return 0 if record["state"] in HEALTHY_SCHEDULER_STATES else 1
+
+
+def command_ensure(_: argparse.Namespace) -> int:
+    """Report an unhealthy schedule in one line, and never install one.
+
+    Installing a background owner that writes credentials is a deliberate act,
+    so this reports and waits rather than repairing itself.
+    """
+
+    record = scheduler_report()
+    if record["state"] in HEALTHY_SCHEDULER_STATES:
+        return 0
+    print(
+        f"PI_AUTH_REFRESH: unavailable: {record['detail']} "
+        f"(install: bin/fm-pi-refresh.py install-scheduler)",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -823,7 +1462,36 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--slot", action="append", default=[])
     run.add_argument("--all", action="store_true")
     run.add_argument("--json", action="store_true")
+    run.add_argument(
+        "--scheduled",
+        action="store_true",
+        help="record the heartbeat, which only launchd's own invocation can do",
+    )
     run.set_defaults(handler=command_run_once)
+
+    install = commands.add_parser(
+        "install-scheduler", help="install the machine-global renewal LaunchAgent"
+    )
+    install.add_argument("--interval-seconds", type=int, default=0)
+    install.set_defaults(handler=command_install_scheduler)
+
+    uninstall = commands.add_parser(
+        "uninstall-scheduler", help="remove the renewal LaunchAgent"
+    )
+    uninstall.set_defaults(handler=command_uninstall_scheduler)
+
+    status = commands.add_parser(
+        "scheduler-status",
+        help="report whether the schedule is installed and proving itself",
+    )
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(handler=command_scheduler_status)
+
+    ensure = commands.add_parser(
+        "ensure",
+        help="print one line when the schedule is unhealthy, and nothing when it is not",
+    )
+    ensure.set_defaults(handler=command_ensure)
     return parser
 
 

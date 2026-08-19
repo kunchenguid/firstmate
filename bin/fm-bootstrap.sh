@@ -170,6 +170,28 @@ checkout_refresh_ensure() {
   fi
 }
 
+pi_auth_refresh_ensure() {
+  local out
+  # The same seam the Python half uses. Checking uname directly made this
+  # unreachable on Linux, so the assertion that bootstrap reports an unhealthy
+  # schedule could only ever run on a developer's Mac.
+  [ "${FM_PI_REFRESH_PLATFORM:-$(uname)}" = Darwin ] || return 0
+  [ -x "$SCRIPT_DIR/fm-pi-refresh.py" ] || return 0
+  # Silent under the test bypass unless a test asks for it, the same seam
+  # checkout-refresh and report-retention use: this reports one machine-global
+  # owner, so without the seam every bootstrap assertion in the suite would
+  # carry its absence.
+  if [ "${FM_GATE_REFUSE_BYPASS:-0}" = 1 ] && [ "${FM_PI_REFRESH_BOOTSTRAP_TEST:-0}" != 1 ]; then
+    return 0
+  fi
+  # Machine-global, not per-home: one Pi credential pool serves every home, so
+  # this reports the same one job from whichever home a session starts in.
+  if ! out=$(python3 "$SCRIPT_DIR/fm-pi-refresh.py" ensure 2>&1); then
+    [ -n "$out" ] || out="the Pi renewal schedule did not report"
+    echo "${out%%$'\n'*}"
+  fi
+}
+
 fleet_sync_origin_backed_project_count() {
   local count proj
   if [ -x "$FM_ROOT/bin/fm-checkout-refresh.sh" ] \
@@ -899,6 +921,11 @@ if [ "${1:-}" = "install" ]; then
       "$SCRIPT_DIR/fm-checkout-refresh.sh" install
       continue
     fi
+    if [ "$t" = pi-auth-refresh ]; then
+      echo "installing pi-auth-refresh LaunchAgent"
+      python3 "$SCRIPT_DIR/fm-pi-refresh.py" install-scheduler
+      continue
+    fi
     if ! cmd=$(install_cmd "$t"); then
       instructions=$(manual_install_url "$t") || { echo "error: unknown tool $t" >&2; exit 1; }
       echo "error: $t requires manual installation (instructions: $instructions)" >&2
@@ -964,6 +991,7 @@ if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
 fi
 author_identity_sweep
 checkout_refresh_ensure
+pi_auth_refresh_ensure
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   report_retention_ensure
   secondmate_sync
