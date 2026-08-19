@@ -856,6 +856,84 @@ test_replace_regenerates_in_place_and_archives_the_superseded_brief() {
   pass "fm-brief.sh: --replace regenerates in place and archives the superseded brief"
 }
 
+test_replace_validates_before_archiving() {
+  local home id brief before out status escaped
+  home="$TMP_ROOT/rescaffold-validation-home"
+  mkdir -p "$home/data"
+
+  id="brief-replace-invalid-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  before=$(cat "$brief")
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --mode direct-PR --replace 2>&1); status=$?
+  expect_code 1 "$status" "ship --replace without a repo must refuse"
+  assert_contains "$out" "briefs require exactly <task-id> <repo-name>" \
+    "ship --replace without a repo did not report the positional contract"
+  [ "$(cat "$brief")" = "$before" ] || fail "invalid ship --replace changed the live brief"
+  assert_absent "$home/data/$id/brief.superseded-1.md" \
+    "invalid ship --replace archived the live brief"
+
+  id="brief-replace-invalid-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  before=$(cat "$brief")
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --scout --replace 2>&1); status=$?
+  expect_code 1 "$status" "scout --replace without a repo must refuse"
+  assert_contains "$out" "briefs require exactly <task-id> <repo-name>" \
+    "scout --replace without a repo did not report the positional contract"
+  [ "$(cat "$brief")" = "$before" ] || fail "invalid scout --replace changed the live brief"
+  assert_absent "$home/data/$id/brief.superseded-1.md" \
+    "invalid scout --replace archived the live brief"
+
+  id="brief-replace-invalid-secondmate"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  before=$(cat "$brief")
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --replace 2>&1); status=$?
+  expect_code 1 "$status" "secondmate --replace without a project contract must refuse"
+  assert_contains "$out" "requires at least one project" \
+    "secondmate --replace without a project contract did not explain the requirement"
+  [ "$(cat "$brief")" = "$before" ] || fail "invalid secondmate --replace changed the live brief"
+  assert_absent "$home/data/$id/brief.superseded-1.md" \
+    "invalid secondmate --replace archived the live brief"
+
+  escaped="$home/escaped"
+  mkdir -p "$escaped"
+  printf 'outside sentinel\n' > "$escaped/brief.md"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ../escaped some-proj --scout --replace 2>&1); status=$?
+  expect_code 2 "$status" "path-traversing task id must refuse"
+  assert_contains "$out" "invalid task id" "unsafe task id refusal was not explicit"
+  [ "$(cat "$escaped/brief.md")" = "outside sentinel" ] \
+    || fail "unsafe task id changed a brief outside the data directory"
+  assert_absent "$escaped/brief.superseded-1.md" \
+    "unsafe task id archived a brief outside the data directory"
+
+  pass "fm-brief.sh: --replace validates every target before archiving"
+}
+
+test_replace_generation_failure_preserves_live_brief() {
+  local home id brief before shim status
+  home="$TMP_ROOT/rescaffold-stage-home"
+  shim="$TMP_ROOT/rescaffold-stage-bin"
+  mkdir -p "$home/data" "$shim"
+  id="brief-replace-stage-failure"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  before=$(cat "$brief")
+  printf '#!/bin/sh\nexit 71\n' > "$shim/cat"
+  chmod +x "$shim/cat"
+
+  PATH="$shim:$PATH" FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --replace >/dev/null 2>&1; status=$?
+  expect_code 71 "$status" "a staged generation failure must propagate"
+  [ "$(cat "$brief")" = "$before" ] \
+    || fail "generation failure removed or changed the live brief"
+  assert_absent "$home/data/$id/brief.superseded-1.md" \
+    "generation failure archived the live brief before replacement was ready"
+
+  pass "fm-brief.sh: generation failure preserves the live brief"
+}
+
 # --replace applies to every scaffold kind, so no kind is left with hand-editing
 # as its only regeneration path.
 test_replace_applies_to_every_scaffold_kind() {
@@ -965,6 +1043,8 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_rescaffold_refuses_by_default_and_changes_nothing
 test_replace_regenerates_in_place_and_archives_the_superseded_brief
+test_replace_validates_before_archiving
+test_replace_generation_failure_preserves_live_brief
 test_replace_applies_to_every_scaffold_kind
 test_generated_briefs_carry_each_section_once
 test_scout_and_secondmate_load_decision_hold_policy

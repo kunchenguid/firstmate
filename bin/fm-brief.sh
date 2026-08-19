@@ -86,6 +86,8 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -168,7 +170,8 @@ elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
-ID=${POS[0]}
+ID=${POS[0]:-}
+fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -180,6 +183,27 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   exit 1
 fi
 
+SECONDMATE_PROJECTS=
+REPO=
+if [ "$KIND" = secondmate ]; then
+  idx=1
+  while [ "$idx" -lt "${#POS[@]}" ]; do
+    SECONDMATE_PROJECTS="${SECONDMATE_PROJECTS}${SECONDMATE_PROJECTS:+ }${POS[$idx]}"
+    idx=$((idx + 1))
+  done
+  if [ "$NO_PROJECTS" -eq 1 ]; then
+    [ -z "$SECONDMATE_PROJECTS" ] || { echo "error: --no-projects cannot be combined with a project list" >&2; exit 1; }
+  else
+    [ -n "$SECONDMATE_PROJECTS" ] || { echo "error: --secondmate requires at least one project, or --no-projects for a project-less home" >&2; exit 1; }
+  fi
+else
+  [ "${#POS[@]}" -eq 2 ] && [ -n "${POS[1]}" ] || {
+    echo "error: $KIND briefs require exactly <task-id> <repo-name>" >&2
+    exit 1
+  }
+  REPO=${POS[1]}
+fi
+
 BRIEF="$DATA/$ID/brief.md"
 # A re-scaffold is a real need (a corrected base ref, a changed delivery mode), and
 # a bare refusal does not remove that need - it only pushes the operator into an
@@ -188,25 +212,38 @@ BRIEF="$DATA/$ID/brief.md"
 # governs, so the worker follows whichever copy it read last. --replace is the
 # supported path, and it archives the superseded brief instead of destroying the
 # filled-in task text that made hand-editing look safer than regenerating.
-if [ -e "$BRIEF" ]; then
+if [ -e "$BRIEF" ] || [ -L "$BRIEF" ]; then
   if [ "$REPLACE" -eq 0 ]; then
     echo "error: $BRIEF already exists; pass --replace to regenerate it (the superseded brief is archived, never appended to)" >&2
     exit 1
   fi
   n=1
-  while [ -e "$DATA/$ID/brief.superseded-$n.md" ]; do n=$((n + 1)); done
+  while [ -e "$DATA/$ID/brief.superseded-$n.md" ] || [ -L "$DATA/$ID/brief.superseded-$n.md" ]; do n=$((n + 1)); done
   ARCHIVED="$DATA/$ID/brief.superseded-$n.md"
-  mv "$BRIEF" "$ARCHIVED"
 fi
 mkdir -p "$DATA/$ID"
+STAGE_DIR=$(mktemp -d "$DATA/$ID/.brief-stage.XXXXXX")
+STAGED="$STAGE_DIR/brief.md"
 
-# Announce the scaffold. A replace names the archive so the superseded brief -
-# which usually holds the filled-in task text - is never quietly lost.
-announce() {  # <detail>
+cleanup_staged_brief() {
+  [ -z "${STAGED:-}" ] || rm -f -- "$STAGED"
+  [ -z "${STAGE_DIR:-}" ] || rmdir "$STAGE_DIR" 2>/dev/null || true
+}
+trap cleanup_staged_brief EXIT
+
+publish_brief() {
+  local detail=$1
   if [ -n "$ARCHIVED" ]; then
-    echo "scaffolded: $BRIEF ($1; replaced, superseded brief archived at $ARCHIVED)"
+    cp -pP -- "$BRIEF" "$ARCHIVED"
+  fi
+  mv -f -- "$STAGED" "$BRIEF"
+  STAGED=
+  rmdir "$STAGE_DIR"
+  STAGE_DIR=
+  if [ -n "$ARCHIVED" ]; then
+    echo "scaffolded: $BRIEF ($detail; replaced, superseded brief archived at $ARCHIVED)"
   else
-    echo "scaffolded: $BRIEF ($1)"
+    echo "scaffolded: $BRIEF ($detail)"
   fi
 }
 
@@ -219,17 +256,6 @@ shell_quote() {
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 
 if [ "$KIND" = secondmate ]; then
-SECONDMATE_PROJECTS=""
-idx=1
-while [ "$idx" -lt "${#POS[@]}" ]; do
-  SECONDMATE_PROJECTS="${SECONDMATE_PROJECTS}${SECONDMATE_PROJECTS:+ }${POS[$idx]}"
-  idx=$((idx + 1))
-done
-if [ "$NO_PROJECTS" -eq 1 ]; then
-  [ -z "$SECONDMATE_PROJECTS" ] || { echo "error: --no-projects cannot be combined with a project list" >&2; exit 1; }
-else
-  [ -n "$SECONDMATE_PROJECTS" ] || { echo "error: --secondmate requires at least one project, or --no-projects for a project-less home" >&2; exit 1; }
-fi
 SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
 SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
 if [ "$NO_PROJECTS" -eq 1 ]; then
@@ -239,7 +265,7 @@ else
   PROJECT_CLONES_BODY=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
   PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
 fi
-cat > "$BRIEF" <<EOF
+cat > "$STAGED" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
 
 # Charter
@@ -297,14 +323,12 @@ An empty queue is a healthy resting state, not a cue to invent work: never spawn
 If this charter cannot be carried out, append \`blocked: {why}\` or \`failed: {why}\` to the main status file and stop.
 EOF
 if [ "$SECONDMATE_CHARTER" = "{TASK}" ]; then
-  announce "secondmate charter; replace {TASK}"
+  publish_brief "secondmate charter; replace {TASK}"
 else
-  announce "secondmate charter"
+  publish_brief "secondmate charter"
 fi
 exit 0
 fi
-
-REPO=${POS[1]}
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -373,7 +397,7 @@ EOF
 WAIT_SECTION=${WAIT_SECTION%$'\n'}
 
 if [ "$KIND" = scout ]; then
-cat > "$BRIEF" <<EOF
+cat > "$STAGED" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
@@ -416,7 +440,7 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-l
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
-announce "scout; replace {TASK}"
+publish_brief "scout; replace {TASK}"
 exit 0
 fi
 
@@ -478,7 +502,7 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
-cat > "$BRIEF" <<EOF
+cat > "$STAGED" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
@@ -526,4 +550,4 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-announce "ship, mode=$MODE; replace {TASK}"
+publish_brief "ship, mode=$MODE; replace {TASK}"
