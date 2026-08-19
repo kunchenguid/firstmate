@@ -214,9 +214,16 @@ build_task_index() {
 }
 
 task_matches_project() { # <task-id> <project>
-  local task=$1 project=$2 line
+  local task=$1 project=$2 line task_project project_path task_project_path
   while IFS= read -r line; do
-    [ "$line" = "$task"$'\t'"$project" ] && return 0
+    case "$line" in
+      "$task"$'\t'*) task_project=${line#*$'\t'} ;;
+      *) continue ;;
+    esac
+    [ "$task_project" = "$project" ] && return 0
+    project_path=$(cd "$PROJECTS/$project" 2>/dev/null && pwd -P) || continue
+    task_project_path=$(cd "$task_project" 2>/dev/null && pwd -P) || continue
+    [ "$task_project_path" = "$project_path" ] && return 0
   done <<EOF
 ${TASK_PROJECT:-}
 EOF
@@ -425,17 +432,14 @@ gh_fetch_open_prs() { # <repo>
 }
 
 gh_fetch_pr_view() { # <repo> <number>
-  local repo=$1 number=$2 view_json thread_snapshot view_head thread_head attempt=0
+  local repo=$1 number=$2 snapshot attempt=0
   while [ "$attempt" -lt 2 ]; do
-    thread_snapshot=$(gh_fetch_review_threads "$repo" "$number") || return 1
-    view_json=$(fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-      "$GH_BIN" pr view "$number" --repo "$repo" \
-      --json number,url,headRefName,headRefOid,baseRefName,reviewDecision,mergeable,statusCheckRollup,state 2>/dev/null) || return 1
-    thread_head=$(printf '%s' "$thread_snapshot" | jq -r '.head // empty')
-    view_head=$(printf '%s' "$view_json" | jq -r '.headRefOid // empty')
-    if [ -n "$thread_head" ] && [ "$thread_head" = "$view_head" ]; then
-      printf '%s' "$view_json" | jq -c --argjson reviewThreads "$thread_snapshot" \
-        '. + {reviewThreads: {nodes: $reviewThreads.nodes}}'
+    snapshot=$(gh_fetch_pr_snapshot "$repo" "$number") || {
+      attempt=$((attempt + 1))
+      continue
+    }
+    if [ -n "$snapshot" ]; then
+      printf '%s\n' "$snapshot"
       return 0
     fi
     attempt=$((attempt + 1))
@@ -443,7 +447,7 @@ gh_fetch_pr_view() { # <repo> <number>
   return 1
 }
 
-gh_fetch_review_threads() { # <repo> <number>
+gh_fetch_pr_snapshot() { # <repo> <number>
   local repo=$1 number=$2 owner name pages
   owner=${repo%%/*}
   name=${repo#*/}
@@ -451,12 +455,29 @@ gh_fetch_review_threads() { # <repo> <number>
   pages=$(fm_run_timed 10 env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     "$GH_BIN" api graphql --paginate \
     -f owner="$owner" -f name="$name" -F number="$number" \
-    -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid reviewThreads(first: 100, after: $endCursor) { nodes { isResolved } pageInfo { hasNextPage endCursor } } } } }' \
+    -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number url headRefName headRefOid baseRefName reviewDecision mergeable state commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { ... on CheckRun { conclusion status } ... on StatusContext { state } } } } } } } reviewThreads(first: 100, after: $endCursor) { nodes { isResolved } pageInfo { hasNextPage endCursor } } } } }' \
     2>/dev/null) || return 1
   printf '%s\n' "$pages" | jq -sec '
-    ([.[].data.repository.pullRequest.headRefOid] | unique) as $heads
-    | select(($heads | length) == 1 and ($heads[0] | length) > 0)
-    | {head: $heads[0], nodes: [.[].data.repository.pullRequest.reviewThreads.nodes[]?]}'
+    def evidence:
+      .data.repository.pullRequest
+      | {
+          number, url, headRefName, headRefOid, baseRefName, reviewDecision,
+          mergeable, state,
+          statusCheckRollup: [
+            (.commits.nodes[-1].commit.statusCheckRollup.contexts.nodes[]? | {
+              conclusion, status, state
+            })
+          ]
+        };
+    [ .[] | evidence ] as $evidence
+    | ($evidence[0]) as $first
+    | select(($first.headRefOid // "") != "")
+    | select(($evidence | all(. == $first)))
+    | $first + {
+        reviewThreads: {
+          nodes: [.[].data.repository.pullRequest.reviewThreads.nodes[]?]
+        }
+      }'
 }
 
 gh_fetch_merged_state() { # <repo> <number>

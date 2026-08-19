@@ -54,7 +54,11 @@ if [ "${1:-}" = api ] && [ "${2:-}" = graphql ]; then
   [ -f "$f" ] || exit 99
   delay="$FIX/delay/${owner}__${name}"
   [ ! -f "$delay" ] || sleep "$(cat "$delay")"
-  jq -c '{data:{repository:{pullRequest:{headRefOid,reviewThreads:(.reviewThreads // {nodes:[]})}}}}' "$f"
+  jq -c '{data:{repository:{pullRequest:{
+    number, url, headRefName, headRefOid, baseRefName, reviewDecision, mergeable, state,
+    commits:{nodes:[{commit:{statusCheckRollup:{contexts:{nodes:(.statusCheckRollup // [])}}}}]},
+    reviewThreads:(.reviewThreads // {nodes:[]})
+  }}}}' "$f"
   after="$FIX/after-graphql/${owner}__${name}-${num}.json"
   if [ -f "$after" ]; then
     cp "$after" "$f"
@@ -197,24 +201,24 @@ test_base_branch_race() {
   pass "base-branch race triggers re-evaluation"
 }
 
-test_head_change_during_review_fetch() {
+test_review_evidence_uses_single_snapshot() {
   local home fixture out
-  home=$(make_world headrace)
-  fixture="$TMP_ROOT/fix-headrace"
+  home=$(make_world reviewsnapshot)
+  fixture="$TMP_ROOT/fix-reviewsnapshot"
   setup_project "$home" "$fixture"
-  write_open "$fixture" acme/alpha '[{"number":11,"url":"https://github.com/acme/alpha/pull/11","headRefName":"fm/head11","headRefOid":"old","baseRefName":"main","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
-  write_view "$fixture" acme/alpha 11 '{"number":11,"url":"https://github.com/acme/alpha/pull/11","headRefName":"fm/head11","headRefOid":"old","baseRefName":"main","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
+  write_open "$fixture" acme/alpha '[{"number":11,"url":"https://github.com/acme/alpha/pull/11","headRefName":"fm/head11","headRefOid":"same","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":null,"status":"IN_PROGRESS"}]}]'
+  write_view "$fixture" acme/alpha 11 '{"number":11,"url":"https://github.com/acme/alpha/pull/11","headRefName":"fm/head11","headRefOid":"same","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":null,"status":"IN_PROGRESS"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   mkdir -p "$fixture/after-graphql"
-  printf '%s' '{"number":11,"url":"https://github.com/acme/alpha/pull/11","headRefName":"fm/head11","headRefOid":"new","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":null,"status":"IN_PROGRESS"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}' \
+  printf '%s' '{"number":11,"url":"https://github.com/acme/alpha/pull/11","headRefName":"fm/head11","headRefOid":"same","baseRefName":"main","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}' \
     > "$fixture/after-graphql/acme__alpha-11.json"
   fm_write_meta "$home/state/head11.meta" \
     'window=fm-head11' "worktree=$home/projects/head11" 'project=alpha' \
     'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
-  [ -z "$out" ] || fail "head race mixed passing evidence from the previous head"
+  [ -z "$out" ] || fail "review snapshot mixed later passing fields with earlier evidence"
   run_delivery "$home" "$fixture" show | grep -Fq 'checks-pending' \
-    || fail "head race did not classify the revalidated current head"
-  pass "head change retries review evidence for the current head"
+    || fail "review snapshot did not preserve the captured pending check"
+  pass "review evidence uses one GraphQL snapshot"
 }
 
 test_optional_review_silence() {
@@ -315,14 +319,14 @@ EOF
   write_open "$fixture" acme/beta '[{"number":16,"url":"https://github.com/acme/beta/pull/16","headRefName":"fm/shared16","headRefOid":"ppp","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
   write_view "$fixture" acme/beta 16 '{"number":16,"url":"https://github.com/acme/beta/pull/16","headRefName":"fm/shared16","headRefOid":"ppp","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   fm_write_meta "$home/state/shared16.meta" \
-    'window=fm-shared16' "worktree=$home/projects/shared16" 'project=alpha' \
+    'window=fm-shared16' "worktree=$home/projects/shared16" "project=$home/projects/alpha" \
     'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   [ -z "$out" ] || fail "task authority crossed into an unrelated project"
   run_delivery "$home" "$fixture" show | grep -Fq 'no-task' \
     || fail "cross-project branch was not held as unlinked"
   fm_write_meta "$home/state/shared16.meta" \
-    'window=fm-shared16' "worktree=$home/projects/shared16" 'project=beta' \
+    'window=fm-shared16' "worktree=$home/projects/shared16" "project=$home/projects/beta" \
     'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=on'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
@@ -478,7 +482,7 @@ test_discovery_without_secondmate
 test_review_issue_then_clearance
 test_migration_hold_clears
 test_base_branch_race
-test_head_change_during_review_fetch
+test_review_evidence_uses_single_snapshot
 test_optional_review_silence
 test_post_merge_routing
 test_closed_pr_state_retires_and_reopens
