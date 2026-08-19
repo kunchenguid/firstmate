@@ -93,8 +93,26 @@ wait_file() { # <path>
   return 1
 }
 
+wait_present() { # <path>
+  local path=$1 tries=${2:-200}
+  while [ "$tries" -gt 0 ]; do
+    [ -e "$path" ] && [ ! -L "$path" ] && return 0
+    sleep 0.05
+    tries=$((tries - 1))
+  done
+  return 1
+}
+
 count_log() { # <log> <fixed-pattern>
   grep -F -c "$2" "$1" 2>/dev/null || true
+}
+
+file_sha256() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
 }
 
 make_fake_bytedcli() { # <dir>
@@ -270,6 +288,58 @@ dispatch_aime() { # <home> <fakebin> <id> [extra args...]
   PATH="$fakebin:$BASE_PATH" \
     "$DISPATCH" cloud-worker/aime "$id" \
       --instructions "$home/data/$id/instructions.txt" "$@"
+}
+
+retire_aime() { # <home> <fakebin> <id>
+  local home=$1 fakebin=$2 id=$3
+  FM_HOME="$home" \
+  FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+  FM_AIME_FAKE_LOG="$home/bytedcli.log" \
+  FM_AIME_FAKE_SPACE_ID="$SPACE_ID" \
+  FM_AIME_FAKE_SESSION_ID="$SESSION_ID" \
+  FM_AIME_FAKE_MESSAGE_ID="$MESSAGE_ID" \
+  FM_AIME_FAKE_REPLAY="${FM_AIME_FAKE_REPLAY:-terminal}" \
+  FM_AIME_FAKE_OUTPUT_MODE="${FM_AIME_FAKE_OUTPUT_MODE:-success}" \
+  FM_AIME_FAKE_SESSION_MODE="${FM_AIME_FAKE_SESSION_MODE:-success}" \
+  FM_AIME_FAKE_SESSION_STATUS="${FM_AIME_FAKE_SESSION_STATUS:-completed}" \
+  PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-task-retire.sh" "$id"
+}
+
+capture_aime_bytes() { # <home> <source-id> <bytes>
+  local home=$1 source=$2 bytes=$3
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-procevent.sh" register aime "$source" -- /bin/printf '%s' "$bytes" >/dev/null \
+    || fail "could not register synthetic AIME capture for $source"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null 2>&1 \
+    || fail "could not capture synthetic AIME bytes for $source"
+}
+
+capture_unpublished_bytes() { # <home> <adapter> <source-id> <bytes>
+  local home=$1 adapter=$2 source=$3 bytes=$4 queue="$1/state/.wake-queue" saved
+  saved="$1/state/.wake-queue.unpublished-saved"
+  [ ! -e "$saved" ] && [ ! -L "$saved" ] \
+    || fail "unpublished capture fixture found a stale saved wake queue"
+  if [ -e "$queue" ]; then
+    [ -f "$queue" ] && [ ! -L "$queue" ] \
+      || fail "unpublished capture fixture found an unsafe wake queue"
+    mv "$queue" "$saved"
+  fi
+  mkdir "$queue"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-procevent.sh" register "$adapter" "$source" -- /bin/printf '%s' "$bytes" >/dev/null \
+    || fail "could not register unpublished $adapter capture for $source"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null 2>&1 \
+    || fail "could not capture unpublished $adapter bytes for $source"
+  rmdir "$queue" || fail "unpublished capture unexpectedly wrote the wake queue"
+  if [ -e "$saved" ]; then
+    mv "$saved" "$queue"
+  else
+    : >"$queue"
+  fi
+  chmod 0600 "$queue"
 }
 
 test_probe_and_disabled_gate() {
@@ -546,6 +616,346 @@ test_oversized_replay_stays_valid_through_runner_capture() {
   pass "oversized replay history stays bounded, handles to terminal success, and safely supersedes the malformed capture"
 }
 
+test_stopped_terminal_unavailable_retires_generations_and_report() {
+  local home fakebin id source trigger report before after out seq quarantine
+  home=$(new_home stopped-terminal-unavailable)
+  fakebin=$(make_fake_bytedcli "$home")
+  write_config "$home" true
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  id=terminal-unavailable
+  source=aime-$id
+  new_task "$home" "$id"
+  : >"$home/bytedcli.log"
+
+  capture_aime_bytes "$home" "$source" '{synthetic-malformed-one'
+  capture_aime_bytes "$home" "$source" '{synthetic-malformed-two'
+  assert_absent "$home/state/procevent-inbox/$source.1.handled" \
+    "malformed fixture was acknowledged before terminal-unavailable proof"
+  assert_absent "$home/state/procevent-inbox/$source.2.handled" \
+    "second malformed fixture was acknowledged before terminal-unavailable proof"
+
+  trigger="$home/terminal"
+  FM_AIME_FAKE_REPLAY=block FM_AIME_FAKE_TRIGGER="$trigger" \
+    FM_AIME_FAKE_SESSION_STATUS=stopped FM_AIME_FAKE_OUTPUT_MODE=unavailable \
+    dispatch_aime "$home" "$fakebin" "$id" >/dev/null \
+    || fail "stopped terminal-unavailable fixture dispatch failed"
+  touch "$trigger"
+  wait_phase "$home" "$id" terminal-failure 400
+  for seq in 1 2 3; do
+    wait_present "$home/state/procevent-inbox/$source.$seq.handled" 400 \
+      || fail "terminal-unavailable generation $seq was not durably acknowledged"
+  done
+  jq -e '
+    .phase == "terminal-failure"
+    and .outcome == "failed"
+    and .error_class == "provider-stopped-output-unavailable"
+    and .provider_checkpoint == "terminal-output-unavailable"
+    and .waiter == "terminal"
+    and .event_cursor == 9
+  ' "$(state_file "$home" "$id")" >/dev/null \
+    || fail "stopped terminal-unavailable state lost its truthful terminal proof"
+  report="$home/data/$id/report.md"
+  assert_grep "Provider status: \`stopped\`" "$report" \
+    "terminal-unavailable report omitted stopped provider truth"
+  assert_grep "Requested output: \`unavailable after bounded readback\`" "$report" \
+    "terminal-unavailable report omitted unavailable output truth"
+  assert_grep 'recovered no result, computed no replacement outcome' "$report" \
+    "terminal-unavailable report implied a result was recovered or computed"
+  assert_grep 'neither attempted nor claimed provider cancellation' "$report" \
+    "terminal-unavailable report blurred the cancellation boundary"
+  assert_no_grep 'synthetic-malformed-one' "$report" \
+    "malformed payload bytes leaked into the failure report"
+  assert_no_grep 'synthetic-malformed-two' "$report" \
+    "second malformed payload leaked into the failure report"
+  quarantine="$home/data/$id/aime-quarantine"
+  cmp -s "$home/state/procevent-inbox/$source.1.result" "$quarantine/$source.1.result" \
+    || fail "first malformed generation was not preserved exactly in private quarantine"
+  cmp -s "$home/state/procevent-inbox/$source.2.result" "$quarantine/$source.2.result" \
+    || fail "second malformed generation was not preserved exactly in private quarantine"
+  cmp -s "$home/state/procevent-inbox/$source.3.result" "$quarantine/$source.3.result" \
+    || fail "terminal proof generation was not preserved exactly in private quarantine"
+  assert_grep "$source#1" "$report" "first quarantined generation is absent from the audit record"
+  assert_grep "$source#2" "$report" "second quarantined generation is absent from the audit record"
+  assert_grep "$source#3" "$report" "terminal proof generation is absent from the audit record"
+  assert_absent "$home/state/procevent/$source.source" \
+    "terminal-unavailable handling left future result listening armed"
+
+  out=$(FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-procevent.sh" reconcile)
+  assert_contains "$out" 'published=0' \
+    "handled terminal-unavailable generations were re-announced"
+  assert_no_grep "procevent aime $source" "$home/state/.wake-queue" \
+    "an already queued terminal-unavailable wake survived adapter retirement"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" prepare-retire "$id" >/dev/null \
+    || fail "first terminal-unavailable retirement preparation retry failed"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" prepare-retire "$id" >/dev/null \
+    || fail "second terminal-unavailable retirement preparation retry was not idempotent"
+
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
+  before=$(file_sha256 "$report")
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-task-retire.sh" "$id" >/dev/null \
+    || fail "stopped terminal-unavailable task did not archive through the task interface"
+  after=$(file_sha256 "$report")
+  [ "$before" = "$after" ] || fail "archival changed the terminal-unavailable failure report"
+  assert_absent "$home/state/cloud-tasks/$id" \
+    "terminal-unavailable archival retained volatile cloud state"
+  assert_present "$quarantine/$source.1.result" \
+    "archival removed the private malformed-generation evidence"
+  assert_present "$quarantine/$source.2.result" \
+    "archival removed the second malformed-generation evidence"
+  out=$(FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-procevent.sh" reconcile)
+  assert_contains "$out" 'published=0' \
+    "archived terminal-unavailable generations resumed announcement"
+  pass "provider-stopped terminal output unavailability becomes a truthful failure, retires exact captured generations, and archives with evidence"
+}
+
+test_existing_result_unavailable_guarded_archival() {
+  local home fakebin id source trigger report
+  home=$(new_home existing-result-unavailable)
+  fakebin=$(make_fake_bytedcli "$home")
+  write_config "$home" true
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  id=existing-terminal-unavailable
+  source=aime-$id
+  new_task "$home" "$id"
+  trigger="$home/initial-wait"
+  FM_AIME_FAKE_REPLAY=block FM_AIME_FAKE_TRIGGER="$trigger" \
+    dispatch_aime "$home" "$fakebin" "$id" >/dev/null \
+    || fail "existing result-unavailable fixture dispatch failed"
+  run_aime "$home" "$fakebin" interrupt-wait "$id" >/dev/null \
+    || fail "existing result-unavailable fixture initial waiter cleanup failed"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" arm "$id" >/dev/null \
+    || fail "existing result-unavailable fixture could not arm bounded readback"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    FM_AIME_FAKE_LOG="$home/bytedcli.log" FM_AIME_FAKE_SPACE_ID="$SPACE_ID" \
+    FM_AIME_FAKE_SESSION_ID="$SESSION_ID" FM_AIME_FAKE_MESSAGE_ID="$MESSAGE_ID" \
+    FM_AIME_FAKE_REPLAY=terminal FM_AIME_FAKE_OUTPUT_MODE=unavailable \
+    FM_AIME_FAKE_SESSION_STATUS=completed PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-procevent.sh" start "$source" >/dev/null \
+    || fail "existing result-unavailable fixture readback did not complete"
+  [ "$(phase_of "$home" "$id")" = result-unavailable ] \
+    || fail "preparation fixture did not preserve the existing result-unavailable phase"
+  run_aime "$home" "$fakebin" interrupt-wait "$id" >/dev/null \
+    || fail "existing result-unavailable fixture re-armed waiter cleanup failed"
+
+  report="$home/data/$id/report.md"
+  printf '# Preserved synthetic AIME failure report\n\nThe provider result is unavailable; no research result was recovered.\n' >"$report"
+  chmod 0600 "$report"
+  capture_unpublished_bytes "$home" aime "$source" '{existing-malformed-one'
+  capture_unpublished_bytes "$home" aime "$source" '{existing-malformed-two'
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
+
+  FM_AIME_FAKE_REPLAY=terminal FM_AIME_FAKE_OUTPUT_MODE=unavailable \
+    FM_AIME_FAKE_SESSION_STATUS=stopped retire_aime "$home" "$fakebin" "$id" >/dev/null \
+    || fail "guarded task retirement did not archive an existing stopped terminal-unavailable record"
+  assert_absent "$home/state/cloud-tasks/$id" \
+    "guarded archival retained the existing volatile cloud record"
+  assert_grep 'Preserved synthetic AIME failure report' "$report" \
+    "guarded archival replaced the existing failure report"
+  assert_grep "Provider status: \`stopped\`" "$report" \
+    "guarded archival did not append the proven terminal outcome"
+  assert_grep "Requested output: \`unavailable after bounded readback\`" "$report" \
+    "guarded archival did not record the failed bounded readback"
+  assert_present "$home/state/procevent-inbox/$source.2.handled" \
+    "guarded archival did not acknowledge the first pending malformed generation"
+  assert_present "$home/state/procevent-inbox/$source.3.handled" \
+    "guarded archival did not acknowledge the second pending malformed generation"
+  assert_present "$home/data/$id/aime-quarantine/$source.2.result" \
+    "guarded archival did not preserve the first pending malformed generation"
+  assert_present "$home/data/$id/aime-quarantine/$source.3.result" \
+    "guarded archival did not preserve the second pending malformed generation"
+  pass "an existing result-unavailable record uses bounded fresh proof to archive only the stopped terminal-unavailable failure class"
+}
+
+test_terminal_unavailable_retry_and_refusal_boundaries() {
+  local home fakebin id source trigger report rc out wrong_session wrong_observation
+  local contradictory_observation unrelated_source
+  home=$(new_home terminal-unavailable-retry)
+  fakebin=$(make_fake_bytedcli "$home")
+  write_config "$home" true
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  id=retry-boundary
+  source=aime-$id
+  new_task "$home" "$id"
+  trigger="$home/terminal"
+  FM_AIME_FAKE_REPLAY=block FM_AIME_FAKE_TRIGGER="$trigger" \
+    FM_AIME_FAKE_SESSION_STATUS=stopped FM_AIME_FAKE_OUTPUT_MODE=unavailable \
+    dispatch_aime "$home" "$fakebin" "$id" >/dev/null \
+    || fail "retry-boundary fixture dispatch failed"
+  touch "$trigger"
+  wait_present "$home/state/procevent-inbox/$source.1.handled" 400 \
+    || fail "retry-boundary terminal proof was not acknowledged"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" prepare-retire "$id" >/dev/null \
+    || fail "retry-boundary terminal seal did not settle"
+
+  capture_unpublished_bytes "$home" aime "$source" '{retry-boundary-malformed'
+  assert_absent "$home/state/procevent-inbox/$source.2.handled" \
+    "unpublished malformed generation was unexpectedly acknowledged"
+  rc=0
+  FM_AIME_RETIRE_MAX_GENERATIONS=1 \
+    FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" prepare-retire "$id" >"$home/bounded.out" 2>"$home/bounded.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "bounded retirement scan silently skipped a later generation"
+  assert_grep 'bounded retirement scan' "$home/bounded.err" \
+    "bounded retirement refusal did not identify its limit"
+  assert_absent "$home/data/$id/aime-quarantine/$source.2.result" \
+    "over-bound retirement partially quarantined a generation"
+  assert_absent "$home/state/procevent-inbox/$source.2.handled" \
+    "over-bound retirement partially acknowledged a generation"
+
+  ln -s "$home/nonexistent-handled-target" "$home/state/procevent-inbox/$source.2.handled"
+  rc=0
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" prepare-retire "$id" >"$home/interrupted.out" 2>"$home/interrupted.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "unsafe acknowledgement boundary did not interrupt retirement preparation"
+  assert_grep 'could not be acknowledged' "$home/interrupted.err" \
+    "interrupted preparation did not preserve its exact retry boundary"
+  assert_present "$home/data/$id/aime-quarantine/$source.2.result" \
+    "interrupted preparation lost the quarantined generation"
+  report="$home/data/$id/report.md"
+  assert_grep "$source#2" "$report" \
+    "interrupted preparation lost the durable report ledger entry"
+  [ -L "$home/state/procevent-inbox/$source.2.handled" ] \
+    || fail "failed acknowledgement unexpectedly replaced its unsafe marker"
+  rm -f -- "$home/state/procevent-inbox/$source.2.handled"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" prepare-retire "$id" >/dev/null \
+    || fail "retry after the acknowledgement interruption did not converge"
+  assert_present "$home/state/procevent-inbox/$source.2.handled" \
+    "retry did not durably acknowledge the quarantined generation"
+  [ "$(grep -F -c "$source#2" "$report")" -eq 1 ] \
+    || fail "retry duplicated the generation audit entry"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" prepare-retire "$id" >/dev/null \
+    || fail "completed retirement preparation was not idempotent"
+
+  rc=0
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-task-retire.sh" "$id" >"$home/decision.out" 2>"$home/decision.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "terminal-unavailable archival bypassed decision review"
+  assert_grep 'decision completion gate has not passed' "$home/decision.err" \
+    "incomplete decision review did not remain the archival blocker"
+  assert_present "$(state_file "$home" "$id")" \
+    "decision-gate refusal removed terminal-unavailable state"
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-task-retire.sh" "$id" >/dev/null \
+    || fail "decision-complete retry did not archive the prepared task"
+
+  id=identity-mismatch
+  source=aime-$id
+  new_task "$home" "$id"
+  trigger="$home/$id-terminal"
+  FM_AIME_FAKE_REPLAY=block FM_AIME_FAKE_TRIGGER="$trigger" \
+    FM_AIME_FAKE_SESSION_STATUS=stopped FM_AIME_FAKE_OUTPUT_MODE=unavailable \
+    dispatch_aime "$home" "$fakebin" "$id" >/dev/null \
+    || fail "identity-mismatch fixture dispatch failed"
+  touch "$trigger"
+  wait_present "$home/state/procevent-inbox/$source.1.handled" 400 \
+    || fail "identity-mismatch fixture did not reach its sealed baseline"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" prepare-retire "$id" >/dev/null \
+    || fail "identity-mismatch terminal seal did not settle"
+  unrelated_source=aime-unrelated-retirement-source
+  capture_unpublished_bytes "$home" aime "$unrelated_source" '{synthetic-unrelated-source'
+  assert_absent "$home/state/procevent-inbox/$unrelated_source.1.handled" \
+    "AIME retirement acknowledged a generation from an unrelated source"
+  assert_absent "$home/data/$id/aime-quarantine/$unrelated_source.1.result" \
+    "AIME retirement quarantined a generation from an unrelated source"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-procevent.sh" retire "$unrelated_source" >/dev/null \
+    || fail "unrelated-source fixture cleanup failed"
+  wrong_session=99999999-9999-4999-8999-999999999999
+  wrong_observation=$(jq -cn \
+    --arg id "$id" --arg session "$wrong_session" '
+      {
+        schema:"fm-aime-observation.v1",task_id:$id,provider:"aime",site:"cn",
+        session_id:$session,from_offset:9,replay_ok:true,session_ok:true,output_ok:false,
+        terminal_candidate:true,observed_at:"2026-08-18T00:00:00Z",
+        replay:{status:"success",data:{session_id:$session,terminal:true,last_event_offset:10,event_count:1},error:null},
+        session:{status:"success",data:{id:$session,status:"stopped"},error:null},
+        output:{status:"error",error_class:"unavailable"}
+      }')
+  capture_unpublished_bytes "$home" aime "$source" "$wrong_observation"
+  rc=0
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" prepare-retire "$id" >"$home/identity.out" 2>"$home/identity.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "identity-mismatched observation was suppressed during retirement"
+  assert_grep 'observation identity does not match' "$home/identity.err" \
+    "identity-mismatch refusal did not name the failed binding"
+  assert_absent "$home/state/procevent-inbox/$source.2.handled" \
+    "identity-mismatched generation was acknowledged"
+  assert_absent "$home/data/$id/aime-quarantine/$source.2.result" \
+    "identity-mismatched generation was quarantined as if owned"
+
+  id='terminal-proof-mismatch'
+  source=aime-$id
+  new_task "$home" "$id"
+  trigger="$home/$id-terminal"
+  FM_AIME_FAKE_REPLAY=block FM_AIME_FAKE_TRIGGER="$trigger" \
+    FM_AIME_FAKE_SESSION_STATUS=stopped FM_AIME_FAKE_OUTPUT_MODE=unavailable \
+    dispatch_aime "$home" "$fakebin" "$id" >/dev/null \
+    || fail "terminal-proof-mismatch fixture dispatch failed"
+  touch "$trigger"
+  wait_present "$home/state/procevent-inbox/$source.1.handled" 400 \
+    || fail "terminal-proof-mismatch fixture did not reach its sealed baseline"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" prepare-retire "$id" >/dev/null \
+    || fail "terminal-proof-mismatch terminal seal did not settle"
+  contradictory_observation=$(jq -cn \
+    --arg id "$id" --arg session "$SESSION_ID" '
+      {
+        schema:"fm-aime-observation.v1",task_id:$id,provider:"aime",site:"cn",
+        session_id:$session,from_offset:9,replay_ok:true,session_ok:true,output_ok:false,
+        terminal_candidate:true,observed_at:"2026-08-18T00:00:00Z",
+        replay:{status:"success",data:{session_id:$session,terminal:false,last_event_offset:10,event_count:1},error:null},
+        session:{status:"success",data:{id:$session,status:"stopped"},error:null},
+        output:{status:"error",error_class:"unavailable"}
+      }')
+  capture_unpublished_bytes "$home" aime "$source" "$contradictory_observation"
+  rc=0
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" prepare-retire "$id" >"$home/terminal-proof.out" 2>"$home/terminal-proof.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "nonterminal replay evidence was suppressed during retirement"
+  assert_grep 'contradicts the terminal-unavailable outcome' "$home/terminal-proof.err" \
+    "nonterminal replay refusal did not preserve the authoritative-terminal boundary"
+  assert_absent "$home/state/procevent-inbox/$source.2.handled" \
+    "generation without authoritative terminal replay was acknowledged"
+  assert_absent "$home/data/$id/aime-quarantine/$source.2.result" \
+    "generation without authoritative terminal replay was quarantined"
+
+  id='adapter-mismatch'
+  source=aime-$id
+  new_task "$home" "$id"
+  trigger="$home/$id-terminal"
+  FM_AIME_FAKE_REPLAY=block FM_AIME_FAKE_TRIGGER="$trigger" \
+    FM_AIME_FAKE_SESSION_STATUS=stopped FM_AIME_FAKE_OUTPUT_MODE=unavailable \
+    dispatch_aime "$home" "$fakebin" "$id" >/dev/null \
+    || fail "adapter-mismatch fixture dispatch failed"
+  touch "$trigger"
+  wait_present "$home/state/procevent-inbox/$source.1.handled" 400 \
+    || fail "adapter-mismatch fixture did not reach its sealed baseline"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" prepare-retire "$id" >/dev/null \
+    || fail "adapter-mismatch terminal seal did not settle"
+  capture_unpublished_bytes "$home" lavish "$source" 'synthetic-unrelated-adapter-result'
+  rc=0
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" prepare-retire "$id" >"$home/adapter.out" 2>"$home/adapter.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "another adapter's generation was suppressed by AIME retirement"
+  assert_grep 'not owned by the AIME adapter' "$home/adapter.err" \
+    "adapter mismatch refusal did not preserve one-owner evidence"
+  assert_absent "$home/state/procevent-inbox/$source.2.handled" \
+    "another adapter's generation was acknowledged by AIME"
+  pass "terminal-unavailable preparation is bounded and retryable, preserves decision holds, and refuses identity or adapter mismatches"
+}
+
 test_restart_adoption_and_cancellation() {
   local home fakebin trigger out rc=0 writes_before state staged
   home=$(new_home restart-adoption)
@@ -558,6 +968,13 @@ test_restart_adoption_and_cancellation() {
   FM_AIME_FAKE_REPLAY=block FM_AIME_FAKE_TRIGGER="$trigger" \
     dispatch_aime "$home" "$fakebin" restart-task >/dev/null \
     || fail "restart fixture dispatch failed"
+  rc=0
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-task-retire.sh" restart-task \
+    >"$home/running-retire.out" 2>"$home/running-retire.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "submitted AIME task was retired"
+  assert_grep 'phase=submitted' "$home/running-retire.err" \
+    "submitted retirement refusal did not retain the live phase"
   run_aime "$home" "$fakebin" interrupt-wait restart-task >"$home/interrupt.out" \
     || fail "local waiter interrupt failed"
   assert_contains "$(cat "$home/interrupt.out")" "may still be running" \
@@ -665,7 +1082,7 @@ test_restart_adoption_and_cancellation() {
 }
 
 test_acceptance_unknown_and_explicit_failures() {
-  local home fakebin id rc phase class
+  local home fakebin id rc phase class retire_rc
   home=$(new_home write-failures)
   fakebin=$(make_fake_bytedcli "$home")
   write_config "$home" true
@@ -687,6 +1104,13 @@ test_acceptance_unknown_and_explicit_failures() {
       *timeout) [ "$class" = timeout ] || fail "$id did not retain timeout class" ;;
       *malformed) [ "$class" = cli-failure ] || fail "$id did not retain malformed class" ;;
     esac
+    retire_rc=0
+    FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+      "$ROOT/bin/fm-task-retire.sh" "$id" \
+      >"$home/$id-retire.out" 2>"$home/$id-retire.err" || retire_rc=$?
+    [ "$retire_rc" -ne 0 ] || fail "$id acceptance uncertainty was retired"
+    assert_grep "phase=$phase" "$home/$id-retire.err" \
+      "$id retirement refusal did not preserve acceptance uncertainty"
     rc=0
     FM_AIME_FAKE_FAILURE='' run_aime "$home" "$fakebin" adopt "$id" \
       >"$home/$id-adopt.out" 2>"$home/$id-adopt.err" || rc=$?
@@ -785,7 +1209,7 @@ test_document_mode_and_terminal_result_failures() {
 }
 
 test_transient_readback_rearms_and_state_is_unknown() {
-  local home fakebin trigger out recovery_marker tries=200 result sequence status_count
+  local home fakebin trigger out recovery_marker tries=200 result sequence status_count rc
   home=$(new_home transient-readback)
   fakebin=$(make_fake_bytedcli "$home")
   write_config "$home" true
@@ -802,6 +1226,40 @@ test_transient_readback_rearms_and_state_is_unknown() {
 
   run_aime "$home" "$fakebin" interrupt-wait transient >/dev/null \
     || fail "transient fixture waiter cleanup failed"
+
+  new_task "$home" uncertain-terminal
+  trigger="$home/uncertain-never"
+  FM_AIME_FAKE_REPLAY=block FM_AIME_FAKE_TRIGGER="$trigger" \
+    dispatch_aime "$home" "$fakebin" uncertain-terminal >/dev/null \
+    || fail "provider-uncertainty fixture dispatch failed"
+  run_aime "$home" "$fakebin" interrupt-wait uncertain-terminal >/dev/null \
+    || fail "provider-uncertainty fixture initial waiter cleanup failed"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ADAPTER" arm uncertain-terminal >/dev/null \
+    || fail "provider-uncertainty fixture could not arm one bounded readback"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    FM_AIME_FAKE_LOG="$home/bytedcli.log" FM_AIME_FAKE_SPACE_ID="$SPACE_ID" \
+    FM_AIME_FAKE_SESSION_ID="$SESSION_ID" FM_AIME_FAKE_MESSAGE_ID="$MESSAGE_ID" \
+    FM_AIME_FAKE_REPLAY=unavailable PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-procevent.sh" start aime-uncertain-terminal >/dev/null \
+    || fail "provider-uncertainty fixture readback did not complete"
+  [ "$(phase_of "$home" uncertain-terminal)" = result-unavailable ] \
+    || fail "provider uncertainty did not remain result-unavailable"
+  printf '# Synthetic provider-uncertainty report\n\nNo provider result is available.\n' \
+    >"$home/data/uncertain-terminal/report.md"
+  chmod 0600 "$home/data/uncertain-terminal/report.md"
+  rc=0
+  FM_AIME_FAKE_REPLAY=unavailable \
+    retire_aime "$home" "$fakebin" uncertain-terminal \
+    >"$home/uncertain-retire.out" 2>"$home/uncertain-retire.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "provider-uncertain result-unavailable task was retired"
+  assert_grep 'terminal stopped/output-unavailable evidence is not proven' \
+    "$home/uncertain-retire.err" \
+    "provider-uncertain retirement did not refuse at the proof boundary"
+  assert_present "$home/state/procevent/aime-uncertain-terminal.source" \
+    "provider-uncertain retirement stopped adoptable result listening"
+  run_aime "$home" "$fakebin" interrupt-wait uncertain-terminal >/dev/null \
+    || fail "provider-uncertainty fixture waiter cleanup failed"
 
   new_task "$home" recovers
   recovery_marker="$home/replay-recovered"
@@ -842,7 +1300,7 @@ test_transient_readback_rearms_and_state_is_unknown() {
 }
 
 test_cloud_retirement_preserves_report() {
-  local home fakebin id rc=0 report
+  local home fakebin id rc=0 report saved alias trigger
   home=$(new_home cloud-retirement)
   fakebin=$(make_fake_bytedcli "$home")
   write_config "$home" true
@@ -858,6 +1316,36 @@ test_cloud_retirement_preserves_report() {
     || fail "retirement fixture did not reach terminal failure"
   report="$home/data/$id/report.md"
   [ -s "$report" ] || fail "retirement fixture has no durable report"
+
+  saved="$home/data/$id/report.saved"
+  mv "$report" "$saved"
+  rc=0
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-task-retire.sh" "$id" >"$home/missing-report.out" 2>"$home/missing-report.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "AIME retirement accepted a missing report"
+  mv "$saved" "$report"
+
+  chmod 0644 "$report"
+  rc=0
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-task-retire.sh" "$id" >"$home/mode-report.out" 2>"$home/mode-report.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "AIME retirement accepted a non-private report"
+  chmod 0600 "$report"
+
+  alias="$home/data/$id/report.alias"
+  ln "$report" "$alias"
+  rc=0
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-task-retire.sh" "$id" >"$home/hardlink-report.out" 2>"$home/hardlink-report.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "AIME retirement accepted a hardlinked report"
+  rm -f -- "$alias"
+
+  rc=0
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-task-retire.sh" "$id" >"$home/decision-report.out" 2>"$home/decision-report.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "AIME retirement bypassed incomplete decision review"
+  assert_grep 'decision completion gate has not passed' "$home/decision-report.err" \
+    "AIME retirement did not preserve the decision gate after report checks"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
 
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
@@ -867,7 +1355,45 @@ test_cloud_retirement_preserves_report() {
   [ ! -e "$home/state/$id.meta" ] || fail "AIME retirement retained volatile task metadata"
   [ ! -e "$home/state/$id.status" ] || fail "AIME retirement retained volatile status history"
   [ ! -e "$home/state/cloud-tasks/$id" ] || fail "AIME retirement retained private cloud state"
-  pass "terminal AIME retirement passes the decision gate, removes volatile cloud state, and preserves the report"
+
+  id=provider-failed
+  new_task "$home" "$id"
+  trigger="$home/provider-failed-terminal"
+  FM_AIME_FAKE_REPLAY=block FM_AIME_FAKE_TRIGGER="$trigger" \
+    FM_AIME_FAKE_SESSION_MODE=failed FM_AIME_FAKE_OUTPUT_MODE=unavailable \
+    dispatch_aime "$home" "$fakebin" "$id" >/dev/null \
+    || fail "ordinary provider-failure retirement fixture dispatch failed"
+  touch "$trigger"
+  wait_phase "$home" "$id" terminal-failure 400
+  [ "$(jq -r '.error_class' "$(state_file "$home" "$id")")" = provider-terminal-failure ] \
+    || fail "ordinary provider failure was changed by terminal-unavailable handling"
+  assert_grep "Error class: \`provider-terminal-failure\`" "$home/data/$id/report.md" \
+    "ordinary provider failure report changed classification"
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-task-retire.sh" "$id" >/dev/null \
+    || fail "ordinary terminal provider failure no longer archives"
+  assert_present "$home/data/$id/report.md" \
+    "ordinary provider failure archival removed its report"
+
+  id=success-retire
+  new_task "$home" "$id"
+  trigger="$home/success-retire-terminal"
+  FM_AIME_FAKE_REPLAY=block FM_AIME_FAKE_TRIGGER="$trigger" \
+    FM_AIME_FAKE_SESSION_STATUS=stopped \
+    dispatch_aime "$home" "$fakebin" "$id" >/dev/null \
+    || fail "successful retirement fixture dispatch failed"
+  touch "$trigger"
+  wait_phase "$home" "$id" terminal-success 400
+  assert_grep '## Provider Result' "$home/data/$id/report.md" \
+    "readable stopped-provider output was not preserved as success"
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
+  FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+    "$ROOT/bin/fm-task-retire.sh" "$id" >/dev/null \
+    || fail "successful AIME result no longer archives"
+  assert_present "$home/data/$id/report.md" \
+    "successful AIME archival removed its report"
+  pass "terminal AIME success and failure retirement enforce report and decision safety while preserving ordinary provider failures"
 }
 
 test_local_executor_wrappers_delegate_unchanged() {
@@ -912,6 +1438,9 @@ test_probe_failures_are_distinct
 test_sandbox_verification_is_explicit_and_stays_disabled
 test_dispatch_completion_and_duplicate_replay
 test_oversized_replay_stays_valid_through_runner_capture
+test_stopped_terminal_unavailable_retires_generations_and_report
+test_existing_result_unavailable_guarded_archival
+test_terminal_unavailable_retry_and_refusal_boundaries
 test_restart_adoption_and_cancellation
 test_acceptance_unknown_and_explicit_failures
 test_document_mode_and_terminal_result_failures

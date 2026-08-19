@@ -74,8 +74,8 @@ $ BYTEDCLI_NO_AUTO_UPGRADE=1 bytedcli aime session replay-events --help | grep -
 
 `tests/fm-aime-cloud-worker.test.sh` puts a fake `bytedcli` first on `PATH` and drives the real Firstmate scripts.
 It performs no real AIME or Feishu write.
-The suite covers the disabled gate; read-only probe classifications; explicit fake sandbox authorization and disabled config output; durable create and send boundaries; asynchronous process-event completion; duplicate wake replay; replay histories larger than the generic capture bound reduced to a valid cursor-bearing summary; adapter-owned preservation and acknowledgement of an older malformed capture only after a later authoritative observation is applied; restart adoption from submitted and checkpointed-created phases even after config removal; acceptance-unknown states; explicit rate-limited and unavailable rejection; canonical Feishu-host document identity validation with no local Feishu write; malformed, empty, missing, and transient results; cancellation refusal; cloud retirement with report preservation; and unchanged local dispatch, state, and retirement delegation.
-Latest fake-provider regression: 2026-08-18 against `origin/main` at `6f41888ae639e1ecf4d3cd6c5d4c27d3bd81fddd`.
+The suite covers the disabled gate; read-only probe classifications; explicit fake sandbox authorization and disabled config output; durable create and send boundaries; asynchronous process-event completion; duplicate wake replay; replay histories larger than the generic capture bound reduced to a valid cursor-bearing summary; adapter-owned preservation and acknowledgement of an older malformed capture only after a later authoritative observation is applied; provider-stopped terminal output unavailability as truthful failure; guarded archival of an existing `result-unavailable` record after one bounded fresh proof; private quarantine, exact generation acknowledgement, queued-wake retirement, scan bounds, retry after interruption, report and decision preservation, unrelated-source isolation, and identity or adapter refusal; restart adoption from submitted and checkpointed-created phases even after config removal; acceptance-unknown states and retirement refusal; explicit rate-limited and unavailable rejection; canonical Feishu-host document identity validation with no local Feishu write; malformed, empty, missing, and transient results; cancellation refusal; successful and ordinary terminal-failure retirement with report preservation; and unchanged local dispatch, state, and retirement delegation.
+Latest fake-provider regression: 2026-08-18 against `main` at `fa7c64c7b3925e5ee21af1372d6f9137cdf89079`.
 
 ```console
 $ bin/fm-test-run.sh tests/fm-aime-cloud-worker.test.sh
@@ -84,14 +84,17 @@ ok - AIME probe distinguishes auth, unsupported capability, malformed output, an
 ok - sandbox verification requires explicit authority, reads back one disposable session, and stays disabled
 ok - AIME dispatch checkpoints identity, completes asynchronously, wakes once, and replays safely
 ok - oversized replay history stays bounded, handles to terminal success, and safely supersedes the malformed capture
+ok - provider-stopped terminal output unavailability becomes a truthful failure, retires exact captured generations, and archives with evidence
+ok - an existing result-unavailable record uses bounded fresh proof to archive only the stopped terminal-unavailable failure class
+ok - terminal-unavailable preparation is bounded and retryable, preserves decision holds, and refuses identity or adapter mismatches
 ok - restart adoption safely resumes not-started and created checkpoints, preserves submissions, and never claims cloud cancellation
 ok - AIME writes preserve acceptance-unknown states and distinguish explicit rejection classes
 ok - AIME document mode records the provider-created artifact and terminal bad results fail explicitly
 ok - transient provider readback is unknown current state, re-arms, and resolves its blocker after recovery
-ok - terminal AIME retirement passes the decision gate, removes volatile cloud state, and preserves the report
+ok - terminal AIME success and failure retirement enforce report and decision safety while preserving ordinary provider failures
 ok - backend-neutral wrappers preserve local spawn, state, and teardown argument semantics
 # fm-aime-cloud-worker.test.sh: all assertions passed
-FM_TEST_END 2026-08-18T07:47:36Z tests/fm-aime-cloud-worker.test.sh exit=0 duration_ms=104689 gate_skip=false
+FM_TEST_END 2026-08-18T14:02:15Z tests/fm-aime-cloud-worker.test.sh exit=0 duration_ms=240043 gate_skip=false
 ```
 
 The complete 136-test repository run also passed the AIME suite and every touched lifecycle family.

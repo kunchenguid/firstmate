@@ -83,6 +83,38 @@ fm_aime_file_owner() {
   fi
 }
 
+fm_aime_private_file_safe() {
+  local file=$1 mode links owner
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  mode=$(fm_aime_file_mode "$file") || return 1
+  [ "$mode" = 600 ] || return 1
+  links=$(fm_aime_file_links "$file") || return 1
+  [ "$links" = 1 ] || return 1
+  owner=$(fm_aime_file_owner "$file") || return 1
+  [ "$owner" = "$(id -u)" ]
+}
+
+fm_aime_report_path() {
+  fm_aime_task_id_valid "$1" || return 1
+  printf '%s/%s/report.md\n' "$DATA" "$1"
+}
+
+fm_aime_report_safe() {
+  local report
+  report=$(fm_aime_report_path "$1") || return 1
+  fm_aime_private_file_safe "$report"
+}
+
+fm_aime_report_replaceable() {
+  local report
+  report=$(fm_aime_report_path "$1") || return 1
+  if [ -e "$report" ] || [ -L "$report" ]; then
+    fm_aime_private_file_safe "$report"
+  else
+    return 0
+  fi
+}
+
 fm_aime_task_id_valid() {
   local id=${1-}
   local LC_ALL=C
@@ -288,6 +320,14 @@ fm_aime_state_load() {
   AIME_STATE_CURSOR=$(jq -r '.event_cursor // 0' "$file")
   # shellcheck disable=SC2034
   AIME_STATE_ERROR_CLASS=$(jq -r '.error_class // ""' "$file")
+  # shellcheck disable=SC2034
+  AIME_STATE_RESULT_PATH=$(jq -r '.result_path // ""' "$file")
+  # shellcheck disable=SC2034
+  AIME_STATE_REPORT_PATH=$(jq -r '.report_path // ""' "$file")
+  # shellcheck disable=SC2034
+  AIME_STATE_PROVIDER_CHECKPOINT=$(jq -r '.provider_checkpoint // ""' "$file")
+  # shellcheck disable=SC2034
+  AIME_STATE_WAITER=$(jq -r '.waiter // ""' "$file")
   # shellcheck disable=SC2034
   AIME_STATE_INSTRUCTION_FILE=$(jq -r '.instruction_file' "$file")
   # shellcheck disable=SC2034
