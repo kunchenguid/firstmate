@@ -35,7 +35,8 @@ Raw provider-account identity never appears in bounded status or Azure tags.
 The account binding must be a high-entropy digest produced by the account lease owner, not a digest of a guessable profile name.
 
 The controller rejects duplicate active account or writable-worktree bindings.
-A general request has role `author`, is explicitly eligible, and is owned by either the primary or a secondmate.
+A general request has role `author`, is explicitly eligible, and is owned by either the primary or a secondmate; a secondmate-owned author request may carry a parent compartment pair, which marks it as a compartment child and arms the child bounds.
+A `secondmate` role request stands up a secondmate compartment, is requested only by the primary, and is capped by `FM_AZURE_SECONDMATE_MAX`.
 The same task generation and exact identity is idempotent, while a changed identity under the same task generation refuses.
 An assigned request stays in the queue until its ordinary release proof is accepted and every exact cloud resource is safely reset.
 A request that never reached assignment leaves the queue by `withdraw`: it accepts an entry still in `queued`, refuses anything a worker owns or a pending provider action names, requires `--confirm-withdraw` and `--confirm-subscription`, touches no capacity, and removes the per-task cloud state including the staged provider credential.

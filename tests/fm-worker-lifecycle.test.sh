@@ -815,8 +815,13 @@ def barrier(action):
     arrived.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(arrived / action["idempotency_key"]), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     os.close(fd)
-    with open(Path(barrier_dir) / "release", "r") as gate:
-        gate.read(1)
+    # Release is an existence poll, not a FIFO read: a FIFO frees only the
+    # readers already blocked on it, so a child still between its arrival
+    # file and the FIFO open would hang forever past the writer's close.
+    import time as _time
+    release = Path(barrier_dir) / "release"
+    while not release.exists():
+        _time.sleep(0.05)
 
 if request["operation"] == "mutate":
     barrier(request["action"])
@@ -838,6 +843,19 @@ def canonical(value):
 
 def tags(action):
     bindings = action["bindings"]
+    if action.get("role") == "secondmate":
+        return {
+            "workload": "firstmate", "firstmate-role": "secondmate-compartment",
+            "deployment-generation": action["deployment_generation"], "cleanup-owner": action["owner"],
+            "worker-slot": str(action["slot"]), "home-binding": bindings["home_binding"],
+            "task-binding": bindings["task"], "task-generation": bindings["task_generation"],
+            "assignment-generation": bindings["assignment_generation"],
+            "account-binding": bindings["account_binding"], "worktree-binding": bindings["worktree_binding"],
+            "repository-binding": bindings["repository_binding"],
+            "repository-generation": bindings["repository_generation"],
+            "agent-capacity": "one-home-scoped-secondmate", "nested-team": "forbidden",
+            "child-launcher": "absent", "browser-profile": "forbidden",
+        }
     return {
         "workload": "firstmate", "firstmate-role": "worker",
         "deployment-generation": action["deployment_generation"], "cleanup-owner": action["owner"],
@@ -3087,7 +3105,6 @@ concurrent_mutations_do_not_serialize() {
   fixture="$tmp/provider-state.json"
   home="$tmp/home"
   mkdir -p "$home" "$tmp/barrier"
-  mkfifo "$tmp/barrier/release"
   write_fixture_provider "$provider"
   envfile="$tmp/env"
   cat >"$envfile" <<EOF
@@ -3223,8 +3240,7 @@ try:
     assert blocked.returncode != 0 and "one exact assigned task generation" in blocked.stderr, blocked.stderr
     assert len(list((Path(barrier) / "arrived").iterdir())) == arrivals_before
 finally:
-    with open(Path(barrier) / "release", "w") as gate:
-        gate.write("xx")
+    (Path(barrier) / "release").touch()
     outcomes = [child.wait(timeout=120) for child in children]
 
 assert outcomes == [0, 0], [child.stderr.read() for child in children]
@@ -3243,6 +3259,7 @@ assert state["revision"] > 2
 # wait, or the wait proves nothing about concurrency.
 for stale in (Path(barrier) / "arrived").iterdir():
     stale.unlink()
+(Path(barrier) / "release").unlink()
 request(3)
 lone = subprocess.Popen(
     [wrapper, "reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"]],
@@ -3250,8 +3267,7 @@ lone = subprocess.Popen(
 try:
     assert not wait_for_arrivals(2, 5), "one child produced two arrivals; the detector is broken"
 finally:
-    with open(Path(barrier) / "release", "w") as gate:
-        gate.write("x")
+    (Path(barrier) / "release").touch()
     assert lone.wait(timeout=120) == 0, lone.stderr.read()
 PY
   pass "two slots' provider mutations run concurrently while readers and unrelated mutations proceed"
@@ -3373,6 +3389,271 @@ PY
 }
 
 
+
+secondmate_role_bounds() {
+  local tmp provider fixture home envfile
+  fm_test_tmproot_into tmp fm-worker-secondmate-bounds
+  provider="$tmp/provider.py"
+  fixture="$tmp/provider-state.json"
+  home="$tmp/home"
+  mkdir -p "$home"
+  write_fixture_provider "$provider"
+  envfile="$tmp/env"
+  cat >"$envfile" <<EOF
+FM_HOME=$home
+FM_AZURE_SUBSCRIPTION_ID=$SUB
+FM_AZURE_DEPLOYMENT_GENERATION=dep-one
+FM_AZURE_OWNER_TAG=owner
+FM_AZURE_WORKER_IDLE_COOLDOWN_SECONDS=0
+FM_AZURE_NAMING_PREFIX=fmtest
+FM_WORKER_PROVIDER_COMMAND=python3 $provider
+FIXTURE_STATE=$fixture
+FM_WORKER_TEST_ALLOW_ASSERTED_BINDINGS=1
+EOF
+
+  python3 - "$WRAPPER" "$envfile" <<'PY' || fail "a secondmate role or child bound is not enforced"
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+wrapper, envfile = sys.argv[1:]
+env = os.environ.copy()
+for line in Path(envfile).read_text().splitlines():
+    key, value = line.split("=", 1)
+    env[key] = value
+
+def run(*args, check=True, extra=None):
+    environment = dict(env)
+    environment.update(extra or {})
+    result = subprocess.run([wrapper] + list(args), env=environment, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if check and result.returncode != 0:
+        raise AssertionError("{} failed: {}".format(args, result.stderr))
+    return result
+
+def binding(number):
+    return format(number, "064x")
+
+def request(number, *extra_args, check=True, extra=None):
+    return run(
+        "request", "--task", "task-{}".format(number), "--task-generation", "gen-{}".format(number),
+        "--home-binding", binding(1000 + number), "--account-binding", binding(2000 + number),
+        "--worktree-binding", binding(3000 + number), "--repository-binding", binding(4000 + number),
+        "--repository-generation", "repo-{}".format(number), "--owner-kind", "primary", "--eligible",
+        *extra_args, check=check, extra=extra)
+
+def controller_state():
+    return json.loads((Path(env["FM_HOME"]) / "state/azure-workers/controller.json").read_text())
+
+# Depth one: a secondmate compartment is requested only by the primary.
+refused = run("request", "--task", "smc-x", "--task-generation", "gen-x",
+              "--home-binding", binding(1), "--account-binding", binding(2),
+              "--worktree-binding", binding(3), "--repository-binding", binding(4),
+              "--repository-generation", "repo-x", "--owner-kind", "secondmate",
+              "--role", "secondmate", "--eligible", check=False)
+assert refused.returncode != 0 and "requested only by the primary" in refused.stderr, refused.stderr
+
+# parent fields are owned by secondmate-owned author requests only.
+refused = request(70, "--parent-task", "smc-1", "--parent-task-generation", "gen-s1", check=False)
+assert refused.returncode != 0 and "secondmate-owned author requests only" in refused.stderr, refused.stderr
+
+# A child cannot name a parent that is not an assigned secondmate compartment.
+refused = run("request", "--task", "child-early", "--task-generation", "gen-ce",
+              "--home-binding", binding(9), "--account-binding", binding(10),
+              "--worktree-binding", binding(11), "--repository-binding", binding(12),
+              "--repository-generation", "repo-ce", "--owner-kind", "secondmate", "--eligible",
+              "--parent-task", "smc-1", "--parent-task-generation", "gen-s1", check=False)
+assert refused.returncode != 0 and "not an assigned secondmate compartment" in refused.stderr, refused.stderr
+
+# Stand a compartment up for real: request role=secondmate, reconcile to assigned.
+run("request", "--task", "smc-1", "--task-generation", "gen-s1",
+    "--home-binding", binding(21), "--account-binding", binding(22),
+    "--worktree-binding", binding(23), "--repository-binding", binding(24),
+    "--repository-generation", "repo-s1", "--owner-kind", "primary",
+    "--role", "secondmate", "--eligible")
+run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+state = controller_state()
+assert state["queue"]["smc-1@gen-s1"]["status"] == "assigned"
+smc_slot = str(state["queue"]["smc-1@gen-s1"]["slot"])
+assert state["workers"][smc_slot]["role"] == "secondmate"
+
+# The compartment cap (default 2): a third compartment refuses.
+run("request", "--task", "smc-2", "--task-generation", "gen-s2",
+    "--home-binding", binding(31), "--account-binding", binding(32),
+    "--worktree-binding", binding(33), "--repository-binding", binding(34),
+    "--repository-generation", "repo-s2", "--owner-kind", "primary",
+    "--role", "secondmate", "--eligible")
+refused = run("request", "--task", "smc-3", "--task-generation", "gen-s3",
+              "--home-binding", binding(41), "--account-binding", binding(42),
+              "--worktree-binding", binding(43), "--repository-binding", binding(44),
+              "--repository-generation", "repo-s3", "--owner-kind", "primary",
+              "--role", "secondmate", "--eligible", check=False)
+assert refused.returncode != 0 and "compartment cap reached" in refused.stderr, refused.stderr
+
+def child(number, check=True, extra=None):
+    return run(
+        "request", "--task", "child-{}".format(number), "--task-generation", "gen-c{}".format(number),
+        "--home-binding", binding(5000 + number), "--account-binding", binding(6000 + number),
+        "--worktree-binding", binding(7000 + number), "--repository-binding", binding(8000 + number),
+        "--repository-generation", "repo-c{}".format(number), "--owner-kind", "secondmate", "--eligible",
+        "--parent-task", "smc-1", "--parent-task-generation", "gen-s1", check=check, extra=extra)
+
+# Fan-out: four children admit, the fifth refuses naming the cap.
+for number in (1, 2, 3, 4):
+    child(number)
+refused = child(5, check=False)
+assert refused.returncode != 0 and "active children (cap 4)" in refused.stderr, refused.stderr
+
+# Lifetime total: with the lifetime cap lowered to the four already minted,
+# even a freed concurrent slot refuses.
+run("withdraw", "--task", "child-1", "--task-generation", "gen-c1", "--confirm-withdraw",
+    "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+refused = child(6, check=False, extra={"FM_SECONDMATE_CHILD_TOTAL": "4"})
+assert refused.returncode != 0 and "lifetime child total" in refused.stderr, refused.stderr
+# With the default lifetime cap the freed slot admits: the fan-out bound
+# counts ACTIVE children, not history.
+child(6)
+
+# Release refuses out from under live children, atomically, in command_release.
+state = controller_state()
+worker = state["workers"][smc_slot]
+import hashlib
+proof = {
+    "schema": "fm.worker-release/v2", "home_binding": worker["bindings"]["home_binding"],
+    "task": "smc-1", "task_generation": "gen-s1",
+    "assignment_generation": worker["assignment_generation"],
+    "account_binding": worker["bindings"]["account_binding"],
+    "worktree_binding": worker["bindings"]["worktree_binding"],
+    "repository_binding": worker["bindings"]["repository_binding"],
+    "repository_generation": worker["bindings"]["repository_generation"],
+    "cloud_instance_id": worker["cloud_instance_id"], "resources": worker["resources"],
+    "authorities": {},
+}
+for offset, authority in enumerate(("endpoint", "report", "landing", "account", "worktree"), 5):
+    receipt = {
+        "schema": "fm.worker-authority/v1", "authority": authority,
+        "task": "smc-1", "task_generation": "gen-s1",
+        "assignment_generation": worker["assignment_generation"], "verdict": "proved",
+        "evidence_digest": binding(offset * 1000 + 77),
+    }
+    receipt["receipt_digest"] = hashlib.sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    proof["authorities"][authority] = receipt
+proof["proof_digest"] = hashlib.sha256(
+    json.dumps(proof, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+proof_path = Path(env["FM_HOME"]) / "smc-proof.json"
+proof_path.write_text(json.dumps(proof, sort_keys=True, separators=(",", ":")))
+refused = run("release", "--task", "smc-1", "--task-generation", "gen-s1",
+              "--proof-file", str(proof_path), check=False)
+assert refused.returncode != 0 and "active children name parent" in refused.stderr, refused.stderr
+assert "children name parent" in refused.stderr and " 4 " in refused.stderr, (
+    "the scan must count THIS generation's children exactly", refused.stderr)
+
+# Quiesce the children; release then succeeds and parent-liveness closes.
+for number in (2, 3, 4, 6):
+    run("withdraw", "--task", "child-{}".format(number), "--task-generation", "gen-c{}".format(number),
+        "--confirm-withdraw", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+# A cross-generation child (hand-planted: no CLI path can mint one, which is
+# the point - the scan's generation clause is defense in depth) must not
+# block THIS generation's release.
+controller_path_state = Path(env["FM_HOME"]) / "state/azure-workers/controller.json"
+planted = json.loads(controller_path_state.read_text())
+planted["queue"]["ghost@gen-g"] = {
+    "schema": "fm.worker-request/v1", "task": "ghost", "task_generation": "gen-g",
+    "parent_task": "smc-1", "parent_task_generation": "gen-OLD",
+    "owner_kind": "secondmate", "role": "author", "status": "queued",
+}
+controller_path_state.write_text(json.dumps(planted, sort_keys=True, separators=(",", ":")))
+run("release", "--task", "smc-1", "--task-generation", "gen-s1", "--proof-file", str(proof_path))
+refused = child(7, check=False)
+assert refused.returncode != 0 and "not an assigned secondmate compartment" in refused.stderr, refused.stderr
+
+# A released compartment holds its cap slot while releasing (it still owns
+# capacity), and frees it once reconcile resets it to complete: the cap
+# counts live compartments, never history.
+held = run("request", "--task", "smc-4", "--task-generation", "gen-s4",
+           "--home-binding", binding(81), "--account-binding", binding(82),
+           "--worktree-binding", binding(83), "--repository-binding", binding(84),
+           "--repository-generation", "repo-s4", "--owner-kind", "primary",
+           "--role", "secondmate", "--eligible", check=False)
+assert held.returncode != 0 and "compartment cap reached" in held.stderr, held.stderr
+for _ in range(4):
+    run("reconcile", "--apply", "--confirm-subscription", env["FM_AZURE_SUBSCRIPTION_ID"])
+    if controller_state()["queue"]["smc-1@gen-s1"]["status"] == "complete":
+        break
+assert controller_state()["queue"]["smc-1@gen-s1"]["status"] == "complete"
+run("request", "--task", "smc-4", "--task-generation", "gen-s4",
+    "--home-binding", binding(81), "--account-binding", binding(82),
+    "--worktree-binding", binding(83), "--repository-binding", binding(84),
+    "--repository-generation", "repo-s4", "--owner-kind", "primary",
+    "--role", "secondmate", "--eligible")
+
+# The documented local-secondmate lane is preserved: owner_kind=secondmate
+# with NO parent pair is an ordinary author request (fm-spawn.sh sends
+# exactly this argv from a secondmate home today).
+run("request", "--task", "local-sub-child", "--task-generation", "gen-ls",
+    "--home-binding", binding(61), "--account-binding", binding(62),
+    "--worktree-binding", binding(63), "--repository-binding", binding(64),
+    "--repository-generation", "repo-ls", "--owner-kind", "secondmate", "--eligible")
+again = run("request", "--task", "local-sub-child", "--task-generation", "gen-ls",
+            "--home-binding", binding(61), "--account-binding", binding(62),
+            "--worktree-binding", binding(63), "--repository-binding", binding(64),
+            "--repository-generation", "repo-ls", "--owner-kind", "secondmate", "--eligible")
+assert "already exists with exact identity" in again.stdout, again.stdout
+
+# A lone half of the parent pair refuses for every caller shape.
+refused = request(71, "--parent-task-generation", "stray-gen", check=False)
+assert refused.returncode != 0 and "travel together" in refused.stderr, refused.stderr
+
+# A child re-request whose parent generation changed refuses as a different
+# identity: the parent pair is part of the durable queue identity.
+run("request", "--task", "child-8", "--task-generation", "gen-c8",
+    "--home-binding", binding(5008), "--account-binding", binding(6008),
+    "--worktree-binding", binding(7008), "--repository-binding", binding(8008),
+    "--repository-generation", "repo-c8", "--owner-kind", "secondmate", "--eligible",
+    "--parent-task", "smc-2", "--parent-task-generation", "gen-s2")
+rere = run("request", "--task", "child-8", "--task-generation", "gen-c8",
+           "--home-binding", binding(5008), "--account-binding", binding(6008),
+           "--worktree-binding", binding(7008), "--repository-binding", binding(8008),
+           "--repository-generation", "repo-c8", "--owner-kind", "secondmate", "--eligible",
+           "--parent-task", "smc-2", "--parent-task-generation", "gen-OTHER", check=False)
+assert rere.returncode != 0 and "different queue identity" in rere.stderr, rere.stderr
+
+# An assigned parent whose worker record is missing (hand-corrupted state -
+# no honest path can produce it) refuses loudly instead of silently skipping
+# the lifetime bound.
+corrupt = json.loads(controller_path_state.read_text())
+corrupt["queue"]["smc-broken@gen-b"] = {
+    "schema": "fm.worker-request/v1", "task": "smc-broken", "task_generation": "gen-b",
+    "owner_kind": "primary", "role": "secondmate", "status": "assigned", "slot": 14,
+}
+controller_path_state.write_text(json.dumps(corrupt, sort_keys=True, separators=(",", ":")))
+refused = run("request", "--task", "child-b", "--task-generation", "gen-cb",
+              "--home-binding", binding(5010), "--account-binding", binding(6010),
+              "--worktree-binding", binding(7010), "--repository-binding", binding(8010),
+              "--repository-generation", "repo-cb", "--owner-kind", "secondmate", "--eligible",
+              "--parent-task", "smc-broken", "--parent-task-generation", "gen-b", check=False)
+assert refused.returncode != 0 and "no exact worker record" in refused.stderr, refused.stderr
+cleaned = json.loads(controller_path_state.read_text())
+del cleaned["queue"]["smc-broken@gen-b"]
+controller_path_state.write_text(json.dumps(cleaned, sort_keys=True, separators=(",", ":")))
+
+# Author-request golden: no compartment field leaks into an ordinary item.
+request(90)
+item = controller_state()["queue"]["task-90@gen-90"]
+assert item["role"] == "author" and "parent_task" not in item, item
+assert sorted(item.keys()) == sorted([
+    "schema", "task", "task_generation", "home_binding", "account_binding",
+    "worktree_binding", "repository_binding", "repository_generation",
+    "owner_kind", "role", "eligible", "discretionary", "status", "enqueued_at",
+]), sorted(item.keys())
+PY
+  pass "secondmate depth, fan-out, lifetime, liveness, compartment cap, and release gates are enforced"
+}
+
+
 static_contract
 classification_and_admission_matrix
 azure_provider_refusal_matrix
@@ -3391,5 +3672,6 @@ legacy_scalar_migration
 state_fence_and_revision_cas
 concurrent_mutations_do_not_serialize
 wedged_slot_does_not_stop_the_fleet
+secondmate_role_bounds
 
 echo "# fm-worker-lifecycle.test.sh: all assertions passed"

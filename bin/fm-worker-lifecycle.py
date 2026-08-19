@@ -237,6 +237,13 @@ def save_json_atomic(path, value):
             temp.unlink()
 
 
+def _bounded_env_int(name, default, low, high):
+    value = int(os.environ.get(name, str(default)))
+    if value < low or value > high:
+        raise LifecycleError("{} must be between {} and {}".format(name, low, high))
+    return value
+
+
 def environment():
     home = Path(os.environ.get("FM_HOME", str(ROOT))).resolve()
     subscription = require_uuid(
@@ -297,6 +304,9 @@ def environment():
         "lock_path": state_dir / ".lock",
         "slot_lock_dir": state_dir / "slots",
         "max_workers": max_workers,
+        "secondmate_max": _bounded_env_int("FM_AZURE_SECONDMATE_MAX", 2, 1, 4),
+        "secondmate_child_max": _bounded_env_int("FM_SECONDMATE_CHILD_MAX", 4, 1, 8),
+        "secondmate_child_total": _bounded_env_int("FM_SECONDMATE_CHILD_TOTAL", 16, 1, 32),
         "cooldown_seconds": cooldown,
         "warm_idle": warm_idle,
         "policy_phase": phase,
@@ -589,10 +599,34 @@ def verify_request(request):
         require_id(field, request.get(field))
     for field in ("home_binding", "account_binding", "worktree_binding", "repository_binding"):
         require_binding(field, request.get(field))
-    if request.get("role") != "author":
-        raise LifecycleError("general worker requests must use the single-agent author role")
+    role = request.get("role")
+    if role not in ("author", "secondmate"):
+        raise LifecycleError("worker request role must be author or secondmate")
     if request.get("owner_kind") not in ("primary", "secondmate"):
         raise LifecycleError("worker request owner_kind must be primary or secondmate")
+    if role == "secondmate" and request.get("owner_kind") != "primary":
+        # Depth one, by construction: a secondmate compartment is requested
+        # only by the primary, so a secondmate owns author crewmates and never
+        # another secondmate or a nested team.
+        raise LifecycleError(
+            "a secondmate compartment is requested only by the primary; "
+            "secondmates own author crewmates, never another secondmate")
+    parent = request.get("parent_task")
+    parent_generation = request.get("parent_task_generation")
+    if (parent is None) != (parent_generation is None):
+        raise LifecycleError(
+            "parent_task and parent_task_generation travel together or not at all")
+    if parent is not None:
+        # The parent pair marks a COMPARTMENT child specifically. A local
+        # secondmate home still requests its own cloud crewmates with
+        # owner_kind=secondmate and no parent (the documented lane in
+        # docs/azure-workers.md), bounded by local policy rather than a
+        # compartment budget; the compartment bridge always stamps the pair.
+        if role != "author" or request.get("owner_kind") != "secondmate":
+            raise LifecycleError(
+                "parent_task is owned by secondmate-owned author requests only")
+        require_id("parent_task", parent)
+        require_id("parent_task_generation", parent_generation)
     if request.get("eligible") is not True:
         raise LifecycleError("worker request must be explicitly eligible")
 
@@ -755,6 +789,29 @@ def bindings_for_item(item, assignment_generation):
 
 def expected_tags(worker):
     bindings = worker["bindings"]
+    if worker.get("role") == "secondmate":
+        # A compartment VM must never be classified (by the cloud's own
+        # metadata) as a one-task crewmate: those tags would be a lie, and the
+        # exactness machinery compares them exactly.
+        return {
+            "workload": "firstmate",
+            "firstmate-role": "secondmate-compartment",
+            "deployment-generation": worker["deployment_generation"],
+            "cleanup-owner": worker["owner"],
+            "worker-slot": str(worker["slot"]),
+            "home-binding": bindings["home_binding"],
+            "task-binding": bindings["task"],
+            "task-generation": bindings["task_generation"],
+            "assignment-generation": bindings["assignment_generation"],
+            "account-binding": bindings["account_binding"],
+            "worktree-binding": bindings["worktree_binding"],
+            "repository-binding": bindings["repository_binding"],
+            "repository-generation": bindings["repository_generation"],
+            "agent-capacity": "one-home-scoped-secondmate",
+            "nested-team": "forbidden",
+            "child-launcher": "absent",
+            "browser-profile": "forbidden",
+        }
     return {
         "workload": "firstmate",
         "firstmate-role": "worker",
@@ -1211,6 +1268,7 @@ def make_action(env, action_type, worker=None, item=None, **fields):
     if worker is not None:
         action.update({
             "slot": worker["slot"],
+            "role": worker.get("role", "author"),
             "sku": worker["sku"],
             "sku_family": worker["sku_family"],
             "cloud_generation": worker["cloud_generation"],
@@ -1237,6 +1295,7 @@ def create_worker_record(env, state, slot, item, reservation):
     sku, family = SKU_PLAN[slot]
     return {
         "slot": slot,
+        "role": item.get("role", "author"),
         "sku": sku,
         "sku_family": family,
         "deployment_generation": env["deployment_generation"],
@@ -1948,6 +2007,9 @@ def parser():
     request.add_argument("--repository-binding", help=argparse.SUPPRESS)
     request.add_argument("--repository-generation", help=argparse.SUPPRESS)
     request.add_argument("--owner-kind", choices=("primary", "secondmate"), required=True)
+    request.add_argument("--role", choices=("author", "secondmate"), default="author")
+    request.add_argument("--parent-task", default=None)
+    request.add_argument("--parent-task-generation", default=None)
     request.add_argument("--eligible", action="store_true")
     request.add_argument("--required", action="store_true", help="mark non-discretionary recovery/landing work")
 
@@ -2119,6 +2181,44 @@ def authoritative_request_bindings(env, task, generation):
     }
 
 
+def enforce_child_bounds(env, state, item):
+    """Every bound on secondmate child compute, under the ONE lock that inserts.
+
+    A single document and a single exclusive hold is what makes these checks
+    non-racy - the same atomicity ensure_unique_bindings already relies on.
+    """
+    parent_key = request_key(item["parent_task"], item["parent_task_generation"])
+    parent = state["queue"].get(parent_key)
+    if parent is None or parent.get("role") != "secondmate" or parent.get("status") != "assigned":
+        raise LifecycleError(
+            "child request parent {}@{} is not an assigned secondmate compartment".format(
+                item["parent_task"], item["parent_task_generation"]))
+    active = sum(
+        1 for entry in state["queue"].values()
+        if entry.get("parent_task") == item["parent_task"]
+        and entry.get("parent_task_generation") == item["parent_task_generation"]
+        and entry.get("status") != "complete"
+    )
+    if active >= env["secondmate_child_max"]:
+        raise LifecycleError(
+            "secondmate {} already owns {} active children (cap {})".format(
+                item["parent_task"], active, env["secondmate_child_max"]))
+    parent_worker = state["workers"].get(str(parent.get("slot")))
+    if parent_worker is None or parent_worker.get("queue_key") != parent_key:
+        # Unreachable through code paths today (assigned implies a worker,
+        # reset both pops the worker and completes the item), so reaching it
+        # means hand-edited or corrupted state; the lifetime bound must not
+        # degrade silently there.
+        raise LifecycleError(
+            "assigned secondmate compartment {} has no exact worker record".format(
+                item["parent_task"]))
+    lifetime = int(parent_worker.get("children_total", 0))
+    if lifetime >= env["secondmate_child_total"]:
+        raise LifecycleError(
+            "secondmate {} reached its lifetime child total ({}, cap {})".format(
+                item["parent_task"], lifetime, env["secondmate_child_total"]))
+
+
 def command_request(env, args):
     supplied = (
         args.home_binding, args.account_binding, args.worktree_binding,
@@ -2147,12 +2247,15 @@ def command_request(env, args):
         "task_generation": args.task_generation,
         **bindings,
         "owner_kind": args.owner_kind,
-        "role": "author",
+        "role": args.role,
         "eligible": args.eligible,
         "discretionary": not args.required,
         "status": "queued",
         "enqueued_at": iso_utc(),
     }
+    if args.parent_task is not None or args.parent_task_generation is not None:
+        item["parent_task"] = args.parent_task
+        item["parent_task_generation"] = args.parent_task_generation
     verify_request(item)
     key = request_key(item["task"], item["task_generation"])
     with controller_lock(env):
@@ -2163,13 +2266,29 @@ def command_request(env, args):
                 "schema", "task", "task_generation", "home_binding", "account_binding",
                 "worktree_binding", "repository_binding", "repository_generation",
                 "owner_kind", "role", "eligible", "discretionary",
+                "parent_task", "parent_task_generation",
             )
             if any(existing.get(field) != item.get(field) for field in identity_fields):
                 raise LifecycleError("task generation already exists with different queue identity")
             print("request already exists with exact identity")
             return
         ensure_unique_bindings(state, item)
+        if item.get("parent_task") is not None:
+            enforce_child_bounds(env, state, item)
+        if item.get("role") == "secondmate":
+            active_compartments = sum(
+                1 for entry in state["queue"].values()
+                if entry.get("role") == "secondmate" and entry.get("status") != "complete"
+            )
+            if active_compartments >= env["secondmate_max"]:
+                raise LifecycleError(
+                    "secondmate compartment cap reached ({} active, cap {})".format(
+                        active_compartments, env["secondmate_max"]))
         state["queue"][key] = item
+        if item.get("parent_task") is not None:
+            parent_key = request_key(item["parent_task"], item["parent_task_generation"])
+            parent_worker = state["workers"][str(state["queue"][parent_key].get("slot"))]
+            parent_worker["children_total"] = int(parent_worker.get("children_total", 0)) + 1
         save_state(env, state)
     print("queued {} generation {} for one isolated author worker".format(item["task"], item["task_generation"]))
 
@@ -2680,6 +2799,18 @@ def command_release(env, args):
         worker = state["workers"].get(str(item.get("slot")))
         if worker is None:
             raise LifecycleError("release task has no exact durable worker owner")
+        live_children = sum(
+            1 for entry in state["queue"].values()
+            if entry.get("parent_task") == args.task
+            and entry.get("parent_task_generation") == args.task_generation
+            and entry.get("status") != "complete"
+        )
+        if live_children:
+            # A parent cannot release out from under live children; this sits
+            # here, under the one lock with the whole queue in hand, because
+            # the authority tool reads controller state lock-free.
+            raise LifecycleError(
+                "release refuses: {} active children name parent {}".format(live_children, args.task))
         proof = release_receipt(state, args.proof_file)
         verify_release_against_worker(proof, worker)
         if worker.get("release_proof") is not None:

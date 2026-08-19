@@ -301,6 +301,31 @@ def expected_names(controller, slot):
 
 def action_tags(controller, action):
     bindings = action["bindings"]
+    if action.get("role") == "secondmate":
+        # The controller's expected_tags branches identically; a compartment
+        # VM must never carry the one-task crewmate posture in the cloud's own
+        # metadata.
+        return {
+            "workload": "firstmate",
+            "firstmate-role": "secondmate-compartment",
+            "deployment-generation": controller["deployment_generation"],
+            "cleanup-owner": controller["owner"],
+            "worker-slot": str(action["slot"]),
+            "home-binding": bindings["home_binding"],
+            "task-binding": bindings["task"],
+            "task-generation": bindings["task_generation"],
+            "assignment-generation": bindings["assignment_generation"],
+            "cloud-generation": str(action["cloud_generation"]),
+            "account-binding": bindings["account_binding"],
+            "worktree-binding": bindings["worktree_binding"],
+            "repository-binding": bindings["repository_binding"],
+            "repository-generation": bindings["repository_generation"],
+            "agent-capacity": "one-home-scoped-secondmate",
+            "nested-team": "forbidden",
+            "child-launcher": "absent",
+            "browser-profile": "forbidden",
+            "lifecycle": "disposable-compute-retained-data",
+        }
     return {
         "workload": "firstmate",
         "firstmate-role": "worker",
