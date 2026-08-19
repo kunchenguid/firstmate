@@ -438,7 +438,6 @@ pause_state_class() {  # <window> <task>
   death_surface_file="$STATE/.paused-rechecked-$key"
   agent_alive=${3:-}
   [ -n "$agent_alive" ] || agent_alive=$(pause_declaration_liveness "$win")
-  [ "$agent_alive" != alive ] || rm -f "$death_surface_file"
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=
   state=${line#state: }
   state=${state%% *}
@@ -1061,6 +1060,7 @@ EOF
     pause_liveness=
     if [ "$kind" != secondmate ] && status_is_paused_or_captain_held "$last"; then
       pause_liveness=$(pause_declaration_liveness "$w")
+      [ "$pause_liveness" != alive ] || rm -f "$STATE/.paused-rechecked-$key"
       if [ "$pause_liveness" = dead ]; then
         pause_class=$(pause_state_class "$w" "$task" "$pause_liveness")
         case "$pause_class" in

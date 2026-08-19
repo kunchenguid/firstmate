@@ -1469,7 +1469,7 @@ SH
 }
 
 test_live_declared_pause_surfaces_once_after_agent_dies() {
-  local dir state fakebin out capture_file statusf window key pane pane_hash pid round wakes
+  local dir state fakebin out capture_file statusf window key pane pane_hash pid round wakes i
   local command label total_wakes surface_resurface_mtime
   dir=$(make_case live-declared-pause-agent-dies); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -1505,6 +1505,7 @@ test_live_declared_pause_surfaces_once_after_agent_dies() {
     || { reap "$pid"; fail "live declared pause recorded a surface while it was absorbed"; }
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the live declared-pause absorb"
+  printf '0\n' > "$state/.count-$key"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
@@ -1571,17 +1572,23 @@ test_live_declared_pause_surfaces_once_after_agent_dies() {
   [ "$(file_mtime "$state/.paused-resurfaced-$key")" = "$surface_resurface_mtime" ] \
     || fail "unknown liveness refreshed the surfaced pause throttle marker"
 
+  printf '0\n' > "$state/.count-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok \
     FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=5 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"
-    fail "confidently alive replacement surfaced while preserving the declared pause"
-  fi
+  i=0
+  while [ "$i" -lt 30 ] && [ "$(cat "$state/.count-$key" 2>/dev/null || true)" != 1 ]; do
+    kill -0 "$pid" 2>/dev/null \
+      || { reap "$pid"; fail "confidently alive replacement surfaced while preserving the declared pause"; }
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.count-$key" 2>/dev/null || true)" = 1 ] \
+    || { reap "$pid"; fail "confidently alive replacement did not finish exactly one same-hash poll"; }
   [ "$(queued_stale_wakes "$state" "$window")" -eq 0 ] \
     || { reap "$pid"; fail "confidently alive replacement queued a stale wake"; }
   reap "$pid"
