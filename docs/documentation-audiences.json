@@ -411,6 +411,14 @@
     {
       "path": "skills/google-developer-docs-style/references/word-list-lookup.md",
       "audience": "public-product"
+    },
+    {
+      "path": "skills/postgres-admin/SKILL.md",
+      "audience": "public-product"
+    },
+    {
+      "path": ".agents/skills/postgres-admin/SKILL.md",
+      "audience": "agent-runtime"
     }
   ]
 }

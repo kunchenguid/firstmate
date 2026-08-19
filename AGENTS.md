@@ -538,6 +538,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 - `bws` - load before any work with Bitwarden Secrets Manager CLI (`bws`, not `bw`): authentication checks, listing projects or secrets, reading secret values, creating, updating, rotating, or deleting secrets.
 - `google-developer-docs-style` - load before writing or editing project documentation, READMEs, ADRs, operator guides, error messages, UI copy, or PR descriptions that should follow Google developer documentation style.
+- `postgres-admin` - load before any PostgreSQL administration: creating or altering roles, schema ownership, grants and default privileges, `pg_dump`/`pg_restore`, backup or restore Jobs, or any psql statement that changes database state.
 
 ## 14. Relay
 
