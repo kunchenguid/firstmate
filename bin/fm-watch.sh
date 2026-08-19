@@ -426,65 +426,34 @@ pause_declaration_liveness() {  # <window>
 # decides whether it still holds, so a confidently dead agent surfaces for
 # reconciliation while every other liveness read keeps the bounded cadence.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file recheck_state class agent_alive
+  local win=$1 task=$2 key last resurface_file agent_alive line state source
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
   last=$(last_status_line "$STATE/$task.status")
-  recheck_file="$STATE/.paused-rechecked-$key"
   if ! status_is_paused_or_captain_held "$last"; then
-    rm -f "$recheck_file"
     crew_absorb_class "$task"
     return
   fi
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    recheck_state=$(cat "$recheck_file" 2>/dev/null || true)
-    agent_alive=$(pause_declaration_liveness "$win")
-    if [ "$agent_alive" = dead ]; then
-      if [ "$recheck_state" = surfaced ]; then
-        printf 'paused'
-      else
-        rm -f "$recheck_file"
-        printf 'none'
-      fi
-      return
-    fi
-    if [ "$agent_alive" = alive ] && [ "$recheck_state" != trusted ]; then
-      printf 'trusted' > "$recheck_file"
-    fi
-    printf 'paused'
-    return
-  fi
-  class=$(crew_absorb_class "$task")
-  if [ "$class" = working ]; then
-    rm -f "$recheck_file"
+  resurface_file="$STATE/.paused-resurfaced-$key"
+  agent_alive=${3:-}
+  [ -n "$agent_alive" ] || agent_alive=$(pause_declaration_liveness "$win")
+  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=
+  state=${line#state: }
+  state=${state%% *}
+  source=${line#*source: }
+  source=${source%% *}
+  if [ "$state" = working ] && [ "$source" = run-step ]; then
     printf 'working'
     return
   fi
-  recheck_state=$(cat "$recheck_file" 2>/dev/null || true)
-  agent_alive=$(pause_declaration_liveness "$win")
   if [ "$agent_alive" = dead ]; then
-    if [ "$recheck_state" = surfaced ]; then
-      printf 'surfaced' > "$recheck_file"
+    if [ -e "$resurface_file" ] && [ "$(age_of "$resurface_file")" -lt "$PAUSE_RESURFACE_SECS" ]; then
       printf 'paused'
     else
-      rm -f "$recheck_file"
       printf 'none'
     fi
     return
-  fi
-  # Only paused and none can reach here (working returned above). A `none` means
-  # fm-crew-state found no active run and could not confirm the pause itself - a
-  # stopped, finished, or unknown read - and the worker's own still-trustworthy
-  # declaration is the better evidence, so both remaining classes take the bounded
-  # pause cadence.
-  if [ "$agent_alive" = alive ]; then
-    printf 'trusted' > "$recheck_file"
-  elif [ "$agent_alive" = unknown ]; then
-    case "$recheck_state" in
-      surfaced|trusted) printf '%s' "$recheck_state" > "$recheck_file" ;;
-      *) printf 'unknown' > "$recheck_file" ;;
-    esac
   fi
   printf 'paused'
 }
@@ -499,7 +468,6 @@ surface_nonterminal_stale() {  # <window> <hash>
   last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
-    printf 'surfaced' > "$STATE/.paused-rechecked-$key"
     date +%s > "$STATE/.paused-resurfaced-$key"
   else
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
@@ -1084,36 +1052,53 @@ EOF
       clear_pause_tracking "$w"
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
+      triage_log "absorbed window (secondmate idle by charter): $w"
       continue
     fi
-    pause_run_step_active=0
+    pause_class=
+    pause_liveness=
     if [ "$kind" != secondmate ] && status_is_paused_or_captain_held "$last"; then
-      pause_recheck_state=$(cat "$STATE/.paused-rechecked-$key" 2>/dev/null || true)
       pause_liveness=$(pause_declaration_liveness "$w")
-      if [ "$pause_recheck_state" = surfaced ] || [ "$pause_liveness" = dead ]; then
-        crew_state=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || crew_state=
-        crew_state_name=${crew_state#state: }
-        crew_state_name=${crew_state_name%% *}
-        crew_state_source=${crew_state#*source: }
-        crew_state_source=${crew_state_source%% *}
-        if [ "$crew_state_name" = working ] && [ "$crew_state_source" = run-step ]; then
-          clear_pause_state "$w"
-          pause_run_step_active=1
-        elif [ "$pause_recheck_state" = surfaced ]; then
-          if ! afk_present; then
+      if [ "$pause_liveness" = dead ]; then
+        pause_class=$(pause_state_class "$w" "$task" "$pause_liveness")
+        case "$pause_class" in
+          working)
+            clear_pause_state "$w"
+            ;;
+          paused)
             handle_paused_stale "$w" "$task" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
-          fi
-          continue
-        else
-          surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
-        fi
+            continue
+            ;;
+          *)
+            surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
+            ;;
+        esac
       fi
     fi
     if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
-      if [ "$kind" != secondmate ] && status_is_paused_or_captain_held "$last" \
-        && [ "$pause_run_step_active" -eq 0 ] && [ "$pause_liveness" != dead ] && ! afk_present; then
-        handle_paused_stale "$w" "$task" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
+      if [ -z "$pause_class" ]; then
+        if status_is_paused_or_captain_held "$last"; then
+          pause_class=$(pause_state_class "$w" "$task" "$pause_liveness")
+        else
+          pause_class=$(crew_absorb_class "$task")
+        fi
       fi
+      case "$pause_class" in
+        working)
+          clear_pause_state "$w"
+          triage_log "absorbed capture failure (provably working): $w"
+          ;;
+        paused)
+          if afk_present; then
+            surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
+          else
+            handle_paused_stale "$w" "$task" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
+          fi
+          ;;
+        *)
+          surface_nonterminal_stale "$w" "$(cat "$STATE/.hash-$key" 2>/dev/null || true)"
+          ;;
+      esac
       continue
     fi
     h=$(printf '%s' "$tail40" | hash_pane)
