@@ -4,9 +4,8 @@
 # handle_push_transition in bin/fm-push-transition-lib.sh). The watcher's source
 # guard lets this file source it to load
 # the functions WITHOUT acquiring the singleton lock or entering the blocking
-# loop; wake/sleep and the backend dispatchers are overridden so the exemptions,
-# capability memo, and fail-closed disable are asserted deterministically with no
-# real herdr, watcher process, or blocking sleeps.
+# loop; wake/sleep and the event-wait dispatcher are overridden, while a PATH
+# fixture drives the capability subprocess through its real executable boundary.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -14,7 +13,32 @@ set -u
 
 TMP=$(fm_test_tmproot fm-supervision-events)
 STATE_DIR="$TMP/state"
-mkdir -p "$STATE_DIR"
+FAKEBIN="$TMP/fakebin"
+CAP_LOG="$TMP/capability-calls"
+mkdir -p "$STATE_DIR" "$FAKEBIN"
+cat > "$FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"status --json"*)
+    printf '%s\n' '{"client":{"protocol":20},"server":{"running":true}}'
+    ;;
+  *"api schema"*)
+    printf 'schema\n' >> "${FM_TEST_EVENT_CAP_LOG:?}"
+    printf '%s\n' '{"methods":["events.subscribe","pane.agent_status_changed"]}'
+    ;;
+  *) exit 1 ;;
+esac
+SH
+chmod 0700 "$FAKEBIN/herdr"
+cat > "$FAKEBIN/event-reader" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod 0700 "$FAKEBIN/event-reader"
+export PATH="$FAKEBIN:$PATH"
+export FM_TEST_EVENT_CAP_LOG="$CAP_LOG"
+export FM_BACKEND_HERDR_EVENT_READER="$FAKEBIN/event-reader"
 
 # Source the watcher with an isolated state/home. The guard returns before the
 # lock/loop, so only the functions load.
@@ -37,6 +61,7 @@ reset_state() {
     "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
+  : > "$CAP_LOG"
   _event_cap_key=""
   _event_cap_ok=0
   _event_cap_fails=0
@@ -88,8 +113,6 @@ reset_state
 fm_write_meta "$STATE_DIR/tk3.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 fm_write_meta "$STATE_DIR/sm1.meta" "window=default:wA:pS" "backend=herdr" "kind=secondmate"
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
-fm_backend_events_capable() { return 0; }
-# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_wait_transition() { shift 4; printf '%s\n' "$*" > "$TMP/panes"; return 1; }
 event_wait_or_sleep
 PANES=$(cat "$TMP/panes" 2>/dev/null || true)
@@ -99,9 +122,6 @@ pass "event_wait_or_sleep: herdr windows go on the event pane list, but kind=sec
 
 reset_state
 fm_write_meta "$STATE_DIR/tk3.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
-CAP_CALLS=0
-# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
-fm_backend_events_capable() { CAP_CALLS=$((CAP_CALLS + 1)); return 0; }
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_wait_transition() {
   [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" = 1 ] || fail "cached capability verdict was not passed to the wait"
@@ -109,6 +129,7 @@ fm_backend_wait_transition() {
 }
 event_wait_or_sleep
 event_wait_or_sleep
+CAP_CALLS=$(wc -l < "$CAP_LOG" | tr -d '[:space:]')
 [ "$CAP_CALLS" = 1 ] || fail "capability probe must be memoized across waits, got $CAP_CALLS calls"
 pass "event_wait_or_sleep: one cached capability probe owns validation across bounded waits"
 
@@ -128,8 +149,6 @@ pass "event_wait_or_sleep: a home with no push-capable window is inert (sleeps P
 reset_state
 fm_write_meta "$STATE_DIR/tk5.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
 export EVENT_CAP_FAIL_MAX=2
-# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
-fm_backend_events_capable() { return 0; }
 # shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
 fm_backend_wait_transition() { printf 'WT\n' >> "$TMP/wtcalls"; return 2; }
 : > "$TMP/wtcalls"

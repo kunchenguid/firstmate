@@ -78,6 +78,67 @@ SH
   printf '%s\n' "$fb"
 }
 
+make_backend_probe_stubs() {  # <dir> -> fakebin
+  local dir=$1 fb="$1/backend-fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  capture-pane)
+    [ -z "${FM_PENDING_BACKEND_PROBE_LOG:-}" ] \
+      || printf 'tmux-capture\n' >> "$FM_PENDING_BACKEND_PROBE_LOG"
+    printf '%s' "${FM_PENDING_TEST_CAPTURE:-idle footer}"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod 0700 "$fb/tmux"
+  cat > "$fb/zellij" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  "list-sessions --short --no-formatting") printf 'session\n' ;;
+  *"action list-panes --json"*)
+    printf '%s\n' '[{"id":1,"tab_id":1,"is_plugin":false}]'
+    ;;
+  *"action list-tabs --json"*)
+    printf '%s\n' '[{"tab_id":1,"name":"fm-hibit"}]'
+    ;;
+  *"action dump-screen"*)
+    [ -z "${FM_PENDING_BACKEND_PROBE_LOG:-}" ] \
+      || printf 'zellij-capture\n' >> "$FM_PENDING_BACKEND_PROBE_LOG"
+    printf '%s' "${FM_PENDING_TEST_CAPTURE:-idle footer}"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod 0700 "$fb/zellij"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"status --json"*)
+    printf '%s\n' '{"client":{"protocol":20},"server":{"running":true}}'
+    ;;
+  *"agent get"*)
+    [ -z "${FM_PENDING_BACKEND_PROBE_LOG:-}" ] \
+      || printf 'herdr-agent\n' >> "$FM_PENDING_BACKEND_PROBE_LOG"
+    printf '{"result":{"agent":{"agent_status":"%s"}}}\n' \
+      "${FM_PENDING_NATIVE_STATUS:-working}"
+    ;;
+  *"pane read"*)
+    [ -z "${FM_PENDING_BACKEND_PROBE_LOG:-}" ] \
+      || printf 'herdr-capture\n' >> "$FM_PENDING_BACKEND_PROBE_LOG"
+    printf '%s' "${FM_PENDING_TEST_CAPTURE:-idle footer}"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod 0700 "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
 setup_parent() {  # <name> -> home
   local home="$TMP_ROOT/$1-$RANDOM"
   mkdir -p "$home/state"
@@ -535,11 +596,16 @@ test_transport_success_is_not_reply_success() {
 
 test_undelivered_records_are_scan_immutable() {
   (
-    local home state sm_home corr rec before after
+    local home state sm_home corr rec before after probe_bin probe_log
     home=$(setup_parent undelivered-scan)
     state="$home/state"
     sm_home="$home/sm"
     mkdir -p "$sm_home/state"
+    probe_bin=$(make_backend_probe_stubs "$home")
+    probe_log="$home/backend-probes.log"
+    : > "$probe_log"
+    export PATH="$probe_bin:$PATH"
+    export FM_PENDING_BACKEND_PROBE_LOG="$probe_log"
     # This fixture clock is intentionally scoped to the isolated subshell.
     # shellcheck disable=SC2030,SC2031
     export FM_PENDING_REPLY_NOW=5500
@@ -556,9 +622,8 @@ test_undelivered_records_are_scan_immutable() {
       || fail "undelivered wrong-home check should be inert"
     fm_pending_reply_tick_one "$state" "$corr" busy "$sm_home" \
       || fail "undelivered direct tick should be inert"
-    fm_backend_busy_state() { fail "undelivered watcher tick must not probe the backend"; }
-    fm_backend_capture() { fail "undelivered watcher tick must not capture the backend"; }
     fm_pending_reply_tick "$state" || fail "undelivered watcher tick should succeed"
+    [ ! -s "$probe_log" ] || fail "undelivered watcher tick must not probe the backend"
     after=$(cat "$rec")
     [ "$after" = "$before" ] || fail "scan paths must not mutate an undelivered record"
     fm_pending_reply_mark_delivered "$state" "$corr" || fail "delivery marker should succeed"
@@ -850,21 +915,23 @@ test_unknown_backend_state_uses_capture_fallback() {
   local backend
   for backend in tmux zellij; do
     (
-      local home state corr rec sm_home
+      local home state corr rec sm_home probe_bin target
       home=$(setup_parent "fallback-$backend")
       state="$home/state"
       sm_home="$home/sm"
       mkdir -p "$sm_home/state"
+      probe_bin=$(make_backend_probe_stubs "$home")
+      export PATH="$probe_bin:$PATH"
       export FM_PENDING_REPLY_GRACE_SECS=10
       # These fixture overrides are intentionally scoped to the isolated subshell.
       # shellcheck disable=SC2030,SC2031
       export FM_PENDING_REPLY_NOW=10000
       corr=$(fm_pending_reply_create "$home" "$state" "hibit" "$backend fallback")
       fm_pending_reply_mark_delivered "$state" "$corr"
-      fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit" alpha pi
+      target=session:fm-hibit
+      [ "$backend" = tmux ] || target=session:1
+      fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "$target" alpha pi
       [ "$backend" = tmux ] || printf 'backend=%s\n' "$backend" >> "$state/hibit.meta"
-      fm_backend_busy_state() { printf 'unknown'; }
-      fm_backend_capture() { printf '%s' "$FM_PENDING_TEST_CAPTURE"; }
       # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
       # shellcheck disable=SC2329
       recovery_hook() { :; }
@@ -896,27 +963,27 @@ test_unknown_backend_state_uses_capture_fallback() {
 }
 
 test_kimi_capture_fallback_uses_recorded_harness() (
-  local home state corr rec sm_home
+  local home state corr rec sm_home probe_bin
   home=$(setup_parent kimi-fallback)
   state="$home/state"
   sm_home="$home/sm"
   mkdir -p "$sm_home/state"
+  probe_bin=$(make_backend_probe_stubs "$home")
+  export PATH="$probe_bin:$PATH"
   # This fixture clock is intentionally scoped to the isolated subshell.
   # shellcheck disable=SC2030,SC2031
   export FM_PENDING_REPLY_NOW=10020
   corr=$(fm_pending_reply_create "$home" "$state" hibit "kimi fallback")
   fm_pending_reply_mark_delivered "$state" "$corr"
   fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit" alpha kimi
-  fm_backend_busy_state() { printf 'unknown'; }
-  fm_backend_capture() { printf '%s' "$FM_PENDING_KIMI_CAPTURE"; }
-  export FM_PENDING_KIMI_CAPTURE=' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
+  export FM_PENDING_TEST_CAPTURE=' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
 
   [ "$(fm_pending_reply_backend_observation tmux session:fm-hibit fm-hibit codex)" = fallback-idle ] \
     || fail "Kimi spinner leaked into another harness"
-  export FM_PENDING_KIMI_CAPTURE='Ctrl+c:cancel'
+  export FM_PENDING_TEST_CAPTURE='Ctrl+c:cancel'
   [ "$(fm_pending_reply_backend_observation tmux session:fm-hibit fm-hibit kimi)" = fallback-idle ] \
     || fail "Grok's exact busy token leaked into Kimi pending-reply observation"
-  export FM_PENDING_KIMI_CAPTURE=' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
+  export FM_PENDING_TEST_CAPTURE=' 🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
   fm_pending_reply_tick "$state"
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] \
@@ -928,13 +995,17 @@ test_kimi_capture_fallback_uses_recorded_harness() (
 
 test_tick_skips_terminal_and_reuses_target_observation() {
   (
-    local home state open1 open2 resolved escalated rec probe_log probes scan_log scans snapshot
+    local home state open1 open2 resolved escalated rec probe_bin probe_log probes scan_log scans snapshot
     home=$(setup_parent observation-cache)
     state="$home/state"
+    probe_bin=$(make_backend_probe_stubs "$home")
     probe_log="$home/backend-probes.log"
     scan_log="$home/status-scans.log"
     : > "$probe_log"
     : > "$scan_log"
+    export PATH="$probe_bin:$PATH"
+    export FM_PENDING_BACKEND_PROBE_LOG="$probe_log"
+    export FM_PENDING_NATIVE_STATUS=working
     # This fixture clock is intentionally scoped to the isolated subshell.
     # shellcheck disable=SC2030,SC2031
     export FM_PENDING_REPLY_NOW=10100
@@ -952,17 +1023,10 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     fm_pending_reply_set "$rec" phase escalated || fail "escalated fixture should transition"
     mkdir -p "$home/escalated/state"
     printf 'done [corr=%s]: wrong home\n' "$escalated" > "$home/escalated/state/escalated.status"
-    fm_write_secondmate_meta "$state/hibit.meta" "$home/hibit" "sess:fm-hibit"
+    fm_write_secondmate_meta "$state/hibit.meta" "$home/hibit" "default:w1:p2"
+    printf 'backend=herdr\n' >> "$state/hibit.meta"
     fm_write_secondmate_meta "$state/resolved.meta" "$home/resolved" "sess:fm-resolved"
     fm_write_secondmate_meta "$state/escalated.meta" "$home/escalated" "sess:fm-escalated"
-    # Runtime overrides called indirectly by the pending-reply tick.
-    # shellcheck disable=SC2329
-    fm_backend_busy_state() {
-      printf '%s\t%s\n' "$1" "$2" >> "$probe_log"
-      printf 'busy'
-    }
-    # shellcheck disable=SC2329
-    fm_backend_capture() { fail "native busy observations should not capture"; }
     # shellcheck disable=SC2329
     fm_pending_reply_find_resolve_line() {
       local status_file=$1 corr=$2 line
@@ -976,8 +1040,11 @@ test_tick_skips_terminal_and_reuses_target_observation() {
       return 0
     }
     fm_pending_reply_tick "$state"
-    probes=$(wc -l < "$probe_log" | tr -d ' ')
+    probes=$(grep -c '^herdr-agent$' "$probe_log" 2>/dev/null || true)
     [ "$probes" = 1 ] || fail "two open records for one target should use one probe, got $probes"
+    if grep -q 'capture' "$probe_log" 2>/dev/null; then
+      fail "native busy observations should not capture"
+    fi
     rec=$(fm_pending_reply_path "$state" "$open1")
     [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] \
       || fail "cached observation should update the first open record"

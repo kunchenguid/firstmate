@@ -85,8 +85,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # through fm_transition_policy - it never re-encodes the mapping.
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-timeout-lib.sh"
 
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
+# Event socket discovery and level reconciliation each get a 10-second CLI budget.
+FM_BACKEND_HERDR_EVENT_PROBE_TIMEOUT=10
+[ "$FM_BACKEND_HERDR_EVENT_PROBE_TIMEOUT" -gt 0 ] || return 1
 # events.subscribe (the native pane.agent_status_changed push stream) and its
 # subscription_event schema first shipped at protocol 16 (verified: herdr
 # 0.7.3). Below this, or with the events surface absent from `herdr api schema`,
@@ -2932,8 +2937,17 @@ fm_backend_herdr_classify_submit_agent_status() {  # <raw-agent_status>
 # successful send-text), so re-checking server liveness on every poll would
 # only add latency without adding safety.
 fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out
-  out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null) || { printf ''; return 0; }
+  local session=$1 pane_id=$2 out status=0
+  out=$(fm_run_timed "$FM_BACKEND_HERDR_EVENT_PROBE_TIMEOUT" env \
+    HERDR_SESSION="$session" herdr agent get "$pane_id" --session "$session" \
+    2>/dev/null) || status=$?
+  if [ "$status" -ne 0 ]; then
+    if [ "$status" -eq 124 ] && declare -F triage_log >/dev/null 2>&1; then
+      triage_log "Herdr event agent-status probe exceeded its 10s bound: $session:$pane_id"
+    fi
+    printf ''
+    return 0
+  fi
   printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null
 }
 
@@ -3106,8 +3120,16 @@ fm_backend_herdr_list_live() {  # <session>
 # session's - verified: default -> ~/.config/herdr/herdr.sock, named ->
 # ~/.config/herdr/sessions/<name>/herdr.sock). Empty on any failure.
 fm_backend_herdr_socket_path() {  # <session>
-  local session=$1
-  herdr session list --json 2>/dev/null \
+  local session=$1 sessions status=0
+  sessions=$(fm_run_timed "$FM_BACKEND_HERDR_EVENT_PROBE_TIMEOUT" \
+    herdr session list --json 2>/dev/null) || status=$?
+  if [ "$status" -ne 0 ]; then
+    if [ "$status" -eq 124 ] && declare -F triage_log >/dev/null 2>&1; then
+      triage_log "Herdr event socket discovery exceeded its 10s bound: $session"
+    fi
+    return 0
+  fi
+  printf '%s' "$sessions" \
     | jq -r --arg name "$session" '.sessions[]? | select(.name == $name) | .socket_path // empty' 2>/dev/null \
     | head -1
 }

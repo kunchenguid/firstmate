@@ -72,6 +72,8 @@
 # Dead lock holders are already reclaimed after FM_LOCK_STALE_AFTER by
 # fm_lock_try_acquire, so the residual gap is only a live holder that never
 # releases the wake-queue lock.
+# Authenticated checks escalate TERM to KILL at their deadline, and a deadline
+# leaves the slow-check cadence unchanged so that durable check work retries.
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -152,6 +154,7 @@ SECONDMATE_WAKE_SCAN_TIMEOUT=30
 # Backend state and capture probes get 10 seconds before the cycle continues conservatively.
 WATCH_BACKEND_PROBE_TIMEOUT=10
 for watcher_timeout in \
+  "$CHECK_TIMEOUT" \
   "$PROCEVENT_RECONCILE_TIMEOUT" \
   "$INACTIVE_RECONCILE_TIMEOUT" \
   "$SECONDMATE_WAKE_SCAN_TIMEOUT" \
@@ -598,9 +601,9 @@ run_check_process() {
   local c=$1
   shift
   if [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v timeout >/dev/null 2>&1; then
-    exec timeout "$CHECK_TIMEOUT" bash "$c" "$@"
+    exec timeout -k 1 "$CHECK_TIMEOUT" bash "$c" "$@"
   elif [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v gtimeout >/dev/null 2>&1; then
-    exec gtimeout "$CHECK_TIMEOUT" bash "$c" "$@"
+    exec gtimeout -k 1 "$CHECK_TIMEOUT" bash "$c" "$@"
   else
     # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
     exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
@@ -615,6 +618,7 @@ FM_ACTIVE_CHECK_PID=
 FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=
 FM_CHECK_RESULT=
+FM_CHECK_STATUS=
 FM_CHECK_SIGNAL_PENDING=
 
 fm_check_output_cleanup() {
@@ -651,6 +655,7 @@ run_check_capture() {
   local pgid
   fm_check_output_cleanup
   FM_CHECK_RESULT=
+  FM_CHECK_STATUS=0
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
   chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
   FM_CHECK_SIGNAL_PENDING=
@@ -668,7 +673,7 @@ run_check_capture() {
     return 1
   fi
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
-  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
+  wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || FM_CHECK_STATUS=$?
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
@@ -1001,6 +1006,7 @@ while :; do
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
+    check_sweep_timed_out=0
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
@@ -1036,6 +1042,11 @@ while :; do
           continue
         fi
       fi
+      if [ "${FM_CHECK_STATUS:-0}" -eq 124 ]; then
+        triage_log "authenticated check exceeded its ${CHECK_TIMEOUT}s bound: $(basename "$c")"
+        check_sweep_timed_out=1
+        continue
+      fi
       if [ -n "$out" ]; then
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
@@ -1047,17 +1058,17 @@ while :; do
             triage_log "merged PR poll retirement deferred because its canonical snapshot changed for $id"
           fi
         fi
-        touch "$STATE/.last-check"
+        [ "$check_sweep_timed_out" -eq 1 ] || touch "$STATE/.last-check"
         wake "$reason"
       fi
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
-      touch "$STATE/.last-check"
+      [ "$check_sweep_timed_out" -eq 1 ] || touch "$STATE/.last-check"
       wake "$reason"
     fi
-    touch "$STATE/.last-check"
+    [ "$check_sweep_timed_out" -eq 1 ] || touch "$STATE/.last-check"
   fi
 
   # On the first changed signal, linger one grace period and re-scan before

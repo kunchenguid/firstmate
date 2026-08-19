@@ -15,8 +15,8 @@
 #
 # There are two documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
-# read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
-# to decide whether a crew that just stopped its turn or went stale is working,
+# read: it reuses bin/fm-crew-state.sh under a fixed whole-reader deadline to
+# decide whether a crew that just stopped its turn or went stale is working,
 # deliberately paused, or neither. Callers run it ONLY on no-verb signal handling
 # and first sighting of a stale hash, never on every wake, so the per-wake triage
 # stays cheap. status_open_decisions_incremental (see "incremental (cursor-backed)
@@ -29,11 +29,16 @@
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
 # bin/ script (which sets its own SCRIPT_DIR) or directly by a test.
 _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-timeout-lib.sh"
 
 # The crew current-state reader used for the "provably working" decision.
 # Overridable so tests can stub the run-step/pane verdict without a real worktree
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
+# Current-state reconciliation can traverse backend and no-mistakes probes, so it gets 15 seconds.
+CREW_STATE_READ_TIMEOUT=15
+[ "$CREW_STATE_READ_TIMEOUT" -gt 0 ] || return 1
 
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
@@ -1098,13 +1103,25 @@ signal_reason_is_actionable() {  # <file> ...
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
-# NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
+# NOT a pure read: fm-crew-state.sh may call backend and no-mistakes probes, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
-  local id=$1 line state src
+  local id=$1 line state src read_status=0
   [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  line=$(fm_run_timed "$CREW_STATE_READ_TIMEOUT" "$FM_CREW_STATE_BIN" "$id" \
+    2>/dev/null) || read_status=$?
+  if [ "$read_status" -eq 124 ]; then
+    if declare -F triage_log >/dev/null 2>&1; then
+      triage_log "crew current-state read exceeded its 15s bound: $id"
+    fi
+    # `none` is neither working nor paused, so signal and stale triage surface instead of absorbing.
+    printf 'none'
+    return
+  elif [ "$read_status" -ne 0 ]; then
+    printf 'none'
+    return
+  fi
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi

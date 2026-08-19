@@ -82,12 +82,18 @@ SH
   chmod 0700 "$lab/fakebin/tmux"
 }
 
-make_herdr() {  # <lab> <agent-mode: quick|hang> <schema-mode: quick|hang>
-  local lab=$1 agent=$2 schema=$3
+make_herdr() {  # <lab> <agent-mode: quick|hang> <schema-mode: quick|hang> [session-mode: quick|hang]
+  local lab=$1 agent=$2 schema=$3 sessions=${4:-quick}
   cat > "$lab/fakebin/herdr" <<SH
 #!/usr/bin/env bash
 set -u
 case "\$*" in
+  *"session list"*)
+    if [ "$sessions" = hang ]; then
+      while :; do /bin/sleep 10; done
+    fi
+    printf '%s\n' '{"sessions":[{"name":"default","socket_path":"/tmp/fm-bounded-herdr.sock"}]}'
+    ;;
   *"api schema"*)
     if [ "$schema" = hang ]; then
       while :; do /bin/sleep 10; done
@@ -106,6 +112,63 @@ case "\$*" in
 esac
 SH
   chmod 0700 "$lab/fakebin/herdr"
+  cat > "$lab/fakebin/event-reader" <<'SH'
+#!/usr/bin/env bash
+printf '@subscribed\n'
+/bin/sleep 0.1
+SH
+  chmod 0700 "$lab/fakebin/event-reader"
+}
+
+seed_event_window() {  # <lab>
+  local lab=$1 state="$1/home/state" gen
+  printf 'kind=ship\nbackend=herdr\nwindow=default:w1:p2\nharness=pi\n' > "$state/worker.meta"
+  gen=$(FM_STATE_OVERRIDE="$state" "$lab/bin/fm-busy-event.sh" arm "$state" worker)
+  FM_STATE_OVERRIDE="$state" "$lab/bin/fm-busy-event.sh" apply "$state" worker busy \
+    --gen "$gen" --source pi-ext --event agent-start >/dev/null
+}
+
+install_event_fallback_sleep() {  # <lab>
+  local lab=$1
+  cat > "$lab/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ ! -e "${FM_TEST_EVENT_SLEEP_MARKER:?}" ]; then
+  : > "$FM_TEST_EVENT_SLEEP_MARKER"
+  printf 'done: event fallback reached the next cycle\n' > "${FM_TEST_EVENT_STATE:?}/event-exit.status"
+fi
+exec /bin/sleep "$@"
+SH
+  chmod 0700 "$lab/fakebin/sleep"
+}
+
+install_term_ignoring_timeout() {  # <lab>
+  local lab=$1
+  cat > "$lab/fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+set -u
+kill_after=
+if [ "${1:-}" = -k ]; then
+  kill_after=${2:-}
+  shift 2
+fi
+shift
+case "$*" in
+  *"/.fm-custom-check."*) ;;
+  *) exec "$@" ;;
+esac
+printf 'kill-after=%s\n' "${kill_after:-none}" >> "${FM_TEST_TIMEOUT_LOG:?}"
+"$@" &
+child=$!
+/bin/sleep 0.1
+kill -TERM "$child" 2>/dev/null || true
+if [ -n "$kill_after" ]; then
+  /bin/sleep 0.1
+  kill -KILL "$child" 2>/dev/null || true
+fi
+wait "$child" 2>/dev/null || true
+exit 124
+SH
+  chmod 0700 "$lab/fakebin/timeout"
 }
 
 file_mtime() {
@@ -409,29 +472,112 @@ test_window_busy() {
 }
 
 test_events_capability() {
-  local lab state gen
+  local lab state
   lab=$(make_lab events-capability); state="$lab/home/state"
   make_herdr "$lab" quick hang
-  printf 'kind=ship\nbackend=herdr\nwindow=default:w1:p2\nharness=pi\n' > "$state/worker.meta"
-  gen=$(FM_STATE_OVERRIDE="$state" "$lab/bin/fm-busy-event.sh" arm "$state" worker)
-  FM_STATE_OVERRIDE="$state" "$lab/bin/fm-busy-event.sh" apply "$state" worker busy \
-    --gen "$gen" --source pi-ext --event agent-start >/dev/null
-  cat > "$lab/fakebin/sleep" <<'SH'
-#!/usr/bin/env bash
-if [ ! -e "${FM_TEST_EVENT_SLEEP_MARKER:?}" ]; then
-  : > "$FM_TEST_EVENT_SLEEP_MARKER"
-  printf 'done: capability fallback reached the next cycle\n' > "${FM_TEST_EVENT_STATE:?}/event-exit.status"
-fi
-exec /bin/sleep "$@"
-SH
-  chmod 0700 "$lab/fakebin/sleep"
-  run_watch "$lab" fm_backend_events_capable FM_BACKEND_HERDR_EVENT_READER=/bin/true \
+  seed_event_window "$lab"
+  install_event_fallback_sleep "$lab"
+  run_watch "$lab" fm_backend_events_capable \
+    FM_BACKEND_HERDR_EVENT_READER="$lab/fakebin/event-reader" \
     FM_TEST_EVENT_SLEEP_MARKER="$lab/event-slept" FM_TEST_EVENT_STATE="$state"
   assert_grep 'backend event-capability probe exceeded its 10s bound' "$state/.watch-triage.log" \
     "event-capability deadline was not logged"
   assert_file "$lab/event-slept" "event-capability timeout did not take the poll fallback"
   assert_grep 'signal:' "$lab/watch.out" "watcher did not begin the next cycle after capability timeout"
   pass "event-capability timeout falls back to the next poll cycle"
+}
+
+test_event_socket_discovery() {
+  local lab state
+  lab=$(make_lab event-socket-discovery); state="$lab/home/state"
+  make_herdr "$lab" quick quick hang
+  seed_event_window "$lab"
+  install_event_fallback_sleep "$lab"
+  run_watch "$lab" "session list" \
+    FM_BACKEND_HERDR_EVENT_READER="$lab/fakebin/event-reader" \
+    FM_TEST_EVENT_SLEEP_MARKER="$lab/event-slept" FM_TEST_EVENT_STATE="$state"
+  assert_grep 'Herdr event socket discovery exceeded its 10s bound: default' \
+    "$state/.watch-triage.log" "event socket discovery deadline was not logged"
+  assert_file "$lab/event-slept" "event socket discovery timeout did not take the poll fallback"
+  assert_grep 'event-exit.status' "$state/.wake-queue" \
+    "event socket discovery timeout lost the next cycle's durable signal"
+  assert_absent "$state/.herdr-escalated-default_w1_p2" \
+    "event socket discovery timeout falsely committed a transition"
+  pass "event socket discovery timeout preserves polling and durable signals"
+}
+
+test_event_agent_status() {
+  local lab state
+  lab=$(make_lab event-agent-status); state="$lab/home/state"
+  make_herdr "$lab" hang quick quick
+  seed_event_window "$lab"
+  cat > "$lab/fakebin/event-reader" <<'SH'
+#!/usr/bin/env bash
+printf '@subscribed\n'
+if [ ! -e "${FM_TEST_EVENT_READER_MARKER:?}" ]; then
+  : > "$FM_TEST_EVENT_READER_MARKER"
+  printf 'done: event level fallback reached the next cycle\n' > "${FM_TEST_EVENT_STATE:?}/event-exit.status"
+fi
+/bin/sleep 0.1
+SH
+  chmod 0700 "$lab/fakebin/event-reader"
+  run_watch "$lab" "agent get" FM_BACKEND_HERDR_EVENT_READER="$lab/fakebin/event-reader" \
+    FM_TEST_EVENT_READER_MARKER="$lab/event-read" FM_TEST_EVENT_STATE="$state"
+  assert_grep 'Herdr event agent-status probe exceeded its 10s bound: default:w1:p2' \
+    "$state/.watch-triage.log" "event agent-status deadline was not logged"
+  assert_file "$lab/event-read" "event reader was not subscribed before level reconciliation"
+  assert_grep 'event-exit.status' "$state/.wake-queue" \
+    "event agent-status timeout lost the next cycle's durable signal"
+  assert_absent "$state/.herdr-escalated-default_w1_p2" \
+    "event agent-status timeout falsely committed a transition"
+  pass "event agent-status timeout preserves polling and durable signals"
+}
+
+test_term_ignoring_check() {
+  local lab state check
+  lab=$(make_lab term-ignoring-check); state="$lab/home/state"
+  install_term_ignoring_timeout "$lab"
+  check="$state/stubborn.check.sh"
+  cat > "$check" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+fifo="${0}.fifo"
+mkfifo "$fifo"
+exec 9<> "$fifo"
+read -r -t 8 -u 9 _ || true
+SH
+  chmod 0700 "$check"
+  FM_HOME="$lab/home" FM_STATE_OVERRIDE="$state" FM_ROOT_OVERRIDE="$lab" \
+    "$lab/bin/fm-check-register.sh" stubborn >/dev/null
+  seed_direct_exit "$state"
+  run_watch "$lab" term-ignoring-check FM_CHECK_INTERVAL=0
+  assert_grep 'kill-after=1' "$lab/timeout.log" \
+    "the external check deadline did not configure kill-after escalation"
+  assert_grep 'authenticated check exceeded its 30s bound: stubborn.check.sh' \
+    "$state/.watch-triage.log" "authenticated check deadline was not logged"
+  assert_absent "$state/.last-check" \
+    "timed-out authenticated check advanced the slow-check cadence"
+  assert_grep 'cycle-exit.status' "$state/.wake-queue" \
+    "timed-out authenticated check lost the next actionable signal"
+  pass "TERM-ignoring authenticated check is killed without advancing cadence"
+}
+
+test_crew_state_triage() {
+  local lab state
+  lab=$(make_lab crew-state-triage); state="$lab/home/state"
+  replace_with_hang "$lab/fakebin/fm-crew-state.sh"
+  printf 'working: no-verb signal requiring current-state classification\n' > "$state/worker.status"
+  run_watch "$lab" fm-crew-state.sh
+  assert_grep 'crew current-state read exceeded its 15s bound: worker' \
+    "$state/.watch-triage.log" "crew current-state deadline was not logged"
+  assert_grep 'worker.status' "$state/.wake-queue" \
+    "crew current-state timeout did not leave the signal durably surfaced"
+  if grep -q 'absorbed benign' "$state/.watch-triage.log" 2>/dev/null; then
+    fail "crew current-state timeout was absorbed as provably working"
+  fi
+  assert_grep 'signal:' "$lab/watch.out" \
+    "crew current-state timeout did not reach the actionable exit"
+  pass "crew current-state timeout surfaces instead of absorbing supervision"
 }
 
 test_apply_lock_symlink() {
@@ -473,6 +619,10 @@ CASES=(
   agent_alive_recheck
   window_busy
   events_capability
+  event_socket_discovery
+  event_agent_status
+  term_ignoring_check
+  crew_state_triage
   apply_lock_symlink
 )
 
