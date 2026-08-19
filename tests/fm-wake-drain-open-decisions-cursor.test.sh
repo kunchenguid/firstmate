@@ -347,7 +347,37 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
   pass "an old fold cache is rebuilt once before same-version incremental reads resume"
 }
 
-test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
+test_cursor_from_a_foreign_fold_version_is_never_trusted() {
+  local dir state status cursor out ident status_bytes
+  dir=$(make_case cursor-foreign-fold-version)
+  state="$dir/state"
+  status="$state/task7.status"
+  cursor="$state/.task7.open-decisions-cursor"
+  out="$dir/drain.out"
+
+  printf 'needs-decision [key=db-choice]: choose A or B\n' > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "bootstrap drain over a keyed escalation failed"
+  grep -F 'task7' "$out" | grep -F 'choose A or B' >/dev/null \
+    || fail "a keyed escalation did not surface through the incremental drain"
+
+  ident=$(sed -n 's/^ident=//p' "$cursor")
+  status_bytes=$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')
+  {
+    printf 'version=0\n'
+    printf 'offset=%s\n' "$status_bytes"
+    printf 'ident=%s\n' "$ident"
+  } > "$cursor"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed over a cursor from another fold version"
+  grep -F 'task7' "$out" | grep -F 'choose A or B' >/dev/null \
+    || fail "a foreign fold version's empty open set was trusted under current fold semantics"
+
+  pass "a cursor persisted under another fold version is refolded, not trusted"
+}
+
+test_cursor_from_a_foreign_fold_version_is_never_trustedtest_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
 test_same_size_rewrite_is_detected_via_inode_identity
 test_read_failure_preserves_state_for_retry
 test_cursor_cache_read_failure_refolds_without_replaying_unread_status

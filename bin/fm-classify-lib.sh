@@ -175,11 +175,13 @@ status_is_paused_or_captain_held() {  # <status-line>
 # so a summary merely MENTIONING "[key=x]" cannot open or close that decision.
 # A line with no token in either position uses the key "default", preserving
 # the historical one-open-decision-per-task behavior (a bare "resolved:" closes
-# "default"). A stated key whose slug fails the charset below is rejected (the
-# folds skip the line), never rewritten to "default".
-# The parsers are pure reads of a single line. Status metadata may contain any
-# number of "[name=value]" tags before the colon, in any order, so verb parsing
-# ends at the first tag rather than special-casing "[key=...]".
+# "default").
+# A malformed slug names nothing, so it can never be a keyed record: the line is
+# ignored by this fold outright. It opens no decision under a key it does not
+# name, and - the part that matters for loss - a malformed CLOSING key can never
+# silently resolve the decision it was meant to name.
+# The three parsers are pure reads of a single line; the verb parser strips any
+# key token before the colon so the leading word is recovered cleanly.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
   v=${v%%\[*}
@@ -315,6 +317,7 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
     || { printf '%s' "$open"; return 0; }
   case "$verb" in
     needs-decision|blocked)
+      key=${key:-invalid-key}
       note=$(status_line_note "$line")
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
@@ -397,9 +400,8 @@ EOF
 # regardless of how much new unrelated log content has since been folded in.
 #
 # The cursor format is `version`, `offset`, `ident`, then the folded open set.
-# FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
-# _fm_decision_fold_line semantics change, so persisted state from an older
-# interpretation is discarded and rebuilt from byte 0.
+# The FM_OPEN_DECISIONS_FOLD_VERSION declaration below owns the bump duty that
+# keeps that recorded version meaningful.
 #
 # Cursor invalidation is deliberately minimal, matching how status files are
 # ACTUALLY used in this repo: every one is created once (`>`) and only ever
@@ -437,8 +439,11 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
+# Bump this on ANY change to _fm_decision_fold_line's open/close semantics: a
+# cursor persisted under older semantics carries an open set that folder would
+# no longer produce, and only a version mismatch forces the full re-fold that
+# discards it. Forgetting the bump silently serves a wrong open set forever.
 FM_OPEN_DECISIONS_FOLD_VERSION=4
-
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
   local f=$1

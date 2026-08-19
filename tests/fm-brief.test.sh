@@ -459,9 +459,9 @@ test_secondmate_no_projects_charter() {
     "project-less charter operating model lost the pooled-worktree note"
   assert_no_grep "The projects above are local clones" "$brief" \
     "project-less charter kept the with-projects operating-model line"
-  assert_grep 'working [key=<work-slug>]' "$brief" \
+  assert_grep 'working [key=api-shape]' "$brief" \
     "secondmate charter did not key material routed-work phases"
-  assert_grep 'resolved [key=<work-slug>]' "$brief" \
+  assert_grep 'resolved [key=api-shape]' "$brief" \
     "secondmate charter did not close a quietly ended routed-work phase"
   assert_grep 'use the same key on its later' "$brief" \
     "secondmate charter did not supersede working phases with later states"
@@ -504,11 +504,11 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter retained the unconditional working opener"
   assert_grep 'When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above' "$brief" \
     "secondmate charter did not limit keyed phases to reportable material changes"
-  assert_grep "If its first reportable event is \`working [key=<work-slug>]: {material phase}\`" "$brief" \
+  assert_grep "If its first reportable event is \`working [key=api-shape]: {material phase}\`" "$brief" \
     "secondmate charter lost keyed working syntax for a reportable material phase"
   assert_grep "use the same key on its later \`paused\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event" "$brief" \
     "secondmate charter lost same-key closure for a reportable material phase"
-  assert_grep 'resolved [key=<work-slug>]' "$brief" \
+  assert_grep 'resolved [key=api-shape]' "$brief" \
     "secondmate charter lost resolved closure for a keyed material phase"
 
   assert_grep 'include that exact token in your parent status reply' "$brief" \
@@ -665,6 +665,23 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
       "$kind brief still instructs the default paused status"
     assert_grep 'a blocker or wait clears' "$brief" \
       "$kind brief did not require durable resolution when a blocker clears"
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_grep 'When you use a key, put it between the verb and the colon, as in `blocked [key=api-shape]: {why}`' "$brief" \
+      "$kind brief did not pin decision-key placement between the verb and colon"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'Use your own slug in place of that example, of letters, digits, `.`, `_`, or `-` only' "$brief" \
+      "$kind brief did not state the key slug grammar it now routes every escalation through"
+    assert_grep 'needs-decision [key=api-shape]:' "$brief" \
+      "$kind brief did not show correctly placed decision-key syntax"
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_grep 'append the closing line yourself as you' "$brief" \
+      "$kind brief made the worker self-close duty conditional on having used a key"
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_grep '`resolved: {how it cleared}`, or `resolved [key=api-shape]: {how it cleared}` if you opened it with a key' "$brief" \
+      "$kind brief did not show both the bare and keyed self-close forms"
+    # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+    assert_no_grep 'resolved: {how it cleared}` yourself (same `[key=<slug>]`' "$brief" \
+      "$kind brief retained the ambiguous trailing-key resolution syntax"
     assert_grep 'even when the answer is what started that work' "$brief" \
       "$kind brief did not warn that an answer-started done/working never closes a decision"
   done
@@ -712,7 +729,68 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# The rendered brief is a generated worker-facing artifact, so every decision-key
+# example it hands out must survive the fold a copied line would actually reach.
+# Each keyed example is pulled out of the rendered brief and executed through
+# bin/fm-classify-lib.sh's real parser and open-decision fold.
+test_brief_key_examples_parse_through_the_real_fold() {
+  local home kind id brief state line verb key open found=0
+  home="$TMP_ROOT/key-example-home"
+  state="$home/state"
+  mkdir -p "$home/data" "$state"
+  # shellcheck source=bin/fm-classify-lib.sh
+  # shellcheck disable=SC1091
+  . "$ROOT/bin/fm-classify-lib.sh"
+
+  for kind in ship scout secondmate; do
+    id="brief-key-examples-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+        ;;
+      secondmate)
+        FM_HOME="$home" FM_SECONDMATE_CHARTER=ops \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded for the key-example check"
+    # shellcheck disable=SC2016 # The pattern's backticks are literal brief markup.
+    grep -o '`[a-z-]\{1,\} \[key=[^]]*\]:[^`]*`' "$brief" | tr -d '`' > "$state/$kind.examples"
+    found=0
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      found=$((found + 1))
+      verb=$(status_line_verb "$line")
+      key=$(_fm_decision_key "$line") \
+        || fail "$kind brief hands out a status example the key parser rejects: $line"
+      [ "$key" != default ] \
+        || fail "$kind brief hands out a keyed example the parser reads as unkeyed: $line"
+      case "$verb" in
+        needs-decision|blocked)
+          printf '%s\n' "$line" > "$state/$kind.status"
+          open=$(status_open_decisions "$state/$kind.status")
+          printf '%s' "$open" | grep -F "$key"$'\t'"$verb"$'\t' >/dev/null \
+            || fail "$kind brief's escalation example opened no keyed decision: $line"
+          ;;
+        resolved)
+          printf 'needs-decision [key=%s]: a real decision\n%s\n' "$key" "$line" > "$state/$kind.status"
+          [ -z "$(status_open_decisions "$state/$kind.status")" ] \
+            || fail "$kind brief's self-close example did not close the decision it names: $line"
+          ;;
+      esac
+    done < "$state/$kind.examples"
+    [ "$found" -ge 1 ] \
+      || fail "$kind brief handed out no decision-key example to check"
+  done
+  pass "fm-brief.sh: every decision-key example the scaffolds hand out parses through the real fold"
+}
+
 test_script_parses
+test_brief_key_examples_parse_through_the_real_fold
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs

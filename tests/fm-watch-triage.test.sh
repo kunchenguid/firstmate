@@ -250,6 +250,17 @@ test_classifier_primitives() {
     && fail "FM_CAPTAIN_RE override bypassed paused: suppression"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "custom-verb: x" \
     || fail "nonterminal suppression weakened custom bare-line behavior"
+  incident_line='blocked: report complete; decision-hold gate needs tasks-axi>=0.2.4 [key=decision-hold-gate]'
+  printf '%s\n' "$incident_line" > "$state/incident.status"
+  open=$(status_open_decisions "$state/incident.status")
+  printf '%s' "$open" | grep -F $'default\tblocked\treport complete; decision-hold gate needs tasks-axi>=0.2.4 [key=decision-hold-gate]' >/dev/null \
+    || fail "the exact trailing-key incident line no longer documents its compatibility behavior"
+  printf '%s' "$open" | grep -F $'decision-hold-gate\t' >/dev/null \
+    && fail "a trailing key token was unexpectedly accepted despite ambiguous note prose"
+  printf 'blocked [key=decision-hold-gate]: report complete; decision-hold gate needs tasks-axi>=0.2.4\n' > "$state/incident-correct.status"
+  open=$(status_open_decisions "$state/incident-correct.status")
+  printf '%s' "$open" | grep -F $'decision-hold-gate\tblocked\treport complete; decision-hold gate needs tasks-axi>=0.2.4' >/dev/null \
+    || fail "a correctly placed decision key was not read"
   printf 'needs-decision: should docs mention [key=prose]?\nneeds-decision [key=q1]: real choice\nresolved: docs still mention [key=q1]\nneeds-decision [key=bad key]: malformed\n' > "$state/keys.status"
   open=$(status_open_decisions "$state/keys.status")
   printf '%s' "$open" | grep -F $'q1\t' >/dev/null \
@@ -258,6 +269,13 @@ test_classifier_primitives() {
     && fail "a key token in note prose changed the decision key"
   printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
     && fail "an invalid key slug entered the open-decision set"
+  printf 'needs-decision: which DB?\nneeds-decision [key=q2]: real choice\nresolved [key=bad key]: typo\nresolved [key=<slug>]: copied placeholder\n' \
+    > "$state/malformed-close.status"
+  open=$(status_open_decisions "$state/malformed-close.status")
+  printf '%s' "$open" | grep -F $'q2\tneeds-decision\treal choice' >/dev/null \
+    || fail "a malformed closing key resolved a keyed decision it does not name"
+  printf '%s' "$open" | grep -F $'default\tneeds-decision\twhich DB?' >/dev/null \
+    || fail "a malformed closing key resolved the unkeyed default decision"
   cat > "$state/activity.status" <<'EOF'
 working [key=phase7]: Phase 7 started
 working [key=phase6]: Phase 6 started
