@@ -174,6 +174,8 @@ test_review_issue_then_clearance() {
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)
   printf '%s\n' "$out" | grep -Fq 'merge-eligible:' \
     || fail "cleared review did not become eligible"
+  run_delivery "$home" "$fixture" show | grep -Fq $'acme/alpha\t3\t' \
+    && fail "eligible PR remained in the blocked queue"
   pass "review-issue hold clears after head/review change"
 }
 
@@ -495,6 +497,8 @@ test_closed_pr_state_retires_and_reopens() {
     || fail "closed PR retained its observation fingerprint"
   [ -z "$(find "$home/state/pr-delivery/delivered" -type f -name '*.delivered' -print -quit)" ] \
     || fail "closed PR retained its delivered marker"
+  run_delivery "$home" "$fixture" show | grep -Fq $'acme/alpha\t13\t' \
+    && fail "closed PR remained in the blocked queue"
   write_open "$fixture" acme/alpha '[{"number":13,"url":"https://github.com/acme/alpha/pull/13","headRefName":"fm/closed13","headRefOid":"lll","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]'
   write_view "$fixture" acme/alpha 13 '{"number":13,"url":"https://github.com/acme/alpha/pull/13","headRefName":"fm/closed13","headRefOid":"lll","baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"reviewThreads":{"nodes":[]},"state":"OPEN"}'
   out=$(run_delivery "$home" "$fixture" _scan-locked 1)

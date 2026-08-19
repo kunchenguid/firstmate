@@ -608,6 +608,13 @@ queue_add_row() { # <repo> <num> <url> <task> <reason> <detail>
   QUEUE_ROWS="${QUEUE_ROWS}${row}"
 }
 
+queue_remove_row() { # <repo> <num>
+  local key
+  key="$(clean_field "$1")"$'\t'"$(clean_field "$2")"
+  QUEUE_ROWS=$(printf '%s' "$QUEUE_ROWS" | awk -F '\t' -v key="$key" '$1 "\t" $2 != key { print }')
+  [ -z "$QUEUE_ROWS" ] || QUEUE_ROWS="${QUEUE_ROWS}"$'\n'
+}
+
 write_blocked_queue() {
   local tmp
   tmp=$(mktemp "$DELIVERY_DIR/.blocked-queue.XXXXXX") || return 1
@@ -629,7 +636,11 @@ process_pr_record() { # <repo> <project> <pr-json> <deadline> -> sets ACTIONABLE
   head=$(printf '%s' "$classified" | jq -r '.head')
   task=$(match_task "$(printf '%s' "$pr_json" | jq -r '.headRefName // ""')" "$url" "$project" 2>/dev/null || true)
   reason_for_pr "$classified" "$task"
-  queue_add_row "$repo" "$num" "$url" "${task:--}" "$REASON_CODE" "$REASON_DETAIL"
+  if [ "$REASON_CODE" = eligible ]; then
+    queue_remove_row "$repo" "$num"
+  else
+    queue_add_row "$repo" "$num" "$url" "${task:--}" "$REASON_CODE" "$REASON_DETAIL"
+  fi
   new_fp=$(fingerprint_for "$classified" "$task" "$REASON_CODE")
   fp_path=$(fingerprint_path "$repo" "$num")
   write_fingerprint "$fp_path" "$new_fp" || return 1
@@ -651,6 +662,7 @@ process_pr_record() { # <repo> <project> <pr-json> <deadline> -> sets ACTIONABLE
 }
 
 retire_pr_state() { # <repo> <number> <url>
+  queue_remove_row "$1" "$2"
   rm -f -- \
     "$(fingerprint_path "$1" "$2")" \
     "$(delivered_path "$1" "$2")" \
