@@ -348,8 +348,7 @@ Resume fleet supervision immediately after the decision lands.
 
 Judge validation by the current-code-matched run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
 Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
-The one exception is narrow and handled by that script: a run object that has stopped moving - judged stale by its `active_steps` `last_activity`, or by a steps table with nothing left running or fixing - no longer describes current work, so on a task whose PR is already recorded it reports the crew's own later `paused:` or `done:` line instead of working.
-That script's header is the single owner of this rule, its reasoning, and the limitations accepted with it.
+The one narrow exception - a frozen run object on a task whose PR is already recorded reports the crew's own later `paused:` or `done:` line instead of working - is owned, with its reasoning and accepted limitations, by that script's header.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
 
