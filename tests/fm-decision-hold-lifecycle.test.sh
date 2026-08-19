@@ -724,6 +724,147 @@ test_out_of_band_close_is_repairable_before_teardown() {
   pass "a decision closed outside the script is repairable and then clears teardown"
 }
 
+# Backlog retention sweeps closed rows out of the active backlog into the archive,
+# which keeps the captain's recorded answer intact. The gate must read the answer
+# where it now lives rather than reporting a retained decision as missing, and it
+# only ever breaks this way when a review goes WELL: the longer the session, the
+# more of its earliest answered decisions retention has already filed.
+test_archived_answer_still_satisfies_the_completion_gate() {
+  local home id settled pending show
+  home=$(make_home archived-answer)
+  id=sample-retention-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample retention surface" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the retention-review origin"
+  write_origin_meta "$home" "$id"
+  cat > "$home/state/$id.status" <<'EOF'
+needs-decision [key=settled]: choose the sample layout
+needs-decision [key=pending]: choose the sample retention window
+done: report and visual review complete
+EOF
+  printf '# Sample retention review\n\nTwo captain choices were raised.\n' \
+    > "$home/data/$id/report.md"
+  settled=$(run_decisions "$home" hold "$id" settled \
+    --title "Choose the sample layout" --reason "captain layout choice pending" --repo sample) \
+    || fail "could not register the settled hold"
+  pending=$(run_decisions "$home" hold "$id" pending \
+    --title "Choose the sample retention window" --reason "captain window choice pending" --repo sample) \
+    || fail "could not register the pending hold"
+  run_decisions "$home" complete "$id" settled pending >/dev/null \
+    || fail "completion failed before any decision was answered"
+
+  printf 'Use the wide sample layout.\n' > "$home/settled-decision.txt"
+  run_decisions "$home" answer "$id" settled --decision-file "$home/settled-decision.txt" >/dev/null \
+    || fail "could not record the captain answer on the settled decision"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention"
+  assert_no_grep "$settled" "$home/data/backlog.md" \
+    "retention did not remove the answered decision from the active backlog"
+  grep -E "^- \[x\] $settled -" "$home/data/done-archive.md" >/dev/null \
+    || fail "retention did not file the answered decision in the archive"
+  assert_grep "Resolution recorded by fm-decision-hold" "$home/data/done-archive.md" \
+    "the archived decision lost the captain answer that proves it was answered"
+
+  # An exact retry of the close must stay idempotent against the archived record,
+  # and a different answer must still be refused rather than silently accepted.
+  run_decisions "$home" answer "$id" settled --decision-file "$home/settled-decision.txt" >/dev/null \
+    || fail "an identical answer retry was refused once retention had archived the record"
+  printf 'Use the narrow sample layout instead.\n' > "$home/drifted-decision.txt"
+  if run_decisions "$home" answer "$id" settled --decision-file "$home/drifted-decision.txt" \
+    > "$home/drifted-answer.out" 2> "$home/drifted-answer.err"; then
+    fail "a different captain answer overwrote an archived decision"
+  fi
+
+  printf 'Keep the sample retention window at ten items.\n' > "$home/pending-decision.txt"
+  run_decisions "$home" answer "$id" pending --decision-file "$home/pending-decision.txt" >/dev/null \
+    || fail "could not record the captain answer on the pending decision"
+  tasks_in "$home" prune --keep 0 --state "done" >/dev/null \
+    || fail "could not run backlog retention a second time"
+  assert_no_grep "$pending" "$home/data/backlog.md" \
+    "retention did not remove the second answered decision from the active backlog"
+  run_decisions "$home" verify "$id" >/dev/null \
+    || fail "the completion gate refused an origin whose every decision was answered and archived"
+  show=$(run_decisions "$home" complete "$id" settled pending) \
+    || fail "completion refused an origin whose every decision was answered and archived"
+  assert_contains "$show" "pending,settled" "completion lost the archived decision inventory"
+
+  # Teeth: reading the archive must not turn the gate into a blanket pass for this
+  # origin. A newly raised decision with no durable record of any kind still shuts
+  # it, and only re-inventorying and holding that decision reopens the way through.
+  printf 'needs-decision [key=late]: choose the sample archive label\n' >> "$home/state/$id.status"
+  if run_decisions "$home" verify "$id" > "$home/late-verify.out" 2> "$home/late-verify.err"; then
+    fail "the gate passed a decision raised after the archived inventory was reviewed"
+  fi
+  if run_teardown "$home" "$id" > "$home/late-teardown.out" 2> "$home/late-teardown.err"; then
+    fail "teardown proceeded on a decision raised after the archived inventory was reviewed"
+  fi
+  assert_present "$home/state/$id.meta" "refused teardown removed investigation metadata"
+  run_decisions "$home" hold "$id" late \
+    --title "Choose the sample archive label" --reason "captain label choice pending" --repo sample >/dev/null \
+    || fail "could not register the late hold"
+  run_decisions "$home" complete "$id" late >/dev/null \
+    || fail "completion refused the re-inventoried late decision"
+  run_teardown "$home" "$id" >/dev/null 2> "$home/teardown.err" \
+    || fail "teardown refused an origin whose decisions were answered, archived, and re-inventoried: $(cat "$home/teardown.err")"
+  pass "an answered decision keeps satisfying the gate after retention archives it"
+}
+
+# Reading the archive must not degrade into "absent means fine". An archived row
+# is proof only when it carries the captain's answer, and a row the archive can
+# no longer have that answer written onto says so instead of passing.
+test_archived_decision_without_an_answer_still_fails_the_gate() {
+  local home id hold
+  home=$(make_home archived-unanswered)
+  id=sample-lost-answer-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample lost answer" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the lost-answer origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample lost answer review\n\nOne captain choice remains.\n' \
+    > "$home/data/$id/report.md"
+  hold=$(run_decisions "$home" hold "$id" placement \
+    --title "Choose the sample placement" --reason "captain placement choice pending" --repo sample) \
+    || fail "could not register the lost-answer hold"
+  run_decisions "$home" complete "$id" placement >/dev/null \
+    || fail "completion failed before the out-of-band close"
+
+  # Closed outside this script and swept into the archive in one step, so the
+  # durable record exists but never recorded a captain answer.
+  tasks_in "$home" "done" "$hold" --keep 0 >/dev/null \
+    || fail "could not reproduce an out-of-band close followed by retention"
+  assert_no_grep "$hold" "$home/data/backlog.md" \
+    "retention did not remove the out-of-band close from the active backlog"
+  grep -E "^- \[x\] $hold -" "$home/data/done-archive.md" >/dev/null \
+    || fail "retention did not file the out-of-band close in the archive"
+  assert_no_grep "Resolution recorded by fm-decision-hold" "$home/data/done-archive.md" \
+    "the unanswered fixture must carry no captain answer"
+
+  if run_decisions "$home" verify "$id" > "$home/archived-verify.out" 2> "$home/archived-verify.err"; then
+    fail "an archived decision with no recorded captain answer satisfied the gate"
+  fi
+  if run_teardown "$home" "$id" > "$home/archived-teardown.out" 2> "$home/archived-teardown.err"; then
+    fail "teardown proceeded on an archived decision with no recorded captain answer"
+  fi
+  assert_present "$home/state/$id.meta" "refused teardown removed investigation metadata"
+
+  # Repair cannot rewrite an archived row, so it must name that limit rather than
+  # claim the decision is missing or pretend the answer was recorded.
+  printf 'Place the sample control on the left.\n' > "$home/placement-decision.txt"
+  if run_decisions "$home" repair "$id" placement --decision-file "$home/placement-decision.txt" \
+    > "$home/archived-repair.out" 2> "$home/archived-repair.err"; then
+    fail "repair claimed to record a captain decision onto an archived row"
+  fi
+  assert_grep "archived by backlog retention" "$home/archived-repair.err" \
+    "repair did not report why the archived decision could not be recorded"
+  if run_decisions "$home" verify "$id" > "$home/still-shut.out" 2> "$home/still-shut.err"; then
+    fail "a refused repair still satisfied the completion gate"
+  fi
+  pass "an archived decision with no captain answer keeps the gate shut"
+}
+
 # The unrouted close paths must not become a way past the gate. An unanswered
 # decision keeps blocking cleanup, and neither new path can manufacture an answer.
 test_unanswered_decision_still_blocks_completion_and_teardown() {
@@ -1276,3 +1417,5 @@ test_unbound_source_closes_no_hold
 test_any_origin_binding_closes_across_origins
 test_answer_preserves_every_unrouted_close_guard
 test_chat_channel_feeds_the_same_keyed_answer_intake
+test_archived_answer_still_satisfies_the_completion_gate
+test_archived_decision_without_an_answer_still_fails_the_gate

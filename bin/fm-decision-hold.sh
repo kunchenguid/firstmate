@@ -120,6 +120,20 @@
 # blocking teardown until `resolve` or `decline` closes it with the captain's word.
 # It also refuses an identity that does not carry surviving captain-hold
 # provenance, so an ordinary captain-kind task cannot be repaired into a decision.
+#
+# READS SPAN THE ARCHIVE; WRITES NEVER DO.
+# Backlog retention sweeps closed rows out of the active backlog into the archive,
+# which keeps every field this script verifies, including the resolution block.
+# A gate that read only the active backlog therefore turned "the captain answered
+# this and retention filed it" into "this decision is missing", and no amount of
+# retrying could ever pass it again - a failure mode that only appeared when a
+# review went WELL, because answering more decisions over a longer session is
+# exactly what pushes the earliest ones past the retention window. Every read that
+# asks whether a durable captain decision EXISTS therefore uses task_show_durable,
+# which consults the active backlog and then the archive. Every write stays on
+# task_show, because the archive is a record tasks-axi cannot rewrite, and a
+# mutation path that cannot reach its target says so instead of reporting the
+# record as absent. bin/fm-tasks-axi-lib.sh owns the archived read itself.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -221,8 +235,33 @@ require_tasks_axi() {
     || fail "tasks-axi does not expose the captain-hold contract"
 }
 
+# The active backlog only: the one record tasks-axi can still change.
 task_show() {  # <id>
   tasks_axi show "$1" --full 2>/dev/null
+}
+
+# The archived record retention already filed, rendered by tasks-axi itself.
+task_show_archived() {  # <id>
+  fm_tasks_axi_archive_show "$FM_HOME" "$1"
+}
+
+# The durable record wherever it now lives. Read-only callers use this; anything
+# that goes on to mutate must still resolve its target through task_show.
+task_show_durable() {  # <id>
+  task_show "$1" || task_show_archived "$1"
+}
+
+# The one absence message, which distinguishes an identity this home has never
+# held from one retention has moved beyond tasks-axi's reach.
+absent_decision_message() {  # <hold-id> <noun>
+  local id=$1 noun=$2
+  if task_show_archived "$id" >/dev/null 2>&1; then
+    printf '%s %s was archived by backlog retention into %s, which tasks-axi cannot rewrite' \
+      "$noun" "$id" "$(fm_tasks_axi_archive_path "$FM_HOME")"
+    return 0
+  fi
+  printf '%s %s is absent from %s and its done archive' \
+    "$noun" "$id" "$(fm_tasks_axi_backlog_path "$FM_HOME")"
 }
 
 show_field() {  # <show-output> <field>
@@ -233,7 +272,7 @@ show_field() {  # <show-output> <field>
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
-  task_show "$1" >/dev/null 2>&1
+  task_show_durable "$1" >/dev/null 2>&1
 }
 
 list_has_key() {  # <comma-list> <key>
@@ -336,7 +375,7 @@ EOF
 
 verify_hold_active() {  # <hold-id>
   local id=$1 show state held kind hold_kind
-  show=$(task_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show "$id") || fail "$(absent_decision_message "$id" 'captain hold')"
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -349,7 +388,7 @@ verify_hold_active() {  # <hold-id>
 
 verify_hold_resolved() {  # <hold-id>
   local id=$1 show state kind body
-  show=$(task_show "$id") || return 1
+  show=$(task_show_durable "$id") || return 1
   state=$(show_field "$show" state)
   kind=$(show_field "$show" kind)
   body=$(show_field "$show" body)
@@ -360,7 +399,7 @@ verify_hold_resolved() {  # <hold-id>
 
 verify_hold_durable() {  # <hold-id>
   local id=$1 show state held kind hold_kind body
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show_durable "$id") || fail "$(absent_decision_message "$id" 'captain decision')"
   state=$(show_field "$show" state)
   held=$(show_field "$show" held)
   kind=$(show_field "$show" kind)
@@ -421,13 +460,17 @@ command_hold() {
   require_tasks_axi
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
   id=$(hold_id "$origin" "$key")
-  if show=$(task_show "$id"); then
+  # The identity check spans the archive so a decision retention has already filed
+  # is recognised as taken, instead of being recreated as a colliding live row.
+  if show=$(task_show_durable "$id"); then
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
+    task_show "$id" >/dev/null \
+      || fail "$(absent_decision_message "$id" 'captain hold'); use a new decision key for a new decision"
   else
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
@@ -575,7 +618,7 @@ command_resolve() {
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_resolved "$id"; then
-    hold_show=$(task_show "$id")
+    hold_show=$(task_show_durable "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$DECISION_DIGEST" "$routed_csv"
     printf 'resolved: %s\n' "$id"
@@ -648,13 +691,14 @@ close_unrouted_hold() {  # <mode> <outcome-word> <origin-id> <decision-key> <fla
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
   if verify_hold_resolved "$id"; then
-    hold_show=$(task_show "$id")
+    hold_show=$(task_show_durable "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$DECISION_DIGEST" "$ROUTED_NONE"
     printf '%s: %s\n' "$outcome" "$id"
     return 0
   fi
-  hold_show=$(task_show "$id") || fail "captain hold $id is absent from $FM_HOME/data/backlog.md"
+  # Closing rewrites the hold, so the live row is required from here on.
+  hold_show=$(task_show "$id") || fail "$(absent_decision_message "$id" 'captain hold')"
   state=$(show_field "$hold_show" state)
   [ "$state" != "done" ] \
     || fail "captain hold $id was closed outside fm-decision-hold; use repair to record the captain decision"
@@ -856,7 +900,7 @@ command_repair() {
   load_decision "$decision_file"
   require_tasks_axi
   id=$(hold_id "$origin" "$key")
-  show=$(task_show "$id") || fail "captain decision $id is absent from $FM_HOME/data/backlog.md"
+  show=$(task_show_durable "$id") || fail "$(absent_decision_message "$id" 'captain decision')"
   kind=$(show_field "$show" kind)
   [ "$kind" = captain ] || fail "backlog item $id is not kind captain"
   # tasks-axi keeps hold_kind after a close, so it is the surviving proof that
@@ -874,6 +918,10 @@ command_repair() {
   fi
   [ "$state" = "done" ] \
     || fail "captain hold $id is still open (state=$state); use resolve or decline to close it with the captain's decision"
+  # An already-repaired archived record returned above; anything still needing the
+  # resolution block written must be reachable in the active backlog.
+  task_show "$id" >/dev/null \
+    || fail "$(absent_decision_message "$id" 'captain decision'), so the missing captain decision can no longer be recorded on it; the archived record is the durable one"
   body=$(resolution_body repaired "$ROUTED_NONE")
   tasks_axi update "$id" --body "$body" >/dev/null \
     || fail "could not record the captain decision on $id"

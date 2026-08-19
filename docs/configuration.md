@@ -46,6 +46,7 @@ Bootstrap requires compatible `tasks-axi` on every profile; see "Toolchain" belo
 Set the local, gitignored `config/backlog-backend` file to `manual` to force manual backlog editing and suppress the verbose `BOOTSTRAP_INFO: tasks-axi available` fact, not missing-tool reporting.
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
+The archive is a durable record rather than a write-only sink: an archived captain decision still carries the captain's recorded answer, and the completion gate in [`bin/fm-decision-hold.sh`](../bin/fm-decision-hold.sh) reads it there, so keep the archive file alongside the backlog.
 
 ## Runtime backend (config/backend / FM_BACKEND)
 
