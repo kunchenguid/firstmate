@@ -1,161 +1,115 @@
-# tmux runtime backend (reference)
+# tmux runtime backend
 
-tmux is firstmate's verified reference runtime backend: the session provider every other backend is compared against, and the fully verified baseline for secondmate support.
-This is the setup guide; for the shared runtime-backend abstraction and selection order, see [`docs/architecture.md`](architecture.md) ("Runtime session backends") and [`docs/configuration.md`](configuration.md) ("Runtime backend").
+tmux is Firstmate's verified reference runtime backend and the fully supported baseline for secondmate homes.
+[`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
-## What it is and when to pick it
+## Setup
 
-tmux is a terminal multiplexer.
-Firstmate gives each crewmate its own tmux window inside a session, so you can attach and watch a task work, or type into its window to intervene directly.
-Pick tmux unless you have a specific reason to try an experimental backend (herdr, zellij, Orca, or cmux) - it is the fully verified reference path for secondmate homes, while Orca and cmux are the backends that do not support secondmate spawns.
+Install tmux with `brew install tmux` or your platform package manager.
+The universal harness and toolchain requirements are in [`configuration.md`](configuration.md#toolchain).
 
-## Prerequisites
+tmux is the hard default when no explicit setting or runtime auto-detection selects another backend.
+Select it explicitly with local `config/backend` containing `tmux`, with `FM_BACKEND=tmux` for one launch, or by asking Firstmate to use tmux.
+An explicit selection is also the opt-out from Herdr or cmux runtime auto-detection.
 
-- tmux itself: `brew install tmux` (or your platform's package manager).
-- The universal firstmate prerequisites: a verified crew harness plus the required toolchain, detected at session start and installed only after you approve; [`docs/configuration.md`](configuration.md) owns both lists ("Harness support", "Toolchain").
+No provisioning is required before the first task.
 
-## Selecting it
+## Watching the crew
 
-tmux is the hard default: it needs no explicit selection.
-It is also what firstmate falls back to when nothing else is set - no local `config/backend` file, no `FM_BACKEND`, no explicit `--backend` flag firstmate passes internally when it spawns a task - and runtime auto-detection (see below) does not pick anything either.
-You can still select it explicitly by putting `tmux` in a local `config/backend` file - the durable way to pick it - or by exporting `FM_BACKEND=tmux` when you launch your harness for a one-off session; telling the first mate in chat to use tmux also works.
-This mainly matters as an opt-out of herdr or cmux runtime auto-detection (see [`docs/herdr-backend.md`](herdr-backend.md) and [`docs/cmux-backend.md`](cmux-backend.md)).
+For the best visible experience, launch the primary harness inside a tmux session:
 
-## First run
+```sh
+tmux new -s firstmate
+```
 
-Nothing to provision up front.
-The first crewmate spawn creates whatever tmux session and window it needs.
-
-## Run inside tmux for the best experience
-
-Launch your harness from inside a tmux session (`tmux new -s firstmate` or similar, then start your agent).
-Every crewmate window then lands in that same session, where you can watch the crew work in real time or type into any window to intervene.
-When following the commands below, use that session's actual name.
-Inside tmux, `tmux display-message -p '#S'` prints it.
-
-## Outside tmux: the detached `firstmate` session
-
-If you launch your harness outside of tmux, crewmate windows land in a detached session named `firstmate`, created on first use.
-Attach to it any time with:
+Crew tasks become windows in that session.
+`tmux display-message -p '#S'` prints its name.
+If the primary harness runs outside tmux, Firstmate creates or reuses a detached session named `firstmate`:
 
 ```sh
 tmux attach -t firstmate
 ```
 
-## Watching and typing into crew windows
-
-Once attached, each crewmate is its own window named `fm-<id>`:
-
-```sh
-tmux list-windows -t <session-name>          # see every crew window
-tmux select-window -t <session-name>:fm-<id> # jump to one, or use ctrl-b <n>
-```
-
-Use the current tmux session name when firstmate was launched inside tmux; use `firstmate` only for the detached outside-tmux path.
-Typing directly into an attached window is authoritative direct intervention - the first mate treats it the same as any other captain instruction and reconciles at the next heartbeat.
-You do not need to attach at all for routine supervision: from an active firstmate session, the first mate reads crew windows itself with `bin/fm-peek.sh fm-<id>` (a bounded, read-only capture) and steers a crew with `FM_HOME=<this-firstmate-home> bin/fm-send.sh fm-<id> "<text>"` unless `FM_HOME` is already set to the active firstmate home.
-
-## Verifying it works
-
-Ask the first mate for any small piece of work, or spawn a trivial scout task, and confirm a new window shows up:
+Each task window is named `fm-<id>`.
 
 ```sh
 tmux list-windows -t <session-name>
+tmux select-window -t <session-name>:fm-<id>
 ```
 
-Use the current tmux session name for the run-inside-tmux path, or `firstmate` for the detached outside-tmux path.
-You should see a `fm-<id>` window for the task, live and updating as the crewmate works.
+Typing into an attached task window is authoritative direct intervention.
+Routine supervision does not require attachment: `bin/fm-peek.sh <id>` captures a bounded tail and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` steers the recorded endpoint.
 
-## Agent liveness probe
+Verify setup by spawning a small task and confirming its `fm-<id>` window appears in the selected session.
 
-`fm_backend_target_exists` (`bin/fm-backend.sh`) only checks that a window's pane still exists.
-A secondmate agent that exits leaves its pane alive as a bare idle shell, which passes that check as "alive" - the gap `bin/fm-bootstrap.sh`'s session-start secondmate-liveness sweep exists to close (evidence 2026-07-07: every secondmate in one fleet was found sitting at a dead `zsh` shell, invisible to that check).
+## Current behavior and safety
 
-`fm_backend_tmux_agent_alive` (`bin/backends/tmux.sh`) answers a deeper question: is a real harness-agent *process* running in the pane right now, not just whether the pane exists?
-It reads tmux's own `#{pane_current_command}`, which reports the pane's live foreground process name - already resolved by tmux from the pty's controlling process group, not something this adapter derives itself.
+### Agent liveness probe
+
+A target-existence check proves only that the pane exists.
+The deeper tmux agent-liveness probe first verifies exact window membership, then reads process names to distinguish a running harness from a bare idle shell.
+It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse process identities as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
+Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
+
+For positive attribution, the probe combines two independent name sources rather than making either one load-bearing.
+`#{pane_current_command}` and the pane tty foreground process group's kernel `comm` values expose different name fields, and which one retains executable identity is platform-dependent.
+The foreground probe also reads argv[0] so an exact harness install-path component can carry the verdict when the other fields expose a rewritten process name.
+Either source naming a verified harness is enough for `alive`, because a false `dead` is the one verdict that can start a duplicate agent on a live worktree, while a readable foreground process group settles the negative verdicts.
+
+Scoping the second source to the foreground process group rather than to the pane's descendants is deliberate: a harness-named process left running in the background of an otherwise idle pane must not read as an agent.
+The same scoping covers multi-process launchers without a special case, so the Pi Launcher path is attributed through its `pi-signed` wrapper and `pi` engine even though its title is the exact foreground command `pi-launcher`.
+Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly, and similar or prefixed process names are not accepted through those exact Pi-family entries.
+Muse is likewise anchored to the exact `muse` launcher identity or the installed `muse-bin-<version>` prefix, so unrelated names such as `musescore` and `amuse` remain ambiguous.
+Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
+
+The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
+Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
+
+### Composer, busy state, and delivery
 
 Agent liveness and composer safety are separate checks.
-During away-mode escalation delivery, `fm_tmux_composer_state` sends a bare shell glyph on an unbordered row to the shared composer classifier as `unknown`, and the daemon injects only into an affirmatively `empty` composer; see [Composer-emptiness safety](herdr-backend.md#composer-emptiness-safety-2026-07-10-fleet-wide-across-all-four-backends).
+The tmux reader is a thin adapter over the fleet-wide classifier in `bin/fm-composer-lib.sh`: it contributes one styled full-pane capture, the `#{cursor_y}` cursor row, and foreground-process identity probes, and the shape containing the cursor - a complete bordered box (titled bottom borders tolerated), a bare agent-glyph row with its wrapped input, opencode's left bar, or Pi's identity-corroborated separator pair - normally decides the verdict.
+Real text in an identified shape is pending, while only positively proven emptiness reads empty.
+A blank or otherwise unidentified cursor row is `unknown` and every consumer defers, except that a foreground process proven to be Cursor is re-read cursorlessly because Cursor parks its terminal cursor below its footer.
+That identity-gated exception preserves the strict container-proof rule for every other pane, so a modal dialog, a dead shell between stale rules, or a mid-redraw pane is never an injection target.
+The shared classifier accepts a shell glyph as an empty agent composer only inside a bordered container.
+A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
 
-Verified empirically with real tmux 3.6a on macOS (Darwin 25.5.0), 2026-07-07:
+Busy state is not read from rendered text on this backend.
+A task's busy, idle, unknown, or dead verdict comes from the semantic busy-state contract owned by `bin/fm-busy-lib.sh`; [architecture](architecture.md#busy-state-is-semantic-per-adapter) owns its boundaries.
+The one remaining rendered-tail reader is Grok's isolated fallback inside that contract, which can only classify a Grok task.
+The submit acknowledgement and away-mode supervisor-pane busy guard below still consult rendered output, but only to decide whether input can be delivered, never to decide recorded task state.
+The supervisor guard selects only the detected primary harness's signature rather than a global union of vendor patterns.
+
+`bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
+It types a message once and retries Enter only until the composer clears.
+Only a proven empty composer is a positive delivery acknowledgement.
+Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
+`fm-send.sh` never retypes or assumes a confirmed submit for an unconfirmed verdict; its header owns the distinct delivered-unconfirmed exit status and operator response.
+
+OpenCode 1.18.4 has one busy-queue exception.
+While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
+After the normal retry budget, only structurally proven pending text in a provably busy pane is accepted as queued, while an idle pane remains `pending` as a genuine swallowed Enter.
+Ambiguous pending text never receives the busy-queue conversion.
+A second, baseline-gated conversion covers harnesses whose mid-turn screen the classifier cannot identify (Pi replaces its separated composer while working): when and only when the pane was idle before the text was typed, an idle-to-busy transition across the submit's own Enter confirms delivery, the same turn-started signal Herdr reads natively.
+Without that baseline, an `unknown` verdict is preserved untouched, so a busy-looking pane can never convert an unread composer into a confirmation.
+`tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
+
+## Limits and regression entry points
+
+- tmux is the reference path and supports secondmate homes.
+- The OpenCode busy-queue exception is tmux-specific; Herdr retains its separately documented gap.
 
 ```sh
-$ tmux new-session -d -s fmtest -n testwin
-$ tmux display-message -p -t fmtest:testwin '#{pane_current_command}'
-zsh
-$ tmux send-keys -t fmtest:testwin 'sleep 30' Enter
-$ tmux display-message -p -t fmtest:testwin '#{pane_current_command}'
-sleep
-$ tmux send-keys -t fmtest:testwin C-c
-$ tmux display-message -p -t fmtest:testwin '#{pane_current_command}'
-zsh
+tests/fm-backend-tmux-smoke.test.sh
+tests/fm-tmux-agent-liveness.test.sh
+tests/fm-harness-liveness-drift-live-e2e.test.sh
+tests/fm-composer-ghost.test.sh
+tests/fm-kimi-harness.test.sh
+tests/fm-cursor-harness.test.sh
+tests/fm-muse-harness.test.sh
+tests/fm-tmux-submit-busy.test.sh
+tests/fm-bootstrap.test.sh
 ```
 
-An idle pane reports the shell's own name; a live foreground process reports its own name; the pane reverts to the shell's name the moment that process exits - exactly the alive/dead signal the probe needs.
-
-A second case matters for a harness that shells out to subcommands while it runs (git, npm, no-mistakes, ...): does `pane_current_command` report the harness or the subcommand?
-Verified the same session: a persisting parent process running a child command (`bash -c 'echo start; sleep 30; echo end'`, where the parent bash stays alive waiting on its own child) reports the PARENT's own name (`bash`) throughout, not the child's (`sleep`) - so a harness that survives while it shells out stays correctly classified as alive.
-(A single-simple-command `bash -c "sleep 30"` is a different, unrelated case: bash execs directly into `sleep`, replacing itself, so the reported name changes because the process itself became `sleep` - not because tmux "saw through" to a child.)
-
-The classifier (`fm_backend_tmux_agent_alive`) maps the observed name to `alive`, `dead`, or `unknown`:
-
-- `alive` - the name contains `claude`, `codex`, `opencode`, or `grok`. All four were confirmed to run as their own literal process name (`ps -ef`, 2026-07-07): `claude` and `codex` and `opencode` are each a native compiled binary (`file` reports Mach-O), so their `comm` is their own binary name with no interpreter wrapper to hide behind.
-- `dead` - the name is a bare shell (`zsh`, `bash`, `sh`, `dash`, `ash`, `ksh`, `mksh`, `tcsh`, `csh`, `fish`).
-- `unknown` - anything else, including an unreadable pane.
-
-### Known gap: `pi` cannot be confidently classified
-
-`pi` is a `#!/usr/bin/env node` script (confirmed via its shebang and installed path, 2026-07-07), so a live `pi` agent's pane reports `node` as its `pane_current_command`, not `pi` - verified by running a long-lived `node -e` script in a pane and confirming its foreground process is a genuine child reachable via `pgrep -P <pane_pid>` with an inspectable `ps -o args=` (the same technique `bin/fm-harness.sh`'s own self-detection uses when walking UP its ancestry), while `pi --version` itself was observed to exit too quickly under the same pane to reliably capture its live foreground state - real `pi` invocations were not available to test.
-Since `node` is also the generic name for a plain interpreter session, any future JS-based harness, or someone's unrelated node script, there is no way to attribute a bare `node` foreground process back to `pi` specifically from outside the pane without deeper (and fragile) argument introspection.
-The classifier deliberately reports `unknown` for `node`/`python`/`python3` rather than guess - per the secondmate-liveness sweep's correctness bar, a wrong `alive` is harmless but a wrong `dead` spins up a duplicate agent, so an unresolvable case must never be treated as confidently dead.
-Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
-Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
-
-## Claude busy signatures
-
-Busy detection (is the pane's harness mid-turn?) is separate from the agent-liveness probe above: it reads the rendered pane text for a busy footer, not the foreground process name.
-The busy signature is owned by `FM_TMUX_BUSY_REGEX_DEFAULT` in `bin/fm-tmux-lib.sh`, mirrored byte-for-byte by `BUSY_REGEX` in `bin/fm-watch.sh` (which stays dependency-light and does not source the lib), and consumed by `bin/fm-crew-state.sh` and `bin/fm-supervise-daemon.sh`.
-
-The original signature keyed only on `esc to interrupt` (plus opencode's `esc interrupt`, pi's `Working...`, grok's `Ctrl+c:cancel`).
-Claude renders NO `esc to interrupt` while a Bash tool (shell) command runs - a multi-minute `docker`/`next build`, for example.
-Verified live 2026-07-16 against a real Claude crew (claude 2.1.211) mid `docker` build: crew-state reported `unknown · source: none` for a healthy, actively-working crew, so `bin/fm-bridge.sh` misplaced it out of RUNNING and the watcher's provably-working check (`bin/fm-classify-lib.sh` `crew_absorb_class`) could not confirm it.
-
-During a shell-tool run the footer and spinner look like this (captured `tmux capture-pane`, last non-blank lines, top-down):
-
-```
-  Running 1 shell command
-  $ DOCKER=/usr/local/bin/docker; "$DOCKER" build -t bolia-oom-repro .
-     ... build output ...
-✽ Flambeing... (1m 20s · ↓ 2.4k tokens · still thinking with high effort)
-  ⎿  Tip: Continue your session in Claude Code Desktop with /desktop
-────────────────────────────────────────────────────────────────────────────────
-❯
-────────────────────────────────────────────────────────────────────────────────
-  [CAVEMAN]
-  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
-```
-
-An idle, freshly-finished pane instead shows a static, past-tense summary with no token readout, and must stay not-busy:
-
-```
-✻ Brewed for 37m 45s
-```
-
-Two fixes, both empirically necessary (a widened regex alone still failed because the live spinner was above the scan window):
-
-- Two more Claude signals added to the signature: the running-shell footer `Running <N> shell command`, and the spinner's live token-flow readout `<N>k tokens`.
-  Both are present only while working; the idle `Brewed for` summary has neither, so it stays not-busy.
-  All alternatives are ASCII - the multibyte spinner glyph, `…`, `·`, and `↓`/`↑` are deliberately not matched, to avoid the locale fragility documented for grok's braille spinner and `bin/fm-composer-lib.sh`'s ghost stripper.
-  The token signal is spinner-anchored: the pattern requires an open-paren elapsed timer `(<Xm >Ys` followed on the same line by `<N>k tokens`, the co-structure only the animated spinner renders.
-  Static idle-pane prose that merely mentions a kilo token count - e.g. a final assistant message reading `... consumed 22.1k tokens before finishing.`, even `30s ... 22.1k tokens` - lacks the `(`+digit elapsed anchor, so it never false-matches.
-  This matters because that failure direction is the dangerous one: a stopped crew whose last message mentions a kilo token count reading busy would be absorbed by the provably-working check forever and never escalate, starving firstmate of supervision.
-- The busy scan reads the last 8 non-blank lines, not 6.
-  An intermittent `Tip:` line and the tool block push the spinner ~7 non-blank lines above the composer, out of a 6-line window; 8 catches it while keeping the bordered idle composer's `Brewed for` summary correctly not-busy.
-
-A busy pane is read before the status-log fallback in `bin/fm-crew-state.sh`, so a crew that declared `paused:` but has re-engaged on raw shell work reports `working`, not `paused` - the fix restores that override for the shell-command case too.
-Regression tests live in `tests/fm-crew-state.test.sh` (`test_no_run_claude_shell_command_pane_working`, `test_no_run_claude_idle_brewed_pane_not_busy`, `test_busy_shell_pane_overrides_stale_paused_log`).
-
-## Limitations
-
-None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.
-The agent-liveness probe above has one known gap (`pi`'s generic `node` process name, see above).
+[`verification/runtime-backends.md`](verification/runtime-backends.md#tmux) records the active foreground-process and submit evidence.

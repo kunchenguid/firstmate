@@ -25,6 +25,11 @@ command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (required 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
+# This suite runs against its own isolated lab session, so a Herdr pane
+# inherited from the terminal it was launched in must not follow spawn into it
+# as a cross-session parent identity (tests/herdr-test-safety.sh).
+herdr_forget_inherited_pane
+
 SESSION="fm-lab-eventwait-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SCRATCH=
@@ -35,7 +40,9 @@ cleanup_all() {
 trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare the isolated Herdr lab session"
 
-# shellcheck source=bin/fm-backend.sh
+# The dispatcher is a separately linted production boundary. Its dynamic
+# adapter source edges stop at each independently linted canonical adapter.
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
@@ -111,12 +118,12 @@ UNDER_ONE=$(python3 -c "print('yes' if (($END)-($START)) < 1.0 else 'no')" 2>/de
 pass "real herdr ($HERDR_VERSION): a driven idle->blocked transition returns the blocked record in ${ELAPSED}s (pane $PANE_ID)"
 
 # --- the watcher's fast-path lands a stale record in the scratch wake queue ---
-# Source the watcher (its guard returns before the lock/loop) and override wake so
-# handle_push_transition enqueues without exiting the test.
+# Load the narrow production owner only after pointing it at scratch state, then
+# override wake so the handler enqueues without exiting the test.
 export FM_STATE_OVERRIDE="$STATE"
 export FM_ROOT_OVERRIDE="$ROOT"
-# shellcheck source=bin/fm-watch.sh
-. "$ROOT/bin/fm-watch.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-push-transition-lib.sh"
 wake() { return 0; }
 handle_push_transition herdr "$SESSION" "$REC"
 [ -e "$STATE/.wake-queue" ] || fail "handle_push_transition did not create the wake queue"

@@ -41,6 +41,11 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
+# This suite runs against its own isolated lab session, so a Herdr pane
+# inherited from the terminal it was launched in must not follow spawn into it
+# as a cross-session parent identity (tests/herdr-test-safety.sh).
+herdr_forget_inherited_pane
+
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
@@ -68,7 +73,7 @@ trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
-# shellcheck source=bin/fm-supervise-daemon.sh
+# shellcheck source=/dev/null
 . "$DAEMON"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
@@ -92,6 +97,30 @@ EOF
 [ -n "$PANE_ID" ] || fail "create_task did not return a pane id"
 SUPERVISOR_TARGET="$SESSION:$PANE_ID"
 
+# Herdr can return the created pane before its interactive shell is ready to
+# receive Enter. Require a stable shell-owned foreground before launching the
+# fixture, or the command can remain typed but unsubmitted in the shell buffer.
+PANE_READY=false
+READY_SAMPLES=0
+for _ in $(seq 1 100); do
+  PROCESS_INFO=$(fm_backend_herdr_cli "$SESSION" pane process-info --pane "$PANE_ID" 2>/dev/null || true)
+  if printf '%s' "$PROCESS_INFO" | jq -e '
+    .result.process_info as $process
+    | ($process.foreground_processes | length == 1)
+      and ($process.foreground_processes[0].pid == $process.shell_pid)
+  ' >/dev/null 2>&1; then
+    READY_SAMPLES=$((READY_SAMPLES + 1))
+    if [ "$READY_SAMPLES" -ge 10 ]; then
+      PANE_READY=true
+      break
+    fi
+  else
+    READY_SAMPLES=0
+  fi
+  sleep 0.1
+done
+[ "$PANE_READY" = true ] || fail "the supervisor pane's shell did not become ready"
+
 # A second, independent live task tab in the same workspace, mirroring the tmux
 # e2e's fake fm-fake-c1 crewmate window - not required by scan_signals (which
 # only watches state/*.status mtimes, no window/pane dependency), but kept for
@@ -102,12 +131,13 @@ read -r _FAKE_TAB_ID FAKE_CREW_PANE_ID <<EOF
 $FAKE_CREW_IDS
 EOF
 
-# --- deterministic bordered-composer loop, drawn in the scratch pane ---------
-# Mirrors tests/fm-afk-inject-e2e.test.sh's supervisor-loop.sh, but draws a
-# "│ > <buf> │" border so the bordered branch of
-# fm_backend_herdr_composer_state recognizes it, exactly like a bordered-TUI
-# harness composer. ALSO registers itself as a real herdr agent via `herdr
-# pane report-agent` and reports idle/working transitions around each
+# --- deterministic bare-composer loop, drawn in the scratch pane -------------
+# Mirrors tests/fm-afk-inject-e2e.test.sh's supervisor-loop.sh, but draws the
+# shared classifier's positively identified bare-agent shape (`❯ <buf>`). This
+# remains readable under the strict blank-row posture without pretending that
+# one side-bordered row is a complete composer box. ALSO registers itself as a
+# real herdr agent via `herdr pane report-agent` and reports idle/working
+# transitions around each
 # submission: fm_backend_herdr_send_text_submit's confirmation is now native
 # agent-state (agent get), not composer content (docs/herdr-backend.md
 # "Native agent-state submit confirmation"), so a synthetic pane that only
@@ -160,7 +190,7 @@ redraw() {
   else
     shown="$_buf"
   fi
-  printf '\r\033[K│ > %s │' "$shown"
+  printf '\r\033[K❯ %s' "$shown"
 }
 submit_line() {
   local _line=$_buf _c _hex
@@ -276,6 +306,7 @@ reset_state() {
          "$STATE_DIR"/.subsuper-* \
          "$STATE_DIR"/.wake-queue* \
          "$STATE_DIR"/.watch.lock* \
+         "$STATE_DIR"/.watcher-down* \
          "$STATE_DIR"/.last-* \
          "$STATE_DIR"/.hash-* \
          "$STATE_DIR"/.count-* \

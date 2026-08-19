@@ -69,7 +69,7 @@ LOG_FILE="$STATE_DIR/submitted.log"
 : > "$LOG_FILE"
 
 # Source the daemon to get FM_INJECT_MARK, afk_enter, afk_exit.
-# shellcheck source=bin/fm-supervise-daemon.sh
+# shellcheck source=/dev/null
 . "$DAEMON"
 
 # Private tmux server with a supervisor session.
@@ -93,8 +93,15 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 _buf=
+# The drawn composer row carries a real agent prompt glyph, matching the
+# production supervisor pane this daemon injects into: under the strict
+# container-proof rule (captain decision blank-row-injection-posture) a bare
+# unidentified row is never a safe injection target, so the fixture must
+# render the shape the classifier positively proves - "❯ " when idle,
+# "❯ <buffer>" while input is pending. The glyph is rendering only; it never
+# enters the buffer, so submitted-content assertions are unchanged.
 redraw() {
-  printf '\r\033[K%s' "$_buf"
+  printf '\r\033[K\xe2\x9d\xaf %s' "$_buf"
 }
 submit_line() {
   local _line=$_buf _c _hex
@@ -199,6 +206,7 @@ reset_state() {
          "$STATE_DIR"/.subsuper-* \
          "$STATE_DIR"/.wake-queue* \
          "$STATE_DIR"/.watch.lock* \
+         "$STATE_DIR"/.watcher-down* \
          "$STATE_DIR"/.last-* \
          "$STATE_DIR"/.hash-* \
          "$STATE_DIR"/.count-* \

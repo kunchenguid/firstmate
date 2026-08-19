@@ -70,6 +70,54 @@ unit_clear_stale() {
   rm -rf "$st"
 }
 
+unit_relative_paths_are_absolute_before_daemon_launch() {
+  local root home state out status linked_home
+  root=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-relative-home.XXXXXX")
+  mkdir -p "$root/home/state" "$root/cdpath/home/state"
+  home=$(cd "$root/home" && pwd -P)
+  state="$home/state"
+  out=$(
+    cd "$root" || exit 1
+    CDPATH="$root/cdpath" FM_HOME=home FM_STATE_OVERRIDE=home/state \
+      bash -c '. "$1"; printf "%s\n%s\n" "$FM_HOME" "$FM_AFK_LAUNCH_STATE"' _ "$LAUNCH"
+  )
+  if [ "$out" = "$home"$'\n'"$state" ]; then
+    pass "launcher paths: relative home and state ignore CDPATH before daemon command construction"
+  else
+    fail "launcher paths: relative home or state remained cwd-dependent ($out)"
+  fi
+  linked_home="$root/home-link"
+  ln -s "$root/home" "$linked_home"
+  out=$(FM_HOME="$linked_home" FM_STATE_OVERRIDE="$linked_home/state" \
+    bash -c '. "$1"; printf "%s\n%s\n" "$FM_HOME" "$FM_AFK_LAUNCH_STATE"' _ "$LAUNCH")
+  if [ "$out" = "$linked_home"$'\n'"$linked_home/state" ]; then
+    pass "launcher paths: absolute symlink spellings are preserved"
+  else
+    fail "launcher paths: absolute symlink spelling changed ($out)"
+  fi
+  out=$(
+    cd "$root" || exit 1
+    FM_HOME=missing-home "$LAUNCH" help 2>&1
+  )
+  status=$?
+  if [ "$status" -ne 0 ] && printf '%s\n' "$out" | grep -F "FM_HOME directory cannot be resolved: missing-home" >/dev/null; then
+    pass "launcher paths: unresolved relative FM_HOME fails loudly"
+  else
+    fail "launcher paths: unresolved relative FM_HOME did not name the bad input ($out)"
+  fi
+  out=$(
+    cd "$root" || exit 1
+    FM_HOME=home FM_STATE_OVERRIDE=missing-state "$LAUNCH" help 2>&1
+  )
+  status=$?
+  if [ "$status" -ne 0 ] && printf '%s\n' "$out" | grep -F "FM_STATE_OVERRIDE directory cannot be resolved: missing-state" >/dev/null; then
+    pass "launcher paths: unresolved relative FM_STATE_OVERRIDE fails loudly"
+  else
+    fail "launcher paths: unresolved relative FM_STATE_OVERRIDE did not name the bad input ($out)"
+  fi
+  rm -rf "$root"
+}
+
 # ---------------------------------------------------------------------------
 # UNIT 2: a FRESH entry clears; a REFRESH (daemon already alive) preserves the
 # current session's buffered escalations.
@@ -121,6 +169,7 @@ unit_stop_ordering() {
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$lock/pid-identity" 2>/dev/null ) || true
   printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  # shellcheck disable=SC2031 # The background daemon writes this shared file; no shell variable is reassigned.
   if [ "$(cat "$marker" 2>/dev/null || echo missing)" = present ]; then
     pass "stop-ordering: daemon SIGTERM'd while .afk still present (flush is not a no-op)"
   else
@@ -218,12 +267,14 @@ unit_lock_initialization_grace() {
     if [ -d "$st/state/.afk-launch.lock" ]; then
       printf '%s' "$$" > "$st/state/.afk-launch.lock/pid"
       ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$$" > "$st/state/.afk-launch.lock/pid-identity" 2>/dev/null ) || true
+      # shellcheck disable=SC2031 # The subshell writes the path value; it does not reassign the variable.
       : > "$marker"
       sleep 0.15
       rm -rf "$st/state/.afk-launch.lock"
     fi
   ) &
   initializer=$!
+  # shellcheck disable=SC2031 # The initializer communicates through this shared file path.
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
     fm_afk_launch_lock_acquire
@@ -248,12 +299,23 @@ unit_signal_exits_with_lock_cleanup() {
     : > "$2"
   ' _ "$LAUNCH" "$marker" &
   child=$!
-  for _ in $(seq 1 40); do
-    [ -d "$st/state/.afk-launch.lock" ] && break
+  # Signal only once the lifecycle actually holds its lock. Killing before the
+  # lock exists tests nothing, and on a loaded machine it used to race: the
+  # lock could be created just after the kill and outlive the process.
+  local locked=0 _
+  for _ in $(seq 1 100); do
+    if [ -d "$st/state/.afk-launch.lock" ]; then locked=1; break; fi
     sleep 0.05
   done
+  [ "$locked" = 1 ] || fail "launcher signal: lifecycle never acquired its lock to interrupt"
   kill -TERM "$child" 2>/dev/null || true
   wait "$child" 2>/dev/null || true
+  # The signal handler releases the lock as it exits; give that removal a
+  # bounded settle rather than sampling the instant `wait` returns.
+  for _ in $(seq 1 100); do
+    [ -e "$st/state/.afk-launch.lock" ] || break
+    sleep 0.05
+  done
   if [ ! -e "$marker" ] && [ ! -e "$st/state/.afk-launch.lock" ]; then
     pass "launcher signal: TERM exits and releases the lifecycle lock"
   else
@@ -771,7 +833,7 @@ e2e_herdr() {
   command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (herdr e2e)"; return 0; }
   # shellcheck source=tests/herdr-test-safety.sh
   . "$ROOT/tests/herdr-test-safety.sh"
-  # shellcheck source=bin/fm-backend.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
 
   local SESSION home_tmp cap_ws cap_tab cap_pane target
@@ -780,6 +842,7 @@ e2e_herdr() {
   export HERDR_SESSION="$SESSION"
   home_tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-e2e-home.XXXXXX")
   E2E_HERDR_CLEANUP() {
+    # shellcheck disable=SC2031 # Cleanup reads the caller's resolved target; it does not reassign it.
     FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
       FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr "$LAUNCH" stop >/dev/null 2>&1 || true
     herdr_safe_stop_and_delete "$SESSION" >/dev/null 2>&1 || true
@@ -861,6 +924,7 @@ e2e_tmux() {
 }
 
 unit_clear_stale
+unit_relative_paths_are_absolute_before_daemon_launch
 unit_fresh_vs_refresh
 unit_stop_ordering
 unit_stop_rejects_reused_pid
