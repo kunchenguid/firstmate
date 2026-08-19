@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# Regression test for fm-spawn.sh's shell-readiness gate on the first text line
+# sent into a pane (bin/fm-spawn.sh, spawn_await_shell_ready).
+#
+# A freshly created pane's shell can still be sourcing its rc files when the
+# first send lands, and a slow init eats the leading byte(s). Seen live on herdr
+# under load (2026-08-17): the leading 't' of `treehouse get` was swallowed three
+# times running, the pane ran `reehouse get`, and the worktree was never entered -
+# with nothing on firstmate's side to notice. The gate proves the shell is
+# reading command lines before trusting a send, so a corrupted first line can no
+# longer reach the pane silently.
+#
+# The fake tmux below is a byte-lossy shell: it drops the leading character of
+# every delivery in a configurable window, records what the pane actually
+# received, and executes a delivered `touch '<path>'` for real. That makes the
+# gate's own readiness signal - a marker file only a byte-exact line can create -
+# observable end to end, and lets each case assert on the exact bytes the pane
+# saw rather than on the script's source.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+SPAWN="$ROOT/bin/fm-spawn.sh"
+TMP_ROOT=$(fm_test_tmproot fm-spawn-first-send)
+
+# make_lossy_fakebin <dir> builds a fake tmux that models the pane's shell.
+#
+# Every `send-keys -t <target> <text> Enter` is one delivery. Deliveries numbered
+# FM_FAKE_SWALLOW_FROM..FM_FAKE_SWALLOW_UNTIL inclusive lose their leading
+# character, exactly like the live incident; every delivery (corrupted or not) is
+# appended to FM_FAKE_DELIVERED so a case can assert what the pane received. A
+# delivered line of the form `touch '<path>'` is then executed for real, which is
+# the only way the readiness marker can ever appear.
+make_lossy_fakebin() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+log_delivery() {
+  local line=$1 path
+  printf '%s\n' "$line" >> "${FM_FAKE_DELIVERED:?FM_FAKE_DELIVERED unset}"
+  case "$line" in
+    touch\ \'*\')
+      path=${line#touch \'}
+      path=${path%\'}
+      : > "$path"
+      ;;
+  esac
+}
+case "$*" in
+  *'#{pane_current_path}'*)
+    printf '%s\n' "${FM_FAKE_PANE_PATH:-}"
+    exit 0
+    ;;
+esac
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    args=()
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) args+=("$1"); shift ;;
+      esac
+    done
+    if [ "$literal" = 1 ]; then
+      # A literal send types without submitting, so it is not a delivery yet.
+      printf 'literal %s\n' "${args[0]:-}" >> "${FM_FAKE_DELIVERED:?}"
+      exit 0
+    fi
+    if [ "${#args[@]}" -eq 1 ]; then
+      # A bare key: the gate's pre-clear Enter, or the launch submit.
+      printf 'key %s\n' "${args[0]}" >> "${FM_FAKE_DELIVERED:?}"
+      exit 0
+    fi
+    text=${args[0]}
+    countfile="${FM_FAKE_DELIVERY_COUNTFILE:?FM_FAKE_DELIVERY_COUNTFILE unset}"
+    seenfile="$countfile.post-treehouse"
+    n=0
+    [ -f "$countfile" ] && n=$(cat "$countfile")
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$countfile"
+    if [ "$n" -ge "${FM_FAKE_SWALLOW_FROM:-1}" ] \
+       && [ "$n" -le "${FM_FAKE_SWALLOW_UNTIL:-0}" ]; then
+      text=${text:1}
+    elif [ -f "$seenfile" ]; then
+      used=$(cat "$seenfile")
+      if [ "$used" -lt "${FM_FAKE_SWALLOW_AFTER_TREEHOUSE:-0}" ]; then
+        text=${text:1}
+        printf '%s\n' "$((used + 1))" > "$seenfile"
+      fi
+    fi
+    # Opening the post-treehouse window on the delivery CONTENT, not on a
+    # delivery number, keeps the case independent of how many probes the
+    # implementation sends - so it still corrupts the launch environment when the
+    # gate is absent, which is what makes the case non-vacuous.
+    if [ "$text" = 'treehouse get' ] && [ ! -f "$seenfile" ]; then
+      printf '0\n' > "$seenfile"
+    fi
+    log_delivery "$text"
+    exit 0
+    ;;
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse
+  printf '%s\n' "$fakebin"
+}
+
+# make_case <name> <id> builds a home plus a real project/worktree pair, and
+# echoes the per-case paths the run helper needs.
+make_case() {
+  local name=$1 id=$2 case_dir home proj wt fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  fakebin=$(make_lossy_fakebin "$case_dir/fake")
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_git_worktree "$proj" "$wt" "wt-$name"
+  mkdir -p "$home/data/$id"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+  printf '%s|%s|%s|%s|%s|%s\n' \
+    "$home" "$proj" "$wt" "$fakebin" "$case_dir/delivered" "$case_dir/delivery-count"
+}
+
+read_case() {
+  IFS='|' read -r HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR DELIVERED COUNTFILE <<EOF
+$1
+EOF
+}
+
+# run_spawn <id> <swallow-from> <swallow-until> [extra KEY=VAL ...]
+run_spawn() {
+  local id=$1 from=$2 upto=$3
+  shift 3
+  # -u FM_SPAWN_READY_BYPASS: tests/lib.sh exports that bypass for every
+  # fixture-based suite, and this is the suite whose whole subject is the gate.
+  env -u FM_SPAWN_READY_BYPASS "$@" \
+    FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_FAKE_PANE_PATH="$WT_DIR" \
+    FM_FAKE_DELIVERED="$DELIVERED" \
+    FM_FAKE_DELIVERY_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_SWALLOW_FROM="$from" FM_FAKE_SWALLOW_UNTIL="$upto" \
+    FM_FAKE_SWALLOW_AFTER_TREEHOUSE="${FM_FAKE_SWALLOW_AFTER_TREEHOUSE:-0}" \
+    FM_SPAWN_READY_INTERVAL=0.05 FM_SPAWN_READY_RESEND_EVERY=1 \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+}
+
+# delivered_line_count <exact-line>
+delivered_line_count() {
+  grep -c -x -F -- "$1" "$DELIVERED" 2>/dev/null || true
+}
+
+# count_probe_scratch: how many readiness probe directories exist right now.
+count_probe_scratch() {
+  find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'fm-spawn-ready.*' 2>/dev/null | wc -l | tr -d ' '
+}
+
+# delivered_prefix_count <prefix>: delivered lines that START with <prefix>.
+# Anchored on purpose: every truncated form this suite must catch is a substring
+# of its intact form (`reehouse get` sits inside `treehouse get`), so an
+# unanchored match cannot tell the two apart.
+delivered_prefix_count() {
+  awk -v want="$1" 'index($0, want) == 1 { n++ } END { print n + 0 }' \
+    "$DELIVERED" 2>/dev/null || printf '0\n'
+}
+
+# assert_delivered_prefix <prefix> <msg>
+assert_delivered_prefix() {
+  [ "$(delivered_prefix_count "$1")" -gt 0 ] || fail \
+    "$2 (no delivered line starts with '$1')"$'\n'"--- delivered ---"$'\n'"$(cat "$DELIVERED" 2>/dev/null)"
+}
+
+# assert_not_delivered_prefix <prefix> <msg>
+assert_not_delivered_prefix() {
+  [ "$(delivered_prefix_count "$1")" -eq 0 ] || fail \
+    "$2 (a delivered line starts with '$1')"$'\n'"--- delivered ---"$'\n'"$(cat "$DELIVERED" 2>/dev/null)"
+}
+
+# The live incident: the first three deliveries lose their leading byte. The
+# gate must absorb all three on its own probe and hand the pane an intact
+# `treehouse get`, never the truncated `reehouse get` that reached it before.
+test_swallowed_leading_bytes_never_corrupt_the_first_command() {
+  local rec id out status
+  id=first-send-swallow-three-a1
+  rec=$(make_case swallow-three "$id")
+  read_case "$rec"
+
+  out=$(run_spawn "$id" 1 3)
+  status=$?
+  expect_code 0 "$status" "spawn should succeed once the gate absorbs the lossy window"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_delivered_prefix "treehouse get" \
+    "the pane never received an intact treehouse get"
+  assert_not_delivered_prefix "reehouse get" \
+    "the pane received a head-truncated treehouse get - the gate did not absorb the loss"
+  [ "$(delivered_line_count 'treehouse get')" = 1 ] \
+    || fail "treehouse get was not delivered exactly once"
+  pass "a lossy shell init cannot corrupt the first command line"
+}
+
+# The loss window opens only AFTER treehouse get, so the second gate - the one
+# covering the launch environment sent into treehouse's new subshell - is the one
+# that has to absorb it. That send is the path a leading-space mitigation on the
+# treehouse line alone leaves unprotected.
+test_second_gate_protects_the_launch_environment() {
+  local rec id out status
+  id=first-send-swallow-later-b2
+  rec=$(make_case swallow-later "$id")
+  read_case "$rec"
+
+  # The lossy window opens on the delivery AFTER treehouse get lands, so it
+  # corrupts only the post-subshell sends however many probes precede them.
+  out=$(FM_FAKE_SWALLOW_AFTER_TREEHOUSE=3 run_spawn "$id" 1 0)
+  status=$?
+  expect_code 0 "$status" "spawn should succeed once the second gate absorbs the lossy window"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  assert_delivered_prefix "treehouse get" \
+    "the pane never received an intact treehouse get"
+  assert_delivered_prefix "export GOTMPDIR=" \
+    "the pane never received an intact launch environment"
+  assert_not_delivered_prefix "xport GOTMPDIR=" \
+    "the pane received a head-truncated launch environment - that send was unguarded"
+  pass "the launch-environment send is guarded too, not only treehouse get"
+}
+
+# A shell that never accepts a line must stop the spawn loudly. Silently
+# proceeding is the exact failure this change exists to remove, so the refusal
+# has to be an error exit that names the send it refused - and no task command
+# may reach the pane after it.
+test_unready_shell_fails_loudly() {
+  local rec id out status
+  id=first-send-never-ready-c3
+  rec=$(make_case never-ready "$id")
+  read_case "$rec"
+
+  out=$(run_spawn "$id" 1 100000 FM_SPAWN_READY_POLLS=3)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn exited 0 with a shell that never accepted a command line"
+  assert_contains "$out" "never confirmed it can read a command line" \
+    "the refusal did not explain that the pane shell was never proven ready"
+  assert_contains "$out" "treehouse get" \
+    "the refusal did not name the send it refused"
+  assert_not_contains "$out" "spawned $id" "spawn reported success despite an unready shell"
+  assert_not_delivered_prefix "treehouse get" \
+    "treehouse get reached the pane after the readiness gate had given up"
+  pass "an unready pane shell refuses the spawn loudly instead of sending into it"
+}
+
+# The gate must not tax a healthy spawn: a shell that answers the first probe
+# costs one poll interval per gated send, not a retry cycle. It must also run
+# BEFORE the command it protects, which the delivery order proves.
+test_healthy_shell_pays_one_probe_per_gate() {
+  local rec id out status start end elapsed first_line
+  id=first-send-healthy-d4
+  rec=$(make_case healthy "$id")
+  read_case "$rec"
+
+  start=$(date +%s)
+  out=$(run_spawn "$id" 1 0)
+  status=$?
+  end=$(date +%s)
+  elapsed=$((end - start))
+  expect_code 0 "$status" "spawn should succeed against a healthy shell"
+  assert_contains "$out" "spawned $id" "spawn did not report success"
+  first_line=$(sed -n '1p' "$DELIVERED")
+  case "$first_line" in
+    touch\ \'*) : ;;
+    *) fail "the readiness probe did not precede the first task command (first delivery: '$first_line')" ;;
+  esac
+  [ "$(delivered_line_count 'key Enter')" = 1 ] \
+    || fail "a healthy shell should need no pre-clear Enter retry, only the launch submit"
+  [ "$elapsed" -le 8 ] || fail "a healthy spawn took ${elapsed}s - the gate is charging retries it should not need"
+  pass "a healthy pane answers the first probe, and the probe precedes the command it guards"
+}
+
+# The probe directory is scratch: it must never survive the spawn, on the
+# success path or the refusal path.
+test_probe_scratch_is_cleaned_up() {
+  local rec id before after
+  id=first-send-scratch-e5
+  rec=$(make_case scratch "$id")
+  read_case "$rec"
+
+  before=$(count_probe_scratch)
+  run_spawn "$id" 1 0 >/dev/null 2>&1
+  run_spawn "$id-refused" 1 100000 FM_SPAWN_READY_POLLS=2 >/dev/null 2>&1 || true
+  after=$(count_probe_scratch)
+  [ "$after" -le "$before" ] \
+    || fail "readiness probe scratch directories leaked (before=$before after=$after)"
+  pass "readiness probe scratch is removed on both the success and refusal paths"
+}
+
+# The fixture escape hatch has to be explicit, and it has to be the ONLY thing
+# that stands the gate down: the same never-ready pane that refuses above must
+# spawn when FM_SPAWN_READY_BYPASS=1 is set, and only then. Pinning both halves
+# keeps a future change from quietly turning the gate into a no-op by default.
+test_fixture_bypass_is_explicit() {
+  local rec id out status
+  id=first-send-bypass-f6
+  rec=$(make_case bypass "$id")
+  read_case "$rec"
+
+  out=$(run_spawn "$id" 1 100000 FM_SPAWN_READY_POLLS=3 FM_SPAWN_READY_BYPASS=1)
+  status=$?
+  expect_code 0 "$status" "an explicitly bypassed gate should not stop a fixture spawn"
+  assert_contains "$out" "spawned $id" "the bypassed spawn did not report success"
+  assert_not_contains "$out" "never confirmed it can read a command line" \
+    "the gate still refused despite an explicit bypass"
+  pass "the gate stands down only for an explicit fixture bypass"
+}
+
+test_swallowed_leading_bytes_never_corrupt_the_first_command
+test_second_gate_protects_the_launch_environment
+test_unready_shell_fails_loudly
+test_healthy_shell_pays_one_probe_per_gate
+test_fixture_bypass_is_explicit
+test_probe_scratch_is_cleaned_up
+
+echo "# all fm-spawn-first-send tests passed"
