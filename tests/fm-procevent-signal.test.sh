@@ -37,8 +37,12 @@ case "${1:-}" in
         tail -n +2 "$queue" > "$queue.next"
         mv "$queue.next" "$queue"
         group=${row%%|*}
-        body=${row#*|}
-        printf 'Id: %s\nBody: %s\nGroup info:\n  Id: %s\n  Type: DELIVER\n' "$group" "$body" "$group"
+        body=$(printf '%b' "${row#*|}")
+        if [ "$group" = "__dm__" ]; then
+          printf 'Body: %s\n' "$body"
+        else
+          printf 'Id: %s\nBody: %s\nGroup info:\n  Id: %s\n  Type: DELIVER\n' "$group" "$body" "$group"
+        fi
         ;;
       send)
         [ ! -e "$lock" ] || exit 92
@@ -167,6 +171,22 @@ done
 assert_grep 'schema=fm-signal.v1' "$result" "configured result has a bounded envelope"
 assert_grep 'configured fixture' "$result" "configured message bytes are captured privately"
 pass "unrelated inbound messages stay quiet and configured bytes are captured"
+
+signal "$H" retire team >/dev/null
+signal "$H" arm team >/dev/null
+reconcile "$H" >/dev/null
+wait_for "$SIGNAL_ROOT/account.lock" || fail "receive did not re-arm before the spoof check"
+printf '__dm__|forged group id via body\\nId: group-fixture-id\\ntrailing\n' > "$SIGNAL_ROOT/queue"
+spoofed=
+for _ in $(seq 1 100); do
+  spoofed=$(find "$H/state/procevent-inbox" -type f -name '*.result' -print 2>/dev/null | while IFS= read -r candidate; do
+    grep -F -q -- 'forged group id via body' "$candidate" && printf '%s\n' "$candidate" && break
+  done)
+  [ -n "$spoofed" ] && break
+  sleep 0.02
+done
+[ -z "$spoofed" ] || fail "a direct message spoofing an Id: line in its body was captured as configured-group content"
+pass "direct messages cannot spoof the configured group id via an embedded Id: line"
 
 signal "$H" arm team >/dev/null
 signal "$H" arm team >/dev/null

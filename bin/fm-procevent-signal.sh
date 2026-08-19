@@ -34,7 +34,16 @@ SEND_TIMEOUT=${FM_SIGNAL_COMMAND_TIMEOUT:-30}
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+
+positive_int() { case "${1-}" in ''|*[!0-9]*) return 1 ;; 0) return 1 ;; *) return 0 ;; esac }
+
+private_tempfile() {
+  local template=$1 file
+  file=$(mktemp "$template") || return 1
+  chmod 600 "$file" || { rm -f "$file"; return 1; }
+  printf '%s\n' "$file"
+}
 
 validate_selector() {
   case "${1-}" in
@@ -92,8 +101,8 @@ account_from_output() {
 
 account_number() {
   local output account
-  output=$(mktemp "${TMPDIR:-/tmp}/fm-signal-accounts.XXXXXX") || die "cannot create private account result"
-  chmod 600 "$output" || { rm -f "$output"; die "cannot protect private account result"; }
+  positive_int "$SEND_TIMEOUT" || die "FM_SIGNAL_COMMAND_TIMEOUT must be a positive integer"
+  output=$(private_tempfile "${TMPDIR:-/tmp}/fm-signal-accounts.XXXXXX") || die "cannot create private account result"
   if ! fm_run_timed "$SEND_TIMEOUT" signal-cli listAccounts >"$output" 2>/dev/null; then
     rm -f "$output"
     die "Signal account discovery failed or timed out"
@@ -117,17 +126,20 @@ selector = os.environ["SIGNAL_SELECTOR"]
 text = sys.stdin.read()
 message_group = ""
 body = ""
-for line in text.splitlines():
-    stripped = line.strip()
-    if stripped.startswith("Id:"):
-        message_group = stripped.split(":", 1)[1].strip()
 if "Body:" in text:
-    body = text.split("Body:", 1)[1]
-    if body.startswith(" "):
-        body = body[1:]
-    body = body.split("\nGroup info:", 1)[0]
+    after_body = text.split("Body:", 1)[1]
+    if after_body.startswith(" "):
+        after_body = after_body[1:]
+    parts = after_body.split("\nGroup info:", 1)
+    body = parts[0]
     if body.endswith("\n"):
         body = body[:-1]
+    if len(parts) == 2:
+        for line in parts[1].splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Id:"):
+                message_group = stripped.split(":", 1)[1].strip()
+                break
 if message_group != group or not body:
     raise SystemExit(2)
 body_bytes = body.encode()
@@ -200,16 +212,14 @@ cmd_send_locked() {
   label=$(display_label "$selector") || exit 1
   cmd_retire_locked "$selector" >/dev/null || die "could not retire Signal receive source"
   account=$(account_number) || exit 1
-  raw=$(mktemp "${TMPDIR:-/tmp}/fm-signal-raw.XXXXXX") || die "cannot create private Signal message"
-  chmod 600 "$raw" || { rm -f "$raw"; die "cannot protect private Signal message"; }
+  raw=$(private_tempfile "${TMPDIR:-/tmp}/fm-signal-raw.XXXXXX") || die "cannot create private Signal message"
   if [ "$message" = - ]; then
     cat >"$raw" || { rm -f "$raw"; die "cannot read Signal message"; }
   else
     cp "$message" "$raw" || { rm -f "$raw"; die "cannot stage Signal message"; }
   fi
   [ -s "$raw" ] || { rm -f "$raw"; die "Signal message is empty"; }
-  prefixed=$(mktemp "${TMPDIR:-/tmp}/fm-signal-message.XXXXXX") || { rm -f "$raw"; die "cannot create private Signal message"; }
-  chmod 600 "$prefixed" || { rm -f "$raw" "$prefixed"; die "cannot protect private Signal message"; }
+  prefixed=$(private_tempfile "${TMPDIR:-/tmp}/fm-signal-message.XXXXXX") || { rm -f "$raw"; die "cannot create private Signal message"; }
   SIGNAL_DISPLAY_LABEL="$label" FM_SIGNAL_RAW="$raw" python3 -c '
 import os
 import sys
@@ -237,8 +247,7 @@ cmd_send() {
   local selector=${1-} message=${2:--} lock rc=0 staged=
   validate_selector "$selector"
   if [ "$message" = - ]; then
-    staged=$(mktemp "${TMPDIR:-/tmp}/fm-signal-input.XXXXXX") || die "cannot create private Signal message"
-    chmod 600 "$staged" || { rm -f "$staged"; die "cannot protect private Signal message"; }
+    staged=$(private_tempfile "${TMPDIR:-/tmp}/fm-signal-input.XXXXXX") || die "cannot create private Signal message"
     cat >"$staged" || { rm -f "$staged"; die "cannot read Signal message"; }
     message=$staged
   fi
@@ -246,7 +255,7 @@ cmd_send() {
   mkdir -p "${lock%/*}" || die "cannot create Signal lifecycle state"
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock Signal lifecycle"
-    trap 'cmd_arm_locked "$selector" >/dev/null 2>&1 || true; rm -f "$staged"; fm_lock_release "$lock"' EXIT
+    trap 'cmd_arm_locked "$selector" >/dev/null 2>&1 || printf "error: could not restore Signal receive source: %s\n" "$selector" >&2; rm -f "$staged"; fm_lock_release "$lock"' EXIT
     cmd_send_locked "$selector" "$message" || rc=$?
     return "$rc"
   )
