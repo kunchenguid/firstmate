@@ -14,7 +14,7 @@ REMOTE="$TMP_ROOT/remote"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE/state" "$REMOTE/data/reply" "$CLAIMS"
-# shellcheck source=bin/fm-remote-job-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-remote-job-lib.sh"
 # The recorded worker pid is the serving child, not its restart supervisor, so
 # stopping that pid alone leaves the supervisor to respawn - the leak
@@ -221,7 +221,7 @@ pass "later generations cannot invalidate an unacknowledged ingested result"
 # line reaches the parent stream, the new decision reaches the parent's
 # open-decision fold, the correlated line still settles its pending-reply record,
 # and the cursor advances so the channel cannot wedge on a line it once refused.
-# shellcheck source=bin/fm-pending-reply-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-pending-reply-lib.sh"
 PENDING_CORR=$(fm_pending_reply_create "$PARENT" "$PARENT/state" ios 'audit the release chain')
 [ -n "$PENDING_CORR" ] || fail "could not create the parent pending-reply record"
@@ -247,7 +247,7 @@ pass "the remote status and decision model mirrors and the cursor advances"
 
 # The newly raised decision must be indistinguishable from a local mate's, so the
 # shared fold - not this adapter - decides it is open.
-# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
 OPEN=$(status_open_decisions "$PARENT/state/ios.status")
 printf '%s' "$OPEN" | grep -q '^rough-cut-version	needs-decision	' \

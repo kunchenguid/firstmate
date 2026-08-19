@@ -2483,6 +2483,9 @@ test_custom_snapshot_cleanup_on_signal() {
   chmod 0700 "$state/custom.check.sh"
   cat > "$dir/fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = -k ]; then
+  shift 2
+fi
 shift
 "$@" &
 child=$!

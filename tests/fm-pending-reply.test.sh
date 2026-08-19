@@ -26,9 +26,9 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-marker-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
-# shellcheck source=bin/fm-pending-reply-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-pending-reply-lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
@@ -663,6 +663,7 @@ test_delivery_confirmation_fallback_reconciles() {
     export FM_PENDING_REPLY_NOW=5750
     corr=$(fm_pending_reply_create "$home" "$state" hibit "confirmed delivery")
     rec=$(fm_pending_reply_path "$state" "$corr")
+    # shellcheck disable=SC2329 # Invoked indirectly by fm_pending_reply_confirm_delivery.
     fm_pending_reply_mark_delivered() { return 1; }
     if fm_pending_reply_confirm_delivery "$state" "$corr"; then
       fail "primary delivery commit failure should be reported"
