@@ -104,6 +104,10 @@ Because children are ordinary tasks, the captain keeps full firstmate control of
 
 The captain drives exactly the phase that needs them and delegates exactly the phase that is safe to delegate.
 
+This flow is packaged as the harness-agnostic public epic pipeline - the `/epic-*` skills under `skills/` (see `skills/README.md`): `/epic-new` -> `/epic-scaffold` -> `/epic-plan` -> `/epic-review` -> `/epic-handoff` -> `/epic-ship`.
+`/epic-new` stands up the umbrella lab; `/epic-handoff` wraps `bin/fm-umbrella-promote.sh` (section 9 step 2a); `/epic-ship` wraps `bin/fm-epic-ship.sh`.
+Each skill's `SKILL.md` is the single owner of its step, and the AGENTS.md that `bin/fm-umbrella.sh` writes into a lab points the design agent at that chain regardless of harness.
+
 ## 6. Concrete changes required
 
 ### 6.1 New: `bin/fm-umbrella.sh`
