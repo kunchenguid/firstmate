@@ -1587,6 +1587,146 @@ test_herdr_flat_teardown_preflight_refuses_before_changes() {
   pass "herdr flat teardown preflight refuses before every destructive change"
 }
 
+test_backend_preflight_refuses_before_parent_cleanup() {
+  local case_dir task_tmp test_root teardown_bin treehouse_log kill_log rc
+  case_dir=$(make_case backend-preflight-parent)
+  task_tmp="$case_dir/tasktmp"
+  mkdir -p "$task_tmp"
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' "tasktmp=$task_tmp" >> "$case_dir/state/task-x1.meta"
+  test_root="$case_dir/test-root"
+  mkdir -p "$test_root"
+  cp -R "$ROOT/bin" "$test_root/bin"
+  rm -f "$test_root/bin/backends/tmux.sh"
+  teardown_bin="$test_root/bin/fm-teardown.sh"
+  treehouse_log="$case_dir/treehouse.log"
+  kill_log="$case_dir/kill.log"
+  : > "$treehouse_log"
+  : > "$kill_log"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$treehouse_log"
+exit 0
+SH
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$kill_log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/tmux"
+
+  rc=0
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    PATH="$case_dir/fakebin:$PATH" \
+    "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "backend-preflight-parent: teardown reported success without the tmux adapter"
+  assert_grep "backend 'tmux' required by task task-x1 cannot be loaded" "$case_dir/stderr" \
+    "backend-preflight-parent: refusal did not name the unloadable backend"
+  [ -d "$case_dir/wt" ] || fail "backend-preflight-parent: refusal returned the worktree"
+  [ -d "$task_tmp" ] || fail "backend-preflight-parent: refusal removed the task temp directory"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "backend-preflight-parent: refusal removed task metadata"
+  [ ! -s "$treehouse_log" ] || fail "backend-preflight-parent: refusal invoked treehouse return"
+  [ ! -s "$kill_log" ] || fail "backend-preflight-parent: refusal attempted endpoint cleanup"
+  pass "teardown preflights its backend before parent cleanup"
+}
+
+configure_secondmate_with_zellij_child() {  # <case-dir>
+  local case_dir=$1 home="$1/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$home/state/child-zellij.meta" \
+    "window=firstmate:42" \
+    "endpoint_task_id=child-zellij" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only" \
+    "backend=zellij" \
+    "zellij_session=firstmate" \
+    "zellij_tab_id=7" \
+    "zellij_pane_id=42"
+  : > "$home/state/child-zellij.status"
+  : > "$home/state/child-zellij.turn-ended"
+}
+
+test_backend_preflight_refuses_before_descendant_cleanup() {
+  local case_dir home test_root teardown_bin treehouse_log kill_log rc
+  case_dir=$(make_case backend-preflight-descendant)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_zellij_child "$case_dir"
+  home="$case_dir/secondmate-home"
+  test_root="$case_dir/test-root"
+  mkdir -p "$test_root"
+  cp -R "$ROOT/bin" "$test_root/bin"
+  rm -f "$test_root/bin/fm-backend-hometag-lib.sh"
+  teardown_bin="$test_root/bin/fm-teardown.sh"
+  treehouse_log="$case_dir/treehouse.log"
+  kill_log="$case_dir/kill.log"
+  : > "$treehouse_log"
+  : > "$kill_log"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$treehouse_log"
+exit 0
+SH
+  cat > "$case_dir/fakebin/zellij" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$kill_log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/zellij"
+
+  rc=0
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    PATH="$case_dir/fakebin:$PATH" \
+    "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "backend-preflight-descendant: teardown reported success without a child backend library"
+  assert_grep "backend 'zellij' required by task child-zellij cannot be loaded" "$case_dir/stderr" \
+    "backend-preflight-descendant: refusal did not name the child's unloadable backend"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "backend-preflight-descendant: refusal removed parent metadata"
+  [ -d "$home" ] || fail "backend-preflight-descendant: refusal removed the secondmate home"
+  [ -e "$home/state/child-zellij.meta" ] || fail "backend-preflight-descendant: refusal removed child metadata"
+  [ -e "$home/state/child-zellij.status" ] || fail "backend-preflight-descendant: refusal removed child status"
+  [ ! -s "$treehouse_log" ] || fail "backend-preflight-descendant: refusal returned a worktree"
+  [ ! -s "$kill_log" ] || fail "backend-preflight-descendant: refusal attempted child endpoint cleanup"
+  pass "forced teardown preflights descendant backends before cleanup"
+}
+
+test_backend_kill_failure_remains_best_effort() {
+  local case_dir task_tmp treehouse_log kill_log rc
+  case_dir=$(make_case backend-kill-best-effort)
+  task_tmp="$case_dir/tasktmp"
+  mkdir -p "$task_tmp"
+  write_meta "$case_dir" local-only ship
+  printf '%s\n' "tasktmp=$task_tmp" >> "$case_dir/state/task-x1.meta"
+  treehouse_log="$case_dir/treehouse.log"
+  kill_log="$case_dir/kill.log"
+  : > "$treehouse_log"
+  : > "$kill_log"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$treehouse_log"
+exit 0
+SH
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$kill_log"
+[ "\${1:-}" != kill-window ]
+SH
+  chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/tmux"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "backend-kill-best-effort: an ordinary endpoint kill failure must remain non-fatal"
+  assert_grep 'kill-window ' "$kill_log" \
+    "backend-kill-best-effort: the fixture did not exercise endpoint cleanup"
+  [ -s "$treehouse_log" ] || fail "backend-kill-best-effort: teardown did not return the worktree"
+  [ ! -d "$task_tmp" ] || fail "backend-kill-best-effort: teardown retained the task temp directory"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "backend-kill-best-effort: teardown retained task metadata"
+  pass "ordinary endpoint kill failures remain best-effort"
+}
+
 configure_secondmate_with_herdr_child() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -2604,6 +2744,9 @@ test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
+test_backend_preflight_refuses_before_parent_cleanup
+test_backend_preflight_refuses_before_descendant_cleanup
+test_backend_kill_failure_remains_best_effort
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed

@@ -2163,7 +2163,23 @@ $session	$lock_path"
   return 1
 }
 
-preflight_firstmate_home_herdr_children() {  # <home>
+teardown_backend_preflight() {  # <backend> <task-id> <home>
+  local backend=$1 task_id=$2 home=$3
+  if (
+    unset FM_ROOT_OVERRIDE
+    unset _FM_BACKEND_TMUX_SOURCED _FM_BACKEND_HERDR_SOURCED _FM_BACKEND_ZELLIJ_SOURCED
+    unset _FM_BACKEND_ORCA_SOURCED _FM_BACKEND_CMUX_SOURCED
+    FM_HOME=$home
+    FM_ROOT=$home
+    fm_backend_source "$backend"
+  ); then
+    return 0
+  fi
+  echo "REFUSED: backend '$backend' required by task $task_id cannot be loaded; nothing was changed - restore its adapter and required libraries, then rerun teardown" >&2
+  return 1
+}
+
+preflight_firstmate_home_backend_children() {  # <home>
   local home=$1 sub_state child_meta child_id child_backend child_target child_kind child_home child_wt
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
@@ -2173,6 +2189,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
     child_backend=$FM_BACKEND_VALIDATED_BACKEND
     child_target=$FM_BACKEND_VALIDATED_TARGET
+    teardown_backend_preflight "$child_backend" "$child_id" "$home" || return 1
     if [ "$child_backend" = herdr ]; then
       teardown_herdr_preflight_target "$child_target" "$child_id" || return 1
     fi
@@ -2182,7 +2199,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
       child_wt=$(meta_value "$child_meta" worktree)
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      preflight_firstmate_home_herdr_children "$child_home" || return 1
+      preflight_firstmate_home_backend_children "$child_home" || return 1
     fi
   done
 }
@@ -2293,6 +2310,7 @@ remove_secondmate_registry_entry() {
 }
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
+teardown_backend_preflight "$BACKEND" "$ID" "$FM_HOME" || exit 1
 
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
@@ -2304,7 +2322,7 @@ if [ "$KIND" = secondmate ]; then
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
     fi
-    preflight_firstmate_home_herdr_children "$HOME_PATH" || exit 1
+    preflight_firstmate_home_backend_children "$HOME_PATH" || exit 1
   fi
 fi
 
